@@ -8,6 +8,8 @@ except ImportError:
 from pathlib import Path
 from types import TracebackType
 
+import uuid6
+
 
 @typing.runtime_checkable
 class Target(typing.Protocol):
@@ -161,7 +163,40 @@ class LocalTarget(FileSystemTarget):
         if mode in ["r", "rb"]:
             return self._path.open(mode)
         if mode in ["w", "wb"]:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            return self._path.open(mode)  # type: ignore
+            return _AtomicWriteFileHandle(self._path, mode)  # type: ignore
 
         raise ValueError(f"Invalid mode {mode}")
+
+
+class _AtomicWriteFileHandle(
+    WritableFileSystemTargetHandle[StreamT_contra],
+    typing.Generic[StreamT_contra],
+):
+    def __init__(self, path: Path, mode: OpenMode) -> None:
+        self.path = path
+        self.mode = mode
+        self._tmp_path = self.path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        self._tmp_handle = self._tmp_path.open(self.mode)
+
+    def write(self, data: StreamT_contra) -> None:
+        self._tmp_handle.write(data)
+
+    def close(self):
+        return self._tmp_handle.close()
+
+    def __enter__(self) -> Self:
+        self._tmp_handle.__enter__()  # type: ignore
+        return self
+
+    def __exit__(
+        self,
+        type: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None:
+        self._tmp_handle.__exit__(type, value, traceback)  # type: ignore
+        if type is None:
+            self._tmp_path.rename(self.path)  # type: ignore
+        else:
+            self._tmp_path.unlink()  # type: ignore

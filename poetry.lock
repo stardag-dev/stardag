@@ -3163,6 +3163,17 @@ socks = ["pysocks (>=1.5.6,!=1.5.7,<2.0)"]
 zstd = ["zstandard (>=0.18.0)"]
 
 [[package]]
+name = "uuid6"
+version = "2024.7.10"
+description = "New time-based UUID formats which are suited for use as a database key"
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "uuid6-2024.7.10-py3-none-any.whl", hash = "sha256:93432c00ba403751f722829ad21759ff9db051dea140bf81493271e8e4dd18b7"},
+    {file = "uuid6-2024.7.10.tar.gz", hash = "sha256:2d29d7f63f593caaeea0e0d0dd0ad8129c9c663b29e19bdf882e864bedf18fb0"},
+]
+
+[[package]]
 name = "uvicorn"
 version = "0.34.0"
 description = "The lightning-fast ASGI server."
@@ -3401,4 +3412,4 @@ prefect = ["asyncpg", "prefect"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "9da6470a2a8d62ce6555ad90693f142d1a9420a3823bc516ada15b9bd4347442"
+content-hash = "c078d05fa00109d5fff146e92f4c0b6c44ef2f159cdc93423cf29dd015044cd7"
