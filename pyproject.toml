@@ -9,12 +9,12 @@ packages = [{ include = "stardag", from = "src" }]
 [tool.poetry.dependencies]
 python = "^3.10"
 pydantic = "^2.8.2"
-asyncpg = { version = ">=0.30.0", markers = "python_version >= '3.13'", optional = true }
 
 pandas = { version = "^2.2.3", optional = true }
 scikit-learn = { version = "^1.5.2", optional = true }
 numpy = { version = "^2.1.1", optional = true }
 prefect = { version = "^3.0.3", optional = true }
+asyncpg = { version = ">=0.30.0", markers = "python_version >= '3.13'", optional = true }
 
 
 [tool.poetry.group.dev.dependencies]
