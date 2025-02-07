@@ -7,6 +7,8 @@ try:
 
     prefect_available = True
 except ImportError:
+    flow = None
+    build = None
     prefect_available = False
 
 from stardag.utils.testing.dynamic_deps_dag import (
@@ -20,9 +22,9 @@ async def test_build_dag_dynamic_deps(default_in_memory_fs_target):
     dag = get_dynamic_deps_dag()
     assert_dynamic_deps_task_complete_recursive(dag, False)
 
-    @flow
+    @flow  # type: ignore
     async def dynamic_deps_dag():
-        task_id_to_future = await build(dag)
+        task_id_to_future = await build(dag)  # type: ignore
         for future in task_id_to_future.values():
             future.wait()
 

@@ -11,7 +11,6 @@ except ImportError:
         yield
 
 
-
 @pytest.fixture(autouse=True, scope="session")
 def prefect_test_fixture():
     with prefect_test_harness():
