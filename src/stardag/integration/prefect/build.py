@@ -223,7 +223,7 @@ async def create_markdown(task: Task):
 ```
 """
 
-    return await create_markdown_artifact(  # type: ignore
+    await create_markdown_artifact(  # type: ignore
         key=format_key(f"{task.id_ref.slug}-spec"),
         description=f"Task spec for {task.task_id}",
         markdown=markdown,
