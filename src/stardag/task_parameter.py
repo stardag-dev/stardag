@@ -81,7 +81,7 @@ def _get_task_param_validate(annotation):
 
         try:
             return handler(instance)
-        except ValidationError:
+        except (ValidationError, TypeError):
             # print(
             #     f"Error in task parameter validation: {e}"
             #     f"\nAnnotation: {annotation}"
