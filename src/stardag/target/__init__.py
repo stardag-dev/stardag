@@ -5,6 +5,9 @@ from stardag.target._base import (
     LoadableTarget,
     LoadedT,
     LocalTarget,
+    MockRemoteFileSystem,
+    RemoteFileSystemABC,
+    RemoteFileSystemTarget,
     SaveableTarget,
     Target,
 )
@@ -23,4 +26,7 @@ __all__ = [
     "SaveableTarget",
     "Serializable",
     "Target",
+    "RemoteFileSystemABC",
+    "RemoteFileSystemTarget",
+    "MockRemoteFileSystem",
 ]
