@@ -1,12 +1,21 @@
-from prefect import flow
+import pytest
 
-from stardag.integration.prefect.build import build
+try:
+    from prefect import flow
+
+    from stardag.integration.prefect.build import build
+
+    prefect_available = True
+except ImportError:
+    prefect_available = False
+
 from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
     get_dynamic_deps_dag,
 )
 
 
+@pytest.mark.skipif(not prefect_available, reason="Prefect is not installed")
 async def test_build_dag_dynamic_deps(default_in_memory_fs_target):
     dag = get_dynamic_deps_dag()
     assert_dynamic_deps_task_complete_recursive(dag, False)
