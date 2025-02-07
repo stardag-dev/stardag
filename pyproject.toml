@@ -9,6 +9,7 @@ packages = [{ include = "stardag", from = "src" }]
 [tool.poetry.dependencies]
 python = "^3.10"
 pydantic = "^2.8.2"
+asyncpg = { version = ">=0.30.0", markers = "python_version >= '3.13'", optional = true }
 
 pandas = { version = "^2.2.3", optional = true }
 scikit-learn = { version = "^1.5.2", optional = true }
@@ -25,7 +26,7 @@ ipdb = "^0.13.13"
 
 [tool.poetry.extras]
 examples-ml-pipeline = ["pandas", "scikit-learn", "numpy"]
-prefect = ["prefect"]
+prefect = ["prefect", "asyncpg"]
 
 
 [build-system]
