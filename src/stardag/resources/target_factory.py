@@ -2,34 +2,49 @@ import typing
 from pathlib import Path
 
 from stardag.target import FileSystemTarget, LocalTarget
+from stardag.target._base import RemoteFileSystemTarget
 from stardag.task import Task
+
+# A class or callable that takes a (fully qualifed/"absolute") path (/uri) and returns
+# a FileSystemTarget.
+_TargetFromPath = (
+    typing.Type[FileSystemTarget] | typing.Callable[[str], FileSystemTarget]
+)
 
 
 @typing.runtime_checkable
-class TargetClassFromURIProtocol(typing.Protocol):
-    def __call__(self, uri: str) -> typing.Type[FileSystemTarget]: ...
+class TargetFromPathFromURIProtocol(typing.Protocol):
+    def __call__(self, uri: str) -> _TargetFromPath: ...
 
 
-PrefixToTargetClass = typing.Mapping[str, typing.Type[FileSystemTarget]]
+PrefixToTargetFromPath = typing.Mapping[str, _TargetFromPath]
 
-_DEFAULT_PREFIX_TO_TARGET_CLASS = {
+_DEFAULT_PREFIX_TO_TARGET_FROM_PATH: dict[str, _TargetFromPath] = {
     "/": LocalTarget,
-    # "s3://": S3Target
-    # "gs://": GSTarget,
 }
 
+try:
+    from stardag.integration.aws.s3 import s3_rfs_provider
 
-class TargetClassByPrefix(TargetClassFromURIProtocol):
+    def s3_target_from_path(path: str) -> FileSystemTarget:
+        return RemoteFileSystemTarget(path=path, rfs=s3_rfs_provider.get())
+
+    _DEFAULT_PREFIX_TO_TARGET_FROM_PATH["s3://"] = s3_target_from_path
+except ImportError:
+    pass
+
+
+class TargetFromPathByPrefix(TargetFromPathFromURIProtocol):
     def __init__(
         self,
-        prefix_to_target_class: PrefixToTargetClass = _DEFAULT_PREFIX_TO_TARGET_CLASS,
+        prefix_to_target_from_path: PrefixToTargetFromPath = _DEFAULT_PREFIX_TO_TARGET_FROM_PATH,
     ) -> None:
-        self.prefix_to_target_class = prefix_to_target_class
+        self.prefix_to_target_from_path = prefix_to_target_from_path
 
-    def __call__(self, uri: str) -> typing.Type[FileSystemTarget]:
-        for prefix, target_class in self.prefix_to_target_class.items():
+    def __call__(self, uri: str) -> _TargetFromPath:
+        for prefix, target_from_path in self.prefix_to_target_from_path.items():
             if uri.startswith(prefix):
-                return target_class
+                return target_from_path
         raise ValueError(f"URI {uri} does not match any prefixes.")
 
 
@@ -45,17 +60,19 @@ class TargetFactory:
     def __init__(
         self,
         target_roots: dict[str, str] = _DEFAULT_TARGET_ROOTS,
-        target_class_by_prefix: (
-            PrefixToTargetClass | TargetClassFromURIProtocol
-        ) = TargetClassByPrefix(),
+        target_from_path_by_prefix: (
+            PrefixToTargetFromPath | TargetFromPathFromURIProtocol | None
+        ) = None,
     ) -> None:
         self.target_roots = {
             key: value.removesuffix("/") + "/" for key, value in target_roots.items()
         }
-        self.target_class_by_prefix = (
-            target_class_by_prefix
-            if isinstance(target_class_by_prefix, TargetClassFromURIProtocol)
-            else TargetClassByPrefix(target_class_by_prefix)
+        self.target_from_path_by_prefix = (
+            target_from_path_by_prefix
+            if isinstance(target_from_path_by_prefix, TargetFromPathFromURIProtocol)
+            else TargetFromPathByPrefix(target_from_path_by_prefix)
+            if target_from_path_by_prefix is not None
+            else TargetFromPathByPrefix()
         )
 
     def get_target(
@@ -75,8 +92,8 @@ class TargetFactory:
             target_root: The key to the target root to use.
         """
         path = self.get_path(relpath, target_root_key)
-        target_class = self.target_class_by_prefix(path)
-        return target_class(path=path)
+        target_from_path = self.target_from_path_by_prefix(path)
+        return target_from_path(path)
 
     def get_path(
         self, relpath: str, target_root_key: str = _DEFAULT_TARGET_ROOT_KEY
