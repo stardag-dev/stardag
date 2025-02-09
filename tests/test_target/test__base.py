@@ -57,7 +57,7 @@ def test_local_target_proxy_path(tmp_path: Path):
 
 def test_remote_filesystem_target():
     rfs = InMemoryRemoteFileSystem()
-    uri = "s3://bucket/key"
+    uri = "in-memory://bucket/key"
     target = RemoteFileSystemTarget(path=uri, rfs=rfs)
     assert not target.exists()
 
@@ -79,7 +79,7 @@ def test_remote_filesystem_target():
 # to also check type checking based in the mode parameter.
 def test_remote_filesystem_target_binary():
     rfs = InMemoryRemoteFileSystem()
-    uri = "s3://bucket/key"
+    uri = "in-memory://bucket/key"
     target = RemoteFileSystemTarget(path=uri, rfs=rfs)
     assert not target.exists()
 
@@ -99,7 +99,7 @@ def test_remote_filesystem_target_binary():
 
 def test_remote_filesystem_target_proxy_path():
     rfs = InMemoryRemoteFileSystem()
-    uri = "s3://bucket/key"
+    uri = "in-memory://bucket/key"
     target = RemoteFileSystemTarget(path=uri, rfs=rfs)
     assert not target.exists()
 

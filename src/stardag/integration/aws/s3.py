@@ -3,8 +3,10 @@ from typing import TYPE_CHECKING
 
 import boto3
 from botocore.exceptions import ClientError
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from stardag.target import RemoteFileSystemABC
+from stardag.target import CachedRemoteFileSystem, RemoteFileSystemABC
+from stardag.target._base import CachedRemoteFileSystemConfig
 from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
@@ -12,10 +14,28 @@ if TYPE_CHECKING:
 else:
     S3Client = object
 
-URI_PREFIX = "s3://"
+DEFAULT_CACHE_ROOT = Path("~/.stardag/cache/s3/").expanduser().absolute()
+
+
+class S3CacheConfig(CachedRemoteFileSystemConfig):
+    root: str = str(DEFAULT_CACHE_ROOT)
+
+    model_config = SettingsConfigDict(
+        env_prefix="stardag_target_s3_cache_",
+        env_nested_delimiter="__",
+    )
+
+
+class S3FileSystemConfig(BaseSettings):
+    use_cache: bool = False
+    cache: S3CacheConfig = S3CacheConfig()
+
+    model_config = SettingsConfigDict(env_prefix="stardag_target_s3_")
 
 
 class S3FileSystem(RemoteFileSystemABC):
+    URI_PREFIX = "s3://"
+
     def __init__(self, s3_client: S3Client | None = None):
         self.s3_client: S3Client = s3_client or boto3.client("s3")
 
@@ -35,27 +55,38 @@ class S3FileSystem(RemoteFileSystemABC):
         bucket, key = get_bucket_key(uri)
         self.s3_client.download_file(bucket, key, str(destination))
 
-    def upload(self, source: Path, uri: str):
+    def upload(self, source: Path, uri: str, ok_remove: bool = False):
         bucket, key = get_bucket_key(uri)
         self.s3_client.upload_file(str(source), bucket, key)
 
 
 def get_bucket_key(uri: str) -> tuple[str, str]:
     """Get the bucket and key from the given S3 URI."""
-    if not uri.startswith(URI_PREFIX):
+    if not uri.startswith(S3FileSystem.URI_PREFIX):
         raise ValueError(f"Unexpected URI {uri}.")
-    bucket_key = uri[len(URI_PREFIX) :]
+    bucket_key = uri[len(S3FileSystem.URI_PREFIX) :]
     bucket, key = bucket_key.split("/", 1)
     return bucket, key
 
 
 def get_uri(bucket: str, key: str) -> str:
     """Get the S3 URI from the given bucket and key."""
-    return f"{URI_PREFIX}{bucket}/{key}"
+    return f"{S3FileSystem.URI_PREFIX}{bucket}/{key}"
 
 
 s3_client_provider = resource_provider(S3Client, lambda: boto3.client("s3"))
 
-s3_rfs_provider = resource_provider(
-    S3FileSystem, lambda: S3FileSystem(s3_client=s3_client_provider.get())
-)
+
+def _init_s3_file_system() -> RemoteFileSystemABC:
+    file_system = S3FileSystem(s3_client=s3_client_provider.get())
+    config = S3FileSystemConfig()
+    if config.use_cache:
+        file_system = CachedRemoteFileSystem(
+            wrapped=file_system,
+            **config.cache.model_dump(),
+        )
+
+    return file_system
+
+
+s3_rfs_provider = resource_provider(RemoteFileSystemABC, _init_s3_file_system)
