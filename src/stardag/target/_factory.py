@@ -1,3 +1,4 @@
+import json
 import typing
 from pathlib import Path
 
@@ -119,11 +120,12 @@ class TargetFactory:
         """Get the full (/"absolute") path (/"URI") to the target."""
         target_root = self.target_roots.get(target_root_key)
         if target_root is None:
+            example_json = json.dumps({target_root_key: "...", "default": "..."})
             raise ValueError(
                 f"No target root is configured for keyL '{target_root_key}'. "
                 f"Available keys are: {self.target_roots.keys()}. Set the missing "
                 "target root for example using the envrionent variable: "
-                f"`STARDAG_TARGET_ROOT__{target_root_key.capitalize()}=<path or URI>`."
+                f"`STARDAG_TARGET_ROOT='{example_json}'`."
             )
 
         return f"{target_root}{relpath}"
