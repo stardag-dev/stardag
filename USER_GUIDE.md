@@ -60,8 +60,7 @@ root_task = Sum(integers=Range(limit=10))
 ### Extending the base `Task`
 
 ```python
-from stardag.resources import get_target
-from stardag.target import LoadableSaveableFileSystemTarget
+from stardag.target import get_target, LoadableSaveableFileSystemTarget
 from stardag.target.serialize import JSONSerializer, Serializable
 from stardag.task import Task
 

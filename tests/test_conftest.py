@@ -1,7 +1,11 @@
 from pathlib import Path
 
-from stardag.resources import get_target, target_factory_provider
-from stardag.target import InMemoryFileSystemTarget, LocalTarget
+from stardag.target import (
+    InMemoryFileSystemTarget,
+    LocalTarget,
+    get_target,
+    target_factory_provider,
+)
 
 
 def test_default_local_target_tmp_path(default_local_target_tmp_path: Path):

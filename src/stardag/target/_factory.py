@@ -1,9 +1,12 @@
 import typing
 from pathlib import Path
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
 from stardag.target import FileSystemTarget, LocalTarget
 from stardag.target._base import RemoteFileSystemTarget
 from stardag.task import Task
+from stardag.utils.resource_provider import resource_provider
 
 # A class or callable that takes a (fully qualifed/"absolute") path (/uri) and returns
 # a FileSystemTarget.
@@ -48,12 +51,18 @@ class TargetFromPathByPrefix(TargetFromPathFromURIProtocol):
         raise ValueError(f"URI {uri} does not match any prefixes.")
 
 
-_DEFAULT_TARGET_ROOT_KEY = "default"
+DEFAULT_TARGET_ROOT_KEY = "default"
 _DEFAULT_TARGET_ROOTS = {
-    _DEFAULT_TARGET_ROOT_KEY: str(
+    DEFAULT_TARGET_ROOT_KEY: str(
         Path("~/.stardag/target-roots/default").expanduser().absolute()
     ),
 }
+
+
+class TargetFactoryConfig(BaseSettings):
+    root: dict[str, str] = _DEFAULT_TARGET_ROOTS
+
+    model_config = SettingsConfigDict(env_prefix="stardag_target_")
 
 
 class TargetFactory:
@@ -75,11 +84,15 @@ class TargetFactory:
             else TargetFromPathByPrefix()
         )
 
+    @classmethod
+    def from_config(cls, config: TargetFactoryConfig) -> "TargetFactory":
+        return cls(target_roots=config.root)
+
     def get_target(
         self,
         relpath: str,
         task: Task | None,  # noqa
-        target_root_key: str = _DEFAULT_TARGET_ROOT_KEY,
+        target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
     ) -> FileSystemTarget:
         """Get a file system target.
 
@@ -96,6 +109,24 @@ class TargetFactory:
         return target_from_path(path)
 
     def get_path(
-        self, relpath: str, target_root_key: str = _DEFAULT_TARGET_ROOT_KEY
+        self, relpath: str, target_root_key: str = DEFAULT_TARGET_ROOT_KEY
     ) -> str:
         return f"{self.target_roots[target_root_key]}{relpath}"
+
+
+target_factory_provider = resource_provider(
+    type_=TargetFactory,
+    default_factory=lambda: TargetFactory.from_config(TargetFactoryConfig()),
+)
+
+
+def get_target(
+    relpath: str,
+    task: Task | None,
+    target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
+) -> FileSystemTarget:
+    return target_factory_provider.get().get_target(
+        relpath=relpath,
+        task=task,
+        target_root_key=target_root_key,
+    )

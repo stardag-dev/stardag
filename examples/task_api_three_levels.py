@@ -45,8 +45,7 @@ def auto_fst_task_api(limit: int) -> TaskLoads[int]:
 
 
 def base_task_api(limit: int) -> TaskLoads[int]:
-    from stardag.resources import get_target
-    from stardag.target import LoadableSaveableFileSystemTarget
+    from stardag.target import LoadableSaveableFileSystemTarget, get_target
     from stardag.target.serialize import JSONSerializer, Serializable
     from stardag.task import Task
 

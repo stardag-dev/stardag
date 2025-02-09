@@ -2535,7 +2535,7 @@ semver = ["semver (>=3.0.2)"]
 name = "pydantic-settings"
 version = "2.7.1"
 description = "Settings management using Pydantic"
-optional = true
+optional = false
 python-versions = ">=3.8"
 files = [
     {file = "pydantic_settings-2.7.1-py3-none-any.whl", hash = "sha256:590be9e6e24d06db33a4262829edef682500ef008565a969c73d39d5f8bfb3fd"},
@@ -2623,7 +2623,7 @@ six = ">=1.5"
 name = "python-dotenv"
 version = "1.0.1"
 description = "Read key-value pairs from a .env file and set them as environment variables"
-optional = true
+optional = false
 python-versions = ">=3.8"
 files = [
     {file = "python-dotenv-1.0.1.tar.gz", hash = "sha256:e324ee90a023d808f1959c46bcbc04446a10ced277783dc6ee09987c37ec10ca"},
@@ -3971,4 +3971,4 @@ s3 = ["boto3", "boto3-stubs", "botocore"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "2f95c9f91d341442027b842b1a0abc8d5798b141455ee473b148186f80695df2"
+content-hash = "71dae12f02194dbc63b2080cf6963b2303a0d6d8c0169a2879bc8e5db889c459"

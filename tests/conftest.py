@@ -3,9 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from stardag.resources import target_factory_provider
-from stardag.resources.target_factory import TargetFactory
-from stardag.target import InMemoryFileSystemTarget, LocalTarget
+from stardag.target import (
+    InMemoryFileSystemTarget,
+    LocalTarget,
+    target_factory_provider,
+)
+from stardag.target._factory import TargetFactory
 from stardag.utils.testing.simple_dag import (
     get_simple_dag,
     get_simple_dag_expected_root_output,
