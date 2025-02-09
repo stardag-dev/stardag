@@ -7,7 +7,7 @@ from stardag.task import Task
 LoadedT = typing.TypeVar("LoadedT")
 
 
-class AutoFSTTask(
+class AutoTask(
     Task[LoadableSaveableFileSystemTarget[LoadedT]],
     typing.Generic[LoadedT],
 ):

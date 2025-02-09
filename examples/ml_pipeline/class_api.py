@@ -9,7 +9,7 @@ import pandas as pd
 from pydantic import Field
 from traitlets import Any
 
-from stardag.auto_task import AutoFSTTask
+from stardag.auto_task import AutoTask
 from stardag.build.sequential import build as build_sequential
 from stardag.target import LoadedT
 from stardag.task import namespace
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 namespace("examples.ml_pipeline.class_api", scope=__name__)
 
 
-class ExamplesMLPipelineBase(AutoFSTTask[LoadedT], typing.Generic[LoadedT]):
+class ExamplesMLPipelineBase(AutoTask[LoadedT], typing.Generic[LoadedT]):
     __version__ = "0"
     version: str | None = __version__
 
@@ -154,10 +154,10 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
 
 | Metric    | Value |
 |-----------|-------|
-| Accuracy  | {metrics['accuracy']} |
-| Precision | {metrics['precision']} |
-| Recall    | {metrics['recall']} |
-| F1        | {metrics['f1']} |
+| Accuracy  | {metrics["accuracy"]} |
+| Precision | {metrics["precision"]} |
+| Recall    | {metrics["recall"]} |
+| F1        | {metrics["f1"]} |
 """
 
         return [

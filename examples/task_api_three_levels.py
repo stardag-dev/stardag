@@ -24,15 +24,15 @@ def decorator_api(limit: int) -> TaskLoads[int]:
 
 
 def auto_fst_task_api(limit: int) -> TaskLoads[int]:
-    from stardag.auto_task import AutoFSTTask
+    from stardag.auto_task import AutoTask
 
-    class Range(AutoFSTTask[list[int]]):
+    class Range(AutoTask[list[int]]):
         limit: int
 
         def run(self):
             self.output().save(list(range(self.limit)))
 
-    class Sum(AutoFSTTask[int]):
+    class Sum(AutoTask[int]):
         integers: TaskLoads[list[int]]
 
         def requires(self):

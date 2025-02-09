@@ -1,4 +1,4 @@
-from stardag.auto_task import AutoFSTTask
+from stardag.auto_task import AutoTask
 from stardag.target import LoadableTarget
 from stardag.task import Task, auto_namespace
 from stardag.task_parameter import TaskParam
@@ -8,7 +8,7 @@ LeafTaskLoadedT = dict[str, str | int | None]
 auto_namespace(__name__)
 
 
-class LeafTask(AutoFSTTask[LeafTaskLoadedT]):
+class LeafTask(AutoTask[LeafTaskLoadedT]):
     param_a: int
     param_b: str
 
@@ -19,7 +19,7 @@ class LeafTask(AutoFSTTask[LeafTaskLoadedT]):
 ParentTaskLoadedT = dict[str, list[LeafTaskLoadedT]]
 
 
-class ParentTask(AutoFSTTask[ParentTaskLoadedT]):
+class ParentTask(AutoTask[ParentTaskLoadedT]):
     param_ab_s: list[tuple[int, str]]
 
     def requires(self):
@@ -34,7 +34,7 @@ class ParentTask(AutoFSTTask[ParentTaskLoadedT]):
 RootTaskLoadedT = dict[str, ParentTaskLoadedT]
 
 
-class RootTask(AutoFSTTask[RootTaskLoadedT]):
+class RootTask(AutoTask[RootTaskLoadedT]):
     parent_task: TaskParam[Task[LoadableTarget[ParentTaskLoadedT]]]
 
     def requires(self):

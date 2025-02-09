@@ -1,15 +1,15 @@
-from stardag.auto_task import AutoFSTTask
+from stardag.auto_task import AutoTask
 from stardag.task_parameter import TaskLoads, TaskParam, TaskSet
 
 
-class ChildTask(AutoFSTTask[str]):
+class ChildTask(AutoTask[str]):
     a: str
 
     def run(self) -> None:
         return None
 
 
-class ParentTask(AutoFSTTask[str]):
+class ParentTask(AutoTask[str]):
     child: TaskParam[ChildTask]
 
     def run(self) -> None:
@@ -37,7 +37,7 @@ def test_task_param():
     }
 
 
-class ParentTask2(AutoFSTTask[str]):
+class ParentTask2(AutoTask[str]):
     children: TaskSet[ChildTask]
 
     def run(self) -> None:
@@ -74,7 +74,7 @@ def test_set_of_task_params():
     }
 
 
-class ParentTask3(AutoFSTTask[str]):
+class ParentTask3(AutoTask[str]):
     child: TaskLoads[str]
 
     def run(self) -> None:
