@@ -1,6 +1,8 @@
 import abc
+import contextlib
 import pickle
 import typing
+from pathlib import Path
 
 try:
     from typing import Self
@@ -90,6 +92,16 @@ class Serializable(
 
     def open(self, mode: OpenMode) -> FileSystemTargetHandle:
         return self.wrapped.open(mode)
+
+    @contextlib.contextmanager
+    def _readable_proxy_path(self) -> typing.Generator[Path, None, None]:
+        with self.wrapped._readable_proxy_path() as path:
+            yield path
+
+    @contextlib.contextmanager
+    def _writable_proxy_path(self) -> typing.Generator[Path, None, None]:
+        with self.wrapped._writable_proxy_path() as path:
+            yield path
 
 
 class PlainTextSerializer(Serializer[str]):

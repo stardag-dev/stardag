@@ -1,4 +1,5 @@
 import abc
+import contextlib
 import tempfile
 import typing
 
@@ -132,6 +133,35 @@ class _FileSystemTargetGeneric(
         method _open without type hints to not having to repeat the overload:s."""
         return self._open(mode=mode)  # type: ignore
 
+    @contextlib.contextmanager
+    def proxy_path(
+        self,
+        mode: typing.Literal["r", "w"],
+    ) -> typing.Generator[Path, None, None]:
+        """Returns a temporary path on the local file system.
+
+        Args:
+            mode:
+              "r": In read mode, the content of the target is downloaded/transfered to
+                the returned local path.
+              "w": In write mode, the content of the local path on closing of the
+                context is uploaded to the target.
+        """
+        if mode == "r":
+            with self._readable_proxy_path() as path:
+                yield path
+        elif mode == "w":
+            with self._writable_proxy_path() as path:
+                yield path
+        else:
+            raise ValueError(f"Invalid mode {mode}")
+
+    @contextlib.contextmanager
+    def _readable_proxy_path(self) -> typing.Generator[Path, None, None]: ...
+
+    @contextlib.contextmanager
+    def _writable_proxy_path(self) -> typing.Generator[Path, None, None]: ...
+
 
 class FileSystemTarget(_FileSystemTargetGeneric[bytes], typing.Protocol):
     pass
@@ -168,6 +198,20 @@ class LocalTarget(FileSystemTarget):
             return _AtomicWriteFileHandle(self._path, mode)  # type: ignore
 
         raise ValueError(f"Invalid mode {mode}")
+
+    @contextlib.contextmanager
+    def _readable_proxy_path(self) -> typing.Generator[Path, None, None]:
+        yield self._path
+
+    @contextlib.contextmanager
+    def _writable_proxy_path(self) -> typing.Generator[Path, None, None]:
+        tmp_path = self._path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        try:
+            yield tmp_path
+            tmp_path.rename(self._path)  # type: ignore
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
 
 class _AtomicWriteFileHandle(
@@ -223,7 +267,7 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def upload(self, source: Path, uri: str): ...
 
-    def get_local_readable_path(self, uri: str) -> Path:
+    def enter_readable_proxy_path(self, uri: str) -> Path:
         """Provides a local path for reading the file.
 
         Exposed only that a cached wrapper can be implemented.
@@ -233,9 +277,13 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
         self.download(uri, local_path)
         return local_path
 
-    def cleanup_local_readable_path(self, local_path: Path) -> None:
-        local_path.unlink()
-        local_path.parent.rmdir()
+    def exit_readable_proxy_path(
+        self,
+        local_path: Path,
+    ) -> None:
+        if local_path.exists():
+            local_path.unlink()
+            local_path.parent.rmdir()
 
 
 class RemoteFileSystemTarget(FileSystemTarget):
@@ -254,6 +302,25 @@ class RemoteFileSystemTarget(FileSystemTarget):
 
         raise ValueError(f"Invalid mode {mode}")  # pragma: no cover
 
+    @contextlib.contextmanager
+    def _readable_proxy_path(self) -> typing.Generator[Path, None, None]:
+        proxy_path = self.rfs.enter_readable_proxy_path(self.path)
+        try:
+            yield proxy_path
+        finally:
+            self.rfs.exit_readable_proxy_path(proxy_path)
+
+    @contextlib.contextmanager
+    def _writable_proxy_path(self) -> typing.Generator[Path, None, None]:
+        tmp_path = Path(tempfile.mkdtemp()) / Path(self.path).name
+        try:
+            yield tmp_path
+            self.rfs.upload(tmp_path, self.path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+                tmp_path.parent.rmdir()
+
 
 class _RemoteReadFileHandle(
     ReadableFileSystemTargetHandle[StreamT_co],
@@ -270,20 +337,20 @@ class _RemoteReadFileHandle(
         if mode not in ["r", "rb"]:
             raise ValueError(f"Invalid mode {mode}")
         self.mode = mode
-        self._local_path = self.rfs.get_local_readable_path(self.path)
-        self._local_handle = self._local_path.open(mode)
+        self._proxy_path = self.rfs.enter_readable_proxy_path(self.path)
+        self._proxy_handle = self._proxy_path.open(mode)
 
     def read(self, size: int = -1) -> StreamT_co:
-        return self._local_handle.read(size)
+        return self._proxy_handle.read(size)
 
     def close(self):
         try:
-            self._local_handle.close()
+            self._proxy_handle.close()
         finally:
-            self.rfs.cleanup_local_readable_path(self._local_path)
+            self.rfs.exit_readable_proxy_path(self._proxy_path)
 
     def __enter__(self) -> Self:
-        self._local_handle.__enter__()  # type: ignore
+        self._proxy_handle.__enter__()  # type: ignore
         return self
 
     def __exit__(
@@ -294,9 +361,9 @@ class _RemoteReadFileHandle(
         /,
     ) -> None:
         try:
-            self._local_handle.__exit__(type, value, traceback)  # type: ignore
+            self._proxy_handle.__exit__(type, value, traceback)  # type: ignore
         finally:
-            self.rfs.cleanup_local_readable_path(self._local_path)
+            self.rfs.exit_readable_proxy_path(self._proxy_path)
 
 
 class _RemoteWriteFileHandle(
@@ -311,7 +378,7 @@ class _RemoteWriteFileHandle(
     ) -> None:
         self.path = path
         self.rfs = rfs
-        self._tmp_path = Path(f"/tmp/{uuid6.uuid7()}")
+        self._tmp_path = Path(tempfile.mkdtemp()) / Path(path).name
         self._tmp_handle = self._tmp_path.open(mode)
 
     def write(self, data: StreamT_contra) -> None:
@@ -324,6 +391,7 @@ class _RemoteWriteFileHandle(
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
+                self._tmp_path.parent.rmdir()
 
     def __enter__(self) -> Self:
         self._tmp_handle.__enter__()  # type: ignore
@@ -343,9 +411,12 @@ class _RemoteWriteFileHandle(
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
+                self._tmp_path.parent.rmdir()
 
 
-class MockRemoteFileSystem(RemoteFileSystemABC):
+class InMemoryRemoteFileSystem(RemoteFileSystemABC):
+    """Mock in-memory implementation of a remote file system."""
+
     def __init__(self) -> None:
         self.uri_to_bytes = {}
 
