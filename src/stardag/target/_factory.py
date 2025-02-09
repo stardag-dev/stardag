@@ -8,85 +8,90 @@ from stardag.target._base import RemoteFileSystemTarget
 from stardag.task import Task
 from stardag.utils.resource_provider import resource_provider
 
+DEFAULT_TARGET_ROOT_KEY = "default"
+DEFAULT_TARGET_ROOT = str(
+    Path("~/.stardag/target-roots/default").expanduser().absolute()
+)
+
+
 # A class or callable that takes a (fully qualifed/"absolute") path (/uri) and returns
 # a FileSystemTarget.
-_TargetFromPath = (
+TargetPrototype = (
     typing.Type[FileSystemTarget] | typing.Callable[[str], FileSystemTarget]
 )
 
 
-@typing.runtime_checkable
-class TargetFromPathFromURIProtocol(typing.Protocol):
-    def __call__(self, uri: str) -> _TargetFromPath: ...
+PrefixToTargetPrototype = typing.Mapping[str, TargetPrototype]
 
 
-PrefixToTargetFromPath = typing.Mapping[str, _TargetFromPath]
+def get_default_prefix_to_target_prototype() -> dict[str, TargetPrototype]:
+    prefix_to_target_prototype: dict[str, TargetPrototype] = {
+        "/": LocalTarget,
+    }
+    try:
+        from stardag.integration.aws.s3 import s3_rfs_provider
 
-_DEFAULT_PREFIX_TO_TARGET_FROM_PATH: dict[str, _TargetFromPath] = {
-    "/": LocalTarget,
-}
+        def s3_target_from_path(path: str) -> FileSystemTarget:
+            return RemoteFileSystemTarget(path=path, rfs=s3_rfs_provider.get())
 
-try:
-    from stardag.integration.aws.s3 import s3_rfs_provider
+        prefix_to_target_prototype["s3://"] = s3_target_from_path
+    except ImportError:
+        pass
 
-    def s3_target_from_path(path: str) -> FileSystemTarget:
-        return RemoteFileSystemTarget(path=path, rfs=s3_rfs_provider.get())
-
-    _DEFAULT_PREFIX_TO_TARGET_FROM_PATH["s3://"] = s3_target_from_path
-except ImportError:
-    pass
-
-
-class TargetFromPathByPrefix(TargetFromPathFromURIProtocol):
-    def __init__(
-        self,
-        prefix_to_target_from_path: PrefixToTargetFromPath = _DEFAULT_PREFIX_TO_TARGET_FROM_PATH,
-    ) -> None:
-        self.prefix_to_target_from_path = prefix_to_target_from_path
-
-    def __call__(self, uri: str) -> _TargetFromPath:
-        for prefix, target_from_path in self.prefix_to_target_from_path.items():
-            if uri.startswith(prefix):
-                return target_from_path
-        raise ValueError(f"URI {uri} does not match any prefixes.")
-
-
-DEFAULT_TARGET_ROOT_KEY = "default"
-_DEFAULT_TARGET_ROOTS = {
-    DEFAULT_TARGET_ROOT_KEY: str(
-        Path("~/.stardag/target-roots/default").expanduser().absolute()
-    ),
-}
+    return prefix_to_target_prototype
 
 
 class TargetFactoryConfig(BaseSettings):
-    root: dict[str, str] = _DEFAULT_TARGET_ROOTS
+    """Configuration of the target factory.
 
-    model_config = SettingsConfigDict(env_prefix="stardag_target_")
+    Examples:
+
+    Setting only the default target root:
+    ```
+    export STARDAG_TARGET_ROOT__DEFAULT=/path/to/default-root
+    ```
+
+    Setting multiple target roots using `__` delimiter:
+    ```
+    export STARDAG_TARGET_ROOT__DEFAULT=/path/to/default-root
+    export STARDAG_TARGET_ROOT__OTHER=/path/to/other-root
+    ```
+
+    Setting multiple target roots using JSON-notation:
+    ```
+    export STARDAG_TARGET_ROOT='{"default": "/...", "other": "/..."}'
+    ```
+    """
+
+    root: dict[str, str] = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
+
+    model_config = SettingsConfigDict(
+        env_prefix="stardag_target_",
+        env_nested_delimiter="__",
+        nested_model_default_partial_update=True,
+    )
+
+    @property
+    def target_roots(self) -> dict[str, str]:
+        return self.root
 
 
 class TargetFactory:
     def __init__(
         self,
-        target_roots: dict[str, str] = _DEFAULT_TARGET_ROOTS,
-        target_from_path_by_prefix: (
-            PrefixToTargetFromPath | TargetFromPathFromURIProtocol | None
-        ) = None,
+        target_roots: dict[str, str],
+        prefixt_to_target_prototype: PrefixToTargetPrototype | None = None,
     ) -> None:
         self.target_roots = {
             key: value.removesuffix("/") + "/" for key, value in target_roots.items()
         }
-        self.target_from_path_by_prefix = (
-            target_from_path_by_prefix
-            if isinstance(target_from_path_by_prefix, TargetFromPathFromURIProtocol)
-            else TargetFromPathByPrefix(target_from_path_by_prefix)
-            if target_from_path_by_prefix is not None
-            else TargetFromPathByPrefix()
+        self.prefixt_to_target_prototype = (
+            prefixt_to_target_prototype or get_default_prefix_to_target_prototype()
         )
 
     @classmethod
     def from_config(cls, config: TargetFactoryConfig) -> "TargetFactory":
-        return cls(target_roots=config.root)
+        return cls(target_roots=config.target_roots)
 
     def get_target(
         self,
@@ -105,13 +110,32 @@ class TargetFactory:
             target_root: The key to the target root to use.
         """
         path = self.get_path(relpath, target_root_key)
-        target_from_path = self.target_from_path_by_prefix(path)
-        return target_from_path(path)
+        target_prototype = self._get_target_prototype(path)
+        return target_prototype(path)
 
     def get_path(
         self, relpath: str, target_root_key: str = DEFAULT_TARGET_ROOT_KEY
     ) -> str:
-        return f"{self.target_roots[target_root_key]}{relpath}"
+        """Get the full (/"absolute") path (/"URI") to the target."""
+        target_root = self.target_roots.get(target_root_key)
+        if target_root is None:
+            raise ValueError(
+                f"No target root is configured for keyL '{target_root_key}'. "
+                f"Available keys are: {self.target_roots.keys()}. Set the missing "
+                "target root for example using the envrionent variable: "
+                f"`STARDAG_TARGET_ROOT__{target_root_key.capitalize()}=<path or URI>`."
+            )
+
+        return f"{target_root}{relpath}"
+
+    def _get_target_prototype(self, path: str) -> TargetPrototype:
+        for prefix, target_prototype in self.prefixt_to_target_prototype.items():
+            if path.startswith(prefix):
+                return target_prototype
+        raise ValueError(
+            f"URI {path} does not match any of the configured prefixes: "
+            f"{self.prefixt_to_target_prototype.keys()}."
+        )
 
 
 target_factory_provider = resource_provider(
