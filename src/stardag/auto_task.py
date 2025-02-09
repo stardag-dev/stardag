@@ -1,7 +1,6 @@
 import typing
 
-from stardag.resources import get_target
-from stardag.target import LoadableSaveableFileSystemTarget, Serializable
+from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
 from stardag.target.serialize import get_serializer
 from stardag.task import Task
 

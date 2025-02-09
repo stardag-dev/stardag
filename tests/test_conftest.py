@@ -1,14 +1,18 @@
 from pathlib import Path
 
-from stardag.resources import get_target, target_factory_provider
-from stardag.target import InMemoryFileSystemTarget, LocalTarget
+from stardag.target import (
+    InMemoryFileSystemTarget,
+    LocalTarget,
+    get_target,
+    target_factory_provider,
+)
 
 
 def test_default_local_target_tmp_path(default_local_target_tmp_path: Path):
     tmp_path = default_local_target_tmp_path
     assert isinstance(tmp_path, Path)
     target_factory = target_factory_provider.get()
-    assert target_factory.target_class_by_prefix("/") == LocalTarget
+    assert target_factory.prefixt_to_target_prototype["/"] == LocalTarget
     assert target_factory.target_roots["default"] == str(tmp_path) + "/"
     key = "mock/target.txt"
     target = get_target(key, task=None)
@@ -30,7 +34,7 @@ def test_default_in_memory_target(
     assert default_in_memory_fs_target == InMemoryFileSystemTarget
     target_factory = target_factory_provider.get()
     assert (
-        target_factory.target_class_by_prefix(default_in_memory_fs_target_prefix)
+        target_factory.prefixt_to_target_prototype[default_in_memory_fs_target_prefix]
         == InMemoryFileSystemTarget
     )
     assert target_factory.target_roots["default"] == default_in_memory_fs_target_prefix

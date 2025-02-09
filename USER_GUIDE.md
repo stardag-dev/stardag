@@ -60,8 +60,7 @@ root_task = Sum(integers=Range(limit=10))
 ### Extending the base `Task`
 
 ```python
-from stardag.resources import get_target
-from stardag.target import LoadableSaveableFileSystemTarget
+from stardag.target import get_target, LoadableSaveableFileSystemTarget
 from stardag.target.serialize import JSONSerializer, Serializable
 from stardag.task import Task
 
@@ -114,9 +113,47 @@ In short:
 - The `AutoFSTTask` should be used when upstream dependencies (output of `.requires()`) needs to be _computed_ based on task input parameters. Most things, like the target path, are still easily tweakable by overriding properties/methods of the `AutoFSTTask`.
 - The base `Task` should be used when we want full flexibility and/or use non-filesystem target (like a row in a DB for example).
 
-## Filesystem Targets
+## Filesystem Targets & Target Roots
 
-...
+In typicall usage, most task will have their output saved to a filesystem; local disk or remote storage such as AWS S3 or Google Cloud Storage. This happens automatically when you use the [decorator API](#the-decorator-task-api) or extending the [`AutoFSTTask`](#extending-the-autofsttask-auto-file-system-target-task).
+
+Each task only specifies its output location _relative to_ a (or multiple) globaly configured _target root(s)_. To configure these, use the following environment variables:
+
+```sh
+export STARDAG_TARGET_ROOT__DEFAULT=<abspath or URI>
+export STARDAG_TARGET_ROOT__OTHER=<abspath or URI>
+```
+
+or equivalent with JSON notation:
+
+```sh
+export STARDAG_TARGET_ROOT='{"default": <abspath or URI>, "other": <abspath or URI>}'
+```
+
+Under the hood, target roots are managed by the global `stardag.target.TargetFactory` instance obtained by `stardag.target.target_factory_provider.get()`. For maximal flexibility you can instantiate a `TargetFactory` (or a custom subclass) explicitly and set it to `target_factory_provider.set(TargetFactory(target_roots={...}))`.
+
+Whe you subclass `Task` directly (i.e. don't use [decorator API](#the-decorator-task-api) or extends the [`AutoFSTTask`](#extending-the-autofsttask-auto-file-system-target-task)) it is recommended to use `stardag.target.get_target(relpath=...)` to instantiate filesystem targets returned by `Task.output()`, this way the task specifes the _relative path_ to the configured target root:
+
+```python
+from stardag.target import get_target
+# ...
+
+class MyTask(Task[FileSystemTarget]):
+    # ...
+    def output(self):
+        return get_target(relpath="...", task=self)
+
+```
+
+For special cases you can of course instantiate and return a `FileSystemTarget` such as `LocalTarget` or `RemoteFilesystemTarget` directly in which case the globaly configured target roots have no effect.
+
+### Switching Target Roots by "Environment"
+
+A common use case for the globaly configured target roots is to switch target filesystem depending on the environemt. In local development you'd typically use a directory of choice on your local filesystem (or you could even set it by active git feature branch etc.). In testing you can setup pytest fixtures to use a temporary directory (separate for each test) or an in-memory filesystem (TODO document both), and in production you would typically select remote storage such as AWS S3:
+
+```sh
+export STARDAG_TARGET_ROOT__DEFAULT="s3://my-bucket/stardag/root-default/"
+```
 
 ### Serialization
 

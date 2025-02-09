@@ -3,9 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from stardag.resources import target_factory_provider
-from stardag.resources.target_factory import TargetFactory
-from stardag.target import InMemoryFileSystemTarget, LocalTarget
+from stardag.target import (
+    InMemoryFileSystemTarget,
+    LocalTarget,
+    target_factory_provider,
+)
+from stardag.target._factory import TargetFactory
 from stardag.utils.testing.simple_dag import (
     get_simple_dag,
     get_simple_dag_expected_root_output,
@@ -31,7 +34,7 @@ def default_local_target_tmp_path(
     with target_factory_provider.override(
         TargetFactory(
             target_roots={"default": str(default_root)},
-            target_class_by_prefix={"/": LocalTarget},
+            prefixt_to_target_prototype={"/": LocalTarget},
         )
     ):
         yield default_root
@@ -49,7 +52,7 @@ def _default_in_memory_fs_target_factory(
     with target_factory_provider.override(
         TargetFactory(
             target_roots={"default": default_in_memory_fs_target_prefix},
-            target_class_by_prefix={
+            prefixt_to_target_prototype={
                 default_in_memory_fs_target_prefix: InMemoryFileSystemTarget
             },
         )
