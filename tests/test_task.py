@@ -2,7 +2,7 @@ import typing
 
 import pytest
 
-from stardag.auto_task import AutoFSTTask
+from stardag.auto_task import AutoTask
 from stardag.decorator import task as task_decorator
 from stardag.parameter import (
     IDHasher,
@@ -36,7 +36,7 @@ from stardag.utils.testing.namepace import (
 from stardag.utils.testing.simple_dag import LeafTask
 
 
-class MockTask(AutoFSTTask[str]):
+class MockTask(AutoTask[str]):
     a: int
     b: IDHashExclude[str]
 

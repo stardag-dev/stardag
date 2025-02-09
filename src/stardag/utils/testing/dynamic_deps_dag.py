@@ -1,11 +1,11 @@
-from stardag.auto_task import AutoFSTTask
+from stardag.auto_task import AutoTask
 from stardag.task import auto_namespace
 from stardag.task_parameter import TaskLoads
 
 auto_namespace(__name__)
 
 
-class DynamicDepsTask(AutoFSTTask[str]):
+class DynamicDepsTask(AutoTask[str]):
     value: str
     static_deps: tuple[TaskLoads[str], ...] = ()
     dynamic_deps: tuple[TaskLoads[str], ...] = ()

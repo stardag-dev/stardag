@@ -32,19 +32,19 @@ def get_sum(integers: Depends[list[int]]) -> int:
 root_task = get_sum(integers=get_range(limit=10))
 ```
 
-### Extending the `AutoFSTTask` (Auto **F**ile **S**ystem **T**arget Task)
+### Extending the `AutoTask`
 
 ```python
-from stardag.auto_task import AutoFSTTask
+from stardag.auto_task import AutoTask
 
-class Range(AutoFSTTask[list[int]]):
+class Range(AutoTask[list[int]]):
     limit: int
 
     def run(self):
         self.output().save(list(range(self.limit)))
 
 
-class Sum(AutoFSTTask[int]):
+class Sum(AutoTask[int]):
     integers: TaskLoads[list[int]]
 
     def requires(self):
@@ -110,12 +110,12 @@ root_task =  Sum(integers=Range(limit=10))
 In short:
 
 - The decorator API can be used when defining a task for which all upstream dependencies are _injected_ as "task parameters". Sane defaults and type annotations are leverage to infer target location and serialization.
-- The `AutoFSTTask` should be used when upstream dependencies (output of `.requires()`) needs to be _computed_ based on task input parameters. Most things, like the target path, are still easily tweakable by overriding properties/methods of the `AutoFSTTask`.
+- The `AutoTask` should be used when upstream dependencies (output of `.requires()`) needs to be _computed_ based on task input parameters. Most things, like the target path, are still easily tweakable by overriding properties/methods of the `AutoTask`.
 - The base `Task` should be used when we want full flexibility and/or use non-filesystem target (like a row in a DB for example).
 
 ## Filesystem Targets & Target Roots
 
-In typicall usage, most task will have their output saved to a filesystem; local disk or remote storage such as AWS S3 or Google Cloud Storage. This happens automatically when you use the [decorator API](#the-decorator-task-api) or extending the [`AutoFSTTask`](#extending-the-autofsttask-auto-file-system-target-task).
+In typicall usage, most task will have their output saved to a filesystem; local disk or remote storage such as AWS S3 or Google Cloud Storage. This happens automatically when you use the [decorator API](#the-decorator-task-api) or extending the [`AutoTask`](#extending-the-AutoTask-auto-file-system-target-task).
 
 Each task only specifies its output location _relative to_ a (or multiple) globaly configured _target root(s)_. To configure these, use the following environment variables:
 
@@ -132,7 +132,7 @@ export STARDAG_TARGET_ROOT='{"default": <abspath or URI>, "other": <abspath or U
 
 Under the hood, target roots are managed by the global `stardag.target.TargetFactory` instance obtained by `stardag.target.target_factory_provider.get()`. For maximal flexibility you can instantiate a `TargetFactory` (or a custom subclass) explicitly and set it to `target_factory_provider.set(TargetFactory(target_roots={...}))`.
 
-Whe you subclass `Task` directly (i.e. don't use [decorator API](#the-decorator-task-api) or extends the [`AutoFSTTask`](#extending-the-autofsttask-auto-file-system-target-task)) it is recommended to use `stardag.target.get_target(relpath=...)` to instantiate filesystem targets returned by `Task.output()`, this way the task specifes the _relative path_ to the configured target root:
+Whe you subclass `Task` directly (i.e. don't use [decorator API](#the-decorator-task-api) or extends the [`AutoTask`](#extending-the-AutoTask-auto-file-system-target-task)) it is recommended to use `stardag.target.get_target(relpath=...)` to instantiate filesystem targets returned by `Task.output()`, this way the task specifes the _relative path_ to the configured target root:
 
 ```python
 from stardag.target import get_target

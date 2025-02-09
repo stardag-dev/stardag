@@ -3,7 +3,7 @@ import typing
 
 from pydantic import create_model
 
-from stardag.auto_task import AutoFSTTask
+from stardag.auto_task import AutoTask
 from stardag.task import Task
 from stardag.task_parameter import TaskLoads
 
@@ -13,7 +13,7 @@ FuncT = typing.TypeVar("FuncT", bound=typing.Callable)
 _PWrapped = typing.ParamSpec("_PWrapped")
 
 
-class _FunctionTask(AutoFSTTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
+class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     _func: typing.Callable[_PWrapped, LoadedT]
 
     if typing.TYPE_CHECKING:
@@ -68,7 +68,7 @@ class _TaskWrapper(typing.Protocol):
     ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
 
-_Relpath = str | typing.Callable[[AutoFSTTask[LoadedT]], str] | None
+_Relpath = str | typing.Callable[[AutoTask[LoadedT]], str] | None
 
 
 @typing.overload
