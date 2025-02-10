@@ -1,4 +1,5 @@
 from stardag.target._base import (
+    CachedRemoteFileSystem,
     FileSystemTarget,
     InMemoryRemoteFileSystem,
     LoadableSaveableFileSystemTarget,
@@ -16,21 +17,22 @@ from stardag.target._in_memory import InMemoryFileSystemTarget, InMemoryTarget
 from stardag.target.serialize import Serializable
 
 __all__ = [
+    "CachedRemoteFileSystem",
     "FileSystemTarget",
+    "get_target",
     "InMemoryFileSystemTarget",
+    "InMemoryRemoteFileSystem",
     "InMemoryTarget",
     "LoadableSaveableTarget",
     "LoadableSaveableFileSystemTarget",
     "LoadableTarget",
     "LoadedT",
     "LocalTarget",
+    "RemoteFileSystemABC",
+    "RemoteFileSystemTarget",
     "SaveableTarget",
     "Serializable",
     "Target",
-    "RemoteFileSystemABC",
-    "RemoteFileSystemTarget",
-    "InMemoryRemoteFileSystem",
     "TargetFactory",
     "target_factory_provider",
-    "get_target",
 ]

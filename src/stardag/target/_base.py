@@ -1,7 +1,10 @@
 import abc
 import contextlib
+import shutil
 import tempfile
 import typing
+
+from pydantic_settings import BaseSettings
 
 try:
     from typing import Self
@@ -258,6 +261,8 @@ class _AtomicWriteFileHandle(
 class RemoteFileSystemABC(metaclass=abc.ABCMeta):
     """*Minimal* interface for a remote file system."""
 
+    URI_PREFIX: str
+
     @abc.abstractmethod
     def exists(self, uri: str) -> bool: ...
 
@@ -265,7 +270,7 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
     def download(self, uri: str, destination: Path): ...
 
     @abc.abstractmethod
-    def upload(self, source: Path, uri: str): ...
+    def upload(self, source: Path, uri: str, ok_remove: bool = False): ...
 
     def enter_readable_proxy_path(self, uri: str) -> Path:
         """Provides a local path for reading the file.
@@ -288,6 +293,10 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
 
 class RemoteFileSystemTarget(FileSystemTarget):
     def __init__(self, path: str, rfs: RemoteFileSystemABC) -> None:
+        if not path.startswith(rfs.URI_PREFIX):
+            raise ValueError(
+                f"Unexpected URI {path}, expected format {rfs.URI_PREFIX}..."
+            )
         self.path = path
         self.rfs = rfs
 
@@ -315,7 +324,7 @@ class RemoteFileSystemTarget(FileSystemTarget):
         tmp_path = Path(tempfile.mkdtemp()) / Path(self.path).name
         try:
             yield tmp_path
-            self.rfs.upload(tmp_path, self.path)
+            self.rfs.upload(tmp_path, self.path, ok_remove=True)
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -387,7 +396,7 @@ class _RemoteWriteFileHandle(
     def close(self):
         try:
             self._tmp_handle.close()
-            self.rfs.upload(self._tmp_path, self.path)
+            self.rfs.upload(self._tmp_path, self.path, ok_remove=True)
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
@@ -407,7 +416,7 @@ class _RemoteWriteFileHandle(
         try:
             self._tmp_handle.__exit__(type, value, traceback)  # type: ignore
             if type is None:
-                self.rfs.upload(self._tmp_path, self.path)
+                self.rfs.upload(self._tmp_path, self.path, ok_remove=True)
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
@@ -416,6 +425,8 @@ class _RemoteWriteFileHandle(
 
 class InMemoryRemoteFileSystem(RemoteFileSystemABC):
     """Mock in-memory implementation of a remote file system."""
+
+    URI_PREFIX = "in-memory://"
 
     def __init__(self) -> None:
         self.uri_to_bytes = {}
@@ -427,6 +438,98 @@ class InMemoryRemoteFileSystem(RemoteFileSystemABC):
         with open(destination, "wb") as f:
             f.write(self.uri_to_bytes[uri])
 
-    def upload(self, source: Path, uri: str):
+    def upload(self, source: Path, uri: str, ok_remove: bool = False):
         with open(source, "rb") as f:
             self.uri_to_bytes[uri] = f.read()
+
+
+class CachedRemoteFileSystemConfig(BaseSettings):
+    root: str
+    root_by_prefix: typing.Dict[str, str] = {}
+    allow_cache_check_exists: bool = True
+
+
+class CachedRemoteFileSystem(RemoteFileSystemABC):
+    def __init__(
+        self,
+        wrapped: RemoteFileSystemABC,
+        root: str,
+        root_by_prefix: typing.Dict[str, str] | None = None,
+        allow_cache_check_exists: bool = True,
+    ) -> None:
+        self.wrapped = wrapped
+        self.root = Path(root)
+        self.root_by_prefix = (
+            {prefix: Path(root) for prefix, root in root_by_prefix.items()}
+            if root_by_prefix is not None
+            else {}
+        )
+        for prefix in self.root_by_prefix:
+            if not prefix.startswith(wrapped.URI_PREFIX):
+                raise ValueError(
+                    f"Unexpected URI prefix {prefix}, "
+                    f"expected format {wrapped.URI_PREFIX}..."
+                )
+        self.allow_cache_check_exists = allow_cache_check_exists
+
+    @property
+    def URI_PREFIX(self) -> str:  # type: ignore  # TODO
+        return self.wrapped.URI_PREFIX
+
+    def get_cache_path(self, uri: str) -> Path:
+        if not uri.startswith(self.wrapped.URI_PREFIX):
+            raise ValueError(
+                f"Unexpected URI {uri}, expected format {self.wrapped.URI_PREFIX}..."
+            )
+        relative_key = uri[len(self.wrapped.URI_PREFIX) :]
+        for prefix, root in self.root_by_prefix.items():
+            if uri.startswith(prefix):
+                return root / relative_key
+
+        return self.root / relative_key
+
+    def exists(self, uri: str) -> bool:
+        if self.allow_cache_check_exists:
+            local_path = self.get_cache_path(uri)
+            if local_path.exists():
+                return True
+
+        return self.wrapped.exists(uri)
+
+    def download(self, uri: str, destination: Path):
+        cache_path = self.get_cache_path(uri)
+        if not cache_path.exists():
+            self._load_to_cache_atomically(uri, cache_path)
+
+        shutil.copy(cache_path, destination)
+
+    def upload(self, source: Path, uri: str, ok_remove: bool = False):
+        self.wrapped.upload(source, uri, ok_remove=False)
+        # NOTE only cache the file if the upload was successful!
+        cache_path = self.get_cache_path(uri)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        if ok_remove:
+            # NOTE faster to rename than to copy!
+            source.rename(cache_path)
+        else:
+            shutil.copy(source, cache_path)
+
+    def enter_readable_proxy_path(self, uri: str) -> Path:
+        cache_path = self.get_cache_path(uri)
+        if not cache_path.exists():
+            self._load_to_cache_atomically(uri, cache_path)
+
+        return cache_path
+
+    def exit_readable_proxy_path(self, local_path: Path) -> None:
+        pass
+
+    def _load_to_cache_atomically(self, uri: str, cache_path: Path):
+        tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        tmp_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.wrapped.download(uri, tmp_cache_path)
+            tmp_cache_path.rename(cache_path)  # type: ignore
+        finally:
+            if tmp_cache_path.exists():
+                tmp_cache_path.unlink()
