@@ -324,7 +324,7 @@ class RemoteFileSystemTarget(FileSystemTarget):
         tmp_path = Path(tempfile.mkdtemp()) / Path(self.path).name
         try:
             yield tmp_path
-            self.rfs.upload(tmp_path, self.path)
+            self.rfs.upload(tmp_path, self.path, ok_remove=True)
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -396,7 +396,7 @@ class _RemoteWriteFileHandle(
     def close(self):
         try:
             self._tmp_handle.close()
-            self.rfs.upload(self._tmp_path, self.path)
+            self.rfs.upload(self._tmp_path, self.path, ok_remove=True)
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
@@ -416,7 +416,7 @@ class _RemoteWriteFileHandle(
         try:
             self._tmp_handle.__exit__(type, value, traceback)  # type: ignore
             if type is None:
-                self.rfs.upload(self._tmp_path, self.path)
+                self.rfs.upload(self._tmp_path, self.path, ok_remove=True)
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
@@ -507,6 +507,7 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
         self.wrapped.upload(source, uri, ok_remove=False)
         # NOTE only cache the file if the upload was successful!
         cache_path = self.get_cache_path(uri)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
         if ok_remove:
             # NOTE faster to rename than to copy!
             source.rename(cache_path)
