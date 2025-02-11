@@ -51,7 +51,7 @@ async def build_dag(task: Task):
     await prefect_build(
         task,
         before_run_callback=create_markdown,
-        after_run_callback=custom_callback,
+        on_complete_callback=custom_callback,
     )
 
 
