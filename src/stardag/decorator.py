@@ -82,6 +82,7 @@ class RelpathSettings(typing.TypedDict):
 def task(
     _func: typing.Callable[_PWrapped, LoadedT],
     *,
+    family: str | None = None,
     version: str = "0",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
@@ -90,6 +91,7 @@ def task(
 @typing.overload
 def task(
     *,
+    family: str | None = None,
     version: str = "0",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> _TaskWrapper: ...
@@ -98,7 +100,8 @@ def task(
 def task(
     _func: typing.Callable[_PWrapped, LoadedT] | None = None,
     *,
-    version: str = "0",
+    family: str | None = None,
+    version: str | None = None,
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]] | _TaskWrapper:
     def wrapper(
@@ -115,7 +118,7 @@ def task(
             raise ValueError("All arguments must have annotations")
 
         task_class = create_model(
-            _func.__name__,
+            family or _func.__name__,
             __base__=_FunctionTask[return_type, _PWrapped],
             __module__=_func.__module__,
             version=(str | None, version),
@@ -128,7 +131,7 @@ def task(
             },
         )
         task_class._func = _func
-        task_class.__version__ = "0"
+        task_class.__version__ = version
 
         # extra properties
         if relpath is not None:
