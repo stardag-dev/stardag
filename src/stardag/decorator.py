@@ -68,35 +68,41 @@ class _TaskWrapper(typing.Protocol):
     ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
 
-_Relpath = str | typing.Callable[[AutoTask[LoadedT]], str] | None
+_RelpathOverride = str | typing.Callable[[AutoTask[LoadedT]], str]
+
+
+class RelpathSettings(typing.TypedDict):
+    base: _RelpathOverride
+    extra: _RelpathOverride
+    filename: _RelpathOverride
+    extension: _RelpathOverride
 
 
 @typing.overload
 def task(
     _func: typing.Callable[_PWrapped, LoadedT],
     *,
+    family: str | None = None,
     version: str = "0",
-    relpath: _Relpath = None,
-    relpath_base: str | None = None,
+    relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
 
 @typing.overload
 def task(
     *,
+    family: str | None = None,
     version: str = "0",
-    relpath: _Relpath = None,
-    relpath_base: str | None = None,
+    relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> _TaskWrapper: ...
 
 
 def task(
     _func: typing.Callable[_PWrapped, LoadedT] | None = None,
     *,
-    version: str = "0",
-    relpath: _Relpath = None,
-    relpath_base: str | None = None,
-    # TODO remaining kwargs!
+    family: str | None = None,
+    version: str | None = None,
+    relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]] | _TaskWrapper:
     def wrapper(
         _func: typing.Callable[_PWrapped, LoadedT],
@@ -112,7 +118,7 @@ def task(
             raise ValueError("All arguments must have annotations")
 
         task_class = create_model(
-            _func.__name__,
+            family or _func.__name__,
             __base__=_FunctionTask[return_type, _PWrapped],
             __module__=_func.__module__,
             version=(str | None, version),
@@ -125,18 +131,26 @@ def task(
             },
         )
         task_class._func = _func
-        task_class.__version__ = "0"
+        task_class.__version__ = version
 
         # extra properties
-        if relpath:
-            if callable(relpath):
+        if relpath is not None:
+            if isinstance(relpath, dict):
+                for key in ["base", "extra", "filename", "extension"]:
+                    value = relpath.get(key)
+                    if value is not None:
+                        if callable(value):
+                            setattr(task_class, f"_relpath_{key}", property(value))
+                        elif isinstance(value, str):
+                            setattr(task_class, f"_relpath_{key}", value)
+                        else:
+                            raise ValueError(f"Invalid relpath value for {key}")
+            elif callable(relpath):
                 task_class._relpath = property(relpath)
-            else:
-                assert isinstance(relpath, str)
+            elif isinstance(relpath, str):
                 task_class._relpath = relpath
-
-        if relpath_base:
-            task_class._relpath_base = relpath_base
+            else:
+                raise ValueError("Invalid relpath type")
 
         return task_class
 

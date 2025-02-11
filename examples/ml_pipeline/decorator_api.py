@@ -21,15 +21,9 @@ base_task = partial(task, version="0")
 
 
 @base_task(
-    relpath=lambda self: "/".join(
-        [
-            self.get_namespace().replace(".", "/"),
-            self.get_family(),
-            f"v{self.version}",
-            self.date.isoformat(),  # type: ignore
-            f"{self.snapshot_slug}.csv",  # type: ignore # TODO extension and format
-        ]
-    )
+    relpath={
+        "extra": lambda self: f"{self.date.isoformat()}/{self.snapshot_slug}"  # type: ignore
+    }
 )
 def dump(
     date: datetime.date = base.utc_today(),

@@ -10,8 +10,8 @@ def test_basic(default_in_memory_fs_target):
     def add(a: int, b: int) -> int:
         return a + b
 
-    assert add.__version__ == "0"
-    assert add.model_fields["version"].default == "0"
+    assert add.__version__ is None
+    assert add.model_fields["version"].default is None
 
     add_b_task = add(a=2, b=3)
     add_task = add(a=1, b=add_b_task)
@@ -35,15 +35,17 @@ def test_with_params(default_in_memory_fs_target):
 
     @task(
         version="1",
-        relpath_base="add_task",
         relpath=lambda self: (
-            f"{self._relpath_base}/add2/v{self.version}/"
+            f"add_task/add2/v{self.version}/"
             f"{val_or_id(self.a)}_{val_or_id(self.b)}/"  # type: ignore
             "result.txt"
         ),
     )
     def add2(a: int, b: int) -> int:
         return a + b
+
+    assert add2.__version__ == "1"
+    assert add2.model_fields["version"].default == "1"
 
     add_b_task = add2(a=2, b=3)
     add_task = add2(a=1, b=add_b_task)

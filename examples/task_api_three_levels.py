@@ -10,13 +10,11 @@ from stardag.task_parameter import TaskLoads
 def decorator_api(limit: int) -> TaskLoads[int]:
     from stardag.decorator import Depends, task
 
-    # @task(family="Range")  # TODO
-    @task
+    @task(family="Range")
     def get_range(limit: int) -> list[int]:
         return list(range(limit))
 
-    # @task(family="Sum")  # TODO
-    @task
+    @task(family="Sum")
     def get_sum(integers: Depends[list[int]]) -> int:
         return sum(integers)
 
@@ -52,7 +50,6 @@ def base_task_api(limit: int) -> TaskLoads[int]:
     def default_relpath(task: Task) -> str:
         return "/".join(
             [
-                task.get_namespace().replace(".", "/"),
                 task.get_family(),
                 task.task_id[:2],
                 task.task_id[2:4],
