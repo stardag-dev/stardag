@@ -21,9 +21,14 @@ base_task = partial(task, version="0")
 
 
 @base_task(
-    relpath=lambda self: (
-        f"dump/v{self.version}/{self.date}/"  # type: ignore
-        f"{self.snapshot_slug}.pkl"  # type: ignore
+    relpath=lambda self: "/".join(
+        [
+            self.get_namespace().replace(".", "/"),
+            self.get_family(),
+            f"v{self.version}",
+            self.date.isoformat(),  # type: ignore
+            f"{self.snapshot_slug}.csv",  # type: ignore # TODO extension and format
+        ]
     )
 )
 def dump(

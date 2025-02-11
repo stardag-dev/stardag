@@ -12,7 +12,7 @@
   - [ ] Add fixture for auto clearing the registry
   - [ ] Add testing util for registering tasks defined outside of test function
 - [ ] Basic heuristic for run-time type checking of Generic type in TaskParams
-- [ ] Express dynamic deps explicitly (Generic: Task[TargetT, RunT], StaticTask, -> NO just type annotate as union in base class.
+- [ ] ~~Express dynamic deps explicitly (Generic: Task[TargetT, RunT], StaticTask,~~ -> NO just type annotate as union in base class.
       DynamicTask) or just class variable `has_dynamic_dependencies: bool` (possible to
       overload type hints on this? Yes: <https://stackoverflow.com/questions/70136046/can-you-type-hint-overload-a-return-type-for-a-method-based-on-an-argument-passe>
       but probably overkill)
@@ -20,8 +20,8 @@
 ### Features
 
 - [ ] FileSystemTargets
-  - [ ] Atomic Writes (copy luigi approach?)
-  - [ ] S3
+  - [x] Atomic Writes (copy luigi approach?)
+  - [x] S3
   - [ ] GS
 - [x] Serialization -> AutoTask
   - [x] Module structure

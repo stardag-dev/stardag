@@ -1,33 +1,36 @@
 import asyncio
 import logging
-import typing
 
 from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
+from stardag.build.registry import RegistryABC, registry_provider
+from stardag.build.task_runner import AsyncRunCallback, AsyncTaskRunner
 from stardag.integration.prefect.utils import format_key
-from stardag.task import Task, TaskDeps, flatten_task_struct
+from stardag.task import Task, flatten_task_struct
 
 logger = logging.getLogger(__name__)
 
 
-Callback = typing.Callable[[Task], typing.Awaitable[None]]
-
-
 async def build(
     task: Task,
-    before_run_callback: Callback | None = None,
-    after_run_callback: Callback | None = None,
+    before_run_callback: AsyncRunCallback | None = None,
+    on_complete_callback: AsyncRunCallback | None = None,
     wait_for_completion: bool = True,
+    registry: RegistryABC | None = None,
 ) -> dict[str, PrefectConcurrentFuture]:
+    task_runner = AsyncTaskRunner(
+        before_run_callback=before_run_callback,
+        on_complete_callback=on_complete_callback,
+        registry=registry or registry_provider.get(),
+    )
     task_id_to_future = {}
     task_id_to_dynamic_future = {}
     task_id_to_dynamic_deps = {}
     res = await build_dag_recursive(
         task,
-        before_run_callback=before_run_callback,
-        after_run_callback=after_run_callback,
+        task_runner=task_runner,
         task_id_to_future=task_id_to_future,
         task_id_to_dynamic_future=task_id_to_dynamic_future,
         task_id_to_dynamic_deps=task_id_to_dynamic_deps,
@@ -60,8 +63,7 @@ async def build(
 
         res = await build_dag_recursive(
             task,
-            before_run_callback=before_run_callback,
-            after_run_callback=after_run_callback,
+            task_runner=task_runner,
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
@@ -77,8 +79,7 @@ async def build(
 async def build_dag_recursive(
     task: Task,
     *,
-    before_run_callback: Callback | None,
-    after_run_callback: Callback | None,
+    task_runner: AsyncTaskRunner,
     task_id_to_future: dict[str, PrefectConcurrentFuture | None],
     task_id_to_dynamic_future: dict[
         str, PrefectConcurrentFuture
@@ -96,14 +97,6 @@ async def build_dag_recursive(
     # pprint(task_id_to_dynamic_future)
     # pprint(task_id_to_dynamic_deps)
     # print()
-
-    async def run(task: Task):
-        if before_run_callback is not None:
-            await before_run_callback(task)
-        res = task.run()
-        if after_run_callback is not None:
-            await after_run_callback(task)
-        return res
 
     # Cycle detection
     if task.task_id in visited:
@@ -126,8 +119,7 @@ async def build_dag_recursive(
     upstream_build_results = [
         await build_dag_recursive(
             dep,
-            before_run_callback=before_run_callback,
-            after_run_callback=after_run_callback,
+            task_runner=task_runner,
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
@@ -147,9 +139,8 @@ async def build_dag_recursive(
             # TODO: concurrency lock
             if not task.complete():
                 try:
-                    gen = await run(task)
-                    assert hasattr(gen, "__next__")
-                    gen = typing.cast(typing.Generator[TaskDeps, None, None], gen)
+                    gen = await task_runner.run(task)
+                    assert gen is not None
 
                     requires = next(gen)
                     deps = flatten_task_struct(requires)
@@ -185,16 +176,12 @@ async def build_dag_recursive(
     async def stardag_task():
         # TODO: concurrency lock
         if not task.complete():
-            res = await run(task)
+            res = await task_runner.run(task)
             # check if it's a generator
-            if hasattr(res, "__next__"):
+            if res is not None:
                 raise AssertionError(
                     "Tasks with dynamic deps should be executed separately."
                 )
-            # TODO remove, should be handled by `on_complete_callback`
-            # if hasattr(task, "prefect_on_complete_artifacts"):
-            #     for artifact in task.prefect_on_complete_artifacts():
-            #         await artifact.create()
 
         return task.task_id
 
