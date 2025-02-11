@@ -535,3 +535,41 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
         finally:
             if tmp_cache_path.exists():
                 tmp_cache_path.unlink()
+
+
+TargetPrototype = (
+    typing.Type[FileSystemTarget] | typing.Callable[[str], FileSystemTarget]
+)
+
+
+class DirectoryTarget(Target):
+    """A target representing a directory."""
+
+    def __init__(self, path: str, prototype: TargetPrototype) -> None:
+        self.path = path.removesuffix("/") + "/"
+        self.prototype = prototype
+        self._flag_target = prototype(self.path[:-1] + "._DONE")
+        self._sub_keys = []
+
+    def exists(self) -> bool:
+        return self._flag_target.exists()
+
+    def mark_done(self):
+        with self.sub_keys_target().open("w") as f:
+            f.write("\n".join(self._sub_keys))
+        with self._flag_target.open("w") as f:
+            f.write("")  # empty file
+
+    def get_sub_target(self, relpath: str) -> FileSystemTarget:
+        if relpath.startswith("/"):
+            raise ValueError(
+                f"Invalid relpath {relpath}, not allowed to start with '/'"
+            )
+        self._sub_keys.append(relpath)
+        return self.prototype(self.path + relpath)
+
+    def __truediv__(self, relpath: str) -> FileSystemTarget:
+        return self.get_sub_target(relpath)
+
+    def sub_keys_target(self) -> FileSystemTarget:
+        return self.prototype(self.path[:-1] + "._SUB_KEYS")

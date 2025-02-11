@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from stardag.target import InMemoryRemoteFileSystem, LocalTarget, RemoteFileSystemTarget
+from stardag.target import (
+    DirectoryTarget,
+    InMemoryRemoteFileSystem,
+    LocalTarget,
+    RemoteFileSystemTarget,
+)
 from stardag.target._base import CachedRemoteFileSystem
 
 
@@ -149,3 +154,36 @@ def test_cached_remote_filesystem_target(tmp_path: Path):
     assert str(cache_path.relative_to(tmp_path)) == "cache/bucket/key"
 
     assert cache_path.read_text() == "test"
+
+
+def test_directory_target(tmp_path: Path):
+    dir_target = DirectoryTarget(path=str(tmp_path / "test"), prototype=LocalTarget)
+    assert not dir_target.exists()
+
+    sub_a: LocalTarget = dir_target.get_sub_target("a")  # type: ignore
+    assert not sub_a.exists()
+    assert sub_a.path == str(tmp_path / "test" / "a")
+    with sub_a.proxy_path("w") as sub_a_path:
+        sub_a_path.write_text("A")
+    assert sub_a.exists()
+
+    assert not dir_target.exists()
+    assert dir_target._sub_keys == ["a"]  # noqa
+
+    sub_b: LocalTarget = dir_target / "b"  # type: ignore
+    assert not sub_b.exists()
+    assert sub_b.path == str(tmp_path / "test" / "b")
+    with sub_b.proxy_path("w") as sub_b_path:
+        sub_b_path.write_text("B")
+    assert sub_b.exists()
+
+    assert not dir_target.exists()
+    assert dir_target._sub_keys == ["a", "b"]  # noqa
+
+    dir_target.mark_done()
+    assert dir_target.exists()
+
+    sub_keys_target = dir_target.sub_keys_target()
+    assert sub_keys_target.exists()
+    with sub_keys_target.proxy_path("r") as sub_keys_target:
+        assert sub_keys_target.read_text() == "a\nb"

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from stardag.target import FileSystemTarget, LocalTarget
+from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
 from stardag.target._base import RemoteFileSystemTarget
 from stardag.task import Task
 from stardag.utils.resource_provider import resource_provider
@@ -109,6 +109,9 @@ class TargetFactory:
               advanced configuration of targets, such as in-memory/local disk caching
               etc.
             target_root: The key to the target root to use.
+
+        Returns:
+            A file system target.
         """
         if self._is_full_path(relpath):
             path = relpath
@@ -116,6 +119,32 @@ class TargetFactory:
             path = self.get_path(relpath, target_root_key)
         target_prototype = self._get_target_prototype(path)
         return target_prototype(path)
+
+    def get_directory_target(
+        self,
+        relpath: str,
+        task: Task | None,  # noqa
+        target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
+    ) -> DirectoryTarget:
+        """Get a directory target.
+
+        Args:
+            relpath: The path to the target, relative to the configured root path for
+              `target_root_key`.
+            task: The task that will use the target. NOTE: this can be used to for
+              advanced configuration of targets, such as in-memory/local disk caching
+              etc.
+            target_root: The key to the target root to use.
+
+        Returns:
+            A directory target.
+        """
+        if self._is_full_path(relpath):
+            path = relpath
+        else:
+            path = self.get_path(relpath, target_root_key)
+        target_prototype = self._get_target_prototype(path)
+        return DirectoryTarget(path, target_prototype)
 
     def get_path(
         self, relpath: str, target_root_key: str = DEFAULT_TARGET_ROOT_KEY
