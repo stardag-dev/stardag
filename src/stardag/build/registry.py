@@ -6,7 +6,7 @@ import subprocess
 from functools import lru_cache
 
 from pydantic import BaseModel
-from pydantic_settings import SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag.target import get_target
 from stardag.task import Task
@@ -38,7 +38,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         pass
 
 
-class FileSystemRegistryConfig(BaseModel):
+class FileSystemRegistryConfig(BaseSettings):
     root: str | None = None
 
     model_config = SettingsConfigDict(env_prefix="stardag_fs_registry_")
@@ -50,27 +50,30 @@ class FileSystemRegistry(RegistryABC):
 
     def register(self, task: Task):
         envelope = RegisterdTaskEnvelope.new(task)
-        target = get_target(self.get_target_path(task), task)
+        target = self._get_target(task.task_id)
         with target.open("w") as handle:
             handle.write(envelope.model_dump_json())
 
-    def get_target_path(self, task: Task):
-        task_id = task.task_id
-        task_path = "/".join(
-            [
-                part
-                for part in [
-                    task.get_namespace().replace(".", "/"),
-                    task.get_family(),
-                    f"v{task.version}" if task.version else "",
-                    task_id[:2],
-                    task_id[2:4],
-                    task_id,
-                ]
-                if part
-            ]
-        )
-        return f"{self.registry_root}{task_path}.json"
+    def is_registered(self, task: Task):
+        target = self._get_target(task.task_id)
+        return target.exists()
+
+    def get(self, task_id: str) -> RegisterdTaskEnvelope | None:
+        target = self._get_target(task_id)
+        if not target.exists():
+            return None
+
+        with target.open("r") as handle:
+            envelope = RegisterdTaskEnvelope.model_validate_json(handle.read())
+
+        return envelope
+
+    def _get_target(self, task_id: str):
+        return get_target(self._get_target_path(task_id), task=None)
+
+    def _get_target_path(self, task_id: str):
+        task_id_path = f"{task_id[:2]}/{task_id[2:4]}/{task_id}"
+        return f"{self.registry_root}{task_id_path}.json"
 
 
 class NoOpRegistry(RegistryABC):

@@ -209,6 +209,7 @@ class LocalTarget(FileSystemTarget):
     @contextlib.contextmanager
     def _writable_proxy_path(self) -> typing.Generator[Path, None, None]:
         tmp_path = self._path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             yield tmp_path
             tmp_path.rename(self._path)  # type: ignore
@@ -225,6 +226,7 @@ class _AtomicWriteFileHandle(
         self.path = path
         self.mode = mode
         self._tmp_path = self.path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        self._tmp_path.parent.mkdir(parents=True, exist_ok=True)
         self._tmp_handle = self._tmp_path.open(self.mode)
 
     def write(self, data: StreamT_contra) -> None:

@@ -110,7 +110,10 @@ class TargetFactory:
               etc.
             target_root: The key to the target root to use.
         """
-        path = self.get_path(relpath, target_root_key)
+        if self._is_full_path(relpath):
+            path = relpath
+        else:
+            path = self.get_path(relpath, target_root_key)
         target_prototype = self._get_target_prototype(path)
         return target_prototype(path)
 
@@ -138,6 +141,13 @@ class TargetFactory:
             f"URI {path} does not match any of the configured prefixes: "
             f"{self.prefixt_to_target_prototype.keys()}."
         )
+
+    def _is_full_path(self, path: str) -> bool:
+        for prefix in self.prefixt_to_target_prototype.keys():
+            if path.startswith(prefix):
+                return True
+
+        return False
 
 
 target_factory_provider = resource_provider(
