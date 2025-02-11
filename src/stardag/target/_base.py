@@ -537,15 +537,17 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
                 tmp_cache_path.unlink()
 
 
-TargetPrototype = (
-    typing.Type[FileSystemTarget] | typing.Callable[[str], FileSystemTarget]
-)
+_FSTargetType = typing.TypeVar("_FSTargetType", bound=FileSystemTarget)
 
 
-class DirectoryTarget(Target):
+class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
     """A target representing a directory."""
 
-    def __init__(self, path: str, prototype: TargetPrototype) -> None:
+    def __init__(
+        self,
+        path: str,
+        prototype: typing.Type[_FSTargetType] | typing.Callable[[str], _FSTargetType],
+    ) -> None:
         self.path = path.removesuffix("/") + "/"
         self.prototype = prototype
         self._flag_target = prototype(self.path[:-1] + "._DONE")
@@ -560,7 +562,7 @@ class DirectoryTarget(Target):
         with self._flag_target.open("w") as f:
             f.write("")  # empty file
 
-    def get_sub_target(self, relpath: str) -> FileSystemTarget:
+    def get_sub_target(self, relpath: str) -> _FSTargetType:
         if relpath.startswith("/"):
             raise ValueError(
                 f"Invalid relpath {relpath}, not allowed to start with '/'"
@@ -568,8 +570,8 @@ class DirectoryTarget(Target):
         self._sub_keys.append(relpath)
         return self.prototype(self.path + relpath)
 
-    def __truediv__(self, relpath: str) -> FileSystemTarget:
+    def __truediv__(self, relpath: str) -> _FSTargetType:
         return self.get_sub_target(relpath)
 
-    def sub_keys_target(self) -> FileSystemTarget:
+    def sub_keys_target(self) -> _FSTargetType:
         return self.prototype(self.path[:-1] + "._SUB_KEYS")

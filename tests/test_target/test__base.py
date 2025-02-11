@@ -160,7 +160,7 @@ def test_directory_target(tmp_path: Path):
     dir_target = DirectoryTarget(path=str(tmp_path / "test"), prototype=LocalTarget)
     assert not dir_target.exists()
 
-    sub_a: LocalTarget = dir_target.get_sub_target("a")  # type: ignore
+    sub_a: LocalTarget = dir_target.get_sub_target("a")
     assert not sub_a.exists()
     assert sub_a.path == str(tmp_path / "test" / "a")
     with sub_a.proxy_path("w") as sub_a_path:
@@ -170,7 +170,7 @@ def test_directory_target(tmp_path: Path):
     assert not dir_target.exists()
     assert dir_target._sub_keys == ["a"]  # noqa
 
-    sub_b: LocalTarget = dir_target / "b"  # type: ignore
+    sub_b: LocalTarget = dir_target / "b"
     assert not sub_b.exists()
     assert sub_b.path == str(tmp_path / "test" / "b")
     with sub_b.proxy_path("w") as sub_b_path:
