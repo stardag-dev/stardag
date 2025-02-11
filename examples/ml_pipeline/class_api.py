@@ -40,9 +40,14 @@ class Dump(ExamplesMLPipelineBase[pd.DataFrame]):
 
     @property
     def _relpath(self) -> str:
-        return (
-            f"{self._relpath_base}/DumpData/v{self.version}/{self.date}/"
-            f"{self.snapshot_slug}.csv"  # TODO extension and format
+        return "/".join(
+            [
+                self.get_namespace().replace(".", "/"),
+                self.get_family(),
+                f"v{self.version}",
+                self.date.isoformat(),
+                f"{self.snapshot_slug}.csv",  # TODO extension and format
+            ]
         )
 
     def run(self):
