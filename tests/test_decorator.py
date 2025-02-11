@@ -35,9 +35,8 @@ def test_with_params(default_in_memory_fs_target):
 
     @task(
         version="1",
-        relpath_base="add_task",
         relpath=lambda self: (
-            f"{self._relpath_base}/add2/v{self.version}/"
+            f"add_task/add2/v{self.version}/"
             f"{val_or_id(self.a)}_{val_or_id(self.b)}/"  # type: ignore
             "result.txt"
         ),

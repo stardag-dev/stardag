@@ -39,16 +39,8 @@ class Dump(ExamplesMLPipelineBase[pd.DataFrame]):
     )
 
     @property
-    def _relpath(self) -> str:
-        return "/".join(
-            [
-                self.get_namespace().replace(".", "/"),
-                self.get_family(),
-                f"v{self.version}",
-                self.date.isoformat(),
-                f"{self.snapshot_slug}.csv",  # TODO extension and format
-            ]
-        )
+    def _relpath_extra(self) -> str:
+        return f"{self.date.isoformat()}/{self.snapshot_slug}"
 
     def run(self):
         if not self.date == base.utc_today():
