@@ -2,6 +2,7 @@ import typing
 
 import pytest
 
+from stardag._auto_task import AutoTask
 from stardag._base import (
     _REGISTER,
     Task,
@@ -9,9 +10,8 @@ from stardag._base import (
     flatten_task_struct,
     get_namespace_family,
 )
-from stardag.auto_task import AutoTask
-from stardag.decorator import task as task_decorator
-from stardag.parameter import (
+from stardag._decorator import task as task_decorator
+from stardag._parameter import (
     IDHasher,
     IDHashExclude,
     IDHashInclude,

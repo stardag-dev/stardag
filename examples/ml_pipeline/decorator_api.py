@@ -8,8 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 from stardag._base import namespace
+from stardag._decorator import Depends, task
 from stardag.build.sequential import build as build_sequential
-from stardag.decorator import Depends, task
 
 from . import base
 

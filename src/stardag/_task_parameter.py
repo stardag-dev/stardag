@@ -10,7 +10,7 @@ from pydantic import (
 )
 
 from stardag._base import _REGISTER, Task
-from stardag.parameter import IDHasherABC
+from stardag._parameter import IDHasherABC
 from stardag.target import LoadableTarget
 
 _TaskT = typing.TypeVar("_TaskT", bound=Task)

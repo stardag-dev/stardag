@@ -1,7 +1,7 @@
+from stardag._auto_task import AutoTask
 from stardag._base import Task, auto_namespace
-from stardag.auto_task import AutoTask
+from stardag._task_parameter import TaskParam
 from stardag.target import LoadableTarget
-from stardag.task_parameter import TaskParam
 
 LeafTaskLoadedT = dict[str, str | int | None]
 

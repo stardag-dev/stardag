@@ -1,5 +1,5 @@
-from stardag.auto_task import AutoTask
-from stardag.task_parameter import TaskLoads, TaskParam, TaskSet
+from stardag._auto_task import AutoTask
+from stardag._task_parameter import TaskLoads, TaskParam, TaskSet
 
 
 class ChildTask(AutoTask[str]):

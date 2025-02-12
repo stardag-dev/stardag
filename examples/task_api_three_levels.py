@@ -4,11 +4,11 @@ The following three ways of specifying a root_task, its dependencies, persistent
 targets and serialization are 100% equivalent.
 """
 
-from stardag.task_parameter import TaskLoads
+from stardag._task_parameter import TaskLoads
 
 
 def decorator_api(limit: int) -> TaskLoads[int]:
-    from stardag.decorator import Depends, task
+    from stardag._decorator import Depends, task
 
     @task(family="Range")
     def get_range(limit: int) -> list[int]:
@@ -22,7 +22,7 @@ def decorator_api(limit: int) -> TaskLoads[int]:
 
 
 def auto_fst_task_api(limit: int) -> TaskLoads[int]:
-    from stardag.auto_task import AutoTask
+    from stardag._auto_task import AutoTask
 
     class Range(AutoTask[list[int]]):
         limit: int

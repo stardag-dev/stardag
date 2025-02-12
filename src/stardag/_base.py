@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from pydantic.fields import FieldInfo
 from typing_extensions import TypeAlias, Union
 
-from stardag.parameter import (
+from stardag._parameter import (
     IDHasher,
     IDHasherABC,
     IDHashInclude,

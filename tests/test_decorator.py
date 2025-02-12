@@ -1,7 +1,7 @@
 import pytest
 
 from stardag._base import Task
-from stardag.decorator import Depends, task
+from stardag._decorator import Depends, task
 from stardag.target import LoadableTarget
 
 

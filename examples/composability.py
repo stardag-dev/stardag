@@ -1,5 +1,5 @@
+from stardag._decorator import task
 from stardag.build.sequential import build
-from stardag.decorator import task
 
 
 @task

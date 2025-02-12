@@ -1,3 +1,4 @@
+from stardag._auto_task import AutoTask
 from stardag._base import (
     Task,
     TaskDeps,
@@ -6,9 +7,11 @@ from stardag._base import (
     auto_namespace,
     namespace,
 )
-from stardag.auto_task import AutoTask
-from stardag.decorator import Depends, task
-from stardag.parameter import IDHasher, IDHasherABC, IDHashInclude, IDHashIncludeABC
+from stardag._decorator import Depends, task
+from stardag._parameter import IDHasher, IDHasherABC, IDHashInclude, IDHashIncludeABC
+from stardag._task_parameter import TaskLoads, TaskParam, TaskSet
+from stardag.build.registry import registry_provider
+from stardag.build.sequential import build
 from stardag.target import (
     DirectoryTarget,
     FileSystemTarget,
@@ -17,11 +20,11 @@ from stardag.target import (
     get_target,
     target_factory_provider,
 )
-from stardag.task_parameter import TaskLoads, TaskParam, TaskSet
 
 __all__ = [
     "auto_namespace",
     "AutoTask",
+    "build",
     "Depends",
     "DirectoryTarget",
     "FileSystemTarget",
@@ -29,6 +32,7 @@ __all__ = [
     "get_target",
     "LocalTarget",
     "namespace",
+    "registry_provider",
     "Task",
     "TaskDeps",
     "TaskIDRef",
