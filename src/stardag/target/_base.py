@@ -16,11 +16,7 @@ from types import TracebackType
 
 import uuid6
 
-
-@typing.runtime_checkable
-class Target(typing.Protocol):
-    def exists(self) -> bool: ...
-
+from stardag._base import Target
 
 LoadedT = typing.TypeVar("LoadedT")
 LoadedT_co = typing.TypeVar("LoadedT_co", covariant=True)

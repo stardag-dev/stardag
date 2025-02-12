@@ -9,10 +9,10 @@ import pandas as pd
 from pydantic import Field
 from traitlets import Any
 
+from stardag._base import namespace
 from stardag.auto_task import AutoTask
 from stardag.build.sequential import build as build_sequential
 from stardag.target import LoadedT
-from stardag.task import namespace
 from stardag.task_parameter import TaskLoads
 
 from . import base

@@ -43,9 +43,9 @@ def auto_fst_task_api(limit: int) -> TaskLoads[int]:
 
 
 def base_task_api(limit: int) -> TaskLoads[int]:
+    from stardag._base import Task
     from stardag.target import LoadableSaveableFileSystemTarget, get_target
     from stardag.target.serialize import JSONSerializer, Serializable
-    from stardag.task import Task
 
     def default_relpath(task: Task) -> str:
         return "/".join(

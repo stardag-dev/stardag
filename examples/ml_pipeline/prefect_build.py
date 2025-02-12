@@ -26,9 +26,9 @@ import asyncio
 
 from prefect import flow
 
+from stardag._base import Task
 from stardag.integration.prefect.build import build as prefect_build
 from stardag.integration.prefect.build import create_markdown
-from stardag.task import Task
 
 from .class_api import get_metrics_dag
 

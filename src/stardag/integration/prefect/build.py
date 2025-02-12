@@ -5,10 +5,10 @@ from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
+from stardag._base import Task, flatten_task_struct
 from stardag.build.registry import RegistryABC, registry_provider
 from stardag.build.task_runner import AsyncRunCallback, AsyncTaskRunner
 from stardag.integration.prefect.utils import format_key
-from stardag.task import Task, flatten_task_struct
 
 logger = logging.getLogger(__name__)
 

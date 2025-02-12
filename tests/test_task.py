@@ -2,6 +2,13 @@ import typing
 
 import pytest
 
+from stardag._base import (
+    _REGISTER,
+    Task,
+    TaskStruct,
+    flatten_task_struct,
+    get_namespace_family,
+)
 from stardag.auto_task import AutoTask
 from stardag.decorator import task as task_decorator
 from stardag.parameter import (
@@ -10,13 +17,6 @@ from stardag.parameter import (
     IDHashInclude,
     _ParameterConfig,
     always_include,
-)
-from stardag.task import (
-    _REGISTER,
-    Task,
-    TaskStruct,
-    flatten_task_struct,
-    get_namespace_family,
 )
 from stardag.utils.testing.namepace import (
     ClearNamespaceByArg,

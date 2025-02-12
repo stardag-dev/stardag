@@ -4,9 +4,9 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from stardag._base import Task
 from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
 from stardag.target._base import RemoteFileSystemTarget
-from stardag.task import Task
 from stardag.utils.resource_provider import resource_provider
 
 DEFAULT_TARGET_ROOT_KEY = "default"
