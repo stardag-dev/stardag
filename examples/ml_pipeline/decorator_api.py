@@ -7,17 +7,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from stardag._base import namespace
-from stardag._decorator import Depends, task
-from stardag.build.sequential import build as build_sequential
+import stardag as sd
 
 from . import base
 
 logger = logging.getLogger(__name__)
 
-namespace("examples.ml_pipeline.decorator_api", scope=__name__)
+sd.namespace("examples.ml_pipeline.decorator_api", scope=__name__)
 
-base_task = partial(task, version="0")
+base_task = partial(sd.task, version="0")
 
 
 @base_task(
@@ -45,7 +43,7 @@ def dump(
 
 @base_task
 def dataset(
-    dump: Depends[pd.DataFrame],
+    dump: sd.Depends[pd.DataFrame],
     params: base.ProcessParams = base.ProcessParams(),
 ) -> pd.DataFrame:
     """Process data."""
@@ -55,7 +53,7 @@ def dataset(
 
 @base_task
 def subset(
-    dataset: Depends[pd.DataFrame],
+    dataset: sd.Depends[pd.DataFrame],
     filter: base.DatasetFilter,
 ) -> pd.DataFrame:
     """Sub setting data..."""
@@ -64,7 +62,7 @@ def subset(
 
 @base_task
 def trained_model(
-    dataset: Depends[pd.DataFrame],
+    dataset: sd.Depends[pd.DataFrame],
     model: base.HyperParameters = base.LogisticRegressionHyperParameters(),
     seed: int = 0,
 ) -> base.SKLearnClassifierModel:
@@ -86,8 +84,8 @@ def trained_model(
 
 @base_task
 def predictions(
-    dataset: Depends[pd.DataFrame],
-    model: Depends[base.SKLearnClassifierModel],
+    dataset: sd.Depends[pd.DataFrame],
+    model: sd.Depends[base.SKLearnClassifierModel],
 ) -> pd.DataFrame:
     """Predicting..."""
     return base.predict_model(model=model, dataset=dataset)
@@ -95,8 +93,8 @@ def predictions(
 
 @base_task
 def metrics(
-    dataset: Depends[pd.DataFrame],
-    predictions: Depends[pd.DataFrame],
+    dataset: sd.Depends[pd.DataFrame],
+    predictions: sd.Depends[pd.DataFrame],
 ) -> dict[str, float]:
     """Calculating metrics..."""
     return base.get_metrics(dataset, predictions)
@@ -135,5 +133,5 @@ def get_metrics_dag():
 if __name__ == "__main__":
     metrics_task = get_metrics_dag()
     print(metrics_task.model_dump_json(indent=2))
-    build_sequential(metrics_task)
+    sd.build(metrics_task)
     print(json.dumps(metrics_task.output().load(), indent=2))

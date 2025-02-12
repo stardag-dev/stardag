@@ -1,18 +1,17 @@
-from stardag._decorator import task
-from stardag.build.sequential import build
+import stardag as sd
 
 
-@task
+@sd.task
 def add(a: float, b: float) -> float:
     return a + b
 
 
-@task
+@sd.task
 def multiply(a: float, b: float) -> float:
     return a * b
 
 
-@task
+@sd.task
 def subtract(a: float, b: float) -> float:
     return a - b
 
@@ -50,7 +49,7 @@ if __name__ == "__main__":
     #     "__namespace__": ""
     #   }
     # }
-    build(expression)
+    sd.build(expression)
     result = expression.output().load()
     print(result)
     # 10.0

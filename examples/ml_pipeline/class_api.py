@@ -9,10 +9,7 @@ import pandas as pd
 from pydantic import Field
 from traitlets import Any
 
-from stardag._auto_task import AutoTask
-from stardag._base import namespace
-from stardag._task_parameter import TaskLoads
-from stardag.build.sequential import build as build_sequential
+import stardag as sd
 from stardag.target import LoadedT
 
 from . import base
@@ -20,10 +17,10 @@ from . import base
 logger = logging.getLogger(__name__)
 
 
-namespace("examples.ml_pipeline.class_api", scope=__name__)
+sd.namespace("examples.ml_pipeline.class_api", scope=__name__)
 
 
-class ExamplesMLPipelineBase(AutoTask[LoadedT], typing.Generic[LoadedT]):
+class ExamplesMLPipelineBase(sd.AutoTask[LoadedT], typing.Generic[LoadedT]):
     __version__ = "0"
     version: str | None = __version__
 
@@ -51,7 +48,7 @@ class Dump(ExamplesMLPipelineBase[pd.DataFrame]):
 
 
 class Dataset(ExamplesMLPipelineBase[pd.DataFrame]):
-    dump: TaskLoads[pd.DataFrame] = Field(default_factory=Dump)
+    dump: sd.TaskLoads[pd.DataFrame] = Field(default_factory=Dump)
     params: base.ProcessParams = base.ProcessParams()
 
     def requires(self):
@@ -65,7 +62,7 @@ class Dataset(ExamplesMLPipelineBase[pd.DataFrame]):
 
 
 class Subset(ExamplesMLPipelineBase[pd.DataFrame]):
-    dataset: TaskLoads[pd.DataFrame]
+    dataset: sd.TaskLoads[pd.DataFrame]
     filter: base.DatasetFilter
 
     def requires(self):  # type: ignore
@@ -299,5 +296,5 @@ def get_benchmark_dag(
 if __name__ == "__main__":
     metrics = get_metrics_dag()
     print(metrics.model_dump_json(indent=2))
-    build_sequential(metrics)
+    sd.build(metrics)
     print(json.dumps(metrics.output().load(), indent=2))
