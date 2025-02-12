@@ -4,9 +4,9 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from stardag._base import Task
 from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
 from stardag.target._base import RemoteFileSystemTarget
-from stardag.task import Task
 from stardag.utils.resource_provider import resource_provider
 
 DEFAULT_TARGET_ROOT_KEY = "default"
@@ -97,7 +97,7 @@ class TargetFactory:
     def get_target(
         self,
         relpath: str,
-        task: Task | None,  # noqa
+        task: Task | None = None,  # noqa
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
     ) -> FileSystemTarget:
         """Get a file system target.
@@ -123,7 +123,7 @@ class TargetFactory:
     def get_directory_target(
         self,
         relpath: str,
-        task: Task | None,  # noqa
+        task: Task | None = None,  # noqa
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
     ) -> DirectoryTarget:
         """Get a directory target.
@@ -187,7 +187,7 @@ target_factory_provider = resource_provider(
 
 def get_target(
     relpath: str,
-    task: Task | None,
+    task: Task | None = None,
     target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
 ) -> FileSystemTarget:
     return target_factory_provider.get().get_target(
@@ -199,7 +199,7 @@ def get_target(
 
 def get_directory_target(
     relpath: str,
-    task: Task | None,
+    task: Task | None = None,
     target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
 ) -> DirectoryTarget:
     return target_factory_provider.get().get_directory_target(

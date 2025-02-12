@@ -15,32 +15,30 @@ pip install stardag
 ### Hello World
 
 ```python
-from stardag.decorator import Depends, task
+import stardag as sd
 
-@task
+@sd.task
 def get_range(limit: int) -> list[int]:
     return list(range(limit))
 
-@task
-def get_sum(integers: Depends[list[int]]) -> int:
+@sd.task
+def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
 # Declarative/"lazy" specification of DAG, no computation yet.
 task = get_sum(integers=get_range(limit=10))
 
 print(repr(task))
-# get_sum(version='0', integers=get_range(version='0', limit=10))
+# get_sum(version=None, integers=get_range(version=None, limit=10))
 print(repr(task.requires()))
-# {'integers': get_range(version='0', limit=10)}
+# {'integers': get_range(version=None, limit=10)}
 print(task.output().path)
-# /path/to/stardag-target-roots/default/get_sum/v0/8f/ea/8fea194424a5b2acaa03b0b53fb228b60b2a5ac6.json'
+# /path/to/.stardag/target-roots/default/get_sum/b4/3c/b43cb402347fbde9590406299759a1ef5a869e21.json
 print(task.complete())
 # False
 
 # Materialize task targets
-from stardag.build.sequential import build
-
-build(task)
+sd.build(task)
 # ...
 
 print(task.complete())
@@ -54,9 +52,9 @@ from pydantic import BaseModel
 assert isinstance(task, BaseModel)
 print(task.model_dump_json(indent=2))
 # {
-#   "version": "0",
+#   "version": null,
 #   "integers": {
-#     "version": "0",
+#     "version": null,
 #     "limit": 10,
 #     "__family__": "get_range",
 #     "__namespace__": ""
@@ -136,21 +134,19 @@ For context see [Composition over inheritance](https://en.wikipedia.org/wiki/Com
 Rather straight forward: A task can take other tasks as parameters. The consuming/downstream task declares the _expectations_ on the input/upstream task by type hinting what type of target the input/upstream task is expected to produce. Example:
 
 ```python
-from stardag.build.sequential import build
-from stardag.decorator import task
+import stardag as sd
 
-
-@task
+@sd.task(version="0")
 def add(a: float, b: float) -> float:
     return a + b
 
 
-@task
+@sd.task(version="0")
 def multiply(a: float, b: float) -> float:
     return a * b
 
 
-@task
+@sd.task(version="0")
 def subtract(a: float, b: float) -> float:
     return a - b
 
@@ -163,7 +159,7 @@ expression = add(
     ),
 )
 
-build(expression)
+sd.build(expression)
 result = expression.output().load()
 print(result)
 # 10.0

@@ -168,7 +168,7 @@ def test_directory_target(tmp_path: Path):
     assert sub_a.exists()
 
     assert not dir_target.exists()
-    assert dir_target._sub_keys == ["a"]  # noqa
+    assert dir_target._sub_keys == {"a"}  # noqa
 
     sub_b: LocalTarget = dir_target / "b"
     assert not sub_b.exists()
@@ -178,7 +178,7 @@ def test_directory_target(tmp_path: Path):
     assert sub_b.exists()
 
     assert not dir_target.exists()
-    assert dir_target._sub_keys == ["a", "b"]  # noqa
+    assert dir_target._sub_keys == {"a", "b"}  # noqa
 
     dir_target.mark_done()
     assert dir_target.exists()

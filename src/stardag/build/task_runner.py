@@ -1,7 +1,7 @@
 import typing
 
+from stardag._base import Task, TaskDeps
 from stardag.build.registry import NoOpRegistry, RegistryABC
-from stardag.task import Task, TaskDeps
 
 RunCallback = typing.Callable[[Task], None]
 AsyncRunCallback = typing.Callable[[Task], typing.Awaitable[None]]

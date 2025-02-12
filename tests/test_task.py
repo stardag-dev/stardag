@@ -2,21 +2,21 @@ import typing
 
 import pytest
 
-from stardag.auto_task import AutoTask
-from stardag.decorator import task as task_decorator
-from stardag.parameter import (
-    IDHasher,
-    IDHashExclude,
-    IDHashInclude,
-    _ParameterConfig,
-    always_include,
-)
-from stardag.task import (
+from stardag._auto_task import AutoTask
+from stardag._base import (
     _REGISTER,
     Task,
     TaskStruct,
     flatten_task_struct,
     get_namespace_family,
+)
+from stardag._decorator import task as task_decorator
+from stardag._parameter import (
+    IDHasher,
+    IDHashExclude,
+    IDHashInclude,
+    _ParameterConfig,
+    always_include,
 )
 from stardag.utils.testing.namepace import (
     ClearNamespaceByArg,

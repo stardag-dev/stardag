@@ -16,11 +16,7 @@ from types import TracebackType
 
 import uuid6
 
-
-@typing.runtime_checkable
-class Target(typing.Protocol):
-    def exists(self) -> bool: ...
-
+from stardag._base import Target
 
 LoadedT = typing.TypeVar("LoadedT")
 LoadedT_co = typing.TypeVar("LoadedT_co", covariant=True)
@@ -554,14 +550,14 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
         self.path = path.removesuffix("/") + "/"
         self.prototype = prototype
         self._flag_target = prototype(self.path[:-1] + "._DONE")
-        self._sub_keys = []
+        self._sub_keys = set()
 
     def exists(self) -> bool:
         return self._flag_target.exists()
 
     def mark_done(self):
         with self.sub_keys_target().open("w") as f:
-            f.write("\n".join(self._sub_keys))
+            f.write("\n".join(sorted(self._sub_keys)))
         with self._flag_target.open("w") as f:
             f.write("")  # empty file
 
@@ -570,7 +566,7 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
             raise ValueError(
                 f"Invalid relpath {relpath}, not allowed to start with '/'"
             )
-        self._sub_keys.append(relpath)
+        self._sub_keys.add(relpath)
         return self.prototype(self.path + relpath)
 
     def __truediv__(self, relpath: str) -> _FSTargetType:
@@ -578,3 +574,6 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
 
     def sub_keys_target(self) -> _FSTargetType:
         return self.prototype(self.path[:-1] + "._SUB_KEYS")
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.path})"

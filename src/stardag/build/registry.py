@@ -8,9 +8,9 @@ from functools import lru_cache
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from stardag._base import Task
+from stardag._task_parameter import TaskParam
 from stardag.target import get_target
-from stardag.task import Task
-from stardag.task_parameter import TaskParam
 from stardag.utils.resource_provider import resource_provider
 
 

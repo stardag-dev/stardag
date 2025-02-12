@@ -13,26 +13,33 @@ from typing import (
     Generator,
     Generic,
     Mapping,
+    Protocol,
     Sequence,
     Tuple,
     Type,
     TypeVar,
+    runtime_checkable,
 )
 
 from pydantic import BaseModel, Field
 from pydantic.fields import FieldInfo
 from typing_extensions import TypeAlias, Union
 
-from stardag.parameter import (
+from stardag._parameter import (
     IDHasher,
     IDHasherABC,
     IDHashInclude,
     IDHashIncludeABC,
     _ParameterConfig,
 )
-from stardag.target import Target
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class Target(Protocol):
+    def exists(self) -> bool: ...
+
 
 TargetT = TypeVar("TargetT", bound=Union[Target, None], covariant=True)
 

@@ -26,9 +26,9 @@ import asyncio
 
 from prefect import flow
 
+import stardag as sd
 from stardag.integration.prefect.build import build as prefect_build
 from stardag.integration.prefect.build import create_markdown
-from stardag.task import Task
 
 from .class_api import get_metrics_dag
 
@@ -41,7 +41,7 @@ async def custom_callback(task):
 
 
 @flow
-async def build_dag(task: Task):
+async def build_dag(task: sd.Task):
     """A flow that builds any stardag Task.
 
     NOTE that since task is a Pydantic model, if is serialized correctly as JSON by

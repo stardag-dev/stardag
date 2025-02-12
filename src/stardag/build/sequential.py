@@ -1,6 +1,6 @@
+from stardag._base import Task
 from stardag.build.registry import RegistryABC, registry_provider
 from stardag.build.task_runner import RunCallback, TaskRunner
-from stardag.task import Task
 
 
 def build(

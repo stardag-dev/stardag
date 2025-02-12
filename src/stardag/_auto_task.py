@@ -1,8 +1,8 @@
 import typing
 
+from stardag._base import Task
 from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
 from stardag.target.serialize import get_serializer
-from stardag.task import Task
 
 LoadedT = typing.TypeVar("LoadedT")
 
