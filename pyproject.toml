@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "stardag"
-version = "0.0.1"
+version = "0.0.2"
 description = ""
 authors = ["Anders Huss <andhus@kth.se>"]
 packages = [{ include = "stardag", from = "src" }]
