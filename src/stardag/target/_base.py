@@ -557,7 +557,7 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
 
     def mark_done(self):
         with self.sub_keys_target().open("w") as f:
-            f.write("\n".join(list(self._sub_keys)))
+            f.write("\n".join(sorted(self._sub_keys)))
         with self._flag_target.open("w") as f:
             f.write("")  # empty file
 
