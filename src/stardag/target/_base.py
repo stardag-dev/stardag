@@ -165,6 +165,9 @@ class _FileSystemTargetGeneric(
     @contextlib.contextmanager
     def _writable_proxy_path(self) -> typing.Generator[Path, None, None]: ...
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.path})"
+
 
 class FileSystemTarget(_FileSystemTargetGeneric[bytes], typing.Protocol):
     pass
@@ -535,3 +538,43 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
         finally:
             if tmp_cache_path.exists():
                 tmp_cache_path.unlink()
+
+
+_FSTargetType = typing.TypeVar("_FSTargetType", bound=FileSystemTarget)
+
+
+class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
+    """A target representing a directory."""
+
+    def __init__(
+        self,
+        path: str,
+        prototype: typing.Type[_FSTargetType] | typing.Callable[[str], _FSTargetType],
+    ) -> None:
+        self.path = path.removesuffix("/") + "/"
+        self.prototype = prototype
+        self._flag_target = prototype(self.path[:-1] + "._DONE")
+        self._sub_keys = []
+
+    def exists(self) -> bool:
+        return self._flag_target.exists()
+
+    def mark_done(self):
+        with self.sub_keys_target().open("w") as f:
+            f.write("\n".join(self._sub_keys))
+        with self._flag_target.open("w") as f:
+            f.write("")  # empty file
+
+    def get_sub_target(self, relpath: str) -> _FSTargetType:
+        if relpath.startswith("/"):
+            raise ValueError(
+                f"Invalid relpath {relpath}, not allowed to start with '/'"
+            )
+        self._sub_keys.append(relpath)
+        return self.prototype(self.path + relpath)
+
+    def __truediv__(self, relpath: str) -> _FSTargetType:
+        return self.get_sub_target(relpath)
+
+    def sub_keys_target(self) -> _FSTargetType:
+        return self.prototype(self.path[:-1] + "._SUB_KEYS")
