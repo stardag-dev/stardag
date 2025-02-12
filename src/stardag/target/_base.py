@@ -165,6 +165,9 @@ class _FileSystemTargetGeneric(
     @contextlib.contextmanager
     def _writable_proxy_path(self) -> typing.Generator[Path, None, None]: ...
 
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.path})"
+
 
 class FileSystemTarget(_FileSystemTargetGeneric[bytes], typing.Protocol):
     pass

@@ -195,3 +195,15 @@ def get_target(
         task=task,
         target_root_key=target_root_key,
     )
+
+
+def get_directory_target(
+    relpath: str,
+    task: Task | None,
+    target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
+) -> DirectoryTarget:
+    return target_factory_provider.get().get_directory_target(
+        relpath=relpath,
+        task=task,
+        target_root_key=target_root_key,
+    )
