@@ -19,14 +19,14 @@ The following three ways of specifying a `root_task`, its _dependencies_, _persi
 ### The Decorator (`@task`) API
 
 ```python
-from stardag.decorator import Depends, task
+import stardag as sd
 
-@task(family="Range")
+@sd.task(family="Range")
 def get_range(limit: int) -> list[int]:
     return list(range(limit))
 
-@task(family="Sum")
-def get_sum(integers: Depends[list[int]]) -> int:
+@sd.task(family="Sum")
+def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
 root_task = get_sum(integers=get_range(limit=10))
@@ -35,17 +35,17 @@ root_task = get_sum(integers=get_range(limit=10))
 ### Extending the `AutoTask`
 
 ```python
-from stardag.auto_task import AutoTask
+import stardag as sd
 
-class Range(AutoTask[list[int]]):
+class Range(sd.AutoTask[list[int]]):
     limit: int
 
     def run(self):
         self.output().save(list(range(self.limit)))
 
 
-class Sum(AutoTask[int]):
-    integers: TaskLoads[list[int]]
+class Sum(sd.AutoTask[int]):
+    integers: sd.TaskLoads[list[int]]
 
     def requires(self):
         return self.integers
@@ -60,14 +60,13 @@ root_task = Sum(integers=Range(limit=10))
 ### Extending the base `Task`
 
 ```python
-from stardag.target import get_target, LoadableSaveableFileSystemTarget
+import stardag as sd
+from stardag.target import LoadableSaveableFileSystemTarget
 from stardag.target.serialize import JSONSerializer, Serializable
-from stardag.task import Task
 
-def default_relpath(task: Task) -> str:
+def default_relpath(task: sd.Task) -> str:
     return "/".join(
         [
-            task.get_namespace().replace(".", "/"),
             task.get_family(),
             task.task_id[:2],
             task.task_id[2:4],
@@ -75,36 +74,34 @@ def default_relpath(task: Task) -> str:
         ]
     )
 
-
-class Range(Task[LoadableSaveableFileSystemTarget[list[int]]]):
+class Range(sd.Task[LoadableSaveableFileSystemTarget[list[int]]]):
     limit: int
 
     def output(self) -> LoadableSaveableFileSystemTarget[list[int]]:
         return Serializable(
-            wrapped=get_target(default_relpath(self), task=self),
+            wrapped=sd.get_target(default_relpath(self), task=self),
             serializer=JSONSerializer(list[int]),
         )
 
     def run(self):
         self.output().save(list(range(self.limit)))
 
-
-class Sum(Task[LoadableSaveableFileSystemTarget[int]]):
-    integers: TaskLoads[list[int]]
+class Sum(sd.Task[LoadableSaveableFileSystemTarget[int]]):
+    integers: sd.TaskLoads[list[int]]
 
     def requires(self):
         return self.integers
 
     def output(self) -> LoadableSaveableFileSystemTarget[int]:
         return Serializable(
-            wrapped=get_target(default_relpath(self), task=self),
+            wrapped=sd.get_target(default_relpath(self), task=self),
             serializer=JSONSerializer(int),
         )
 
     def run(self):
         return self.output().save(sum(self.integers.output().load()))
 
-root_task =  Sum(integers=Range(limit=10))
+root_task = Sum(integers=Range(limit=10))
 ```
 
 In short:
@@ -135,13 +132,13 @@ Under the hood, target roots are managed by the global `stardag.target.TargetFac
 Whe you subclass `Task` directly (i.e. don't use [decorator API](#the-decorator-task-api) or extends the [`AutoTask`](#extending-the-AutoTask-auto-file-system-target-task)) it is recommended to use `stardag.target.get_target(relpath=...)` to instantiate filesystem targets returned by `Task.output()`, this way the task specifes the _relative path_ to the configured target root:
 
 ```python
-from stardag.target import get_target
+import stardag as sd
 # ...
 
-class MyTask(Task[FileSystemTarget]):
+class MyTask(sd.Task[sd.FileSystemTarget]):
     # ...
     def output(self):
-        return get_target(relpath="...", task=self)
+        return sd.get_target(relpath="...", task=self)
 
 ```
 
