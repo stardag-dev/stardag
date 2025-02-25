@@ -6,11 +6,12 @@ from stardag.build.task_runner import RunCallback, TaskRunner
 def build(
     task: Task,
     completion_cache: set[str] | None = None,
+    task_runner: TaskRunner | None = None,
     before_run_callback: RunCallback | None = None,
     on_complete_callback: RunCallback | None = None,
     registry: RegistryABC | None = None,
 ) -> None:
-    task_runner = TaskRunner(
+    task_runner = task_runner or TaskRunner(
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
         registry=registry or registry_provider.get(),

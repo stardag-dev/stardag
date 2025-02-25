@@ -22,7 +22,7 @@ class TaskRunner:
         if self.before_run_callback is not None:
             self.before_run_callback(task)
 
-        res = task.run()
+        res = self._run_task(task)
 
         # check if res is a generator -> task is not complete
         if hasattr(res, "__next__"):
@@ -38,6 +38,9 @@ class TaskRunner:
             self.on_complete_callback(task)
 
         return res
+
+    def _run_task(self, task: Task) -> typing.Generator[TaskDeps, None, None] | None:
+        return task.run()
 
 
 class AsyncTaskRunner:
@@ -55,7 +58,7 @@ class AsyncTaskRunner:
         if self.before_run_callback is not None:
             await self.before_run_callback(task)
 
-        res = task.run()
+        res = await self._run_task(task)
 
         # check if res is a coroutine
         if res is not None and hasattr(res, "__await__"):
@@ -71,3 +74,8 @@ class AsyncTaskRunner:
             await self.on_complete_callback(task)
 
         return res
+
+    async def _run_task(
+        self, task: Task
+    ) -> typing.Generator[TaskDeps, None, None] | None:
+        return task.run()
