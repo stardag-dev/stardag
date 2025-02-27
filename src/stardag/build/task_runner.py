@@ -10,6 +10,7 @@ AsyncRunCallback = typing.Callable[[Task], typing.Awaitable[None]]
 class TaskRunner:
     def __init__(
         self,
+        *,
         before_run_callback: RunCallback | None = None,
         on_complete_callback: RunCallback | None = None,
         registry: RegistryABC | None = None,

@@ -1,3 +1,5 @@
+from pydantic import TypeAdapter
+
 from stardag._auto_task import AutoTask
 from stardag._base import (
     Task,
@@ -21,6 +23,10 @@ from stardag.target import (
     target_factory_provider,
 )
 
+task_type_adapter = TypeAdapter(TaskParam[Task])
+tasks_type_adapter = TypeAdapter(list[TaskParam[Task]])
+
+
 __all__ = [
     "auto_namespace",
     "AutoTask",
@@ -42,6 +48,8 @@ __all__ = [
     "TaskStruct",
     "target_factory_provider",
     "task",
+    "task_type_adapter",
+    "tasks_type_adapter",
     "IDHasher",
     "IDHashInclude",
     "IDHasherABC",
