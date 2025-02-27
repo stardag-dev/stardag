@@ -1,3 +1,4 @@
+import pathlib
 import typing
 
 import modal
@@ -13,6 +14,10 @@ FunctionSettings = typing.TypedDict(
         "cpu": float,
         "memory": float,
         "timeout": float,
+        "volumes": dict[
+            typing.Union[str, pathlib.PurePosixPath],
+            typing.Union[modal.Volume, modal.CloudBucketMount],
+        ],
         # TODO add the rest of the function settings
     },
 )
@@ -59,7 +64,7 @@ class ModalTaskRunner(TaskRunner):
 
         # return worker_function.remote(task_type_adapter.dump_json(task).decode("utf-8"))
         try:
-            return worker_function.remote(task)
+            res = worker_function.remote(task)
         except Exception as e:
             print(f"Error running task '{task}': {e}")
             raise
@@ -67,6 +72,11 @@ class ModalTaskRunner(TaskRunner):
             # import IPython
 
             # IPython.embed()
+
+        vol = modal.Volume.from_name("stardag-default", create_if_missing=True)
+        vol.reload()
+
+        return res
 
 
 # def _build(
@@ -111,6 +121,8 @@ def _run(task: Task):
     task.run()
     print(f"Task '{task}' completed")
     print(f"task.output().path: {task.output().path}")
+    vol = modal.Volume.from_name("stardag-default", create_if_missing=True)
+    vol.commit()
 
 
 class StardagApp:
