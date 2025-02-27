@@ -58,7 +58,15 @@ class ModalTaskRunner(TaskRunner):
             raise ValueError(f"Worker function '{worker_name}' not found")
 
         # return worker_function.remote(task_type_adapter.dump_json(task).decode("utf-8"))
-        return worker_function.remote(task)
+        try:
+            return worker_function.remote(task)
+        except Exception as e:
+            print(f"Error running task '{task}': {e}")
+            raise
+            # modal.interact()
+            # import IPython
+
+            # IPython.embed()
 
 
 # def _build(
@@ -127,17 +135,36 @@ class StardagApp:
         )
 
         self.modal_app.function(
-            **{**(builder_settings or {"image": default_image}), **{"name": "build"}}
+            **{
+                **(builder_settings or {"image": default_image}),
+                **{"name": "build", "serialized": True},
+            }
         )(_build)
 
         worker_settings = worker_settings or {
             "worker_default": {"image": default_image}
         }
         for worker_name, settings in worker_settings.items():
-            self.modal_app.function(**{**settings, **{"name": worker_name}})(_run)
+            self.modal_app.function(
+                **{
+                    **settings,
+                    **{"name": worker_name, "serialized": True},
+                }
+            )(_run)
 
     def build_remote(self, task: Task):
-        self.modal_app.registered_functions["build"].remote(
+        return self.modal_app.registered_functions["build"].remote(
+            task=task,
+            worker_selector=self.worker_selector,
+            modal_app_name=self.modal_app.name,
+        )
+
+    def build_spawn(self, task: Task):
+        build_function = modal.Function.from_name(
+            app_name=self.modal_app.name,
+            name="build",
+        )
+        return build_function.spawn(
             task=task,
             worker_selector=self.worker_selector,
             modal_app_name=self.modal_app.name,
