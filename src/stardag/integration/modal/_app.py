@@ -1,0 +1,151 @@
+import typing
+
+import modal
+
+from stardag import Task, build
+from stardag.build.task_runner import TaskRunner
+
+FunctionSettings = typing.TypedDict(
+    "FunctionSettings",
+    {
+        "image": modal.Image,
+        "gpu": float,
+        "cpu": float,
+        "memory": float,
+        "timeout": float,
+        # TODO add the rest of the function settings
+    },
+)
+
+
+WorkerSelector = typing.Callable[[Task], str]
+
+default_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install(
+        "pydantic>=2.8.2",
+        "pydantic-settings>=2.7.1",
+        "uuid6>=2024.7.10",
+    )
+    # .env({"STARDAG_TARGET_ROOT__DEFAULT": "/data/root-default"})
+    .add_local_python_source("stardag")
+)
+
+
+def _default_worker_selector(task: Task) -> str:
+    return "worker_default"
+
+
+class ModalTaskRunner(TaskRunner):
+    def __init__(
+        self,
+        *,
+        modal_app_name: str,
+        worker_selector: WorkerSelector,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.worker_selector = worker_selector
+        self.modal_app_name = modal_app_name
+
+    def _run_task(self, task):
+        worker_name = self.worker_selector(task)
+        worker_function = modal.Function.from_name(
+            app_name=self.modal_app_name,
+            name=worker_name,
+        )
+        if worker_function is None:
+            raise ValueError(f"Worker function '{worker_name}' not found")
+
+        # return worker_function.remote(task_type_adapter.dump_json(task).decode("utf-8"))
+        return worker_function.remote(task)
+
+
+# def _build(
+#     task_json: str,
+#     worker_selector: WorkerSelector,
+#     modal_app_name: str,
+# ):
+#     task_runner = ModalTaskRunner(
+#         modal_app_name=modal_app_name,
+#         worker_selector=worker_selector,
+#     )
+#     task = task_type_adapter.validate_json(task_json)
+#     print(f"Building task: '{task_json}'")
+#     build(task, task_runner=task_runner)
+#     print(f"Completed building task '{task_json}'")
+
+
+# def _run(task_json: str):
+#     task = task_type_adapter.validate_json(task_json)
+#     print(f"Running task: '{task_json}'")
+#     task.run()
+#     print(f"Task '{task_json}' completed")
+#     print(f"task.output().path: {task.output().path}")
+
+
+def _build(
+    task: Task,
+    worker_selector: WorkerSelector,
+    modal_app_name: str,
+):
+    task_runner = ModalTaskRunner(
+        modal_app_name=modal_app_name,
+        worker_selector=worker_selector,
+    )
+    print(f"Building task: '{task}'")
+    build(task, task_runner=task_runner)
+    print(f"Completed building task '{task}'")
+
+
+def _run(task: Task):
+    print(f"Running task: '{task}'")
+    task.run()
+    print(f"Task '{task}' completed")
+    print(f"task.output().path: {task.output().path}")
+
+
+class StardagApp:
+    def __init__(
+        self,
+        modal_app_or_name: modal.App | str,
+        *,
+        builder_settings: FunctionSettings | None = None,
+        worker_settings: dict[str, FunctionSettings] | None = None,
+        worker_selector: WorkerSelector | None = None,
+    ):
+        if isinstance(modal_app_or_name, str):
+            self.modal_app = modal.App(name=modal_app_or_name)
+        else:
+            self.modal_app = modal_app_or_name
+
+        self.worker_selector = worker_selector or _default_worker_selector
+
+        self.task_runner = ModalTaskRunner(
+            modal_app_name=self.modal_app.name,
+            worker_selector=self.worker_selector,
+        )
+
+        self.modal_app.function(
+            **{**(builder_settings or {"image": default_image}), **{"name": "build"}}
+        )(_build)
+
+        worker_settings = worker_settings or {
+            "worker_default": {"image": default_image}
+        }
+        for worker_name, settings in worker_settings.items():
+            self.modal_app.function(**{**settings, **{"name": worker_name}})(_run)
+
+    def build_remote(self, task: Task):
+        self.modal_app.registered_functions["build"].remote(
+            task=task,
+            worker_selector=self.worker_selector,
+            modal_app_name=self.modal_app.name,
+        )
+
+    def local_entrypoint(self, *args, **kwargs):
+        return self.modal_app.local_entrypoint(*args, **kwargs)
+
+    @property
+    def name(self) -> str:
+        return self.modal_app.name

@@ -3,7 +3,14 @@ import modal
 import stardag as sd
 import stardag.integration.modal as sd_modal
 
-modal_app = modal.App("stardag-default")
+
+class AppContainer:
+    def __init__(self):
+        self.modal_app = modal.App("stardag-default")
+
+
+app_container = AppContainer()
+
 # volume_default = modal.Volume.from_name("stardag-default", create_if_missing=True)
 
 image = (
@@ -18,20 +25,25 @@ image = (
 )
 
 
-@modal_app.function(image=image)
-def run(task_json: str):
+def _run(task_json: str):
     sd_modal.modal_run_worker(task_json)
 
 
 task_runner = sd_modal.ModalTaskRunner(
-    app=modal_app,
-    default_runner=run,
+    app=app_container.modal_app,
+    default_runner=app_container.modal_app.function(image=image)(_run),
 )
 
 
-@modal_app.function(image=image)
-def build(task_json: str):
+def _build(task_json: str):
     sd_modal.modal_build_worker(task_json, task_runner)
+
+
+build = app_container.modal_app.function(image=image)(_build)
+
+
+# TODO wrap app creation in
+# `ModalStardagApp(worker_image, build_image=None, volumes=None)`
 
 
 @sd.task
@@ -49,7 +61,7 @@ def subtract(a: float, b: float) -> float:
     return a - b
 
 
-@modal_app.local_entrypoint()
+@app_container.modal_app.local_entrypoint()
 def main():
     expression = add(
         a=add(a=1, b=2),
