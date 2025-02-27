@@ -20,7 +20,7 @@ def subtract(a: float, b: float) -> float:
     return a - b
 
 
-def _main():
+def get_dag():
     expression = add(
         a=add(a=1, b=2),
         b=subtract(
@@ -28,13 +28,15 @@ def _main():
             b=5,
         ),
     )
-    return stardag_app.build_remote(expression)
+    return expression
 
 
 @app.local_entrypoint()
 def main():
-    return _main()
+    dag = get_dag()
+    return stardag_app.build_remote(dag)
 
 
 if __name__ == "__main__":
-    res = _main()
+    dag = get_dag()
+    res = stardag_app.build_spawn(dag)
