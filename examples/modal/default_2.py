@@ -11,7 +11,13 @@ worker_image = (
         "pydantic-settings>=2.7.1",
         "uuid6>=2024.7.10",
     )
-    .env({"STARDAG_TARGET_ROOT__DEFAULT": "/data/root-default"})
+    .env(
+        {
+            "STARDAG_TARGET_ROOT__DEFAULT": "/data/root-default",
+            # "STARDAG_TARGET_ROOT__DEFAULT": "modal-volume://stardag-default/root/default",
+            # "STARDAG_MODAL_VOLUMES": '{"stardag-default": "/data"}',
+        }
+    )
     .add_local_python_source("stardag")
 )
 volume_default = modal.Volume.from_name("stardag-default", create_if_missing=True)

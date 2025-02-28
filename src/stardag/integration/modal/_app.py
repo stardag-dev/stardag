@@ -79,29 +79,6 @@ class ModalTaskRunner(TaskRunner):
         return res
 
 
-# def _build(
-#     task_json: str,
-#     worker_selector: WorkerSelector,
-#     modal_app_name: str,
-# ):
-#     task_runner = ModalTaskRunner(
-#         modal_app_name=modal_app_name,
-#         worker_selector=worker_selector,
-#     )
-#     task = task_type_adapter.validate_json(task_json)
-#     print(f"Building task: '{task_json}'")
-#     build(task, task_runner=task_runner)
-#     print(f"Completed building task '{task_json}'")
-
-
-# def _run(task_json: str):
-#     task = task_type_adapter.validate_json(task_json)
-#     print(f"Running task: '{task_json}'")
-#     task.run()
-#     print(f"Task '{task_json}' completed")
-#     print(f"task.output().path: {task.output().path}")
-
-
 def _build(
     task: Task,
     worker_selector: WorkerSelector,
