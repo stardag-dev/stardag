@@ -2,25 +2,23 @@ import pathlib
 import typing
 
 import modal
+from modal.gpu import GPU_T
 
 from stardag import Task, build
 from stardag.build.task_runner import TaskRunner
 
-FunctionSettings = typing.TypedDict(
-    "FunctionSettings",
-    {
-        "image": modal.Image,
-        "gpu": float,
-        "cpu": float,
-        "memory": float,
-        "timeout": float,
-        "volumes": dict[
-            typing.Union[str, pathlib.PurePosixPath],
-            typing.Union[modal.Volume, modal.CloudBucketMount],
-        ],
-        # TODO add the rest of the function settings
-    },
-)
+
+class FunctionSettings(typing.TypedDict, total=False):
+    image: typing.Required[modal.Image]
+    gpu: GPU_T | list[GPU_T]
+    cpu: float | tuple[float, float]
+    memory: int | tuple[int, int]
+    timeout: int
+    volumes: dict[
+        typing.Union[str, pathlib.PurePosixPath],
+        typing.Union[modal.Volume, modal.CloudBucketMount],
+    ]
+    # TODO add the rest of the function settings
 
 
 WorkerSelector = typing.Callable[[Task], str]
@@ -114,12 +112,14 @@ class StardagApp:
         if isinstance(modal_app_or_name, str):
             self.modal_app = modal.App(name=modal_app_or_name)
         else:
+            assert isinstance(modal_app_or_name, modal.App)
+            assert modal_app_or_name.name is not None
             self.modal_app = modal_app_or_name
 
         self.worker_selector = worker_selector or _default_worker_selector
 
         self.task_runner = ModalTaskRunner(
-            modal_app_name=self.modal_app.name,
+            modal_app_name=self.name,
             worker_selector=self.worker_selector,
         )
 
@@ -145,12 +145,12 @@ class StardagApp:
         return self.modal_app.registered_functions["build"].remote(
             task=task,
             worker_selector=self.worker_selector,
-            modal_app_name=self.modal_app.name,
+            modal_app_name=self.name,
         )
 
     def build_spawn(self, task: Task):
         build_function = modal.Function.from_name(
-            app_name=self.modal_app.name,
+            app_name=self.name,
             name="build",
         )
         return build_function.spawn(
@@ -164,4 +164,5 @@ class StardagApp:
 
     @property
     def name(self) -> str:
+        assert self.modal_app.name is not None
         return self.modal_app.name
