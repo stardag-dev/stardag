@@ -20,7 +20,7 @@ def get_volume_name_and_path(uri: str) -> tuple[str, str]:
     return volume, path
 
 
-class MountedModalVolumeTarget(LocalTarget):
+class ModalMountedVolumeTarget(LocalTarget):
     def __init__(self, path: str, **kwargs):
         super().__init__(path, **kwargs)
         volume_name, in_volume_path = get_volume_name_and_path(path)
@@ -39,3 +39,13 @@ class MountedModalVolumeTarget(LocalTarget):
 
     def _post_write_hook(self) -> None:
         self.volume.commit()
+
+
+def get_modal_target(path: str) -> ModalMountedVolumeTarget:
+    volume_name, in_volume_path = get_volume_name_and_path(uri=path)
+    mount_path = modal_config_provider.get().volume_name_to_mount_path.get(volume_name)
+    if mount_path is not None:
+        return ModalMountedVolumeTarget(path)
+    else:
+        # TODO implement "remote access" target
+        raise NotImplementedError(f"Volume '{volume_name}' is not mounted")

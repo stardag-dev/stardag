@@ -29,6 +29,7 @@ def get_default_prefix_to_target_prototype() -> dict[str, TargetPrototype]:
     prefix_to_target_prototype: dict[str, TargetPrototype] = {
         "/": LocalTarget,
     }
+    # S3 integration
     try:
         from stardag.integration.aws.s3 import s3_rfs_provider
 
@@ -36,6 +37,14 @@ def get_default_prefix_to_target_prototype() -> dict[str, TargetPrototype]:
             return RemoteFileSystemTarget(path=path, rfs=s3_rfs_provider.get())
 
         prefix_to_target_prototype["s3://"] = s3_target_from_path
+    except ImportError:
+        pass
+
+    # Modal integration
+    try:
+        from stardag.integration.modal._target import get_modal_target
+
+        prefix_to_target_prototype["modalvol://"] = get_modal_target
     except ImportError:
         pass
 
