@@ -1,3 +1,10 @@
+"""NOTE: after any changes, the app must be redeployed for the changes to take effect.
+
+```sh
+modal deploy tests/test_integration/test_modal/test__target.py
+```
+"""
+
 import uuid
 
 import pytest
@@ -12,6 +19,7 @@ except ImportError:
 VOLUME_NAME = "stardag-testing"
 VOLUME = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 MOUNT_PATH = "/data"
+# ROOT_DEAFULT = "stardag/root/default"
 
 TEST_IMAGE = (
     modal.Image.debian_slim(python_version="3.12")
@@ -23,23 +31,25 @@ TEST_IMAGE = (
     )
     .env(
         {
-            "STARDAG_TARGET_ROOT__DEFAULT": (
-                "modalvol://stardag-default/stardag/root/default"
-            ),
+            # "STARDAG_TARGET_ROOT__DEFAULT": (
+            #     f"modalvol://stardag-default/{ROOT_DEAFULT}"
+            # ),
             "STARDAG_MODAL_VOLUME_MOUNTS": '{"/data": "stardag-testing"}',
         }
     )
     .add_local_python_source("stardag")
 )
 
+TEST_APP_NAME = "stardag-testing"
+
 app = modal.App(
-    "stardag-testing",
+    TEST_APP_NAME,
     image=TEST_IMAGE,
 )
 
 
-def write_read(temp_test_dir: str):
-    uri = f"modalvol://{VOLUME_NAME}/{MOUNT_PATH}/{temp_test_dir}"
+def _write_read(temp_test_dir: str):
+    uri = f"modalvol://{VOLUME_NAME}/{temp_test_dir}/test.txt"
     target = sd_modal.MountedModalVolumeTarget(uri)
     assert not target.exists()
 
@@ -56,16 +66,29 @@ def write_read(temp_test_dir: str):
 
 
 @app.function(volumes={MOUNT_PATH: VOLUME})
-def write_read_function(temp_test_dir: str):
+def write_read(temp_test_dir: str):
     VOLUME.reload()  # TODO: should not be necessary
-    write_read(temp_test_dir)
+    _write_read(temp_test_dir)
 
 
 def test_modal_mounted_volume_target_base():
+    write_read_function = modal.Function.from_name(
+        app_name=TEST_APP_NAME,
+        name="write_read",
+    )
     temp_test_dir = f"test-{uuid.uuid4()}"
-    write_read_function.remote(temp_test_dir=temp_test_dir)
+    try:
+        write_read_function.remote(temp_test_dir=temp_test_dir)
+        # VOLUME.reload()
+        res = read_file(f"{temp_test_dir}/test.txt")
+        assert res == b"test"
+    finally:
+        VOLUME.remove_file(temp_test_dir, recursive=True)
 
 
-@app.local_entrypoint()
-def main():
-    test_modal_mounted_volume_target_base()
+def read_file(in_volume_path: str) -> bytes:
+    data = b""
+    for chunk in VOLUME.read_file(in_volume_path):
+        data += chunk
+
+    return data

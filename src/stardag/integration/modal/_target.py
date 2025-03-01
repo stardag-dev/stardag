@@ -36,3 +36,6 @@ class MountedModalVolumeTarget(LocalTarget):
     @property
     def _path(self) -> Path:
         return self.local_path
+
+    def _post_write_hook(self) -> None:
+        self.volume.commit()
