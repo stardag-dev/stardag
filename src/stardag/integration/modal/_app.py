@@ -6,6 +6,7 @@ from modal.gpu import GPU_T
 
 from stardag import Task, build
 from stardag.build.task_runner import TaskRunner
+from stardag.integration.modal._config import modal_config_provider
 
 
 class FunctionSettings(typing.TypedDict, total=False):
@@ -52,6 +53,7 @@ class ModalTaskRunner(TaskRunner):
         self.modal_app_name = modal_app_name
 
     def _run_task(self, task):
+        self._reload_volumes()
         worker_name = self.worker_selector(task)
         worker_function = modal.Function.from_name(
             app_name=self.modal_app_name,
@@ -71,10 +73,13 @@ class ModalTaskRunner(TaskRunner):
 
             # IPython.embed()
 
-        vol = modal.Volume.from_name("stardag-default", create_if_missing=True)
-        vol.reload()
-
         return res
+
+    def _reload_volumes(self):
+        modal_config = modal_config_provider.get()
+        for volume_name in modal_config.volume_name_to_mount_path.keys():
+            vol = modal.Volume.from_name(volume_name, create_if_missing=True)
+            vol.reload()
 
 
 def _build(
@@ -96,8 +101,6 @@ def _run(task: Task):
     task.run()
     print(f"Task '{task}' completed")
     print(f"task.output().path: {task.output().path}")
-    vol = modal.Volume.from_name("stardag-default", create_if_missing=True)
-    vol.commit()
 
 
 class StardagApp:

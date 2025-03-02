@@ -1,3 +1,7 @@
+import os
+
+os.environ["STARDAG_TARGET_ROOT__DEFAULT"] = "modalvol://stardag-default/root/default"
+
 import modal
 
 import stardag as sd
@@ -13,9 +17,8 @@ worker_image = (
     )
     .env(
         {
-            "STARDAG_TARGET_ROOT__DEFAULT": "/data/root-default",
-            # "STARDAG_TARGET_ROOT__DEFAULT": "modal-volume://stardag-default/root/default",
-            # "STARDAG_MODAL_VOLUMES": '{"stardag-default": "/data"}',
+            "STARDAG_TARGET_ROOT__DEFAULT": "modalvol://stardag-default/root/default",
+            "STARDAG_MODAL_VOLUME_MOUNTS": '{"/data": "stardag-default"}',
         }
     )
     .add_local_python_source("stardag")
@@ -28,7 +31,7 @@ def worker_selector(task: sd.Task) -> str:
 
 
 stardag_app = sd_modal.StardagApp(
-    "stardag-default-2",
+    "stardag-default",
     builder_settings=sd_modal.FunctionSettings(
         image=worker_image,
         volumes={"/data": volume_default},
@@ -58,4 +61,4 @@ def main():
 
 if __name__ == "__main__":
     dag = simple_dag.get_simple_dag()
-    res = stardag_app.build_spawn(dag)
+    # res = stardag_app.build_spawn(dag)
