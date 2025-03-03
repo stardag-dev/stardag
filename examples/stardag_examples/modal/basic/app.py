@@ -22,7 +22,6 @@ worker_image = (
 )
 volume_default = modal.Volume.from_name("stardag-default", create_if_missing=True)
 
-
 stardag_app = sd_modal.StardagApp(
     "stardag-examples-basic",
     builder_settings=sd_modal.FunctionSettings(
@@ -41,9 +40,6 @@ stardag_app = sd_modal.StardagApp(
             # volumes={"/data": volume_default},
         ),
     },
-    worker_selector=sd_modal.WorkerSelectorByFamily(
-        family_to_worker={"LeafTask": "large"},
-        default_worker="default",
-    ),
 )
+
 app = stardag_app.modal_app

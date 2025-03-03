@@ -40,7 +40,7 @@ default_image = (
 
 
 def _default_worker_selector(task: Task) -> str:
-    return "worker_default"
+    return "default"
 
 
 class ModalTaskRunner(TaskRunner):
@@ -60,7 +60,7 @@ class ModalTaskRunner(TaskRunner):
         worker_name = self.worker_selector(task)
         worker_function = modal.Function.from_name(
             app_name=self.modal_app_name,
-            name=worker_name,
+            name=f"worker_{worker_name}",
         )
         if worker_function is None:
             raise ValueError(f"Worker function '{worker_name}' not found")
@@ -108,6 +108,10 @@ def _setup_logging():
     logging.basicConfig(level=logging.INFO)
 
 
+class WorkerSettings(typing.TypedDict, total=False):
+    default: typing.Required[FunctionSettings]
+
+
 class StardagApp:
     def __init__(
         self,
@@ -125,11 +129,6 @@ class StardagApp:
             self.modal_app = modal_app_or_name
 
         self.worker_selector = worker_selector or _default_worker_selector
-
-        self.task_runner = ModalTaskRunner(
-            modal_app_name=self.name,
-            worker_selector=self.worker_selector,
-        )
 
         self.modal_app.function(
             **{
@@ -150,28 +149,28 @@ class StardagApp:
                 **{
                     **settings,
                     **{
-                        "name": worker_name,
+                        "name": f"worker_{worker_name}",
                         "serialized": True,
                         # "include_source": False,
                     },
                 }
             )(_run)
 
-    def build_remote(self, task: Task):
+    def build_remote(self, task: Task, worker_selector: WorkerSelector | None = None):
         return self.modal_app.registered_functions["build"].remote(
             task=task,
-            worker_selector=self.worker_selector,
+            worker_selector=worker_selector or self.worker_selector,
             modal_app_name=self.name,
         )
 
-    def build_spawn(self, task: Task):
+    def build_spawn(self, task: Task, worker_selector: WorkerSelector | None = None):
         build_function = modal.Function.from_name(
             app_name=self.name,
             name="build",
         )
         return build_function.spawn(
             task=task,
-            worker_selector=self.worker_selector,
+            worker_selector=worker_selector or self.worker_selector,
             modal_app_name=self.modal_app.name,
         )
 
