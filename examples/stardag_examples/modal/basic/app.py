@@ -2,8 +2,13 @@ import modal
 
 import stardag.integration.modal as sd_modal
 
-worker_image = (
+VOLUME_NAME = "stardag-default"
+
+volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+
+image = (
     modal.Image.debian_slim(python_version="3.11")
+    # TODO replace with just stardag
     .pip_install(
         "pydantic>=2.8.2",
         "pydantic-settings>=2.7.1",
@@ -11,8 +16,7 @@ worker_image = (
     )
     .env(
         {
-            "STARDAG_TARGET_ROOT__DEFAULT": "modalvol://stardag-default/root/default",
-            # "STARDAG_MODAL_VOLUME_MOUNTS": '{"/data": "stardag-default"}',
+            "STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
         }
     )
     .add_local_python_source(
@@ -20,24 +24,18 @@ worker_image = (
         "stardag_examples",
     )
 )
-volume_default = modal.Volume.from_name("stardag-default", create_if_missing=True)
 
 stardag_app = sd_modal.StardagApp(
     "stardag-examples-basic",
-    builder_settings=sd_modal.FunctionSettings(
-        image=worker_image,
-        # volumes={"/data": volume_default},
-    ),
+    builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={
         "default": sd_modal.FunctionSettings(
-            image=worker_image,
+            image=image,
             cpu=1,
-            # volumes={"/data": volume_default},
         ),
         "large": sd_modal.FunctionSettings(
-            image=worker_image,
+            image=image,
             cpu=2,
-            # volumes={"/data": volume_default},
         ),
     },
 )

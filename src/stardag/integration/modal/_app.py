@@ -27,17 +27,6 @@ class FunctionSettings(typing.TypedDict, total=False):
 
 WorkerSelector = typing.Callable[[Task], str]
 
-default_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install(
-        "pydantic>=2.8.2",
-        "pydantic-settings>=2.7.1",
-        "uuid6>=2024.7.10",
-    )
-    # .env({"STARDAG_TARGET_ROOT__DEFAULT": "/data/root-default"})
-    .add_local_python_source("stardag")
-)
-
 
 def _default_worker_selector(task: Task) -> str:
     return "default"
@@ -108,17 +97,13 @@ def _setup_logging():
     logging.basicConfig(level=logging.INFO)
 
 
-class WorkerSettings(typing.TypedDict, total=False):
-    default: typing.Required[FunctionSettings]
-
-
 class StardagApp:
     def __init__(
         self,
         modal_app_or_name: modal.App | str,
         *,
-        builder_settings: FunctionSettings | None = None,
-        worker_settings: dict[str, FunctionSettings] | None = None,
+        builder_settings: FunctionSettings,
+        worker_settings: dict[str, FunctionSettings],
         worker_selector: WorkerSelector | None = None,
     ):
         if isinstance(modal_app_or_name, str):
@@ -132,7 +117,7 @@ class StardagApp:
 
         self.modal_app.function(
             **{
-                **(builder_settings or {"image": default_image}),
+                **builder_settings,
                 **{
                     "name": "build",
                     "serialized": True,
@@ -141,9 +126,6 @@ class StardagApp:
             }
         )(_build)
 
-        worker_settings = worker_settings or {
-            "worker_default": {"image": default_image}
-        }
         for worker_name, settings in worker_settings.items():
             self.modal_app.function(
                 **{
