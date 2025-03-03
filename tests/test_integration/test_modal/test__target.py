@@ -12,15 +12,25 @@ import pytest
 from stardag import FileSystemTarget, get_target
 from stardag.target import RemoteFileSystemTarget
 
+VOLUME_NAME = "stardag-testing"
+
 try:
     import modal
+    from modal.exception import AuthError
 
     from stardag.integration import modal as sd_modal
-except ImportError:
-    pytest.skip("Skipping modal tests", allow_module_level=True)
 
-VOLUME_NAME = "stardag-testing"
-VOLUME = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+    # check if logged in and volume exists
+    try:
+        VOLUME = modal.Volume.from_name(VOLUME_NAME)
+        VOLUME.listdir("/")
+    except AuthError:
+        pytest.skip("Skipping modal tests (not authenticated)", allow_module_level=True)
+
+except ImportError:
+    pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
+
+
 MOUNT_PATH = "/data"
 ROOT_DEAFULT = "stardag/root/default"
 
