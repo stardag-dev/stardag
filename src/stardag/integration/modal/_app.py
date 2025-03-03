@@ -134,7 +134,11 @@ class StardagApp:
         self.modal_app.function(
             **{
                 **(builder_settings or {"image": default_image}),
-                **{"name": "build", "serialized": True},
+                **{
+                    "name": "build",
+                    "serialized": True,
+                    # "include_source": False,
+                },
             }
         )(_build)
 
@@ -145,7 +149,11 @@ class StardagApp:
             self.modal_app.function(
                 **{
                     **settings,
-                    **{"name": worker_name, "serialized": True},
+                    **{
+                        "name": worker_name,
+                        "serialized": True,
+                        # "include_source": False,
+                    },
                 }
             )(_run)
 

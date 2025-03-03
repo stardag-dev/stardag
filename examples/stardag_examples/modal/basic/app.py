@@ -1,10 +1,9 @@
 import modal
 
 import stardag.integration.modal as sd_modal
-from stardag.utils.testing import simple_dag
 
 worker_image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.debian_slim(python_version="3.11")
     .pip_install(
         "pydantic>=2.8.2",
         "pydantic-settings>=2.7.1",
@@ -16,17 +15,16 @@ worker_image = (
             # "STARDAG_MODAL_VOLUME_MOUNTS": '{"/data": "stardag-default"}',
         }
     )
-    .add_local_python_source("stardag")
+    .add_local_python_source(
+        "stardag",
+        "stardag_examples",
+    )
 )
 volume_default = modal.Volume.from_name("stardag-default", create_if_missing=True)
 
-# NOTE pickling this causes hard crash!?
-# def worker_selector(task: sd.Task) -> str:
-#     return "large" if isinstance(task, simple_dag.LeafTask) else "default"
-
 
 stardag_app = sd_modal.StardagApp(
-    "stardag-default",
+    "stardag-examples-basic",
     builder_settings=sd_modal.FunctionSettings(
         image=worker_image,
         # volumes={"/data": volume_default},
@@ -49,14 +47,3 @@ stardag_app = sd_modal.StardagApp(
     ),
 )
 app = stardag_app.modal_app
-
-
-@app.local_entrypoint()
-def main():
-    dag = simple_dag.get_simple_dag()
-    return stardag_app.build_remote(dag)
-
-
-if __name__ == "__main__":
-    dag = simple_dag.get_simple_dag()
-    res = stardag_app.build_spawn(dag)

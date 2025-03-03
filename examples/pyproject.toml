@@ -3,7 +3,7 @@ name = "stardag-examples"
 version = "0.0.1"
 description = ""
 authors = ["Anders Huss <andhus@kth.se>"]
-packages = [{ include = "stardag_examples", from = "src" }]
+packages = [{ include = "stardag_examples" }]
 
 
 [tool.poetry.dependencies]
@@ -11,6 +11,30 @@ python = "^3.10"
 pydantic = "^2.8.2"
 
 stardag = {path = "../", develop = true}
+
+# prefect extras
+prefect = { version = "^3.0.3", optional = true }
+asyncpg = { version = ">=0.30.0", markers = "python_version >= '3.13'", optional = true }
+
+# s3 extras
+boto3 = { version = "^1.34", optional = true }
+botocore = { version = "^1.36", optional = true }
+boto3-stubs = { version = "*", extras = ["s3"], optional = true }
+
+# modal extras
+modal = {version = "^0.73.59", optional = true}
+
+# ml-pipeline extras
+pandas = { version = "^2.2.3", optional = true }
+scikit-learn = { version = "^1.5.2", optional = true }
+numpy = { version = "^2.1.1", optional = true }
+
+
+[tool.poetry.extras]
+prefect = ["prefect", "asyncpg"]
+s3 = ["boto3", "botocore", "boto3-stubs"]
+modal = ["modal"]
+ml-pipeline = ["pandas", "scikit-learn", "numpy"]
 
 
 [tool.poetry.group.dev.dependencies]
