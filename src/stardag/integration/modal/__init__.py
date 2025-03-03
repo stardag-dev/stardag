@@ -1,4 +1,8 @@
-from stardag.integration.modal._app import FunctionSettings, StardagApp
+from stardag.integration.modal._app import (
+    FunctionSettings,
+    StardagApp,
+    WorkerSelectorByFamily,
+)
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
     ModalMountedVolumeTarget,
@@ -13,4 +17,5 @@ __all__ = [
     "ModalMountedVolumeTarget",
     "get_volume_name_and_path",
     "get_modal_target",
+    "WorkerSelectorByFamily",
 ]

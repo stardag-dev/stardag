@@ -1,3 +1,4 @@
+import logging
 import pathlib
 import typing
 
@@ -7,6 +8,8 @@ from modal.gpu import GPU_T
 from stardag import Task, build
 from stardag.build.task_runner import TaskRunner
 from stardag.integration.modal._config import modal_config_provider
+
+logger = logging.getLogger(__name__)
 
 
 class FunctionSettings(typing.TypedDict, total=False):
@@ -62,16 +65,7 @@ class ModalTaskRunner(TaskRunner):
         if worker_function is None:
             raise ValueError(f"Worker function '{worker_name}' not found")
 
-        # return worker_function.remote(task_type_adapter.dump_json(task).decode("utf-8"))
-        try:
-            res = worker_function.remote(task)
-        except Exception as e:
-            print(f"Error running task '{task}': {e}")
-            raise
-            # modal.interact()
-            # import IPython
-
-            # IPython.embed()
+        res = worker_function.remote(task)
 
         return res
 
@@ -91,16 +85,20 @@ def _build(
         modal_app_name=modal_app_name,
         worker_selector=worker_selector,
     )
-    print(f"Building task: '{task}'")
+    logger.info(f"Building root task: {task}")
     build(task, task_runner=task_runner)
-    print(f"Completed building task '{task}'")
+    logger.info(f"Completed building root task {task}")
 
 
 def _run(task: Task):
-    print(f"Running task: '{task}'")
-    task.run()
-    print(f"Task '{task}' completed")
-    print(f"task.output().path: {task.output().path}")
+    logger.info(f"Running task: {task}")
+    try:
+        task.run()
+    except Exception as e:
+        logger.exception(f"Error running task: {task} - {e}")
+        raise
+
+    logger.info(f"Completed running task: {task}")
 
 
 class StardagApp:
@@ -169,3 +167,17 @@ class StardagApp:
     def name(self) -> str:
         assert self.modal_app.name is not None
         return self.modal_app.name
+
+
+class WorkerSelectorByFamily:
+    def __init__(self, family_to_worker: dict[str, str], default_worker: str):
+        self.family_to_worker = family_to_worker
+        self.default_worker = default_worker
+
+    def __call__(self, task: Task) -> str:
+        return self.family_to_worker.get(task.get_family(), self.default_worker)
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}({self.family_to_worker}, {self.default_worker})"
+        )
