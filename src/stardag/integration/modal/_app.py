@@ -81,24 +81,31 @@ def _build(
     worker_selector: WorkerSelector,
     modal_app_name: str,
 ):
+    _setup_logging()
     task_runner = ModalTaskRunner(
         modal_app_name=modal_app_name,
         worker_selector=worker_selector,
     )
-    logger.info(f"Building root task: {task}")
+    logger.info(f"Building root task: {repr(task)}")
     build(task, task_runner=task_runner)
-    logger.info(f"Completed building root task {task}")
+    logger.info(f"Completed building root task {repr(task)}")
 
 
 def _run(task: Task):
-    logger.info(f"Running task: {task}")
+    _setup_logging()
+    logger.info(f"Running task: {repr(task)}")
     try:
         task.run()
     except Exception as e:
-        logger.exception(f"Error running task: {task} - {e}")
+        logger.exception(f"Error running task: {repr(task)} - {e}")
         raise
 
-    logger.info(f"Completed running task: {task}")
+    logger.info(f"Completed running task: {repr(task)}")
+
+
+def _setup_logging():
+    """Setup logging for the modal app"""
+    logging.basicConfig(level=logging.INFO)
 
 
 class StardagApp:
