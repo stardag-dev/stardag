@@ -151,7 +151,9 @@ async def _prefect_build(
         ),
     )
     logger.info(f"Building root task: {repr(task)}")
-    await prefect_build_flow(task, task_runner=task_runner)
+    await prefect_build_flow.with_options(
+        name=f"stardag-build-{task.get_namespace_family()}"
+    )(task, task_runner=task_runner)
     logger.info(f"Completed building root task {repr(task)}")
 
 
