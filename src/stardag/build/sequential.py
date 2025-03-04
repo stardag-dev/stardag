@@ -9,8 +9,10 @@ logger = logging.getLogger(__name__)
 
 def build(
     task: Task,
+    *,
     completion_cache: set[str] | None = None,
     task_runner: TaskRunner | None = None,
+    # TODO clean up duplicate arg options
     before_run_callback: RunCallback | None = None,
     on_complete_callback: RunCallback | None = None,
     registry: RegistryABC | None = None,

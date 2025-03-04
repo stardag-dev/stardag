@@ -6,8 +6,15 @@ import modal
 from modal.gpu import GPU_T
 
 from stardag import Task, build
-from stardag.build.task_runner import TaskRunner
+from stardag.build.task_runner import AsyncTaskRunner, TaskRunner
 from stardag.integration.modal._config import modal_config_provider
+
+try:
+    from stardag.integration.prefect.build import build_flow as prefect_build_flow
+    from stardag.integration.prefect.build import create_markdown
+except ImportError:
+    prefect_build_flow = None
+    create_markdown = None
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +29,7 @@ class FunctionSettings(typing.TypedDict, total=False):
         typing.Union[str, pathlib.PurePosixPath],
         typing.Union[modal.Volume, modal.CloudBucketMount],
     ]
+    secrets: list[modal.Secret]
     # TODO add the rest of the function settings
 
 
@@ -80,6 +88,58 @@ def _build(
     logger.info(f"Completed building root task {repr(task)}")
 
 
+class ModalAsyncTaskRunner(AsyncTaskRunner):
+    def __init__(
+        self,
+        *,
+        modal_app_name: str,
+        worker_selector: WorkerSelector,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.worker_selector = worker_selector
+        self.modal_app_name = modal_app_name
+
+    async def _run_task(self, task):
+        await self._reload_volumes()
+        worker_name = self.worker_selector(task)
+        worker_function = modal.Function.from_name(
+            app_name=self.modal_app_name,
+            name=f"worker_{worker_name}",
+        )
+        if worker_function is None:
+            raise ValueError(f"Worker function '{worker_name}' not found")
+
+        res = await worker_function.remote.aio(task)
+
+        return res
+
+    async def _reload_volumes(self):
+        modal_config = modal_config_provider.get()
+        for volume_name in modal_config.volume_name_to_mount_path.keys():
+            vol = modal.Volume.from_name(volume_name, create_if_missing=True)
+            await vol.reload.aio()
+
+
+async def _prefect_build(
+    task: Task,
+    worker_selector: WorkerSelector,
+    modal_app_name: str,
+):
+    if prefect_build_flow is None or create_markdown is None:
+        raise ImportError("Prefect is not installed")
+
+    _setup_logging()
+    task_runner = ModalAsyncTaskRunner(
+        modal_app_name=modal_app_name,
+        worker_selector=worker_selector,
+        before_run_callback=create_markdown,  # TODO make this optional
+    )
+    logger.info(f"Building root task: {repr(task)}")
+    await prefect_build_flow(task, task_runner=task_runner)
+    logger.info(f"Completed building root task {repr(task)}")
+
+
 def _run(task: Task):
     _setup_logging()
     logger.info(f"Running task: {repr(task)}")
@@ -97,11 +157,15 @@ def _setup_logging():
     logging.basicConfig(level=logging.INFO)
 
 
+BuilderType = typing.Literal["basic", "prefect"]
+
+
 class StardagApp:
     def __init__(
         self,
         modal_app_or_name: modal.App | str,
         *,
+        builder_type: BuilderType = "basic",
         builder_settings: FunctionSettings,
         worker_settings: dict[str, FunctionSettings],
         worker_selector: WorkerSelector | None = None,
@@ -115,6 +179,8 @@ class StardagApp:
 
         self.worker_selector = worker_selector or _default_worker_selector
 
+        build_function = _prefect_build if builder_type == "prefect" else _build
+
         self.modal_app.function(
             **{
                 **builder_settings,
@@ -124,7 +190,7 @@ class StardagApp:
                     # "include_source": False,
                 },
             }
-        )(_build)
+        )(build_function)
 
         for worker_name, settings in worker_settings.items():
             self.modal_app.function(
