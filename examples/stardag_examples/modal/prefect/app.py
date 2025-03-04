@@ -14,6 +14,9 @@ image = (
         "pydantic-settings>=2.7.1",
         "uuid6>=2024.7.10",
         "prefect",
+        "pandas",
+        "scikit-learn",
+        "numpy",
     )
     .env(
         {
