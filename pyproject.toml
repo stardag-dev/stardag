@@ -31,7 +31,7 @@ ipython = "^8.25.0"
 pytest-asyncio = "^0.23.7"
 ipdb = "^0.13.13"
 
-stardag_examples = { path = "examples", develop = true, extras = ["ml-pipeline"] }
+stardag-examples = { path = "examples", develop = true, extras = ["ml-pipeline"] }
 
 
 [tool.poetry.extras]

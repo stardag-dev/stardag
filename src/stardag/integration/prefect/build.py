@@ -28,7 +28,7 @@ async def build_flow(task: Task, **kwargs):
 async def build(
     task: Task,
     *,
-    task_runner: AsyncTaskRunner,
+    task_runner: AsyncTaskRunner | None = None,
     # TODO clean up duplicate arg options
     before_run_callback: AsyncRunCallback | None = None,
     on_complete_callback: AsyncRunCallback | None = None,
