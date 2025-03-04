@@ -125,6 +125,9 @@ class LogisticRegressionHyperParameters(BaseModel):
     type: Literal["LogisticRegression"] = "LogisticRegression"
     penalty: Literal["l1", "l2", "elasticnet"] = "l2"
 
+    # make model hashable
+    model_config = ConfigDict(frozen=True)
+
     def init(self):
         return self.class_(**self.model_dump(exclude={"type"}))
 
@@ -135,6 +138,9 @@ class DecisionTreeHyperParameters(BaseModel):
     type: Literal["DecisionTreeClassifier"] = "DecisionTreeClassifier"
     criterion: Literal["gini", "entropy", "log_loss"] = "gini"
     max_depth: int = 3
+
+    # make model hashable
+    model_config = ConfigDict(frozen=True)
 
     def init(self):
         return self.class_(**self.model_dump(exclude={"type"}))

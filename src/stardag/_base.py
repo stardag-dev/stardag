@@ -91,6 +91,16 @@ class _Register:
         )
         existing = self._namespace_family_to_class.get(namespace_family)
         if existing:
+            if (existing.__module__ == task_class.__module__) and (
+                existing.__name__ == task_class.__name__
+            ):
+                # NOTE/TODO issue when cloudpickling
+                logger.info(
+                    f"Task class already registered: {task_class} "
+                    f"(namespace_family: {namespace_family})"
+                )
+                return
+
             raise ValueError(
                 "A task is already registered for the "
                 f'namespace_family "{namespace_family}".\n'

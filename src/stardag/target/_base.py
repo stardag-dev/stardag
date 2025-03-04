@@ -197,7 +197,11 @@ class LocalTarget(FileSystemTarget):
         if mode in ["r", "rb"]:
             return self._path.open(mode)
         if mode in ["w", "wb"]:
-            return _AtomicWriteFileHandle(self._path, mode)  # type: ignore
+            return _AtomicWriteFileHandle(  # type: ignore
+                self._path,
+                mode,
+                self._post_write_hook,
+            )
 
         raise ValueError(f"Invalid mode {mode}")
 
@@ -212,21 +216,31 @@ class LocalTarget(FileSystemTarget):
         try:
             yield tmp_path
             tmp_path.rename(self._path)  # type: ignore
+            self._post_write_hook()
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
+
+    def _post_write_hook(self) -> None:
+        pass
 
 
 class _AtomicWriteFileHandle(
     WritableFileSystemTargetHandle[StreamT_contra],
     typing.Generic[StreamT_contra],
 ):
-    def __init__(self, path: Path, mode: OpenMode) -> None:
+    def __init__(
+        self,
+        path: Path,
+        mode: OpenMode,
+        post_write_hook: typing.Callable[[], None],
+    ) -> None:
         self.path = path
         self.mode = mode
         self._tmp_path = self.path.with_suffix(f".tmp-{uuid6.uuid7()}")
         self._tmp_path.parent.mkdir(parents=True, exist_ok=True)
         self._tmp_handle = self._tmp_path.open(self.mode)
+        self._post_write_hook = post_write_hook
 
     def write(self, data: StreamT_contra) -> None:
         self._tmp_handle.write(data)
@@ -235,6 +249,7 @@ class _AtomicWriteFileHandle(
         self._tmp_handle.close()
         try:
             self._tmp_path.rename(self.path)  # type: ignore
+            self._post_write_hook()
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
@@ -254,6 +269,7 @@ class _AtomicWriteFileHandle(
             self._tmp_handle.__exit__(type, value, traceback)  # type: ignore
             if type is None:
                 self._tmp_path.rename(self.path)  # type: ignore
+                self._post_write_hook()
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()

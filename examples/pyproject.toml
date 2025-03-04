@@ -1,16 +1,16 @@
 [tool.poetry]
-name = "stardag"
-version = "0.0.2"
+name = "stardag-examples"
+version = "0.0.1"
 description = ""
 authors = ["Anders Huss <andhus@kth.se>"]
-packages = [{ include = "stardag", from = "src" }]
+packages = [{ include = "stardag_examples" }]
 
 
 [tool.poetry.dependencies]
 python = "^3.10"
 pydantic = "^2.8.2"
-pydantic-settings = "^2.7.1"
-uuid6 = "^2024.7.10"
+
+stardag = {path = "../", develop = true}
 
 # prefect extras
 prefect = { version = "^3.0.3", optional = true }
@@ -24,20 +24,24 @@ boto3-stubs = { version = "*", extras = ["s3"], optional = true }
 # modal extras
 modal = {version = "^0.73.59", optional = true}
 
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.2.2"
-ipython = "^8.25.0"
-pytest-asyncio = "^0.23.7"
-ipdb = "^0.13.13"
-
-stardag-examples = { path = "examples", develop = true, extras = ["ml-pipeline"] }
+# ml-pipeline extras
+pandas = { version = "^2.2.3", optional = true }
+scikit-learn = { version = "^1.5.2", optional = true }
+numpy = { version = "^2.1.1", optional = true }
 
 
 [tool.poetry.extras]
 prefect = ["prefect", "asyncpg"]
 s3 = ["boto3", "botocore", "boto3-stubs"]
 modal = ["modal"]
+ml-pipeline = ["pandas", "scikit-learn", "numpy"]
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.2"
+ipython = "^8.25.0"
+pytest-asyncio = "^0.23.7"
+ipdb = "^0.13.13"
 
 
 [build-system]
@@ -47,10 +51,3 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.isort]
 profile = "black"
-known_local_folder = ["stardag", "stardag_examples"]
-
-[tool.pytest]
-testpaths = ["tests"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"

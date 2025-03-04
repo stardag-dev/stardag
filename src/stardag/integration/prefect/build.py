@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from prefect import flow
 from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
@@ -13,14 +14,28 @@ from stardag.integration.prefect.utils import format_key
 logger = logging.getLogger(__name__)
 
 
+@flow
+async def build_flow(task: Task, **kwargs):
+    """A flow that builds any stardag Task.
+
+    NOTE that since task is a Pydantic model, if is serialized correctly as JSON by
+    prefect. This means that if this flow is deployed to Prefect Cloud, the json
+    representation of any task can be submitted to the flow via the UI.
+    """
+    return await build(task, **kwargs)
+
+
 async def build(
     task: Task,
+    *,
+    task_runner: AsyncTaskRunner | None = None,
+    # TODO clean up duplicate arg options
     before_run_callback: AsyncRunCallback | None = None,
     on_complete_callback: AsyncRunCallback | None = None,
     wait_for_completion: bool = True,
     registry: RegistryABC | None = None,
 ) -> dict[str, PrefectConcurrentFuture]:
-    task_runner = AsyncTaskRunner(
+    task_runner = task_runner or AsyncTaskRunner(
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
         registry=registry or registry_provider.get(),
@@ -215,3 +230,10 @@ async def create_markdown(task: Task):
         description=f"Task spec for {task.task_id}",
         markdown=markdown,
     )
+
+
+async def upload_task_on_complete_artifacts(task):
+    """Upload artifacts to Prefect Cloud for tasks that implement the special method."""
+    if hasattr(task, "prefect_on_complete_artifacts"):
+        for artifact in task.prefect_on_complete_artifacts():
+            await artifact.create()
