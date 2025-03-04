@@ -230,3 +230,10 @@ async def create_markdown(task: Task):
         description=f"Task spec for {task.task_id}",
         markdown=markdown,
     )
+
+
+async def upload_task_on_complete_artifacts(task):
+    """Upload artifacts to Prefect Cloud for tasks that implement the special method."""
+    if hasattr(task, "prefect_on_complete_artifacts"):
+        for artifact in task.prefect_on_complete_artifacts():
+            await artifact.create()

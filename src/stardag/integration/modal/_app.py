@@ -11,10 +11,14 @@ from stardag.integration.modal._config import modal_config_provider
 
 try:
     from stardag.integration.prefect.build import build_flow as prefect_build_flow
-    from stardag.integration.prefect.build import create_markdown
+    from stardag.integration.prefect.build import (
+        create_markdown,
+        upload_task_on_complete_artifacts,
+    )
 except ImportError:
     prefect_build_flow = None
     create_markdown = None
+    upload_task_on_complete_artifacts = None
 
 logger = logging.getLogger(__name__)
 
@@ -125,15 +129,26 @@ async def _prefect_build(
     task: Task,
     worker_selector: WorkerSelector,
     modal_app_name: str,
+    on_complete_callback: typing.Callable[[Task], typing.Awaitable[None]] | None = None,
+    before_run_callback: typing.Callable[[Task], typing.Awaitable[None]] | None = None,
 ):
-    if prefect_build_flow is None or create_markdown is None:
+    if (
+        prefect_build_flow is None
+        or create_markdown is None
+        or upload_task_on_complete_artifacts is None
+    ):
         raise ImportError("Prefect is not installed")
 
     _setup_logging()
     task_runner = ModalAsyncTaskRunner(
         modal_app_name=modal_app_name,
         worker_selector=worker_selector,
-        before_run_callback=create_markdown,  # TODO make this optional
+        before_run_callback=(
+            before_run_callback or create_markdown
+        ),  # TODO default to None
+        on_complete_callback=(
+            on_complete_callback or upload_task_on_complete_artifacts
+        ),
     )
     logger.info(f"Building root task: {repr(task)}")
     await prefect_build_flow(task, task_runner=task_runner)
