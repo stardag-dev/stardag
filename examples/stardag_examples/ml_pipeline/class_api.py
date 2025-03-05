@@ -166,7 +166,7 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
 class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
     train_dataset: Subset
     test_dataset: Subset
-    models: frozenset[base.HyperParameters]
+    models: tuple[base.HyperParameters, ...]
     seed: int = 0
 
     def requires(self):  # type: ignore
@@ -278,14 +278,12 @@ def get_benchmark_dag(
     benchmark = Benchmark(
         train_dataset=train_dataset,
         test_dataset=test_dataset,
-        models=frozenset(
-            [
-                base.LogisticRegressionHyperParameters(penalty="l2"),
-                base.DecisionTreeHyperParameters(criterion="gini", max_depth=3),
-                base.DecisionTreeHyperParameters(criterion="gini", max_depth=10),
-                base.DecisionTreeHyperParameters(criterion="entropy", max_depth=3),
-                base.DecisionTreeHyperParameters(criterion="entropy", max_depth=10),
-            ]
+        models=(
+            base.LogisticRegressionHyperParameters(penalty="l2"),
+            base.DecisionTreeHyperParameters(criterion="gini", max_depth=3),
+            base.DecisionTreeHyperParameters(criterion="gini", max_depth=10),
+            base.DecisionTreeHyperParameters(criterion="entropy", max_depth=3),
+            base.DecisionTreeHyperParameters(criterion="entropy", max_depth=10),
         ),
         seed=0,
     )

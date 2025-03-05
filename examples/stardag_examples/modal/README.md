@@ -123,7 +123,6 @@ export STARDAG_TARGET_ROOT__DEFAULT=modalvol://stardag-default/root/default
 and run
 
 ```python
-
 from stardag_examples.modal.basic.task import get_range, get_sum
 
 dag = get_sum(integers=get_range(limit=10))
@@ -141,3 +140,53 @@ TL;DR/to just run the example:
 modal deploy stardag_examples/modal/prefect/app.py
 python stardag_examples/modal/prefect/main.py
 ```
+
+<img width="424" alt="image" src="https://github.com/user-attachments/assets/3826dd13-42ea-4791-bcf3-e7faf5445423" />
+
+<img width="1500" alt="image" src="https://github.com/user-attachments/assets/2f0d9db7-e9b7-4138-91c8-5973073dcd62" />
+
+```python
+from stardag_examples.ml_pipeline.class_api import get_benchmark_dag
+
+dag = get_benchmark_dag()
+dag.output().load()
+```
+
+```
+[{'accuracy': 0.7477477477477478,
+  'precision': 0.6935483870967742,
+  'recall': 0.6515151515151515,
+  'f1': 0.671875,
+  'type': 'LogisticRegression',
+  'penalty': 'l2'},
+ {'accuracy': 0.7327327327327328,
+  'precision': 0.6837606837606838,
+  'recall': 0.6060606060606061,
+  'f1': 0.642570281124498,
+  'type': 'DecisionTreeClassifier',
+  'criterion': 'gini',
+  'max_depth': 3},
+ {'accuracy': 0.7057057057057057,
+  'precision': 0.6268656716417911,
+  'recall': 0.6363636363636364,
+  'f1': 0.631578947368421,
+  'type': 'DecisionTreeClassifier',
+  'criterion': 'gini',
+  'max_depth': 10},
+ {'accuracy': 0.7327327327327328,
+  'precision': 0.6837606837606838,
+  'recall': 0.6060606060606061,
+  'f1': 0.642570281124498,
+  'type': 'DecisionTreeClassifier',
+  'criterion': 'entropy',
+  'max_depth': 3},
+ {'accuracy': 0.7087087087087087,
+  'precision': 0.64,
+  'recall': 0.6060606060606061,
+  'f1': 0.622568093385214,
+  'type': 'DecisionTreeClassifier',
+  'criterion': 'entropy',
+  'max_depth': 10}]
+```
+
+<img width="1500" alt="image" src="https://github.com/user-attachments/assets/4f4ca0c2-9da1-48ff-a367-0111e9028aac" />
