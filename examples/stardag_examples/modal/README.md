@@ -146,7 +146,7 @@ python stardag_examples/modal/prefect/main.py
 Compared to the basic example above we set `sd_modal.StardagApp(builder_type="prefect", ...)`
 and also define two different workers, with cpu counts 1 and 2 respectively (we can do any other modal function configuration separately for each worker).
 
-For the prefect builder type to work we also need to install the prefect extras `stardag[modal,prefect]
+For the prefect builder type to work, we also need to install the prefect extras `stardag[modal,prefect]`
 
 Moreover, we set the prefect API URL anb the corresponding API-key secret to the _builder_ settings. Note that you can skip doing this, in which case a "local" prefect task runner will be used, but you won't get any Web-UI observability ofc.
 
