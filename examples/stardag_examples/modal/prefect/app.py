@@ -16,7 +16,7 @@ image = (
     )
     .env(
         {
-            "PREFECT_API_URL": (
+            "PREFECT_API_URL": (  # NOTE optional
                 "https://api.prefect.cloud/api/"
                 "accounts/bbef4152-5db3-471d-81c9-fa01fb0e0eb8/"
                 "workspaces/04af8615-4247-4607-a052-291be49f958f"
