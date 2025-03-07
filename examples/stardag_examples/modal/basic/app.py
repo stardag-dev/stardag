@@ -3,24 +3,17 @@ import modal
 import stardag.integration.modal as sd_modal
 
 VOLUME_NAME = "stardag-default"
-
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    # TODO replace with just stardag
-    .pip_install(
-        "pydantic>=2.8.2",
-        "pydantic-settings>=2.7.1",
-        "uuid6>=2024.7.10",
-    )
+    .pip_install("stardag[modal]>=0.0.3")
     .env(
         {
             "STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
         }
     )
     .add_local_python_source(
-        "stardag",
         "stardag_examples",
     )
 )

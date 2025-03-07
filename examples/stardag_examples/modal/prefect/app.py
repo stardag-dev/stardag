@@ -8,19 +8,15 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    # TODO replace with just stardag
     .pip_install(
-        "pydantic>=2.8.2",
-        "pydantic-settings>=2.7.1",
-        "uuid6>=2024.7.10",
-        "prefect",
+        "stardag[modal,prefect]>=0.0.3",
         "pandas",
         "scikit-learn",
         "numpy",
     )
     .env(
         {
-            "PREFECT_API_URL": (
+            "PREFECT_API_URL": (  # NOTE optional
                 "https://api.prefect.cloud/api/"
                 "accounts/bbef4152-5db3-471d-81c9-fa01fb0e0eb8/"
                 "workspaces/04af8615-4247-4607-a052-291be49f958f"
@@ -29,7 +25,6 @@ image = (
         }
     )
     .add_local_python_source(
-        "stardag",
         "stardag_examples",
     )
 )
@@ -40,7 +35,7 @@ stardag_app = sd_modal.StardagApp(
     builder_settings=sd_modal.FunctionSettings(
         image=image,
         secrets=[
-            modal.Secret.from_name("prefect-api-key"),
+            modal.Secret.from_name("prefect-api-key"),  # NOTE optional
         ],
     ),
     worker_settings={
