@@ -8,9 +8,8 @@ See also `./examples` folder.
 
 - Abstraction over the filesystem: The target location of any asset is deterministically determined by its input parameters, _before_ it has been executed.
 - Each Asset has a self-contained representation of its entire upstream dependency tree -> great for reducing complexity and composability.
-- Declarative: Concurrency and execution can be planned separately. has its limitations, but no framework gives it a ambitious go...
 - `Makefile`/`luigi` style bottom up execution
-- Typesafe/hints, leverage pythons ecosystem around types...
+- Typesafe/hints, leverage Python's ecosystem around types...
 
 ## The Three Levels of the Task-API
 
