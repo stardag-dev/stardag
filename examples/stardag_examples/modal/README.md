@@ -48,14 +48,8 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("stardag[modal]>=0.0.3")
-    .env(
-        {
-            "STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
-        }
-    )
-    .add_local_python_source(
-        "my_package",
-    )
+    .env({"STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default"})
+    .add_local_python_source("my_package")
 )
 
 stardag_app = sd_modal.StardagApp(
