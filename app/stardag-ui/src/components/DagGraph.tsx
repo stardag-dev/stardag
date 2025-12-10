@@ -9,6 +9,7 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo } from "react";
 import type { Task } from "../types/task";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
@@ -23,104 +24,67 @@ const nodeTypes: NodeTypes = {
   taskNode: TaskNode,
 };
 
-interface LayoutNode {
-  id: string;
-  depth: number;
-  horizontalIndex: number;
-}
+type TaskNodeType = Node<TaskNodeData>;
 
-function layoutDag(tasks: Task[]): LayoutNode[] {
-  const taskMap = new Map(tasks.map((t) => [t.task_id, t]));
-  const depths = new Map<string, number>();
-  const visited = new Set<string>();
+const NODE_WIDTH = 160;
+const NODE_HEIGHT = 90;
 
-  // Calculate depth for each node (distance from leaves)
-  function calculateDepth(taskId: string): number {
-    if (depths.has(taskId)) return depths.get(taskId)!;
-    if (visited.has(taskId)) return 0; // Cycle protection
-    visited.add(taskId);
+function getLayoutedElements(
+  nodes: TaskNodeType[],
+  edges: Edge[],
+): { nodes: TaskNodeType[]; edges: Edge[] } {
+  const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
 
-    const task = taskMap.get(taskId);
-    if (!task || task.dependency_ids.length === 0) {
-      depths.set(taskId, 0);
-      return 0;
-    }
-
-    const maxDepDeph = Math.max(
-      ...task.dependency_ids
-        .filter((depId) => taskMap.has(depId))
-        .map((depId) => calculateDepth(depId)),
-    );
-    const depth = maxDepDeph + 1;
-    depths.set(taskId, depth);
-    return depth;
-  }
-
-  // Calculate depths for all tasks
-  tasks.forEach((t) => calculateDepth(t.task_id));
-
-  // Group by depth and assign horizontal positions
-  const byDepth = new Map<number, string[]>();
-  tasks.forEach((t) => {
-    const depth = depths.get(t.task_id) || 0;
-    if (!byDepth.has(depth)) byDepth.set(depth, []);
-    byDepth.get(depth)!.push(t.task_id);
+  g.setGraph({
+    rankdir: "TB", // Top to bottom
+    nodesep: 50, // Horizontal spacing between nodes
+    ranksep: 80, // Vertical spacing between ranks
+    marginx: 20,
+    marginy: 20,
   });
 
-  // Create layout nodes
-  const layoutNodes: LayoutNode[] = [];
-  byDepth.forEach((taskIds, depth) => {
-    taskIds.forEach((id, index) => {
-      layoutNodes.push({ id, depth, horizontalIndex: index });
-    });
+  nodes.forEach((node) => {
+    g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
   });
 
-  return layoutNodes;
-}
+  edges.forEach((edge) => {
+    g.setEdge(edge.source, edge.target);
+  });
 
-type TaskNode = Node<TaskNodeData>;
+  Dagre.layout(g);
+
+  const layoutedNodes = nodes.map((node) => {
+    const nodeWithPosition = g.node(node.id);
+    return {
+      ...node,
+      position: {
+        x: nodeWithPosition.x - NODE_WIDTH / 2,
+        y: nodeWithPosition.y - NODE_HEIGHT / 2,
+      },
+    };
+  });
+
+  return { nodes: layoutedNodes, edges };
+}
 
 export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) {
   const taskMap = useMemo(() => new Map(tasks.map((t) => [t.task_id, t])), [tasks]);
 
-  const { initialNodes, initialEdges } = useMemo(() => {
-    const layout = layoutDag(tasks);
-    const maxDepth = Math.max(...layout.map((n) => n.depth), 0);
+  const { nodes: initialNodes, edges: initialEdges } = useMemo(() => {
+    // Create nodes
+    const nodes: TaskNodeType[] = tasks.map((task) => ({
+      id: task.task_id,
+      type: "taskNode",
+      position: { x: 0, y: 0 }, // Will be set by dagre
+      data: {
+        label: task.task_family,
+        taskId: task.task_id,
+        status: task.status,
+        isSelected: task.task_id === selectedTaskId,
+      },
+    }));
 
-    // Calculate width per depth level
-    const countByDepth = new Map<number, number>();
-    layout.forEach((n) => {
-      countByDepth.set(n.depth, (countByDepth.get(n.depth) || 0) + 1);
-    });
-
-    const nodeWidth = 160;
-    const nodeHeight = 80;
-    const horizontalSpacing = 40;
-    const verticalSpacing = 100;
-
-    const nodes: TaskNode[] = layout.map((layoutNode) => {
-      const task = taskMap.get(layoutNode.id)!;
-      const countAtDepth = countByDepth.get(layoutNode.depth) || 1;
-      const totalWidth =
-        countAtDepth * nodeWidth + (countAtDepth - 1) * horizontalSpacing;
-      const startX = -totalWidth / 2 + nodeWidth / 2;
-
-      return {
-        id: layoutNode.id,
-        type: "taskNode",
-        position: {
-          x: startX + layoutNode.horizontalIndex * (nodeWidth + horizontalSpacing),
-          y: (maxDepth - layoutNode.depth) * (nodeHeight + verticalSpacing),
-        },
-        data: {
-          label: task.task_family,
-          taskId: task.task_id,
-          status: task.status,
-          isSelected: task.task_id === selectedTaskId,
-        },
-      };
-    });
-
+    // Create edges (from dependency to dependent)
     const edges: Edge[] = [];
     tasks.forEach((task) => {
       task.dependency_ids.forEach((depId) => {
@@ -136,7 +100,8 @@ export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) 
       });
     });
 
-    return { initialNodes: nodes, initialEdges: edges };
+    // Apply dagre layout
+    return getLayoutedElements(nodes, edges);
   }, [tasks, selectedTaskId, taskMap]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
