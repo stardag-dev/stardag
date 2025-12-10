@@ -1,6 +1,6 @@
 [project]
 name = "stardag"
-version = "0.0.3"
+version = "0.0.4"
 description = ""
 authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
 requires-python = ">=3.10"
