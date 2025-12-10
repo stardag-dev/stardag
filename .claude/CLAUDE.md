@@ -38,7 +38,9 @@ See [DEV_README.md](/DEV_README.md) for setup and commands.
 
 Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/README.md) for the template and structure.
 
-**Current tasks:** None active
+**Current tasks:**
+
+- [registry-service](tasks/registry-service/main.md) - Backend API & Frontend App for task tracking and monitoring
 
 ## Code Style
 
