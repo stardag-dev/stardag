@@ -11,6 +11,14 @@ Transform stardag into a full-fledged data processing/workflow tool by adding:
 1. A **backend API service** that the DAG building functionality communicates with via the Registry abstraction to track and monitor task execution
 2. A **frontend application** for monitoring DAGs, tasks, and execution status through a web UI
 
+**Primary objective**: Make it exist first. Do all necessary simplifications to reach a working state where we can:
+
+1. Run `docker compose up`
+2. Build a minimal DAG from local Python talking to the Docker-hosted service and DB
+3. View the task details in the app in the browser
+
+_Don't get carried away._ We will add more features incrementally later.
+
 ## Instructions
 
 ### Scope & Priorities
