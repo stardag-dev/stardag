@@ -9,10 +9,10 @@ The file path of any persisted metric/result contains a hash of _all upstream de
 ## Prerequisites
 
 ```shell
-poetry install --extras examples-ml-pipeline
+uv sync --extra ml-pipeline
 ```
 
-NOTE: the submodules in this directory contains relative imports and should be run from the repo root directory using `python -m examples.ml_pipeline.<module>` (assuming you have the poetry managed virtual env activated, else prefix with `poetry run ...`)
+NOTE: the submodules in this directory contains relative imports and should be run from the repo root directory using `uv run python -m stardag_examples.ml_pipeline.<module>`
 
 ## `.base.py`
 
@@ -21,7 +21,7 @@ The `base` module implements all business logic, independent of any dag/workflow
 You can run the logic as is, by:
 
 ```shell
-python -m examples.ml_pipeline.base
+uv run python -m stardag_examples.ml_pipeline.base
 ```
 
 To get the output (something like):
@@ -40,7 +40,7 @@ To get the output (something like):
 Connects the pieces in the `.base` module into a `stardag` DAG using the "class API" (defining tasks by inheriting a `Task` base class)"
 
 ```shell
-python -m examples.ml_pipeline.class_api
+uv run python -m stardag_examples.ml_pipeline.class_api
 ```
 
 with the output (something like)
@@ -140,7 +140,7 @@ with the output (something like)
 Connects the pieces in the `.base` module into a `stardag` DAG using the "class API" (defining tasks by inheriting a `Task` base class)"
 
 ```shell
-python -m examples.ml_pipeline.decorator_api
+uv run python -m stardag_examples.ml_pipeline.decorator_api
 ```
 
 with the output very similar to above.
@@ -150,7 +150,7 @@ with the output very similar to above.
 Builds the DAG using `prefect`. To run this you must first install prefect
 
 ```shell
-poetry install --extras prefect
+uv sync --extra prefect
 ```
 
 And have access to a prefect server, by Option 1 _or_ 2 below:
@@ -178,7 +178,7 @@ prefect cloud login
 Then, run:
 
 ```shell
-python -m examples.ml_pipeline.prefect_build
+uv run python -m stardag_examples.ml_pipeline.prefect_build
 ```
 
 You should get several prefect logs, navigate to the Prefect UI, click "latest run" and

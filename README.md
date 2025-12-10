@@ -71,8 +71,8 @@ print(res)
 If you want to try something more realistic, make sure you have access to a prefect server (see [examples/ml_pipeline/README.md](./examples/ml_pipeline/README.md)) and run
 
 ```shell
-poetry install --extras prefect --extras examples-ml-pipeline
-poetry run python -m examples.ml_pipeline.prefect_build
+uv sync --extra prefect
+uv run python -m stardag_examples.ml_pipeline.prefect_build
 ```
 
 to watch you ML-DAG materialize
