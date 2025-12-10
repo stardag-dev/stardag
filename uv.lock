@@ -3617,7 +3617,6 @@ wheels = [
 
 [[package]]
 name = "stardag"
-version = "0.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -3662,7 +3661,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.7.1" },
     { name = "uuid6", specifier = ">=2024.7.10" },
 ]
-provides-extras = ["prefect", "s3", "modal"]
+provides-extras = ["modal", "prefect", "s3"]
 
 [package.metadata.requires-dev]
 dev = [

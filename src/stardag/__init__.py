@@ -1,3 +1,5 @@
+from importlib.metadata import version
+
 from pydantic import TypeAdapter
 
 from stardag._auto_task import AutoTask
@@ -23,11 +25,14 @@ from stardag.target import (
     target_factory_provider,
 )
 
+__version__ = version("stardag")
+
 task_type_adapter = TypeAdapter(TaskParam[Task])
 tasks_type_adapter = TypeAdapter(list[TaskParam[Task]])
 
 
 __all__ = [
+    "__version__",
     "auto_namespace",
     "AutoTask",
     "build",
