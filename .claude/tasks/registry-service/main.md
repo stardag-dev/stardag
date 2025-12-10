@@ -2,7 +2,7 @@
 
 ## Status
 
-active
+completed (MVP)
 
 ## Goal
 
@@ -17,131 +17,72 @@ Transform stardag into a full-fledged data processing/workflow tool by adding:
 2. Build a minimal DAG from local Python talking to the Docker-hosted service and DB
 3. View the task details in the app in the browser
 
-_Don't get carried away._ We will add more features incrementally later.
+## What Was Built
 
-## Instructions
+### Repo Structure
 
-### Scope & Priorities
+```
+stardag/
+├── lib/stardag-sdk/     # SDK library (moved from src/)
+├── service/stardag-api/ # FastAPI backend
+├── app/stardag-ui/      # React frontend
+├── examples/            # Example code (unchanged)
+└── docker-compose.yml   # Full stack orchestration
+```
 
-**MVP**: Tasks are registered via backend service and viewable/searchable by basic options (task family, ID, etc.)
+### Backend (service/stardag-api)
 
-**Initial steps** - Restructure repo into:
+- FastAPI REST API with PostgreSQL
+- Task CRUD endpoints with filtering/pagination
+- Task lifecycle: pending → running → completed/failed
+- SQLAlchemy models with JSONB for task data
+- Dockerfile for containerization
 
-- `lib/stardag-sdk` - Main user SDK library (current codebase)
-- `service/stardag-api` - Backend service (registry API)
-- `app/stardag-ui` - Frontend application
+### Frontend (app/stardag-ui)
 
-### Backend Architecture
+- React 18 + TypeScript + Vite
+- Tailwind CSS v4 styling
+- Task list with filtering by family/status
+- Task detail panel showing parameters and dependencies
+- Status badges with color coding
+- Nginx production container with API proxy
 
-- **Framework**: FastAPI
-- **API style**: REST (initially)
-- **Database**: PostgreSQL
-- **Authentication**: None for MVP (later: API keys, OAuth)
-- **Deployment**: Local Docker with docker-compose for MVP
+### SDK Integration (lib/stardag-sdk)
 
-### Frontend Architecture
+- New `APIRegistry` class using httpx
+- Auto-selected when `STARDAG_API_REGISTRY_URL` is set
+- Falls back to FileSystemRegistry or NoOpRegistry
+- TaskRunner updated to call start/complete/fail lifecycle methods
 
-- **Framework**: React 18 with TypeScript
-- **Styling**: Tailwind CSS + shadcn/ui
-- **Real-time updates**: Not in MVP (WebSockets/SSE/polling can be added later)
+## Quick Start
 
-### Registry Integration
+```bash
+# Start services
+docker compose up -d
 
-- `APIRegistry` as default when service is available, with `FileSystemRegistry` as fallback
-- Start with current `RegisterdTaskEnvelope` fields
-- Track task status (pending, running, completed, failed) in addition to registration
-- DAG-level tracking: Not part of MVP
+# Run demo
+export STARDAG_API_REGISTRY_URL=http://localhost:8000
+python -m stardag_examples.api_registry_demo
 
-### Key Features
-
-**Backend (MVP):**
-
-- Task registration and status tracking
-- Execution history and logs
-- DAG structure persistence: Store serialized tasks as JSONB, model dependencies in DB for querying upstream/downstream tasks
-
-**Backend (Not MVP):**
-
-- Run/build initiation via API (execution triggered from CLI/Python only; UI is passive)
-- Metrics and statistics
-
-**Frontend (MVP):**
-
-- Task list with filtering/search
-- Task detail view (parameters, outputs, dependencies)
-- DAG visualization (graph view) - bonus, not required
-
-**Frontend (Later):**
-
-- Execution timeline/history
-- Real-time status updates
-- Log viewer
-
-### Constraints & Preferences
-
-- **Testing**: High-level unit and integration tests
-- **Documentation**: Standard docs in code; READMEs for user overview (how to start service, run examples, etc.)
-- **Performance**: Not critical for MVP, but use reasonable indices in PostgreSQL
-
-## Context
-
-### Current Registry System
-
-The existing `RegistryABC` (`src/stardag/build/registry.py`) provides:
-
-- `FileSystemRegistry`: Persists task registration to JSON files
-- `NoOpRegistry`: No-op implementation for when registry is disabled
-- `RegisterdTaskEnvelope`: Captures task, task_id, user, created_at, commit_hash
-
-The registry is used by `TaskRunner` (`src/stardag/build/task_runner.py`) to register tasks after successful completion.
-
-### Current Build System
-
-- `build()` function in `sequential.py` traverses DAG depth-first
-- Uses `TaskRunner` which invokes callbacks and registers completed tasks
-- `registry_provider` pattern allows runtime registry injection
-
-### Related Files
-
-- `src/stardag/build/registry.py` - Registry abstraction
-- `src/stardag/build/task_runner.py` - Task execution
-- `src/stardag/build/sequential.py` - Sequential build orchestration
-- `src/stardag/_base.py` - Core Task class
-
-## Execution Plan
-
-### Summary Of Preparatory Analysis
-
-_To be filled after instructions are finalized and analysis is complete._
-
-### Plan
-
-_To be created after instructions are reviewed._
-
-## Decisions
-
-- **Repo structure**: Monorepo with `lib/`, `service/`, `app/` directories
-- **Backward compatibility**: No concerns for FileSystemRegistry users
-- **Deployment model**: Both local dev (docker-compose prioritized in MVP) and standalone service (later)
+# View UI
+open http://localhost:3000
+```
 
 ## Progress
 
-- [x] Created task folder and main.md
-- [x] User reviewed and completed Instructions section
-- [ ] Preparatory analysis
-- [ ] Architecture design
-- [ ] Implementation plan breakdown into subtasks
+- [x] Restructure repo into monorepo
+- [x] FastAPI backend with task CRUD
+- [x] React frontend with task list/detail
+- [x] APIRegistry in SDK
+- [x] docker-compose.yml
+- [x] End-to-end demo verified
 
-## Notes
+## Future Work (Not MVP)
 
-### Suggested Subtask Structure
-
-This is a large initiative. Consider breaking into subtasks like:
-
-- `repo-restructure.md` - Monorepo setup
-- `backend-api.md` - API service implementation
-- `database-schema.md` - Data model design
-- `api-registry.md` - New APIRegistry implementation
-- `frontend-app.md` - Frontend application
-- `dag-visualization.md` - Graph rendering (bonus)
-- `deployment.md` - Docker/docker-compose setup
+- [ ] DAG visualization (graph view)
+- [ ] Real-time updates (WebSockets/SSE)
+- [ ] Execution timeline/history
+- [ ] Log viewer
+- [ ] Authentication (API keys, OAuth)
+- [ ] Metrics and statistics
+- [ ] Run/build initiation via API
