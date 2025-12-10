@@ -1,28 +1,8 @@
 [project]
-name = "stardag"
-dynamic = ["version"]
-description = ""
-authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
+name = "stardag-workspace"
+version = "0.0.0"
+description = "Stardag monorepo workspace"
 requires-python = ">=3.10"
-dependencies = [
-    "pydantic>=2.8.2",
-    "pydantic-settings>=2.7.1",
-    "uuid6>=2024.7.10",
-]
-
-[project.optional-dependencies]
-prefect = [
-    "prefect>=3.0.3",
-    "asyncpg>=0.30.0; python_version >= '3.13'",
-]
-s3 = [
-    "boto3>=1.34",
-    "botocore>=1.36",
-    "boto3-stubs[s3]",
-]
-modal = [
-    "modal>=0.73.59",
-]
 
 [dependency-groups]
 dev = [
@@ -31,32 +11,25 @@ dev = [
     "pytest-asyncio>=0.23.7",
     "ipdb>=0.13.13",
     "pyright>=1.1.359",
+    "stardag",
     "stardag-examples[ml-pipeline]",
 ]
 
 [tool.uv]
-package = true
+package = false
 
 [tool.uv.sources]
+stardag = { workspace = true }
 stardag-examples = { workspace = true }
+stardag-api = { workspace = true }
 
 [tool.uv.workspace]
-members = ["examples"]
-
-[build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
-
-[tool.hatch.version]
-source = "vcs"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/stardag"]
+members = ["lib/stardag-sdk", "examples", "service/stardag-api"]
 
 [tool.isort]
 profile = "black"
-known_local_folder = ["stardag", "stardag_examples"]
+known_local_folder = ["stardag", "stardag_examples", "stardag_api"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["lib/stardag-sdk/tests"]
 asyncio_mode = "auto"

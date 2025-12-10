@@ -1,0 +1,61 @@
+[project]
+name = "stardag"
+dynamic = ["version"]
+description = "Declarative and composable DAG framework for Python with persistent asset management"
+authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.8.2",
+    "pydantic-settings>=2.7.1",
+    "uuid6>=2024.7.10",
+]
+
+[project.optional-dependencies]
+prefect = [
+    "prefect>=3.0.3",
+    "asyncpg>=0.30.0; python_version >= '3.13'",
+]
+s3 = [
+    "boto3>=1.34",
+    "botocore>=1.36",
+    "boto3-stubs[s3]",
+]
+modal = [
+    "modal>=0.73.59",
+]
+api = [
+    "httpx>=0.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.2",
+    "ipython>=8.25.0",
+    "pytest-asyncio>=0.23.7",
+    "ipdb>=0.13.13",
+    "pyright>=1.1.359",
+]
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+root = "../.."
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stardag"]
+
+[tool.isort]
+profile = "black"
+known_local_folder = ["stardag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

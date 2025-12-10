@@ -1,0 +1,6 @@
+{
+  "include": ["lib/stardag-sdk/src", "lib/stardag-sdk/tests", "examples"],
+  "extraPaths": ["lib/stardag-sdk/src"],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "standard"
+}

@@ -1,0 +1,40 @@
+[project]
+name = "stardag-api"
+version = "0.0.1"
+description = "Stardag API service for task tracking and monitoring"
+authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "alembic>=1.14.0",
+    "pydantic>=2.8.2",
+    "pydantic-settings>=2.7.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.2",
+    "pytest-asyncio>=0.23.7",
+    "httpx>=0.27.0",
+]
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stardag_api"]
+
+[tool.isort]
+profile = "black"
+known_local_folder = ["stardag_api"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
