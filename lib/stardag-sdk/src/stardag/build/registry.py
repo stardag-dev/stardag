@@ -82,6 +82,14 @@ class NoOpRegistry(RegistryABC):
 
 
 def init_registry():
+    # Try API registry first (if configured)
+    from stardag.build.api_registry import APIRegistry, APIRegistryConfig
+
+    api_config = APIRegistryConfig()
+    if api_config.url:
+        return APIRegistry(api_config.url, timeout=api_config.timeout)
+
+    # Fall back to filesystem registry
     fs_registry_config = FileSystemRegistryConfig()
     if fs_registry_config.root:
         return FileSystemRegistry(fs_registry_config.root)

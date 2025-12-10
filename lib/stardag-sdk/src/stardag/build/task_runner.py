@@ -20,25 +20,37 @@ class TaskRunner:
         self.registry = registry or NoOpRegistry()
 
     def run(self, task: Task) -> typing.Generator[TaskDeps, None, None] | None:
+        # Notify registry that task is starting
+        if hasattr(self.registry, "start"):
+            self.registry.start(task)  # type: ignore
+
         if self.before_run_callback is not None:
             self.before_run_callback(task)
 
-        res = self._run_task(task)
+        try:
+            res = self._run_task(task)
 
-        # check if res is a generator -> task is not complete
-        if hasattr(res, "__next__"):
-            res = typing.cast(typing.Generator[TaskDeps, None, None], res)
+            # check if res is a generator -> task is not complete
+            if hasattr(res, "__next__"):
+                res = typing.cast(typing.Generator[TaskDeps, None, None], res)
+                return res
+
+            # Task completed successfully
+            if hasattr(self.registry, "complete"):
+                self.registry.complete(task)  # type: ignore
+            else:
+                self.registry.register(task)
+
+            if self.on_complete_callback is not None:
+                self.on_complete_callback(task)
+
             return res
 
-        self.registry.register(task)  # TODO add async implementation
-        if self.on_complete_callback is not None:
-            self.on_complete_callback(task)
-
-        self.registry.register(task)
-        if self.on_complete_callback is not None:
-            self.on_complete_callback(task)
-
-        return res
+        except Exception as e:
+            # Task failed
+            if hasattr(self.registry, "fail"):
+                self.registry.fail(task, str(e))  # type: ignore
+            raise
 
     def _run_task(self, task: Task) -> typing.Generator[TaskDeps, None, None] | None:
         return task.run()
@@ -56,25 +68,41 @@ class AsyncTaskRunner:
         self.registry = registry or NoOpRegistry()
 
     async def run(self, task: Task) -> typing.Generator[TaskDeps, None, None] | None:
+        # Notify registry that task is starting
+        if hasattr(self.registry, "start"):
+            self.registry.start(task)  # type: ignore
+
         if self.before_run_callback is not None:
             await self.before_run_callback(task)
 
-        res = await self._run_task(task)
+        try:
+            res = await self._run_task(task)
 
-        # check if res is a coroutine
-        if res is not None and hasattr(res, "__await__"):
-            res = await res  # type: ignore
+            # check if res is a coroutine
+            if res is not None and hasattr(res, "__await__"):
+                res = await res  # type: ignore
 
-        # check if res is a generator -> task is not complete
-        if hasattr(res, "__next__"):
-            res = typing.cast(typing.Generator[TaskDeps, None, None], res)
+            # check if res is a generator -> task is not complete
+            if hasattr(res, "__next__"):
+                res = typing.cast(typing.Generator[TaskDeps, None, None], res)
+                return res
+
+            # Task completed successfully
+            if hasattr(self.registry, "complete"):
+                self.registry.complete(task)  # type: ignore
+            else:
+                self.registry.register(task)
+
+            if self.on_complete_callback is not None:
+                await self.on_complete_callback(task)
+
             return res
 
-        self.registry.register(task)  # TODO add async implementation
-        if self.on_complete_callback is not None:
-            await self.on_complete_callback(task)
-
-        return res
+        except Exception as e:
+            # Task failed
+            if hasattr(self.registry, "fail"):
+                self.registry.fail(task, str(e))  # type: ignore
+            raise
 
     async def _run_task(
         self, task: Task
