@@ -1,6 +1,6 @@
 [project]
 name = "stardag"
-version = "0.0.4"
+dynamic = ["version"]
 description = ""
 authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
 requires-python = ">=3.10"
@@ -44,8 +44,11 @@ stardag-examples = { workspace = true }
 members = ["examples"]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stardag"]
