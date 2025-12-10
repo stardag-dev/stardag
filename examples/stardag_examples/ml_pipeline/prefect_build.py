@@ -1,7 +1,7 @@
 """Builds the ML Pipeline using Prefect and a local (ThreadPool)TaskRunner.
 
 Prerequisites:
-- Prefect installed: `poetry install --extras prefect`
+- Prefect installed: `uv sync --extra prefect`
 - Use a prefect server, one of:
     * Use local prefect server:
        ```shell

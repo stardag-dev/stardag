@@ -58,8 +58,8 @@
 - [ ] repo and package name (`stardag`, `*dag`, :star: dag)
 - [ ] PyPI name
 - [ ] Github Workflows
-- [ ] unit test (tox??) with poetry
-- [ ] Relase package with poetry spec.?
+- [x] unit test (tox) with uv
+- [x] Release package with uv/hatchling
 - [ ] Cleanup README, basic Docs and overview of core features
 
 ## More Recent :)
