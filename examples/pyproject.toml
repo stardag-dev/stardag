@@ -6,7 +6,7 @@ authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.8.2",
-    "stardag",
+    "stardag[api]",
 ]
 
 [project.optional-dependencies]

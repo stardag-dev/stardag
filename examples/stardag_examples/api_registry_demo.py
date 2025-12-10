@@ -6,76 +6,48 @@ To run this demo:
 3. Run this script: python -m stardag_examples.api_registry_demo
 """
 
-import tempfile
-
-from stardag import AutoTask, Depends, build
+import stardag as sd
 
 
-class AddNumbers(AutoTask):
+@sd.task
+def add_numbers(a: int, b: int) -> int:
     """A simple task that adds two numbers."""
-
-    a: int
-    b: int
-
-    def run(self) -> None:
-        result = self.a + self.b
-        with self.output().open("w") as f:
-            f.write(str(result))
+    return a + b
 
 
-class MultiplyByTwo(AutoTask):
+@sd.task
+def multiply_by_two(value: int) -> int:
     """A task that multiplies its input by two."""
-
-    add_task: AddNumbers = Depends()
-
-    def run(self) -> None:
-        with self.add_task.output().open("r") as f:
-            value = int(f.read())
-        result = value * 2
-        with self.output().open("w") as f:
-            f.write(str(result))
+    return value * 2
 
 
-class SumAll(AutoTask):
-    """A task that sums multiple inputs."""
-
-    multiply_tasks: list[MultiplyByTwo] = Depends()
-
-    def run(self) -> None:
-        total = 0
-        for task in self.multiply_tasks:
-            with task.output().open("r") as f:
-                total += int(f.read())
-        with self.output().open("w") as f:
-            f.write(str(total))
+@sd.task
+def add_and_format(a: int, b: int) -> str:
+    """A task that adds two numbers and formats the result."""
+    result = a + b
+    return f"The sum is: {result}"
 
 
 def main():
-    # Create a DAG with multiple tasks
-    multiply_tasks = [
-        MultiplyByTwo(add_task=AddNumbers(a=i, b=i + 1)) for i in range(3)
-    ]
-    final_task = SumAll(multiply_tasks=multiply_tasks)
+    # Create a simple DAG:
+    # add(1, 2) -> multiply(*2) -> add_with(multiply(3, 4)) -> format
+    step1 = add_numbers(a=1, b=2)  # = 3
+    step2 = multiply_by_two(value=step1)  # = 6
+    step3 = add_numbers(a=3, b=4)  # = 7
+    step4 = multiply_by_two(value=step3)  # = 14
+    final_task = add_and_format(a=step2, b=step4)  # = "The sum is: 20"
 
-    # Use a temporary directory for outputs
-    with tempfile.TemporaryDirectory() as tmpdir:
-        import os
+    print("Building DAG...")
+    print(f"Final task: {final_task.get_family()} ({final_task.task_id[:12]}...)")
 
-        os.environ["STARDAG_TARGET_ROOT"] = tmpdir
+    # Build the DAG
+    sd.build(final_task)
 
-        print("Building DAG...")
-        print(f"Final task: {final_task.task_family} ({final_task.task_id[:12]}...)")
-        print(f"Dependencies: {len(final_task.deps())}")
+    # Read the result
+    result = final_task.result()
 
-        # Build the DAG
-        build(final_task)
-
-        # Read the result
-        with final_task.output().open("r") as f:
-            result = f.read()
-
-        print(f"Result: {result}")
-        print("\nCheck the UI at http://localhost:3000 to see the registered tasks!")
+    print(f"Result: {result}")
+    print("\nCheck the UI at http://localhost:3000 to see the registered tasks!")
 
 
 if __name__ == "__main__":

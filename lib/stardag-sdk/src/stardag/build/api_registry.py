@@ -43,7 +43,7 @@ class APIRegistry(RegistryABC):
         """Register a task with the API service."""
         task_data = {
             "task_id": task.task_id,
-            "task_family": task.task_family,
+            "task_family": task.get_family(),
             "task_data": task.model_dump(mode="json"),
             "user": getpass.getuser(),
             "commit_hash": get_git_commit_hash(),
