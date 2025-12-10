@@ -1,56 +1,59 @@
-[tool.poetry]
+[project]
 name = "stardag"
 version = "0.0.3"
 description = ""
-authors = ["Anders Huss <andhus@kth.se>"]
-packages = [{ include = "stardag", from = "src" }]
+authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.8.2",
+    "pydantic-settings>=2.7.1",
+    "uuid6>=2024.7.10",
+]
 
+[project.optional-dependencies]
+prefect = [
+    "prefect>=3.0.3",
+    "asyncpg>=0.30.0; python_version >= '3.13'",
+]
+s3 = [
+    "boto3>=1.34",
+    "botocore>=1.36",
+    "boto3-stubs[s3]",
+]
+modal = [
+    "modal>=0.73.59",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-pydantic = "^2.8.2"
-pydantic-settings = "^2.7.1"
-uuid6 = "^2024.7.10"
+[dependency-groups]
+dev = [
+    "pytest>=8.2.2",
+    "ipython>=8.25.0",
+    "pytest-asyncio>=0.23.7",
+    "ipdb>=0.13.13",
+    "pyright>=1.1.359",
+    "stardag-examples[ml-pipeline]",
+]
 
-# prefect extras
-prefect = { version = "^3.0.3", optional = true }
-asyncpg = { version = ">=0.30.0", markers = "python_version >= '3.13'", optional = true }
+[tool.uv]
+package = true
 
-# s3 extras
-boto3 = { version = "^1.34", optional = true }
-botocore = { version = "^1.36", optional = true }
-boto3-stubs = { version = "*", extras = ["s3"], optional = true }
+[tool.uv.sources]
+stardag-examples = { workspace = true }
 
-# modal extras
-modal = {version = "^0.73.59", optional = true}
-
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.2.2"
-ipython = "^8.25.0"
-pytest-asyncio = "^0.23.7"
-ipdb = "^0.13.13"
-
-stardag-examples = { path = "examples", develop = true, extras = ["ml-pipeline"] }
-
-
-[tool.poetry.extras]
-prefect = ["prefect", "asyncpg"]
-s3 = ["boto3", "botocore", "boto3-stubs"]
-modal = ["modal"]
-
+[tool.uv.workspace]
+members = ["examples"]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/stardag"]
 
 [tool.isort]
 profile = "black"
 known_local_folder = ["stardag", "stardag_examples"]
 
-[tool.pytest]
-testpaths = ["tests"]
-
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 asyncio_mode = "auto"

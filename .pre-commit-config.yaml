@@ -15,4 +15,3 @@ repos:
     rev: v1.1.359
     hooks:
       - id: pyright
-        args: [--pythonpath=.tox/py312/bin/python]

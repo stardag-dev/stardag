@@ -2,17 +2,17 @@
 
 ## Setup
 
-Install dependencies with Poetry:
+Install dependencies with uv:
 
 ```bash
-poetry install --all-extras
+uv sync --all-extras
 ```
 
 ## Running Tests
 
 ```bash
 # Run tests directly
-poetry run pytest
+uv run pytest
 
 # Run tests via tox (all Python versions)
 tox
