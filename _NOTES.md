@@ -61,3 +61,18 @@
 - [ ] unit test (tox??) with poetry
 - [ ] Relase package with poetry spec.?
 - [ ] Cleanup README, basic Docs and overview of core features
+
+## More Recent :)
+
+### Ideas
+
+- [ ] Implement hashing vs serialization with `info.context["mode"]` to have a unified way to hash and serialize tasks and other pydantic models/primitives. Can support even tasks nested in pydantic models and no need for (that) special treatment at task level
+  - [ ] `param: Annotated[int, BackwardCompat(default=0)] = 1`
+
+### TODOs
+
+- [ ] Setup for Claude
+  - [ ] Instructions (append continously)
+  - [ ] DEV-README.md, how to run tests pre-commit etc.
+- [ ] convert to UV
+- [ ] Nest to: lib/stardag, (lib/stardag_core), server/, app/
