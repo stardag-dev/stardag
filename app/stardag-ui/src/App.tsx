@@ -19,14 +19,18 @@ function App() {
       <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <div className="grid gap-6 lg:grid-cols-3">
           {/* Task list */}
-          <div className={selectedTask ? "lg:col-span-2" : "lg:col-span-3"}>
+          <div className={selectedTask ? "lg:col-span-1" : "lg:col-span-3"}>
             <TaskList onSelectTask={setSelectedTask} />
           </div>
 
-          {/* Task detail panel */}
+          {/* Task detail panel with DAG */}
           {selectedTask && (
-            <div className="lg:col-span-1">
-              <TaskDetail task={selectedTask} onClose={() => setSelectedTask(null)} />
+            <div className="lg:col-span-2">
+              <TaskDetail
+                task={selectedTask}
+                onClose={() => setSelectedTask(null)}
+                onTaskSelect={setSelectedTask}
+              />
             </div>
           )}
         </div>
