@@ -68,7 +68,7 @@ print(res)
 # 45
 ```
 
-If you want to try something more realistic, make sure you have access to a prefect server (see [examples/ml_pipeline/README.md](./examples/ml_pipeline/README.md)) and run
+If you want to try something more realistic, make sure you have access to a prefect server (see [lib/stardag-examples/stardag_examples/ml_pipeline/README.md](./lib/stardag-examples/stardag_examples/ml_pipeline/README.md)) and run
 
 ```shell
 uv sync --extra prefect

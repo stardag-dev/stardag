@@ -23,6 +23,7 @@ _build/
 .mypy_cache/
 .pytest_cache/
 /.ruff_cache/
+.tox/
 
 # Node.js
 node_modules/
