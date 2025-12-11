@@ -5,59 +5,59 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import Event, EventType, RunStatus, TaskStatus
+from stardag_api.models import BuildStatus, Event, EventType, TaskStatus
 
 
-async def get_run_status(
-    db: AsyncSession, run_id: str
-) -> tuple[RunStatus, datetime | None, datetime | None]:
-    """Get derived run status from events.
+async def get_build_status(
+    db: AsyncSession, build_id: str
+) -> tuple[BuildStatus, datetime | None, datetime | None]:
+    """Get derived build status from events.
 
     Returns:
         Tuple of (status, started_at, completed_at)
     """
-    # Get run-level events (task_id is NULL)
+    # Get build-level events (task_id is NULL)
     result = await db.execute(
         select(Event)
-        .where(Event.run_id == run_id)
+        .where(Event.build_id == build_id)
         .where(Event.task_id.is_(None))
         .order_by(Event.created_at.desc())
     )
     events = result.scalars().all()
 
-    status = RunStatus.PENDING
+    status = BuildStatus.PENDING
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
     # Process events from oldest to newest to build final state
     for event in reversed(events):
-        if event.event_type == EventType.RUN_STARTED:
-            status = RunStatus.RUNNING
+        if event.event_type == EventType.BUILD_STARTED:
+            status = BuildStatus.RUNNING
             started_at = event.created_at
-        elif event.event_type == EventType.RUN_COMPLETED:
-            status = RunStatus.COMPLETED
+        elif event.event_type == EventType.BUILD_COMPLETED:
+            status = BuildStatus.COMPLETED
             completed_at = event.created_at
-        elif event.event_type == EventType.RUN_FAILED:
-            status = RunStatus.FAILED
+        elif event.event_type == EventType.BUILD_FAILED:
+            status = BuildStatus.FAILED
             completed_at = event.created_at
-        elif event.event_type == EventType.RUN_CANCELLED:
-            status = RunStatus.CANCELLED
+        elif event.event_type == EventType.BUILD_CANCELLED:
+            status = BuildStatus.CANCELLED
             completed_at = event.created_at
 
     return status, started_at, completed_at
 
 
-async def get_task_status_in_run(
-    db: AsyncSession, run_id: str, task_db_id: int
+async def get_task_status_in_build(
+    db: AsyncSession, build_id: str, task_db_id: int
 ) -> tuple[TaskStatus, datetime | None, datetime | None, str | None]:
-    """Get derived task status from events for a specific run.
+    """Get derived task status from events for a specific build.
 
     Returns:
         Tuple of (status, started_at, completed_at, error_message)
     """
     result = await db.execute(
         select(Event)
-        .where(Event.run_id == run_id)
+        .where(Event.build_id == build_id)
         .where(Event.task_id == task_db_id)
         .order_by(Event.created_at.desc())
     )
@@ -89,17 +89,17 @@ async def get_task_status_in_run(
     return status, started_at, completed_at, error_message
 
 
-async def get_all_task_statuses_in_run(
-    db: AsyncSession, run_id: str
+async def get_all_task_statuses_in_build(
+    db: AsyncSession, build_id: str
 ) -> dict[int, tuple[TaskStatus, datetime | None, datetime | None, str | None]]:
-    """Get derived status for all tasks in a run.
+    """Get derived status for all tasks in a build.
 
     Returns:
         Dict mapping task_db_id to (status, started_at, completed_at, error_message)
     """
     result = await db.execute(
         select(Event)
-        .where(Event.run_id == run_id)
+        .where(Event.build_id == build_id)
         .where(Event.task_id.isnot(None))
         .order_by(Event.created_at.asc())
     )

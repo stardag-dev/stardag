@@ -10,15 +10,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
+    from stardag_api.models.build import Build
     from stardag_api.models.organization import Organization
-    from stardag_api.models.run import Run
     from stardag_api.models.task import Task
 
 
 class Workspace(Base, TimestampMixin):
     """Isolated environment within an organization.
 
-    Similar to a 'project' - contains runs, tasks, and their relationships.
+    Similar to a 'project' - contains builds, tasks, and their relationships.
     """
 
     __tablename__ = "workspaces"
@@ -43,7 +43,7 @@ class Workspace(Base, TimestampMixin):
 
     # Relationships
     organization: Mapped[Organization] = relationship(back_populates="workspaces")
-    runs: Mapped[list[Run]] = relationship(
+    builds: Mapped[list[Build]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
     )

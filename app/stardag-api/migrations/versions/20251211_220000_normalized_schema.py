@@ -1,4 +1,4 @@
-"""Normalized schema with Organization, Workspace, User, Run, Task, Event, TaskDependency.
+"""Normalized schema with Organization, Workspace, User, Build, Task, Event, TaskDependency.
 
 Revision ID: 001_normalized
 Revises:
@@ -81,9 +81,9 @@ def upgrade() -> None:
         sa.UniqueConstraint("organization_id", "slug", name="uq_workspace_org_slug"),
     )
 
-    # Runs
+    # Builds
     op.create_table(
-        "runs",
+        "builds",
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column(
             "workspace_id",
@@ -110,7 +110,9 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
     )
-    op.create_index("ix_runs_workspace_created", "runs", ["workspace_id", "created_at"])
+    op.create_index(
+        "ix_builds_workspace_created", "builds", ["workspace_id", "created_at"]
+    )
 
     # Tasks
     op.create_table(
@@ -179,9 +181,9 @@ def upgrade() -> None:
         "events",
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column(
-            "run_id",
+            "build_id",
             sa.String(36),
-            sa.ForeignKey("runs.id", ondelete="CASCADE"),
+            sa.ForeignKey("builds.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
         ),
@@ -203,11 +205,11 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text, nullable=True),
         sa.Column("event_metadata", sa.JSON, nullable=True),
     )
-    op.create_index("ix_events_run_created", "events", ["run_id", "created_at"])
+    op.create_index("ix_events_build_created", "events", ["build_id", "created_at"])
     op.create_index("ix_events_task_created", "events", ["task_id", "created_at"])
     op.create_index("ix_events_type_created", "events", ["event_type", "created_at"])
     op.create_index(
-        "ix_events_run_task_type", "events", ["run_id", "task_id", "event_type"]
+        "ix_events_build_task_type", "events", ["build_id", "task_id", "event_type"]
     )
 
     # Seed default organization, workspace, and user
@@ -236,7 +238,7 @@ def downgrade() -> None:
     op.drop_table("events")
     op.drop_table("task_dependencies")
     op.drop_table("tasks")
-    op.drop_table("runs")
+    op.drop_table("builds")
     op.drop_table("workspaces")
     op.drop_table("users")
     op.drop_table("organizations")

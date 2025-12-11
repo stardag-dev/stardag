@@ -2916,7 +2916,7 @@ asyncio = [
 
 [[package]]
 name = "stardag"
-source = { directory = "../stardag" }
+source = { editable = "../stardag" }
 dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -3001,7 +3001,7 @@ requires-dist = [
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "scikit-learn", marker = "extra == 'ml-pipeline'", specifier = ">=1.5.2" },
-    { name = "stardag", extras = ["api"], directory = "../stardag" },
+    { name = "stardag", extras = ["api"], editable = "../stardag" },
 ]
 provides-extras = ["prefect", "s3", "modal", "ml-pipeline"]
 

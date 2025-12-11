@@ -12,27 +12,27 @@ from stardag_api.models.base import Base, generate_uuid, utc_now
 from stardag_api.models.enums import EventType
 
 if TYPE_CHECKING:
-    from stardag_api.models.run import Run
+    from stardag_api.models.build import Build
     from stardag_api.models.task import Task
 
 
 class Event(Base):
     """IMMUTABLE append-only event log.
 
-    All state changes are recorded as events. Task and Run status
+    All state changes are recorded as events. Task and Build status
     are derived from the latest relevant event.
 
-    Every event has a run_id. Most events also have a task_id
-    (task-level events), but run-level events (RUN_STARTED, etc.)
+    Every event has a build_id. Most events also have a task_id
+    (task-level events), but build-level events (BUILD_STARTED, etc.)
     may not have a task_id.
     """
 
     __tablename__ = "events"
     __table_args__ = (
-        Index("ix_events_run_created", "run_id", "created_at"),
+        Index("ix_events_build_created", "build_id", "created_at"),
         Index("ix_events_task_created", "task_id", "created_at"),
         Index("ix_events_type_created", "event_type", "created_at"),
-        Index("ix_events_run_task_type", "run_id", "task_id", "event_type"),
+        Index("ix_events_build_task_type", "build_id", "task_id", "event_type"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -41,15 +41,15 @@ class Event(Base):
         default=generate_uuid,
     )
 
-    # Always required - every event belongs to a run
-    run_id: Mapped[str] = mapped_column(
+    # Always required - every event belongs to a build
+    build_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("runs.id", ondelete="CASCADE"),
+        ForeignKey("builds.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
 
-    # Optional - task-level events have this, run-level events may not
+    # Optional - task-level events have this, build-level events may not
     task_id: Mapped[int | None] = mapped_column(
         Integer,
         ForeignKey("tasks.id", ondelete="CASCADE"),
@@ -78,5 +78,5 @@ class Event(Base):
     event_metadata: Mapped[dict | None] = mapped_column(JSON)
 
     # Relationships
-    run: Mapped[Run] = relationship(back_populates="events")
+    build: Mapped[Build] = relationship(back_populates="events")
     task: Mapped[Task | None] = relationship(back_populates="events")

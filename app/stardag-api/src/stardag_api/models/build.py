@@ -1,4 +1,4 @@
-"""Run model for tracking DAG executions."""
+"""Build model for tracking DAG executions."""
 
 from __future__ import annotations
 
@@ -15,15 +15,17 @@ if TYPE_CHECKING:
     from stardag_api.models.workspace import Workspace
 
 
-class Run(Base, TimestampMixin):
+class Build(Base, TimestampMixin):
     """Represents execution of sd.build() for a DAG/set of tasks.
 
     Status is derived from events (no stored status field).
     Timestamps (started_at, completed_at) are derived from events.
     """
 
-    __tablename__ = "runs"
-    __table_args__ = (Index("ix_runs_workspace_created", "workspace_id", "created_at"),)
+    __tablename__ = "builds"
+    __table_args__ = (
+        Index("ix_builds_workspace_created", "workspace_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -60,10 +62,10 @@ class Run(Base, TimestampMixin):
     )
 
     # Relationships
-    workspace: Mapped[Workspace] = relationship(back_populates="runs")
-    user: Mapped[User | None] = relationship(back_populates="runs")
+    workspace: Mapped[Workspace] = relationship(back_populates="builds")
+    user: Mapped[User | None] = relationship(back_populates="builds")
     events: Mapped[list[Event]] = relationship(
-        back_populates="run",
+        back_populates="build",
         cascade="all, delete-orphan",
         order_by="Event.created_at",
     )

@@ -65,16 +65,16 @@ export STARDAG_API_REGISTRY_URL="http://localhost:8000"
 cd "$REPO_ROOT/lib/stardag-examples"
 uv run python src/stardag_examples/api_registry_demo.py
 
-# Verify API has runs
-echo "=== Verifying API - Runs ==="
-RUNS_RESPONSE=$(curl -s http://localhost:8000/api/v1/runs)
-RUN_COUNT=$(echo "$RUNS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
-if [ "$RUN_COUNT" -lt 1 ]; then
-    echo "ERROR: No runs found in API"
-    echo "API response: $RUNS_RESPONSE"
+# Verify API has builds
+echo "=== Verifying API - Builds ==="
+BUILDS_RESPONSE=$(curl -s http://localhost:8000/api/v1/builds)
+BUILD_COUNT=$(echo "$BUILDS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
+if [ "$BUILD_COUNT" -lt 1 ]; then
+    echo "ERROR: No builds found in API"
+    echo "API response: $BUILDS_RESPONSE"
     exit 1
 fi
-echo "Found $RUN_COUNT run(s) in API"
+echo "Found $BUILD_COUNT build(s) in API"
 
 # Verify API has tasks
 echo "=== Verifying API - Tasks ==="

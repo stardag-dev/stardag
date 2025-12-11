@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.db import engine
 from stardag_api.models import Base
-from stardag_api.routes import runs_router, tasks_router
+from stardag_api.routes import builds_router, tasks_router
 
 
 @asynccontextmanager
@@ -32,7 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(runs_router, prefix="/api/v1")
+app.include_router(builds_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
 
 

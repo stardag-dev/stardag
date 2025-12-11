@@ -13,8 +13,8 @@ class TaskStatus(str, enum.Enum):
     SKIPPED = "skipped"
 
 
-class RunStatus(str, enum.Enum):
-    """Derived status for runs, computed from events."""
+class BuildStatus(str, enum.Enum):
+    """Derived status for builds, computed from events."""
 
     PENDING = "pending"
     RUNNING = "running"
@@ -26,13 +26,13 @@ class RunStatus(str, enum.Enum):
 class EventType(str, enum.Enum):
     """Event types for the append-only event log."""
 
-    # Run events
-    RUN_STARTED = "run_started"
-    RUN_COMPLETED = "run_completed"
-    RUN_FAILED = "run_failed"
-    RUN_CANCELLED = "run_cancelled"
+    # Build events
+    BUILD_STARTED = "build_started"
+    BUILD_COMPLETED = "build_completed"
+    BUILD_FAILED = "build_failed"
+    BUILD_CANCELLED = "build_cancelled"
 
-    # Task events (within a run)
+    # Task events (within a build)
     TASK_PENDING = "task_pending"
     TASK_STARTED = "task_started"
     TASK_COMPLETED = "task_completed"

@@ -10,8 +10,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
+    from stardag_api.models.build import Build
     from stardag_api.models.organization import Organization
-    from stardag_api.models.run import Run
 
 
 class User(Base, TimestampMixin):
@@ -42,4 +42,4 @@ class User(Base, TimestampMixin):
 
     # Relationships
     organization: Mapped[Organization] = relationship(back_populates="users")
-    runs: Mapped[list[Run]] = relationship(back_populates="user")
+    builds: Mapped[list[Build]] = relationship(back_populates="user")

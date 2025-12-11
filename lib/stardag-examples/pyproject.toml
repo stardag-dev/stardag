@@ -38,7 +38,7 @@ dev = [
 package = true
 
 [tool.uv.sources]
-stardag = { path = "../stardag" }
+stardag = { path = "../stardag", editable = true }
 
 [build-system]
 requires = ["hatchling"]

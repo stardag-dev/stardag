@@ -24,19 +24,19 @@ def build(
         registry=registry,
     )
 
-    # Start a run if registry supports it
-    if hasattr(registry, "start_run"):
-        registry.start_run(root_tasks=[task])  # type: ignore
+    # Start a build if registry supports it
+    if hasattr(registry, "start_build"):
+        registry.start_build(root_tasks=[task])  # type: ignore
 
     try:
         _build(task, completion_cache or set(), task_runner=task_runner)
-        # Complete the run if registry supports it
-        if hasattr(registry, "complete_run"):
-            registry.complete_run()  # type: ignore
+        # Complete the build if registry supports it
+        if hasattr(registry, "complete_build"):
+            registry.complete_build()  # type: ignore
     except Exception as e:
-        # Fail the run if registry supports it
-        if hasattr(registry, "fail_run"):
-            registry.fail_run(str(e))  # type: ignore
+        # Fail the build if registry supports it
+        if hasattr(registry, "fail_build"):
+            registry.fail_build(str(e))  # type: ignore
         raise
 
 

@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from stardag_api.models.enums import EventType, RunStatus, TaskStatus
+from stardag_api.models.enums import BuildStatus, EventType, TaskStatus
 
 
 # --- Organization Schemas ---
@@ -78,11 +78,11 @@ class WorkspaceResponse(BaseModel):
     created_at: datetime
 
 
-# --- Run Schemas ---
+# --- Build Schemas ---
 
 
-class RunCreate(BaseModel):
-    """Schema for creating a run."""
+class BuildCreate(BaseModel):
+    """Schema for creating a build."""
 
     workspace_id: str = "default"
     user: str = "default"  # Username, will be resolved to user_id
@@ -91,8 +91,8 @@ class RunCreate(BaseModel):
     description: str | None = None
 
 
-class RunResponse(BaseModel):
-    """Schema for run response with derived status."""
+class BuildResponse(BaseModel):
+    """Schema for build response with derived status."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -105,15 +105,15 @@ class RunResponse(BaseModel):
     root_task_ids: list[str]
     created_at: datetime
     # Derived fields (not from model directly)
-    status: RunStatus = RunStatus.PENDING
+    status: BuildStatus = BuildStatus.PENDING
     started_at: datetime | None = None
     completed_at: datetime | None = None
 
 
-class RunListResponse(BaseModel):
-    """Schema for paginated run list."""
+class BuildListResponse(BaseModel):
+    """Schema for paginated build list."""
 
-    runs: list[RunResponse]
+    builds: list[BuildResponse]
     total: int
     page: int
     page_size: int
@@ -123,7 +123,7 @@ class RunListResponse(BaseModel):
 
 
 class TaskCreate(BaseModel):
-    """Schema for registering a task to a run."""
+    """Schema for registering a task to a build."""
 
     task_id: str
     task_namespace: str = ""
@@ -149,7 +149,7 @@ class TaskResponse(BaseModel):
 
 
 class TaskWithStatusResponse(TaskResponse):
-    """Task response with status derived from events for a specific run."""
+    """Task response with status derived from events for a specific build."""
 
     status: TaskStatus = TaskStatus.PENDING
     started_at: datetime | None = None
@@ -184,7 +184,7 @@ class EventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    run_id: str
+    build_id: str
     task_id: int | None
     event_type: EventType
     created_at: datetime

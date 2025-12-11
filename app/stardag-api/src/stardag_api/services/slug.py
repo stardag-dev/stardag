@@ -1,4 +1,4 @@
-"""Memorable slug generation for runs."""
+"""Memorable slug generation for builds."""
 
 import random
 
@@ -69,8 +69,8 @@ NOUNS = [
 ]
 
 
-def generate_run_slug() -> str:
-    """Generate a memorable slug for a run.
+def generate_build_slug() -> str:
+    """Generate a memorable slug for a build.
 
     Format: adjective-noun-number (e.g., "brave-tiger-42")
     """
