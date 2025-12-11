@@ -15,17 +15,30 @@ services:
       timeout: 5s
       retries: 5
 
+  migrations:
+    build:
+      context: ./app/stardag-api
+      dockerfile: Dockerfile
+    environment:
+      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag:stardag@db:5432/stardag
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
   api:
     build:
       context: ./app/stardag-api
       dockerfile: Dockerfile
     environment:
-      STARDAG_API_DATABASE_URL: postgresql://stardag:stardag@db:5432/stardag
+      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag:stardag@db:5432/stardag
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
 
   ui:
     build:

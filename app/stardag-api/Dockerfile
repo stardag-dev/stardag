@@ -12,6 +12,10 @@ COPY src/ src/
 # Install the package
 RUN uv pip install --system .
 
+# Copy alembic configuration and migrations
+COPY alembic.ini .
+COPY migrations/ migrations/
+
 EXPOSE 8000
 
 CMD ["uvicorn", "stardag_api.main:app", "--host", "0.0.0.0", "--port", "8000"]

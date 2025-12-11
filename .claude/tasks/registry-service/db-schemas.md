@@ -19,9 +19,38 @@ other of an arcitectural nature. Starting with an overview list below:
 - [ ] Extend unit tests to also cover the task endpoint (high level functionality/smoke test)
 
 **Set up standard migration management with alembic**
-NOTE an external reference will be provided.
 
-WIP.
+- [x] Setup standard alembic migrations
+- [x] Tweak: Keep migration statements in plain SQL, use this template for the migrations/script.py.mako and set it up so that there is sister .sql file.
+
+```
+"""${message}
+
+Revision ID: ${up_revision}
+Revises: ${down_revision | comma,n}
+Create Date: ${create_date}
+
+"""
+from pathlib import Path
+
+from alembic import op
+
+# revision identifiers, used by Alembic.
+revision = ${repr(up_revision)}
+down_revision = ${repr(down_revision)}
+branch_labels = ${repr(branch_labels)}
+depends_on = ${repr(depends_on)}
+
+
+def upgrade():
+    file_text = Path(__file__).with_suffix(".sql").read_text()
+    if file_text:
+        op.execute(file_text)
+```
+
+- [x] Make sure migrations are applied in tests (via conftest fixtures).
+- [x] In docker-compose, add an additional `alembic` service that runs migrations
+- [x] Add migration handling to a app/stardag-api/README.md (also add other basic info here, keep it concise)
 
 ## Context
 
