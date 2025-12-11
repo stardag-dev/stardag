@@ -25,25 +25,36 @@ interface UseTasksReturn {
 
 const MAX_DEPTH = 3;
 
-async function loadRelatedTasks(
-  matchingTasks: Task[],
-  allKnownTasks: Map<string, Task>,
-): Promise<Map<string, Task>> {
-  const taskMap = new Map(allKnownTasks);
+async function fetchAllTasks(): Promise<Task[]> {
+  const allTasks: Task[] = [];
+  let page = 1;
+  const pageSize = 100;
+
+  while (true) {
+    try {
+      const response = await fetchTasks({ page, page_size: pageSize });
+      allTasks.push(...response.tasks);
+      if (allTasks.length >= response.total || response.tasks.length === 0) {
+        break;
+      }
+      page++;
+    } catch {
+      break;
+    }
+  }
+
+  return allTasks;
+}
+
+async function loadRelatedTasks(matchingTasks: Task[]): Promise<Map<string, Task>> {
+  const taskMap = new Map<string, Task>();
   matchingTasks.forEach((t) => taskMap.set(t.task_id, t));
 
   const matchingIds = new Set(matchingTasks.map((t) => t.task_id));
 
-  // Find upstream (dependencies) and downstream (dependents)
-  // We need to load all tasks to find dependents
-  let allTasks: Task[] = [];
-  try {
-    const response = await fetchTasks({ page_size: 500 });
-    allTasks = response.tasks;
-    allTasks.forEach((t) => taskMap.set(t.task_id, t));
-  } catch {
-    // If we can't load all tasks, just work with what we have
-  }
+  // Load all tasks to find dependents
+  const allTasks = await fetchAllTasks();
+  allTasks.forEach((t) => taskMap.set(t.task_id, t));
 
   // Build reverse dependency map (task -> tasks that depend on it)
   const dependentsMap = new Map<string, Set<string>>();
@@ -138,7 +149,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
 
       // Load related tasks for DAG view
       const matchingIds = new Set(matchingTasks.map((t) => t.task_id));
-      const relatedMap = await loadRelatedTasks(matchingTasks, new Map());
+      const relatedMap = await loadRelatedTasks(matchingTasks);
 
       const withContext: TaskWithContext[] = Array.from(relatedMap.values()).map(
         (task) => ({
