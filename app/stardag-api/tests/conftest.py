@@ -27,6 +27,39 @@ def get_alembic_config(connection_url: str | None = None) -> Config:
     return alembic_cfg
 
 
+async def seed_defaults(session: AsyncSession):
+    """Seed default organization, workspace, and user."""
+    from stardag_api.models import Organization, User, Workspace
+
+    # Create default organization
+    org = Organization(
+        id="default",
+        name="Default Organization",
+        slug="default",
+    )
+    session.add(org)
+
+    # Create default workspace
+    workspace = Workspace(
+        id="default",
+        organization_id="default",
+        name="Default Workspace",
+        slug="default",
+    )
+    session.add(workspace)
+
+    # Create default user
+    user = User(
+        id="default",
+        organization_id="default",
+        username="default",
+        display_name="Default User",
+    )
+    session.add(user)
+
+    await session.commit()
+
+
 @pytest.fixture
 async def async_engine():
     """Create a test database engine with schema initialized.
@@ -38,6 +71,12 @@ async def async_engine():
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Seed defaults
+    async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with async_session_maker() as session:
+        await seed_defaults(session)
+
     yield engine
     await engine.dispose()
 

@@ -17,13 +17,27 @@ def build(
     on_complete_callback: RunCallback | None = None,
     registry: RegistryABC | None = None,
 ) -> None:
+    registry = registry or registry_provider.get()
     task_runner = task_runner or TaskRunner(
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
-        registry=registry or registry_provider.get(),
+        registry=registry,
     )
 
-    _build(task, completion_cache or set(), task_runner=task_runner)
+    # Start a run if registry supports it
+    if hasattr(registry, "start_run"):
+        registry.start_run(root_tasks=[task])  # type: ignore
+
+    try:
+        _build(task, completion_cache or set(), task_runner=task_runner)
+        # Complete the run if registry supports it
+        if hasattr(registry, "complete_run"):
+            registry.complete_run()  # type: ignore
+    except Exception as e:
+        # Fail the run if registry supports it
+        if hasattr(registry, "fail_run"):
+            registry.fail_run(str(e))  # type: ignore
+        raise
 
 
 def _build(task: Task, completion_cache: set[str], task_runner: TaskRunner) -> None:

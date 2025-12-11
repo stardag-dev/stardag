@@ -65,13 +65,24 @@ export STARDAG_API_REGISTRY_URL="http://localhost:8000"
 cd "$REPO_ROOT/lib/stardag-examples"
 uv run python src/stardag_examples/api_registry_demo.py
 
+# Verify API has runs
+echo "=== Verifying API - Runs ==="
+RUNS_RESPONSE=$(curl -s http://localhost:8000/api/v1/runs)
+RUN_COUNT=$(echo "$RUNS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
+if [ "$RUN_COUNT" -lt 1 ]; then
+    echo "ERROR: No runs found in API"
+    echo "API response: $RUNS_RESPONSE"
+    exit 1
+fi
+echo "Found $RUN_COUNT run(s) in API"
+
 # Verify API has tasks
-echo "=== Verifying API ==="
-API_RESPONSE=$(curl -s http://localhost:8000/api/v1/tasks)
-TASK_COUNT=$(echo "$API_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
+echo "=== Verifying API - Tasks ==="
+TASKS_RESPONSE=$(curl -s http://localhost:8000/api/v1/tasks)
+TASK_COUNT=$(echo "$TASKS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
 if [ "$TASK_COUNT" -lt 1 ]; then
     echo "ERROR: No tasks found in API"
-    echo "API response: $API_RESPONSE"
+    echo "API response: $TASKS_RESPONSE"
     exit 1
 fi
 echo "Found $TASK_COUNT task(s) in API"

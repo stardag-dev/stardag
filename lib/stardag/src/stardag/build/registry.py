@@ -87,7 +87,11 @@ def init_registry():
 
     api_config = APIRegistryConfig()
     if api_config.url:
-        return APIRegistry(api_config.url, timeout=api_config.timeout)
+        return APIRegistry(
+            api_config.url,
+            timeout=api_config.timeout,
+            workspace_id=api_config.workspace_id,
+        )
 
     # Fall back to filesystem registry
     fs_registry_config = FileSystemRegistryConfig()
