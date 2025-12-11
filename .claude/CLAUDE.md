@@ -41,6 +41,11 @@ app/
 
 See [DEV_README.md](/DEV_README.md) for setup and commands.
 
+## Testing
+
+- **Unit tests**: Prefer unit tests for testing specific components and logic
+- **E2E test**: `./scripts/e2e-test.sh` runs a full integration test (docker-compose, API, UI, demo script). Use sparingly - it's slow and should not replace unit tests. Good for verifying the full stack works together after significant changes.
+
 ## Tasks
 
 Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/README.md) for the template and structure.
