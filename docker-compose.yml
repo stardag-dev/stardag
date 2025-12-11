@@ -17,7 +17,7 @@ services:
 
   api:
     build:
-      context: ./service/stardag-api
+      context: ./app/stardag-api
       dockerfile: Dockerfile
     environment:
       STARDAG_API_DATABASE_URL: postgresql://stardag:stardag@db:5432/stardag

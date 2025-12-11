@@ -1,4 +1,4 @@
-# Stardag Service
+# Stardag Applications
 
 This directory contains the backend API service and web UI for monitoring Stardag task execution.
 
@@ -31,7 +31,6 @@ Then run any stardag build. Tasks will be automatically registered with the API.
 Example:
 
 ```bash
-cd examples
 python -m stardag_examples.api_registry_demo
 ```
 
@@ -52,7 +51,7 @@ docker compose up -d db
 **API:**
 
 ```bash
-cd service/stardag-api
+cd app/stardag-api
 STARDAG_API_DATABASE_URL=postgresql://stardag:stardag@localhost:5432/stardag \
   uvicorn stardag_api.main:app --reload
 ```

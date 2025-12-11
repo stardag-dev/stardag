@@ -24,12 +24,12 @@ stardag-examples = { workspace = true }
 stardag-api = { workspace = true }
 
 [tool.uv.workspace]
-members = ["lib/stardag-sdk", "examples", "service/stardag-api"]
+members = ["lib/stardag", "lib/stardag-examples", "app/stardag-api"]
 
 [tool.isort]
 profile = "black"
 known_local_folder = ["stardag", "stardag_examples", "stardag_api"]
 
 [tool.pytest.ini_options]
-testpaths = ["lib/stardag-sdk/tests"]
+testpaths = ["lib/stardag/tests"]
 asyncio_mode = "auto"

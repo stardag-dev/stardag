@@ -20,14 +20,21 @@ Stardag is a Python framework for building DAGs (Directed Acyclic Graphs) with:
 ## Project Structure
 
 ```
-src/stardag/
-├── _base.py           # Core Task class
-├── _decorator.py      # @task decorator API
-├── _auto_task.py      # AutoTask with filesystem targets
-├── _task_parameter.py # Depends, TaskLoads, TaskSet
-├── build/             # Execution/build logic
-├── target/            # Target abstraction (local, S3)
-└── integration/       # Prefect, Modal, AWS integrations
+lib/
+├── stardag/                    # Core SDK library
+│   └── src/stardag/
+│       ├── _base.py            # Core Task class
+│       ├── _decorator.py       # @task decorator API
+│       ├── _auto_task.py       # AutoTask with filesystem targets
+│       ├── _task_parameter.py  # Depends, TaskLoads, TaskSet
+│       ├── build/              # Execution/build logic
+│       ├── target/             # Target abstraction (local, S3)
+│       └── integration/        # Prefect, Modal, AWS integrations
+└── stardag-examples/           # Example DAGs and demos
+
+app/
+├── stardag-api/                # FastAPI backend for task tracking
+└── stardag-ui/                 # React frontend for monitoring
 ```
 
 ## Development
@@ -40,7 +47,9 @@ Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/READ
 
 **Current tasks:**
 
-- [registry-service](tasks/registry-service/main_and_mvp.md) - Backend API & Frontend App for task tracking and monitoring, subtask: [`mvp_cleanup.md`](tasks/registry-service/mvp_cleanup.md)
+- [registry-service](tasks/registry-service/) - Backend API & Frontend App for task tracking and monitoring
+  - [main_and_mvp.md](tasks/registry-service/main_and_mvp.md) - MVP implementation (completed)
+  - [mvp_cleanup.md](tasks/registry-service/mvp_cleanup.md) - Post-MVP cleanup (active)
 
 ## Code Style
 

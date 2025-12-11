@@ -353,30 +353,30 @@ wheels = [
 
 [[package]]
 name = "boto3"
-version = "1.42.6"
+version = "1.42.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore" },
     { name = "jmespath" },
     { name = "s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/a8/e7a408127d61569df097d6c128775ffa3e609a023d4461686fd85fe5eef4/boto3-1.42.6.tar.gz", hash = "sha256:11dab889a24f378af6c93afd4aa06d7cace3866cbf02e78c7a77e9a7fb41967a", size = 112859, upload-time = "2025-12-09T23:00:33.685Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/f9/808ed6c387802399a9d6c3a6cc3d09d19376dbbcdf228a8ca501b7f98eda/boto3-1.42.7.tar.gz", hash = "sha256:eda49046c0f6a21ac159f9b2d609e5cc70d1dd019b7ac9618eec99285282b3db", size = 112817, upload-time = "2025-12-10T20:32:10.414Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ee/dd/af36b27e9fc004cd8ae2290d6d76a8de34d098d17a3718ae875e5e856ab1/boto3-1.42.6-py3-none-any.whl", hash = "sha256:69ff5cf6431fe7870da009f23aceabb20d56b4c9852ba9a808eaf6cc30ae02a5", size = 140574, upload-time = "2025-12-09T23:00:31.355Z" },
+    { url = "https://files.pythonhosted.org/packages/99/87/0929d68046575a2171a6ef8681a14e707c25e1dcc6db883f1729c3c111cd/boto3-1.42.7-py3-none-any.whl", hash = "sha256:c5cb2ada690c14e2dfa1e1c59ef7ef399c5e381f5514f1541d28310e35192300", size = 140573, upload-time = "2025-12-10T20:32:08.253Z" },
 ]
 
 [[package]]
 name = "boto3-stubs"
-version = "1.42.6"
+version = "1.42.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore-stubs" },
     { name = "types-s3transfer" },
     { name = "typing-extensions", marker = "python_full_version < '3.12'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5d/ae/cf44140a46973a9bf2202b110adfffaf6b40f0f08f2d3e6fdf250290d48e/boto3_stubs-1.42.6.tar.gz", hash = "sha256:41e38a060a9d0d4738d496a7f869195ad33f80b59690005c9962dc977626494b", size = 100803, upload-time = "2025-12-09T23:12:57.854Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/71/e07f37db5b92c75244e6146f27d751a90c56910b445aeef8f4c72a874d82/boto3_stubs-1.42.7.tar.gz", hash = "sha256:2d3f9e10686ca7ca054b788450fcc3d505b9f74954817afd994f71742df6d883", size = 100834, upload-time = "2025-12-10T20:41:14.679Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/41/39062d380770057f0c4b048dfc7dadc1d68a0db18e61eac81baa80c1a139/boto3_stubs-1.42.6-py3-none-any.whl", hash = "sha256:8a591f3af2bef1fb646294fda5edbb457c0c57d39d0934ea7b6083596a34a33c", size = 69705, upload-time = "2025-12-09T23:12:54.669Z" },
+    { url = "https://files.pythonhosted.org/packages/75/91/6d9789991a74d2236c91246bcd57c65357c17d2d95f863bc30d03e6f4658/boto3_stubs-1.42.7-py3-none-any.whl", hash = "sha256:e4f153103a3e67a50aa98b9141382a16d37e943aef957319fe3a48e9b4a33a5a", size = 69702, upload-time = "2025-12-10T20:41:09.46Z" },
 ]
 
 [package.optional-dependencies]
@@ -386,28 +386,28 @@ s3 = [
 
 [[package]]
 name = "botocore"
-version = "1.42.6"
+version = "1.42.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jmespath" },
     { name = "python-dateutil" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a6/28/e1ad336dd409e3cde0644cbba644056248e873b77129502f81581f5a222f/botocore-1.42.6.tar.gz", hash = "sha256:ab389c6874dfbdc4c18de9b4a02d300cb6c7f6f2d4622c73e5965aeef80e570d", size = 14851572, upload-time = "2025-12-09T23:00:21.993Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/76/d55a451399fa3a05a39881976dc9a02e6d60661f7e68976a387da655be5a/botocore-1.42.7.tar.gz", hash = "sha256:cc401b4836eae2a781efa1d1df88b2e92f9245885a6ae1bf9a6b26bc97b3efd2", size = 14855150, upload-time = "2025-12-10T20:31:58.665Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/1e/545d3ca599aea7a7aaad23735ae2d1c7280557e115086208d68af1621f93/botocore-1.42.6-py3-none-any.whl", hash = "sha256:c4aebdc391f3542270ebea8b8f0060fde514f6441de207dce862ed759887607e", size = 14527177, upload-time = "2025-12-09T23:00:17.197Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/46/223f3e319a5a710bd28b4e4b5d0ba16a0ee9c858541335ef42fd14443e83/botocore-1.42.7-py3-none-any.whl", hash = "sha256:92128d56654342f026d5c20a92bf0e8b546be1eb38df2c0efc7433e8bbc39045", size = 14527904, upload-time = "2025-12-10T20:31:54.934Z" },
 ]
 
 [[package]]
 name = "botocore-stubs"
-version = "1.42.6"
+version = "1.42.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "types-awscrt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5d/b1/556e80eb0354f0a49c215c5d93ff3c5ec32967e1f404c75c638314524eac/botocore_stubs-1.42.6.tar.gz", hash = "sha256:ba3e770966c76b9eb9a6b300fd7d9b1c4021bac91dde6652b555c4a0e0b73392", size = 42416, upload-time = "2025-12-09T23:26:08.069Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cf/71/60ed60efadff75be02bdd9acb554c043d0f9388fc3907c3be953709e04c7/botocore_stubs-1.42.7.tar.gz", hash = "sha256:951fc41e78e1a53b49bfe8511bc24e430eda4c689ca6033c643693e56485e69c", size = 42392, upload-time = "2025-12-10T21:29:19.759Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/37/798c9a295cb91a0f56d86e120737e354fb7322b4c252821ee7e474e69cb3/botocore_stubs-1.42.6-py3-none-any.whl", hash = "sha256:08502fdac438b1934a803e5fd11838b2792c68115274a20f3677ded250caa7d2", size = 66749, upload-time = "2025-12-09T23:26:06.267Z" },
+    { url = "https://files.pythonhosted.org/packages/37/45/ab92dfc4d44b9fd652fca4ca02f523ea03c5f1f5babea225ce1230f30cd6/botocore_stubs-1.42.7-py3-none-any.whl", hash = "sha256:d5c9ac851e8d7ce30d25204add0e2448cb23cb5f8fbe6b5c768ea1e4471b4455", size = 66749, upload-time = "2025-12-10T21:29:18.25Z" },
 ]
 
 [[package]]
@@ -832,7 +832,7 @@ lua = [
 
 [[package]]
 name = "fastapi"
-version = "0.124.1"
+version = "0.124.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -840,9 +840,9 @@ dependencies = [
     { name = "starlette" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/cd/51b0df6347fc5205ea2b7cff6f1299c2112ad2a0abc0183f86f9a32b3f96/fastapi-0.124.1.tar.gz", hash = "sha256:659166e4d3c19b26e1e77bfd64d649f64233dcc47677a97a822f38cefb64db47", size = 361493, upload-time = "2025-12-10T10:40:26.517Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/58/b7/4dbca3f9d847ba9876dcb7098c13a4c6c86ee8db148c923fab78e27748d3/fastapi-0.124.2.tar.gz", hash = "sha256:72e188f01f360e2f59da51c8822cbe4bca210c35daaae6321b1b724109101c00", size = 361867, upload-time = "2025-12-10T12:10:10.676Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/aa/18/39a6e0f8ed7a9e202e415c142ecfb3d79f8f3d1d9eb8f040b889bbae0b8c/fastapi-0.124.1-py3-none-any.whl", hash = "sha256:c8a2deaa03837e5694eaf1eb538b7637abd86f25973cbaf9d51525e5c03a967a", size = 112634, upload-time = "2025-12-10T10:40:24.741Z" },
+    { url = "https://files.pythonhosted.org/packages/25/c5/8a5231197b81943b2df126cc8ea2083262e004bee3a39cf85a471392d145/fastapi-0.124.2-py3-none-any.whl", hash = "sha256:6314385777a507bb19b34bd064829fddaea0eea54436deb632b5de587554055c", size = 112711, upload-time = "2025-12-10T12:10:08.855Z" },
 ]
 
 [[package]]
@@ -3667,12 +3667,14 @@ dependencies = [
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/be/f9/5e4491e5ccf42f5d9cfc663741d261b3e6e1683ae7812114e7636409fcc6/sqlalchemy-2.0.45.tar.gz", hash = "sha256:1632a4bda8d2d25703fdad6363058d882541bdaaee0e5e3ddfa0cd3229efce88", size = 9869912, upload-time = "2025-12-09T21:05:16.737Z" }
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/fe/70/75b1387d72e2847220441166c5eb4e9846dd753895208c13e6d66523b2d9/sqlalchemy-2.0.45-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:c64772786d9eee72d4d3784c28f0a636af5b0a29f3fe26ff11f55efe90c0bd85", size = 2154148, upload-time = "2025-12-10T20:03:21.023Z" },
     { url = "https://files.pythonhosted.org/packages/d8/a4/7805e02323c49cb9d1ae5cd4913b28c97103079765f520043f914fca4cb3/sqlalchemy-2.0.45-cp310-cp310-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:7ae64ebf7657395824a19bca98ab10eb9a3ecb026bf09524014f1bb81cb598d4", size = 3233051, upload-time = "2025-12-09T22:06:04.768Z" },
     { url = "https://files.pythonhosted.org/packages/d7/ec/32ae09139f61bef3de3142e85c47abdee8db9a55af2bb438da54a4549263/sqlalchemy-2.0.45-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:0f02325709d1b1a1489f23a39b318e175a171497374149eae74d612634b234c0", size = 3232781, upload-time = "2025-12-09T22:09:54.435Z" },
     { url = "https://files.pythonhosted.org/packages/ad/bd/bf7b869b6f5585eac34222e1cf4405f4ba8c3b85dd6b1af5d4ce8bca695f/sqlalchemy-2.0.45-cp310-cp310-musllinux_1_2_aarch64.whl", hash = "sha256:d2c3684fca8a05f0ac1d9a21c1f4a266983a7ea9180efb80ffeb03861ecd01a0", size = 3182096, upload-time = "2025-12-09T22:06:06.169Z" },
     { url = "https://files.pythonhosted.org/packages/21/6a/c219720a241bb8f35c88815ccc27761f5af7fdef04b987b0e8a2c1a6dcaa/sqlalchemy-2.0.45-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:040f6f0545b3b7da6b9317fc3e922c9a98fc7243b2a1b39f78390fc0942f7826", size = 3205109, upload-time = "2025-12-09T22:09:55.969Z" },
     { url = "https://files.pythonhosted.org/packages/bd/c4/6ccf31b2bc925d5d95fab403ffd50d20d7c82b858cf1a4855664ca054dce/sqlalchemy-2.0.45-cp310-cp310-win32.whl", hash = "sha256:830d434d609fe7bfa47c425c445a8b37929f140a7a44cdaf77f6d34df3a7296a", size = 2114240, upload-time = "2025-12-09T21:29:54.007Z" },
     { url = "https://files.pythonhosted.org/packages/de/29/a27a31fca07316def418db6f7c70ab14010506616a2decef1906050a0587/sqlalchemy-2.0.45-cp310-cp310-win_amd64.whl", hash = "sha256:0209d9753671b0da74da2cfbb9ecf9c02f72a759e4b018b3ab35f244c91842c7", size = 2137615, upload-time = "2025-12-09T21:29:55.85Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/1c/769552a9d840065137272ebe86ffbb0bc92b0f1e0a68ee5266a225f8cd7b/sqlalchemy-2.0.45-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:2e90a344c644a4fa871eb01809c32096487928bd2038bf10f3e4515cb688cc56", size = 2153860, upload-time = "2025-12-10T20:03:23.843Z" },
     { url = "https://files.pythonhosted.org/packages/f3/f8/9be54ff620e5b796ca7b44670ef58bc678095d51b0e89d6e3102ea468216/sqlalchemy-2.0.45-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:b8c8b41b97fba5f62349aa285654230296829672fc9939cd7f35aab246d1c08b", size = 3309379, upload-time = "2025-12-09T22:06:07.461Z" },
     { url = "https://files.pythonhosted.org/packages/f6/2b/60ce3ee7a5ae172bfcd419ce23259bb874d2cddd44f67c5df3760a1e22f9/sqlalchemy-2.0.45-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:12c694ed6468333a090d2f60950e4250b928f457e4962389553d6ba5fe9951ac", size = 3309948, upload-time = "2025-12-09T22:09:57.643Z" },
     { url = "https://files.pythonhosted.org/packages/a3/42/bac8d393f5db550e4e466d03d16daaafd2bad1f74e48c12673fb499a7fc1/sqlalchemy-2.0.45-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:f7d27a1d977a1cfef38a0e2e1ca86f09c4212666ce34e6ae542f3ed0a33bc606", size = 3261239, upload-time = "2025-12-09T22:06:08.879Z" },
@@ -3725,7 +3727,7 @@ wheels = [
 
 [[package]]
 name = "stardag"
-source = { editable = "lib/stardag-sdk" }
+source = { editable = "lib/stardag" }
 dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -3786,7 +3788,7 @@ dev = [
 [[package]]
 name = "stardag-api"
 version = "0.0.1"
-source = { editable = "service/stardag-api" }
+source = { editable = "app/stardag-api" }
 dependencies = [
     { name = "alembic" },
     { name = "fastapi" },
@@ -3825,7 +3827,7 @@ dev = [
 [[package]]
 name = "stardag-examples"
 version = "0.0.1"
-source = { editable = "examples" }
+source = { editable = "lib/stardag-examples" }
 dependencies = [
     { name = "pydantic" },
     { name = "stardag", extra = ["api"] },
@@ -3864,7 +3866,7 @@ requires-dist = [
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "scikit-learn", marker = "extra == 'ml-pipeline'", specifier = ">=1.5.2" },
-    { name = "stardag", extras = ["api"], editable = "lib/stardag-sdk" },
+    { name = "stardag", extras = ["api"], editable = "lib/stardag" },
 ]
 provides-extras = ["prefect", "s3", "modal", "ml-pipeline"]
 
@@ -3894,8 +3896,8 @@ dev = [
     { name = "pyright", specifier = ">=1.1.359" },
     { name = "pytest", specifier = ">=8.2.2" },
     { name = "pytest-asyncio", specifier = ">=0.23.7" },
-    { name = "stardag", editable = "lib/stardag-sdk" },
-    { name = "stardag-examples", extras = ["ml-pipeline"], editable = "examples" },
+    { name = "stardag", editable = "lib/stardag" },
+    { name = "stardag-examples", extras = ["ml-pipeline"], editable = "lib/stardag-examples" },
 ]
 
 [[package]]
