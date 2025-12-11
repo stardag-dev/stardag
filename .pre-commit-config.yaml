@@ -38,3 +38,18 @@ repos:
         types: [python]
         pass_filenames: false
         verbose: true
+      # TypeScript/React hooks for stardag-ui
+      - id: eslint-stardag-ui
+        name: eslint (app/stardag-ui)
+        entry: bash -c 'cd app/stardag-ui && npm run lint'
+        language: system
+        files: ^app/stardag-ui/.*\.(ts|tsx|js|jsx)$
+        pass_filenames: false
+        verbose: true
+      - id: tsc-stardag-ui
+        name: tsc (app/stardag-ui)
+        entry: bash -c 'cd app/stardag-ui && npx tsc -b'
+        language: system
+        files: ^app/stardag-ui/.*\.(ts|tsx)$
+        pass_filenames: false
+        verbose: true

@@ -78,8 +78,8 @@
 - [x] Nest to: lib/stardag, (lib/stardag_core), server/, app/
 
 - [x] src nest
-- [ ] tox pyright fails and should run on tests
-- [ ] vscode settings for default interpreter
+- [x] tox pyright fails and should run on tests
+- [x] vscode settings for default interpreter
 - [ ] pre-commits for ui?
 
 Code fixes:

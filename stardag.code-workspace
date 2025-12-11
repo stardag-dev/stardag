@@ -1,0 +1,96 @@
+{
+  "folders": [
+    {
+      "path": ".",
+      "name": "repo-root"
+    },
+    {
+      "path": "lib/stardag",
+      "name": "lib/stardag",
+      "settings": {
+        "python.defaultInterpreterPath": "lib/stardag/.venv/bin/python"
+      }
+    },
+    {
+      "path": "lib/stardag-examples",
+      "name": "lib/stardag-examples",
+      "settings": {
+        "python.defaultInterpreterPath": "lib/stardag-examples/.venv/bin/python"
+      }
+    },
+    {
+      "path": "app/stardag-api",
+      "name": "app/stardag-api",
+      "settings": {
+        "python.defaultInterpreterPath": "app/stardag-api/.venv/bin/python"
+      }
+    },
+    {
+      "path": "app/stardag-ui",
+      "name": "app/stardag-ui"
+    }
+  ],
+  "settings": {
+    "editor.rulers": [88],
+    "[python]": {
+      "editor.formatOnSave": true,
+      "editor.codeActionsOnSave": {
+        "source.fixAll": "explicit",
+        "source.organizeImports": "explicit"
+      },
+      "editor.defaultFormatter": "charliermarsh.ruff"
+    },
+    "notebook.formatOnSave.enabled": true,
+    "[json]": {
+      "editor.formatOnSave": false
+    },
+    "[markdown]": {
+      "editor.formatOnSave": false
+    },
+    "files.watcherExclude": {
+      "**/.git/objects/**": true,
+      "**/.git/subtree-cache/**": true,
+      "**/.venv/**": true,
+      "**/__pycache__/**": true,
+      "**/.idea/**": true,
+      "**/.ruff_cache/**": true,
+      "**/.pytest_cache/**": true
+    },
+    "cSpell.words": [
+      "boto",
+      "botocore",
+      "fastapi",
+      "httpx",
+      "jsonable",
+      "Ortofoto",
+      "pydantic",
+      "rdbms",
+      "sqlalchemy"
+    ],
+    "files.exclude": {
+      "**/.git": true,
+      "**/.svn": true,
+      "**/.hg": true,
+      "**/CVS": true,
+      "**/.DS_Store": true,
+      "**/Thumbs.db": true,
+      "**/__pycache__": false,
+      "**/.idea": false,
+      "**/.pytest_cache": false,
+      "**/.ruff_cache": false,
+      "**/.venv": false,
+      "**/.vscode": false,
+      "**/luigi.cfg": false,
+      "**/pyrightconfig.json": false,
+      "**/pytest.ini": false
+    },
+    "explorerExclude.backup": {},
+    "python.testing.pytestArgs": ["."],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "python.analysis.typeCheckingMode": "standard"
+  },
+  "extensions": {
+    "recommendations": ["charliermarsh.ruff"]
+  }
+}

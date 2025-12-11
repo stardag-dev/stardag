@@ -164,6 +164,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshKey intentionally triggers reload
   }, [page, pageSize, familyFilter, statusFilter, refreshKey]);
 
   useEffect(() => {
