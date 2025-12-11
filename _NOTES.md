@@ -80,17 +80,20 @@
 - [x] src nest
 - [x] tox pyright fails and should run on tests
 - [x] vscode settings for default interpreter
-- [ ] pre-commits for ui?
+- [x] pre-commits for ui?
 
 Code fixes:
 
-- basic tests for stardag-api
-- DB
+- [x] basic tests for stardag-api
+- [x] DB
+
   - alembic migrations
     - plain SQL
     - separate docker service to apply these
   - separate module for each db-model
   - Use async sqlalchemy everywhere
+
+- Support python 3.14
 
 Later:
 

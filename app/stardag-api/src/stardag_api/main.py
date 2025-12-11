@@ -11,7 +11,8 @@ from stardag_api.routes import tasks_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create tables on startup
-    Base.metadata.create_all(bind=engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
     yield
 
 
@@ -35,5 +36,5 @@ app.include_router(tasks_router, prefix="/api/v1")
 
 
 @app.get("/health")
-def health_check():
+async def health_check():
     return {"status": "healthy"}

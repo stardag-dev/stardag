@@ -3,7 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.db import get_db
 from stardag_api.models.task import TaskRecord, TaskStatus
@@ -18,8 +18,8 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
 @router.post("", response_model=TaskResponse, status_code=201)
-def create_task(task: TaskCreate, db: Session = Depends(get_db)):
-    existing = db.get(TaskRecord, task.task_id)
+async def create_task(task: TaskCreate, db: AsyncSession = Depends(get_db)):
+    existing = await db.get(TaskRecord, task.task_id)
     if existing:
         raise HTTPException(status_code=409, detail="Task already exists")
 
@@ -33,14 +33,14 @@ def create_task(task: TaskCreate, db: Session = Depends(get_db)):
         status=TaskStatus.PENDING,
     )
     db.add(db_task)
-    db.commit()
-    db.refresh(db_task)
+    await db.commit()
+    await db.refresh(db_task)
     return db_task
 
 
 @router.get("", response_model=TaskListResponse)
-def list_tasks(
-    db: Session = Depends(get_db),
+async def list_tasks(
+    db: AsyncSession = Depends(get_db),
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     task_family: str | None = None,
@@ -60,19 +60,17 @@ def list_tasks(
         query = query.where(TaskRecord.user == user)
         count_query = count_query.where(TaskRecord.user == user)
 
-    total = db.execute(count_query).scalar() or 0
-    tasks = (
-        db.execute(
-            query.order_by(TaskRecord.created_at.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        .scalars()
-        .all()
+    total_result = await db.execute(count_query)
+    total = total_result.scalar() or 0
+    result = await db.execute(
+        query.order_by(TaskRecord.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     )
+    tasks = result.scalars().all()
 
     return TaskListResponse(
-        tasks=tasks,  # type: ignore
+        tasks=tasks,  # type: ignore[arg-type]
         total=total,
         page=page,
         page_size=page_size,
@@ -80,16 +78,18 @@ def list_tasks(
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
-def get_task(task_id: str, db: Session = Depends(get_db)):
-    task = db.get(TaskRecord, task_id)
+async def get_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    task = await db.get(TaskRecord, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
 
 
 @router.patch("/{task_id}", response_model=TaskResponse)
-def update_task(task_id: str, update: TaskUpdate, db: Session = Depends(get_db)):
-    task = db.get(TaskRecord, task_id)
+async def update_task(
+    task_id: str, update: TaskUpdate, db: AsyncSession = Depends(get_db)
+):
+    task = await db.get(TaskRecord, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -103,42 +103,42 @@ def update_task(task_id: str, update: TaskUpdate, db: Session = Depends(get_db))
     if update.error_message is not None:
         task.error_message = update.error_message
 
-    db.commit()
-    db.refresh(task)
+    await db.commit()
+    await db.refresh(task)
     return task
 
 
 @router.post("/{task_id}/start", response_model=TaskResponse)
-def start_task(task_id: str, db: Session = Depends(get_db)):
-    task = db.get(TaskRecord, task_id)
+async def start_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    task = await db.get(TaskRecord, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
     task.status = TaskStatus.RUNNING
     task.started_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(task)
+    await db.commit()
+    await db.refresh(task)
     return task
 
 
 @router.post("/{task_id}/complete", response_model=TaskResponse)
-def complete_task(task_id: str, db: Session = Depends(get_db)):
-    task = db.get(TaskRecord, task_id)
+async def complete_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    task = await db.get(TaskRecord, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
     task.status = TaskStatus.COMPLETED
     task.completed_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(task)
+    await db.commit()
+    await db.refresh(task)
     return task
 
 
 @router.post("/{task_id}/fail", response_model=TaskResponse)
-def fail_task(
-    task_id: str, error_message: str | None = None, db: Session = Depends(get_db)
+async def fail_task(
+    task_id: str, error_message: str | None = None, db: AsyncSession = Depends(get_db)
 ):
-    task = db.get(TaskRecord, task_id)
+    task = await db.get(TaskRecord, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
@@ -146,6 +146,6 @@ def fail_task(
     task.completed_at = datetime.now(timezone.utc)
     if error_message:
         task.error_message = error_message
-    db.commit()
-    db.refresh(task)
+    await db.commit()
+    await db.refresh(task)
     return task

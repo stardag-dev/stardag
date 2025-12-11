@@ -1,13 +1,11 @@
 """Smoke test for API health endpoint."""
 
-from fastapi.testclient import TestClient
-
-from stardag_api.main import app
-
-client = TestClient(app)
+import pytest
+from httpx import AsyncClient
 
 
-def test_health_endpoint():
-    response = client.get("/health")
+@pytest.mark.asyncio
+async def test_health_endpoint(client: AsyncClient):
+    response = await client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "healthy"}
