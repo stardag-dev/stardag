@@ -13,17 +13,31 @@ Get a state-of-the-art scalable setup of DB use.
 This task will happen iteratively. There are several steps. Some mostly boilerplate,
 other of an arcitectural nature. Starting with an overview list below:
 
-**Use async sqlalchemy everywhere (+tests)**
+**Normalized, more complete schemas and corresponding endpoints**
 
-- [x] Refactore current implementation to use async sql alchemy functionality.
-- [x] Extend unit tests to also cover the task endpoint (high level functionality/smoke test)
+Split it up, suggestion:
 
-**Set up standard migration management with alembic**
-
-- [x] Setup standard alembic migrations (using default autogenerate template)
-- [x] Make sure migrations are applied in tests (via conftest fixtures).
-- [x] In docker-compose, add an additional `alembic` service that runs migrations
-- [x] Add migration handling to a app/stardag-api/README.md (also add other basic info here, keep it concise)
+- `Organization` to be prepared for multi tenancy, autopopulated with a "default"
+- `Workspace` like "project" for isolated environments
+- `User` default to "default" but prepare for auth later.
+- `Run` The execution `sd.build([...])` of a DAG/set of tasks. Metadata like
+  - user (who triggered)
+  - name (given randomly, memorable slug)
+  - docs (optionally user provided/editable)
+  - No events like start/end time, handleded by `Events`
+- `Task` (main properties, independent of execution/Run,)
+  - namespace
+  - family
+  - parameters
+- `Event` All events that happens _IMMUTABLE appedn only_
+  - always associated with a `run_id`
+  - mostly assiciated with a `task_id` (started, completed, failed) but can also for entire run started and completed, failed etc.
+  - type (see examples above)
+  - So a `Task` or `Run` status will be inferred from the latest event with type like `TASK_STATUS_CHANGED`.
+- `Dependency` (better name?) for keeping track for tasks' up vs downstream dependencies:
+  - upstream_task_id
+  - downstream_task_id
+  - Should support efficent graph traversal queries
 
 ## Context
 
