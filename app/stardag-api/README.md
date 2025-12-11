@@ -17,7 +17,7 @@ uv run pytest
 
 ## Database Migrations
 
-This project uses [Alembic](https://alembic.sqlalchemy.org/) for database migrations with plain SQL files.
+This project uses [Alembic](https://alembic.sqlalchemy.org/) for database migrations.
 
 ### Running Migrations
 
@@ -38,22 +38,12 @@ uv run alembic history
 ### Creating Migrations
 
 ```bash
-# Create a new migration
+# Auto-generate migration from model changes (requires running database)
+uv run alembic revision --autogenerate -m "description of change"
+
+# Create empty migration (for manual edits)
 uv run alembic revision -m "description of change"
 ```
-
-This creates two files in `migrations/versions/`:
-
-- `<revision>_<slug>.py` - Python migration script
-- `<revision>_<slug>.sql` - SQL statements (edit this file)
-
-Write your SQL statements in the `.sql` file. The Python script automatically reads and executes the SQL.
-
-### Migration Guidelines
-
-- Write migrations in plain SQL for PostgreSQL
-- Keep migrations atomic and reversible when possible
-- Test migrations locally before committing
 
 ## Docker
 

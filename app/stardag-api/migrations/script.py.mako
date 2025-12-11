@@ -5,18 +5,24 @@ Revises: ${down_revision | comma,n}
 Create Date: ${create_date}
 
 """
-from pathlib import Path
+from typing import Sequence, Union
 
 from alembic import op
+import sqlalchemy as sa
+${imports if imports else ""}
 
 # revision identifiers, used by Alembic.
-revision = ${repr(up_revision)}
-down_revision = ${repr(down_revision)}
-branch_labels = ${repr(branch_labels)}
-depends_on = ${repr(depends_on)}
+revision: str = ${repr(up_revision)}
+down_revision: Union[str, Sequence[str], None] = ${repr(down_revision)}
+branch_labels: Union[str, Sequence[str], None] = ${repr(branch_labels)}
+depends_on: Union[str, Sequence[str], None] = ${repr(depends_on)}
 
 
-def upgrade():
-    file_text = Path(__file__).with_suffix(".sql").read_text()
-    if file_text:
-        op.execute(file_text)
+def upgrade() -> None:
+    """Upgrade schema."""
+    ${upgrades if upgrades else "pass"}
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    ${downgrades if downgrades else "pass"}
