@@ -7,16 +7,18 @@ import {
   useNodesState,
   useEdgesState,
   type NodeTypes,
+  type ColorMode,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo } from "react";
+import { useTheme } from "../context/ThemeContext";
 import type { Task } from "../types/task";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 
 interface DagGraphProps {
   tasks: Task[];
-  selectedTaskId: string;
+  selectedTaskId: string | null;
   onTaskClick: (taskId: string) => void;
 }
 
@@ -33,12 +35,14 @@ function getLayoutedElements(
   nodes: TaskNodeType[],
   edges: Edge[],
 ): { nodes: TaskNodeType[]; edges: Edge[] } {
+  if (nodes.length === 0) return { nodes, edges };
+
   const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
 
   g.setGraph({
-    rankdir: "TB", // Top to bottom
-    nodesep: 50, // Horizontal spacing between nodes
-    ranksep: 80, // Vertical spacing between ranks
+    rankdir: "TB",
+    nodesep: 50,
+    ranksep: 80,
     marginx: 20,
     marginy: 20,
   });
@@ -68,14 +72,14 @@ function getLayoutedElements(
 }
 
 export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) {
+  const { theme } = useTheme();
   const taskMap = useMemo(() => new Map(tasks.map((t) => [t.task_id, t])), [tasks]);
 
   const { nodes: initialNodes, edges: initialEdges } = useMemo(() => {
-    // Create nodes
     const nodes: TaskNodeType[] = tasks.map((task) => ({
       id: task.task_id,
       type: "taskNode",
-      position: { x: 0, y: 0 }, // Will be set by dagre
+      position: { x: 0, y: 0 },
       data: {
         label: task.task_family,
         taskId: task.task_id,
@@ -84,7 +88,6 @@ export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) 
       },
     }));
 
-    // Create edges (from dependency to dependent)
     const edges: Edge[] = [];
     tasks.forEach((task) => {
       task.dependency_ids.forEach((depId) => {
@@ -94,20 +97,21 @@ export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) 
             source: depId,
             target: task.task_id,
             animated: task.status === "running",
-            style: { stroke: "#94a3b8", strokeWidth: 2 },
+            style: {
+              stroke: theme === "dark" ? "#6b7280" : "#94a3b8",
+              strokeWidth: 2,
+            },
           });
         }
       });
     });
 
-    // Apply dagre layout
     return getLayoutedElements(nodes, edges);
-  }, [tasks, selectedTaskId, taskMap]);
+  }, [tasks, selectedTaskId, taskMap, theme]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
-  // Update nodes when tasks change
   useEffect(() => {
     setNodes(initialNodes);
     setEdges(initialEdges);
@@ -122,14 +126,16 @@ export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) 
 
   if (tasks.length === 0) {
     return (
-      <div className="flex h-64 items-center justify-center text-gray-500">
+      <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
         No tasks to display
       </div>
     );
   }
 
+  const colorMode: ColorMode = theme === "dark" ? "dark" : "light";
+
   return (
-    <div className="h-96 w-full rounded-lg border border-gray-200 bg-gray-50">
+    <div className="h-full w-full bg-gray-50 dark:bg-gray-900">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -137,13 +143,14 @@ export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) 
         onEdgesChange={onEdgesChange}
         onNodeClick={handleNodeClick}
         nodeTypes={nodeTypes}
+        colorMode={colorMode}
         fitView
         fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.5}
-        maxZoom={1.5}
+        minZoom={0.3}
+        maxZoom={2}
       >
-        <Background color="#e5e7eb" gap={16} />
-        <Controls />
+        <Background color={theme === "dark" ? "#374151" : "#e5e7eb"} gap={16} />
+        <Controls className="!bg-white dark:!bg-gray-800 !border-gray-200 dark:!border-gray-700" />
       </ReactFlow>
     </div>
   );
