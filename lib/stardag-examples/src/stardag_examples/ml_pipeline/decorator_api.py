@@ -6,10 +6,9 @@ from functools import partial
 from pathlib import Path
 
 import pandas as pd
-
 import stardag as sd
 
-from . import base
+from stardag_examples.ml_pipeline import base
 
 logger = logging.getLogger(__name__)
 

@@ -94,6 +94,7 @@ Code fixes:
   - Use async sqlalchemy everywhere
 
 - Support python 3.14
+- Locks
 
 Later:
 

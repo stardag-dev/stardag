@@ -15,8 +15,8 @@ other of an arcitectural nature. Starting with an overview list below:
 
 **Use async sqlalchemy everywhere (+tests)**
 
-- [ ] Refactore current implementation to use async sql alchemy functionality.
-- [ ] Extend unit tests to also cover the task endpoint (high level functionality/smoke test)
+- [x] Refactore current implementation to use async sql alchemy functionality.
+- [x] Extend unit tests to also cover the task endpoint (high level functionality/smoke test)
 
 **Set up standard migration management with alembic**
 

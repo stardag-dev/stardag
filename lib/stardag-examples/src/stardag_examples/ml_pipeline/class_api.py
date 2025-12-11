@@ -11,7 +11,7 @@ import stardag as sd
 from pydantic import Field
 from stardag.target import LoadedT
 
-from . import base
+from stardag_examples.ml_pipeline import base
 
 logger = logging.getLogger(__name__)
 

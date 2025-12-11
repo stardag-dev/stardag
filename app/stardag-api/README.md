@@ -52,6 +52,10 @@ uv run alembic revision -m "description of change"
 docker-compose up
 
 # The migrations service runs automatically before the API starts
+
+# Reset database (useful during development when modifying migrations)
+docker-compose down -v  # -v removes the postgres_data volume
+docker-compose up
 ```
 
 ## Configuration
