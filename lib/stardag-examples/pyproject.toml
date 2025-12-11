@@ -3,7 +3,7 @@ name = "stardag-examples"
 version = "0.0.1"
 description = ""
 authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"  # TODO update modal deps
 dependencies = [
     "pydantic>=2.8.2",
     "stardag[api]",
@@ -38,7 +38,7 @@ dev = [
 package = true
 
 [tool.uv.sources]
-stardag = { workspace = true }
+stardag = { path = "../stardag" }
 
 [build-system]
 requires = ["hatchling"]
@@ -49,6 +49,7 @@ packages = ["src/stardag_examples"]
 
 [tool.isort]
 profile = "black"
+known_local_folder = ["stardag", "stardag_examples"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

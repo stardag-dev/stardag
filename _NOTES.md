@@ -77,6 +77,11 @@
 - [x] convert to UV
 - [x] Nest to: lib/stardag, (lib/stardag_core), server/, app/
 
+- [x] src nest
+- [ ] tox pyright fails and should run on tests
+- [ ] vscode settings for default interpreter
+- [ ] pre-commits for ui?
+
 Code fixes:
 
 - basic tests for stardag-api

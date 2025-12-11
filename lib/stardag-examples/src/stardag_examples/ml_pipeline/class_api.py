@@ -4,12 +4,11 @@ import logging
 import tempfile
 import typing
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
-from pydantic import Field
-from traitlets import Any
-
 import stardag as sd
+from pydantic import Field
 from stardag.target import LoadedT
 
 from . import base
@@ -140,7 +139,6 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
 
     def prefect_on_complete_artifacts(self):
         from prefect.artifacts import MarkdownArtifact
-
         from stardag.integration.prefect.utils import format_key
 
         metrics = self.output().load()
@@ -194,7 +192,6 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
 
     def prefect_on_complete_artifacts(self):
         from prefect.artifacts import TableArtifact
-
         from stardag.integration.prefect.utils import format_key
 
         rows = self.output().load()

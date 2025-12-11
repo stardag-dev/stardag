@@ -8,7 +8,6 @@ modal deploy tests/test_integration/test_modal/test__target.py
 import uuid
 
 import pytest
-
 from stardag import FileSystemTarget, get_target
 from stardag.target import RemoteFileSystemTarget
 
@@ -17,7 +16,6 @@ VOLUME_NAME = "stardag-testing"
 try:
     import modal
     from modal.exception import AuthError
-
     from stardag.integration import modal as sd_modal
 
     # check if logged in and volume exists

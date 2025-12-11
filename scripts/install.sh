@@ -26,9 +26,4 @@ cd "$ROOT_DIR/app/stardag-ui"
 npm install
 
 echo ""
-echo "=== Installing root workspace (for dev) ==="
-cd "$ROOT_DIR"
-uv sync --all-extras
-
-echo ""
 echo "Done! All packages installed."

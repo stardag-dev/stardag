@@ -3,7 +3,7 @@ name = "stardag"
 dynamic = ["version"]
 description = "Declarative and composable DAG framework for Python with persistent asset management"
 authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"  # TODO update modal deps
 dependencies = [
     "pydantic>=2.8.2",
     "pydantic-settings>=2.7.1",
@@ -25,6 +25,9 @@ modal = [
 ]
 api = [
     "httpx>=0.27.0",
+]
+pandas = [
+    "pandas>=2.1.0",
 ]
 
 [dependency-groups]

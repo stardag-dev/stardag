@@ -71,7 +71,12 @@ def list_tasks(
         .all()
     )
 
-    return TaskListResponse(tasks=tasks, total=total, page=page, page_size=page_size)
+    return TaskListResponse(
+        tasks=tasks,  # type: ignore
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
