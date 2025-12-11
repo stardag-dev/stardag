@@ -71,8 +71,12 @@
 
 ### TODOs
 
-- [ ] Setup for Claude
-  - [ ] Instructions (append continously)
-  - [ ] DEV-README.md, how to run tests pre-commit etc.
-- [ ] convert to UV
-- [ ] Nest to: lib/stardag, (lib/stardag_core), server/, app/
+- [x] Setup for Claude
+  - [x] Instructions (append continously)
+  - [x] DEV-README.md, how to run tests pre-commit etc.
+- [x] convert to UV
+- [x] Nest to: lib/stardag, (lib/stardag_core), server/, app/
+
+Later:
+
+- publish stardag-examples for ease to get started.

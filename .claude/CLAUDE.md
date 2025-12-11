@@ -40,7 +40,7 @@ Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/READ
 
 **Current tasks:**
 
-- [registry-service](tasks/registry-service/main.md) - Backend API & Frontend App for task tracking and monitoring
+- [registry-service](tasks/registry-service/main_and_mvp.md) - Backend API & Frontend App for task tracking and monitoring, subtask: [`mvp_cleanup.md`](tasks/registry-service/mvp_cleanup.md)
 
 ## Code Style
 
