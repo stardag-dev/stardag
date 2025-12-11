@@ -14,6 +14,9 @@ function Dashboard() {
   const {
     tasks,
     tasksWithContext,
+    graph,
+    currentBuild,
+    builds,
     total,
     page,
     setPage,
@@ -25,6 +28,7 @@ function Dashboard() {
     setStatusFilter,
     pageSize,
     totalPages,
+    selectBuild,
   } = useTasks();
 
   const handleDagTaskClick = useCallback(
@@ -40,7 +44,24 @@ function Dashboard() {
     <div className="flex h-screen flex-col bg-gray-100 dark:bg-gray-900">
       {/* Header */}
       <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3">
-        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Stardag</h1>
+        <div className="flex items-center gap-4">
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+            Stardag
+          </h1>
+          {builds.length > 0 && (
+            <select
+              value={currentBuild?.id ?? ""}
+              onChange={(e) => selectBuild(e.target.value)}
+              className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              {builds.map((build) => (
+                <option key={build.id} value={build.id}>
+                  {build.name} ({build.status})
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
         <ThemeToggle />
       </header>
 
@@ -65,6 +86,7 @@ function Dashboard() {
                   <div className="h-full border-b border-gray-200 dark:border-gray-700">
                     <DagGraph
                       tasks={tasksWithContext}
+                      graph={graph}
                       selectedTaskId={selectedTask?.task_id ?? null}
                       onTaskClick={handleDagTaskClick}
                     />

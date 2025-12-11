@@ -18,6 +18,11 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
           <p className="font-mono text-sm text-gray-500 dark:text-gray-400 truncate">
             {task.task_id}
           </p>
+          {task.task_namespace && (
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              Namespace: {task.task_namespace}
+            </p>
+          )}
         </div>
         <button
           onClick={onClose}
@@ -48,24 +53,6 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
           </label>
           <div className="mt-1">
             <StatusBadge status={task.status} />
-          </div>
-        </div>
-
-        {/* Metadata */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
-              User
-            </label>
-            <p className="mt-1 text-sm text-gray-900 dark:text-gray-100">{task.user}</p>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
-              Commit
-            </label>
-            <p className="mt-1 font-mono text-sm text-gray-900 dark:text-gray-100">
-              {task.commit_hash}
-            </p>
           </div>
         </div>
 
@@ -110,25 +97,6 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
             <pre className="mt-1 overflow-auto rounded-md bg-red-50 dark:bg-red-900/20 p-3 text-sm text-red-700 dark:text-red-400">
               {task.error_message}
             </pre>
-          </div>
-        )}
-
-        {/* Dependencies */}
-        {task.dependency_ids.length > 0 && (
-          <div>
-            <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
-              Dependencies ({task.dependency_ids.length})
-            </label>
-            <ul className="mt-1 space-y-1">
-              {task.dependency_ids.map((depId) => (
-                <li
-                  key={depId}
-                  className="font-mono text-sm text-gray-600 dark:text-gray-300"
-                >
-                  {depId.slice(0, 16)}...
-                </li>
-              ))}
-            </ul>
           </div>
         )}
 

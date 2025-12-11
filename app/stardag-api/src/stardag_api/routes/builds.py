@@ -475,13 +475,17 @@ async def list_tasks_in_build(build_id: str, db: AsyncSession = Depends(get_db))
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Get all tasks that have events in this build
-    result = await db.execute(
-        select(Task)
-        .join(Event, Event.task_id == Task.id)
+    # Get distinct task IDs that have events in this build
+    task_ids_subquery = (
+        select(Event.task_id)
         .where(Event.build_id == build_id)
+        .where(Event.task_id.isnot(None))
         .distinct()
+        .scalar_subquery()
     )
+
+    # Get all tasks by those IDs
+    result = await db.execute(select(Task).where(Task.id.in_(task_ids_subquery)))
     tasks = result.scalars().all()
 
     # Get all statuses
@@ -545,13 +549,17 @@ async def get_build_graph(build_id: str, db: AsyncSession = Depends(get_db)):
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Get all tasks in this build
-    result = await db.execute(
-        select(Task)
-        .join(Event, Event.task_id == Task.id)
+    # Get distinct task IDs that have events in this build
+    task_ids_subquery = (
+        select(Event.task_id)
         .where(Event.build_id == build_id)
+        .where(Event.task_id.isnot(None))
         .distinct()
+        .scalar_subquery()
     )
+
+    # Get all tasks by those IDs
+    result = await db.execute(select(Task).where(Task.id.in_(task_ids_subquery)))
     tasks = result.scalars().all()
     task_ids = {t.id for t in tasks}
 
