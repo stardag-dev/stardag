@@ -77,6 +77,16 @@
 - [x] convert to UV
 - [x] Nest to: lib/stardag, (lib/stardag_core), server/, app/
 
+Code fixes:
+
+- basic tests for stardag-api
+- DB
+  - alembic migrations
+    - plain SQL
+    - separate docker service to apply these
+  - separate module for each db-model
+  - Use async sqlalchemy everywhere
+
 Later:
 
 - publish stardag-examples for ease to get started.

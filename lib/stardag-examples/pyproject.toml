@@ -28,6 +28,12 @@ ml-pipeline = [
     "numpy>=2.1.1",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.2.2",
+    "pyright>=1.1.359",
+]
+
 [tool.uv]
 package = true
 
@@ -43,3 +49,6 @@ packages = ["stardag_examples"]
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

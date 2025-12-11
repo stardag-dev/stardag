@@ -1,19 +1,29 @@
 #!/bin/bash
 # Run tests for all packages in the monorepo
+# Each Python package runs tests in its own .venv
 set -e
 
-echo "Running Python tests..."
-uv run pytest lib/stardag/tests
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+echo "=== Testing lib/stardag ==="
+cd "$ROOT_DIR/lib/stardag"
+uv run pytest tests
 
 echo ""
-echo "Running frontend tests..."
-cd app/stardag-ui
-if [ -f "package.json" ] && grep -q '"test"' package.json 2>/dev/null; then
-    npm test
-else
-    echo "No frontend tests configured yet"
-fi
-cd ../..
+echo "=== Testing lib/stardag-examples ==="
+cd "$ROOT_DIR/lib/stardag-examples"
+uv run pytest tests
+
+echo ""
+echo "=== Testing app/stardag-api ==="
+cd "$ROOT_DIR/app/stardag-api"
+uv run pytest tests
+
+echo ""
+echo "=== Testing app/stardag-ui ==="
+cd "$ROOT_DIR/app/stardag-ui"
+npm test
 
 echo ""
 echo "All tests completed!"

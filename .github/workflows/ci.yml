@@ -20,14 +20,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # Set environment variables to skip pyright hook (requires installed venv so
-      # run in tox environment)
-      - name: Set environment variable to skip
-        run: echo "SKIP=pyright" >> $GITHUB_ENV
+      # Skip pyright hooks in pre-commit (they're informational with || true anyway)
+      # Pyright runs separately in tox when needed
+      - name: Set environment variable to skip pyright
+        run: echo "SKIP=pyright-stardag,pyright-stardag-examples,pyright-stardag-api" >> $GITHUB_ENV
       - uses: pre-commit/action@v3.0.1
 
-  test-and-type-check:
-    name: Test and type check
+  test-python:
+    name: Test Python (${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,6 +52,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .tox
-          key: ${{ runner.os }}-${{ matrix.python-version }}-tox-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          key: ${{ runner.os }}-${{ matrix.python-version }}-tox-${{ hashFiles('**/pyproject.toml', 'uv.lock') }}
       - name: Test with tox
         run: tox
+
+  test-frontend:
+    name: Test Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/stardag-ui
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Build
+        run: npm run build

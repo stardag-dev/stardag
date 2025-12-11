@@ -11,8 +11,31 @@ repos:
         args:
           - --fix
       - id: ruff-format
-  - repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.359
+  # Pyright hooks - one per Python package, each using its own .venv
+  # These are run via tox environments for CI; pre-commit hooks are informational
+  - repo: local
     hooks:
-      - id: pyright
-        args: [--pythonpath=.venv/bin/python]
+      - id: pyright-stardag
+        name: pyright (lib/stardag)
+        entry: bash -c 'cd lib/stardag && uv run pyright src tests || true'
+        language: system
+        files: ^lib/stardag/
+        types: [python]
+        pass_filenames: false
+        verbose: true
+      - id: pyright-stardag-examples
+        name: pyright (lib/stardag-examples)
+        entry: bash -c 'cd lib/stardag-examples && uv run pyright stardag_examples || true'
+        language: system
+        files: ^lib/stardag-examples/
+        types: [python]
+        pass_filenames: false
+        verbose: true
+      - id: pyright-stardag-api
+        name: pyright (app/stardag-api)
+        entry: bash -c 'cd app/stardag-api && uv run pyright src || true'
+        language: system
+        files: ^app/stardag-api/
+        types: [python]
+        pass_filenames: false
+        verbose: true

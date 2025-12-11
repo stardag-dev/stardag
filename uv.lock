@@ -3802,6 +3802,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "httpx" },
+    { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -3820,6 +3821,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "pyright", specifier = ">=1.1.359" },
     { name = "pytest", specifier = ">=8.2.2" },
     { name = "pytest-asyncio", specifier = ">=0.23.7" },
 ]
@@ -3854,6 +3856,12 @@ s3 = [
     { name = "botocore" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pyright" },
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", marker = "python_full_version >= '3.13' and extra == 'prefect'", specifier = ">=0.30.0" },
@@ -3869,6 +3877,12 @@ requires-dist = [
     { name = "stardag", extras = ["api"], editable = "lib/stardag" },
 ]
 provides-extras = ["prefect", "s3", "modal", "ml-pipeline"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pyright", specifier = ">=1.1.359" },
+    { name = "pytest", specifier = ">=8.2.2" },
+]
 
 [[package]]
 name = "stardag-workspace"
