@@ -25,7 +25,7 @@ repos:
         verbose: true
       - id: pyright-stardag-examples
         name: pyright (lib/stardag-examples)
-        entry: bash -c 'cd lib/stardag-examples && uv run pyright stardag_examples || true'
+        entry: bash -c 'cd lib/stardag-examples && uv run pyright src || true'
         language: system
         files: ^lib/stardag-examples/
         types: [python]

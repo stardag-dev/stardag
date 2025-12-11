@@ -45,7 +45,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["stardag_examples"]
+packages = ["src/stardag_examples"]
 
 [tool.isort]
 profile = "black"
