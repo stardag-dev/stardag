@@ -13,11 +13,11 @@ import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo } from "react";
 import { useTheme } from "../context/ThemeContext";
-import type { Task } from "../types/task";
+import type { TaskWithContext } from "../hooks/useTasks";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 
 interface DagGraphProps {
-  tasks: Task[];
+  tasks: TaskWithContext[];
   selectedTaskId: string | null;
   onTaskClick: (taskId: string) => void;
 }
@@ -85,6 +85,7 @@ export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) 
         taskId: task.task_id,
         status: task.status,
         isSelected: task.task_id === selectedTaskId,
+        isFilterMatch: task.isFilterMatch,
       },
     }));
 
@@ -92,14 +93,23 @@ export function DagGraph({ tasks, selectedTaskId, onTaskClick }: DagGraphProps) 
     tasks.forEach((task) => {
       task.dependency_ids.forEach((depId) => {
         if (taskMap.has(depId)) {
+          const sourceTask = taskMap.get(depId)!;
+          const isMutedEdge = !task.isFilterMatch || !sourceTask.isFilterMatch;
           edges.push({
             id: `${depId}-${task.task_id}`,
             source: depId,
             target: task.task_id,
             animated: task.status === "running",
             style: {
-              stroke: theme === "dark" ? "#6b7280" : "#94a3b8",
-              strokeWidth: 2,
+              stroke: isMutedEdge
+                ? theme === "dark"
+                  ? "#4b5563"
+                  : "#d1d5db"
+                : theme === "dark"
+                  ? "#6b7280"
+                  : "#94a3b8",
+              strokeWidth: isMutedEdge ? 1.5 : 2,
+              opacity: isMutedEdge ? 0.5 : 1,
             },
           });
         }

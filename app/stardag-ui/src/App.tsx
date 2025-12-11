@@ -13,6 +13,7 @@ function Dashboard() {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const {
     tasks,
+    tasksWithContext,
     total,
     page,
     setPage,
@@ -26,12 +27,13 @@ function Dashboard() {
     totalPages,
   } = useTasks();
 
-  const handleTaskClick = useCallback(
+  const handleDagTaskClick = useCallback(
     (taskId: string) => {
-      const task = tasks.find((t) => t.task_id === taskId);
+      // Look in tasksWithContext first (includes related tasks)
+      const task = tasksWithContext.find((t) => t.task_id === taskId);
       if (task) setSelectedTask(task);
     },
-    [tasks],
+    [tasksWithContext],
   );
 
   return (
@@ -62,9 +64,9 @@ function Dashboard() {
                 <Panel defaultSize={50} minSize={20}>
                   <div className="h-full border-b border-gray-200 dark:border-gray-700">
                     <DagGraph
-                      tasks={tasks}
+                      tasks={tasksWithContext}
                       selectedTaskId={selectedTask?.task_id ?? null}
-                      onTaskClick={handleTaskClick}
+                      onTaskClick={handleDagTaskClick}
                     />
                   </div>
                 </Panel>

@@ -1,9 +1,14 @@
 import { useEffect, useState, useCallback } from "react";
-import { fetchTasks, type TaskFilters } from "../api/tasks";
+import { fetchTask, fetchTasks, type TaskFilters } from "../api/tasks";
 import type { Task, TaskStatus } from "../types/task";
+
+export interface TaskWithContext extends Task {
+  isFilterMatch: boolean;
+}
 
 interface UseTasksReturn {
   tasks: Task[];
+  tasksWithContext: TaskWithContext[];
   total: number;
   page: number;
   setPage: (page: number) => void;
@@ -18,8 +23,95 @@ interface UseTasksReturn {
   refresh: () => void;
 }
 
+const MAX_DEPTH = 3;
+
+async function loadRelatedTasks(
+  matchingTasks: Task[],
+  allKnownTasks: Map<string, Task>,
+): Promise<Map<string, Task>> {
+  const taskMap = new Map(allKnownTasks);
+  matchingTasks.forEach((t) => taskMap.set(t.task_id, t));
+
+  const matchingIds = new Set(matchingTasks.map((t) => t.task_id));
+
+  // Find upstream (dependencies) and downstream (dependents)
+  // We need to load all tasks to find dependents
+  let allTasks: Task[] = [];
+  try {
+    const response = await fetchTasks({ page_size: 500 });
+    allTasks = response.tasks;
+    allTasks.forEach((t) => taskMap.set(t.task_id, t));
+  } catch {
+    // If we can't load all tasks, just work with what we have
+  }
+
+  // Build reverse dependency map (task -> tasks that depend on it)
+  const dependentsMap = new Map<string, Set<string>>();
+  allTasks.forEach((task) => {
+    task.dependency_ids.forEach((depId) => {
+      if (!dependentsMap.has(depId)) {
+        dependentsMap.set(depId, new Set());
+      }
+      dependentsMap.get(depId)!.add(task.task_id);
+    });
+  });
+
+  // BFS to find tasks within MAX_DEPTH connections
+  const toVisit: Array<{ taskId: string; depth: number }> = [];
+  const visited = new Set<string>();
+
+  // Start from matching tasks
+  matchingIds.forEach((id) => {
+    toVisit.push({ taskId: id, depth: 0 });
+    visited.add(id);
+  });
+
+  while (toVisit.length > 0) {
+    const { taskId, depth } = toVisit.shift()!;
+    if (depth >= MAX_DEPTH) continue;
+
+    const task = taskMap.get(taskId);
+    if (!task) continue;
+
+    // Upstream (dependencies)
+    for (const depId of task.dependency_ids) {
+      if (!visited.has(depId)) {
+        visited.add(depId);
+        if (!taskMap.has(depId)) {
+          try {
+            const depTask = await fetchTask(depId);
+            taskMap.set(depId, depTask);
+          } catch {
+            continue;
+          }
+        }
+        toVisit.push({ taskId: depId, depth: depth + 1 });
+      }
+    }
+
+    // Downstream (dependents)
+    const dependents = dependentsMap.get(taskId) || new Set();
+    for (const depId of dependents) {
+      if (!visited.has(depId)) {
+        visited.add(depId);
+        toVisit.push({ taskId: depId, depth: depth + 1 });
+      }
+    }
+  }
+
+  // Return only visited tasks
+  const result = new Map<string, Task>();
+  visited.forEach((id) => {
+    const task = taskMap.get(id);
+    if (task) result.set(id, task);
+  });
+
+  return result;
+}
+
 export function useTasks(pageSize = 20): UseTasksReturn {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasksWithContext, setTasksWithContext] = useState<TaskWithContext[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -40,8 +132,22 @@ export function useTasks(pageSize = 20): UseTasksReturn {
       if (statusFilter) filters.status = statusFilter;
 
       const response = await fetchTasks(filters);
-      setTasks(response.tasks);
+      const matchingTasks = response.tasks;
+      setTasks(matchingTasks);
       setTotal(response.total);
+
+      // Load related tasks for DAG view
+      const matchingIds = new Set(matchingTasks.map((t) => t.task_id));
+      const relatedMap = await loadRelatedTasks(matchingTasks, new Map());
+
+      const withContext: TaskWithContext[] = Array.from(relatedMap.values()).map(
+        (task) => ({
+          ...task,
+          isFilterMatch: matchingIds.has(task.task_id),
+        }),
+      );
+
+      setTasksWithContext(withContext);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load tasks");
     } finally {
@@ -69,6 +175,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
 
   return {
     tasks,
+    tasksWithContext,
     total,
     page,
     setPage,
