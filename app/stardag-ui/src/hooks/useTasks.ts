@@ -1,10 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
-import {
-  fetchBuilds,
-  fetchTasksInBuild,
-  fetchBuildGraph,
-  type TaskFilters,
-} from "../api/tasks";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { fetchBuilds, fetchTasksInBuild, fetchBuildGraph } from "../api/tasks";
 import type { Build, Task, TaskStatus, TaskGraphResponse } from "../types/task";
 
 export interface TaskWithContext extends Task {
@@ -33,12 +28,13 @@ interface UseTasksReturn {
 }
 
 export function useTasks(pageSize = 20): UseTasksReturn {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [tasksWithContext, setTasksWithContext] = useState<TaskWithContext[]>([]);
+  // Raw data from API
+  const [allTasks, setAllTasks] = useState<Task[]>([]);
   const [graph, setGraph] = useState<TaskGraphResponse | null>(null);
   const [builds, setBuilds] = useState<Build[]>([]);
   const [currentBuild, setCurrentBuild] = useState<Build | null>(null);
-  const [total, setTotal] = useState(0);
+
+  // UI state
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +58,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     }
   }, [currentBuild]);
 
-  // Load tasks for current build
+  // Load tasks for current build (no filtering - get all)
   const loadTasks = useCallback(async () => {
     if (!currentBuild) {
       setLoading(false);
@@ -72,62 +68,73 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     setLoading(true);
     setError(null);
     try {
-      const filters: TaskFilters = {};
-      if (familyFilter) filters.task_family = familyFilter;
-      if (statusFilter) filters.status = statusFilter;
-
-      // Fetch tasks and graph in parallel
+      // Fetch all tasks and graph in parallel
       const [tasksData, graphData] = await Promise.all([
-        fetchTasksInBuild(currentBuild.id, filters),
+        fetchTasksInBuild(currentBuild.id),
         fetchBuildGraph(currentBuild.id),
       ]);
 
-      setTasks(tasksData);
+      setAllTasks(tasksData);
       setGraph(graphData);
-      setTotal(tasksData.length);
-
-      // Mark which tasks match the filter
-      const matchingTaskIds = new Set(tasksData.map((t) => t.task_id));
-
-      // Create tasks with context from graph nodes
-      const withContext: TaskWithContext[] = graphData.nodes.map((node) => {
-        // Find full task data if available
-        const fullTask = tasksData.find((t) => t.task_id === node.task_id);
-        return {
-          id: node.id,
-          task_id: node.task_id,
-          workspace_id: currentBuild.workspace_id,
-          task_namespace: node.task_namespace,
-          task_family: node.task_family,
-          task_data: fullTask?.task_data ?? {},
-          version: fullTask?.version ?? null,
-          created_at: fullTask?.created_at ?? currentBuild.created_at,
-          status: node.status,
-          started_at: fullTask?.started_at ?? null,
-          completed_at: fullTask?.completed_at ?? null,
-          error_message: fullTask?.error_message ?? null,
-          isFilterMatch:
-            matchingTaskIds.has(node.task_id) || matchingTaskIds.size === 0,
-        };
-      });
-
-      setTasksWithContext(withContext);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load tasks");
     } finally {
       setLoading(false);
     }
-  }, [currentBuild, familyFilter, statusFilter]);
+  }, [currentBuild]);
 
   // Initial load of builds
   useEffect(() => {
     loadBuilds();
   }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load tasks when build or filters change
+  // Load tasks when build changes
   useEffect(() => {
     loadTasks();
   }, [loadTasks, refreshKey]);
+
+  // Client-side filtering
+  const filteredTasks = useMemo(() => {
+    let result = allTasks;
+
+    if (familyFilter) {
+      const lowerFilter = familyFilter.toLowerCase();
+      result = result.filter((t) => t.task_family.toLowerCase().includes(lowerFilter));
+    }
+
+    if (statusFilter) {
+      result = result.filter((t) => t.status === statusFilter);
+    }
+
+    return result;
+  }, [allTasks, familyFilter, statusFilter]);
+
+  // Tasks with context for DAG (shows all tasks, marks which match filter)
+  const tasksWithContext = useMemo(() => {
+    if (!graph || !currentBuild) return [];
+
+    const matchingTaskIds = new Set(filteredTasks.map((t) => t.task_id));
+    const noFilter = !familyFilter && !statusFilter;
+
+    return graph.nodes.map((node) => {
+      const fullTask = allTasks.find((t) => t.task_id === node.task_id);
+      return {
+        id: node.id,
+        task_id: node.task_id,
+        workspace_id: currentBuild.workspace_id,
+        task_namespace: node.task_namespace,
+        task_family: node.task_family,
+        task_data: fullTask?.task_data ?? {},
+        version: fullTask?.version ?? null,
+        created_at: fullTask?.created_at ?? currentBuild.created_at,
+        status: node.status,
+        started_at: fullTask?.started_at ?? null,
+        completed_at: fullTask?.completed_at ?? null,
+        error_message: fullTask?.error_message ?? null,
+        isFilterMatch: noFilter || matchingTaskIds.has(node.task_id),
+      };
+    });
+  }, [graph, currentBuild, allTasks, filteredTasks, familyFilter, statusFilter]);
 
   const handleSetFamilyFilter = useCallback((filter: string) => {
     setFamilyFilter(filter);
@@ -153,9 +160,10 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     [builds],
   );
 
-  // Paginate tasks client-side since we fetch all from build
-  const paginatedTasks = tasks.slice((page - 1) * pageSize, page * pageSize);
+  // Pagination on filtered tasks
+  const total = filteredTasks.length;
   const totalPages = Math.ceil(total / pageSize);
+  const paginatedTasks = filteredTasks.slice((page - 1) * pageSize, page * pageSize);
 
   return {
     tasks: paginatedTasks,
