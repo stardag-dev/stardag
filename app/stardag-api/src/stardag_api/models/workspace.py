@@ -10,6 +10,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
+    from stardag_api.models.api_key import ApiKey
     from stardag_api.models.build import Build
     from stardag_api.models.organization import Organization
     from stardag_api.models.task import Task
@@ -48,6 +49,10 @@ class Workspace(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
     tasks: Mapped[list[Task]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+    )
+    api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
     )

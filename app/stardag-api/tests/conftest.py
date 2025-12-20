@@ -28,8 +28,9 @@ def get_alembic_config(connection_url: str | None = None) -> Config:
 
 
 async def seed_defaults(session: AsyncSession):
-    """Seed default organization, workspace, and user."""
-    from stardag_api.models import Organization, User, Workspace
+    """Seed default organization, workspace, user, and membership."""
+    from stardag_api.models import Organization, OrganizationMember, User, Workspace
+    from stardag_api.models.enums import OrganizationRole
 
     # Create default organization
     org = Organization(
@@ -39,6 +40,24 @@ async def seed_defaults(session: AsyncSession):
     )
     session.add(org)
 
+    # Create default user
+    user = User(
+        id="default",
+        external_id="default-local-user",
+        email="default@localhost",
+        display_name="Default User",
+    )
+    session.add(user)
+
+    # Create membership (user is owner of default org)
+    membership = OrganizationMember(
+        id="default",
+        organization_id="default",
+        user_id="default",
+        role=OrganizationRole.OWNER,
+    )
+    session.add(membership)
+
     # Create default workspace
     workspace = Workspace(
         id="default",
@@ -47,15 +66,6 @@ async def seed_defaults(session: AsyncSession):
         slug="default",
     )
     session.add(workspace)
-
-    # Create default user
-    user = User(
-        id="default",
-        organization_id="default",
-        username="default",
-        display_name="Default User",
-    )
-    session.add(user)
 
     await session.commit()
 

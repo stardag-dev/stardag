@@ -3,6 +3,23 @@
 import enum
 
 
+class OrganizationRole(str, enum.Enum):
+    """Role of a user within an organization."""
+
+    OWNER = "owner"  # Full control, cannot be removed, can transfer ownership
+    ADMIN = "admin"  # Can manage members and workspaces
+    MEMBER = "member"  # Read/write access to workspaces
+
+
+class InviteStatus(str, enum.Enum):
+    """Status of an organization invite."""
+
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    CANCELLED = "cancelled"
+
+
 class TaskStatus(str, enum.Enum):
     """Derived status for tasks, computed from events."""
 

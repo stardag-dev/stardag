@@ -10,14 +10,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
-    from stardag_api.models.user import User
+    from stardag_api.models.invite import Invite
+    from stardag_api.models.organization_member import OrganizationMember
     from stardag_api.models.workspace import Workspace
 
 
 class Organization(Base, TimestampMixin):
     """Multi-tenancy root entity.
 
-    Auto-populated with 'default' organization for single-tenant deployments.
+    Users belong to organizations via OrganizationMember with roles.
     """
 
     __tablename__ = "organizations"
@@ -46,7 +47,11 @@ class Organization(Base, TimestampMixin):
         back_populates="organization",
         cascade="all, delete-orphan",
     )
-    users: Mapped[list[User]] = relationship(
+    members: Mapped[list[OrganizationMember]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
+    invites: Mapped[list[Invite]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
     )
