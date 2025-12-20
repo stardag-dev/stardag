@@ -1,10 +1,15 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { setAccessTokenGetter } from "./api/client";
+import { AuthCallback } from "./components/AuthCallback";
 import { DagGraph } from "./components/DagGraph";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskFilters } from "./components/TaskFilters";
 import { TaskTable } from "./components/TaskTable";
 import { ThemeToggle } from "./components/ThemeToggle";
+import { UserMenu } from "./components/UserMenu";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { useTasks } from "./hooks/useTasks";
 import type { Task } from "./types/task";
@@ -62,7 +67,10 @@ function Dashboard() {
             </select>
           )}
         </div>
-        <ThemeToggle />
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          <UserMenu />
+        </div>
       </header>
 
       {/* Main content */}
@@ -134,10 +142,54 @@ function Dashboard() {
   );
 }
 
+// Connect API client to auth when auth context is available
+function AuthConnector({ children }: { children: React.ReactNode }) {
+  const { getAccessToken } = useAuth();
+
+  useEffect(() => {
+    setAccessTokenGetter(getAccessToken);
+  }, [getAccessToken]);
+
+  return <>{children}</>;
+}
+
+// Simple URL-based routing
+function Router() {
+  const [path, setPath] = useState(window.location.pathname);
+
+  useEffect(() => {
+    const handlePopState = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const navigateTo = useCallback((newPath: string) => {
+    window.history.pushState({}, "", newPath);
+    setPath(newPath);
+  }, []);
+
+  if (path === "/callback") {
+    return (
+      <AuthCallback
+        onSuccess={() => navigateTo("/")}
+        onError={() => {
+          // Stay on callback page to show error
+        }}
+      />
+    );
+  }
+
+  return <Dashboard />;
+}
+
 function App() {
   return (
     <ThemeProvider>
-      <Dashboard />
+      <AuthProvider>
+        <AuthConnector>
+          <Router />
+        </AuthConnector>
+      </AuthProvider>
     </ThemeProvider>
   );
 }
