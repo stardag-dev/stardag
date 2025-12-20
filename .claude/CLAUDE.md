@@ -54,7 +54,9 @@ Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/READ
 
 - [registry-service](tasks/registry-service/) - Backend API & Frontend App for task tracking and monitoring
   - [main_and_mvp.md](tasks/registry-service/main_and_mvp.md) - MVP implementation (completed)
-  - [mvp_cleanup.md](tasks/registry-service/mvp_cleanup.md) - Post-MVP cleanup (active)
+  - [mvp_cleanup.md](tasks/registry-service/mvp_cleanup.md) - Post-MVP cleanup (completed)
+  - [db-schemas.md](tasks/registry-service/db-schemas.md) - Update schemas (~completed)
+  - [auth](tasks/registry-service/auth.md) - Production grad auth and org/user/workspace management (active)
 
 ## Code Style
 
