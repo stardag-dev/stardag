@@ -1,6 +1,7 @@
 import { Handle, Position } from "@xyflow/react";
 import type { TaskStatus } from "../types/task";
 import { StatusBadge } from "./StatusBadge";
+import type { LayoutDirection } from "./DagGraph";
 
 export interface TaskNodeData extends Record<string, unknown> {
   label: string;
@@ -8,6 +9,7 @@ export interface TaskNodeData extends Record<string, unknown> {
   status: TaskStatus;
   isSelected: boolean;
   isFilterMatch: boolean;
+  direction: LayoutDirection;
 }
 
 const statusBorderColors: Record<TaskStatus, string> = {
@@ -30,6 +32,7 @@ interface TaskNodeProps {
 
 export function TaskNode({ data }: TaskNodeProps) {
   const isMuted = !data.isFilterMatch;
+  const isHorizontal = data.direction === "LR";
 
   return (
     <div
@@ -45,7 +48,7 @@ export function TaskNode({ data }: TaskNodeProps) {
     >
       <Handle
         type="target"
-        position={Position.Top}
+        position={isHorizontal ? Position.Left : Position.Top}
         className={
           isMuted ? "!bg-gray-300 dark:!bg-gray-600" : "!bg-gray-400 dark:!bg-gray-500"
         }
@@ -75,7 +78,7 @@ export function TaskNode({ data }: TaskNodeProps) {
       </div>
       <Handle
         type="source"
-        position={Position.Bottom}
+        position={isHorizontal ? Position.Right : Position.Bottom}
         className={
           isMuted ? "!bg-gray-300 dark:!bg-gray-600" : "!bg-gray-400 dark:!bg-gray-500"
         }

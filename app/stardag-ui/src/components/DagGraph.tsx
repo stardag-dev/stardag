@@ -2,6 +2,8 @@ import {
   ReactFlow,
   Background,
   Controls,
+  Panel,
+  useReactFlow,
   type Node,
   type Edge,
   useNodesState,
@@ -11,11 +13,84 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
 import type { TaskWithContext } from "../hooks/useTasks";
 import type { TaskGraphResponse } from "../types/task";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
+
+export type LayoutDirection = "TB" | "LR";
+
+interface LayoutToggleProps {
+  direction: LayoutDirection;
+  onDirectionChange: (direction: LayoutDirection) => void;
+}
+
+function LayoutToggle({ direction, onDirectionChange }: LayoutToggleProps) {
+  const { fitView } = useReactFlow();
+
+  const handleDirectionChange = useCallback(
+    (newDirection: LayoutDirection) => {
+      onDirectionChange(newDirection);
+      // Delay fitView slightly to allow layout to update
+      setTimeout(() => fitView({ padding: 0.2 }), 50);
+    },
+    [onDirectionChange, fitView],
+  );
+
+  return (
+    <Panel position="top-right">
+      <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white p-1 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+        <button
+          onClick={() => handleDirectionChange("LR")}
+          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+            direction === "LR"
+              ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+              : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+          }`}
+          title="Left to Right"
+        >
+          <svg
+            className="h-4 w-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M14 5l7 7m0 0l-7 7m7-7H3"
+            />
+          </svg>
+        </button>
+        <button
+          onClick={() => handleDirectionChange("TB")}
+          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+            direction === "TB"
+              ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+              : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+          }`}
+          title="Top to Bottom"
+        >
+          <svg
+            className="h-4 w-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M19 14l-7 7m0 0l-7-7m7 7V3"
+            />
+          </svg>
+        </button>
+      </div>
+    </Panel>
+  );
+}
 
 interface DagGraphProps {
   tasks: TaskWithContext[];
@@ -36,15 +111,16 @@ const NODE_HEIGHT = 90;
 function getLayoutedElements(
   nodes: TaskNodeType[],
   edges: Edge[],
+  direction: LayoutDirection,
 ): { nodes: TaskNodeType[]; edges: Edge[] } {
   if (nodes.length === 0) return { nodes, edges };
 
   const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
 
   g.setGraph({
-    rankdir: "TB",
-    nodesep: 50,
-    ranksep: 80,
+    rankdir: direction,
+    nodesep: direction === "LR" ? 30 : 50,
+    ranksep: direction === "LR" ? 100 : 80,
     marginx: 20,
     marginy: 20,
   });
@@ -75,6 +151,7 @@ function getLayoutedElements(
 
 export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraphProps) {
   const { theme } = useTheme();
+  const [direction, setDirection] = useState<LayoutDirection>("LR");
 
   // Build maps for lookups
   const taskByTaskId = useMemo(
@@ -101,6 +178,7 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
           status: graphNode.status,
           isSelected: graphNode.task_id === selectedTaskId,
           isFilterMatch: task?.isFilterMatch ?? true,
+          direction,
         },
       };
     });
@@ -131,8 +209,8 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
       };
     });
 
-    return getLayoutedElements(nodes, edges);
-  }, [graph, selectedTaskId, taskByTaskId, taskByInternalId, theme]);
+    return getLayoutedElements(nodes, edges, direction);
+  }, [graph, selectedTaskId, taskByTaskId, taskByInternalId, theme, direction]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -178,6 +256,7 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
       >
         <Background color={theme === "dark" ? "#374151" : "#e5e7eb"} gap={16} />
         <Controls className="!bg-white dark:!bg-gray-800 !border-gray-200 dark:!border-gray-700" />
+        <LayoutToggle direction={direction} onDirectionChange={setDirection} />
       </ReactFlow>
     </div>
   );
