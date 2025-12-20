@@ -14,7 +14,6 @@ from stardag_api.models import (
     Task,
     TaskDependency,
     TaskStatus,
-    User,
 )
 from stardag_api.schemas import (
     BuildCreate,
@@ -42,17 +41,15 @@ async def create_build(build: BuildCreate, db: AsyncSession = Depends(get_db)):
     """Create a new build.
 
     This is the entry point for SDK - creates a new build and returns its ID.
+    Note: user_id is optional until auth is implemented. In Phase 2+, the user
+    will be determined from the JWT token.
     """
-    # Resolve user by username
-    user_result = await db.execute(select(User).where(User.username == build.user))
-    user = user_result.scalar_one_or_none()
-
     # Generate memorable slug
     name = generate_build_slug()
 
     db_build = Build(
         workspace_id=build.workspace_id,
-        user_id=user.id if user else None,
+        user_id=build.user_id,  # Optional, will be set from auth token in Phase 2
         name=name,
         description=build.description,
         commit_hash=build.commit_hash,

@@ -210,25 +210,29 @@ The implementation is split into 6 phases, each building on the previous.
 
 **Tasks:**
 
-- [ ] **1.1** Create new Alembic migration (replace existing `normalized_schema.py`)
-- [ ] **1.2** Update `User` model:
+- [x] **1.0** Setup separate Postgres roles (admin/service):
+  - Create `docker/postgres/init.sql` with role creation and default privileges
+  - Update `docker-compose.yml` to mount init script and use separate credentials
+  - Migrations run as `stardag_admin`, API runs as `stardag_service`
+- [x] **1.1** Create new Alembic migration (replace existing `normalized_schema.py`)
+- [x] **1.2** Update `User` model:
   - Remove `organization_id` FK (users belong to many orgs now)
   - Add `external_id` (string, unique) - stores OIDC `sub` claim
   - Add `email` as unique field (for invite matching)
-- [ ] **1.3** Create `OrganizationMember` junction table:
+- [x] **1.3** Create `OrganizationMember` junction table:
   - `user_id` FK, `organization_id` FK
   - `role` enum: `owner`, `admin`, `member`
   - `joined_at` timestamp
   - Constraint: exactly one owner per org
-- [ ] **1.4** Create `Invite` model:
+- [x] **1.4** Create `Invite` model:
   - `id`, `organization_id` FK, `email`, `role`, `invited_by` (user FK)
   - `created_at`, `expires_at` (optional), `accepted_at` (nullable)
   - Unique constraint: `(organization_id, email)` where not accepted
-- [ ] **1.5** Create `ApiKey` model:
+- [x] **1.5** Create `ApiKey` model:
   - `id`, `workspace_id` FK, `name`, `key_hash` (bcrypt), `key_prefix` (first 8 chars for display)
   - `created_by` (user FK), `created_at`, `last_used_at`, `revoked_at` (nullable)
-- [ ] **1.6** Update test fixtures and seed data
-- [ ] **1.7** Add unit tests for new models and constraints
+- [x] **1.6** Update test fixtures and seed data
+- [x] **1.7** Add unit tests for new models and constraints
 
 **Deliverable:** Database schema supporting multi-tenant auth with all required tables.
 
@@ -472,7 +476,13 @@ This ensures `docker-compose up` provides a working local environment.
 
 - [x] Initial planning and requirements gathering
 - [x] Codebase analysis
-- [ ] Phase 1: Database Schema & Multi-Tenancy Foundation
+- [x] Phase 1: Database Schema & Multi-Tenancy Foundation
+  - [x] 1.0 Setup separate Postgres roles (admin/service)
+  - [x] 1.1-1.5 Created new models (OrganizationMember, Invite, ApiKey)
+  - [x] 1.6 Updated User model (external_id, email, removed org FK)
+  - [x] 1.7 Created Alembic migration with all auth tables
+  - [x] 1.8 Updated test fixtures and added 9 new auth model tests
+  - [x] E2E smoke test verified (docker-compose up, migrations, API)
 - [ ] Phase 2: Keycloak + Backend Auth Infrastructure
 - [ ] Phase 3: Frontend Auth Integration
 - [ ] Phase 4: Organization & Workspace Management (Backend)

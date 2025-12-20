@@ -85,7 +85,7 @@ class BuildCreate(BaseModel):
     """Schema for creating a build."""
 
     workspace_id: str = "default"
-    user: str = "default"  # Username, will be resolved to user_id
+    user_id: str | None = None  # Optional until auth is implemented
     commit_hash: str | None = None
     root_task_ids: list[str] = []
     description: str | None = None

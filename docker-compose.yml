@@ -7,6 +7,7 @@ services:
       POSTGRES_DB: stardag
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -20,7 +21,8 @@ services:
       context: ./app/stardag-api
       dockerfile: Dockerfile
     environment:
-      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag:stardag@db:5432/stardag
+      # Admin role: can CREATE/ALTER/DROP tables
+      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag_admin:stardag_admin@db:5432/stardag
     command: ["alembic", "upgrade", "head"]
     depends_on:
       db:
@@ -31,7 +33,8 @@ services:
       context: ./app/stardag-api
       dockerfile: Dockerfile
     environment:
-      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag:stardag@db:5432/stardag
+      # Service role: can only SELECT/INSERT/UPDATE/DELETE
+      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag_service:stardag_service@db:5432/stardag
     ports:
       - "8000:8000"
     depends_on:

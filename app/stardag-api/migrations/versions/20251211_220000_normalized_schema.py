@@ -1,4 +1,7 @@
-"""Normalized schema with Organization, Workspace, User, Build, Task, Event, TaskDependency.
+"""Normalized schema with multi-tenant auth support.
+
+Includes Organization, OrganizationMember, User, Workspace, Build, Task,
+Event, TaskDependency, Invite, and ApiKey tables.
 
 Revision ID: 001_normalized
 Revises:
@@ -19,7 +22,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Create normalized schema."""
+    """Create normalized schema with auth tables."""
     # Organizations
     op.create_table(
         "organizations",
@@ -35,9 +38,26 @@ def upgrade() -> None:
         ),
     )
 
-    # Users
+    # Users (no org FK - users belong to orgs via organization_members)
     op.create_table(
         "users",
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column(
+            "external_id", sa.String(255), unique=True, nullable=False, index=True
+        ),
+        sa.Column("email", sa.String(255), unique=True, nullable=False, index=True),
+        sa.Column("display_name", sa.String(255), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+    )
+
+    # Organization Members (junction table with roles)
+    op.create_table(
+        "organization_members",
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column(
             "organization_id",
@@ -46,16 +66,77 @@ def upgrade() -> None:
             nullable=False,
             index=True,
         ),
-        sa.Column("username", sa.String(255), nullable=False, index=True),
-        sa.Column("display_name", sa.String(255), nullable=True),
-        sa.Column("email", sa.String(255), nullable=True),
+        sa.Column(
+            "user_id",
+            sa.String(36),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+        sa.Column(
+            "role",
+            sa.Enum("owner", "admin", "member", name="organizationrole"),
+            nullable=False,
+            server_default="member",
+        ),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.UniqueConstraint("organization_id", "username", name="uq_user_org_username"),
+        sa.UniqueConstraint("organization_id", "user_id", name="uq_org_member"),
+    )
+
+    # Invites
+    op.create_table(
+        "invites",
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column(
+            "organization_id",
+            sa.String(36),
+            sa.ForeignKey("organizations.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+        sa.Column("email", sa.String(255), nullable=False, index=True),
+        sa.Column(
+            "role",
+            sa.Enum("owner", "admin", "member", name="organizationrole"),
+            nullable=False,
+            server_default="member",
+        ),
+        sa.Column(
+            "status",
+            sa.Enum(
+                "pending", "accepted", "declined", "cancelled", name="invitestatus"
+            ),
+            nullable=False,
+            server_default="pending",
+            index=True,
+        ),
+        sa.Column(
+            "invited_by_id",
+            sa.String(36),
+            sa.ForeignKey("users.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("accepted_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+    )
+    # Partial unique index for pending invites (PostgreSQL specific)
+    op.execute(
+        """
+        CREATE UNIQUE INDEX ix_invite_org_email_pending
+        ON invites (organization_id, email)
+        WHERE status = 'pending'
+        """
     )
 
     # Workspaces
@@ -79,6 +160,36 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
         sa.UniqueConstraint("organization_id", "slug", name="uq_workspace_org_slug"),
+    )
+
+    # API Keys (scoped to workspace)
+    op.create_table(
+        "api_keys",
+        sa.Column("id", sa.String(36), primary_key=True),
+        sa.Column(
+            "workspace_id",
+            sa.String(36),
+            sa.ForeignKey("workspaces.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+        sa.Column("name", sa.String(255), nullable=False),
+        sa.Column("key_prefix", sa.String(8), nullable=False, index=True),
+        sa.Column("key_hash", sa.String(255), nullable=False),
+        sa.Column(
+            "created_by_id",
+            sa.String(36),
+            sa.ForeignKey("users.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+        sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True, index=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
     )
 
     # Builds
@@ -212,7 +323,8 @@ def upgrade() -> None:
         "ix_events_build_task_type", "events", ["build_id", "task_id", "event_type"]
     )
 
-    # Seed default organization, workspace, and user
+    # Seed default organization, user, workspace, and membership for local dev
+    # In production, users will be created via OIDC login
     op.execute(
         """
         INSERT INTO organizations (id, name, slug)
@@ -221,8 +333,14 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        INSERT INTO users (id, organization_id, username, display_name)
-        VALUES ('default', 'default', 'default', 'Default User')
+        INSERT INTO users (id, external_id, email, display_name)
+        VALUES ('default', 'default-local-user', 'default@localhost', 'Default User')
+        """
+    )
+    op.execute(
+        """
+        INSERT INTO organization_members (id, organization_id, user_id, role)
+        VALUES ('default', 'default', 'default', 'owner')
         """
     )
     op.execute(
@@ -239,6 +357,12 @@ def downgrade() -> None:
     op.drop_table("task_dependencies")
     op.drop_table("tasks")
     op.drop_table("builds")
+    op.drop_table("api_keys")
     op.drop_table("workspaces")
+    op.execute("DROP INDEX IF EXISTS ix_invite_org_email_pending")
+    op.drop_table("invites")
+    op.drop_table("organization_members")
     op.drop_table("users")
     op.drop_table("organizations")
+    op.execute("DROP TYPE IF EXISTS organizationrole")
+    op.execute("DROP TYPE IF EXISTS invitestatus")
