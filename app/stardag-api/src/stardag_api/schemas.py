@@ -233,3 +233,38 @@ class TaskGraphResponse(BaseModel):
 
     nodes: list[TaskNode]
     edges: list[TaskEdge]
+
+
+# --- API Key Schemas ---
+
+
+class ApiKeyCreate(BaseModel):
+    """Schema for creating an API key."""
+
+    name: str
+
+
+class ApiKeyResponse(BaseModel):
+    """Schema for API key response (without the actual key)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    name: str
+    key_prefix: str
+    created_by_id: str | None
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+    @property
+    def is_active(self) -> bool:
+        """Check if the API key is active."""
+        return self.revoked_at is None
+
+
+class ApiKeyCreateResponse(ApiKeyResponse):
+    """Schema for API key creation response (includes the full key once)."""
+
+    key: str  # The full key, only returned on creation

@@ -20,6 +20,7 @@ from stardag_api.models import (
     User,
     Workspace,
 )
+from stardag_api.services import api_keys as api_key_service
 
 router = APIRouter(prefix="/ui/organizations", tags=["organizations"])
 
@@ -813,4 +814,167 @@ async def delete_workspace(
         )
 
     await db.delete(workspace)
+    await db.commit()
+
+
+# --- API Key Schemas ---
+
+
+class ApiKeyCreate(BaseModel):
+    """Create an API key."""
+
+    name: str
+
+
+class ApiKeyResponse(BaseModel):
+    """API key response (without the actual key)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    name: str
+    key_prefix: str
+    created_by_id: str | None
+    created_at: str  # ISO format datetime
+    last_used_at: str | None
+    revoked_at: str | None
+
+    @property
+    def is_active(self) -> bool:
+        """Check if the API key is active."""
+        return self.revoked_at is None
+
+
+class ApiKeyCreateResponse(ApiKeyResponse):
+    """API key creation response (includes the full key once)."""
+
+    key: str  # The full key, only returned on creation
+
+
+# --- API Key endpoints ---
+
+
+@router.get(
+    "/{org_id}/workspaces/{workspace_id}/api-keys", response_model=list[ApiKeyResponse]
+)
+async def list_api_keys(
+    org_id: str,
+    workspace_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    include_revoked: bool = False,
+):
+    """List API keys for a workspace."""
+    await require_org_access(db, current_user.id, org_id)
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    keys = await api_key_service.list_api_keys(
+        db, workspace_id, include_revoked=include_revoked
+    )
+
+    return [
+        ApiKeyResponse(
+            id=key.id,
+            workspace_id=key.workspace_id,
+            name=key.name,
+            key_prefix=key.key_prefix,
+            created_by_id=key.created_by_id,
+            created_at=key.created_at.isoformat(),
+            last_used_at=key.last_used_at.isoformat() if key.last_used_at else None,
+            revoked_at=key.revoked_at.isoformat() if key.revoked_at else None,
+        )
+        for key in keys
+    ]
+
+
+@router.post(
+    "/{org_id}/workspaces/{workspace_id}/api-keys",
+    response_model=ApiKeyCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_api_key(
+    org_id: str,
+    workspace_id: str,
+    data: ApiKeyCreate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create a new API key for a workspace (admin+ only)."""
+    await require_org_access(
+        db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
+    )
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    api_key, full_key = await api_key_service.create_api_key(
+        db,
+        workspace_id=workspace_id,
+        name=data.name,
+        created_by_id=current_user.id,
+    )
+    await db.commit()
+
+    return ApiKeyCreateResponse(
+        id=api_key.id,
+        workspace_id=api_key.workspace_id,
+        name=api_key.name,
+        key_prefix=api_key.key_prefix,
+        created_by_id=api_key.created_by_id,
+        created_at=api_key.created_at.isoformat(),
+        last_used_at=None,
+        revoked_at=None,
+        key=full_key,
+    )
+
+
+@router.delete(
+    "/{org_id}/workspaces/{workspace_id}/api-keys/{key_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def revoke_api_key(
+    org_id: str,
+    workspace_id: str,
+    key_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Revoke an API key (admin+ only)."""
+    await require_org_access(
+        db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
+    )
+
+    # Verify the key exists and belongs to this workspace
+    key = await api_key_service.get_api_key_by_id(db, key_id)
+    if not key or key.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    await api_key_service.revoke_api_key(db, key_id)
     await db.commit()

@@ -297,3 +297,73 @@ export async function declineInvite(inviteId: string): Promise<void> {
     throw new Error(`Failed to decline invite: ${response.statusText}`);
   }
 }
+
+// --- API Keys ---
+
+export interface ApiKey {
+  id: string;
+  workspace_id: string;
+  name: string;
+  key_prefix: string;
+  created_by_id: string | null;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface ApiKeyCreateResponse extends ApiKey {
+  key: string; // The full key, only returned once on creation
+}
+
+export async function fetchApiKeys(
+  orgId: string,
+  workspaceId: string,
+  includeRevoked = false,
+): Promise<ApiKey[]> {
+  const params = new URLSearchParams();
+  if (includeRevoked) {
+    params.append("include_revoked", "true");
+  }
+  const response = await fetchWithAuth(
+    `${API_BASE}/organizations/${orgId}/workspaces/${workspaceId}/api-keys?${params}`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch API keys: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function createApiKey(
+  orgId: string,
+  workspaceId: string,
+  name: string,
+): Promise<ApiKeyCreateResponse> {
+  const response = await fetchWithAuth(
+    `${API_BASE}/organizations/${orgId}/workspaces/${workspaceId}/api-keys`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Failed to create API key`);
+  }
+  return response.json();
+}
+
+export async function revokeApiKey(
+  orgId: string,
+  workspaceId: string,
+  keyId: string,
+): Promise<void> {
+  const response = await fetchWithAuth(
+    `${API_BASE}/organizations/${orgId}/workspaces/${workspaceId}/api-keys/${keyId}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Failed to revoke API key`);
+  }
+}
