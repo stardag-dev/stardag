@@ -144,6 +144,7 @@ async def get_or_create_user(
         name=org_name,
         slug=org_slug,
         description="Personal organization",
+        created_by_id=user.id,
     )
     db.add(org)
     await db.flush()  # Get org.id

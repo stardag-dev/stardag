@@ -5,7 +5,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -205,6 +205,19 @@ async def create_organization(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Create a new organization. Creator becomes owner."""
+    # Check org creation limit
+    org_count_result = await db.execute(
+        select(func.count(Organization.id)).where(
+            Organization.created_by_id == current_user.id
+        )
+    )
+    org_count = org_count_result.scalar() or 0
+    if org_count >= Organization.MAX_ORGS_PER_USER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You can create at most {Organization.MAX_ORGS_PER_USER} organizations",
+        )
+
     # Check if slug is taken
     existing = await db.execute(
         select(Organization).where(Organization.slug == data.slug)
@@ -220,6 +233,7 @@ async def create_organization(
         name=data.name,
         slug=data.slug,
         description=data.description,
+        created_by_id=current_user.id,
     )
     db.add(org)
     await db.flush()
@@ -669,6 +683,17 @@ async def create_workspace(
     await require_org_access(
         db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
     )
+
+    # Check workspace limit
+    workspace_count_result = await db.execute(
+        select(func.count(Workspace.id)).where(Workspace.organization_id == org_id)
+    )
+    workspace_count = workspace_count_result.scalar() or 0
+    if workspace_count >= Organization.MAX_WORKSPACES_PER_ORG:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Organization can have at most {Organization.MAX_WORKSPACES_PER_ORG} workspaces",
+        )
 
     # Check if slug exists in this org
     existing = await db.execute(
