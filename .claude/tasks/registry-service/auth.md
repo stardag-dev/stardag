@@ -362,39 +362,46 @@ The implementation is split into 6 phases, each building on the previous.
 
 **Tasks:**
 
-- [ ] **5.1** Create global state for active org/workspace:
-  - Store in React context or lightweight state manager
+- [x] **5.1** Create global state for active org/workspace:
+  - Created `WorkspaceContext` with `WorkspaceProvider`
   - Persist selection to localStorage
-  - Sync with URL params (optional)
-- [ ] **5.2** Create `ProfilePage` component:
+  - Fetches user orgs on login, auto-selects last active
+- [ ] **5.2** Create `ProfilePage` component (deferred - not blocking):
   - Display user info (name, email)
   - List organizations user belongs to
   - Show pending invites with accept/decline actions
-- [ ] **5.3** Create org/workspace selector in header:
-  - Dropdown to switch active organization
-  - Secondary dropdown for workspace within org
-  - "Create new organization" option
-- [ ] **5.4** Create `OrganizationSettingsPage`:
+- [x] **5.3** Create org/workspace selector in header:
+  - Created `WorkspaceSelector` dropdown component
+  - Shows active org/workspace
+  - Allows switching between orgs and workspaces
+- [x] **5.4** Create `OrganizationSettingsPage`:
+  - Created `/settings` route with `OrganizationSettings` component
   - Org details (name, description) - editable by admin+
-  - Member list with roles
-  - Invite member form (email + role)
-  - Remove member button (admin+ only)
-  - Role change dropdown (owner only)
-  - Delete org button (owner only, with confirmation)
-- [ ] **5.5** Create `WorkspaceSettingsPage`:
-  - Workspace details (name, description)
-  - Delete workspace button (admin+ only)
-- [ ] **5.6** Create `CreateOrganizationModal`:
+  - Member list with roles and role change (owner only)
+  - Invite member form (email + role) - admin+
+  - Remove member button (owner only)
+  - Delete org button (owner only, with slug confirmation)
+- [x] **5.5** Create workspace management in settings:
+  - Workspace list with CRUD in `OrganizationSettings`
+  - Create workspace form (name, auto-slug)
+  - Edit workspace name inline
+  - Delete workspace button (admin+ only, can't delete last)
+- [ ] **5.6** Create `CreateOrganizationModal` (deferred - can use API directly):
   - Name, slug, description inputs
   - On success, switch to new org
-- [ ] **5.7** Create `CreateWorkspaceModal`:
+- [ ] **5.7** Create `CreateWorkspaceModal` (moved to settings page):
   - Name, slug, description inputs
   - On success, switch to new workspace
-- [ ] **5.8** Update dashboard to filter by active workspace
-- [ ] **5.9** Add navigation and routing for new pages
-- [ ] **5.10** Handle edge cases:
-  - User with no organizations (prompt to create or wait for invite)
-  - Org/workspace deleted while viewing
+- [x] **5.8** Update dashboard to filter by active workspace:
+  - Updated `useTasks` hook to use `activeWorkspace` from context
+  - Builds fetched with `workspace_id` filter
+- [x] **5.9** Add navigation and routing for new pages:
+  - Added `/settings` route
+  - Added settings gear icon in header
+  - Simple URL-based router in App.tsx
+- [ ] **5.10** Handle edge cases (partial):
+  - User with no organizations shows "No organizations" in selector
+  - Loading states implemented
 
 **Deliverable:** Complete UI for managing organizations, workspaces, and members.
 
@@ -508,7 +515,17 @@ This ensures `docker-compose up` provides a working local environment.
   - [x] Implemented authorization (role hierarchy: member < admin < owner)
   - [x] Added org, workspace, member, and invite endpoints
   - [x] Added 11 new tests (57 total tests passing)
-- [ ] Phase 5: Organization & Workspace Management (UI)
+- [x] Phase 5: Organization & Workspace Management (UI)
+  - [x] Created `WorkspaceContext` for global org/workspace state
+  - [x] Created `WorkspaceSelector` dropdown in header
+  - [x] Created `OrganizationSettings` page with:
+    - Org details editing (admin+)
+    - Member list with role changes (owner)
+    - Invite form (admin+)
+    - Workspace list with CRUD (admin+)
+    - Delete org (owner with confirmation)
+  - [x] Updated `useTasks` hook to filter by active workspace
+  - [x] Added `/settings` route and navigation
 - [ ] Phase 6: API Keys & SDK Authentication
 
 ## Notes

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { fetchBuilds, fetchTasksInBuild, fetchBuildGraph } from "../api/tasks";
+import { useWorkspace } from "../context/WorkspaceContext";
 import type { Build, Task, TaskStatus, TaskGraphResponse } from "../types/task";
 
 export interface TaskWithContext extends Task {
@@ -28,6 +29,8 @@ interface UseTasksReturn {
 }
 
 export function useTasks(pageSize = 20): UseTasksReturn {
+  const { activeWorkspace } = useWorkspace();
+
   // Raw data from API
   const [allTasks, setAllTasks] = useState<Task[]>([]);
   const [graph, setGraph] = useState<TaskGraphResponse | null>(null);
@@ -42,21 +45,27 @@ export function useTasks(pageSize = 20): UseTasksReturn {
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "">("");
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Load builds first
+  // Load builds for current workspace
   const loadBuilds = useCallback(async () => {
     try {
-      const response = await fetchBuilds({ page: 1, page_size: 50 });
+      const response = await fetchBuilds({
+        page: 1,
+        page_size: 50,
+        workspace_id: activeWorkspace?.id,
+      });
       setBuilds(response.builds);
-      // Select most recent build if no current build
-      if (response.builds.length > 0 && !currentBuild) {
+      // Select most recent build if no current build or workspace changed
+      if (response.builds.length > 0) {
         setCurrentBuild(response.builds[0]);
+      } else {
+        setCurrentBuild(null);
       }
       return response.builds;
     } catch (err) {
       console.error("Failed to load builds:", err);
       return [];
     }
-  }, [currentBuild]);
+  }, [activeWorkspace?.id]);
 
   // Load tasks for current build (no filtering - get all)
   const loadTasks = useCallback(async () => {
@@ -83,10 +92,10 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     }
   }, [currentBuild]);
 
-  // Initial load of builds
+  // Load builds when workspace changes
   useEffect(() => {
     loadBuilds();
-  }, [refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadBuilds, refreshKey]);
 
   // Load tasks when build changes
   useEffect(() => {
