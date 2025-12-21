@@ -43,10 +43,18 @@ export function WorkspaceSelector() {
     );
   }
 
-  // No organizations yet
+  // No organizations yet - prompt to check invites
   if (organizations.length === 0) {
     return (
-      <span className="text-sm text-gray-500 dark:text-gray-400">No organizations</span>
+      <button
+        onClick={() => {
+          window.history.pushState({}, "", "/invites");
+          window.dispatchEvent(new PopStateEvent("popstate"));
+        }}
+        className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 underline"
+      >
+        View pending invites
+      </button>
     );
   }
 

@@ -14,7 +14,8 @@ from stardag_api.auth.jwt import (
     get_jwt_validator,
 )
 from stardag_api.db import get_db
-from stardag_api.models import User
+from stardag_api.models import Invite, Organization, OrganizationMember, User, Workspace
+from stardag_api.models.enums import InviteStatus, OrganizationRole
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +111,81 @@ async def get_or_create_user(
         display_name=token.display_name,
     )
     db.add(user)
-    await db.commit()
-    await db.refresh(user)
+    await db.flush()  # Get user.id without committing
     logger.info("Created new user %s from OIDC token", user.id)
 
+    # Check if user has pending invites
+    pending_invites_result = await db.execute(
+        select(Invite).where(
+            Invite.email == token.email,
+            Invite.status == InviteStatus.PENDING,
+        )
+    )
+    pending_invites = pending_invites_result.scalars().all()
+
+    if pending_invites:
+        # User has pending invites - don't create personal org
+        # They should accept invites to join existing orgs
+        logger.info(
+            "User %s has %d pending invite(s), skipping personal org creation",
+            user.id,
+            len(pending_invites),
+        )
+        await db.commit()
+        await db.refresh(user)
+        return user
+
+    # No pending invites - create a personal organization for the new user
+    username = token.email.split("@")[0]
+    org_name = f"{username}'s Organization"
+    org_slug = _generate_unique_slug(username)
+
+    org = Organization(
+        name=org_name,
+        slug=org_slug,
+        description="Personal organization",
+    )
+    db.add(org)
+    await db.flush()  # Get org.id
+
+    # Add user as owner of the organization
+    membership = OrganizationMember(
+        organization_id=org.id,
+        user_id=user.id,
+        role=OrganizationRole.OWNER,
+    )
+    db.add(membership)
+
+    # Create default workspace
+    workspace = Workspace(
+        organization_id=org.id,
+        name="Default",
+        slug="default",
+        description="Default workspace",
+    )
+    db.add(workspace)
+
+    await db.commit()
+    await db.refresh(user)
+    logger.info(
+        "Created personal organization %s and workspace for user %s",
+        org.id,
+        user.id,
+    )
+
     return user
+
+
+def _generate_unique_slug(base: str) -> str:
+    """Generate a URL-safe slug from a base string."""
+    import re
+    import uuid
+
+    # Convert to lowercase, replace non-alphanumeric with hyphens
+    slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
+    # Add a short unique suffix to avoid collisions
+    suffix = uuid.uuid4().hex[:6]
+    return f"{slug}-{suffix}"
 
 
 async def get_current_user(
