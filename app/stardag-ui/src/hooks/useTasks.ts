@@ -47,11 +47,16 @@ export function useTasks(pageSize = 20): UseTasksReturn {
 
   // Load builds for current workspace
   const loadBuilds = useCallback(async () => {
+    console.log("loadBuilds called:", { workspaceId: activeWorkspace?.id });
     try {
       const response = await fetchBuilds({
         page: 1,
         page_size: 50,
         workspace_id: activeWorkspace?.id,
+      });
+      console.log("loadBuilds response:", {
+        buildsCount: response.builds.length,
+        firstBuild: response.builds[0],
       });
       setBuilds(response.builds);
       // Select most recent build if no current build or workspace changed
@@ -59,6 +64,9 @@ export function useTasks(pageSize = 20): UseTasksReturn {
         setCurrentBuild(response.builds[0]);
       } else {
         setCurrentBuild(null);
+        // Clear stale data when no builds for this workspace
+        setAllTasks([]);
+        setGraph(null);
       }
       return response.builds;
     } catch (err) {
@@ -120,6 +128,14 @@ export function useTasks(pageSize = 20): UseTasksReturn {
 
   // Tasks with context for DAG (shows all tasks, marks which match filter)
   const tasksWithContext = useMemo(() => {
+    console.log("tasksWithContext useMemo:", {
+      hasGraph: !!graph,
+      graphNodesCount: graph?.nodes.length ?? 0,
+      hasCurrentBuild: !!currentBuild,
+      currentBuildId: currentBuild?.id,
+      allTasksCount: allTasks.length,
+      filteredTasksCount: filteredTasks.length,
+    });
     if (!graph || !currentBuild) return [];
 
     const matchingTaskIds = new Set(filteredTasks.map((t) => t.task_id));

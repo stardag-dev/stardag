@@ -160,14 +160,30 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
   );
   const taskByInternalId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
+  // Debug logging
+  console.log("DagGraph render:", {
+    tasksCount: tasks.length,
+    graphNodesCount: graph?.nodes.length ?? 0,
+    taskByTaskIdSize: taskByTaskId.size,
+    sampleTask: tasks[0],
+    sampleGraphNode: graph?.nodes[0],
+  });
+
   const { nodes: initialNodes, edges: initialEdges } = useMemo(() => {
     if (!graph || graph.nodes.length === 0) {
       return { nodes: [], edges: [] };
     }
 
     // Create nodes from graph data
-    const nodes: TaskNodeType[] = graph.nodes.map((graphNode) => {
+    const nodes: TaskNodeType[] = graph.nodes.map((graphNode, idx) => {
       const task = taskByTaskId.get(graphNode.task_id);
+      if (idx === 0) {
+        console.log("First node lookup:", {
+          graphNodeTaskId: graphNode.task_id,
+          foundTask: !!task,
+          taskIsFilterMatch: task?.isFilterMatch,
+        });
+      }
       return {
         id: String(graphNode.id), // ReactFlow needs string IDs
         type: "taskNode",
@@ -216,8 +232,13 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
   useEffect(() => {
-    setNodes(initialNodes);
-    setEdges(initialEdges);
+    // Force create new node objects to ensure React Flow detects the change
+    const newNodes = initialNodes.map((node) => ({
+      ...node,
+      data: { ...node.data },
+    }));
+    setNodes(newNodes);
+    setEdges([...initialEdges]);
   }, [initialNodes, initialEdges, setNodes, setEdges]);
 
   const handleNodeClick = useCallback(
