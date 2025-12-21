@@ -5,7 +5,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.db import engine
 from stardag_api.models import Base
-from stardag_api.routes import builds_router, tasks_router, ui_router
+from stardag_api.routes import (
+    builds_router,
+    organizations_router,
+    tasks_router,
+    ui_router,
+)
 
 
 @asynccontextmanager
@@ -37,6 +42,7 @@ app.add_middleware(
 
 # UI routes (JWT auth required)
 app.include_router(ui_router, prefix="/api/v1")
+app.include_router(organizations_router, prefix="/api/v1")
 
 # Existing routes (no auth during transition, will be moved to /api/v1/sdk later)
 app.include_router(builds_router, prefix="/api/v1")

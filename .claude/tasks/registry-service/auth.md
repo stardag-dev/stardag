@@ -244,30 +244,30 @@ The implementation is split into 6 phases, each building on the previous.
 
 **Tasks:**
 
-- [ ] **2.1** Add Keycloak service to `docker-compose.yml`:
+- [x] **2.1** Add Keycloak service to `docker-compose.yml`:
   - Use `quay.io/keycloak/keycloak` image
   - Configure realm import on startup
   - Create public SPA client with PKCE
-- [ ] **2.2** Create Keycloak realm configuration (`keycloak/realm-export.json`):
+- [x] **2.2** Create Keycloak realm configuration (`docker/keycloak/realm-export.json`):
   - Realm: `stardag`
   - Client: `stardag-ui` (public, auth code + PKCE)
   - Client: `stardag-sdk` (public, for CLI device flow)
-  - Test users with emails
-- [ ] **2.3** Implement JWT validation in FastAPI:
+  - Test users: `admin`/`admin`, `testuser`/`testpassword`
+- [x] **2.3** Implement JWT validation in FastAPI:
   - Create `auth/jwt.py` with JWKS fetching and caching
   - Create `auth/dependencies.py` with `get_current_user` dependency
   - Validate: signature, issuer, audience, expiration
-- [ ] **2.4** Implement user auto-provisioning:
+- [x] **2.4** Implement user auto-provisioning:
   - On valid JWT, lookup user by `external_id` (sub claim)
   - If not found, create user from token claims (email, name)
   - Return `User` model instance to endpoints
-- [ ] **2.5** Add auth configuration via environment variables:
-  - `OIDC_ISSUER_URL`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL` (optional, derived from issuer)
-- [ ] **2.6** Reorganize API routes:
+- [x] **2.5** Add auth configuration via environment variables:
+  - `OIDC_ISSUER_URL`, `OIDC_AUDIENCE`, `OIDC_EXTERNAL_ISSUER_URL`
+- [x] **2.6** Reorganize API routes:
   - `/api/v1/ui/...` - UI endpoints (JWT auth)
-  - `/api/v1/sdk/...` - SDK endpoints (API key OR JWT auth)
+  - `/api/v1/sdk/...` - SDK endpoints (API key OR JWT auth) - pending
   - Keep existing endpoints functional during transition
-- [ ] **2.7** Add integration tests for auth flow (using test JWTs)
+- [x] **2.7** Add integration tests for auth flow (19 new tests)
 
 **Deliverable:** Working JWT auth locally with Keycloak; users auto-created on first login.
 
@@ -279,24 +279,26 @@ The implementation is split into 6 phases, each building on the previous.
 
 **Tasks:**
 
-- [ ] **3.1** Install and configure `oidc-client-ts` (or `react-oidc-context`)
-- [ ] **3.2** Create `AuthProvider` context:
+- [x] **3.1** Install and configure `oidc-client-ts`
+- [x] **3.2** Create `AuthProvider` context:
   - Manage auth state (user, isAuthenticated, isLoading)
-  - Handle silent token refresh
-  - Store tokens in memory (not localStorage for security)
-- [ ] **3.3** Implement login flow:
+  - Handle silent token refresh via `automaticSilentRenew`
+  - Store tokens in localStorage (via oidc-client-ts default)
+- [x] **3.3** Implement login flow:
   - Redirect to Keycloak hosted login
-  - Handle callback, extract tokens
-  - Call API to get/create user profile
-- [ ] **3.4** Implement logout flow:
+  - Handle callback via `/callback` route
+  - User auto-provisioned via backend on first API call
+- [x] **3.4** Implement logout flow:
   - Clear local state
   - Redirect to Keycloak logout endpoint
-- [ ] **3.5** Create `ProtectedRoute` wrapper component
-- [ ] **3.6** Update API client to include `Authorization: Bearer` header
-- [ ] **3.7** Add auth config via environment variables:
+- [ ] **3.5** Create `ProtectedRoute` wrapper component (deferred - not blocking)
+- [x] **3.6** Update API client to include `Authorization: Bearer` header
+  - Created `api/client.ts` with `fetchWithAuth()` wrapper
+- [x] **3.7** Add auth config via environment variables:
   - `VITE_OIDC_ISSUER`, `VITE_OIDC_CLIENT_ID`, `VITE_OIDC_REDIRECT_URI`
-- [ ] **3.8** Create minimal login page / landing page
-- [ ] **3.9** Add loading states and error handling for auth
+  - Updated Dockerfile to pass build args
+- [x] **3.8** Create UserMenu component with login/logout
+- [x] **3.9** Add loading states and error handling for auth
 
 **Deliverable:** Users can log in via Keycloak, access protected dashboard, and log out.
 
@@ -308,45 +310,47 @@ The implementation is split into 6 phases, each building on the previous.
 
 **Tasks:**
 
-- [ ] **4.1** Create `OrganizationService` with business logic:
-  - Create org (creator becomes owner)
-  - Get user's organizations
+- [x] **4.1** Create organization management endpoints:
+  - Create org (creator becomes owner, default workspace created)
+  - Get org details (members only)
   - Update org details (admin+ only)
-  - Delete org (owner only, with cascade considerations)
-- [ ] **4.2** Create `MembershipService`:
+  - Delete org (owner only, cascades)
+- [x] **4.2** Create membership management endpoints:
   - Invite user by email (admin+ only)
-  - List pending invites
-  - Accept invite (by invited user)
-  - Remove member (admin+ only, cannot remove owner)
-  - Change member role (owner only)
-- [ ] **4.3** Create `WorkspaceService`:
+  - List pending invites (admin+ only)
+  - Accept/decline invite (by invited user)
+  - Remove member (admin+ only, cannot remove last owner)
+  - Change member role (admin+, owner for owner changes)
+- [x] **4.3** Create workspace management endpoints:
   - Create workspace in org (admin+ only)
   - List workspaces in org (all members)
-  - Update workspace (admin+ only)
-  - Delete workspace (admin+ only)
-- [ ] **4.4** Add authorization helpers:
-  - `require_org_member(org_id)` - raises 403 if not member
-  - `require_org_admin(org_id)` - raises 403 if not admin+
-  - `require_org_owner(org_id)` - raises 403 if not owner
-- [ ] **4.5** Create REST endpoints:
+  - Get/Update workspace (admin+ only)
+  - Delete workspace (admin+ only, can't delete last)
+- [x] **4.4** Add authorization helpers:
+  - `require_org_access(org_id, min_role)` - returns 404 if not member, 403 if insufficient role
+  - Role hierarchy: member < admin < owner
+- [x] **4.5** Create REST endpoints in `routes/organizations.py`:
   - `POST /api/v1/ui/organizations` - create org
-  - `GET /api/v1/ui/organizations` - list user's orgs
   - `GET /api/v1/ui/organizations/{org_id}` - get org details
-  - `PUT /api/v1/ui/organizations/{org_id}` - update org
+  - `PATCH /api/v1/ui/organizations/{org_id}` - update org
   - `DELETE /api/v1/ui/organizations/{org_id}` - delete org
   - `GET /api/v1/ui/organizations/{org_id}/members` - list members
+  - `PATCH /api/v1/ui/organizations/{org_id}/members/{id}` - change role
+  - `DELETE /api/v1/ui/organizations/{org_id}/members/{id}` - remove member
   - `POST /api/v1/ui/organizations/{org_id}/invites` - create invite
   - `GET /api/v1/ui/organizations/{org_id}/invites` - list pending invites
-  - `DELETE /api/v1/ui/organizations/{org_id}/invites/{invite_id}` - cancel invite
-  - `POST /api/v1/ui/invites/{invite_id}/accept` - accept invite
-  - `DELETE /api/v1/ui/organizations/{org_id}/members/{user_id}` - remove member
-  - `PUT /api/v1/ui/organizations/{org_id}/members/{user_id}` - change role
-  - `POST /api/v1/ui/organizations/{org_id}/workspaces` - create workspace
+  - `DELETE /api/v1/ui/organizations/{org_id}/invites/{id}` - cancel invite
+  - `POST /api/v1/ui/organizations/invites/{id}/accept` - accept invite
+  - `POST /api/v1/ui/organizations/invites/{id}/decline` - decline invite
   - `GET /api/v1/ui/organizations/{org_id}/workspaces` - list workspaces
-  - `GET /api/v1/ui/me` - get current user profile
-  - `GET /api/v1/ui/me/invites` - list user's pending invites
-- [ ] **4.6** Update existing build/task endpoints to enforce org membership
-- [ ] **4.7** Add comprehensive unit and integration tests
+  - `POST /api/v1/ui/organizations/{org_id}/workspaces` - create workspace
+  - `GET /api/v1/ui/organizations/{org_id}/workspaces/{id}` - get workspace
+  - `PATCH /api/v1/ui/organizations/{org_id}/workspaces/{id}` - update workspace
+  - `DELETE /api/v1/ui/organizations/{org_id}/workspaces/{id}` - delete workspace
+  - (Existing) `GET /api/v1/ui/me` - get current user profile with orgs
+  - (Existing) `GET /api/v1/ui/me/invites` - list user's pending invites
+- [ ] **4.6** Update existing build/task endpoints to enforce org membership (deferred to Phase 5/6)
+- [x] **4.7** Add comprehensive unit and integration tests (11 new tests)
 
 **Deliverable:** Full backend API for multi-tenant org/workspace management with authorization.
 
@@ -483,9 +487,27 @@ This ensures `docker-compose up` provides a working local environment.
   - [x] 1.7 Created Alembic migration with all auth tables
   - [x] 1.8 Updated test fixtures and added 9 new auth model tests
   - [x] E2E smoke test verified (docker-compose up, migrations, API)
-- [ ] Phase 2: Keycloak + Backend Auth Infrastructure
-- [ ] Phase 3: Frontend Auth Integration
-- [ ] Phase 4: Organization & Workspace Management (Backend)
+- [x] Phase 2: Keycloak + Backend Auth Infrastructure
+  - [x] Added Keycloak to docker-compose with realm import
+  - [x] Created realm config with stardag-ui and stardag-sdk clients
+  - [x] Implemented JWT validation with JWKS caching (`auth/jwt.py`)
+  - [x] Implemented user auto-provisioning (`auth/dependencies.py`)
+  - [x] Added OIDC config via env vars
+  - [x] Created `/api/v1/ui/me` and `/api/v1/ui/me/invites` endpoints
+  - [x] Added 19 auth tests
+- [x] Phase 3: Frontend Auth Integration
+  - [x] Installed oidc-client-ts
+  - [x] Created AuthProvider context with login/logout
+  - [x] Created UserMenu component
+  - [x] Added `/callback` route for OIDC redirect
+  - [x] Created `fetchWithAuth` API wrapper
+  - [x] Updated Dockerfile with OIDC build args
+  - [x] Verified login flow works with Keycloak
+- [x] Phase 4: Organization & Workspace Management (Backend)
+  - [x] Created `routes/organizations.py` with full CRUD
+  - [x] Implemented authorization (role hierarchy: member < admin < owner)
+  - [x] Added org, workspace, member, and invite endpoints
+  - [x] Added 11 new tests (57 total tests passing)
 - [ ] Phase 5: Organization & Workspace Management (UI)
 - [ ] Phase 6: API Keys & SDK Authentication
 
