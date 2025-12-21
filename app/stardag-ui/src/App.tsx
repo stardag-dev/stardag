@@ -3,13 +3,14 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { setAccessTokenGetter } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
 import { DagGraph } from "./components/DagGraph";
+import { OrganizationSettings } from "./components/OrganizationSettings";
+import { PendingInvites } from "./components/PendingInvites";
 import { TaskDetail } from "./components/TaskDetail";
 import { TaskFilters } from "./components/TaskFilters";
 import { TaskTable } from "./components/TaskTable";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { WorkspaceSelector } from "./components/WorkspaceSelector";
-import { OrganizationSettings } from "./components/OrganizationSettings";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -186,6 +187,61 @@ function AuthConnector({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+// Page to view and accept pending invites
+interface InvitesPageProps {
+  onNavigate: (path: string) => void;
+}
+
+function InvitesPage({ onNavigate }: InvitesPageProps) {
+  const { isAuthenticated } = useAuth();
+
+  if (!isAuthenticated) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-100 dark:bg-gray-900">
+        <div className="text-center">
+          <p className="text-gray-600 dark:text-gray-400">
+            Please sign in to view your invites.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900">
+      {/* Header */}
+      <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => onNavigate("/")}
+            className="text-xl font-bold text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400"
+          >
+            Stardag
+          </button>
+        </div>
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          <UserMenu />
+        </div>
+      </header>
+
+      {/* Content */}
+      <main className="mx-auto max-w-2xl px-4 py-8">
+        <PendingInvites />
+
+        <div className="mt-8 text-center">
+          <button
+            onClick={() => onNavigate("/")}
+            className="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+          >
+            Back to Dashboard
+          </button>
+        </div>
+      </main>
+    </div>
+  );
+}
+
 // Simple URL-based routing
 function Router() {
   const [path, setPath] = useState(window.location.pathname);
@@ -214,6 +270,10 @@ function Router() {
 
   if (path === "/settings") {
     return <OrganizationSettings onNavigate={navigateTo} />;
+  }
+
+  if (path === "/invites") {
+    return <InvitesPage onNavigate={navigateTo} />;
   }
 
   return <Dashboard onNavigate={navigateTo} />;

@@ -45,7 +45,7 @@ class OrganizationMember(Base, TimestampMixin):
         index=True,
     )
     role: Mapped[OrganizationRole] = mapped_column(
-        Enum(OrganizationRole),
+        Enum(OrganizationRole, values_callable=lambda e: [x.value for x in e]),
         nullable=False,
         default=OrganizationRole.MEMBER,
     )
