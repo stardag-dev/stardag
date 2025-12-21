@@ -5,6 +5,7 @@ import type {
   TaskGraphResponse,
   TaskStatus,
 } from "../types/task";
+import { fetchWithAuth } from "./client";
 
 const API_BASE = "/api/v1";
 
@@ -25,7 +26,7 @@ export async function fetchBuilds(
   if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
 
   const url = `${API_BASE}/builds?${params.toString()}`;
-  const response = await fetch(url);
+  const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch builds: ${response.statusText}`);
   }
@@ -33,7 +34,7 @@ export async function fetchBuilds(
 }
 
 export async function fetchBuild(buildId: string): Promise<Build> {
-  const response = await fetch(`${API_BASE}/builds/${buildId}`);
+  const response = await fetchWithAuth(`${API_BASE}/builds/${buildId}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch build: ${response.statusText}`);
   }
@@ -56,7 +57,7 @@ export async function fetchTasksInBuild(
   if (filters.status) params.set("status", filters.status);
 
   const url = `${API_BASE}/builds/${buildId}/tasks?${params.toString()}`;
-  const response = await fetch(url);
+  const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch tasks: ${response.statusText}`);
   }
@@ -64,7 +65,7 @@ export async function fetchTasksInBuild(
 }
 
 export async function fetchBuildGraph(buildId: string): Promise<TaskGraphResponse> {
-  const response = await fetch(`${API_BASE}/builds/${buildId}/graph`);
+  const response = await fetchWithAuth(`${API_BASE}/builds/${buildId}/graph`);
   if (!response.ok) {
     throw new Error(`Failed to fetch graph: ${response.statusText}`);
   }
@@ -90,7 +91,7 @@ export async function fetchTasks(
   if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
 
   const url = `${API_BASE}/tasks?${params.toString()}`;
-  const response = await fetch(url);
+  const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch tasks: ${response.statusText}`);
   }
@@ -98,7 +99,7 @@ export async function fetchTasks(
 }
 
 export async function fetchTask(taskId: string): Promise<Task> {
-  const response = await fetch(`${API_BASE}/tasks/${taskId}`);
+  const response = await fetchWithAuth(`${API_BASE}/tasks/${taskId}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch task: ${response.statusText}`);
   }

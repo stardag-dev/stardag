@@ -63,8 +63,14 @@ function Dashboard({ onNavigate }: DashboardProps) {
 
   const handleDagTaskClick = useCallback(
     (taskId: string) => {
+      console.log("handleDagTaskClick:", {
+        taskId,
+        tasksWithContextLength: tasksWithContext.length,
+        taskIds: tasksWithContext.map((t) => t.task_id).slice(0, 3),
+      });
       // Look in tasksWithContext first (includes related tasks)
       const task = tasksWithContext.find((t) => t.task_id === taskId);
+      console.log("Found task:", !!task);
       if (task) setSelectedTask(task);
     },
     [tasksWithContext],
@@ -268,15 +274,12 @@ function LandingPage() {
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-4">
         <h1 className="text-2xl font-bold text-white">Stardag</h1>
-        <div className="flex items-center gap-3">
-          <ThemeToggle />
-          <button
-            onClick={login}
-            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
-          >
-            Sign In
-          </button>
-        </div>
+        <button
+          onClick={login}
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+        >
+          Sign In
+        </button>
       </header>
 
       {/* Hero */}
