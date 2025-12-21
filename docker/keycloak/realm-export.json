@@ -75,7 +75,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "testuser",
+          "value": "testpassword",
           "temporary": false
         }
       ]

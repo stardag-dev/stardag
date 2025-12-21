@@ -2,6 +2,11 @@ FROM node:22-alpine as builder
 
 WORKDIR /app
 
+# Build arguments for OIDC configuration (passed at build time)
+ARG VITE_OIDC_ISSUER
+ARG VITE_OIDC_CLIENT_ID
+ARG VITE_OIDC_REDIRECT_URI
+
 # Copy package files
 COPY package*.json ./
 
@@ -11,7 +16,7 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build for production
+# Build for production (ARGs are available as env vars during build)
 RUN npm run build
 
 # Production stage with nginx
