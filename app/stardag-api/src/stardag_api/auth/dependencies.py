@@ -212,3 +212,38 @@ async def get_current_user_optional(
     if token is None:
         return None
     return await get_or_create_user(db, token)
+
+
+async def verify_workspace_access(
+    db: AsyncSession,
+    user: User,
+    workspace_id: str,
+) -> Workspace:
+    """Verify user has access to a workspace.
+
+    Returns the workspace if access is granted, raises HTTPException otherwise.
+    """
+    # Get the workspace
+    workspace = await db.get(Workspace, workspace_id)
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found",
+        )
+
+    # Check if user is a member of the workspace's organization
+    result = await db.execute(
+        select(OrganizationMember).where(
+            OrganizationMember.organization_id == workspace.organization_id,
+            OrganizationMember.user_id == user.id,
+        )
+    )
+    membership = result.scalar_one_or_none()
+
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this workspace",
+        )
+
+    return workspace

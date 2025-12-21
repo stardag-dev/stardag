@@ -160,30 +160,14 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
   );
   const taskByInternalId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
-  // Debug logging
-  console.log("DagGraph render:", {
-    tasksCount: tasks.length,
-    graphNodesCount: graph?.nodes.length ?? 0,
-    taskByTaskIdSize: taskByTaskId.size,
-    sampleTask: tasks[0],
-    sampleGraphNode: graph?.nodes[0],
-  });
-
   const { nodes: initialNodes, edges: initialEdges } = useMemo(() => {
     if (!graph || graph.nodes.length === 0) {
       return { nodes: [], edges: [] };
     }
 
     // Create nodes from graph data
-    const nodes: TaskNodeType[] = graph.nodes.map((graphNode, idx) => {
+    const nodes: TaskNodeType[] = graph.nodes.map((graphNode) => {
       const task = taskByTaskId.get(graphNode.task_id);
-      if (idx === 0) {
-        console.log("First node lookup:", {
-          graphNodeTaskId: graphNode.task_id,
-          foundTask: !!task,
-          taskIsFilterMatch: task?.isFilterMatch,
-        });
-      }
       return {
         id: String(graphNode.id), // ReactFlow needs string IDs
         type: "taskNode",

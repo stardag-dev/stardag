@@ -6,6 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from stardag_api.auth.dependencies import (
+    get_current_user,
+    verify_workspace_access,
+)
 from stardag_api.db import get_db
 from stardag_api.models import (
     Build,
@@ -14,6 +18,7 @@ from stardag_api.models import (
     Task,
     TaskDependency,
     TaskStatus,
+    User,
 )
 from stardag_api.schemas import (
     BuildCreate,
@@ -90,11 +95,15 @@ async def create_build(build: BuildCreate, db: AsyncSession = Depends(get_db)):
 @router.get("", response_model=BuildListResponse)
 async def list_builds(
     db: AsyncSession = Depends(get_db),
-    workspace_id: str = "default",
+    user: User = Depends(get_current_user),
+    workspace_id: str = Query(..., description="Workspace ID to list builds from"),
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
-    """List builds in a workspace."""
+    """List builds in a workspace (requires authentication)."""
+    # Verify user has access to this workspace
+    await verify_workspace_access(db, user, workspace_id)
+
     query = select(Build).where(Build.workspace_id == workspace_id)
     count_query = (
         select(func.count())
@@ -141,11 +150,18 @@ async def list_builds(
 
 
 @router.get("/{build_id}", response_model=BuildResponse)
-async def get_build(build_id: str, db: AsyncSession = Depends(get_db)):
-    """Get a build by ID with derived status."""
+async def get_build(
+    build_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get a build by ID with derived status (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify user has access to the build's workspace
+    await verify_workspace_access(db, user, build.workspace_id)
 
     status, started_at, completed_at = await get_build_status(db, build.id)
 
@@ -466,11 +482,18 @@ async def fail_task(
 
 
 @router.get("/{build_id}/tasks", response_model=list[TaskWithStatusResponse])
-async def list_tasks_in_build(build_id: str, db: AsyncSession = Depends(get_db)):
-    """List all tasks in a build with their status."""
+async def list_tasks_in_build(
+    build_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List all tasks in a build with their status (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify user has access to the build's workspace
+    await verify_workspace_access(db, user, build.workspace_id)
 
     # Get distinct task IDs that have events in this build
     task_ids_subquery = (
@@ -514,11 +537,18 @@ async def list_tasks_in_build(build_id: str, db: AsyncSession = Depends(get_db))
 
 
 @router.get("/{build_id}/events", response_model=list[EventResponse])
-async def list_build_events(build_id: str, db: AsyncSession = Depends(get_db)):
-    """List all events for a build."""
+async def list_build_events(
+    build_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List all events for a build (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify user has access to the build's workspace
+    await verify_workspace_access(db, user, build.workspace_id)
 
     result = await db.execute(
         select(Event).where(Event.build_id == build_id).order_by(Event.created_at.asc())
@@ -540,11 +570,18 @@ async def list_build_events(build_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{build_id}/graph", response_model=TaskGraphResponse)
-async def get_build_graph(build_id: str, db: AsyncSession = Depends(get_db)):
-    """Get the task graph for a build (for visualization)."""
+async def get_build_graph(
+    build_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get the task graph for a build (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify user has access to the build's workspace
+    await verify_workspace_access(db, user, build.workspace_id)
 
     # Get distinct task IDs that have events in this build
     task_ids_subquery = (
