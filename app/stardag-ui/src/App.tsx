@@ -63,14 +63,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
 
   const handleDagTaskClick = useCallback(
     (taskId: string) => {
-      console.log("handleDagTaskClick:", {
-        taskId,
-        tasksWithContextLength: tasksWithContext.length,
-        taskIds: tasksWithContext.map((t) => t.task_id).slice(0, 3),
-      });
       // Look in tasksWithContext first (includes related tasks)
       const task = tasksWithContext.find((t) => t.task_id === taskId);
-      console.log("Found task:", !!task);
       if (task) setSelectedTask(task);
     },
     [tasksWithContext],

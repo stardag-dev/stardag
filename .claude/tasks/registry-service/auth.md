@@ -399,9 +399,25 @@ The implementation is split into 6 phases, each building on the previous.
   - Added `/settings` route
   - Added settings gear icon in header
   - Simple URL-based router in App.tsx
-- [ ] **5.10** Handle edge cases (partial):
-  - User with no organizations shows "No organizations" in selector
+- [x] **5.10** Handle edge cases:
+  - User with no organizations shows "View pending invites" link
   - Loading states implemented
+  - Stale data cleared when switching workspaces with no builds
+- [x] **5.11** Additional UI improvements:
+  - Created landing page for non-authenticated users
+  - URL paths now include org/workspace slugs for shareable links (e.g., `/:orgSlug/:workspaceSlug`)
+  - Create organization page with auto-slug generation
+  - Pending invites page for new users
+  - Newly created org automatically becomes active
+- [x] **5.12** Add workspace authorization to builds API (read endpoints):
+  - `GET /builds` - requires auth + workspace_id, verifies user has access
+  - `GET /builds/{build_id}` - requires auth, verifies user can access build's workspace
+  - `GET /builds/{build_id}/tasks` - requires auth, verifies workspace access
+  - `GET /builds/{build_id}/events` - requires auth, verifies workspace access
+  - `GET /builds/{build_id}/graph` - requires auth, verifies workspace access
+  - Created `verify_workspace_access()` helper in `auth/dependencies.py`
+- [x] **5.13** Fix tasks API to use authenticated fetch:
+  - Updated `api/tasks.ts` to use `fetchWithAuth()` for all API calls
 
 **Deliverable:** Complete UI for managing organizations, workspaces, and members.
 
@@ -526,6 +542,12 @@ This ensures `docker-compose up` provides a working local environment.
     - Delete org (owner with confirmation)
   - [x] Updated `useTasks` hook to filter by active workspace
   - [x] Added `/settings` route and navigation
+  - [x] Created landing page for non-authenticated users
+  - [x] Added URL paths with org/workspace slugs for shareable links
+  - [x] Created organization creation page
+  - [x] Created pending invites page
+  - [x] Added workspace authorization to builds API (read endpoints)
+  - [x] Fixed tasks API to use authenticated fetch
 - [ ] Phase 6: API Keys & SDK Authentication
 
 ## Notes
