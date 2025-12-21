@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { setAccessTokenGetter } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
+import { CreateOrganization } from "./components/CreateOrganization";
 import { DagGraph } from "./components/DagGraph";
 import { OrganizationSettings } from "./components/OrganizationSettings";
 import { PendingInvites } from "./components/PendingInvites";
@@ -14,7 +15,7 @@ import { WorkspaceSelector } from "./components/WorkspaceSelector";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
-import { WorkspaceProvider } from "./context/WorkspaceContext";
+import { WorkspaceProvider, useWorkspace } from "./context/WorkspaceContext";
 import { useTasks } from "./hooks/useTasks";
 import type { Task } from "./types/task";
 
@@ -24,6 +25,7 @@ interface DashboardProps {
 
 function Dashboard({ onNavigate }: DashboardProps) {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const { getWorkspacePath, activeOrg, activeWorkspace } = useWorkspace();
   const {
     tasks,
     tasksWithContext,
@@ -43,6 +45,21 @@ function Dashboard({ onNavigate }: DashboardProps) {
     totalPages,
     selectBuild,
   } = useTasks();
+
+  // Sync URL with active org/workspace
+  const isInitialMount = useRef(true);
+  useEffect(() => {
+    // Skip on initial mount - let URL drive initial state
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    // Update URL when org/workspace changes
+    const newPath = getWorkspacePath();
+    if (window.location.pathname !== newPath) {
+      window.history.replaceState({}, "", newPath);
+    }
+  }, [activeOrg, activeWorkspace, getWorkspacePath]);
 
   const handleDagTaskClick = useCallback(
     (taskId: string) => {
@@ -242,8 +259,140 @@ function InvitesPage({ onNavigate }: InvitesPageProps) {
   );
 }
 
+// Landing page for non-authenticated users
+function LandingPage() {
+  const { login } = useAuth();
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 flex flex-col">
+      {/* Header */}
+      <header className="flex items-center justify-between px-6 py-4">
+        <h1 className="text-2xl font-bold text-white">Stardag</h1>
+        <div className="flex items-center gap-3">
+          <ThemeToggle />
+          <button
+            onClick={login}
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+          >
+            Sign In
+          </button>
+        </div>
+      </header>
+
+      {/* Hero */}
+      <main className="flex-1 flex items-center justify-center px-6">
+        <div className="max-w-2xl text-center">
+          <h2 className="text-5xl font-bold text-white mb-6">
+            Declarative DAG Framework
+          </h2>
+          <p className="text-xl text-gray-300 mb-8">
+            Build composable data pipelines with type-safe tasks, deterministic outputs,
+            and bottom-up execution. Track, monitor, and manage your workflows with
+            ease.
+          </p>
+          <div className="flex gap-4 justify-center">
+            <button
+              onClick={login}
+              className="rounded-md bg-blue-600 px-6 py-3 text-lg font-medium text-white hover:bg-blue-700 transition-colors"
+            >
+              Get Started
+            </button>
+            <a
+              href="https://github.com/andhus/stardag"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-md border border-gray-600 px-6 py-3 text-lg font-medium text-gray-300 hover:bg-gray-800 transition-colors"
+            >
+              View on GitHub
+            </a>
+          </div>
+
+          {/* Feature highlights */}
+          <div className="mt-16 grid grid-cols-1 md:grid-cols-3 gap-8 text-left">
+            <div className="bg-gray-800/50 rounded-lg p-6">
+              <div className="text-blue-400 mb-3">
+                <svg
+                  className="h-8 w-8"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-white mb-2">
+                Composable Tasks
+              </h3>
+              <p className="text-gray-400 text-sm">
+                Build complex pipelines from simple, reusable task components with full
+                type safety.
+              </p>
+            </div>
+            <div className="bg-gray-800/50 rounded-lg p-6">
+              <div className="text-green-400 mb-3">
+                <svg
+                  className="h-8 w-8"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-white mb-2">
+                Deterministic Outputs
+              </h3>
+              <p className="text-gray-400 text-sm">
+                Parameter-based hashing ensures reproducible builds and efficient
+                caching.
+              </p>
+            </div>
+            <div className="bg-gray-800/50 rounded-lg p-6">
+              <div className="text-purple-400 mb-3">
+                <svg
+                  className="h-8 w-8"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M13 10V3L4 14h7v7l9-11h-7z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-lg font-semibold text-white mb-2">Smart Execution</h3>
+              <p className="text-gray-400 text-sm">
+                Bottom-up, Makefile-style execution builds only what's needed.
+              </p>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="px-6 py-4 text-center text-gray-500 text-sm">
+        Built with Stardag
+      </footer>
+    </div>
+  );
+}
+
 // Simple URL-based routing
 function Router() {
+  const { isAuthenticated } = useAuth();
   const [path, setPath] = useState(window.location.pathname);
 
   useEffect(() => {
@@ -257,6 +406,7 @@ function Router() {
     setPath(newPath);
   }, []);
 
+  // Auth callback - always handle regardless of auth state
   if (path === "/callback") {
     return (
       <AuthCallback
@@ -268,6 +418,12 @@ function Router() {
     );
   }
 
+  // Landing page for non-authenticated users
+  if (!isAuthenticated) {
+    return <LandingPage />;
+  }
+
+  // Authenticated routes
   if (path === "/settings") {
     return <OrganizationSettings onNavigate={navigateTo} />;
   }
@@ -276,6 +432,11 @@ function Router() {
     return <InvitesPage onNavigate={navigateTo} />;
   }
 
+  if (path === "/organizations/new") {
+    return <CreateOrganization onNavigate={navigateTo} />;
+  }
+
+  // Dashboard handles all other paths (including /:orgSlug and /:orgSlug/:workspaceSlug)
   return <Dashboard onNavigate={navigateTo} />;
 }
 

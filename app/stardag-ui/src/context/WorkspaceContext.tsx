@@ -27,10 +27,12 @@ interface WorkspaceContextType {
   setActiveWorkspace: (workspace: Workspace | null) => void;
   // Loading state
   isLoading: boolean;
-  // Refresh data
-  refresh: () => Promise<void>;
+  // Refresh data, optionally selecting a specific org/workspace by slug
+  refresh: (preferOrgSlug?: string, preferWorkspaceSlug?: string) => Promise<void>;
   // User's role in active org
   activeOrgRole: "owner" | "admin" | "member" | null;
+  // Get the current URL path for org/workspace
+  getWorkspacePath: () => string;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextType | null>(null);
@@ -52,45 +54,81 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
   const [isLoading, setIsLoading] = useState(false);
 
   // Load user's organizations when authenticated
-  const loadOrganizations = useCallback(async () => {
-    if (!isAuthenticated) {
-      setOrganizations([]);
-      setActiveOrgState(null);
-      setWorkspaces([]);
-      setActiveWorkspaceState(null);
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      const profile = await fetchUserProfile();
-      setOrganizations(profile.organizations);
-
-      // Restore active org from localStorage or use first org
-      const savedOrgId = localStorage.getItem(STORAGE_KEY_ORG);
-      const savedOrg = profile.organizations.find((o) => o.id === savedOrgId);
-      const orgToActivate = savedOrg || profile.organizations[0] || null;
-
-      if (orgToActivate) {
-        setActiveOrgState(orgToActivate);
-        // Load workspaces for this org
-        const ws = await fetchWorkspaces(orgToActivate.id);
-        setWorkspaces(ws);
-
-        // Restore active workspace or use first
-        const savedWorkspaceId = localStorage.getItem(STORAGE_KEY_WORKSPACE);
-        const savedWorkspace = ws.find((w) => w.id === savedWorkspaceId);
-        setActiveWorkspaceState(savedWorkspace || ws[0] || null);
+  const loadOrganizations = useCallback(
+    async (preferOrgSlug?: string, preferWorkspaceSlug?: string) => {
+      if (!isAuthenticated) {
+        setOrganizations([]);
+        setActiveOrgState(null);
+        setWorkspaces([]);
+        setActiveWorkspaceState(null);
+        return;
       }
-    } catch (error) {
-      console.error("Failed to load organizations:", error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isAuthenticated]);
+
+      setIsLoading(true);
+      try {
+        const profile = await fetchUserProfile();
+        setOrganizations(profile.organizations);
+
+        // Priority for selecting org: 1) preferOrgSlug, 2) localStorage, 3) first org
+        let orgToActivate: OrganizationSummary | null = null;
+        if (preferOrgSlug) {
+          orgToActivate =
+            profile.organizations.find((o) => o.slug === preferOrgSlug) || null;
+        }
+        if (!orgToActivate) {
+          const savedOrgId = localStorage.getItem(STORAGE_KEY_ORG);
+          orgToActivate =
+            profile.organizations.find((o) => o.id === savedOrgId) ||
+            profile.organizations[0] ||
+            null;
+        }
+
+        if (orgToActivate) {
+          setActiveOrgState(orgToActivate);
+          localStorage.setItem(STORAGE_KEY_ORG, orgToActivate.id);
+
+          // Load workspaces for this org
+          const ws = await fetchWorkspaces(orgToActivate.id);
+          setWorkspaces(ws);
+
+          // Priority for workspace: 1) preferWorkspaceSlug, 2) localStorage, 3) first
+          let wsToActivate: Workspace | null = null;
+          if (preferWorkspaceSlug) {
+            wsToActivate = ws.find((w) => w.slug === preferWorkspaceSlug) || null;
+          }
+          if (!wsToActivate) {
+            const savedWorkspaceId = localStorage.getItem(STORAGE_KEY_WORKSPACE);
+            wsToActivate = ws.find((w) => w.id === savedWorkspaceId) || ws[0] || null;
+          }
+
+          setActiveWorkspaceState(wsToActivate);
+          if (wsToActivate) {
+            localStorage.setItem(STORAGE_KEY_WORKSPACE, wsToActivate.id);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to load organizations:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [isAuthenticated],
+  );
 
   useEffect(() => {
-    loadOrganizations();
+    // Parse URL to get initial org/workspace slugs
+    const path = window.location.pathname;
+    const knownRoutes = ["/callback", "/settings", "/invites", "/organizations/new"];
+    let orgSlug: string | undefined;
+    let workspaceSlug: string | undefined;
+
+    if (!knownRoutes.some((r) => path.startsWith(r))) {
+      const parts = path.split("/").filter(Boolean);
+      orgSlug = parts[0] || undefined;
+      workspaceSlug = parts[1] || undefined;
+    }
+
+    loadOrganizations(orgSlug, workspaceSlug);
   }, [loadOrganizations, user]);
 
   // Set active organization
@@ -133,6 +171,15 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     }
   }, []);
 
+  // Get URL path for current org/workspace
+  const getWorkspacePath = useCallback(() => {
+    if (!activeOrg) return "/";
+    if (!activeWorkspace || activeWorkspace.slug === "default") {
+      return `/${activeOrg.slug}`;
+    }
+    return `/${activeOrg.slug}/${activeWorkspace.slug}`;
+  }, [activeOrg, activeWorkspace]);
+
   const value: WorkspaceContextType = {
     organizations,
     activeOrg,
@@ -143,6 +190,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     isLoading,
     refresh: loadOrganizations,
     activeOrgRole: activeOrg?.role || null,
+    getWorkspacePath,
   };
 
   return (

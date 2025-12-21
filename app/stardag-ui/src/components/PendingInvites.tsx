@@ -73,7 +73,25 @@ export function PendingInvites({ compact = false }: PendingInvitesProps) {
   }
 
   if (invites.length === 0) {
-    return null;
+    return (
+      <div className="text-center py-8">
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">
+          No Pending Invitations
+        </h2>
+        <p className="text-gray-500 dark:text-gray-400 mb-6">
+          You don't have any pending invitations to organizations.
+        </p>
+        <button
+          onClick={() => {
+            window.history.pushState({}, "", "/organizations/new");
+            window.dispatchEvent(new PopStateEvent("popstate"));
+          }}
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          Create an Organization
+        </button>
+      </div>
+    );
   }
 
   if (compact) {
