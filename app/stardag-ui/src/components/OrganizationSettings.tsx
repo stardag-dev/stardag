@@ -14,10 +14,14 @@ import {
   createWorkspace,
   updateWorkspace,
   deleteWorkspace,
+  fetchApiKeys,
+  createApiKey,
+  revokeApiKey,
   type OrganizationDetail,
   type Member,
   type Invite,
   type Workspace,
+  type ApiKey,
 } from "../api/organizations";
 
 interface OrganizationSettingsProps {
@@ -25,7 +29,7 @@ interface OrganizationSettingsProps {
 }
 
 export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) {
-  const { activeOrg, activeOrgRole, refresh } = useWorkspace();
+  const { activeOrg, activeOrgRole, activeWorkspace, refresh } = useWorkspace();
 
   const [organization, setOrganization] = useState<OrganizationDetail | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -50,6 +54,19 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
   const [editingWorkspace, setEditingWorkspace] = useState<string | null>(null);
   const [editWorkspaceName, setEditWorkspaceName] = useState("");
+
+  // API Keys state - keys grouped by workspace
+  const [apiKeysByWorkspace, setApiKeysByWorkspace] = useState<Map<string, ApiKey[]>>(
+    new Map(),
+  );
+  const [newKeyWorkspace, setNewKeyWorkspace] = useState<string>("");
+  const [newKeyName, setNewKeyName] = useState("");
+  const [isCreatingKey, setIsCreatingKey] = useState(false);
+  const [newlyCreatedKey, setNewlyCreatedKey] = useState<string | null>(null);
+  const [newlyCreatedKeyWorkspace, setNewlyCreatedKeyWorkspace] = useState<
+    string | null
+  >(null);
+  const [copiedKey, setCopiedKey] = useState(false);
 
   // Delete confirmation
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -216,6 +233,91 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
       onNavigate("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete organization");
+    }
+  };
+
+  // Initialize default workspace for new key creation
+  useEffect(() => {
+    if (workspacesList.length > 0 && !newKeyWorkspace) {
+      setNewKeyWorkspace(activeWorkspace?.id || workspacesList[0].id);
+    }
+  }, [workspacesList, activeWorkspace, newKeyWorkspace]);
+
+  // Load API keys for all workspaces
+  useEffect(() => {
+    async function loadAllApiKeys() {
+      if (!activeOrg || !isAdmin || workspacesList.length === 0) return;
+      try {
+        const keysByWs = new Map<string, ApiKey[]>();
+        await Promise.all(
+          workspacesList.map(async (ws) => {
+            const keys = await fetchApiKeys(activeOrg.id, ws.id);
+            keysByWs.set(ws.id, keys);
+          }),
+        );
+        setApiKeysByWorkspace(keysByWs);
+      } catch (err) {
+        console.error("Failed to load API keys:", err);
+      }
+    }
+    loadAllApiKeys();
+  }, [activeOrg, workspacesList, isAdmin]);
+
+  const handleCreateApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrg || !newKeyWorkspace || !newKeyName) return;
+
+    setIsCreatingKey(true);
+    try {
+      const result = await createApiKey(activeOrg.id, newKeyWorkspace, newKeyName);
+      // Add the new key to the appropriate workspace's list
+      setApiKeysByWorkspace((prev) => {
+        const newMap = new Map(prev);
+        const existingKeys = newMap.get(newKeyWorkspace) || [];
+        newMap.set(newKeyWorkspace, [result, ...existingKeys]);
+        return newMap;
+      });
+      setNewKeyName("");
+      setNewlyCreatedKey(result.key);
+      setNewlyCreatedKeyWorkspace(newKeyWorkspace);
+      setCopiedKey(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create API key");
+    } finally {
+      setIsCreatingKey(false);
+    }
+  };
+
+  const handleRevokeApiKey = async (workspaceId: string, keyId: string) => {
+    if (!activeOrg) return;
+    if (
+      !confirm("Are you sure you want to revoke this API key? This cannot be undone.")
+    )
+      return;
+
+    try {
+      await revokeApiKey(activeOrg.id, workspaceId, keyId);
+      setApiKeysByWorkspace((prev) => {
+        const newMap = new Map(prev);
+        const existingKeys = newMap.get(workspaceId) || [];
+        newMap.set(
+          workspaceId,
+          existingKeys.filter((k) => k.id !== keyId),
+        );
+        return newMap;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to revoke API key");
+    }
+  };
+
+  const handleCopyKey = async () => {
+    if (!newlyCreatedKey) return;
+    try {
+      await navigator.clipboard.writeText(newlyCreatedKey);
+      setCopiedKey(true);
+    } catch (err) {
+      console.error("Failed to copy:", err);
     }
   };
 
@@ -531,6 +633,153 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
             ))}
           </div>
         </section>
+
+        {/* API Keys */}
+        {isAdmin && (
+          <section className="mb-8 rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
+            <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
+              API Keys
+            </h2>
+            <p className="mb-4 text-sm text-gray-600 dark:text-gray-400">
+              API keys are used by the SDK to authenticate with the API. Each key is
+              scoped to a specific workspace.
+            </p>
+
+            {/* Create key form */}
+            <form
+              onSubmit={handleCreateApiKey}
+              className="mb-6 flex flex-wrap gap-2 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+            >
+              <select
+                value={newKeyWorkspace}
+                onChange={(e) => setNewKeyWorkspace(e.target.value)}
+                className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
+              >
+                {workspacesList.map((ws) => (
+                  <option key={ws.id} value={ws.id}>
+                    {ws.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                placeholder="Key name (e.g., 'CI/CD Pipeline')"
+                required
+                className="flex-1 min-w-48 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
+              />
+              <button
+                type="submit"
+                disabled={isCreatingKey}
+                className="rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {isCreatingKey ? "Creating..." : "Create Key"}
+              </button>
+            </form>
+
+            {/* Newly created key modal */}
+            {newlyCreatedKey && (
+              <div className="mb-6 rounded-md bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 p-4">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <h3 className="text-sm font-medium text-green-800 dark:text-green-200">
+                      API Key Created for{" "}
+                      {workspacesList.find((ws) => ws.id === newlyCreatedKeyWorkspace)
+                        ?.name || "workspace"}
+                    </h3>
+                    <p className="mt-1 text-sm text-green-700 dark:text-green-300">
+                      Copy this key now. You won't be able to see it again!
+                    </p>
+                    <div className="mt-2 flex items-center gap-2">
+                      <code className="flex-1 rounded bg-green-100 dark:bg-green-800 px-2 py-1 text-sm font-mono text-green-900 dark:text-green-100 break-all">
+                        {newlyCreatedKey}
+                      </code>
+                      <button
+                        onClick={handleCopyKey}
+                        className="rounded-md bg-green-600 px-3 py-1 text-white hover:bg-green-700"
+                      >
+                        {copiedKey ? "Copied!" : "Copy"}
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setNewlyCreatedKey(null);
+                      setNewlyCreatedKeyWorkspace(null);
+                    }}
+                    className="ml-2 text-green-600 hover:text-green-800 dark:text-green-400"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Keys grouped by workspace */}
+            <div className="space-y-6">
+              {workspacesList.map((ws) => {
+                const keys = apiKeysByWorkspace.get(ws.id) || [];
+                return (
+                  <div key={ws.id}>
+                    {/* Workspace header */}
+                    <div className="flex items-center gap-2 mb-3">
+                      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
+                        {ws.name}
+                      </h3>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        /{ws.slug}
+                      </span>
+                      <div className="flex-1 border-t border-gray-200 dark:border-gray-700 ml-2" />
+                    </div>
+
+                    {/* Keys for this workspace */}
+                    {keys.length === 0 ? (
+                      <p className="py-2 text-sm text-gray-500 dark:text-gray-400 italic">
+                        No API keys for this workspace
+                      </p>
+                    ) : (
+                      <div className="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-md">
+                        {keys.map((key) => (
+                          <div
+                            key={key.id}
+                            className="flex items-center justify-between py-3 px-4"
+                          >
+                            <div>
+                              <div className="font-medium text-gray-900 dark:text-gray-100">
+                                {key.name}
+                              </div>
+                              <div className="text-sm text-gray-500 dark:text-gray-400">
+                                <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">
+                                  sk_{key.key_prefix}...
+                                </code>
+                                {key.last_used_at && (
+                                  <span className="ml-2">
+                                    Last used:{" "}
+                                    {new Date(key.last_used_at).toLocaleDateString()}
+                                  </span>
+                                )}
+                                {!key.last_used_at && (
+                                  <span className="ml-2">Never used</span>
+                                )}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => handleRevokeApiKey(ws.id, key.id)}
+                              className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
+                            >
+                              Revoke
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* Danger Zone */}
         {isOwner && (

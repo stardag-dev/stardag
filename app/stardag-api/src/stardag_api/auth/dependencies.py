@@ -1,9 +1,10 @@
 """FastAPI dependencies for authentication."""
 
 import logging
+from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +15,16 @@ from stardag_api.auth.jwt import (
     get_jwt_validator,
 )
 from stardag_api.db import get_db
-from stardag_api.models import Invite, Organization, OrganizationMember, User, Workspace
+from stardag_api.models import (
+    ApiKey,
+    Invite,
+    Organization,
+    OrganizationMember,
+    User,
+    Workspace,
+)
 from stardag_api.models.enums import InviteStatus, OrganizationRole
+from stardag_api.services import api_keys as api_key_service
 
 logger = logging.getLogger(__name__)
 
@@ -247,3 +256,142 @@ async def verify_workspace_access(
         )
 
     return workspace
+
+
+# --- API Key Authentication ---
+
+
+@dataclass
+class ApiKeyAuth:
+    """Authentication context from an API key."""
+
+    api_key: ApiKey
+    workspace: Workspace
+
+
+async def get_api_key_auth(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> ApiKeyAuth | None:
+    """Get and validate API key if present.
+
+    Returns ApiKeyAuth if a valid API key is provided, None otherwise.
+    Raises HTTPException if an API key is provided but invalid.
+    """
+    if x_api_key is None:
+        return None
+
+    # Validate the API key
+    api_key = await api_key_service.validate_api_key(db, x_api_key)
+    if api_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
+
+    # Get the workspace for the API key
+    workspace = await db.get(Workspace, api_key.workspace_id)
+    if workspace is None:
+        # This shouldn't happen, but handle it gracefully
+        logger.error(
+            "API key %s has invalid workspace_id %s", api_key.id, api_key.workspace_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="API key configuration error",
+        )
+
+    return ApiKeyAuth(api_key=api_key, workspace=workspace)
+
+
+async def require_api_key_auth(
+    api_key_auth: Annotated[ApiKeyAuth | None, Depends(get_api_key_auth)],
+) -> ApiKeyAuth:
+    """Require API key authentication.
+
+    Raises HTTPException if no API key is provided.
+    """
+    if api_key_auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API key required",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+    return api_key_auth
+
+
+@dataclass
+class SdkAuth:
+    """Authentication context for SDK endpoints.
+
+    Supports either API key or JWT authentication.
+    """
+
+    workspace: Workspace
+    api_key: ApiKey | None = None
+    user: User | None = None
+
+    @property
+    def workspace_id(self) -> str:
+        """Get the workspace ID for convenience."""
+        return self.workspace.id
+
+
+async def get_sdk_auth(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    api_key_auth: Annotated[ApiKeyAuth | None, Depends(get_api_key_auth)],
+    token: Annotated[TokenPayload | None, Depends(get_optional_token)],
+    workspace_id: str | None = None,
+) -> SdkAuth | None:
+    """Get SDK authentication from either API key or JWT token.
+
+    Priority:
+    1. API key (if X-API-Key header present)
+    2. JWT token + workspace_id parameter
+
+    Returns SdkAuth if authenticated, None if no authentication provided.
+    Raises HTTPException if authentication is invalid.
+    """
+    # API key takes priority
+    if api_key_auth is not None:
+        return SdkAuth(
+            workspace=api_key_auth.workspace,
+            api_key=api_key_auth.api_key,
+        )
+
+    # Fall back to JWT token
+    if token is not None:
+        user = await get_or_create_user(db, token)
+
+        # JWT requires workspace_id parameter
+        if workspace_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="workspace_id is required when using JWT authentication",
+            )
+
+        # Verify user has access to workspace
+        workspace = await verify_workspace_access(db, user, workspace_id)
+
+        return SdkAuth(
+            workspace=workspace,
+            user=user,
+        )
+
+    return None
+
+
+async def require_sdk_auth(
+    sdk_auth: Annotated[SdkAuth | None, Depends(get_sdk_auth)],
+) -> SdkAuth:
+    """Require SDK authentication (either API key or JWT).
+
+    Raises HTTPException if no authentication is provided.
+    """
+    if sdk_auth is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Provide X-API-Key header or Bearer token.",
+            headers={"WWW-Authenticate": 'Bearer, ApiKey realm="sdk"'},
+        )
+    return sdk_auth

@@ -429,29 +429,40 @@ The implementation is split into 6 phases, each building on the previous.
 
 **Tasks:**
 
-- [ ] **6.1** Create `ApiKeyService`:
-  - Generate API key (returns plaintext once, stores hash)
+- [x] **6.1** Create `ApiKeyService` (`services/api_keys.py`):
+  - Generate API key with bcrypt hashing (returns plaintext once, stores hash)
   - List keys for workspace (show prefix, name, created_at, last_used)
-  - Revoke key
-- [ ] **6.2** Add API key endpoints:
-  - `POST /api/v1/ui/workspaces/{workspace_id}/api-keys` - create key
-  - `GET /api/v1/ui/workspaces/{workspace_id}/api-keys` - list keys
-  - `DELETE /api/v1/ui/workspaces/{workspace_id}/api-keys/{key_id}` - revoke key
-- [ ] **6.3** Implement API key auth middleware:
+  - Revoke key (sets `revoked_at` timestamp)
+  - Validate API key by prefix lookup + hash verification
+- [x] **6.2** Add API key endpoints in `routes/organizations.py`:
+  - `POST /api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/api-keys` - create key (admin+)
+  - `GET /api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/api-keys` - list keys
+  - `DELETE /api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/api-keys/{key_id}` - revoke key (admin+)
+- [x] **6.3** Implement API key auth middleware (`auth/dependencies.py`):
   - Check `X-API-Key` header
-  - Validate against stored hash
-  - Update `last_used_at`
-  - Return workspace context (not user context)
-- [ ] **6.4** Update SDK endpoints to accept API key OR JWT:
-  - If `X-API-Key` present, use API key auth
-  - If `Authorization: Bearer` present, use JWT auth
-  - Require at least one
-- [ ] **6.5** Create API key management UI:
+  - Validate against stored hash via `api_key_service.validate_api_key()`
+  - Update `last_used_at` on successful validation
+  - Return `ApiKeyAuth` context with workspace (not user context)
+  - Added `SdkAuth` dataclass for unified SDK authentication context
+- [x] **6.4** Update SDK endpoints to accept API key OR JWT (`routes/builds.py`):
+  - If `X-API-Key` present, use API key auth (workspace from key)
+  - If `Authorization: Bearer` present, use JWT auth (requires workspace_id param)
+  - All SDK write endpoints now require authentication:
+    - `POST /builds` - create build (auth required)
+    - `POST /builds/{id}/complete` - mark complete (auth required, verifies workspace)
+    - `POST /builds/{id}/fail` - mark failed (auth required, verifies workspace)
+    - `POST /builds/{id}/tasks` - register task (auth required, verifies workspace)
+    - `POST /builds/{id}/tasks/{task_id}/start` - start task (auth required, verifies workspace)
+    - `POST /builds/{id}/tasks/{task_id}/complete` - complete task (auth required, verifies workspace)
+    - `POST /builds/{id}/tasks/{task_id}/fail` - fail task (auth required, verifies workspace)
+- [x] **6.5** Create API key management UI (`components/OrganizationSettings.tsx`):
+  - Added API Keys section in organization settings (admin+ only)
+  - Workspace selector to view/manage keys per workspace
   - List existing keys (prefix, name, last used)
-  - "Create new key" button with name input
-  - Show generated key ONCE in modal (copy button)
-  - Revoke button with confirmation
-  - Only visible to admin+ users
+  - Create key form with name input
+  - Show generated key ONCE in green highlighted modal with copy button
+  - Revoke button with confirmation dialog
+  - Added API functions in `api/organizations.ts` (fetchApiKeys, createApiKey, revokeApiKey)
 - [ ] **6.6** Implement SDK CLI authentication (lower priority):
   - Device authorization flow or localhost callback flow
   - CLI command: `stardag auth login`
@@ -548,12 +559,21 @@ This ensures `docker-compose up` provides a working local environment.
   - [x] Created pending invites page
   - [x] Added workspace authorization to builds API (read endpoints)
   - [x] Fixed tasks API to use authenticated fetch
-- [ ] Phase 6: API Keys & SDK Authentication
+- [x] Phase 6: API Keys & SDK Authentication
+  - [x] Created `ApiKeyService` in `services/api_keys.py`
+  - [x] Added API key management endpoints in `routes/organizations.py`
+  - [x] Implemented API key auth middleware in `auth/dependencies.py`
+  - [x] Updated SDK endpoints to accept API key OR JWT in `routes/builds.py`
+  - [x] Created API key management UI in `OrganizationSettings.tsx`
+  - [ ] SDK CLI authentication (6.6) - lower priority, deferred
+  - [ ] SDK Registry client credentials (6.7) - lower priority, deferred
+  - [ ] Tests for API key auth (6.8) - to be added
 
 ## Notes
 
 - **Testing strategy:** Each phase should include unit tests. Integration tests with Keycloak can use testcontainers or a dedicated test realm.
 - **Migration path for production:** When deploying to AWS, swap Keycloak for Cognito by changing env vars only.
+- **Legacy data migration:** Builds created before multi-tenancy have `workspace_id: 'default'` (string) instead of proper UUID. These need manual migration to associate with real workspaces.
 - **Future considerations:**
   - Workspace-level permissions (read-only members)
   - Audit logging for compliance

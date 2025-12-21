@@ -6,8 +6,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.auth.dependencies import (
+from stardag_api.auth import (
+    SdkAuth,
     get_current_user,
+    require_sdk_auth,
     verify_workspace_access,
 )
 from stardag_api.db import get_db
@@ -42,19 +44,24 @@ router = APIRouter(prefix="/builds", tags=["builds"])
 
 
 @router.post("", response_model=BuildResponse, status_code=201)
-async def create_build(build: BuildCreate, db: AsyncSession = Depends(get_db)):
+async def create_build(
+    build: BuildCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
     """Create a new build.
 
     This is the entry point for SDK - creates a new build and returns its ID.
-    Note: user_id is optional until auth is implemented. In Phase 2+, the user
-    will be determined from the JWT token.
+    Requires API key authentication (recommended) or JWT token with workspace_id.
+    The workspace is determined from the authentication context.
     """
     # Generate memorable slug
     name = generate_build_slug()
 
+    # Use workspace from auth context (API key determines workspace)
     db_build = Build(
-        workspace_id=build.workspace_id,
-        user_id=build.user_id,  # Optional, will be set from auth token in Phase 2
+        workspace_id=auth.workspace_id,
+        user_id=auth.user.id if auth.user else None,
         name=name,
         description=build.description,
         commit_hash=build.commit_hash,
@@ -181,11 +188,21 @@ async def get_build(
 
 
 @router.post("/{build_id}/complete", response_model=BuildResponse)
-async def complete_build(build_id: str, db: AsyncSession = Depends(get_db)):
+async def complete_build(
+    build_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
     """Mark a build as completed."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
 
     event = Event(
         build_id=build_id,
@@ -215,13 +232,20 @@ async def complete_build(build_id: str, db: AsyncSession = Depends(get_db)):
 @router.post("/{build_id}/fail", response_model=BuildResponse)
 async def fail_build(
     build_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     error_message: str | None = None,
-    db: AsyncSession = Depends(get_db),
 ):
     """Mark a build as failed."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
 
     event = Event(
         build_id=build_id,
@@ -254,7 +278,10 @@ async def fail_build(
 
 @router.post("/{build_id}/tasks", response_model=TaskResponse, status_code=201)
 async def register_task(
-    build_id: str, task: TaskCreate, db: AsyncSession = Depends(get_db)
+    build_id: str,
+    task: TaskCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
     """Register a task to a build.
 
@@ -264,6 +291,12 @@ async def register_task(
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
 
     # Check if task already exists in workspace
     result = await db.execute(
@@ -333,11 +366,22 @@ async def register_task(
 
 
 @router.post("/{build_id}/tasks/{task_id}/start", response_model=TaskWithStatusResponse)
-async def start_task(build_id: str, task_id: str, db: AsyncSession = Depends(get_db)):
+async def start_task(
+    build_id: str,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
     """Mark a task as started within a build."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
 
     # Find task by task_id (hash) in workspace
     result = await db.execute(
@@ -383,12 +427,21 @@ async def start_task(build_id: str, task_id: str, db: AsyncSession = Depends(get
     "/{build_id}/tasks/{task_id}/complete", response_model=TaskWithStatusResponse
 )
 async def complete_task(
-    build_id: str, task_id: str, db: AsyncSession = Depends(get_db)
+    build_id: str,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
     """Mark a task as completed within a build."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
 
     result = await db.execute(
         select(Task)
@@ -433,13 +486,20 @@ async def complete_task(
 async def fail_task(
     build_id: str,
     task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     error_message: str | None = None,
-    db: AsyncSession = Depends(get_db),
 ):
     """Mark a task as failed within a build."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
 
     result = await db.execute(
         select(Task)
