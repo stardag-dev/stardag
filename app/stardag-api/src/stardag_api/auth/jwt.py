@@ -80,12 +80,12 @@ class JWTValidator:
         self,
         jwks_url: str,
         allowed_issuers: list[str],
-        audience: str,
+        audiences: list[str],
         cache_ttl: int = 300,
     ):
         self.jwks_url = jwks_url
         self.allowed_issuers = allowed_issuers
-        self.audience = audience
+        self.audiences = audiences
         self.cache_ttl = cache_ttl
         self._jwks: dict[str, Any] | None = None
         self._jwks_fetched_at: float = 0
@@ -154,18 +154,31 @@ class JWTValidator:
 
             # Decode and validate the token
             # Note: python-jose will validate exp, iat, and signature
+            # We handle audience verification manually to support multiple audiences
             payload = jwt.decode(
                 token,
                 key,
                 algorithms=["RS256"],
-                audience=self.audience,
                 issuer=self.allowed_issuers,
                 options={
-                    "verify_aud": True,
+                    "verify_aud": False,  # We verify manually below
                     "verify_iss": True,
                     "verify_exp": True,
                 },
             )
+
+            # Manually verify audience
+            token_aud = payload.get("aud")
+            if token_aud:
+                # aud can be a string or list
+                token_audiences = (
+                    [token_aud] if isinstance(token_aud, str) else token_aud
+                )
+                if not any(aud in self.audiences for aud in token_audiences):
+                    raise AuthenticationError(
+                        f"Invalid audience. Expected one of {self.audiences}, "
+                        f"got {token_audiences}"
+                    )
 
             return TokenPayload.from_dict(payload)
 
@@ -193,7 +206,7 @@ def get_jwt_validator() -> JWTValidator:
         _validator = JWTValidator(
             jwks_url=oidc_settings.effective_jwks_url,
             allowed_issuers=oidc_settings.allowed_issuers,
-            audience=oidc_settings.audience,
+            audiences=oidc_settings.allowed_audiences,
             cache_ttl=oidc_settings.jwks_cache_ttl,
         )
     return _validator

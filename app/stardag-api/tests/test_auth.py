@@ -169,7 +169,7 @@ async def test_jwt_validator_caches_jwks():
     validator = JWTValidator(
         jwks_url="https://example.com/.well-known/jwks.json",
         allowed_issuers=["https://example.com"],
-        audience="stardag-ui",
+        audiences=["stardag-ui"],
         cache_ttl=300,
     )
 
@@ -195,7 +195,7 @@ async def test_jwt_validator_force_refresh():
     validator = JWTValidator(
         jwks_url="https://example.com/.well-known/jwks.json",
         allowed_issuers=["https://example.com"],
-        audience="stardag-ui",
+        audiences=["stardag-ui"],
         cache_ttl=300,
     )
 
@@ -218,7 +218,7 @@ async def test_jwt_validator_cache_expiry():
     validator = JWTValidator(
         jwks_url="https://example.com/.well-known/jwks.json",
         allowed_issuers=["https://example.com"],
-        audience="stardag-ui",
+        audiences=["stardag-ui"],
         cache_ttl=1,  # 1 second TTL
     )
 
@@ -243,7 +243,7 @@ async def test_jwt_validator_missing_kid():
     validator = JWTValidator(
         jwks_url="https://example.com/.well-known/jwks.json",
         allowed_issuers=["https://example.com"],
-        audience="stardag-ui",
+        audiences=["stardag-ui"],
     )
 
     # Token without kid in header (base64 encoded {"alg": "RS256", "typ": "JWT"})

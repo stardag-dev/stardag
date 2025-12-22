@@ -1,9 +1,15 @@
 """Stardag CLI - Command line interface for Stardag.
 
 Usage:
-    stardag auth login --api-key sk_xxx
+    stardag auth login
     stardag auth status
     stardag auth logout
+
+    stardag config get
+    stardag config set organization <org-id>
+    stardag config set workspace <workspace-id>
+    stardag config list organizations
+    stardag config list workspaces
 """
 
 try:
@@ -13,7 +19,7 @@ except ImportError:
         "Typer is required for the CLI. Install with: pip install stardag[cli]"
     )
 
-from stardag.cli import auth
+from stardag.cli import auth, config
 
 # Main CLI app
 app = typer.Typer(
@@ -24,6 +30,7 @@ app = typer.Typer(
 
 # Add subcommands
 app.add_typer(auth.app, name="auth")
+app.add_typer(config.app, name="config")
 
 
 @app.command()
@@ -44,6 +51,7 @@ def main() -> None:
     """Stardag CLI - Declarative DAG framework for Python.
 
     Use 'stardag auth login' to authenticate with the Stardag API.
+    Use 'stardag config' commands to manage your active organization and workspace.
     """
     pass
 

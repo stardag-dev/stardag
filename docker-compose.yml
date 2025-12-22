@@ -64,7 +64,7 @@ services:
       STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag_service:stardag_service@db:5432/stardag
       # OIDC configuration for JWT validation
       OIDC_ISSUER_URL: http://keycloak:8080/realms/stardag
-      OIDC_AUDIENCE: stardag-ui
+      OIDC_AUDIENCE: stardag-ui,stardag-sdk
       # External issuer URL (for token validation from browser)
       OIDC_EXTERNAL_ISSUER_URL: http://localhost:8080/realms/stardag
     ports:
