@@ -82,16 +82,19 @@ class NoOpRegistry(RegistryABC):
 
 
 def init_registry():
-    # Try API registry first (if configured)
-    from stardag.build.api_registry import APIRegistry, APIRegistryConfig
+    # Try API registry first (if configured via central config)
+    from stardag.build.api_registry import APIRegistry
+    from stardag.config import config_provider
 
-    api_config = APIRegistryConfig()
-    if api_config.url:
-        return APIRegistry(
-            api_config.url,
-            timeout=api_config.timeout,
-            workspace_id=api_config.workspace_id,
-        )
+    config = config_provider.get()
+
+    # Use API registry if we have authentication or explicit API URL set
+    if (
+        config.api_key
+        or config.access_token
+        or config.api.url != "http://localhost:8000"
+    ):
+        return APIRegistry()
 
     # Fall back to filesystem registry
     fs_registry_config = FileSystemRegistryConfig()

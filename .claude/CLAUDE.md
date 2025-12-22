@@ -57,7 +57,7 @@ Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/READ
   - [mvp_cleanup.md](tasks/registry-service/mvp_cleanup.md) - Post-MVP cleanup (completed)
   - [db-schemas.md](tasks/registry-service/db-schemas.md) - Update schemas (~completed)
   - [auth](tasks/registry-service/auth.md) - Production grad auth and org/user/workspace management (~completed)
-  - [config-and-auth-cleanup]
+  - [config-and-auth-cleanup](tasks/registry-service/config-and-auth-cleanup.md) (active)
 
 ## Code Style
 

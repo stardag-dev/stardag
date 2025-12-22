@@ -1,18 +1,11 @@
 import json
 import typing
-from pathlib import Path
-
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag._base import Task
+from stardag.config import DEFAULT_TARGET_ROOT_KEY, config_provider
 from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
 from stardag.target._base import RemoteFileSystemTarget
 from stardag.utils.resource_provider import resource_provider
-
-DEFAULT_TARGET_ROOT_KEY = "default"
-DEFAULT_TARGET_ROOT = str(
-    Path("~/.stardag/target-roots/default").expanduser().absolute()
-)
 
 
 # A class or callable that takes a (fully qualifed/"absolute") path (/uri) and returns
@@ -51,57 +44,22 @@ def get_default_prefix_to_target_prototype() -> dict[str, TargetPrototype]:
     return prefix_to_target_prototype
 
 
-class TargetFactoryConfig(BaseSettings):
-    """Configuration of the target factory.
-
-    Examples:
-
-    Setting only the default target root:
-    ```
-    export STARDAG_TARGET_ROOT__DEFAULT=/path/to/default-root
-    ```
-
-    Setting multiple target roots using `__` delimiter:
-    ```
-    export STARDAG_TARGET_ROOT__DEFAULT=/path/to/default-root
-    export STARDAG_TARGET_ROOT__OTHER=/path/to/other-root
-    ```
-
-    Setting multiple target roots using JSON-notation:
-    ```
-    export STARDAG_TARGET_ROOT='{"default": "/...", "other": "/..."}'
-    ```
-    """
-
-    root: dict[str, str] = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
-
-    model_config = SettingsConfigDict(
-        env_prefix="stardag_target_",
-        env_nested_delimiter="__",
-        nested_model_default_partial_update=True,
-    )
-
-    @property
-    def target_roots(self) -> dict[str, str]:
-        return self.root
-
-
 class TargetFactory:
     def __init__(
         self,
-        target_roots: dict[str, str],
+        target_roots: dict[str, str] | None = None,
         prefixt_to_target_prototype: PrefixToTargetPrototype | None = None,
     ) -> None:
+        # If no target_roots provided, get from central config
+        if target_roots is None:
+            target_roots = config_provider.get().target.roots
+
         self.target_roots = {
             key: value.removesuffix("/") + "/" for key, value in target_roots.items()
         }
         self.prefixt_to_target_prototype = (
             prefixt_to_target_prototype or get_default_prefix_to_target_prototype()
         )
-
-    @classmethod
-    def from_config(cls, config: TargetFactoryConfig) -> "TargetFactory":
-        return cls(target_roots=config.target_roots)
 
     def get_target(
         self,
@@ -163,10 +121,10 @@ class TargetFactory:
         if target_root is None:
             example_json = json.dumps({target_root_key: "...", "default": "..."})
             raise ValueError(
-                f"No target root is configured for keyL '{target_root_key}'. "
-                f"Available keys are: {self.target_roots.keys()}. Set the missing "
-                "target root for example using the envrionent variable: "
-                f"`STARDAG_TARGET_ROOT='{example_json}'`."
+                f"No target root is configured for key: '{target_root_key}'. "
+                f"Available keys are: {list(self.target_roots.keys())}. Set the missing "
+                "target root in your profile config or via environment variable: "
+                f"`STARDAG_TARGET_ROOTS='{example_json}'`."
             )
 
         return f"{target_root}{relpath}"
@@ -177,7 +135,7 @@ class TargetFactory:
                 return target_prototype
         raise ValueError(
             f"URI {path} does not match any of the configured prefixes: "
-            f"{self.prefixt_to_target_prototype.keys()}."
+            f"{list(self.prefixt_to_target_prototype.keys())}."
         )
 
     def _is_full_path(self, path: str) -> bool:
@@ -190,7 +148,7 @@ class TargetFactory:
 
 target_factory_provider = resource_provider(
     type_=TargetFactory,
-    default_factory=lambda: TargetFactory.from_config(TargetFactoryConfig()),
+    default_factory=TargetFactory,
 )
 
 
