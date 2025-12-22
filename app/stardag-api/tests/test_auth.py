@@ -35,6 +35,39 @@ def test_token_payload_from_dict():
     assert token.name is None
 
 
+def test_token_payload_from_dict_missing_sub():
+    """Test TokenPayload.from_dict raises error for missing sub claim."""
+    payload = {
+        "iss": "https://example.com",
+        "exp": 1234567890,
+    }
+    with pytest.raises(AuthenticationError) as exc_info:
+        TokenPayload.from_dict(payload)
+    assert "sub" in str(exc_info.value).lower()
+
+
+def test_token_payload_from_dict_missing_iss():
+    """Test TokenPayload.from_dict raises error for missing iss claim."""
+    payload = {
+        "sub": "user-123",
+        "exp": 1234567890,
+    }
+    with pytest.raises(AuthenticationError) as exc_info:
+        TokenPayload.from_dict(payload)
+    assert "iss" in str(exc_info.value).lower()
+
+
+def test_token_payload_from_dict_missing_exp():
+    """Test TokenPayload.from_dict raises error for missing exp claim."""
+    payload = {
+        "sub": "user-123",
+        "iss": "https://example.com",
+    }
+    with pytest.raises(AuthenticationError) as exc_info:
+        TokenPayload.from_dict(payload)
+    assert "exp" in str(exc_info.value).lower()
+
+
 def test_token_payload_from_dict_full_claims():
     """Test TokenPayload.from_dict with all claims."""
     payload = {

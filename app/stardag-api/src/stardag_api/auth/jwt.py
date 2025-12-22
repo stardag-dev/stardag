@@ -39,7 +39,19 @@ class TokenPayload:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TokenPayload":
-        """Create TokenPayload from decoded JWT payload."""
+        """Create TokenPayload from decoded JWT payload.
+
+        Raises:
+            AuthenticationError: If required claims (sub, iss, exp) are missing.
+        """
+        # Validate required claims
+        if "sub" not in payload:
+            raise AuthenticationError("Token missing required 'sub' (subject) claim")
+        if "iss" not in payload:
+            raise AuthenticationError("Token missing required 'iss' (issuer) claim")
+        if "exp" not in payload:
+            raise AuthenticationError("Token missing required 'exp' (expiration) claim")
+
         return cls(
             sub=payload["sub"],
             email=payload.get("email"),

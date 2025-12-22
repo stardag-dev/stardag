@@ -16,6 +16,13 @@ from stardag._parameter import IDHasher, IDHasherABC, IDHashInclude, IDHashInclu
 from stardag._task_parameter import TaskLoads, TaskParam, TaskSet
 from stardag.build.registry import registry_provider
 from stardag.build.sequential import build
+from stardag.exceptions import (
+    APIError,
+    AuthenticationError,
+    AuthorizationError,
+    StardagError,
+    TokenExpiredError,
+)
 from stardag.target import (
     DirectoryTarget,
     FileSystemTarget,
@@ -33,6 +40,9 @@ tasks_type_adapter = TypeAdapter(list[TaskParam[Task]])
 
 __all__ = [
     "__version__",
+    "APIError",
+    "AuthenticationError",
+    "AuthorizationError",
     "auto_namespace",
     "AutoTask",
     "build",
@@ -41,9 +51,14 @@ __all__ = [
     "FileSystemTarget",
     "get_directory_target",
     "get_target",
+    "IDHasher",
+    "IDHashInclude",
+    "IDHasherABC",
+    "IDHashIncludeABC",
     "LocalTarget",
     "namespace",
     "registry_provider",
+    "StardagError",
     "Task",
     "TaskDeps",
     "TaskIDRef",
@@ -55,8 +70,5 @@ __all__ = [
     "task",
     "task_type_adapter",
     "tasks_type_adapter",
-    "IDHasher",
-    "IDHashInclude",
-    "IDHasherABC",
-    "IDHashIncludeABC",
+    "TokenExpiredError",
 ]
