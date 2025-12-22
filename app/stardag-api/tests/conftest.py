@@ -101,7 +101,59 @@ async def async_session(async_engine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest.fixture
 async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
-    """Create a test client with isolated database."""
+    """Create a test client with isolated database and mocked auth."""
+    from stardag_api.auth import (
+        SdkAuth,
+        get_current_user,
+        require_sdk_auth,
+    )
+    from stardag_api.models import User, Workspace
+
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with async_session_maker() as session:
+            yield session
+
+    # Create mock auth objects
+    mock_workspace = Workspace(
+        id="default",
+        organization_id="default",
+        name="Default Workspace",
+        slug="default",
+    )
+    mock_user = User(
+        id="default",
+        external_id="default-local-user",
+        email="default@localhost",
+        display_name="Default User",
+    )
+    mock_sdk_auth = SdkAuth(workspace=mock_workspace, user=mock_user)
+
+    async def override_require_sdk_auth() -> SdkAuth:
+        return mock_sdk_auth
+
+    async def override_get_current_user() -> User:
+        return mock_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_sdk_auth] = override_require_sdk_auth
+    app.dependency_overrides[get_current_user] = override_get_current_user
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        yield ac
+
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def unauthenticated_client(async_engine) -> AsyncGenerator[AsyncClient, None]:
+    """Create a test client without mocked authentication.
+
+    Use this for tests that verify authentication is required.
+    """
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
     async def override_get_db() -> AsyncGenerator[AsyncSession, None]:

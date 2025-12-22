@@ -62,7 +62,9 @@ async def test_list_builds(client: AsyncClient):
     for _ in range(3):
         await client.post("/api/v1/builds", json={})
 
-    response = await client.get("/api/v1/builds", params={"page_size": 2})
+    response = await client.get(
+        "/api/v1/builds", params={"workspace_id": "default", "page_size": 2}
+    )
     assert response.status_code == 200
     data = response.json()
     assert len(data["builds"]) == 2
