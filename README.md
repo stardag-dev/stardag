@@ -80,6 +80,61 @@ to watch you ML-DAG materialize
 
 See the [`USER_GUIDE.md`](./USER_GUIDE.md) for further details.
 
+## Using the Stardag API Service
+
+Stardag includes an optional API service for tracking task builds and monitoring progress. The SDK can register tasks with the API service for visibility and coordination.
+
+### Authentication
+
+There are two ways to authenticate with the Stardag API:
+
+**Option 1: API Key (recommended for production/CI)**
+
+Set the `STARDAG_API_KEY` environment variable:
+
+```bash
+export STARDAG_API_KEY=sk_your_api_key_here
+```
+
+API keys can be generated from the web UI under Organization Settings > API Keys.
+
+**Option 2: Browser Login (for local development)**
+
+Install the CLI extras and run the login command:
+
+```bash
+pip install stardag[cli]
+stardag auth login
+```
+
+This opens your browser to authenticate with the identity provider. After successful login, credentials are stored in `~/.stardag/credentials.json`.
+
+**CLI Commands:**
+
+```bash
+stardag auth login    # Login via browser
+stardag auth status   # Show authentication status
+stardag auth logout   # Clear stored credentials
+stardag version       # Show SDK version
+```
+
+### Using the API Registry
+
+Once authenticated, configure the SDK to use the API registry:
+
+```python
+import stardag as sd
+from stardag.build.api_registry import APIRegistry
+
+# Create registry (uses credentials from env var or CLI login)
+registry = APIRegistry(api_url="http://localhost:8000")
+
+# Build with registry tracking
+sd.build(my_task, registry=registry)
+```
+
+The registry will automatically track task status and you can monitor builds in the web UI.
+
 ## Why yet another Python DAG-framework?
 
 Luigi is extremely powerful in its simplicity, but outdated. Many modern frameworks makes a point out of being fully flexible and dynamic "just annotate any python function as a task and go..." kind of. `stardag` takes a different approach; the power of a framework is when it is helping the user to code - and even think - in a way that helps you reduce complexity and provides a structured way of doing things...

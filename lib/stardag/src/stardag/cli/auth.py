@@ -1,0 +1,369 @@
+"""Authentication commands for Stardag CLI.
+
+Supports two authentication modes:
+1. API Key (production): Set STARDAG_API_KEY environment variable
+2. Browser login (local dev): OAuth flow with Keycloak/Cognito
+"""
+
+import base64
+import hashlib
+import http.server
+import os
+import secrets
+import socketserver
+import threading
+import time
+import urllib.parse
+import webbrowser
+from dataclasses import dataclass
+
+import typer
+
+from stardag.cli.credentials import (
+    Credentials,
+    clear_credentials,
+    get_credentials_path,
+    load_credentials,
+    save_credentials,
+)
+
+app = typer.Typer(help="Authentication commands for Stardag API")
+
+# Default OIDC configuration for local Keycloak
+DEFAULT_OIDC_ISSUER = "http://localhost:8080/realms/stardag"
+DEFAULT_OIDC_CLIENT_ID = "stardag-sdk"
+DEFAULT_API_URL = "http://localhost:8000"
+CALLBACK_PORT = 8400
+
+
+@dataclass
+class AuthResult:
+    """Result from OAuth callback."""
+
+    code: str | None = None
+    error: str | None = None
+
+
+class OAuthCallbackHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP handler for OAuth callback."""
+
+    auth_result: AuthResult | None = None
+
+    def do_GET(self):
+        """Handle GET request from OAuth redirect."""
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+
+        if "code" in params:
+            OAuthCallbackHandler.auth_result = AuthResult(code=params["code"][0])
+            self._send_success_response()
+        elif "error" in params:
+            error = params.get("error", ["unknown"])[0]
+            error_desc = params.get("error_description", [""])[0]
+            OAuthCallbackHandler.auth_result = AuthResult(
+                error=f"{error}: {error_desc}"
+            )
+            self._send_error_response(error, error_desc)
+        else:
+            OAuthCallbackHandler.auth_result = AuthResult(
+                error="No code or error in callback"
+            )
+            self._send_error_response(
+                "invalid_response", "No authorization code received"
+            )
+
+    def _send_success_response(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        html = """
+        <html>
+        <head><title>Stardag - Login Successful</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>Login Successful!</h1>
+            <p>You can close this window and return to the terminal.</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode())
+
+    def _send_error_response(self, error: str, description: str):
+        self.send_response(400)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        html = f"""
+        <html>
+        <head><title>Stardag - Login Failed</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>Login Failed</h1>
+            <p>Error: {error}</p>
+            <p>{description}</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(html.encode())
+
+    def log_message(self, format, *args):
+        """Suppress default logging."""
+        pass
+
+
+def _generate_pkce() -> tuple[str, str]:
+    """Generate PKCE code verifier and challenge."""
+    verifier = secrets.token_urlsafe(32)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def _exchange_code_for_tokens(
+    token_endpoint: str,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str,
+    client_id: str,
+) -> dict:
+    """Exchange authorization code for tokens."""
+    try:
+        import httpx
+    except ImportError:
+        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
+
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "code_verifier": code_verifier,
+    }
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(token_endpoint, data=data)
+        response.raise_for_status()
+        return response.json()
+
+
+def _get_oidc_config(issuer: str) -> dict:
+    """Fetch OIDC configuration from issuer."""
+    try:
+        import httpx
+    except ImportError:
+        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
+
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(f"{issuer}/.well-known/openid-configuration")
+        response.raise_for_status()
+        return response.json()
+
+
+@app.command()
+def login(
+    api_url: str = typer.Option(
+        DEFAULT_API_URL,
+        "--api-url",
+        "-u",
+        help="Base URL of the Stardag API",
+    ),
+    oidc_issuer: str = typer.Option(
+        DEFAULT_OIDC_ISSUER,
+        "--oidc-issuer",
+        help="OIDC issuer URL (e.g., Keycloak realm URL)",
+    ),
+    client_id: str = typer.Option(
+        DEFAULT_OIDC_CLIENT_ID,
+        "--client-id",
+        help="OIDC client ID",
+    ),
+) -> None:
+    """Login to Stardag API via browser.
+
+    Opens your browser to authenticate with the identity provider (Keycloak/Cognito).
+    After successful login, credentials are stored locally.
+
+    For production/CI, use the STARDAG_API_KEY environment variable instead.
+    """
+    # Check if API key is already set via env var
+    env_api_key = os.environ.get("STARDAG_API_KEY")
+    if env_api_key:
+        typer.echo("STARDAG_API_KEY environment variable is set.")
+        typer.echo("You're already authenticated via API key.")
+        typer.echo("")
+        typer.echo("To use browser login instead, unset the environment variable:")
+        typer.echo("  unset STARDAG_API_KEY")
+        return
+
+    typer.echo("Fetching OIDC configuration...")
+
+    try:
+        oidc_config = _get_oidc_config(oidc_issuer)
+    except Exception as e:
+        typer.echo(
+            f"Error: Could not fetch OIDC configuration from {oidc_issuer}", err=True
+        )
+        typer.echo(f"  {e}", err=True)
+        typer.echo("")
+        typer.echo("Make sure Keycloak is running (docker compose up keycloak)")
+        raise typer.Exit(1)
+
+    auth_endpoint = oidc_config["authorization_endpoint"]
+    token_endpoint = oidc_config["token_endpoint"]
+
+    # Generate PKCE challenge
+    code_verifier, code_challenge = _generate_pkce()
+
+    # Start callback server
+    redirect_uri = f"http://localhost:{CALLBACK_PORT}/callback"
+    OAuthCallbackHandler.auth_result = None
+
+    server = socketserver.TCPServer(("", CALLBACK_PORT), OAuthCallbackHandler)
+    server_thread = threading.Thread(target=server.handle_request)
+    server_thread.daemon = True
+    server_thread.start()
+
+    # Build authorization URL
+    state = secrets.token_urlsafe(16)
+    auth_params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": "openid profile email",
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    auth_url = f"{auth_endpoint}?{urllib.parse.urlencode(auth_params)}"
+
+    typer.echo("")
+    typer.echo("Opening browser for authentication...")
+    typer.echo(f"If the browser doesn't open, visit: {auth_url}")
+    typer.echo("")
+
+    # Open browser
+    webbrowser.open(auth_url)
+
+    # Wait for callback
+    typer.echo("Waiting for authentication...")
+    timeout = 120  # 2 minutes
+    start = time.time()
+
+    while OAuthCallbackHandler.auth_result is None and time.time() - start < timeout:
+        time.sleep(0.5)
+
+    server.server_close()
+
+    if OAuthCallbackHandler.auth_result is None:
+        typer.echo("Error: Authentication timed out", err=True)
+        raise typer.Exit(1)
+
+    result = OAuthCallbackHandler.auth_result
+
+    if result.error:
+        typer.echo(f"Error: {result.error}", err=True)
+        raise typer.Exit(1)
+
+    if not result.code:
+        typer.echo("Error: No authorization code received", err=True)
+        raise typer.Exit(1)
+
+    typer.echo("Exchanging code for tokens...")
+
+    try:
+        tokens = _exchange_code_for_tokens(
+            token_endpoint=token_endpoint,
+            code=result.code,
+            code_verifier=code_verifier,
+            redirect_uri=redirect_uri,
+            client_id=client_id,
+        )
+    except Exception as e:
+        typer.echo(f"Error exchanging code for tokens: {e}", err=True)
+        raise typer.Exit(1)
+
+    # Save credentials
+    save_credentials(
+        Credentials(
+            api_url=api_url.rstrip("/"),
+            access_token=tokens["access_token"],
+            refresh_token=tokens["refresh_token"],
+            token_endpoint=token_endpoint,
+            client_id=client_id,
+        )
+    )
+
+    typer.echo("")
+    typer.echo("Login successful!")
+    typer.echo(f"Credentials saved to {get_credentials_path()}")
+
+
+@app.command()
+def logout() -> None:
+    """Logout and clear stored credentials."""
+    if clear_credentials():
+        typer.echo("Credentials cleared successfully.")
+    else:
+        typer.echo("No credentials found.")
+
+
+@app.command()
+def status() -> None:
+    """Show current authentication status."""
+    # Check env var first
+    env_api_key = os.environ.get("STARDAG_API_KEY")
+    if env_api_key:
+        prefix = env_api_key[:11] if len(env_api_key) > 11 else env_api_key[:4]
+        typer.echo("Authenticated via environment variable:")
+        typer.echo(f"  STARDAG_API_KEY: {prefix}...")
+        return
+
+    creds = load_credentials()
+
+    if creds is None:
+        typer.echo("Not logged in.")
+        typer.echo("")
+        typer.echo("Options:")
+        typer.echo("  1. Set STARDAG_API_KEY environment variable (for production/CI)")
+        typer.echo("  2. Run 'stardag auth login' for browser-based login (local dev)")
+        raise typer.Exit(1)
+
+    typer.echo("Logged in via browser:")
+    typer.echo(f"  API URL:    {creds.get('api_url', 'not set')}")
+
+    access_token = creds.get("access_token", "")
+    if access_token:
+        typer.echo(f"  Token:      {access_token[:20]}...")
+    else:
+        typer.echo("  Token:      not set")
+
+    has_refresh = bool(creds.get("refresh_token"))
+    typer.echo(f"  Refresh:    {'available' if has_refresh else 'not available'}")
+
+    typer.echo("")
+    typer.echo(f"Credentials file: {get_credentials_path()}")
+
+
+@app.command()
+def configure(
+    api_url: str | None = typer.Option(
+        None,
+        "--api-url",
+        "-u",
+        help="Update the API URL",
+    ),
+) -> None:
+    """Update configuration without re-authenticating."""
+    creds = load_credentials()
+
+    if creds is None:
+        typer.echo("Not logged in. Run 'stardag auth login' first.", err=True)
+        raise typer.Exit(1)
+
+    if api_url is None:
+        typer.echo("No options provided. Use --api-url to update config.")
+        raise typer.Exit(1)
+
+    if api_url is not None:
+        creds["api_url"] = api_url.rstrip("/")
+        typer.echo(f"Updated API URL: {api_url}")
+
+    save_credentials(creds)
+    typer.echo("Configuration saved.")
