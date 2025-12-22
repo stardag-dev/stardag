@@ -14,35 +14,58 @@ TEST = "test"
 
 
 class APIRegistryConfig(BaseSettings):
+    """Configuration for APIRegistry via environment variables.
+
+    Environment variables (prefixed with STARDAG_API_REGISTRY_):
+    - STARDAG_API_REGISTRY_URL: API URL
+    - STARDAG_API_REGISTRY_TIMEOUT: Request timeout
+    - STARDAG_API_REGISTRY_WORKSPACE_ID: Workspace ID (required for JWT auth)
+
+    Note: API key should be set via STARDAG_API_KEY (not prefixed).
+    """
+
     url: str | None = None
     timeout: float = 30.0
-    workspace_id: str = "default"
-    api_key: str | None = None  # API key for authentication
+    workspace_id: str | None = None  # Required for JWT auth, not needed for API key
 
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_REGISTRY_")
 
 
-def _load_credentials_from_cli() -> dict[str, str | None]:
-    """Load credentials from CLI credential store if available.
+def _load_cli_settings() -> dict[str, str | float | None]:
+    """Load credentials and config from CLI store if available.
 
-    Returns dict with access_token, api_url, workspace_id (any may be None).
+    Returns dict with access_token, api_url, workspace_id, timeout (any may be None).
+    Credentials (tokens) come from ~/.stardag/credentials.json
+    Config (api_url, timeout, workspace_id) comes from ~/.stardag/config.json
     """
-    try:
-        from stardag.cli.credentials import load_credentials
+    result: dict[str, str | float | None] = {
+        "access_token": None,
+        "api_url": None,
+        "workspace_id": None,
+        "timeout": None,
+    }
 
+    try:
+        from stardag.cli.credentials import load_config, load_credentials
+
+        # Load OAuth credentials (tokens only)
         creds = load_credentials()
         if creds:
-            return {
-                "access_token": creds.get("access_token"),
-                "api_url": creds.get("api_url"),
-                "workspace_id": creds.get("workspace_id"),
-            }
+            result["access_token"] = creds.get("access_token")
+
+        # Load config (api_url, timeout, workspace_id)
+        config = load_config()
+        if config:
+            result["api_url"] = config.get("api_url")
+            result["workspace_id"] = config.get("workspace_id")
+            result["timeout"] = config.get("timeout")
+
     except ImportError:
         pass  # CLI not installed
     except Exception as e:
-        logger.debug(f"Could not load CLI credentials: {e}")
+        logger.debug(f"Could not load CLI credentials/config: {e}")
 
-    return {"access_token": None, "api_url": None, "workspace_id": None}
+    return result
 
 
 class APIRegistry(RegistryABC):
@@ -62,45 +85,66 @@ class APIRegistry(RegistryABC):
     def __init__(
         self,
         api_url: str | None = None,
-        timeout: float = 30.0,
+        timeout: float | None = None,
         workspace_id: str | None = None,
         api_key: str | None = None,
     ):
-        # Load CLI credentials as fallback
-        cli_creds = _load_credentials_from_cli()
+        # Load CLI settings as fallback
+        cli_settings = _load_cli_settings()
 
-        # API key priority: explicit > env var (for production/CI)
+        # API key: explicit > env var only (not from CLI config)
         self.api_key = api_key or os.environ.get("STARDAG_API_KEY")
 
-        # Access token from CLI browser login (for local dev)
-        self.access_token = cli_creds.get("access_token") if not self.api_key else None
-
-        # API URL priority: explicit > env var > CLI credentials > default
-        self.api_url = (
-            api_url
-            or os.environ.get("STARDAG_API_URL")
-            or cli_creds.get("api_url")
-            or "http://localhost:8000"
-        ).rstrip("/")
-
-        # Workspace ID priority: explicit > env var > CLI credentials > default
-        self.workspace_id = (
-            workspace_id
-            or os.environ.get("STARDAG_WORKSPACE_ID")
-            or cli_creds.get("workspace_id")
-            or "default"
+        # Access token from CLI browser login (for local dev, only if no API key)
+        self.access_token = (
+            cli_settings.get("access_token") if not self.api_key else None
         )
 
-        self.timeout = timeout
+        # API URL priority: explicit > env var > CLI config > default
+        cli_api_url = cli_settings.get("api_url")
+        resolved_api_url = (
+            api_url
+            or os.environ.get("STARDAG_API_URL")
+            or (cli_api_url if isinstance(cli_api_url, str) else None)
+            or "http://localhost:8000"
+        )
+        self.api_url = resolved_api_url.rstrip("/")
+
+        # Timeout priority: explicit > env var > CLI config > default
+        env_timeout = os.environ.get("STARDAG_API_TIMEOUT")
+        cli_timeout = cli_settings.get("timeout")
+        self.timeout: float = (
+            timeout
+            if timeout is not None
+            else (float(env_timeout) if env_timeout else None)
+            or (cli_timeout if isinstance(cli_timeout, float) else None)
+            or 30.0
+        )
+
+        # Workspace ID priority: explicit > env var > CLI config > None
+        # (required for JWT auth, but API key auth gets workspace from key)
+        cli_workspace_id = cli_settings.get("workspace_id")
+        self.workspace_id: str | None = (
+            workspace_id
+            or os.environ.get("STARDAG_WORKSPACE_ID")
+            or (cli_workspace_id if isinstance(cli_workspace_id, str) else None)
+        )
+
         self._client = None
         self._build_id: str | None = None
 
         if self.api_key:
             logger.debug("APIRegistry initialized with API key authentication")
         elif self.access_token:
-            logger.debug(
-                "APIRegistry initialized with browser login (JWT) authentication"
-            )
+            if not self.workspace_id:
+                logger.warning(
+                    "APIRegistry: JWT auth requires workspace_id. "
+                    "Run 'stardag config set workspace <id>' to set it."
+                )
+            else:
+                logger.debug(
+                    "APIRegistry initialized with browser login (JWT) authentication"
+                )
         else:
             logger.warning(
                 "APIRegistry initialized without authentication. "
@@ -133,6 +177,15 @@ class APIRegistry(RegistryABC):
         """Get the current build ID."""
         return self._build_id
 
+    def _get_params(self) -> dict[str, str]:
+        """Get query params for API requests.
+
+        When using JWT auth, workspace_id must be passed as a query param.
+        """
+        if self.access_token and not self.api_key and self.workspace_id:
+            return {"workspace_id": self.workspace_id}
+        return {}
+
     def start_build(
         self,
         root_tasks: list[Task] | None = None,
@@ -153,6 +206,7 @@ class APIRegistry(RegistryABC):
             response = self.client.post(
                 f"{self.api_url}/api/v1/builds",
                 json=build_data,
+                params=self._get_params(),
             )
             response.raise_for_status()
             data = response.json()
@@ -172,7 +226,8 @@ class APIRegistry(RegistryABC):
 
         try:
             response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/complete"
+                f"{self.api_url}/api/v1/builds/{self._build_id}/complete",
+                params=self._get_params(),
             )
             if response.status_code >= 400:
                 logger.warning(
@@ -192,7 +247,7 @@ class APIRegistry(RegistryABC):
             return
 
         try:
-            params = {}
+            params = self._get_params()
             if error_message:
                 params["error_message"] = error_message
             response = self.client.post(
@@ -229,6 +284,7 @@ class APIRegistry(RegistryABC):
             response = self.client.post(
                 f"{self.api_url}/api/v1/builds/{self._build_id}/tasks",
                 json=task_data,
+                params=self._get_params(),
             )
             if response.status_code >= 400:
                 logger.warning(
@@ -250,7 +306,8 @@ class APIRegistry(RegistryABC):
 
         try:
             response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/start"
+                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/start",
+                params=self._get_params(),
             )
             if response.status_code >= 400:
                 logger.warning(
@@ -269,7 +326,8 @@ class APIRegistry(RegistryABC):
 
         try:
             response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/complete"
+                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/complete",
+                params=self._get_params(),
             )
             if response.status_code >= 400:
                 logger.warning(
@@ -287,7 +345,7 @@ class APIRegistry(RegistryABC):
             return
 
         try:
-            params = {}
+            params = self._get_params()
             if error_message:
                 params["error_message"] = error_message
             response = self.client.post(

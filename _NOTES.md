@@ -99,3 +99,17 @@ Code fixes:
 Later:
 
 - publish stardag-examples for ease to get started.
+
+CLI:
+
+- [ ] Inconsistent docker compose down (DB vs keycloak) what's expected?
+- [ ] View pending invites should say "Create org" when no pending and bring up a modal on first login. Same with pending invites (modal).
+- [ ] Token expired propagate to CLI and SDK
+- [ ] Token expiration time (locally 24h)
+- [ ] Fix auth error missing sub
+- [ ] Unless a organization is set, auto set first (and ask for confirmation), set to default/first workspace
+- [ ] Invalid parameter: id_token_hint
+- [ ] clarify what is in extra and not
+- [ ] claude instructions how to install --all-extras, and to use pre-commit hooks
+- [ ] DAG view default to centered
+- [ ] Canonical way to read all config from model (not separate via envvars etc.)

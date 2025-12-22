@@ -20,11 +20,13 @@ from dataclasses import dataclass
 import typer
 
 from stardag.cli.credentials import (
-    Credentials,
     clear_credentials,
+    get_config_path,
     get_credentials_path,
+    load_config,
     load_credentials,
     save_credentials,
+    set_api_url,
 )
 
 app = typer.Typer(help="Authentication commands for Stardag API")
@@ -180,6 +182,9 @@ def login(
     Opens your browser to authenticate with the identity provider (Keycloak/Cognito).
     After successful login, credentials are stored locally.
 
+    After login, use 'stardag config' commands to set your active organization
+    and workspace.
+
     For production/CI, use the STARDAG_API_KEY environment variable instead.
     """
     # Check if API key is already set via env var
@@ -279,20 +284,31 @@ def login(
         typer.echo(f"Error exchanging code for tokens: {e}", err=True)
         raise typer.Exit(1)
 
-    # Save credentials
-    save_credentials(
-        Credentials(
-            api_url=api_url.rstrip("/"),
-            access_token=tokens["access_token"],
-            refresh_token=tokens["refresh_token"],
-            token_endpoint=token_endpoint,
-            client_id=client_id,
-        )
-    )
+    # Save credentials (OAuth tokens only)
+    creds_to_save: dict[str, str] = {
+        "access_token": tokens["access_token"],
+        "token_endpoint": token_endpoint,
+        "client_id": client_id,
+    }
+    if tokens.get("refresh_token"):
+        creds_to_save["refresh_token"] = tokens["refresh_token"]
+    save_credentials(creds_to_save)  # type: ignore[arg-type]
+
+    # Save api_url to config
+    set_api_url(api_url)
 
     typer.echo("")
     typer.echo("Login successful!")
     typer.echo(f"Credentials saved to {get_credentials_path()}")
+    typer.echo("")
+    typer.echo("Next steps:")
+    typer.echo("  1. List your organizations:  stardag config list organizations")
+    typer.echo(
+        "  2. Set active organization:  stardag config set organization <org-id>"
+    )
+    typer.echo(
+        "  3. Set active workspace:     stardag config set workspace <workspace-id>"
+    )
 
 
 @app.command()
@@ -306,39 +322,62 @@ def logout() -> None:
 
 @app.command()
 def status() -> None:
-    """Show current authentication status."""
+    """Show current authentication status and active context."""
     # Check env var first
     env_api_key = os.environ.get("STARDAG_API_KEY")
     if env_api_key:
         prefix = env_api_key[:11] if len(env_api_key) > 11 else env_api_key[:4]
-        typer.echo("Authenticated via environment variable:")
+        typer.echo("Authentication: API Key (environment variable)")
         typer.echo(f"  STARDAG_API_KEY: {prefix}...")
+        typer.echo("")
+        typer.echo("Note: API key determines workspace automatically.")
         return
 
     creds = load_credentials()
 
     if creds is None:
-        typer.echo("Not logged in.")
+        typer.echo("Authentication: Not logged in")
         typer.echo("")
         typer.echo("Options:")
         typer.echo("  1. Set STARDAG_API_KEY environment variable (for production/CI)")
         typer.echo("  2. Run 'stardag auth login' for browser-based login (local dev)")
         raise typer.Exit(1)
 
-    typer.echo("Logged in via browser:")
-    typer.echo(f"  API URL:    {creds.get('api_url', 'not set')}")
+    config = load_config()
+
+    typer.echo("Authentication: Browser login (JWT)")
+    typer.echo(f"  API URL: {config.get('api_url', 'not set')}")
 
     access_token = creds.get("access_token", "")
     if access_token:
-        typer.echo(f"  Token:      {access_token[:20]}...")
+        typer.echo(f"  Token:   {access_token[:20]}...")
     else:
-        typer.echo("  Token:      not set")
+        typer.echo("  Token:   not set")
 
     has_refresh = bool(creds.get("refresh_token"))
-    typer.echo(f"  Refresh:    {'available' if has_refresh else 'not available'}")
+    typer.echo(f"  Refresh: {'available' if has_refresh else 'not available'}")
+
+    typer.echo("")
+    typer.echo("Active Context:")
+
+    org_id = config.get("organization_id")
+    workspace_id = config.get("workspace_id")
+
+    if org_id:
+        typer.echo(f"  Organization: {org_id}")
+    else:
+        typer.echo(
+            "  Organization: not set (run 'stardag config set organization <id>')"
+        )
+
+    if workspace_id:
+        typer.echo(f"  Workspace:    {workspace_id}")
+    else:
+        typer.echo("  Workspace:    not set (run 'stardag config set workspace <id>')")
 
     typer.echo("")
     typer.echo(f"Credentials file: {get_credentials_path()}")
+    typer.echo(f"Config file:      {get_config_path()}")
 
 
 @app.command()
@@ -350,20 +389,15 @@ def configure(
         help="Update the API URL",
     ),
 ) -> None:
-    """Update configuration without re-authenticating."""
-    creds = load_credentials()
+    """Update configuration without re-authenticating.
 
-    if creds is None:
-        typer.echo("Not logged in. Run 'stardag auth login' first.", err=True)
-        raise typer.Exit(1)
-
+    Note: Prefer using 'stardag config set api-url <url>' instead.
+    """
     if api_url is None:
         typer.echo("No options provided. Use --api-url to update config.")
+        typer.echo("")
+        typer.echo("Tip: Use 'stardag config set api-url <url>' for configuration.")
         raise typer.Exit(1)
 
-    if api_url is not None:
-        creds["api_url"] = api_url.rstrip("/")
-        typer.echo(f"Updated API URL: {api_url}")
-
-    save_credentials(creds)
-    typer.echo("Configuration saved.")
+    set_api_url(api_url)
+    typer.echo(f"Updated API URL: {api_url}")

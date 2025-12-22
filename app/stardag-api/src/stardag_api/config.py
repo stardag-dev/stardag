@@ -15,14 +15,19 @@ class OIDCSettings(BaseSettings):
     issuer_url: str = "http://localhost:8080/realms/stardag"
     # External issuer URL (what the browser sees, for token validation)
     external_issuer_url: str | None = None
-    # Expected audience claim
-    audience: str = "stardag-ui"
+    # Expected audience claim (comma-separated for multiple audiences)
+    audience: str = "stardag-ui,stardag-sdk"
     # JWKS URL (auto-derived from issuer if not set)
     jwks_url: str | None = None
     # Cache JWKS for this many seconds
     jwks_cache_ttl: int = 300
 
     model_config = SettingsConfigDict(env_prefix="OIDC_")
+
+    @property
+    def allowed_audiences(self) -> list[str]:
+        """Get list of allowed audience values for token validation."""
+        return [a.strip() for a in self.audience.split(",") if a.strip()]
 
     @property
     def effective_jwks_url(self) -> str:
