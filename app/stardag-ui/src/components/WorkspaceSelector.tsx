@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { useAuth } from "../context/AuthContext";
+import { fetchPendingInvites, type PendingInvite } from "../api/organizations";
 
 export function WorkspaceSelector() {
   const { isAuthenticated } = useAuth();
@@ -15,7 +16,17 @@ export function WorkspaceSelector() {
   } = useWorkspace();
 
   const [isOpen, setIsOpen] = useState(false);
+  const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Load pending invites when authenticated and no orgs
+  useEffect(() => {
+    if (isAuthenticated && organizations.length === 0 && !isLoading) {
+      fetchPendingInvites()
+        .then(setPendingInvites)
+        .catch((err) => console.error("Failed to load invites:", err));
+    }
+  }, [isAuthenticated, organizations.length, isLoading]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -43,17 +54,33 @@ export function WorkspaceSelector() {
     );
   }
 
-  // No organizations yet - prompt to check invites
+  // No organizations yet - show appropriate action
   if (organizations.length === 0) {
+    // If there are pending invites, show link to view them
+    if (pendingInvites.length > 0) {
+      return (
+        <button
+          onClick={() => {
+            window.history.pushState({}, "", "/invites");
+            window.dispatchEvent(new PopStateEvent("popstate"));
+          }}
+          className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 underline"
+        >
+          {pendingInvites.length} pending invite{pendingInvites.length > 1 ? "s" : ""}
+        </button>
+      );
+    }
+
+    // Otherwise, prompt to create organization
     return (
       <button
         onClick={() => {
-          window.history.pushState({}, "", "/invites");
+          window.history.pushState({}, "", "/organizations/new");
           window.dispatchEvent(new PopStateEvent("popstate"));
         }}
         className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200 underline"
       >
-        View pending invites
+        Create Organization
       </button>
     );
   }
