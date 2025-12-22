@@ -4,6 +4,7 @@ import { setAccessTokenGetter } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
 import { CreateOrganization } from "./components/CreateOrganization";
 import { DagGraph } from "./components/DagGraph";
+import { OnboardingModal } from "./components/OnboardingModal";
 import { OrganizationSettings } from "./components/OrganizationSettings";
 import { PendingInvites } from "./components/PendingInvites";
 import { TaskDetail } from "./components/TaskDetail";
@@ -420,21 +421,30 @@ function Router() {
     return <LandingPage />;
   }
 
-  // Authenticated routes
-  if (path === "/settings") {
-    return <OrganizationSettings onNavigate={navigateTo} />;
-  }
+  // Authenticated routes - wrap with onboarding modal
+  const renderAuthenticatedContent = () => {
+    if (path === "/settings") {
+      return <OrganizationSettings onNavigate={navigateTo} />;
+    }
 
-  if (path === "/invites") {
-    return <InvitesPage onNavigate={navigateTo} />;
-  }
+    if (path === "/invites") {
+      return <InvitesPage onNavigate={navigateTo} />;
+    }
 
-  if (path === "/organizations/new") {
-    return <CreateOrganization onNavigate={navigateTo} />;
-  }
+    if (path === "/organizations/new") {
+      return <CreateOrganization onNavigate={navigateTo} />;
+    }
 
-  // Dashboard handles all other paths (including /:orgSlug and /:orgSlug/:workspaceSlug)
-  return <Dashboard onNavigate={navigateTo} />;
+    // Dashboard handles all other paths (including /:orgSlug and /:orgSlug/:workspaceSlug)
+    return <Dashboard onNavigate={navigateTo} />;
+  };
+
+  return (
+    <>
+      <OnboardingModal />
+      {renderAuthenticatedContent()}
+    </>
+  );
 }
 
 function App() {

@@ -27,6 +27,7 @@ services:
       KC_HTTP_MANAGEMENT_PORT: "9000"
     volumes:
       - ./docker/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - keycloak_data:/opt/keycloak/data
     command:
       - start-dev
       - --import-realm
@@ -93,3 +94,4 @@ services:
 
 volumes:
   postgres_data:
+  keycloak_data:

@@ -113,3 +113,16 @@ CLI:
 - [ ] claude instructions how to install --all-extras, and to use pre-commit hooks
 - [ ] DAG view default to centered
 - [ ] Canonical way to read all config from model (not separate via envvars etc.)
+
+1. [x] Dev-experience: What happens when we run `docker compose down` (vs e.g. `docker compose down -v)` seems abit inconsistent when it comes to DB vs Keycloak; Does Keycloak drop the created user always when brought down, but DB state is perserved. If so this causes issue, what's expected and how do we make this synced (preferably Keycloak also persistent state unless `-v`)?
+2. [x] UI: The "pending invites" link/button (upper left corner) should say "Create organization" when no pending invites exists. And let's bring up a modal on "first login"/whenever an org is not created, promting you to create your first org. Same with pending invites; if there are pending invites that are not accepted or rejected yet, bring up a modal asking for action when loging in (can be closed and ignored ("Answer later") as well)).
+
+3. Auth Error handling: I think I noticed that when my token expired, this caused an auth http error code but no detail explained why. Make sure the status code and error message is clear in this case, and _importantly_: propagate this info to the CLI and SDK exceptions.
+4. Related: What is the default token expiration time? It seems short, set it to 24h in the local setup.
+5. Related: We previously got a "500 Internl Server Error" when the "sub" token claims where missing, make sure such issue yield correct HTTPException/status codes.
+
+6. CLI: Unless a organization is set, auto set first (and ask for confirmation), set to default/first workspace
+7. Invalid parameter: id_token_hint
+8. clarify what is in extra and not
+9. claude instructions how to install --all-extras, and to use pre-commit hooks
+10. DAG view default to centered
