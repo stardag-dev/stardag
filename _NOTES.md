@@ -112,7 +112,9 @@ CLI:
 - [ ] clarify what is in extra and not
 - [ ] claude instructions how to install --all-extras, and to use pre-commit hooks
 - [ ] DAG view default to centered
+
 - [ ] Canonical way to read all config from model (not separate via envvars etc.)
+- [ ] How to handle tasks alredy built (still register as referenced, tasks don't belong to builds (or even workspaces!? YES they DO, same task ID but different targets, so duplicate), they have events in builds)
 
 1. [x] Dev-experience: What happens when we run `docker compose down` (vs e.g. `docker compose down -v)` seems abit inconsistent when it comes to DB vs Keycloak; Does Keycloak drop the created user always when brought down, but DB state is perserved. If so this causes issue, what's expected and how do we make this synced (preferably Keycloak also persistent state unless `-v`)?
 2. [x] UI: The "pending invites" link/button (upper left corner) should say "Create organization" when no pending invites exists. And let's bring up a modal on "first login"/whenever an org is not created, promting you to create your first org. Same with pending invites; if there are pending invites that are not accepted or rejected yet, bring up a modal asking for action when loging in (can be closed and ignored ("Answer later") as well)).

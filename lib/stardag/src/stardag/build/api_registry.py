@@ -7,6 +7,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag._base import Task
 from stardag.build.registry import RegistryABC, get_git_commit_hash
+from stardag.exceptions import (
+    APIError,
+    AuthorizationError,
+    InvalidAPIKeyError,
+    InvalidTokenError,
+    NotAuthenticatedError,
+    NotFoundError,
+    TokenExpiredError,
+    WorkspaceAccessError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +161,66 @@ class APIRegistry(RegistryABC):
                 "Run 'stardag auth login' or set STARDAG_API_KEY env var."
             )
 
+    def _handle_response_error(self, response, operation: str = "API call") -> None:
+        """Check response for errors and raise appropriate exceptions.
+
+        Args:
+            response: httpx Response object
+            operation: Description of the operation for error messages
+
+        Raises:
+            TokenExpiredError: If token has expired
+            InvalidTokenError: If token is invalid
+            InvalidAPIKeyError: If API key is invalid
+            NotAuthenticatedError: If no auth provided
+            WorkspaceAccessError: If workspace access denied
+            AuthorizationError: If other 403 error
+            NotFoundError: If resource not found
+            APIError: For other HTTP errors
+        """
+        if response.status_code < 400:
+            return  # No error
+
+        # Try to extract detail from response JSON
+        detail = None
+        try:
+            data = response.json()
+            detail = data.get("detail", str(data))
+        except Exception:
+            detail = response.text[:200] if response.text else None
+
+        status_code = response.status_code
+
+        if status_code == 401:
+            # Authentication error - determine specific type
+            detail_lower = (detail or "").lower()
+            if "expired" in detail_lower:
+                raise TokenExpiredError(detail)
+            elif "api key" in detail_lower:
+                raise InvalidAPIKeyError(detail)
+            elif "not authenticated" in detail_lower or not detail:
+                raise NotAuthenticatedError(detail)
+            else:
+                raise InvalidTokenError(detail)
+
+        elif status_code == 403:
+            # Authorization error
+            detail_lower = (detail or "").lower()
+            if "workspace" in detail_lower:
+                raise WorkspaceAccessError(
+                    workspace_id=self.workspace_id, detail=detail
+                )
+            else:
+                raise AuthorizationError(f"{operation} access denied", detail=detail)
+
+        elif status_code == 404:
+            raise NotFoundError(f"{operation}: resource not found", detail=detail)
+
+        else:
+            raise APIError(
+                f"{operation} failed", status_code=status_code, detail=detail
+            )
+
     @property
     def client(self):
         if self._client is None:
@@ -202,21 +272,17 @@ class APIRegistry(RegistryABC):
             "description": description,
         }
 
-        try:
-            response = self.client.post(
-                f"{self.api_url}/api/v1/builds",
-                json=build_data,
-                params=self._get_params(),
-            )
-            response.raise_for_status()
-            data = response.json()
-            build_id: str = data["id"]
-            self._build_id = build_id
-            logger.info(f"Started build: {data['name']} (ID: {build_id})")
-            return build_id
-        except Exception as e:
-            logger.warning(f"Failed to start build: {e}")
-            raise
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds",
+            json=build_data,
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, "Start build")
+        data = response.json()
+        build_id: str = data["id"]
+        self._build_id = build_id
+        logger.info(f"Started build: {data['name']} (ID: {build_id})")
+        return build_id
 
     def complete_build(self) -> None:
         """Mark the current build as completed."""
@@ -224,21 +290,12 @@ class APIRegistry(RegistryABC):
             logger.warning("No active build to complete")
             return
 
-        try:
-            response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/complete",
-                params=self._get_params(),
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    f"Failed to complete build {self._build_id}: "
-                    f"{response.status_code} {response.text}"
-                )
-            else:
-                logger.info(f"Completed build: {self._build_id}")
-        except Exception as e:
-            logger.warning(f"Failed to complete build {self._build_id}: {e}")
-            raise
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/complete",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, "Complete build")
+        logger.info(f"Completed build: {self._build_id}")
 
     def fail_build(self, error_message: str | None = None) -> None:
         """Mark the current build as failed."""
@@ -246,24 +303,15 @@ class APIRegistry(RegistryABC):
             logger.warning("No active build to fail")
             return
 
-        try:
-            params = self._get_params()
-            if error_message:
-                params["error_message"] = error_message
-            response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/fail",
-                params=params,
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    f"Failed to mark build {self._build_id} as failed: "
-                    f"{response.status_code} {response.text}"
-                )
-            else:
-                logger.info(f"Marked build as failed: {self._build_id}")
-        except Exception as e:
-            logger.warning(f"Failed to mark build {self._build_id} as failed: {e}")
-            raise
+        params = self._get_params()
+        if error_message:
+            params["error_message"] = error_message
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/fail",
+            params=params,
+        )
+        self._handle_response_error(response, "Fail build")
+        logger.info(f"Marked build as failed: {self._build_id}")
 
     def register(self, task: Task) -> None:
         """Register a task with the API service within the current build."""
@@ -280,20 +328,12 @@ class APIRegistry(RegistryABC):
             "dependency_task_ids": [dep.task_id for dep in task.deps()],
         }
 
-        try:
-            response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks",
-                json=task_data,
-                params=self._get_params(),
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    f"Failed to register task {task.task_id}: "
-                    f"{response.status_code} {response.text}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to register task {task.task_id}: {e}")
-            raise
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks",
+            json=task_data,
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Register task {task.task_id}")
 
     def start(self, task: Task) -> None:
         """Mark a task as started within the current build."""
@@ -304,19 +344,11 @@ class APIRegistry(RegistryABC):
         # Ensure task is registered first
         self.register(task)
 
-        try:
-            response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/start",
-                params=self._get_params(),
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    f"Failed to start task {task.task_id}: "
-                    f"{response.status_code} {response.text}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to start task {task.task_id}: {e}")
-            raise
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/start",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Start task {task.task_id}")
 
     def complete(self, task: Task) -> None:
         """Mark a task as completed within the current build."""
@@ -324,19 +356,11 @@ class APIRegistry(RegistryABC):
             logger.warning("No active build - cannot complete task")
             return
 
-        try:
-            response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/complete",
-                params=self._get_params(),
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    f"Failed to complete task {task.task_id}: "
-                    f"{response.status_code} {response.text}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to complete task {task.task_id}: {e}")
-            raise
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/complete",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Complete task {task.task_id}")
 
     def fail(self, task: Task, error_message: str | None = None) -> None:
         """Mark a task as failed within the current build."""
@@ -344,22 +368,14 @@ class APIRegistry(RegistryABC):
             logger.warning("No active build - cannot fail task")
             return
 
-        try:
-            params = self._get_params()
-            if error_message:
-                params["error_message"] = error_message
-            response = self.client.post(
-                f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/fail",
-                params=params,
-            )
-            if response.status_code >= 400:
-                logger.warning(
-                    f"Failed to mark task {task.task_id} as failed: "
-                    f"{response.status_code} {response.text}"
-                )
-        except Exception as e:
-            logger.warning(f"Failed to mark task {task.task_id} as failed: {e}")
-            raise
+        params = self._get_params()
+        if error_message:
+            params["error_message"] = error_message
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/fail",
+            params=params,
+        )
+        self._handle_response_error(response, f"Fail task {task.task_id}")
 
     def close(self) -> None:
         """Close the HTTP client."""
