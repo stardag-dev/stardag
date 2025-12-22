@@ -100,15 +100,7 @@ Later:
 
 - publish stardag-examples for ease to get started.
 
-CLI:
-
-- [ ] Inconsistent docker compose down (DB vs keycloak) what's expected?
-- [ ] View pending invites should say "Create org" when no pending and bring up a modal on first login. Same with pending invites (modal).
-- [ ] Token expired propagate to CLI and SDK
-- [ ] Token expiration time (locally 24h)
-- [ ] Fix auth error missing sub
 - [ ] Unless a organization is set, auto set first (and ask for confirmation), set to default/first workspace
-- [ ] Invalid parameter: id_token_hint
 - [ ] clarify what is in extra and not
 - [ ] claude instructions how to install --all-extras, and to use pre-commit hooks
 - [ ] DAG view default to centered
@@ -119,12 +111,34 @@ CLI:
 1. [x] Dev-experience: What happens when we run `docker compose down` (vs e.g. `docker compose down -v)` seems abit inconsistent when it comes to DB vs Keycloak; Does Keycloak drop the created user always when brought down, but DB state is perserved. If so this causes issue, what's expected and how do we make this synced (preferably Keycloak also persistent state unless `-v`)?
 2. [x] UI: The "pending invites" link/button (upper left corner) should say "Create organization" when no pending invites exists. And let's bring up a modal on "first login"/whenever an org is not created, promting you to create your first org. Same with pending invites; if there are pending invites that are not accepted or rejected yet, bring up a modal asking for action when loging in (can be closed and ignored ("Answer later") as well)).
 
-3. Auth Error handling: I think I noticed that when my token expired, this caused an auth http error code but no detail explained why. Make sure the status code and error message is clear in this case, and _importantly_: propagate this info to the CLI and SDK exceptions.
-4. Related: What is the default token expiration time? It seems short, set it to 24h in the local setup.
-5. Related: We previously got a "500 Internl Server Error" when the "sub" token claims where missing, make sure such issue yield correct HTTPException/status codes.
+3. [x] Auth Error handling: I think I noticed that when my token expired, this caused an auth http error code but no detail explained why. Make sure the status code and error message is clear in this case, and _importantly_: propagate this info to the CLI and SDK exceptions.
+4. [x] Related: What is the default token expiration time? It seems short, set it to 24h in the local setup.
+5. [x] Related: We previously got a "500 Internl Server Error" when the "sub" token claims where missing, make sure such issue yield correct HTTPException/status codes.
 
-6. CLI: Unless a organization is set, auto set first (and ask for confirmation), set to default/first workspace
+6. CLI: I want to make the loging and configuration via CLI more user firendly. Unless a organization is set, auto set first (and ask for confirmation), set to default/first workspace
+
+We need to straighten out the configuration+auth model and flow. Basically there are a few separate components:
+
+- 1. Core config (used both by SDK and CLI): things like API_URL, timeouts/retries etc.
+- 2. Organization+Workspace specific config: for each workspace there should be clearly defined "target roots" (see: `TargetFactoryConfig` in `lib/stardag/src/stardag/target/_factory.py`)
+- 3. Active context/state: Which is my currently active (logged in to) organization, and which is the active workspace.
+- 4. Credentials (obtained via CLI) _per organization_.
+
+Some suggested TODOs:
+
+- [ ] Is the CLI login token really scoped on organization?
+
 7. Invalid parameter: id_token_hint
+
+```
+⏺ The issue is that signoutRedirect() sends the stored id_token as an id_token_hint to Keycloak. When that token is stale or Keycloak's session data is gone (e.g., after container restart without persisted data), Keycloak rejects it.
+
+  Common causes:
+  1. Keycloak restart - Session data was lost (you added the volume, so this should help going forward)
+  2. Token expired - The stored id_token expired but local storage still has it
+  3. Session mismatch - Browser has an old token from a previous Keycloak session
+```
+
 8. clarify what is in extra and not
 9. claude instructions how to install --all-extras, and to use pre-commit hooks
 10. DAG view default to centered

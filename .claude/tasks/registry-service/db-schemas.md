@@ -2,7 +2,7 @@
 
 ## Status
 
-active
+completed
 
 ## Goal
 

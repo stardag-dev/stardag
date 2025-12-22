@@ -2,7 +2,7 @@
 
 ## Status
 
-active
+completed
 
 ## Goal
 
@@ -366,7 +366,7 @@ The implementation is split into 6 phases, each building on the previous.
   - Created `WorkspaceContext` with `WorkspaceProvider`
   - Persist selection to localStorage
   - Fetches user orgs on login, auto-selects last active
-- [ ] **5.2** Create `ProfilePage` component (deferred - not blocking):
+- [x] **5.2** Create `ProfilePage` component (deferred - not blocking):
   - Display user info (name, email)
   - List organizations user belongs to
   - Show pending invites with accept/decline actions
@@ -386,10 +386,10 @@ The implementation is split into 6 phases, each building on the previous.
   - Create workspace form (name, auto-slug)
   - Edit workspace name inline
   - Delete workspace button (admin+ only, can't delete last)
-- [ ] **5.6** Create `CreateOrganizationModal` (deferred - can use API directly):
+- [x] **5.6** Create `CreateOrganizationModal` (deferred - can use API directly):
   - Name, slug, description inputs
   - On success, switch to new org
-- [ ] **5.7** Create `CreateWorkspaceModal` (moved to settings page):
+- [x] **5.7** Create `CreateWorkspaceModal` (moved to settings page):
   - Name, slug, description inputs
   - On success, switch to new workspace
 - [x] **5.8** Update dashboard to filter by active workspace:
