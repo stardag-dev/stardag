@@ -463,17 +463,19 @@ The implementation is split into 6 phases, each building on the previous.
   - Show generated key ONCE in green highlighted modal with copy button
   - Revoke button with confirmation dialog
   - Added API functions in `api/organizations.ts` (fetchApiKeys, createApiKey, revokeApiKey)
-- [ ] **6.6** Implement SDK CLI authentication (lower priority):
-  - Device authorization flow or localhost callback flow
-  - CLI command: `stardag auth login`
-  - Opens browser to Keycloak/Cognito
-  - Receives token via localhost callback or polling
-  - Stores token in `~/.stardag/credentials`
-  - CLI command: `stardag auth logout` - clears stored token
-- [ ] **6.7** Update SDK `Registry` client to use credentials:
-  - Check for API key in env (`STARDAG_API_KEY`)
-  - Fall back to stored JWT from CLI login
-  - Fall back to browser-based login prompt
+- [x] **6.6** Implement SDK CLI authentication (`lib/stardag/src/stardag/cli/`):
+  - Created Typer-based CLI with `stardag` command
+  - `stardag auth login --api-key sk_xxx` - validates and stores API key
+  - `stardag auth logout` - clears stored credentials
+  - `stardag auth status` - shows current auth status
+  - `stardag auth configure` - update API URL or workspace
+  - Credentials stored in `~/.stardag/credentials.json` (0600 permissions)
+  - Added `cli` optional dependency with typer and httpx
+- [x] **6.7** Update SDK `Registry` client to use credentials (`build/api_registry.py`):
+  - APIRegistry auto-loads credentials from CLI store
+  - Priority: explicit api_key > STARDAG_API_KEY env var > CLI credentials
+  - Also loads api_url and workspace_id from CLI credentials
+  - Adds X-API-Key header to all requests
 - [ ] **6.8** Add tests for API key auth and SDK flows
 
 **Deliverable:** Complete API key management; SDK can authenticate via API key or user JWT.
@@ -565,8 +567,8 @@ This ensures `docker-compose up` provides a working local environment.
   - [x] Implemented API key auth middleware in `auth/dependencies.py`
   - [x] Updated SDK endpoints to accept API key OR JWT in `routes/builds.py`
   - [x] Created API key management UI in `OrganizationSettings.tsx`
-  - [ ] SDK CLI authentication (6.6) - lower priority, deferred
-  - [ ] SDK Registry client credentials (6.7) - lower priority, deferred
+  - [x] Implemented SDK CLI with Typer (`stardag auth login/logout/status`)
+  - [x] Updated APIRegistry to auto-load credentials from CLI store
   - [ ] Tests for API key auth (6.8) - to be added
 
 ## Notes

@@ -1,7 +1,7 @@
 """API-based registry that communicates with the stardag-api service."""
 
-import getpass
 import logging
+import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -17,8 +17,32 @@ class APIRegistryConfig(BaseSettings):
     url: str | None = None
     timeout: float = 30.0
     workspace_id: str = "default"
+    api_key: str | None = None  # API key for authentication
 
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_REGISTRY_")
+
+
+def _load_credentials_from_cli() -> dict[str, str | None]:
+    """Load credentials from CLI credential store if available.
+
+    Returns dict with access_token, api_url, workspace_id (any may be None).
+    """
+    try:
+        from stardag.cli.credentials import load_credentials
+
+        creds = load_credentials()
+        if creds:
+            return {
+                "access_token": creds.get("access_token"),
+                "api_url": creds.get("api_url"),
+                "workspace_id": creds.get("workspace_id"),
+            }
+    except ImportError:
+        pass  # CLI not installed
+    except Exception as e:
+        logger.debug(f"Could not load CLI credentials: {e}")
+
+    return {"access_token": None, "api_url": None, "workspace_id": None}
 
 
 class APIRegistry(RegistryABC):
@@ -28,19 +52,60 @@ class APIRegistry(RegistryABC):
     1. Call start_build() at the beginning of a build to create a build record
     2. Tasks are registered within the build context
     3. Call complete_build() or fail_build() when the build finishes
+
+    Authentication:
+    - API key can be provided directly, via STARDAG_API_KEY env var,
+      or loaded from CLI credentials (~/.stardag/credentials.json)
+    - Priority: explicit api_key > STARDAG_API_KEY env var > CLI credentials
     """
 
     def __init__(
         self,
-        api_url: str,
+        api_url: str | None = None,
         timeout: float = 30.0,
-        workspace_id: str = "default",
+        workspace_id: str | None = None,
+        api_key: str | None = None,
     ):
-        self.api_url = api_url.rstrip("/")
+        # Load CLI credentials as fallback
+        cli_creds = _load_credentials_from_cli()
+
+        # API key priority: explicit > env var (for production/CI)
+        self.api_key = api_key or os.environ.get("STARDAG_API_KEY")
+
+        # Access token from CLI browser login (for local dev)
+        self.access_token = cli_creds.get("access_token") if not self.api_key else None
+
+        # API URL priority: explicit > env var > CLI credentials > default
+        self.api_url = (
+            api_url
+            or os.environ.get("STARDAG_API_URL")
+            or cli_creds.get("api_url")
+            or "http://localhost:8000"
+        ).rstrip("/")
+
+        # Workspace ID priority: explicit > env var > CLI credentials > default
+        self.workspace_id = (
+            workspace_id
+            or os.environ.get("STARDAG_WORKSPACE_ID")
+            or cli_creds.get("workspace_id")
+            or "default"
+        )
+
         self.timeout = timeout
-        self.workspace_id = workspace_id
         self._client = None
         self._build_id: str | None = None
+
+        if self.api_key:
+            logger.debug("APIRegistry initialized with API key authentication")
+        elif self.access_token:
+            logger.debug(
+                "APIRegistry initialized with browser login (JWT) authentication"
+            )
+        else:
+            logger.warning(
+                "APIRegistry initialized without authentication. "
+                "Run 'stardag auth login' or set STARDAG_API_KEY env var."
+            )
 
     @property
     def client(self):
@@ -52,7 +117,15 @@ class APIRegistry(RegistryABC):
                     "httpx is required for APIRegistry. "
                     "Install it with: pip install stardag[api]"
                 )
-            self._client = httpx.Client(timeout=self.timeout)
+            # Create client with appropriate auth header
+            headers = {}
+            if self.api_key:
+                # API key auth (production/CI)
+                headers["X-API-Key"] = self.api_key
+            elif self.access_token:
+                # JWT auth from browser login (local dev)
+                headers["Authorization"] = f"Bearer {self.access_token}"
+            self._client = httpx.Client(timeout=self.timeout, headers=headers)
         return self._client
 
     @property
@@ -68,10 +141,9 @@ class APIRegistry(RegistryABC):
         """Start a new build and return its ID.
 
         This should be called at the beginning of a build session.
+        The workspace and user are determined from the API key authentication.
         """
         build_data = {
-            "workspace_id": self.workspace_id,
-            "user": getpass.getuser(),
             "commit_hash": get_git_commit_hash(),
             "root_task_ids": [t.task_id for t in (root_tasks or [])],
             "description": description,

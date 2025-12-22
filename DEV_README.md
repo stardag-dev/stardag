@@ -117,6 +117,76 @@ npm run build    # Production build
 
 The dev server proxies `/api` to `http://localhost:8000`.
 
+## Authentication for Local Development
+
+When developing locally against the docker compose stack, you need to authenticate the SDK with the API service.
+
+### Setup
+
+1. Start the full stack (includes Keycloak identity provider):
+
+```bash
+docker compose up -d
+```
+
+2. Access the web UI at http://localhost:3000 and create an account or log in.
+
+3. Install the CLI:
+
+```bash
+cd lib/stardag
+uv sync --extra cli
+```
+
+### Authentication Methods
+
+**Method 1: Browser Login (recommended for interactive development)**
+
+```bash
+uv run stardag auth login
+```
+
+This opens your browser to Keycloak (http://localhost:8080). After login, tokens are stored in `~/.stardag/credentials.json`.
+
+Check your auth status:
+
+```bash
+uv run stardag auth status
+```
+
+**Method 2: API Key (for scripts/automation)**
+
+1. Log in to the web UI at http://localhost:3000
+2. Go to Organization Settings > API Keys
+3. Create a new API key for your workspace
+4. Set the environment variable:
+
+```bash
+export STARDAG_API_KEY=sk_your_key_here
+```
+
+### Sanity Check
+
+After authentication, verify the setup works:
+
+```bash
+# Check auth status
+uv run stardag auth status
+
+# Run the demo script to test API registry integration
+cd lib/stardag-examples
+export STARDAG_API_URL=http://localhost:8000
+uv run python -m stardag_examples.api_registry_demo
+```
+
+You should see tasks appearing in the web UI at http://localhost:3000.
+
+### Logout
+
+```bash
+uv run stardag auth logout
+```
+
 ## Contributing
 
 1. Create a feature branch

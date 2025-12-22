@@ -2935,14 +2935,16 @@ requires-dist = [
     { name = "boto3-stubs", extras = ["s3"], marker = "extra == 's3'" },
     { name = "botocore", marker = "extra == 's3'", specifier = ">=1.36" },
     { name = "httpx", marker = "extra == 'api'", specifier = ">=0.27.0" },
+    { name = "httpx", marker = "extra == 'cli'", specifier = ">=0.27.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=0.73.59" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.1.0" },
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "pydantic-settings", specifier = ">=2.7.1" },
+    { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12.0" },
     { name = "uuid6", specifier = ">=2024.7.10" },
 ]
-provides-extras = ["api", "modal", "pandas", "prefect", "s3"]
+provides-extras = ["api", "cli", "modal", "pandas", "prefect", "s3"]
 
 [package.metadata.requires-dev]
 dev = [
