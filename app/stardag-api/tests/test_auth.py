@@ -411,9 +411,9 @@ def _create_mock_token_payload(
 
 
 @pytest.mark.asyncio
-async def test_me_endpoint_requires_auth(client: AsyncClient):
+async def test_me_endpoint_requires_auth(unauthenticated_client: AsyncClient):
     """Test that /api/v1/ui/me requires authentication."""
-    response = await client.get("/api/v1/ui/me")
+    response = await unauthenticated_client.get("/api/v1/ui/me")
     assert response.status_code == 401
 
 
