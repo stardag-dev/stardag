@@ -117,28 +117,26 @@ def set_timeout_cmd(
     typer.echo(f"Timeout set to: {timeout}s")
 
 
-def _resolve_organization(client, api_url: str, org_id_or_slug: str) -> str:
-    """Resolve an organization ID or slug to an ID.
+def _resolve_organization(
+    client, api_url: str, org_id_or_slug: str
+) -> tuple[str, str | None]:
+    """Resolve an organization ID or slug to an ID and slug.
 
-    Returns the organization ID if found, or the input if it looks like an ID.
+    Returns tuple of (org_id, org_slug).
     """
-    # First check if it's a valid UUID (36 chars with hyphens)
-    if len(org_id_or_slug) == 36 and org_id_or_slug.count("-") == 4:
-        return org_id_or_slug
-
-    # Try to resolve by slug via /me endpoint
+    # Try to resolve via /me endpoint to get both ID and slug
     try:
         response = client.get(f"{api_url}/api/v1/ui/me")
         if response.status_code == 200:
             data = response.json()
             for org in data.get("organizations", []):
                 if org["slug"] == org_id_or_slug or org["id"] == org_id_or_slug:
-                    return str(org["id"])
+                    return str(org["id"]), str(org["slug"])
     except Exception:
         pass
 
-    # Assume it's an ID if we couldn't resolve
-    return org_id_or_slug
+    # If we couldn't resolve, assume it's an ID and return without slug
+    return org_id_or_slug, None
 
 
 @set_app.command("organization")
@@ -156,8 +154,8 @@ def set_organization(
     client, api_url = _get_authenticated_client()
 
     try:
-        # Resolve slug to ID if needed
-        org_id = _resolve_organization(client, api_url, org_id_or_slug)
+        # Resolve slug to ID and get slug for validation
+        org_id, org_slug = _resolve_organization(client, api_url, org_id_or_slug)
 
         # Try to get workspaces for this org (validates access)
         response = client.get(f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces")
@@ -187,7 +185,7 @@ def set_organization(
     finally:
         client.close()
 
-    set_organization_id(org_id)
+    set_organization_id(org_id, org_slug)
     typer.echo(f"Active organization set to: {org_id}")
 
     if workspaces:

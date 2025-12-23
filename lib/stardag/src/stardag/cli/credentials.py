@@ -113,6 +113,7 @@ class Config(TypedDict, total=False):
 
     # Active context
     organization_id: str  # Active organization ID
+    organization_slug: str  # Active organization slug (for validation)
     workspace_id: str  # Active workspace ID
 
     # Target roots (synced from workspace)
@@ -201,10 +202,14 @@ def get_organization_id(profile: str | None = None) -> str | None:
     return config.get("organization_id")
 
 
-def set_organization_id(org_id: str, profile: str | None = None) -> None:
-    """Set the active organization ID."""
+def set_organization_id(
+    org_id: str, org_slug: str | None = None, profile: str | None = None
+) -> None:
+    """Set the active organization ID and slug."""
     config = load_config(profile)
     config["organization_id"] = org_id
+    if org_slug:
+        config["organization_slug"] = org_slug
     # Clear workspace when org changes (workspace belongs to old org)
     if "workspace_id" in config:
         del config["workspace_id"]

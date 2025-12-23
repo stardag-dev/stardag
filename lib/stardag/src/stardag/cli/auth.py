@@ -200,7 +200,7 @@ def _auto_select_context(api_url: str, access_token: str) -> None:
             # Auto-select org if only one, otherwise prompt
             if len(organizations) == 1:
                 org = organizations[0]
-                set_organization_id(org["id"])
+                set_organization_id(org["id"], org["slug"])
                 typer.echo("")
                 typer.echo(f"Auto-selected organization: {org['name']} ({org['slug']})")
             else:

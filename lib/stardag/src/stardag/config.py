@@ -163,11 +163,13 @@ class ContextConfig(BaseModel):
     Attributes:
         profile: Active profile name.
         organization_id: Active organization ID.
+        organization_slug: Active organization slug (for validation).
         workspace_id: Active workspace ID.
     """
 
     profile: str = DEFAULT_PROFILE
     organization_id: str | None = None
+    organization_slug: str | None = None
     workspace_id: str | None = None
 
 
@@ -243,8 +245,12 @@ class StardagConfig(BaseModel):
             ValueError: If organization is not in allowed_organizations.
         """
         org = org_id or self.context.organization_id
+        org_slug = self.context.organization_slug
         if self.allowed_organizations and org:
-            if org not in self.allowed_organizations:
+            # Check if org ID or slug matches any allowed organization
+            if org not in self.allowed_organizations and (
+                not org_slug or org_slug not in self.allowed_organizations
+            ):
                 raise ValueError(
                     f"Organization '{org}' is not allowed by project config. "
                     f"Allowed: {self.allowed_organizations}"
@@ -333,6 +339,8 @@ def load_config(
         or profile_data.get("organization_id")
     )
 
+    organization_slug = profile_data.get("organization_slug")
+
     workspace_id = (
         env_settings.workspace_id
         or project_config.workspace_id
@@ -349,6 +357,7 @@ def load_config(
         context=ContextConfig(
             profile=effective_profile,
             organization_id=organization_id,
+            organization_slug=organization_slug,
             workspace_id=workspace_id,
         ),
         access_token=access_token,
