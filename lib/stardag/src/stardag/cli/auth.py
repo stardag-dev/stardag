@@ -197,22 +197,11 @@ def _auto_select_context(api_url: str, access_token: str) -> None:
                 typer.echo("No organizations found. Create one in the web UI first.")
                 return
 
-            # Auto-select org if only one, otherwise prompt
-            if len(organizations) == 1:
-                org = organizations[0]
-                set_organization_id(org["id"], org["slug"])
-                typer.echo("")
-                typer.echo(f"Auto-selected organization: {org['name']} ({org['slug']})")
-            else:
-                typer.echo("")
-                typer.echo("Your organizations:")
-                for org in organizations:
-                    typer.echo(f"  {org['id']}  {org['name']} ({org['slug']})")
-                typer.echo("")
-                typer.echo(
-                    "Set active organization with: stardag config set organization <org-id-or-slug>"
-                )
-                return
+            # Auto-select org (first one if multiple)
+            org = organizations[0]
+            set_organization_id(org["id"], org["slug"])
+            typer.echo("")
+            typer.echo(f"Auto-selected organization: {org['name']} ({org['slug']})")
 
             # Fetch workspaces and auto-select Default workspace
             org_id = org["id"]
@@ -262,6 +251,10 @@ def _auto_select_context(api_url: str, access_token: str) -> None:
                 typer.echo(
                     "Switch workspace with: stardag config set workspace <workspace-id-or-slug>"
                 )
+                if len(organizations) > 1:
+                    typer.echo(
+                        "Switch organization with: stardag config set organization <org-id-or-slug>"
+                    )
 
     except Exception:
         # Silent fail - user can manually set context
