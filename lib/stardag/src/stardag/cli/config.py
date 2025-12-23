@@ -6,6 +6,7 @@ Manages the active context (organization and workspace) for SDK operations.
 import typer
 
 from stardag.cli.credentials import (
+    clear_workspace,
     get_config_path,
     get_organization_id,
     get_target_roots,
@@ -184,6 +185,10 @@ def set_organization(
         raise typer.Exit(1)
     finally:
         client.close()
+
+    # Clear workspace when changing org (workspaces belong to specific orgs)
+    if clear_workspace():
+        typer.echo("Cleared previous workspace (belongs to different org)")
 
     set_organization_id(org_id, org_slug)
     typer.echo(f"Active organization set to: {org_id}")

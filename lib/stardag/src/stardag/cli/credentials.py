@@ -14,7 +14,11 @@ from stardag.config import (
     get_profile_credentials_path,
     get_profile_dir,
     load_active_profile,
+    load_active_workspace,
+    load_workspace_target_roots,
     save_active_profile,
+    save_active_workspace,
+    save_workspace_target_roots,
 )
 
 
@@ -105,19 +109,19 @@ def get_access_token(profile: str | None = None) -> str | None:
 
 
 class Config(TypedDict, total=False):
-    """Stored config structure (settings and active context)."""
+    """Stored config structure (settings and active context).
+
+    Note: workspace_id is stored in active_workspace file, not here.
+    Note: target_roots are stored in workspaces/{workspace_id}/target_roots.json.
+    """
 
     # API settings
     api_url: str  # Base URL of the Stardag API
     timeout: float  # Request timeout in seconds
 
-    # Active context
+    # Active context (organization only - workspace is in active_workspace file)
     organization_id: str  # Active organization ID
     organization_slug: str  # Active organization slug (for validation)
-    workspace_id: str  # Active workspace ID
-
-    # Target roots (synced from workspace)
-    target_roots: dict[str, str]  # Named target roots
 
 
 def load_config(profile: str | None = None) -> Config:
@@ -205,28 +209,51 @@ def get_organization_id(profile: str | None = None) -> str | None:
 def set_organization_id(
     org_id: str, org_slug: str | None = None, profile: str | None = None
 ) -> None:
-    """Set the active organization ID and slug."""
+    """Set the active organization ID and slug.
+
+    Note: This does NOT clear the active workspace. Call clear_workspace()
+    separately if you want to clear it when switching organizations.
+    """
     config = load_config(profile)
     config["organization_id"] = org_id
     if org_slug:
         config["organization_slug"] = org_slug
-    # Clear workspace when org changes (workspace belongs to old org)
-    if "workspace_id" in config:
-        del config["workspace_id"]
     save_config(config, profile)
 
 
 def get_workspace_id(profile: str | None = None) -> str | None:
-    """Get the active workspace ID."""
-    config = load_config(profile)
-    return config.get("workspace_id")
+    """Get the active workspace ID from the active_workspace file."""
+    if profile is None:
+        profile = load_active_profile()
+    return load_active_workspace(profile)
 
 
 def set_workspace_id(workspace_id: str, profile: str | None = None) -> None:
-    """Set the active workspace ID."""
-    config = load_config(profile)
-    config["workspace_id"] = workspace_id
-    save_config(config, profile)
+    """Set the active workspace ID in the active_workspace file."""
+    if profile is None:
+        profile = load_active_profile()
+    save_active_workspace(profile, workspace_id)
+
+
+def clear_workspace(profile: str | None = None) -> bool:
+    """Clear the active workspace for a profile.
+
+    Args:
+        profile: Profile name. If None, uses active profile.
+
+    Returns:
+        True if workspace was cleared, False if no workspace was set.
+    """
+    if profile is None:
+        profile = load_active_profile()
+
+    from stardag.config import get_profile_active_workspace_path
+
+    path = get_profile_active_workspace_path(profile)
+    if path.exists():
+        path.unlink()
+        return True
+    return False
 
 
 def get_timeout(profile: str | None = None) -> float | None:
@@ -243,16 +270,23 @@ def set_timeout(timeout: float, profile: str | None = None) -> None:
 
 
 def get_target_roots(profile: str | None = None) -> dict[str, str]:
-    """Get the stored target roots from config."""
-    config = load_config(profile)
-    return config.get("target_roots", {})
+    """Get the target roots for the active workspace."""
+    if profile is None:
+        profile = load_active_profile()
+    workspace_id = load_active_workspace(profile)
+    if not workspace_id:
+        return {}
+    return load_workspace_target_roots(profile, workspace_id)
 
 
 def set_target_roots(target_roots: dict[str, str], profile: str | None = None) -> None:
-    """Set the target roots (synced from workspace)."""
-    config = load_config(profile)
-    config["target_roots"] = target_roots
-    save_config(config, profile)
+    """Set the target roots for the active workspace."""
+    if profile is None:
+        profile = load_active_profile()
+    workspace_id = load_active_workspace(profile)
+    if not workspace_id:
+        raise ValueError("No active workspace. Set a workspace first.")
+    save_workspace_target_roots(profile, workspace_id, target_roots)
 
 
 # --- Path convenience functions (for CLI display) ---
