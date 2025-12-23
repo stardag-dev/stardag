@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from stardag_api.models.organization import Organization
     from stardag_api.models.target_root import TargetRoot
     from stardag_api.models.task import Task
+    from stardag_api.models.user import User
 
 
 class Workspace(Base, TimestampMixin):
@@ -42,9 +43,17 @@ class Workspace(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text)
+    # Personal workspace owner (null for shared workspaces)
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     # Relationships
     organization: Mapped[Organization] = relationship(back_populates="workspaces")
+    owner: Mapped[User | None] = relationship()
     builds: Mapped[list[Build]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",

@@ -255,7 +255,12 @@ See **Decisions** section below for questions requiring user input.
   - [x] SDK validation against project restrictions (`allowed_organizations`)
   - [x] 6 unit tests for profile CLI
   - [x] All 82 tests pass
-- [ ] Phase 4: Personal Workspaces
+- [x] Phase 4: Personal Workspaces
+  - [x] Added `owner_id` column to workspaces (migration 20251223_150000)
+  - [x] Auto-create personal workspace on org creation
+  - [x] Auto-create personal workspace on invite acceptance
+  - [x] UI: show personal workspaces in collapsed section
+  - [x] All 65 API tests pass
 - [ ] Phase 5: CLI Improvements
 - [ ] Phase 6: Sample Project Config
 

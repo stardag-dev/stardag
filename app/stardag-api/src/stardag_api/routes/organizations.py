@@ -148,9 +148,58 @@ class WorkspaceResponse(BaseModel):
     name: str
     slug: str
     description: str | None
+    owner_id: str | None = None  # Non-null for personal workspaces
 
 
 # --- Helper functions ---
+
+
+def generate_personal_workspace_slug(email: str, suffix: int = 0) -> str:
+    """Generate a personal workspace slug from email.
+
+    Format: personal-{email_prefix} or personal-{email_prefix}-{suffix}
+    """
+    email_prefix = email.split("@")[0].lower()
+    # Clean up for slug: only alphanumeric and hyphens
+    clean_prefix = re.sub(r"[^a-z0-9]+", "-", email_prefix).strip("-")[:40]
+    if suffix > 0:
+        return f"personal-{clean_prefix}-{suffix}"
+    return f"personal-{clean_prefix}"
+
+
+async def create_personal_workspace(
+    db: AsyncSession, org_id: str, user: User
+) -> Workspace:
+    """Create a personal workspace for a user in an organization.
+
+    Ensures unique slug by appending numeric suffix if needed.
+    """
+    base_slug = generate_personal_workspace_slug(user.email)
+
+    # Check for existing slugs and find unique one
+    suffix = 0
+    slug = base_slug
+    while True:
+        existing = await db.execute(
+            select(Workspace).where(
+                Workspace.organization_id == org_id,
+                Workspace.slug == slug,
+            )
+        )
+        if not existing.scalar_one_or_none():
+            break
+        suffix += 1
+        slug = generate_personal_workspace_slug(user.email, suffix)
+
+    workspace = Workspace(
+        organization_id=org_id,
+        name=f"Personal ({user.email.split('@')[0]})",
+        slug=slug,
+        description=f"Personal workspace for {user.email}",
+        owner_id=user.id,
+    )
+    db.add(workspace)
+    return workspace
 
 
 async def get_user_membership(
@@ -256,6 +305,9 @@ async def create_organization(
         description="Default workspace",
     )
     db.add(workspace)
+
+    # Create personal workspace for the creator
+    await create_personal_workspace(db, org.id, current_user)
 
     await db.commit()
     await db.refresh(org)
@@ -623,6 +675,9 @@ async def accept_invite(
         role=invite.role,
     )
     db.add(membership)
+
+    # Create personal workspace for the new member
+    await create_personal_workspace(db, invite.organization_id, current_user)
 
     invite.status = InviteStatus.ACCEPTED
     await db.commit()
