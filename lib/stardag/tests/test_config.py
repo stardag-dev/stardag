@@ -8,22 +8,22 @@ import pytest
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_API_URL,
-    DEFAULT_PROFILE,
+    DEFAULT_REGISTRY,
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
     ConfigProvider,
     ProjectConfig,
-    ProjectProfileConfig,
+    ProjectRegistryConfig,
     ProjectWorkspaceConfig,
     StardagConfig,
     clear_config_cache,
     find_project_config,
     get_config,
-    load_active_profile,
+    load_active_registry,
     load_active_workspace,
     load_config,
     load_workspace_target_roots,
-    save_active_profile,
+    save_active_registry,
     save_active_workspace,
     save_workspace_target_roots,
 )
@@ -58,30 +58,32 @@ def temp_project_dir(tmp_path, monkeypatch):
     return project_dir
 
 
-class TestLoadActiveProfile:
+class TestLoadActiveRegistry:
     def test_returns_default_when_no_file(self, temp_stardag_dir):
-        assert load_active_profile() == DEFAULT_PROFILE
+        assert load_active_registry() == DEFAULT_REGISTRY
 
-    def test_returns_saved_profile(self, temp_stardag_dir):
-        save_active_profile("production")
-        assert load_active_profile() == "production"
+    def test_returns_saved_registry(self, temp_stardag_dir):
+        save_active_registry("production")
+        assert load_active_registry() == "production"
 
     def test_strips_whitespace(self, temp_stardag_dir):
-        active_profile_path = temp_stardag_dir / "active_profile"
-        active_profile_path.write_text("  my-profile  \n")
-        assert load_active_profile() == "my-profile"
+        active_registry_path = temp_stardag_dir / "active_registry"
+        active_registry_path.write_text("  my-registry  \n")
+        assert load_active_registry() == "my-registry"
 
 
-class TestSaveActiveProfile:
+class TestSaveActiveRegistry:
     def test_creates_directory_if_needed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         # Directory doesn't exist yet
         assert not (tmp_path / ".stardag").exists()
 
-        save_active_profile("test-profile")
+        save_active_registry("test-registry")
 
-        assert (tmp_path / ".stardag" / "active_profile").exists()
-        assert (tmp_path / ".stardag" / "active_profile").read_text() == "test-profile"
+        assert (tmp_path / ".stardag" / "active_registry").exists()
+        assert (
+            tmp_path / ".stardag" / "active_registry"
+        ).read_text() == "test-registry"
 
 
 class TestActiveWorkspace:
@@ -92,16 +94,16 @@ class TestActiveWorkspace:
         save_active_workspace("local", "ws-123")
         assert load_active_workspace("local") == "ws-123"
 
-    def test_creates_profile_dir_if_needed(self, temp_stardag_dir):
-        # Profile directory doesn't exist yet
-        assert not (temp_stardag_dir / "profiles" / "newprofile").exists()
+    def test_creates_registry_dir_if_needed(self, temp_stardag_dir):
+        # Registry directory doesn't exist yet
+        assert not (temp_stardag_dir / "registries" / "newregistry").exists()
 
-        save_active_workspace("newprofile", "ws-456")
+        save_active_workspace("newregistry", "ws-456")
 
         assert (
-            temp_stardag_dir / "profiles" / "newprofile" / "active_workspace"
+            temp_stardag_dir / "registries" / "newregistry" / "active_workspace"
         ).exists()
-        assert load_active_workspace("newprofile") == "ws-456"
+        assert load_active_workspace("newregistry") == "ws-456"
 
 
 class TestWorkspaceTargetRoots:
@@ -115,24 +117,24 @@ class TestWorkspaceTargetRoots:
         result = load_workspace_target_roots("local", "ws-123")
         assert result == target_roots
 
-    def test_loads_from_profile_only(self, temp_stardag_dir):
-        """load_workspace_target_roots only loads from profile, not project config."""
-        # Save to profile
-        profile_roots = {"default": "/profile/root"}
-        save_workspace_target_roots("local", "ws-123", profile_roots)
+    def test_loads_from_registry_only(self, temp_stardag_dir):
+        """load_workspace_target_roots only loads from registry, not project config."""
+        # Save to registry
+        registry_roots = {"default": "/registry/root"}
+        save_workspace_target_roots("local", "ws-123", registry_roots)
 
         result = load_workspace_target_roots("local", "ws-123")
-        assert result == profile_roots
+        assert result == registry_roots
 
 
 class TestProjectConfig:
     def test_nested_structure(self):
-        """Test nested profiles/workspaces structure."""
+        """Test nested registries/workspaces structure."""
         config = ProjectConfig(
-            default_profile="central",
+            default_registry="central",
             allowed_organizations=["my-org"],
-            profiles={
-                "local": ProjectProfileConfig(
+            registries={
+                "local": ProjectRegistryConfig(
                     organization_id="local-org",
                     default_workspace="dev",
                     workspaces={
@@ -141,7 +143,7 @@ class TestProjectConfig:
                         ),
                     },
                 ),
-                "central": ProjectProfileConfig(
+                "central": ProjectRegistryConfig(
                     organization_id="central-org",
                     default_workspace="prod",
                     workspaces={
@@ -156,16 +158,16 @@ class TestProjectConfig:
             },
         )
 
-        assert config.default_profile == "central"
+        assert config.default_registry == "central"
 
-        # Local profile
+        # Local registry
         assert config.get_organization_id("local") == "local-org"
         assert config.get_workspace_id("local") == "dev"
         assert config.get_workspace_target_roots("local", "dev") == {
             "default": "/local/data"
         }
 
-        # Central profile
+        # Central registry
         assert config.get_organization_id("central") == "central-org"
         assert config.get_workspace_id("central") == "prod"
         assert config.get_workspace_target_roots("central", "prod") == {
@@ -175,19 +177,19 @@ class TestProjectConfig:
             "default": "s3://bucket/staging/"
         }
 
-    def test_returns_none_for_unknown_profile(self):
-        """Test that unknown profile returns None."""
+    def test_returns_none_for_unknown_registry(self):
+        """Test that unknown registry returns None."""
         config = ProjectConfig(
-            profiles={
-                "known-profile": ProjectProfileConfig(
+            registries={
+                "known-registry": ProjectRegistryConfig(
                     organization_id="known-org",
                 )
             },
         )
 
-        assert config.get_organization_id("unknown-profile") is None
-        assert config.get_workspace_id("unknown-profile") is None
-        assert config.get_workspace_target_roots("unknown-profile", "ws") is None
+        assert config.get_organization_id("unknown-registry") is None
+        assert config.get_workspace_id("unknown-registry") is None
+        assert config.get_workspace_target_roots("unknown-registry", "ws") is None
 
 
 class TestFindProjectConfig:
@@ -225,19 +227,19 @@ class TestLoadConfig:
         assert config.target.roots == {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
         assert config.api.url == DEFAULT_API_URL
         assert config.api.timeout == DEFAULT_API_TIMEOUT
-        assert config.context.profile == DEFAULT_PROFILE
+        assert config.context.registry == DEFAULT_REGISTRY
         assert config.context.organization_id is None
         assert config.context.workspace_id is None
         assert config.access_token is None
         assert config.api_key is None
 
-    def test_loads_from_profile_config(self, temp_stardag_dir, monkeypatch):
+    def test_loads_from_registry_config(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
 
-        # Create profile config
-        profile_dir = temp_stardag_dir / "profiles" / "local"
-        profile_dir.mkdir(parents=True)
-        config_path = profile_dir / "config.json"
+        # Create registry config
+        registry_dir = temp_stardag_dir / "registries" / "local"
+        registry_dir.mkdir(parents=True)
+        config_path = registry_dir / "config.json"
         config_path.write_text(
             json.dumps(
                 {
@@ -249,10 +251,10 @@ class TestLoadConfig:
         )
 
         # Create active_workspace file
-        (profile_dir / "active_workspace").write_text("ws-456")
+        (registry_dir / "active_workspace").write_text("ws-456")
 
         # Create workspace-specific target roots
-        ws_dir = profile_dir / "workspaces" / "ws-456"
+        ws_dir = registry_dir / "workspaces" / "ws-456"
         ws_dir.mkdir(parents=True)
         (ws_dir / "target_roots.json").write_text(
             json.dumps({"default": "/custom/path"})
@@ -266,13 +268,13 @@ class TestLoadConfig:
         assert config.context.workspace_id == "ws-456"
         assert config.target.roots == {"default": "/custom/path"}
 
-    def test_loads_credentials_from_profile(self, temp_stardag_dir, monkeypatch):
+    def test_loads_credentials_from_registry(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
 
-        # Create profile credentials
-        profile_dir = temp_stardag_dir / "profiles" / "local"
-        profile_dir.mkdir(parents=True)
-        creds_path = profile_dir / "credentials.json"
+        # Create registry credentials
+        registry_dir = temp_stardag_dir / "registries" / "local"
+        registry_dir.mkdir(parents=True)
+        creds_path = registry_dir / "credentials.json"
         creds_path.write_text(
             json.dumps(
                 {
@@ -286,23 +288,23 @@ class TestLoadConfig:
 
         assert config.access_token == "my-jwt-token"
 
-    def test_env_vars_override_profile_config(self, temp_stardag_dir, monkeypatch):
+    def test_env_vars_override_registry_config(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
 
-        # Create profile config
-        profile_dir = temp_stardag_dir / "profiles" / "local"
-        profile_dir.mkdir(parents=True)
-        config_path = profile_dir / "config.json"
+        # Create registry config
+        registry_dir = temp_stardag_dir / "registries" / "local"
+        registry_dir.mkdir(parents=True)
+        config_path = registry_dir / "config.json"
         config_path.write_text(
             json.dumps(
                 {
-                    "api_url": "http://profile-api:9000",
+                    "api_url": "http://registry-api:9000",
                 }
             )
         )
 
         # Create active_workspace file
-        (profile_dir / "active_workspace").write_text("profile-ws")
+        (registry_dir / "active_workspace").write_text("registry-ws")
 
         # Set env vars (should override)
         monkeypatch.setenv("STARDAG_API_URL", "http://env-api:8080")
@@ -314,30 +316,30 @@ class TestLoadConfig:
         assert config.api.url == "http://env-api:8080"
         assert config.context.workspace_id == "env-ws"
 
-    def test_project_config_overrides_profile(
+    def test_project_config_overrides_registry(
         self, temp_stardag_dir, temp_project_dir, monkeypatch
     ):
-        # Create profile config
-        profile_dir = temp_stardag_dir / "profiles" / "local"
-        profile_dir.mkdir(parents=True)
-        profile_config = profile_dir / "config.json"
-        profile_config.write_text(
+        # Create registry config
+        registry_dir = temp_stardag_dir / "registries" / "local"
+        registry_dir.mkdir(parents=True)
+        registry_config = registry_dir / "config.json"
+        registry_config.write_text(
             json.dumps(
                 {
-                    "organization_id": "profile-org",
+                    "organization_id": "registry-org",
                 }
             )
         )
-        # Create active_workspace file for profile
-        (profile_dir / "active_workspace").write_text("profile-ws")
+        # Create active_workspace file for registry
+        (registry_dir / "active_workspace").write_text("registry-ws")
 
         # Create project config (overrides organization and workspace via nested structure)
         project_config = temp_project_dir / ".stardag" / "config.json"
         project_config.write_text(
             json.dumps(
                 {
-                    "default_profile": "local",
-                    "profiles": {
+                    "default_registry": "local",
+                    "registries": {
                         "local": {
                             "organization_id": "project-org",
                             "default_workspace": "project-ws",
@@ -356,19 +358,19 @@ class TestLoadConfig:
         self, temp_stardag_dir, temp_project_dir, monkeypatch
     ):
         """Test that nested project config provides target roots."""
-        # Create profile config (will be used if project config doesn't have it)
-        profile_dir = temp_stardag_dir / "profiles" / "local"
-        profile_dir.mkdir(parents=True)
-        profile_config = profile_dir / "config.json"
-        profile_config.write_text(json.dumps({}))
+        # Create registry config (will be used if project config doesn't have it)
+        registry_dir = temp_stardag_dir / "registries" / "local"
+        registry_dir.mkdir(parents=True)
+        registry_config = registry_dir / "config.json"
+        registry_config.write_text(json.dumps({}))
 
         # Create nested project config with target roots
         project_config = temp_project_dir / ".stardag" / "config.json"
         project_config.write_text(
             json.dumps(
                 {
-                    "default_profile": "local",
-                    "profiles": {
+                    "default_registry": "local",
+                    "registries": {
                         "local": {
                             "organization_id": "my-org",
                             "default_workspace": "dev-ws",
@@ -385,16 +387,16 @@ class TestLoadConfig:
 
         config = load_config()
 
-        assert config.context.profile == "local"
+        assert config.context.registry == "local"
         assert config.context.organization_id == "my-org"
         assert config.context.workspace_id == "dev-ws"
         assert config.target.roots == {"default": "/project/dev/data"}
 
-    def test_project_config_can_set_profile(self, temp_stardag_dir, temp_project_dir):
-        # Create production profile config
-        prod_profile_dir = temp_stardag_dir / "profiles" / "production"
-        prod_profile_dir.mkdir(parents=True)
-        prod_config = prod_profile_dir / "config.json"
+    def test_project_config_can_set_registry(self, temp_stardag_dir, temp_project_dir):
+        # Create production registry config
+        prod_registry_dir = temp_stardag_dir / "registries" / "production"
+        prod_registry_dir.mkdir(parents=True)
+        prod_config = prod_registry_dir / "config.json"
         prod_config.write_text(
             json.dumps(
                 {
@@ -403,19 +405,19 @@ class TestLoadConfig:
             )
         )
 
-        # Create project config that selects production profile
+        # Create project config that selects production registry
         project_config = temp_project_dir / ".stardag" / "config.json"
         project_config.write_text(
             json.dumps(
                 {
-                    "default_profile": "production",
+                    "default_registry": "production",
                 }
             )
         )
 
         config = load_config()
 
-        assert config.context.profile == "production"
+        assert config.context.registry == "production"
         assert config.api.url == "https://api.stardag.io"
 
     def test_api_key_from_env_var(self, temp_stardag_dir, monkeypatch):

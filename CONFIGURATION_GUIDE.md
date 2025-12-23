@@ -7,13 +7,13 @@ This guide covers how to configure Stardag for different deployment scenarios, m
 Stardag configuration follows a hierarchical model:
 
 ```
-Profile (API Backend)
+Registry (API Backend)
   └── Organization (team/company)
         └── Workspace (project/stage separation)
               └── Target Roots (where task outputs are stored)
 ```
 
-**Profile** = Which Stardag API backend you're connecting to (local dev server vs central/remote SAAS).
+**Registry** = Which Stardag API backend you're connecting to (local dev server vs central/remote SAAS).
 
 **Workspace** = Logical grouping within an organization for separating projects or stages (staging vs production).
 
@@ -21,26 +21,26 @@ Profile (API Backend)
 
 ## Conceptual Model
 
-### Profiles
+### Registries
 
-A **profile** represents a connection to a specific Stardag API backend. Each profile contains:
+A **registry** represents a connection to a specific Stardag API backend. Each registry contains:
 
 - API URL (where the backend is running)
 - Credentials (OAuth tokens or API key)
 - Cached workspace settings
 
-Profiles are stored in `~/.stardag/profiles/{profile_name}/`.
+Registries are stored in `~/.stardag/registries/{registry_name}/`.
 
-**Common profile setup:**
+**Common registry setup:**
 
-| Profile   | API URL                  | Use Case                              |
+| Registry  | API URL                  | Use Case                              |
 | --------- | ------------------------ | ------------------------------------- |
 | `local`   | `http://localhost:8000`  | Local development with docker-compose |
 | `central` | `https://api.stardag.io` | Central SAAS deployment               |
 
-For self-hosted deployments, you might have additional profiles:
+For self-hosted deployments, you might have additional registries:
 
-| Profile           | API URL                               | Use Case               |
+| Registry          | API URL                               | Use Case               |
 | ----------------- | ------------------------------------- | ---------------------- |
 | `local`           | `http://localhost:8000`               | Local development      |
 | `company-staging` | `https://staging.stardag.company.com` | Staging environment    |
@@ -48,7 +48,7 @@ For self-hosted deployments, you might have additional profiles:
 
 ### Organizations
 
-An **organization** is a team or company that shares access to workspaces and their contents. Organizations exist within a profile (API backend).
+An **organization** is a team or company that shares access to workspaces and their contents. Organizations exist within a registry (API backend).
 
 - Users can belong to multiple organizations
 - Each organization has members with roles (owner, admin, member)
@@ -91,7 +91,7 @@ Stardag resolves configuration values in this priority order (highest to lowest)
 
 1. **Environment variables** (`STARDAG_*`)
 2. **Project config** (`.stardag/config.json` in repository root)
-3. **Profile config** (`~/.stardag/profiles/{profile}/config.json`)
+3. **Registry config** (`~/.stardag/registries/{registry}/config.json`)
 4. **Defaults**
 
 This allows:
@@ -106,10 +106,10 @@ This allows:
 
 ```
 ~/.stardag/
-├── active_profile              # Contains active profile name (e.g., "central")
-└── profiles/
+├── active_registry              # Contains active registry name (e.g., "central")
+└── registries/
     ├── local/
-    │   ├── active_workspace    # Contains the active workspace in this profile
+    │   ├── active_workspace    # Contains the active workspace in this registry
     │   ├── config.json         # API URL, other *shared* settings (can be overriden in project config)
     │   ├── credentials.json    # OAuth tokens
     │   └── workspaces/
@@ -137,7 +137,7 @@ your-project/
 
 ## Configuration Files
 
-### Profile Config (`~/.stardag/profiles/{profile}/config.json`)
+### Registry Config (`~/.stardag/registries/{registry}/config.json`)
 
 ```json
 {
@@ -148,7 +148,7 @@ your-project/
 }
 ```
 
-### Profile Credentials (`~/.stardag/profiles/{profile}/credentials.json`)
+### Registry Credentials (`~/.stardag/registries/{registry}/credentials.json`)
 
 ```json
 {
@@ -161,15 +161,15 @@ your-project/
 
 ### Project Config (`.stardag/config.json`)
 
-Defines per-profile settings with optional workspace configurations.
+Defines per-registry settings with optional workspace configurations.
 
-**Simple example** (single profile):
+**Simple example** (single registry):
 
 ```json
 {
-  "default_profile": "local",
+  "default_registry": "local",
   "allowed_organizations": ["my-org-slug"],
-  "profiles": {
+  "registries": {
     "local": {
       "organization_id": "my-org-slug"
     }
@@ -177,13 +177,13 @@ Defines per-profile settings with optional workspace configurations.
 }
 ```
 
-**Full example** (multiple profiles and workspaces):
+**Full example** (multiple registries and workspaces):
 
 ```json
 {
-  "default_profile": "central",
+  "default_registry": "central",
   "allowed_organizations": ["my-org-slug"],
-  "profiles": {
+  "registries": {
     "local": {
       "organization_id": "local-dev-org",
       "default_workspace": "dev",
@@ -219,19 +219,19 @@ Defines per-profile settings with optional workspace configurations.
 
 | Field                   | Description                                             |
 | ----------------------- | ------------------------------------------------------- |
-| `default_profile`       | Which profile to use by default for this project        |
+| `default_registry`      | Which registry to use by default for this project       |
 | `allowed_organizations` | Restrict which organizations can be used (safety check) |
-| `profiles`              | Per-profile configuration with workspaces               |
+| `registries`            | Per-registry configuration with workspaces              |
 
-**Per-profile fields** (in `profiles.{profile_name}`):
+**Per-registry fields** (in `registries.{registry_name}`):
 
 | Field               | Description                           |
 | ------------------- | ------------------------------------- |
-| `organization_id`   | Organization for this profile         |
-| `default_workspace` | Default workspace for this profile    |
+| `organization_id`   | Organization for this registry        |
+| `default_workspace` | Default workspace for this registry   |
 | `workspaces`        | Per-workspace settings (target roots) |
 
-### Workspace Target Roots (`~/.stardag/profiles/{profile}/workspaces/{workspace_id}/target_roots.json`)
+### Workspace Target Roots (`~/.stardag/registries/{registry}/workspaces/{workspace_id}/target_roots.json`)
 
 ```json
 {
@@ -248,7 +248,7 @@ All configuration can be overridden via environment variables:
 
 | Variable                      | Description                         |
 | ----------------------------- | ----------------------------------- |
-| `STARDAG_PROFILE`             | Active profile name                 |
+| `STARDAG_REGISTRY`            | Active registry name                |
 | `STARDAG_API_URL`             | API backend URL                     |
 | `STARDAG_API_KEY`             | API key (for CI/CD, bypasses OAuth) |
 | `STARDAG_ORGANIZATION_ID`     | Active organization ID              |
@@ -257,20 +257,20 @@ All configuration can be overridden via environment variables:
 
 ## CLI Commands
 
-### Profile Management
+### Registry Management
 
 ```bash
-# List available profiles
-stardag profile list
+# List available registries
+stardag registry list
 
-# Add a new profile
-stardag profile add central --api-url https://api.stardag.io
+# Add a new registry
+stardag registry add central --api-url https://api.stardag.io
 
-# Switch active profile
-stardag profile use central
+# Switch active registry
+stardag registry use central
 
-# Show current profile
-stardag profile current
+# Show current registry
+stardag registry current
 ```
 
 ### Authentication
@@ -279,8 +279,8 @@ stardag profile current
 # Login (opens browser for OAuth)
 stardag auth login
 
-# Login to specific profile
-stardag auth login --profile central
+# Login to specific registry
+stardag auth login --registry central
 
 # Check auth status
 stardag auth status
@@ -292,7 +292,7 @@ stardag auth logout
 ### Organization & Workspace
 
 ```bash
-# List organizations (in current profile)
+# List organizations (in current registry)
 stardag config list organizations
 
 # Set active organization (by ID or slug)
@@ -322,26 +322,30 @@ stardag config show
 Most common setup for individual developers or small teams:
 
 ```bash
-# Setup local profile (docker-compose)
-stardag profile add local --api-url http://localhost:8000
+# Setup local registry (docker-compose)
+stardag registry add local --api-url http://localhost:8000
 
-# Setup central profile (SAAS)
-stardag profile add central --api-url https://api.stardag.io
-stardag profile use central
+# Setup central registry (SAAS)
+stardag registry add central --api-url https://api.stardag.io
+stardag registry use central
 stardag auth login
 
 # In your project, set defaults
 # .stardag/config.json:
 {
-  "profile": "central",
-  "workspace_id": "ws_your_workspace"
+  "default_registry": "central",
+  "registries": {
+    "central": {
+      "workspace_id": "ws_your_workspace"
+    }
+  }
 }
 ```
 
 **Workflow:**
 
-- Daily work: Uses `central` profile automatically (from project config)
-- Testing stardag itself: `stardag profile use local`
+- Daily work: Uses `central` registry automatically (from project config)
+- Testing stardag itself: `stardag registry use local`
 
 ### Pattern 2: Multi-Stage Deployment
 
@@ -368,15 +372,23 @@ For consultants or developers working across multiple client organizations:
 ```json
 // Project A: .stardag/config.json
 {
-  "profile": "central",
-  "organization_id": "org_client_a",
+  "default_registry": "central",
+  "registries": {
+    "central": {
+      "organization_id": "org_client_a"
+    }
+  },
   "allowed_organizations": ["org_client_a"]
 }
 
 // Project B: .stardag/config.json
 {
-  "profile": "central",
-  "organization_id": "org_client_b",
+  "default_registry": "central",
+  "registries": {
+    "central": {
+      "organization_id": "org_client_b"
+    }
+  },
   "allowed_organizations": ["org_client_b"]
 }
 ```

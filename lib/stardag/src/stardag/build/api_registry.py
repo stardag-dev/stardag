@@ -29,7 +29,7 @@ class APIRegistry(RegistryABC):
 
     Authentication:
     - API key can be provided directly or via STARDAG_API_KEY env var
-    - JWT token from browser login (stored in profile credentials)
+    - JWT token from browser login (stored in registry credentials)
 
     Configuration is loaded from the central config module (stardag.config).
     """
