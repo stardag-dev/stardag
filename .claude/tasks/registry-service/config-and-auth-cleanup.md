@@ -241,8 +241,20 @@ See **Decisions** section below for questions requiring user input.
   - [x] Updated `cli/credentials.py` to use profile-based paths
   - [x] Added 23 unit tests for config module
   - [x] All 76 tests pass
-- [ ] Phase 2: Workspace Target Roots
-- [ ] Phase 3: Profile & Project Config
+- [x] Phase 2: Workspace Target Roots
+  - [x] TargetRoot model and migration (workspace_id, name, uri_prefix)
+  - [x] CRUD endpoints at /ui/organizations/{org}/workspaces/{ws}/target-roots
+  - [x] SDK sync endpoint at /api/v1/target-roots
+  - [x] CLI sync on `stardag config set workspace`
+  - [x] `stardag config list target-roots` command
+  - [x] UI Target Roots section in Organization Settings
+  - [x] 5 API tests for target root CRUD
+- [x] Phase 3: Profile & Project Config
+  - [x] CLI profile commands (`stardag profile list/current/add/use/delete`)
+  - [x] Project-level config loading (`.stardag/config.json`)
+  - [x] SDK validation against project restrictions (`allowed_organizations`)
+  - [x] 6 unit tests for profile CLI
+  - [x] All 82 tests pass
 - [ ] Phase 4: Personal Workspaces
 - [ ] Phase 5: CLI Improvements
 - [ ] Phase 6: Sample Project Config
