@@ -174,30 +174,19 @@ def save_active_workspace(profile: str, workspace_id: str) -> None:
     path.write_text(workspace_id)
 
 
-def load_workspace_target_roots(
-    profile: str, workspace_id: str, project_dir: Path | None = None
-) -> dict[str, str]:
-    """Load target roots for a workspace.
+def load_workspace_target_roots(profile: str, workspace_id: str) -> dict[str, str]:
+    """Load target roots for a workspace from profile config.
 
-    Checks project config first (if project_dir provided), then profile config.
+    Note: Project-level overrides are handled in load_config() via
+    ProjectConfig.get_workspace_target_roots().
 
     Args:
         profile: Profile name.
         workspace_id: Workspace ID.
-        project_dir: Optional project directory to check for overrides.
 
     Returns:
         Dict of target root name to URI prefix. Empty dict if not found.
     """
-    # Check project-level override first
-    if project_dir:
-        project_path = (
-            project_dir / ".stardag" / "workspaces" / workspace_id / "target_roots.json"
-        )
-        if project_path.exists():
-            return load_json_file(project_path)
-
-    # Fall back to profile config
     profile_path = get_workspace_target_roots_path(profile, workspace_id)
     return load_json_file(profile_path)
 
@@ -262,20 +251,109 @@ class ContextConfig(BaseModel):
     workspace_id: str | None = None
 
 
+class ProjectWorkspaceConfig(BaseModel):
+    """Project-level workspace configuration.
+
+    Attributes:
+        target_roots: Target roots for this workspace.
+    """
+
+    target_roots: dict[str, str] | None = None
+
+
+class ProjectProfileConfig(BaseModel):
+    """Project-level profile configuration.
+
+    Attributes:
+        organization_id: Organization for this profile.
+        default_workspace: Default workspace for this profile.
+        workspaces: Per-workspace settings.
+    """
+
+    organization_id: str | None = None
+    default_workspace: str | None = None
+    workspaces: dict[str, ProjectWorkspaceConfig] = Field(default_factory=dict)
+
+
 class ProjectConfig(BaseModel):
     """Project-level configuration (.stardag/config.json in repo).
 
-    Attributes:
-        profile: Override default profile for this project.
-        organization_id: Override organization for this project.
-        workspace_id: Override workspace for this project.
-        allowed_organizations: Restrict which orgs can be used (safety check).
+    Supports both flat (simple) and nested (multi-profile) structures.
+
+    Flat structure (backwards compatible):
+        {
+            "profile": "central",
+            "organization_id": "my-org",
+            "workspace_id": "my-ws",
+            "allowed_organizations": ["my-org"]
+        }
+
+    Nested structure (multi-profile):
+        {
+            "default_profile": "central",
+            "allowed_organizations": ["my-org"],
+            "profiles": {
+                "local": {
+                    "organization_id": "local-org",
+                    "default_workspace": "dev",
+                    "workspaces": {
+                        "dev": {"target_roots": {"default": "/local/data"}}
+                    }
+                },
+                "central": {
+                    "organization_id": "my-org",
+                    "workspaces": {
+                        "prod": {"target_roots": {"default": "s3://bucket/prod/"}}
+                    }
+                }
+            }
+        }
     """
 
+    # Flat structure (backwards compatible)
     profile: str | None = None
     organization_id: str | None = None
     workspace_id: str | None = None
+
+    # Nested structure
+    default_profile: str | None = None
+    profiles: dict[str, ProjectProfileConfig] = Field(default_factory=dict)
+
+    # Global settings
     allowed_organizations: list[str] | None = None
+
+    def get_effective_profile(self) -> str | None:
+        """Get the effective default profile (nested or flat)."""
+        return self.default_profile or self.profile
+
+    def get_profile_config(self, profile: str) -> ProjectProfileConfig | None:
+        """Get profile-specific config if it exists."""
+        return self.profiles.get(profile)
+
+    def get_organization_id(self, profile: str) -> str | None:
+        """Get organization ID for a profile (nested first, then flat fallback)."""
+        profile_config = self.profiles.get(profile)
+        if profile_config and profile_config.organization_id:
+            return profile_config.organization_id
+        return self.organization_id
+
+    def get_workspace_id(self, profile: str) -> str | None:
+        """Get workspace ID for a profile (nested first, then flat fallback)."""
+        profile_config = self.profiles.get(profile)
+        if profile_config and profile_config.default_workspace:
+            return profile_config.default_workspace
+        return self.workspace_id
+
+    def get_workspace_target_roots(
+        self, profile: str, workspace_id: str
+    ) -> dict[str, str] | None:
+        """Get target roots for a specific workspace in a profile."""
+        profile_config = self.profiles.get(profile)
+        if profile_config:
+            ws_config = profile_config.workspaces.get(workspace_id)
+            if ws_config and ws_config.target_roots:
+                return ws_config.target_roots
+        return None
 
 
 class StardagSettings(BaseSettings):
@@ -380,18 +458,15 @@ def load_config(
 
     # 3. Load project config (if enabled)
     project_config = ProjectConfig()
-    project_dir: Path | None = None
     if use_project_config:
         project_path = find_project_config()
         if project_path:
-            project_dir = (
-                project_path.parent.parent
-            )  # .stardag/config.json -> project root
             project_data = load_json_file(project_path)
             project_config = ProjectConfig.model_validate(project_data)
-            # Project can override profile
-            if project_config.profile:
-                effective_profile = project_config.profile
+            # Project can override profile (supports both flat and nested)
+            project_default_profile = project_config.get_effective_profile()
+            if project_default_profile:
+                effective_profile = project_default_profile
 
     # 4. Load profile config and credentials
     profile_config_path = get_profile_config_path(effective_profile)
@@ -417,10 +492,10 @@ def load_config(
         or DEFAULT_API_TIMEOUT
     )
 
-    # Context (org/workspace)
+    # Context (org/workspace) - use project config methods for nested support
     organization_id = (
         env_settings.organization_id
-        or project_config.organization_id
+        or project_config.get_organization_id(effective_profile)
         or profile_data.get("organization_id")
     )
 
@@ -429,26 +504,37 @@ def load_config(
     # Workspace from: env > project config > active_workspace file > profile config (legacy)
     workspace_id = (
         env_settings.workspace_id
-        or project_config.workspace_id
+        or project_config.get_workspace_id(effective_profile)
         or load_active_workspace(effective_profile)
         or profile_data.get("workspace_id")  # Legacy fallback
     )
 
-    # Target roots from workspace-specific file (with project override)
+    # Target roots resolution order:
+    # 1. Environment variables
+    # 2. Project config nested structure (profiles.{profile}.workspaces.{ws}.target_roots)
+    # 3. Profile workspace file (~/.stardag/profiles/{profile}/workspaces/{ws}/target_roots.json)
+    # 4. Legacy profile config (target_roots in config.json)
+    # 5. Defaults
     target_roots: dict[str, str]
     if env_settings.target_roots:
         target_roots = env_settings.target_roots
     elif workspace_id:
-        target_roots = load_workspace_target_roots(
-            effective_profile, workspace_id, project_dir
+        # Check nested project config first
+        project_target_roots = project_config.get_workspace_target_roots(
+            effective_profile, workspace_id
         )
-        if not target_roots:
-            # Legacy fallback: check profile config
-            target_roots = (
-                profile_data.get("target_roots")
-                or profile_data.get("target", {}).get("roots")
-                or {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
-            )
+        if project_target_roots:
+            target_roots = project_target_roots
+        else:
+            # Check profile workspace file
+            target_roots = load_workspace_target_roots(effective_profile, workspace_id)
+            if not target_roots:
+                # Legacy fallback: check profile config
+                target_roots = (
+                    profile_data.get("target_roots")
+                    or profile_data.get("target", {}).get("roots")
+                    or {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
+                )
     else:
         # No workspace - use legacy config or defaults
         target_roots = (
