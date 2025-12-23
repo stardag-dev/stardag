@@ -2,7 +2,7 @@
 
 ## Status
 
-active
+completed
 
 ## Goal
 
@@ -266,7 +266,9 @@ See **Decisions** section below for questions requiring user input.
   - [x] Support slugs for `stardag config set organization/workspace`
   - [x] Added `stardag config sync` command
   - [x] All 82 SDK tests pass
-- [ ] Phase 6: Sample Project Config
+- [x] Phase 6: Sample Project Config
+  - [x] Created `.stardag/config.json` in stardag-examples
+  - [x] Added README explaining the config format
 
 ## Notes
 
