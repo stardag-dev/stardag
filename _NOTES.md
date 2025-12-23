@@ -100,11 +100,6 @@ Later:
 
 - publish stardag-examples for ease to get started.
 
-- [ ] Unless a organization is set, auto set first (and ask for confirmation), set to default/first workspace
-- [ ] clarify what is in extra and not
-- [ ] claude instructions how to install --all-extras, and to use pre-commit hooks
-- [ ] DAG view default to centered
-
 - [ ] Canonical way to read all config from model (not separate via envvars etc.)
 - [ ] How to handle tasks alredy built (still register as referenced, tasks don't belong to builds (or even workspaces!? YES they DO, same task ID but different targets, so duplicate), they have events in builds)
 
@@ -115,20 +110,7 @@ Later:
 4. [x] Related: What is the default token expiration time? It seems short, set it to 24h in the local setup.
 5. [x] Related: We previously got a "500 Internl Server Error" when the "sub" token claims where missing, make sure such issue yield correct HTTPException/status codes.
 
-6. CLI: I want to make the loging and configuration via CLI more user firendly. Unless a organization is set, auto set first (and ask for confirmation), set to default/first workspace
-
-We need to straighten out the configuration+auth model and flow. Basically there are a few separate components:
-
-- 1. Core config (used both by SDK and CLI): things like API_URL, timeouts/retries etc.
-- 2. Organization+Workspace specific config: for each workspace there should be clearly defined "target roots" (see: `TargetFactoryConfig` in `lib/stardag/src/stardag/target/_factory.py`)
-- 3. Active context/state: Which is my currently active (logged in to) organization, and which is the active workspace.
-- 4. Credentials (obtained via CLI) _per organization_.
-
-Some suggested TODOs:
-
-- [ ] Is the CLI login token really scoped on organization?
-
-7. Invalid parameter: id_token_hint
+6. [x] Invalid parameter: id_token_hint
 
 ```
 ⏺ The issue is that signoutRedirect() sends the stored id_token as an id_token_hint to Keycloak. When that token is stale or Keycloak's session data is gone (e.g., after container restart without persisted data), Keycloak rejects it.
@@ -140,5 +122,14 @@ Some suggested TODOs:
 ```
 
 8. clarify what is in extra and not
-9. claude instructions how to install --all-extras, and to use pre-commit hooks
+9. [x] claude instructions how to install --all-extras, and to use pre-commit hooks
 10. DAG view default to centered
+
+## config follow ups
+
+- [x] Fix migrations
+- [x] Auto default in CLI
+- [ ] workspace specific configs!?
+- [ ] Create a sub project (python package) example-project in lib/examples
+- [ ] worspace config in _project config_ (committed)
+- [ ] Rename profile to registry!?

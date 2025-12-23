@@ -109,19 +109,18 @@ This allows:
 ├── active_profile              # Contains active profile name (e.g., "central")
 └── profiles/
     ├── local/
-    │   ├── config.json         # API URL, active org/workspace
+    │   ├── config.json         # API URL, other *shared* settings (can be overriden in project config)
     │   ├── credentials.json    # OAuth tokens
-    │   └── cache/
-    │       └── workspaces/
-    │           └── {workspace_id}/
-    │               └── target_roots.json
+    │   └── workspaces/
+    |       └── README.md      # Explaining content optional
+    │       └── {workspace_id}/
+    │           └── target_roots.json
     └── central/
         ├── config.json
         ├── credentials.json
-        └── cache/
-            └── workspaces/
-                └── {workspace_id}/
-                    └── target_roots.json
+        └── workspaces/
+            └── {workspace_id}/
+                └── target_roots.json
 ```
 
 ### Project Configuration
