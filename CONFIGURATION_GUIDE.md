@@ -161,20 +161,23 @@ your-project/
 
 ### Project Config (`.stardag/config.json`)
 
-Supports both flat (simple) and nested (multi-profile/workspace) structures.
+Defines per-profile settings with optional workspace configurations.
 
-**Flat structure** (for simple projects):
+**Simple example** (single profile):
 
 ```json
 {
-  "profile": "central",
-  "organization_id": "my-org-slug",
-  "workspace_id": "my-workspace",
-  "allowed_organizations": ["my-org-slug"]
+  "default_profile": "local",
+  "allowed_organizations": ["my-org-slug"],
+  "profiles": {
+    "local": {
+      "organization_id": "my-org-slug"
+    }
+  }
 }
 ```
 
-**Nested structure** (for multi-environment projects):
+**Full example** (multiple profiles and workspaces):
 
 ```json
 {
@@ -212,14 +215,11 @@ Supports both flat (simple) and nested (multi-profile/workspace) structures.
 }
 ```
 
-**Fields:**
+**Top-level fields:**
 
 | Field                   | Description                                             |
 | ----------------------- | ------------------------------------------------------- |
-| `profile`               | Default profile (flat structure)                        |
-| `default_profile`       | Default profile (nested structure, takes precedence)    |
-| `organization_id`       | Default organization (flat or per-profile in nested)    |
-| `workspace_id`          | Default workspace (flat structure)                      |
+| `default_profile`       | Which profile to use by default for this project        |
 | `allowed_organizations` | Restrict which organizations can be used (safety check) |
 | `profiles`              | Per-profile configuration with workspaces               |
 
