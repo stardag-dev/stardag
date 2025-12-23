@@ -580,3 +580,305 @@ async def test_accept_invite(
         assert data["id"] == test_org_with_owner.id
     finally:
         app.dependency_overrides.clear()
+
+
+# --- Target Root tests ---
+
+
+@pytest.mark.asyncio
+async def test_create_target_root(
+    async_engine, test_user: User, test_org_with_owner: Organization
+):
+    """Test creating a target root in a workspace."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_token(
+        sub=test_user.external_id,
+        email=test_user.email,
+    )
+
+    # Get the workspace ID
+    async with async_session_maker() as session:
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+        )
+        workspace = result.scalar_one()
+        workspace_id = workspace.id
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots",
+                json={
+                    "name": "default",
+                    "uri_prefix": "s3://my-bucket/stardag/",
+                },
+            )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "default"
+        assert data["uri_prefix"] == "s3://my-bucket/stardag/"
+        assert data["workspace_id"] == workspace_id
+        assert "id" in data
+        assert "created_at" in data
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_list_target_roots(
+    async_engine, test_user: User, test_org_with_owner: Organization
+):
+    """Test listing target roots in a workspace."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_token(
+        sub=test_user.external_id,
+        email=test_user.email,
+    )
+
+    # Get the workspace ID and create a target root
+    from stardag_api.models import TargetRoot
+
+    async with async_session_maker() as session:
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+        )
+        workspace = result.scalar_one()
+        workspace_id = workspace.id
+
+        target_root = TargetRoot(
+            workspace_id=workspace_id,
+            name="test-root",
+            uri_prefix="/data/stardag/",
+        )
+        session.add(target_root)
+        await session.commit()
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots"
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["name"] == "test-root"
+        assert data[0]["uri_prefix"] == "/data/stardag/"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_update_target_root(
+    async_engine, test_user: User, test_org_with_owner: Organization
+):
+    """Test updating a target root."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_token(
+        sub=test_user.external_id,
+        email=test_user.email,
+    )
+
+    # Get the workspace ID and create a target root
+    from stardag_api.models import TargetRoot
+
+    async with async_session_maker() as session:
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+        )
+        workspace = result.scalar_one()
+        workspace_id = workspace.id
+
+        target_root = TargetRoot(
+            workspace_id=workspace_id,
+            name="old-name",
+            uri_prefix="/old/path/",
+        )
+        session.add(target_root)
+        await session.commit()
+        await session.refresh(target_root)
+        root_id = target_root.id
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch(
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots/{root_id}",
+                json={
+                    "name": "new-name",
+                    "uri_prefix": "/new/path/",
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "new-name"
+        assert data["uri_prefix"] == "/new/path/"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_delete_target_root(
+    async_engine, test_user: User, test_org_with_owner: Organization
+):
+    """Test deleting a target root."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_token(
+        sub=test_user.external_id,
+        email=test_user.email,
+    )
+
+    # Get the workspace ID and create a target root
+    from stardag_api.models import TargetRoot
+
+    async with async_session_maker() as session:
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+        )
+        workspace = result.scalar_one()
+        workspace_id = workspace.id
+
+        target_root = TargetRoot(
+            workspace_id=workspace_id,
+            name="to-delete",
+            uri_prefix="/delete/me/",
+        )
+        session.add(target_root)
+        await session.commit()
+        await session.refresh(target_root)
+        root_id = target_root.id
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # Delete the target root
+            response = await client.delete(
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots/{root_id}"
+            )
+            assert response.status_code == 204
+
+            # Verify it's gone
+            response = await client.get(
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots"
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data) == 0
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_create_target_root_duplicate_name(
+    async_engine, test_user: User, test_org_with_owner: Organization
+):
+    """Test that duplicate target root names in same workspace are rejected."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_token(
+        sub=test_user.external_id,
+        email=test_user.email,
+    )
+
+    # Get the workspace ID and create a target root
+    from stardag_api.models import TargetRoot
+
+    async with async_session_maker() as session:
+        from sqlalchemy import select
+
+        result = await session.execute(
+            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+        )
+        workspace = result.scalar_one()
+        workspace_id = workspace.id
+
+        target_root = TargetRoot(
+            workspace_id=workspace_id,
+            name="existing-name",
+            uri_prefix="/existing/",
+        )
+        session.add(target_root)
+        await session.commit()
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots",
+                json={
+                    "name": "existing-name",  # Same name as existing
+                    "uri_prefix": "/different/path/",
+                },
+            )
+
+        assert response.status_code == 409
+        data = response.json()
+        assert "existing-name" in data["detail"]
+    finally:
+        app.dependency_overrides.clear()

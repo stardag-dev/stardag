@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from stardag_api.models.api_key import ApiKey
     from stardag_api.models.build import Build
     from stardag_api.models.organization import Organization
+    from stardag_api.models.target_root import TargetRoot
     from stardag_api.models.task import Task
 
 
@@ -53,6 +54,10 @@ class Workspace(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
     api_keys: Mapped[list[ApiKey]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+    )
+    target_roots: Mapped[list[TargetRoot]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
     )

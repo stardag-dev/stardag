@@ -8,6 +8,7 @@ from stardag_api.models import Base
 from stardag_api.routes import (
     builds_router,
     organizations_router,
+    target_roots_router,
     tasks_router,
     ui_router,
 )
@@ -44,9 +45,10 @@ app.add_middleware(
 app.include_router(ui_router, prefix="/api/v1")
 app.include_router(organizations_router, prefix="/api/v1")
 
-# Existing routes (no auth during transition, will be moved to /api/v1/sdk later)
+# SDK routes (API key or JWT auth)
 app.include_router(builds_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
+app.include_router(target_roots_router, prefix="/api/v1")
 
 
 @app.get("/health")

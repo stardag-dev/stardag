@@ -30,7 +30,7 @@
       "Bash(npm install:*)",
       "Bash(docker compose:*)",
       "Bash(curl:*)",
-      "Bash(STARDAG_API_REGISTRY_URL=* uv run python:*)"
+      "Bash(STARDAG_API_REGISTRY_URL=:* uv run python:*)"
     ]
   }
 }

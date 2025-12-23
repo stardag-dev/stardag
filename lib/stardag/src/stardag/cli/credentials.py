@@ -237,6 +237,19 @@ def set_timeout(timeout: float, profile: str | None = None) -> None:
     save_config(config, profile)
 
 
+def get_target_roots(profile: str | None = None) -> dict[str, str]:
+    """Get the stored target roots from config."""
+    config = load_config(profile)
+    return config.get("target_roots", {})
+
+
+def set_target_roots(target_roots: dict[str, str], profile: str | None = None) -> None:
+    """Set the target roots (synced from workspace)."""
+    config = load_config(profile)
+    config["target_roots"] = target_roots
+    save_config(config, profile)
+
+
 # --- Path convenience functions (for CLI display) ---
 
 

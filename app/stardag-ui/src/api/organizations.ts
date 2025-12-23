@@ -367,3 +367,82 @@ export async function revokeApiKey(
     throw new Error(error.detail || `Failed to revoke API key`);
   }
 }
+
+// --- Target Roots ---
+
+export interface TargetRoot {
+  id: string;
+  workspace_id: string;
+  name: string;
+  uri_prefix: string;
+  created_at: string;
+}
+
+export async function fetchTargetRoots(
+  orgId: string,
+  workspaceId: string,
+): Promise<TargetRoot[]> {
+  const response = await fetchWithAuth(
+    `${API_BASE}/organizations/${orgId}/workspaces/${workspaceId}/target-roots`,
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch target roots: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function createTargetRoot(
+  orgId: string,
+  workspaceId: string,
+  data: { name: string; uri_prefix: string },
+): Promise<TargetRoot> {
+  const response = await fetchWithAuth(
+    `${API_BASE}/organizations/${orgId}/workspaces/${workspaceId}/target-roots`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Failed to create target root`);
+  }
+  return response.json();
+}
+
+export async function updateTargetRoot(
+  orgId: string,
+  workspaceId: string,
+  rootId: string,
+  data: { name?: string; uri_prefix?: string },
+): Promise<TargetRoot> {
+  const response = await fetchWithAuth(
+    `${API_BASE}/organizations/${orgId}/workspaces/${workspaceId}/target-roots/${rootId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Failed to update target root`);
+  }
+  return response.json();
+}
+
+export async function deleteTargetRoot(
+  orgId: string,
+  workspaceId: string,
+  rootId: string,
+): Promise<void> {
+  const response = await fetchWithAuth(
+    `${API_BASE}/organizations/${orgId}/workspaces/${workspaceId}/target-roots/${rootId}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Failed to delete target root`);
+  }
+}

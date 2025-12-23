@@ -14,6 +14,7 @@ from stardag_api.models.event import Event
 from stardag_api.models.invite import Invite
 from stardag_api.models.organization import Organization
 from stardag_api.models.organization_member import OrganizationMember
+from stardag_api.models.target_root import TargetRoot
 from stardag_api.models.task import Task
 from stardag_api.models.task_dependency import TaskDependency
 from stardag_api.models.user import User
@@ -31,6 +32,7 @@ __all__ = [
     "Organization",
     "OrganizationMember",
     "OrganizationRole",
+    "TargetRoot",
     "Task",
     "TaskDependency",
     "TaskStatus",
