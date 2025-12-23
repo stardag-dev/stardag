@@ -161,12 +161,54 @@ your-project/
 
 ### Project Config (`.stardag/config.json`)
 
+Supports both flat (simple) and nested (multi-profile/workspace) structures.
+
+**Flat structure** (for simple projects):
+
 ```json
 {
   "profile": "central",
-  "organization_id": "org_abc123",
-  "workspace_id": "ws_def456",
-  "allowed_organizations": ["org_abc123", "my-org-slug"]
+  "organization_id": "my-org-slug",
+  "workspace_id": "my-workspace",
+  "allowed_organizations": ["my-org-slug"]
+}
+```
+
+**Nested structure** (for multi-environment projects):
+
+```json
+{
+  "default_profile": "central",
+  "allowed_organizations": ["my-org-slug"],
+  "profiles": {
+    "local": {
+      "organization_id": "local-dev-org",
+      "default_workspace": "dev",
+      "workspaces": {
+        "dev": {
+          "target_roots": {
+            "default": "/local/data/dev"
+          }
+        }
+      }
+    },
+    "central": {
+      "organization_id": "my-org-slug",
+      "default_workspace": "project-prod",
+      "workspaces": {
+        "project-prod": {
+          "target_roots": {
+            "default": "s3://company-bucket/prod/"
+          }
+        },
+        "project-staging": {
+          "target_roots": {
+            "default": "s3://company-bucket/staging/"
+          }
+        }
+      }
+    }
+  }
 }
 ```
 
@@ -174,10 +216,20 @@ your-project/
 
 | Field                   | Description                                             |
 | ----------------------- | ------------------------------------------------------- |
-| `profile`               | Which profile to use by default for this project        |
-| `organization_id`       | Override the active organization                        |
-| `workspace_id`          | Override the active workspace                           |
+| `profile`               | Default profile (flat structure)                        |
+| `default_profile`       | Default profile (nested structure, takes precedence)    |
+| `organization_id`       | Default organization (flat or per-profile in nested)    |
+| `workspace_id`          | Default workspace (flat structure)                      |
 | `allowed_organizations` | Restrict which organizations can be used (safety check) |
+| `profiles`              | Per-profile configuration with workspaces               |
+
+**Per-profile fields** (in `profiles.{profile_name}`):
+
+| Field               | Description                           |
+| ------------------- | ------------------------------------- |
+| `organization_id`   | Organization for this profile         |
+| `default_workspace` | Default workspace for this profile    |
+| `workspaces`        | Per-workspace settings (target roots) |
 
 ### Workspace Target Roots (`~/.stardag/profiles/{profile}/workspaces/{workspace_id}/target_roots.json`)
 
@@ -188,7 +240,7 @@ your-project/
 }
 ```
 
-This file is synced from the central API when you set a workspace. It can also be committed to a project's `.stardag/workspaces/{workspace_id}/target_roots.json` for team consistency.
+This file is synced from the central API when you set a workspace. Target roots can also be defined in the project's `.stardag/config.json` (nested structure) for team consistency.
 
 ## Environment Variables
 

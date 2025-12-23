@@ -12,6 +12,9 @@ from stardag.config import (
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
     ConfigProvider,
+    ProjectConfig,
+    ProjectProfileConfig,
+    ProjectWorkspaceConfig,
     StardagConfig,
     clear_config_cache,
     find_project_config,
@@ -112,26 +115,109 @@ class TestWorkspaceTargetRoots:
         result = load_workspace_target_roots("local", "ws-123")
         assert result == target_roots
 
-    def test_project_override_takes_precedence(
-        self, temp_stardag_dir, temp_project_dir
-    ):
+    def test_loads_from_profile_only(self, temp_stardag_dir):
+        """load_workspace_target_roots only loads from profile, not project config."""
         # Save to profile
         profile_roots = {"default": "/profile/root"}
         save_workspace_target_roots("local", "ws-123", profile_roots)
 
-        # Save to project
-        project_roots = {"default": "/project/root"}
-        project_ws_dir = temp_project_dir / ".stardag" / "workspaces" / "ws-123"
-        project_ws_dir.mkdir(parents=True)
-        (project_ws_dir / "target_roots.json").write_text(json.dumps(project_roots))
+        result = load_workspace_target_roots("local", "ws-123")
+        assert result == profile_roots
 
-        # Project should take precedence
-        result = load_workspace_target_roots("local", "ws-123", temp_project_dir)
-        assert result == project_roots
 
-        # Without project_dir, should return profile roots
-        result_no_project = load_workspace_target_roots("local", "ws-123")
-        assert result_no_project == profile_roots
+class TestProjectConfig:
+    def test_flat_structure_backwards_compatible(self):
+        """Test that flat structure still works."""
+        config = ProjectConfig(
+            profile="central",
+            organization_id="my-org",
+            workspace_id="my-ws",
+            allowed_organizations=["my-org"],
+        )
+        assert config.get_effective_profile() == "central"
+        assert config.get_organization_id("central") == "my-org"
+        assert config.get_workspace_id("central") == "my-ws"
+
+    def test_nested_structure(self):
+        """Test nested profiles/workspaces structure."""
+        config = ProjectConfig(
+            default_profile="central",
+            allowed_organizations=["my-org"],
+            profiles={
+                "local": ProjectProfileConfig(
+                    organization_id="local-org",
+                    default_workspace="dev",
+                    workspaces={
+                        "dev": ProjectWorkspaceConfig(
+                            target_roots={"default": "/local/data"}
+                        ),
+                    },
+                ),
+                "central": ProjectProfileConfig(
+                    organization_id="central-org",
+                    default_workspace="prod",
+                    workspaces={
+                        "prod": ProjectWorkspaceConfig(
+                            target_roots={"default": "s3://bucket/prod/"}
+                        ),
+                        "staging": ProjectWorkspaceConfig(
+                            target_roots={"default": "s3://bucket/staging/"}
+                        ),
+                    },
+                ),
+            },
+        )
+
+        assert config.get_effective_profile() == "central"
+
+        # Local profile
+        assert config.get_organization_id("local") == "local-org"
+        assert config.get_workspace_id("local") == "dev"
+        assert config.get_workspace_target_roots("local", "dev") == {
+            "default": "/local/data"
+        }
+
+        # Central profile
+        assert config.get_organization_id("central") == "central-org"
+        assert config.get_workspace_id("central") == "prod"
+        assert config.get_workspace_target_roots("central", "prod") == {
+            "default": "s3://bucket/prod/"
+        }
+        assert config.get_workspace_target_roots("central", "staging") == {
+            "default": "s3://bucket/staging/"
+        }
+
+    def test_nested_overrides_flat(self):
+        """Test that nested config takes precedence over flat."""
+        config = ProjectConfig(
+            profile="old-profile",  # Flat
+            default_profile="new-profile",  # Nested (should win)
+            organization_id="flat-org",  # Flat
+            profiles={
+                "new-profile": ProjectProfileConfig(
+                    organization_id="nested-org",  # Should win
+                )
+            },
+        )
+
+        assert config.get_effective_profile() == "new-profile"
+        assert config.get_organization_id("new-profile") == "nested-org"
+
+    def test_falls_back_to_flat_when_profile_not_in_nested(self):
+        """Test fallback to flat values when profile not in nested."""
+        config = ProjectConfig(
+            organization_id="flat-org",
+            workspace_id="flat-ws",
+            profiles={
+                "other-profile": ProjectProfileConfig(
+                    organization_id="other-org",
+                )
+            },
+        )
+
+        # Profile not in nested - should fall back to flat
+        assert config.get_organization_id("unknown-profile") == "flat-org"
+        assert config.get_workspace_id("unknown-profile") == "flat-ws"
 
 
 class TestFindProjectConfig:
@@ -290,6 +376,44 @@ class TestLoadConfig:
 
         assert config.context.organization_id == "project-org"
         assert config.context.workspace_id == "project-ws"
+
+    def test_nested_project_config_with_target_roots(
+        self, temp_stardag_dir, temp_project_dir, monkeypatch
+    ):
+        """Test that nested project config provides target roots."""
+        # Create profile config (will be used if project config doesn't have it)
+        profile_dir = temp_stardag_dir / "profiles" / "local"
+        profile_dir.mkdir(parents=True)
+        profile_config = profile_dir / "config.json"
+        profile_config.write_text(json.dumps({}))
+
+        # Create nested project config with target roots
+        project_config = temp_project_dir / ".stardag" / "config.json"
+        project_config.write_text(
+            json.dumps(
+                {
+                    "default_profile": "local",
+                    "profiles": {
+                        "local": {
+                            "organization_id": "my-org",
+                            "default_workspace": "dev-ws",
+                            "workspaces": {
+                                "dev-ws": {
+                                    "target_roots": {"default": "/project/dev/data"}
+                                }
+                            },
+                        }
+                    },
+                }
+            )
+        )
+
+        config = load_config()
+
+        assert config.context.profile == "local"
+        assert config.context.organization_id == "my-org"
+        assert config.context.workspace_id == "dev-ws"
+        assert config.target.roots == {"default": "/project/dev/data"}
 
     def test_project_config_can_set_profile(self, temp_stardag_dir, temp_project_dir):
         # Create production profile config
