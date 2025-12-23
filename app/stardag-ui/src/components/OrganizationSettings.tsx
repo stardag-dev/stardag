@@ -17,11 +17,16 @@ import {
   fetchApiKeys,
   createApiKey,
   revokeApiKey,
+  fetchTargetRoots,
+  createTargetRoot,
+  updateTargetRoot,
+  deleteTargetRoot,
   type OrganizationDetail,
   type Member,
   type Invite,
   type Workspace,
   type ApiKey,
+  type TargetRoot,
 } from "../api/organizations";
 
 interface OrganizationSettingsProps {
@@ -67,6 +72,18 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
     string | null
   >(null);
   const [copiedKey, setCopiedKey] = useState(false);
+
+  // Target Roots state - grouped by workspace
+  const [targetRootsByWorkspace, setTargetRootsByWorkspace] = useState<
+    Map<string, TargetRoot[]>
+  >(new Map());
+  const [newRootWorkspace, setNewRootWorkspace] = useState<string>("");
+  const [newRootName, setNewRootName] = useState("");
+  const [newRootUriPrefix, setNewRootUriPrefix] = useState("");
+  const [isCreatingRoot, setIsCreatingRoot] = useState(false);
+  const [editingRoot, setEditingRoot] = useState<string | null>(null);
+  const [editRootName, setEditRootName] = useState("");
+  const [editRootUriPrefix, setEditRootUriPrefix] = useState("");
 
   // Delete confirmation
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -236,12 +253,18 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
     }
   };
 
-  // Initialize default workspace for new key creation
+  // Initialize default workspace for new key/root creation
   useEffect(() => {
-    if (workspacesList.length > 0 && !newKeyWorkspace) {
-      setNewKeyWorkspace(activeWorkspace?.id || workspacesList[0].id);
+    if (workspacesList.length > 0) {
+      const defaultWs = activeWorkspace?.id || workspacesList[0].id;
+      if (!newKeyWorkspace) {
+        setNewKeyWorkspace(defaultWs);
+      }
+      if (!newRootWorkspace) {
+        setNewRootWorkspace(defaultWs);
+      }
     }
-  }, [workspacesList, activeWorkspace, newKeyWorkspace]);
+  }, [workspacesList, activeWorkspace, newKeyWorkspace, newRootWorkspace]);
 
   // Load API keys for all workspaces
   useEffect(() => {
@@ -261,6 +284,26 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
       }
     }
     loadAllApiKeys();
+  }, [activeOrg, workspacesList, isAdmin]);
+
+  // Load target roots for all workspaces
+  useEffect(() => {
+    async function loadAllTargetRoots() {
+      if (!activeOrg || !isAdmin || workspacesList.length === 0) return;
+      try {
+        const rootsByWs = new Map<string, TargetRoot[]>();
+        await Promise.all(
+          workspacesList.map(async (ws) => {
+            const roots = await fetchTargetRoots(activeOrg.id, ws.id);
+            rootsByWs.set(ws.id, roots);
+          }),
+        );
+        setTargetRootsByWorkspace(rootsByWs);
+      } catch (err) {
+        console.error("Failed to load target roots:", err);
+      }
+    }
+    loadAllTargetRoots();
   }, [activeOrg, workspacesList, isAdmin]);
 
   const handleCreateApiKey = async (e: React.FormEvent) => {
@@ -318,6 +361,74 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
       setCopiedKey(true);
     } catch (err) {
       console.error("Failed to copy:", err);
+    }
+  };
+
+  // Target Root handlers
+  const handleCreateTargetRoot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrg || !newRootWorkspace || !newRootName || !newRootUriPrefix) return;
+
+    setIsCreatingRoot(true);
+    try {
+      const result = await createTargetRoot(activeOrg.id, newRootWorkspace, {
+        name: newRootName,
+        uri_prefix: newRootUriPrefix,
+      });
+      setTargetRootsByWorkspace((prev) => {
+        const newMap = new Map(prev);
+        const existingRoots = newMap.get(newRootWorkspace) || [];
+        newMap.set(newRootWorkspace, [result, ...existingRoots]);
+        return newMap;
+      });
+      setNewRootName("");
+      setNewRootUriPrefix("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create target root");
+    } finally {
+      setIsCreatingRoot(false);
+    }
+  };
+
+  const handleUpdateTargetRoot = async (workspaceId: string, rootId: string) => {
+    if (!activeOrg || !editRootName || !editRootUriPrefix) return;
+    try {
+      const updated = await updateTargetRoot(activeOrg.id, workspaceId, rootId, {
+        name: editRootName,
+        uri_prefix: editRootUriPrefix,
+      });
+      setTargetRootsByWorkspace((prev) => {
+        const newMap = new Map(prev);
+        const existingRoots = newMap.get(workspaceId) || [];
+        newMap.set(
+          workspaceId,
+          existingRoots.map((r) => (r.id === rootId ? updated : r)),
+        );
+        return newMap;
+      });
+      setEditingRoot(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update target root");
+    }
+  };
+
+  const handleDeleteTargetRoot = async (workspaceId: string, rootId: string) => {
+    if (!activeOrg) return;
+    if (!confirm("Are you sure you want to delete this target root?")) return;
+
+    try {
+      await deleteTargetRoot(activeOrg.id, workspaceId, rootId);
+      setTargetRootsByWorkspace((prev) => {
+        const newMap = new Map(prev);
+        const existingRoots = newMap.get(workspaceId) || [];
+        newMap.set(
+          workspaceId,
+          existingRoots.filter((r) => r.id !== rootId),
+        );
+        return newMap;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete target root");
     }
   };
 
@@ -770,6 +881,156 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                             >
                               Revoke
                             </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Target Roots Section */}
+        {isAdmin && (
+          <section className="mb-8 rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
+            <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
+              Target Roots
+            </h2>
+            <p className="mb-4 text-sm text-gray-600 dark:text-gray-400">
+              Target roots define where task outputs are stored. These are shared across
+              all users in a workspace.
+            </p>
+
+            {/* Create new target root form */}
+            <form
+              onSubmit={handleCreateTargetRoot}
+              className="mb-6 flex flex-wrap gap-2 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+            >
+              <select
+                value={newRootWorkspace}
+                onChange={(e) => setNewRootWorkspace(e.target.value)}
+                className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
+              >
+                {workspacesList.map((ws) => (
+                  <option key={ws.id} value={ws.id}>
+                    {ws.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                value={newRootName}
+                onChange={(e) => setNewRootName(e.target.value)}
+                placeholder="Name (e.g., 'default')"
+                required
+                className="w-32 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
+              />
+              <input
+                type="text"
+                value={newRootUriPrefix}
+                onChange={(e) => setNewRootUriPrefix(e.target.value)}
+                placeholder="URI prefix (e.g., 's3://bucket/path/')"
+                required
+                className="flex-1 min-w-64 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
+              />
+              <button
+                type="submit"
+                disabled={isCreatingRoot}
+                className="rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {isCreatingRoot ? "Creating..." : "Add Root"}
+              </button>
+            </form>
+
+            {/* Target roots grouped by workspace */}
+            <div className="space-y-6">
+              {workspacesList.map((ws) => {
+                const roots = targetRootsByWorkspace.get(ws.id) || [];
+                return (
+                  <div key={ws.id}>
+                    {/* Workspace header */}
+                    <div className="flex items-center gap-2 mb-3">
+                      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
+                        {ws.name}
+                      </h3>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        /{ws.slug}
+                      </span>
+                      <div className="flex-1 border-t border-gray-200 dark:border-gray-700 ml-2" />
+                    </div>
+
+                    {/* Roots for this workspace */}
+                    {roots.length === 0 ? (
+                      <p className="py-2 text-sm text-gray-500 dark:text-gray-400 italic">
+                        No target roots configured
+                      </p>
+                    ) : (
+                      <div className="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-md">
+                        {roots.map((root) => (
+                          <div key={root.id} className="py-3 px-4">
+                            {editingRoot === root.id ? (
+                              <div className="flex flex-wrap gap-2 items-center">
+                                <input
+                                  type="text"
+                                  value={editRootName}
+                                  onChange={(e) => setEditRootName(e.target.value)}
+                                  className="w-32 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-sm text-gray-900 dark:text-gray-100"
+                                />
+                                <input
+                                  type="text"
+                                  value={editRootUriPrefix}
+                                  onChange={(e) => setEditRootUriPrefix(e.target.value)}
+                                  className="flex-1 min-w-48 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-sm text-gray-900 dark:text-gray-100"
+                                />
+                                <button
+                                  onClick={() => handleUpdateTargetRoot(ws.id, root.id)}
+                                  className="text-blue-600 hover:text-blue-800 dark:text-blue-400 text-sm"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingRoot(null)}
+                                  className="text-gray-600 hover:text-gray-800 dark:text-gray-400 text-sm"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <div className="font-medium text-gray-900 dark:text-gray-100">
+                                    {root.name}
+                                  </div>
+                                  <div className="text-sm text-gray-500 dark:text-gray-400">
+                                    <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded break-all">
+                                      {root.uri_prefix}
+                                    </code>
+                                  </div>
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => {
+                                      setEditingRoot(root.id);
+                                      setEditRootName(root.name);
+                                      setEditRootUriPrefix(root.uri_prefix);
+                                    }}
+                                    className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+                                  >
+                                    Edit
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      handleDeleteTargetRoot(ws.id, root.id)
+                                    }
+                                    className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>

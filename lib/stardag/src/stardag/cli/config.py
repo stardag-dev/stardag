@@ -8,11 +8,13 @@ import typer
 from stardag.cli.credentials import (
     get_config_path,
     get_organization_id,
+    get_target_roots,
     get_workspace_id,
     load_config,
     load_credentials,
     set_api_url,
     set_organization_id,
+    set_target_roots,
     set_timeout,
     set_workspace_id,
 )
@@ -83,6 +85,13 @@ def get_config() -> None:
     typer.echo(f"  Timeout:      {config.get('timeout', 'not set (default: 30.0)')}")
     typer.echo(f"  Organization: {config.get('organization_id', 'not set')}")
     typer.echo(f"  Workspace:    {config.get('workspace_id', 'not set')}")
+
+    target_roots = get_target_roots()
+    if target_roots:
+        typer.echo(f"  Target Roots: {len(target_roots)} configured")
+    else:
+        typer.echo("  Target Roots: none")
+
     typer.echo("")
     typer.echo(f"Config file: {get_config_path()}")
 
@@ -161,6 +170,33 @@ def set_organization(
         )
 
 
+def _sync_target_roots(client, api_url: str, org_id: str, workspace_id: str) -> bool:
+    """Sync target roots from API to local config.
+
+    Returns True if sync was successful, False otherwise.
+    """
+    try:
+        response = client.get(
+            f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/target-roots"
+        )
+
+        if response.status_code != 200:
+            typer.echo(
+                f"Warning: Failed to sync target roots: {response.status_code}",
+                err=True,
+            )
+            return False
+
+        roots = response.json()
+        target_roots = {root["name"]: root["uri_prefix"] for root in roots}
+        set_target_roots(target_roots)
+        return True
+
+    except Exception as e:
+        typer.echo(f"Warning: Failed to sync target roots: {e}", err=True)
+        return False
+
+
 @set_app.command("workspace")
 def set_workspace(
     workspace_id: str = typer.Argument(..., help="Workspace ID to set as active"),
@@ -201,6 +237,18 @@ def set_workspace(
                 typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']})")
             raise typer.Exit(1)
 
+        # Save workspace ID and sync target roots
+        set_workspace_id(workspace_id)
+        typer.echo(f"Active workspace set to: {workspace_id}")
+
+        # Sync target roots from API
+        if _sync_target_roots(client, api_url, org_id, workspace_id):
+            target_roots = get_target_roots()
+            if target_roots:
+                typer.echo(f"Synced {len(target_roots)} target root(s)")
+            else:
+                typer.echo("No target roots configured for this workspace")
+
     except Exception as e:
         if isinstance(e, typer.Exit):
             raise
@@ -208,9 +256,6 @@ def set_workspace(
         raise typer.Exit(1)
     finally:
         client.close()
-
-    set_workspace_id(workspace_id)
-    typer.echo(f"Active workspace set to: {workspace_id}")
 
 
 # --- List commands ---
@@ -306,3 +351,21 @@ def list_workspaces() -> None:
     if current_ws:
         typer.echo("")
         typer.echo("* = active workspace")
+
+
+@list_app.command("target-roots")
+def list_target_roots_cmd() -> None:
+    """List synced target roots for the active workspace."""
+    target_roots = get_target_roots()
+
+    if not target_roots:
+        typer.echo("No target roots configured.")
+        typer.echo("")
+        typer.echo(
+            "Set a workspace with 'stardag config set workspace <id>' to sync target roots."
+        )
+        return
+
+    typer.echo("Target Roots:")
+    for name, uri_prefix in sorted(target_roots.items()):
+        typer.echo(f"  {name}: {uri_prefix}")

@@ -17,6 +17,7 @@ from stardag_api.models import (
     Organization,
     OrganizationMember,
     OrganizationRole,
+    TargetRoot,
     User,
     Workspace,
 )
@@ -852,6 +853,35 @@ class ApiKeyCreateResponse(ApiKeyResponse):
     key: str  # The full key, only returned on creation
 
 
+# --- Target Root Schemas ---
+
+
+class TargetRootCreate(BaseModel):
+    """Create a target root."""
+
+    name: str
+    uri_prefix: str
+
+
+class TargetRootUpdate(BaseModel):
+    """Update a target root."""
+
+    name: str | None = None
+    uri_prefix: str | None = None
+
+
+class TargetRootResponse(BaseModel):
+    """Target root response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    name: str
+    uri_prefix: str
+    created_at: str  # ISO format datetime
+
+
 # --- API Key endpoints ---
 
 
@@ -977,4 +1007,255 @@ async def revoke_api_key(
         raise HTTPException(status_code=404, detail="Workspace not found")
 
     await api_key_service.revoke_api_key(db, key_id)
+    await db.commit()
+
+
+# --- Target Root endpoints ---
+
+
+@router.get(
+    "/{org_id}/workspaces/{workspace_id}/target-roots",
+    response_model=list[TargetRootResponse],
+)
+async def list_target_roots(
+    org_id: str,
+    workspace_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """List target roots for a workspace."""
+    await require_org_access(db, current_user.id, org_id)
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    result = await db.execute(
+        select(TargetRoot).where(TargetRoot.workspace_id == workspace_id)
+    )
+    roots = result.scalars().all()
+
+    return [
+        TargetRootResponse(
+            id=root.id,
+            workspace_id=root.workspace_id,
+            name=root.name,
+            uri_prefix=root.uri_prefix,
+            created_at=root.created_at.isoformat(),
+        )
+        for root in roots
+    ]
+
+
+@router.post(
+    "/{org_id}/workspaces/{workspace_id}/target-roots",
+    response_model=TargetRootResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_target_root(
+    org_id: str,
+    workspace_id: str,
+    data: TargetRootCreate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create a new target root for a workspace (admin+ only)."""
+    await require_org_access(
+        db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
+    )
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # Check for duplicate name
+    result = await db.execute(
+        select(TargetRoot).where(
+            TargetRoot.workspace_id == workspace_id,
+            TargetRoot.name == data.name,
+        )
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Target root with name '{data.name}' already exists",
+        )
+
+    target_root = TargetRoot(
+        workspace_id=workspace_id,
+        name=data.name,
+        uri_prefix=data.uri_prefix,
+    )
+    db.add(target_root)
+    await db.commit()
+    await db.refresh(target_root)
+
+    return TargetRootResponse(
+        id=target_root.id,
+        workspace_id=target_root.workspace_id,
+        name=target_root.name,
+        uri_prefix=target_root.uri_prefix,
+        created_at=target_root.created_at.isoformat(),
+    )
+
+
+@router.get(
+    "/{org_id}/workspaces/{workspace_id}/target-roots/{root_id}",
+    response_model=TargetRootResponse,
+)
+async def get_target_root(
+    org_id: str,
+    workspace_id: str,
+    root_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Get a specific target root."""
+    await require_org_access(db, current_user.id, org_id)
+
+    result = await db.execute(
+        select(TargetRoot).where(
+            TargetRoot.id == root_id,
+            TargetRoot.workspace_id == workspace_id,
+        )
+    )
+    target_root = result.scalar_one_or_none()
+    if not target_root:
+        raise HTTPException(status_code=404, detail="Target root not found")
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    return TargetRootResponse(
+        id=target_root.id,
+        workspace_id=target_root.workspace_id,
+        name=target_root.name,
+        uri_prefix=target_root.uri_prefix,
+        created_at=target_root.created_at.isoformat(),
+    )
+
+
+@router.patch(
+    "/{org_id}/workspaces/{workspace_id}/target-roots/{root_id}",
+    response_model=TargetRootResponse,
+)
+async def update_target_root(
+    org_id: str,
+    workspace_id: str,
+    root_id: str,
+    data: TargetRootUpdate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update a target root (admin+ only)."""
+    await require_org_access(
+        db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
+    )
+
+    result = await db.execute(
+        select(TargetRoot).where(
+            TargetRoot.id == root_id,
+            TargetRoot.workspace_id == workspace_id,
+        )
+    )
+    target_root = result.scalar_one_or_none()
+    if not target_root:
+        raise HTTPException(status_code=404, detail="Target root not found")
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    # Check for duplicate name if name is being changed
+    if data.name is not None and data.name != target_root.name:
+        result = await db.execute(
+            select(TargetRoot).where(
+                TargetRoot.workspace_id == workspace_id,
+                TargetRoot.name == data.name,
+            )
+        )
+        if result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Target root with name '{data.name}' already exists",
+            )
+        target_root.name = data.name
+
+    if data.uri_prefix is not None:
+        target_root.uri_prefix = data.uri_prefix
+
+    await db.commit()
+    await db.refresh(target_root)
+
+    return TargetRootResponse(
+        id=target_root.id,
+        workspace_id=target_root.workspace_id,
+        name=target_root.name,
+        uri_prefix=target_root.uri_prefix,
+        created_at=target_root.created_at.isoformat(),
+    )
+
+
+@router.delete(
+    "/{org_id}/workspaces/{workspace_id}/target-roots/{root_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_target_root(
+    org_id: str,
+    workspace_id: str,
+    root_id: str,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Delete a target root (admin+ only)."""
+    await require_org_access(
+        db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
+    )
+
+    result = await db.execute(
+        select(TargetRoot).where(
+            TargetRoot.id == root_id,
+            TargetRoot.workspace_id == workspace_id,
+        )
+    )
+    target_root = result.scalar_one_or_none()
+    if not target_root:
+        raise HTTPException(status_code=404, detail="Target root not found")
+
+    # Verify workspace belongs to org
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.id == workspace_id,
+            Workspace.organization_id == org_id,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    await db.delete(target_root)
     await db.commit()
