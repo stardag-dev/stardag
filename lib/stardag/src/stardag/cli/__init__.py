@@ -6,8 +6,9 @@ Usage:
     stardag auth logout
 
     stardag config get
-    stardag config set organization <org-id>
-    stardag config set workspace <workspace-id>
+    stardag config sync
+    stardag config set organization <org-id-or-slug>
+    stardag config set workspace <workspace-id-or-slug>
     stardag config list organizations
     stardag config list workspaces
     stardag config list target-roots

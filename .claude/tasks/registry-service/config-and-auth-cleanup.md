@@ -261,7 +261,11 @@ See **Decisions** section below for questions requiring user input.
   - [x] Auto-create personal workspace on invite acceptance
   - [x] UI: show personal workspaces in collapsed section
   - [x] All 65 API tests pass
-- [ ] Phase 5: CLI Improvements
+- [x] Phase 5: CLI Improvements
+  - [x] Streamlined login flow with auto-select org/workspace
+  - [x] Support slugs for `stardag config set organization/workspace`
+  - [x] Added `stardag config sync` command
+  - [x] All 82 SDK tests pass
 - [ ] Phase 6: Sample Project Config
 
 ## Notes
