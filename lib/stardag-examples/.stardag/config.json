@@ -1,4 +1,4 @@
 {
   "profile": "local",
-  "allowed_organizations": ["stardag-examples"]
+  "allowed_organizations": ["stardag-examples", "org1", "admin-469bdd"]
 }
