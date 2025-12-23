@@ -3,12 +3,12 @@
 This module provides a unified configuration system that consolidates:
 - Target factory settings (target roots)
 - API registry settings (URL, timeout, workspace)
-- Active context (profile, organization, workspace)
+- Active context (registry, organization, workspace)
 
 Configuration is loaded from multiple sources with the following priority:
 1. Environment variables (STARDAG_*)
 2. Project config (.stardag/config.json in working directory or parents)
-3. Profile config (~/.stardag/profiles/{profile}/config.json)
+3. Registry config (~/.stardag/registries/{registry}/config.json)
 4. Defaults
 
 Usage:
@@ -41,7 +41,7 @@ DEFAULT_TARGET_ROOT = str(
 )
 DEFAULT_API_URL = "http://localhost:8000"
 DEFAULT_API_TIMEOUT = 30.0
-DEFAULT_PROFILE = "local"
+DEFAULT_REGISTRY = "local"
 
 
 # --- Path utilities ---
@@ -52,49 +52,49 @@ def get_stardag_dir() -> Path:
     return Path.home() / ".stardag"
 
 
-def get_profiles_dir() -> Path:
-    """Get the profiles directory (~/.stardag/profiles)."""
-    return get_stardag_dir() / "profiles"
+def get_registries_dir() -> Path:
+    """Get the registries directory (~/.stardag/registries)."""
+    return get_stardag_dir() / "registries"
 
 
-def get_active_profile_path() -> Path:
-    """Get the path to the active profile file."""
-    return get_stardag_dir() / "active_profile"
+def get_active_registry_path() -> Path:
+    """Get the path to the active registry file."""
+    return get_stardag_dir() / "active_registry"
 
 
-def get_profile_dir(profile: str) -> Path:
-    """Get the directory for a specific profile."""
-    return get_profiles_dir() / profile
+def get_registry_dir(registry: str) -> Path:
+    """Get the directory for a specific registry."""
+    return get_registries_dir() / registry
 
 
-def get_profile_config_path(profile: str) -> Path:
-    """Get the config file path for a specific profile."""
-    return get_profile_dir(profile) / "config.json"
+def get_registry_config_path(registry: str) -> Path:
+    """Get the config file path for a specific registry."""
+    return get_registry_dir(registry) / "config.json"
 
 
-def get_profile_credentials_path(profile: str) -> Path:
-    """Get the credentials file path for a specific profile."""
-    return get_profile_dir(profile) / "credentials.json"
+def get_registry_credentials_path(registry: str) -> Path:
+    """Get the credentials file path for a specific registry."""
+    return get_registry_dir(registry) / "credentials.json"
 
 
-def get_profile_active_workspace_path(profile: str) -> Path:
-    """Get the active_workspace file path for a specific profile."""
-    return get_profile_dir(profile) / "active_workspace"
+def get_registry_active_workspace_path(registry: str) -> Path:
+    """Get the active_workspace file path for a specific registry."""
+    return get_registry_dir(registry) / "active_workspace"
 
 
-def get_profile_workspaces_dir(profile: str) -> Path:
-    """Get the workspaces directory for a specific profile."""
-    return get_profile_dir(profile) / "workspaces"
+def get_registry_workspaces_dir(registry: str) -> Path:
+    """Get the workspaces directory for a specific registry."""
+    return get_registry_dir(registry) / "workspaces"
 
 
-def get_workspace_dir(profile: str, workspace_id: str) -> Path:
-    """Get the directory for a specific workspace within a profile."""
-    return get_profile_workspaces_dir(profile) / workspace_id
+def get_workspace_dir(registry: str, workspace_id: str) -> Path:
+    """Get the directory for a specific workspace within a registry."""
+    return get_registry_workspaces_dir(registry) / workspace_id
 
 
-def get_workspace_target_roots_path(profile: str, workspace_id: str) -> Path:
+def get_workspace_target_roots_path(registry: str, workspace_id: str) -> Path:
     """Get the target_roots.json path for a specific workspace."""
-    return get_workspace_dir(profile, workspace_id) / "target_roots.json"
+    return get_workspace_dir(registry, workspace_id) / "target_roots.json"
 
 
 def find_project_config() -> Path | None:
@@ -126,34 +126,34 @@ def load_json_file(path: Path) -> dict[str, Any]:
         return {}
 
 
-def load_active_profile() -> str:
-    """Load the active profile name from ~/.stardag/active_profile."""
-    path = get_active_profile_path()
+def load_active_registry() -> str:
+    """Load the active registry name from ~/.stardag/active_registry."""
+    path = get_active_registry_path()
     if path.exists():
         try:
             return path.read_text().strip()
         except OSError:
             pass
-    return DEFAULT_PROFILE
+    return DEFAULT_REGISTRY
 
 
-def save_active_profile(profile: str) -> None:
-    """Save the active profile name."""
-    path = get_active_profile_path()
+def save_active_registry(registry: str) -> None:
+    """Save the active registry name."""
+    path = get_active_registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(profile)
+    path.write_text(registry)
 
 
-def load_active_workspace(profile: str) -> str | None:
-    """Load the active workspace ID for a profile.
+def load_active_workspace(registry: str) -> str | None:
+    """Load the active workspace ID for a registry.
 
     Args:
-        profile: Profile name.
+        registry: Registry name.
 
     Returns:
         Workspace ID if set, None otherwise.
     """
-    path = get_profile_active_workspace_path(profile)
+    path = get_registry_active_workspace_path(registry)
     if path.exists():
         try:
             return path.read_text().strip() or None
@@ -162,46 +162,46 @@ def load_active_workspace(profile: str) -> str | None:
     return None
 
 
-def save_active_workspace(profile: str, workspace_id: str) -> None:
-    """Save the active workspace ID for a profile.
+def save_active_workspace(registry: str, workspace_id: str) -> None:
+    """Save the active workspace ID for a registry.
 
     Args:
-        profile: Profile name.
+        registry: Registry name.
         workspace_id: Workspace ID to save.
     """
-    path = get_profile_active_workspace_path(profile)
+    path = get_registry_active_workspace_path(registry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(workspace_id)
 
 
-def load_workspace_target_roots(profile: str, workspace_id: str) -> dict[str, str]:
-    """Load target roots for a workspace from profile config.
+def load_workspace_target_roots(registry: str, workspace_id: str) -> dict[str, str]:
+    """Load target roots for a workspace from registry config.
 
     Note: Project-level overrides are handled in load_config() via
     ProjectConfig.get_workspace_target_roots().
 
     Args:
-        profile: Profile name.
+        registry: Registry name.
         workspace_id: Workspace ID.
 
     Returns:
         Dict of target root name to URI prefix. Empty dict if not found.
     """
-    profile_path = get_workspace_target_roots_path(profile, workspace_id)
-    return load_json_file(profile_path)
+    registry_path = get_workspace_target_roots_path(registry, workspace_id)
+    return load_json_file(registry_path)
 
 
 def save_workspace_target_roots(
-    profile: str, workspace_id: str, target_roots: dict[str, str]
+    registry: str, workspace_id: str, target_roots: dict[str, str]
 ) -> None:
     """Save target roots for a workspace.
 
     Args:
-        profile: Profile name.
+        registry: Registry name.
         workspace_id: Workspace ID.
         target_roots: Dict of target root name to URI prefix.
     """
-    path = get_workspace_target_roots_path(profile, workspace_id)
+    path = get_workspace_target_roots_path(registry, workspace_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(target_roots, f, indent=2)
@@ -239,13 +239,13 @@ class ContextConfig(BaseModel):
     """Active context configuration.
 
     Attributes:
-        profile: Active profile name.
+        registry: Active registry name.
         organization_id: Active organization ID.
         organization_slug: Active organization slug (for validation).
         workspace_id: Active workspace ID.
     """
 
-    profile: str = DEFAULT_PROFILE
+    registry: str = DEFAULT_REGISTRY
     organization_id: str | None = None
     organization_slug: str | None = None
     workspace_id: str | None = None
@@ -261,12 +261,12 @@ class ProjectWorkspaceConfig(BaseModel):
     target_roots: dict[str, str] | None = None
 
 
-class ProjectProfileConfig(BaseModel):
-    """Project-level profile configuration.
+class ProjectRegistryConfig(BaseModel):
+    """Project-level registry configuration.
 
     Attributes:
-        organization_id: Organization for this profile.
-        default_workspace: Default workspace for this profile.
+        organization_id: Organization for this registry.
+        default_workspace: Default workspace for this registry.
         workspaces: Per-workspace settings.
     """
 
@@ -280,9 +280,9 @@ class ProjectConfig(BaseModel):
 
     Example:
         {
-            "default_profile": "central",
+            "default_registry": "central",
             "allowed_organizations": ["my-org"],
-            "profiles": {
+            "registries": {
                 "local": {
                     "organization_id": "local-org",
                     "default_workspace": "dev",
@@ -300,35 +300,35 @@ class ProjectConfig(BaseModel):
         }
     """
 
-    default_profile: str | None = None
-    profiles: dict[str, ProjectProfileConfig] = Field(default_factory=dict)
+    default_registry: str | None = None
+    registries: dict[str, ProjectRegistryConfig] = Field(default_factory=dict)
     allowed_organizations: list[str] | None = None
 
-    def get_profile_config(self, profile: str) -> ProjectProfileConfig | None:
-        """Get profile-specific config if it exists."""
-        return self.profiles.get(profile)
+    def get_registry_config(self, registry: str) -> ProjectRegistryConfig | None:
+        """Get registry-specific config if it exists."""
+        return self.registries.get(registry)
 
-    def get_organization_id(self, profile: str) -> str | None:
-        """Get organization ID for a profile."""
-        profile_config = self.profiles.get(profile)
-        if profile_config:
-            return profile_config.organization_id
+    def get_organization_id(self, registry: str) -> str | None:
+        """Get organization ID for a registry."""
+        registry_config = self.registries.get(registry)
+        if registry_config:
+            return registry_config.organization_id
         return None
 
-    def get_workspace_id(self, profile: str) -> str | None:
-        """Get default workspace ID for a profile."""
-        profile_config = self.profiles.get(profile)
-        if profile_config:
-            return profile_config.default_workspace
+    def get_workspace_id(self, registry: str) -> str | None:
+        """Get default workspace ID for a registry."""
+        registry_config = self.registries.get(registry)
+        if registry_config:
+            return registry_config.default_workspace
         return None
 
     def get_workspace_target_roots(
-        self, profile: str, workspace_id: str
+        self, registry: str, workspace_id: str
     ) -> dict[str, str] | None:
-        """Get target roots for a specific workspace in a profile."""
-        profile_config = self.profiles.get(profile)
-        if profile_config:
-            ws_config = profile_config.workspaces.get(workspace_id)
+        """Get target roots for a specific workspace in a registry."""
+        registry_config = self.registries.get(registry)
+        if registry_config:
+            ws_config = registry_config.workspaces.get(workspace_id)
             if ws_config and ws_config.target_roots:
                 return ws_config.target_roots
         return None
@@ -348,7 +348,7 @@ class StardagSettings(BaseSettings):
     target_roots: dict[str, str] | None = None
 
     # Context settings
-    profile: str | None = None
+    registry: str | None = None
     organization_id: str | None = None
     workspace_id: str | None = None
 
@@ -366,7 +366,7 @@ class StardagConfig(BaseModel):
     """Unified Stardag configuration.
 
     This is the main configuration object that combines settings from
-    all sources (env vars, project config, profile config, defaults).
+    all sources (env vars, project config, registry config, defaults).
     """
 
     target: TargetConfig = Field(default_factory=TargetConfig)
@@ -406,7 +406,7 @@ class StardagConfig(BaseModel):
 
 
 def load_config(
-    profile: str | None = None,
+    registry: str | None = None,
     use_project_config: bool = True,
 ) -> StardagConfig:
     """Load configuration from all sources.
@@ -414,24 +414,24 @@ def load_config(
     Priority (highest to lowest):
     1. Environment variables (STARDAG_*)
     2. Project config (.stardag/config.json in repo)
-    3. Profile config (~/.stardag/profiles/{profile}/...)
+    3. Registry config (~/.stardag/registries/{registry}/...)
     4. Defaults
 
     Args:
-        profile: Profile name to load. If None, uses active profile or default.
+        registry: Registry name to load. If None, uses active registry or default.
         use_project_config: Whether to load .stardag/config.json from project.
 
     Returns:
         Fully resolved StardagConfig.
     """
-    # 1. Load env vars first (highest priority for determining profile)
+    # 1. Load env vars first (highest priority for determining registry)
     env_settings = StardagSettings()
 
-    # 2. Determine active profile
-    effective_profile = (
-        env_settings.profile  # Env var override
-        or profile  # Explicit argument
-        or load_active_profile()  # From ~/.stardag/active_profile
+    # 2. Determine active registry
+    effective_registry = (
+        env_settings.registry  # Env var override
+        or registry  # Explicit argument
+        or load_active_registry()  # From ~/.stardag/active_registry
     )
 
     # 3. Load project config (if enabled)
@@ -441,56 +441,56 @@ def load_config(
         if project_path:
             project_data = load_json_file(project_path)
             project_config = ProjectConfig.model_validate(project_data)
-            # Project can override profile
-            if project_config.default_profile:
-                effective_profile = project_config.default_profile
+            # Project can override registry
+            if project_config.default_registry:
+                effective_registry = project_config.default_registry
 
-    # 4. Load profile config and credentials
-    profile_config_path = get_profile_config_path(effective_profile)
-    profile_data = load_json_file(profile_config_path)
+    # 4. Load registry config and credentials
+    registry_config_path = get_registry_config_path(effective_registry)
+    registry_data = load_json_file(registry_config_path)
 
-    profile_creds_path = get_profile_credentials_path(effective_profile)
-    profile_creds = load_json_file(profile_creds_path)
+    registry_creds_path = get_registry_credentials_path(effective_registry)
+    registry_creds = load_json_file(registry_creds_path)
 
-    # 5. Merge everything (env vars > project > profile > defaults)
+    # 5. Merge everything (env vars > project > registry > defaults)
 
     # API settings
     api_url = (
         env_settings.api_url
-        or profile_data.get("api_url")
-        or profile_data.get("api", {}).get("url")
+        or registry_data.get("api_url")
+        or registry_data.get("api", {}).get("url")
         or DEFAULT_API_URL
     )
 
     api_timeout = (
         env_settings.api_timeout
-        or profile_data.get("api_timeout")
-        or profile_data.get("api", {}).get("timeout")
+        or registry_data.get("api_timeout")
+        or registry_data.get("api", {}).get("timeout")
         or DEFAULT_API_TIMEOUT
     )
 
     # Context (org/workspace) - use project config methods for nested support
     organization_id = (
         env_settings.organization_id
-        or project_config.get_organization_id(effective_profile)
-        or profile_data.get("organization_id")
+        or project_config.get_organization_id(effective_registry)
+        or registry_data.get("organization_id")
     )
 
-    organization_slug = profile_data.get("organization_slug")
+    organization_slug = registry_data.get("organization_slug")
 
-    # Workspace from: env > project config > active_workspace file > profile config (legacy)
+    # Workspace from: env > project config > active_workspace file > registry config (legacy)
     workspace_id = (
         env_settings.workspace_id
-        or project_config.get_workspace_id(effective_profile)
-        or load_active_workspace(effective_profile)
-        or profile_data.get("workspace_id")  # Legacy fallback
+        or project_config.get_workspace_id(effective_registry)
+        or load_active_workspace(effective_registry)
+        or registry_data.get("workspace_id")  # Legacy fallback
     )
 
     # Target roots resolution order:
     # 1. Environment variables
-    # 2. Project config nested structure (profiles.{profile}.workspaces.{ws}.target_roots)
-    # 3. Profile workspace file (~/.stardag/profiles/{profile}/workspaces/{ws}/target_roots.json)
-    # 4. Legacy profile config (target_roots in config.json)
+    # 2. Project config nested structure (registries.{registry}.workspaces.{ws}.target_roots)
+    # 3. Registry workspace file (~/.stardag/registries/{registry}/workspaces/{ws}/target_roots.json)
+    # 4. Legacy registry config (target_roots in config.json)
     # 5. Defaults
     target_roots: dict[str, str]
     if env_settings.target_roots:
@@ -498,37 +498,37 @@ def load_config(
     elif workspace_id:
         # Check nested project config first
         project_target_roots = project_config.get_workspace_target_roots(
-            effective_profile, workspace_id
+            effective_registry, workspace_id
         )
         if project_target_roots:
             target_roots = project_target_roots
         else:
-            # Check profile workspace file
-            target_roots = load_workspace_target_roots(effective_profile, workspace_id)
+            # Check registry workspace file
+            target_roots = load_workspace_target_roots(effective_registry, workspace_id)
             if not target_roots:
-                # Legacy fallback: check profile config
+                # Legacy fallback: check registry config
                 target_roots = (
-                    profile_data.get("target_roots")
-                    or profile_data.get("target", {}).get("roots")
+                    registry_data.get("target_roots")
+                    or registry_data.get("target", {}).get("roots")
                     or {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
                 )
     else:
         # No workspace - use legacy config or defaults
         target_roots = (
-            profile_data.get("target_roots")
-            or profile_data.get("target", {}).get("roots")
+            registry_data.get("target_roots")
+            or registry_data.get("target", {}).get("roots")
             or {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
         )
 
     # Credentials
-    access_token = profile_creds.get("access_token")
+    access_token = registry_creds.get("access_token")
     api_key = env_settings.api_key or os.environ.get("STARDAG_API_KEY")
 
     return StardagConfig(
         target=TargetConfig(roots=target_roots),
         api=APIConfig(url=api_url, timeout=api_timeout),
         context=ContextConfig(
-            profile=effective_profile,
+            registry=effective_registry,
             organization_id=organization_id,
             organization_slug=organization_slug,
             workspace_id=workspace_id,

@@ -123,7 +123,7 @@ class TargetFactory:
             raise ValueError(
                 f"No target root is configured for key: '{target_root_key}'. "
                 f"Available keys are: {list(self.target_roots.keys())}. Set the missing "
-                "target root in your profile config or via environment variable: "
+                "target root in your registry config or via environment variable: "
                 f"`STARDAG_TARGET_ROOTS='{example_json}'`."
             )
 

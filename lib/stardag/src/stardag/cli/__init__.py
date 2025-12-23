@@ -13,11 +13,11 @@ Usage:
     stardag config list workspaces
     stardag config list target-roots
 
-    stardag profile list
-    stardag profile current
-    stardag profile add <name> --api-url <url>
-    stardag profile use <name>
-    stardag profile delete <name>
+    stardag registry list
+    stardag registry current
+    stardag registry add <name> --api-url <url>
+    stardag registry use <name>
+    stardag registry delete <name>
 """
 
 try:
@@ -27,7 +27,7 @@ except ImportError:
         "Typer is required for the CLI. Install with: pip install stardag[cli]"
     )
 
-from stardag.cli import auth, config, profile
+from stardag.cli import auth, config, registry
 
 # Main CLI app
 app = typer.Typer(
@@ -39,7 +39,7 @@ app = typer.Typer(
 # Add subcommands
 app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
-app.add_typer(profile.app, name="profile")
+app.add_typer(registry.app, name="registry")
 
 
 @app.command()
