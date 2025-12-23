@@ -214,7 +214,7 @@ def _auto_select_context(api_url: str, access_token: str) -> None:
                 )
                 return
 
-            # Fetch workspaces and auto-select personal workspace
+            # Fetch workspaces and auto-select Default workspace
             org_id = org["id"]
             response = client.get(
                 f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces"
@@ -228,43 +228,39 @@ def _auto_select_context(api_url: str, access_token: str) -> None:
 
             workspaces = response.json()
 
-            # Look for personal workspace (owner_id is not null)
-            user_email = data.get("user", {}).get("email", "")
-            personal_ws = None
+            # Look for "Default" workspace (slug "default", not a personal workspace)
+            default_ws = None
             for ws in workspaces:
-                if (
-                    ws.get("owner_id")
-                    and user_email.split("@")[0].lower() in ws.get("slug", "").lower()
-                ):
-                    personal_ws = ws
+                if ws.get("slug") == "default" and not ws.get("owner_id"):
+                    default_ws = ws
                     break
 
-            # If no personal workspace found, try to find one by owner_id
-            if not personal_ws:
-                for ws in workspaces:
-                    if ws.get("owner_id"):
-                        personal_ws = ws
-                        break
-
-            if personal_ws:
-                set_workspace_id(personal_ws["id"])
+            if default_ws:
+                set_workspace_id(default_ws["id"])
                 typer.echo(
-                    f"Auto-selected workspace: {personal_ws['name']} ({personal_ws['slug']})"
+                    f"Auto-selected workspace: {default_ws['name']} ({default_ws['slug']})"
                 )
 
                 # Sync target roots
                 _sync_target_roots_after_login(
-                    client, api_url, org_id, personal_ws["id"]
+                    client, api_url, org_id, default_ws["id"]
                 )
-            elif workspaces:
+
+            # Show available workspaces and help message
+            if workspaces:
                 typer.echo("")
                 typer.echo("Available workspaces:")
                 for ws in workspaces:
                     personal = " (personal)" if ws.get("owner_id") else ""
-                    typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}")
+                    marker = " *" if default_ws and ws["id"] == default_ws["id"] else ""
+                    typer.echo(
+                        f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}{marker}"
+                    )
                 typer.echo("")
+                if default_ws:
+                    typer.echo("* = active workspace")
                 typer.echo(
-                    "Set workspace with: stardag config set workspace <workspace-id-or-slug>"
+                    "Switch workspace with: stardag config set workspace <workspace-id-or-slug>"
                 )
 
     except Exception:
