@@ -17,8 +17,12 @@ from stardag.config import (
     find_project_config,
     get_config,
     load_active_profile,
+    load_active_workspace,
     load_config,
+    load_workspace_target_roots,
     save_active_profile,
+    save_active_workspace,
+    save_workspace_target_roots,
 )
 
 
@@ -77,6 +81,59 @@ class TestSaveActiveProfile:
         assert (tmp_path / ".stardag" / "active_profile").read_text() == "test-profile"
 
 
+class TestActiveWorkspace:
+    def test_returns_none_when_no_file(self, temp_stardag_dir):
+        assert load_active_workspace("local") is None
+
+    def test_returns_saved_workspace(self, temp_stardag_dir):
+        save_active_workspace("local", "ws-123")
+        assert load_active_workspace("local") == "ws-123"
+
+    def test_creates_profile_dir_if_needed(self, temp_stardag_dir):
+        # Profile directory doesn't exist yet
+        assert not (temp_stardag_dir / "profiles" / "newprofile").exists()
+
+        save_active_workspace("newprofile", "ws-456")
+
+        assert (
+            temp_stardag_dir / "profiles" / "newprofile" / "active_workspace"
+        ).exists()
+        assert load_active_workspace("newprofile") == "ws-456"
+
+
+class TestWorkspaceTargetRoots:
+    def test_returns_empty_when_no_file(self, temp_stardag_dir):
+        result = load_workspace_target_roots("local", "ws-123")
+        assert result == {}
+
+    def test_saves_and_loads_target_roots(self, temp_stardag_dir):
+        target_roots = {"default": "/data/root", "archive": "s3://bucket/archive"}
+        save_workspace_target_roots("local", "ws-123", target_roots)
+        result = load_workspace_target_roots("local", "ws-123")
+        assert result == target_roots
+
+    def test_project_override_takes_precedence(
+        self, temp_stardag_dir, temp_project_dir
+    ):
+        # Save to profile
+        profile_roots = {"default": "/profile/root"}
+        save_workspace_target_roots("local", "ws-123", profile_roots)
+
+        # Save to project
+        project_roots = {"default": "/project/root"}
+        project_ws_dir = temp_project_dir / ".stardag" / "workspaces" / "ws-123"
+        project_ws_dir.mkdir(parents=True)
+        (project_ws_dir / "target_roots.json").write_text(json.dumps(project_roots))
+
+        # Project should take precedence
+        result = load_workspace_target_roots("local", "ws-123", temp_project_dir)
+        assert result == project_roots
+
+        # Without project_dir, should return profile roots
+        result_no_project = load_workspace_target_roots("local", "ws-123")
+        assert result_no_project == profile_roots
+
+
 class TestFindProjectConfig:
     def test_finds_config_in_current_dir(self, temp_project_dir):
         config_path = temp_project_dir / ".stardag" / "config.json"
@@ -131,10 +188,18 @@ class TestLoadConfig:
                     "api_url": "http://my-api:9000",
                     "api_timeout": 60.0,
                     "organization_id": "org-123",
-                    "workspace_id": "ws-456",
-                    "target_roots": {"default": "/custom/path"},
                 }
             )
+        )
+
+        # Create active_workspace file
+        (profile_dir / "active_workspace").write_text("ws-456")
+
+        # Create workspace-specific target roots
+        ws_dir = profile_dir / "workspaces" / "ws-456"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "target_roots.json").write_text(
+            json.dumps({"default": "/custom/path"})
         )
 
         config = load_config(use_project_config=False)
@@ -176,10 +241,12 @@ class TestLoadConfig:
             json.dumps(
                 {
                     "api_url": "http://profile-api:9000",
-                    "workspace_id": "profile-ws",
                 }
             )
         )
+
+        # Create active_workspace file
+        (profile_dir / "active_workspace").write_text("profile-ws")
 
         # Set env vars (should override)
         monkeypatch.setenv("STARDAG_API_URL", "http://env-api:8080")
@@ -202,12 +269,13 @@ class TestLoadConfig:
             json.dumps(
                 {
                     "organization_id": "profile-org",
-                    "workspace_id": "profile-ws",
                 }
             )
         )
+        # Create active_workspace file for profile
+        (profile_dir / "active_workspace").write_text("profile-ws")
 
-        # Create project config
+        # Create project config (overrides organization and workspace)
         project_config = temp_project_dir / ".stardag" / "config.json"
         project_config.write_text(
             json.dumps(

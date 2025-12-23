@@ -77,9 +77,24 @@ def get_profile_credentials_path(profile: str) -> Path:
     return get_profile_dir(profile) / "credentials.json"
 
 
-def get_profile_cache_dir(profile: str) -> Path:
-    """Get the cache directory for a specific profile."""
-    return get_profile_dir(profile) / "cache"
+def get_profile_active_workspace_path(profile: str) -> Path:
+    """Get the active_workspace file path for a specific profile."""
+    return get_profile_dir(profile) / "active_workspace"
+
+
+def get_profile_workspaces_dir(profile: str) -> Path:
+    """Get the workspaces directory for a specific profile."""
+    return get_profile_dir(profile) / "workspaces"
+
+
+def get_workspace_dir(profile: str, workspace_id: str) -> Path:
+    """Get the directory for a specific workspace within a profile."""
+    return get_profile_workspaces_dir(profile) / workspace_id
+
+
+def get_workspace_target_roots_path(profile: str, workspace_id: str) -> Path:
+    """Get the target_roots.json path for a specific workspace."""
+    return get_workspace_dir(profile, workspace_id) / "target_roots.json"
 
 
 def find_project_config() -> Path | None:
@@ -127,6 +142,80 @@ def save_active_profile(profile: str) -> None:
     path = get_active_profile_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(profile)
+
+
+def load_active_workspace(profile: str) -> str | None:
+    """Load the active workspace ID for a profile.
+
+    Args:
+        profile: Profile name.
+
+    Returns:
+        Workspace ID if set, None otherwise.
+    """
+    path = get_profile_active_workspace_path(profile)
+    if path.exists():
+        try:
+            return path.read_text().strip() or None
+        except OSError:
+            pass
+    return None
+
+
+def save_active_workspace(profile: str, workspace_id: str) -> None:
+    """Save the active workspace ID for a profile.
+
+    Args:
+        profile: Profile name.
+        workspace_id: Workspace ID to save.
+    """
+    path = get_profile_active_workspace_path(profile)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(workspace_id)
+
+
+def load_workspace_target_roots(
+    profile: str, workspace_id: str, project_dir: Path | None = None
+) -> dict[str, str]:
+    """Load target roots for a workspace.
+
+    Checks project config first (if project_dir provided), then profile config.
+
+    Args:
+        profile: Profile name.
+        workspace_id: Workspace ID.
+        project_dir: Optional project directory to check for overrides.
+
+    Returns:
+        Dict of target root name to URI prefix. Empty dict if not found.
+    """
+    # Check project-level override first
+    if project_dir:
+        project_path = (
+            project_dir / ".stardag" / "workspaces" / workspace_id / "target_roots.json"
+        )
+        if project_path.exists():
+            return load_json_file(project_path)
+
+    # Fall back to profile config
+    profile_path = get_workspace_target_roots_path(profile, workspace_id)
+    return load_json_file(profile_path)
+
+
+def save_workspace_target_roots(
+    profile: str, workspace_id: str, target_roots: dict[str, str]
+) -> None:
+    """Save target roots for a workspace.
+
+    Args:
+        profile: Profile name.
+        workspace_id: Workspace ID.
+        target_roots: Dict of target root name to URI prefix.
+    """
+    path = get_workspace_target_roots_path(profile, workspace_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(target_roots, f, indent=2)
 
 
 # --- Pydantic Config Models ---
@@ -269,7 +358,7 @@ def load_config(
     Priority (highest to lowest):
     1. Environment variables (STARDAG_*)
     2. Project config (.stardag/config.json in repo)
-    3. Profile config (~/.stardag/profiles/{profile}/config.json)
+    3. Profile config (~/.stardag/profiles/{profile}/...)
     4. Defaults
 
     Args:
@@ -291,9 +380,13 @@ def load_config(
 
     # 3. Load project config (if enabled)
     project_config = ProjectConfig()
+    project_dir: Path | None = None
     if use_project_config:
         project_path = find_project_config()
         if project_path:
+            project_dir = (
+                project_path.parent.parent
+            )  # .stardag/config.json -> project root
             project_data = load_json_file(project_path)
             project_config = ProjectConfig.model_validate(project_data)
             # Project can override profile
@@ -308,14 +401,6 @@ def load_config(
     profile_creds = load_json_file(profile_creds_path)
 
     # 5. Merge everything (env vars > project > profile > defaults)
-
-    # Target roots
-    target_roots = (
-        env_settings.target_roots
-        or profile_data.get("target_roots")
-        or profile_data.get("target", {}).get("roots")
-        or {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
-    )
 
     # API settings
     api_url = (
@@ -341,11 +426,36 @@ def load_config(
 
     organization_slug = profile_data.get("organization_slug")
 
+    # Workspace from: env > project config > active_workspace file > profile config (legacy)
     workspace_id = (
         env_settings.workspace_id
         or project_config.workspace_id
-        or profile_data.get("workspace_id")
+        or load_active_workspace(effective_profile)
+        or profile_data.get("workspace_id")  # Legacy fallback
     )
+
+    # Target roots from workspace-specific file (with project override)
+    target_roots: dict[str, str]
+    if env_settings.target_roots:
+        target_roots = env_settings.target_roots
+    elif workspace_id:
+        target_roots = load_workspace_target_roots(
+            effective_profile, workspace_id, project_dir
+        )
+        if not target_roots:
+            # Legacy fallback: check profile config
+            target_roots = (
+                profile_data.get("target_roots")
+                or profile_data.get("target", {}).get("roots")
+                or {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
+            )
+    else:
+        # No workspace - use legacy config or defaults
+        target_roots = (
+            profile_data.get("target_roots")
+            or profile_data.get("target", {}).get("roots")
+            or {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
+        )
 
     # Credentials
     access_token = profile_creds.get("access_token")

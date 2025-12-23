@@ -109,6 +109,7 @@ This allows:
 ├── active_profile              # Contains active profile name (e.g., "central")
 └── profiles/
     ├── local/
+    │   ├── active_workspace    # Contains the active workspace in this profile
     │   ├── config.json         # API URL, other *shared* settings (can be overriden in project config)
     │   ├── credentials.json    # OAuth tokens
     │   └── workspaces/
@@ -116,6 +117,7 @@ This allows:
     │       └── {workspace_id}/
     │           └── target_roots.json
     └── central/
+    │   ├── active_workspace
         ├── config.json
         ├── credentials.json
         └── workspaces/
@@ -177,7 +179,7 @@ your-project/
 | `workspace_id`          | Override the active workspace                           |
 | `allowed_organizations` | Restrict which organizations can be used (safety check) |
 
-### Cached Target Roots (`~/.stardag/profiles/{profile}/cache/workspaces/{id}/target_roots.json`)
+### Workspace Target Roots (`~/.stardag/profiles/{profile}/workspaces/{workspace_id}/target_roots.json`)
 
 ```json
 {
@@ -185,6 +187,8 @@ your-project/
   "archive": "s3://company-archive/stardag/"
 }
 ```
+
+This file is synced from the central API when you set a workspace. It can also be committed to a project's `.stardag/workspaces/{workspace_id}/target_roots.json` for team consistency.
 
 ## Environment Variables
 
