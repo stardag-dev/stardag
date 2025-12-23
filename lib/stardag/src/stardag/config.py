@@ -278,17 +278,7 @@ class ProjectProfileConfig(BaseModel):
 class ProjectConfig(BaseModel):
     """Project-level configuration (.stardag/config.json in repo).
 
-    Supports both flat (simple) and nested (multi-profile) structures.
-
-    Flat structure (backwards compatible):
-        {
-            "profile": "central",
-            "organization_id": "my-org",
-            "workspace_id": "my-ws",
-            "allowed_organizations": ["my-org"]
-        }
-
-    Nested structure (multi-profile):
+    Example:
         {
             "default_profile": "central",
             "allowed_organizations": ["my-org"],
@@ -310,39 +300,27 @@ class ProjectConfig(BaseModel):
         }
     """
 
-    # Flat structure (backwards compatible)
-    profile: str | None = None
-    organization_id: str | None = None
-    workspace_id: str | None = None
-
-    # Nested structure
     default_profile: str | None = None
     profiles: dict[str, ProjectProfileConfig] = Field(default_factory=dict)
-
-    # Global settings
     allowed_organizations: list[str] | None = None
-
-    def get_effective_profile(self) -> str | None:
-        """Get the effective default profile (nested or flat)."""
-        return self.default_profile or self.profile
 
     def get_profile_config(self, profile: str) -> ProjectProfileConfig | None:
         """Get profile-specific config if it exists."""
         return self.profiles.get(profile)
 
     def get_organization_id(self, profile: str) -> str | None:
-        """Get organization ID for a profile (nested first, then flat fallback)."""
+        """Get organization ID for a profile."""
         profile_config = self.profiles.get(profile)
-        if profile_config and profile_config.organization_id:
+        if profile_config:
             return profile_config.organization_id
-        return self.organization_id
+        return None
 
     def get_workspace_id(self, profile: str) -> str | None:
-        """Get workspace ID for a profile (nested first, then flat fallback)."""
+        """Get default workspace ID for a profile."""
         profile_config = self.profiles.get(profile)
-        if profile_config and profile_config.default_workspace:
+        if profile_config:
             return profile_config.default_workspace
-        return self.workspace_id
+        return None
 
     def get_workspace_target_roots(
         self, profile: str, workspace_id: str
@@ -463,10 +441,9 @@ def load_config(
         if project_path:
             project_data = load_json_file(project_path)
             project_config = ProjectConfig.model_validate(project_data)
-            # Project can override profile (supports both flat and nested)
-            project_default_profile = project_config.get_effective_profile()
-            if project_default_profile:
-                effective_profile = project_default_profile
+            # Project can override profile
+            if project_config.default_profile:
+                effective_profile = project_config.default_profile
 
     # 4. Load profile config and credentials
     profile_config_path = get_profile_config_path(effective_profile)

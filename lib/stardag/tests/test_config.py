@@ -126,18 +126,6 @@ class TestWorkspaceTargetRoots:
 
 
 class TestProjectConfig:
-    def test_flat_structure_backwards_compatible(self):
-        """Test that flat structure still works."""
-        config = ProjectConfig(
-            profile="central",
-            organization_id="my-org",
-            workspace_id="my-ws",
-            allowed_organizations=["my-org"],
-        )
-        assert config.get_effective_profile() == "central"
-        assert config.get_organization_id("central") == "my-org"
-        assert config.get_workspace_id("central") == "my-ws"
-
     def test_nested_structure(self):
         """Test nested profiles/workspaces structure."""
         config = ProjectConfig(
@@ -168,7 +156,7 @@ class TestProjectConfig:
             },
         )
 
-        assert config.get_effective_profile() == "central"
+        assert config.default_profile == "central"
 
         # Local profile
         assert config.get_organization_id("local") == "local-org"
@@ -187,37 +175,19 @@ class TestProjectConfig:
             "default": "s3://bucket/staging/"
         }
 
-    def test_nested_overrides_flat(self):
-        """Test that nested config takes precedence over flat."""
+    def test_returns_none_for_unknown_profile(self):
+        """Test that unknown profile returns None."""
         config = ProjectConfig(
-            profile="old-profile",  # Flat
-            default_profile="new-profile",  # Nested (should win)
-            organization_id="flat-org",  # Flat
             profiles={
-                "new-profile": ProjectProfileConfig(
-                    organization_id="nested-org",  # Should win
+                "known-profile": ProjectProfileConfig(
+                    organization_id="known-org",
                 )
             },
         )
 
-        assert config.get_effective_profile() == "new-profile"
-        assert config.get_organization_id("new-profile") == "nested-org"
-
-    def test_falls_back_to_flat_when_profile_not_in_nested(self):
-        """Test fallback to flat values when profile not in nested."""
-        config = ProjectConfig(
-            organization_id="flat-org",
-            workspace_id="flat-ws",
-            profiles={
-                "other-profile": ProjectProfileConfig(
-                    organization_id="other-org",
-                )
-            },
-        )
-
-        # Profile not in nested - should fall back to flat
-        assert config.get_organization_id("unknown-profile") == "flat-org"
-        assert config.get_workspace_id("unknown-profile") == "flat-ws"
+        assert config.get_organization_id("unknown-profile") is None
+        assert config.get_workspace_id("unknown-profile") is None
+        assert config.get_workspace_target_roots("unknown-profile", "ws") is None
 
 
 class TestFindProjectConfig:
@@ -361,13 +331,18 @@ class TestLoadConfig:
         # Create active_workspace file for profile
         (profile_dir / "active_workspace").write_text("profile-ws")
 
-        # Create project config (overrides organization and workspace)
+        # Create project config (overrides organization and workspace via nested structure)
         project_config = temp_project_dir / ".stardag" / "config.json"
         project_config.write_text(
             json.dumps(
                 {
-                    "organization_id": "project-org",
-                    "workspace_id": "project-ws",
+                    "default_profile": "local",
+                    "profiles": {
+                        "local": {
+                            "organization_id": "project-org",
+                            "default_workspace": "project-ws",
+                        }
+                    },
                 }
             )
         )
@@ -433,7 +408,7 @@ class TestLoadConfig:
         project_config.write_text(
             json.dumps(
                 {
-                    "profile": "production",
+                    "default_profile": "production",
                 }
             )
         )
