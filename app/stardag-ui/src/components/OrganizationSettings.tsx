@@ -89,6 +89,9 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
+  // Personal workspaces collapsed state
+  const [showPersonalWorkspaces, setShowPersonalWorkspaces] = useState(false);
+
   const isAdmin = activeOrgRole === "owner" || activeOrgRole === "admin";
   const isOwner = activeOrgRole === "owner";
 
@@ -640,7 +643,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
         {/* Workspaces */}
         <section className="mb-8 rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
           <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
-            Workspaces ({workspacesList.length})
+            Workspaces ({workspacesList.filter((ws) => !ws.owner_id).length})
           </h2>
 
           {/* Create workspace form */}
@@ -682,67 +685,110 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
             </form>
           )}
 
-          {/* Workspaces list */}
+          {/* Shared workspaces list */}
           <div className="divide-y divide-gray-200 dark:divide-gray-700">
-            {workspacesList.map((ws) => (
-              <div key={ws.id} className="flex items-center justify-between py-3">
-                <div className="flex-1">
-                  {editingWorkspace === ws.id ? (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={editWorkspaceName}
-                        onChange={(e) => setEditWorkspaceName(e.target.value)}
-                        className="flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-gray-900 dark:text-gray-100"
-                      />
-                      <button
-                        onClick={() => handleUpdateWorkspace(ws.id)}
-                        className="text-blue-600 hover:text-blue-800 dark:text-blue-400"
-                      >
-                        Save
-                      </button>
-                      <button
-                        onClick={() => setEditingWorkspace(null)}
-                        className="text-gray-500 hover:text-gray-700 dark:text-gray-400"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="font-medium text-gray-900 dark:text-gray-100">
-                        {ws.name}
+            {workspacesList
+              .filter((ws) => !ws.owner_id)
+              .map((ws) => (
+                <div key={ws.id} className="flex items-center justify-between py-3">
+                  <div className="flex-1">
+                    {editingWorkspace === ws.id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={editWorkspaceName}
+                          onChange={(e) => setEditWorkspaceName(e.target.value)}
+                          className="flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-gray-900 dark:text-gray-100"
+                        />
+                        <button
+                          onClick={() => handleUpdateWorkspace(ws.id)}
+                          className="text-blue-600 hover:text-blue-800 dark:text-blue-400"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setEditingWorkspace(null)}
+                          className="text-gray-500 hover:text-gray-700 dark:text-gray-400"
+                        >
+                          Cancel
+                        </button>
                       </div>
-                      <div className="text-sm text-gray-500 dark:text-gray-400">
-                        /{ws.slug}
-                      </div>
-                    </>
-                  )}
-                </div>
-                {isAdmin && editingWorkspace !== ws.id && (
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => {
-                        setEditingWorkspace(ws.id);
-                        setEditWorkspaceName(ws.name);
-                      }}
-                      className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
-                    >
-                      Edit
-                    </button>
-                    {workspacesList.length > 1 && (
-                      <button
-                        onClick={() => handleDeleteWorkspace(ws.id)}
-                        className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
-                      >
-                        Delete
-                      </button>
+                    ) : (
+                      <>
+                        <div className="font-medium text-gray-900 dark:text-gray-100">
+                          {ws.name}
+                        </div>
+                        <div className="text-sm text-gray-500 dark:text-gray-400">
+                          /{ws.slug}
+                        </div>
+                      </>
                     )}
                   </div>
-                )}
-              </div>
-            ))}
+                  {isAdmin && editingWorkspace !== ws.id && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setEditingWorkspace(ws.id);
+                          setEditWorkspaceName(ws.name);
+                        }}
+                        className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+                      >
+                        Edit
+                      </button>
+                      {workspacesList.filter((w) => !w.owner_id).length > 1 && (
+                        <button
+                          onClick={() => handleDeleteWorkspace(ws.id)}
+                          className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
           </div>
+
+          {/* Personal workspaces (collapsed) */}
+          {workspacesList.filter((ws) => ws.owner_id).length > 0 && (
+            <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
+              <button
+                onClick={() => setShowPersonalWorkspaces(!showPersonalWorkspaces)}
+                className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
+              >
+                <span
+                  className={`transform transition-transform ${
+                    showPersonalWorkspaces ? "rotate-90" : ""
+                  }`}
+                >
+                  ▶
+                </span>
+                Personal workspaces ({workspacesList.filter((ws) => ws.owner_id).length}
+                )
+              </button>
+              {showPersonalWorkspaces && (
+                <div className="mt-2 ml-4 divide-y divide-gray-200 dark:divide-gray-700">
+                  {workspacesList
+                    .filter((ws) => ws.owner_id)
+                    .map((ws) => (
+                      <div
+                        key={ws.id}
+                        className="flex items-center justify-between py-2"
+                      >
+                        <div className="flex-1">
+                          <div className="font-medium text-gray-900 dark:text-gray-100 text-sm">
+                            {ws.name}
+                          </div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400">
+                            /{ws.slug}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
         </section>
 
         {/* API Keys */}

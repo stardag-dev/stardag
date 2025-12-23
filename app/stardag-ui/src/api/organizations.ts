@@ -39,6 +39,7 @@ export interface Workspace {
   name: string;
   slug: string;
   description: string | null;
+  owner_id: string | null; // Non-null for personal workspaces
 }
 
 export interface Member {
