@@ -27,6 +27,9 @@ from stardag.cli.credentials import (
     load_credentials,
     save_credentials,
     set_api_url,
+    set_organization_id,
+    set_target_roots,
+    set_workspace_id,
 )
 
 app = typer.Typer(help="Authentication commands for Stardag API")
@@ -156,6 +159,140 @@ def _get_oidc_config(issuer: str) -> dict:
         response = client.get(f"{issuer}/.well-known/openid-configuration")
         response.raise_for_status()
         return response.json()
+
+
+def _auto_select_context(api_url: str, access_token: str) -> None:
+    """Auto-select organization and workspace after login.
+
+    - If user has exactly one org, auto-select it
+    - After org is selected, auto-select personal workspace if available
+    """
+    try:
+        import httpx
+    except ImportError:
+        return  # Silent fail if httpx not available
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    try:
+        with httpx.Client(timeout=10.0, headers=headers) as client:
+            # Fetch user profile with organizations
+            response = client.get(f"{api_url}/api/v1/ui/me")
+            if response.status_code != 200:
+                typer.echo("")
+                typer.echo("Next steps:")
+                typer.echo(
+                    "  1. List your organizations:  stardag config list organizations"
+                )
+                typer.echo(
+                    "  2. Set active organization:  stardag config set organization <org-id>"
+                )
+                return
+
+            data = response.json()
+            organizations = data.get("organizations", [])
+
+            if not organizations:
+                typer.echo("")
+                typer.echo("No organizations found. Create one in the web UI first.")
+                return
+
+            # Auto-select org if only one, otherwise prompt
+            if len(organizations) == 1:
+                org = organizations[0]
+                set_organization_id(org["id"])
+                typer.echo("")
+                typer.echo(f"Auto-selected organization: {org['name']} ({org['slug']})")
+            else:
+                typer.echo("")
+                typer.echo("Your organizations:")
+                for org in organizations:
+                    typer.echo(f"  {org['id']}  {org['name']} ({org['slug']})")
+                typer.echo("")
+                typer.echo(
+                    "Set active organization with: stardag config set organization <org-id-or-slug>"
+                )
+                return
+
+            # Fetch workspaces and auto-select personal workspace
+            org_id = org["id"]
+            response = client.get(
+                f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces"
+            )
+            if response.status_code != 200:
+                typer.echo("")
+                typer.echo(
+                    "Set workspace with: stardag config set workspace <workspace-id>"
+                )
+                return
+
+            workspaces = response.json()
+
+            # Look for personal workspace (owner_id is not null)
+            user_email = data.get("user", {}).get("email", "")
+            personal_ws = None
+            for ws in workspaces:
+                if (
+                    ws.get("owner_id")
+                    and user_email.split("@")[0].lower() in ws.get("slug", "").lower()
+                ):
+                    personal_ws = ws
+                    break
+
+            # If no personal workspace found, try to find one by owner_id
+            if not personal_ws:
+                for ws in workspaces:
+                    if ws.get("owner_id"):
+                        personal_ws = ws
+                        break
+
+            if personal_ws:
+                set_workspace_id(personal_ws["id"])
+                typer.echo(
+                    f"Auto-selected workspace: {personal_ws['name']} ({personal_ws['slug']})"
+                )
+
+                # Sync target roots
+                _sync_target_roots_after_login(
+                    client, api_url, org_id, personal_ws["id"]
+                )
+            elif workspaces:
+                typer.echo("")
+                typer.echo("Available workspaces:")
+                for ws in workspaces:
+                    personal = " (personal)" if ws.get("owner_id") else ""
+                    typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}")
+                typer.echo("")
+                typer.echo(
+                    "Set workspace with: stardag config set workspace <workspace-id-or-slug>"
+                )
+
+    except Exception:
+        # Silent fail - user can manually set context
+        typer.echo("")
+        typer.echo("Next steps:")
+        typer.echo("  1. List your organizations:  stardag config list organizations")
+        typer.echo(
+            "  2. Set active organization:  stardag config set organization <org-id>"
+        )
+
+
+def _sync_target_roots_after_login(
+    client, api_url: str, org_id: str, workspace_id: str
+) -> None:
+    """Sync target roots after login."""
+    try:
+        response = client.get(
+            f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/target-roots"
+        )
+        if response.status_code == 200:
+            roots = response.json()
+            target_roots = {root["name"]: root["uri_prefix"] for root in roots}
+            set_target_roots(target_roots)
+            if target_roots:
+                typer.echo(f"Synced {len(target_roots)} target root(s)")
+    except Exception:
+        pass  # Silent fail
 
 
 @app.command()
@@ -300,15 +437,9 @@ def login(
     typer.echo("")
     typer.echo("Login successful!")
     typer.echo(f"Credentials saved to {get_credentials_path()}")
-    typer.echo("")
-    typer.echo("Next steps:")
-    typer.echo("  1. List your organizations:  stardag config list organizations")
-    typer.echo(
-        "  2. Set active organization:  stardag config set organization <org-id>"
-    )
-    typer.echo(
-        "  3. Set active workspace:     stardag config set workspace <workspace-id>"
-    )
+
+    # Auto-select organization and workspace
+    _auto_select_context(api_url, tokens["access_token"])
 
 
 @app.command()

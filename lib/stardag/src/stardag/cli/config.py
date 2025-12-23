@@ -117,27 +117,58 @@ def set_timeout_cmd(
     typer.echo(f"Timeout set to: {timeout}s")
 
 
+def _resolve_organization(client, api_url: str, org_id_or_slug: str) -> str:
+    """Resolve an organization ID or slug to an ID.
+
+    Returns the organization ID if found, or the input if it looks like an ID.
+    """
+    # First check if it's a valid UUID (36 chars with hyphens)
+    if len(org_id_or_slug) == 36 and org_id_or_slug.count("-") == 4:
+        return org_id_or_slug
+
+    # Try to resolve by slug via /me endpoint
+    try:
+        response = client.get(f"{api_url}/api/v1/ui/me")
+        if response.status_code == 200:
+            data = response.json()
+            for org in data.get("organizations", []):
+                if org["slug"] == org_id_or_slug or org["id"] == org_id_or_slug:
+                    return str(org["id"])
+    except Exception:
+        pass
+
+    # Assume it's an ID if we couldn't resolve
+    return org_id_or_slug
+
+
 @set_app.command("organization")
 def set_organization(
-    org_id: str = typer.Argument(..., help="Organization ID to set as active"),
+    org_id_or_slug: str = typer.Argument(
+        ..., help="Organization ID or slug to set as active"
+    ),
 ) -> None:
     """Set the active organization.
 
+    Accepts either an organization ID or slug.
     This also clears the active workspace (since workspaces belong to organizations).
     """
     # Validate the organization exists and user has access
     client, api_url = _get_authenticated_client()
 
     try:
+        # Resolve slug to ID if needed
+        org_id = _resolve_organization(client, api_url, org_id_or_slug)
+
         # Try to get workspaces for this org (validates access)
         response = client.get(f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces")
 
         if response.status_code == 404:
-            typer.echo(f"Error: Organization '{org_id}' not found.", err=True)
+            typer.echo(f"Error: Organization '{org_id_or_slug}' not found.", err=True)
             raise typer.Exit(1)
         elif response.status_code == 403:
             typer.echo(
-                f"Error: You don't have access to organization '{org_id}'.", err=True
+                f"Error: You don't have access to organization '{org_id_or_slug}'.",
+                err=True,
             )
             raise typer.Exit(1)
         elif response.status_code != 200:
@@ -163,10 +194,11 @@ def set_organization(
         typer.echo("")
         typer.echo("Available workspaces:")
         for ws in workspaces:
-            typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']})")
+            personal = " (personal)" if ws.get("owner_id") else ""
+            typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}")
         typer.echo("")
         typer.echo(
-            "Set active workspace with: stardag config set workspace <workspace-id>"
+            "Set active workspace with: stardag config set workspace <workspace-id-or-slug>"
         )
 
 
@@ -199,9 +231,14 @@ def _sync_target_roots(client, api_url: str, org_id: str, workspace_id: str) -> 
 
 @set_app.command("workspace")
 def set_workspace(
-    workspace_id: str = typer.Argument(..., help="Workspace ID to set as active"),
+    workspace_id_or_slug: str = typer.Argument(
+        ..., help="Workspace ID or slug to set as active"
+    ),
 ) -> None:
-    """Set the active workspace."""
+    """Set the active workspace.
+
+    Accepts either a workspace ID or slug.
+    """
     # Check if organization is set
     org_id = get_organization_id()
     if not org_id:
@@ -224,17 +261,24 @@ def set_workspace(
             raise typer.Exit(1)
 
         workspaces = response.json()
-        workspace_ids = {ws["id"] for ws in workspaces}
 
-        if workspace_id not in workspace_ids:
+        # Resolve slug to ID if needed
+        workspace_id = None
+        for ws in workspaces:
+            if ws["id"] == workspace_id_or_slug or ws["slug"] == workspace_id_or_slug:
+                workspace_id = ws["id"]
+                break
+
+        if workspace_id is None:
             typer.echo(
-                f"Error: Workspace '{workspace_id}' not found in organization.",
+                f"Error: Workspace '{workspace_id_or_slug}' not found in organization.",
                 err=True,
             )
             typer.echo("")
             typer.echo("Available workspaces:")
             for ws in workspaces:
-                typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']})")
+                personal = " (personal)" if ws.get("owner_id") else ""
+                typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}")
             raise typer.Exit(1)
 
         # Save workspace ID and sync target roots
@@ -369,3 +413,51 @@ def list_target_roots_cmd() -> None:
     typer.echo("Target Roots:")
     for name, uri_prefix in sorted(target_roots.items()):
         typer.echo(f"  {name}: {uri_prefix}")
+
+
+# --- Sync command ---
+
+
+@app.command("sync")
+def sync_config() -> None:
+    """Sync workspace settings from the API.
+
+    Fetches the latest target roots configuration from the central API
+    for the active workspace.
+    """
+    org_id = get_organization_id()
+    workspace_id = get_workspace_id()
+
+    if not org_id:
+        typer.echo(
+            "Error: No organization set. Run 'stardag config set organization <id>' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not workspace_id:
+        typer.echo(
+            "Error: No workspace set. Run 'stardag config set workspace <id>' first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    client, api_url = _get_authenticated_client()
+
+    try:
+        typer.echo(f"Syncing workspace settings from {api_url}...")
+
+        if _sync_target_roots(client, api_url, org_id, workspace_id):
+            target_roots = get_target_roots()
+            if target_roots:
+                typer.echo(f"Synced {len(target_roots)} target root(s):")
+                for name, uri_prefix in sorted(target_roots.items()):
+                    typer.echo(f"  {name}: {uri_prefix}")
+            else:
+                typer.echo("No target roots configured for this workspace.")
+        else:
+            typer.echo("Warning: Failed to sync target roots.", err=True)
+            raise typer.Exit(1)
+
+    finally:
+        client.close()
