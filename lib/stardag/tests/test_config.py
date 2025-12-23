@@ -291,6 +291,20 @@ class TestStardagConfigValidation:
         config = StardagConfig()
         config.validate_organization("any-org")  # Should not raise
 
+    def test_validate_organization_passes_when_slug_matches(self):
+        """Test that validation passes when org_slug matches allowed list."""
+        from stardag.config import ContextConfig
+
+        config = StardagConfig(
+            context=ContextConfig(
+                organization_id="some-uuid-id",
+                organization_slug="my-org-slug",
+            ),
+            allowed_organizations=["my-org-slug", "other-org"],
+        )
+        # ID doesn't match, but slug does - should pass
+        config.validate_organization()  # Should not raise
+
 
 class TestConfigProvider:
     def test_get_returns_loaded_config(self, temp_stardag_dir, monkeypatch):
