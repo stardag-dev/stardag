@@ -1,23 +1,30 @@
 """Stardag CLI - Command line interface for Stardag.
 
 Usage:
-    stardag auth login
-    stardag auth status
-    stardag auth logout
+    stardag auth login [-r registry] [--api-url url]
+    stardag auth logout [-r registry]
+    stardag auth status [-r registry]
+    stardag auth refresh [-r registry] [-o org]
 
-    stardag config get
-    stardag config sync
-    stardag config set organization <org-id-or-slug>
-    stardag config set workspace <workspace-id-or-slug>
+    stardag registry add <name> --url <url>
+    stardag registry list
+    stardag registry remove <name>
+
+    stardag config show
+    stardag config profile add <name> -r <registry> -o <org> -w <workspace>
+    stardag config profile list
+    stardag config profile use <name>
+    stardag config profile remove <name>
+    stardag config target-roots list
+    stardag config target-roots sync
     stardag config list organizations
     stardag config list workspaces
-    stardag config list target-roots
 
-    stardag registry list
-    stardag registry current
-    stardag registry add <name> --api-url <url>
-    stardag registry use <name>
-    stardag registry delete <name>
+Configuration:
+    Set STARDAG_PROFILE=<profile-name> to use a specific profile.
+    Set STARDAG_REGISTRY_URL, STARDAG_ORGANIZATION_ID, STARDAG_WORKSPACE_ID
+    for direct configuration (bypasses profiles).
+    Set STARDAG_API_KEY for API key authentication.
 """
 
 try:
@@ -60,7 +67,8 @@ def main() -> None:
     """Stardag CLI - Declarative DAG framework for Python.
 
     Use 'stardag auth login' to authenticate with the Stardag API.
-    Use 'stardag config' commands to manage your active organization and workspace.
+    Use 'stardag config profile' commands to manage profiles.
+    Set STARDAG_PROFILE environment variable to activate a profile.
     """
     pass
 

@@ -1,6 +1,5 @@
 """Tests for stardag.config module."""
 
-import json
 from pathlib import Path
 
 import pytest
@@ -8,24 +7,18 @@ import pytest
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_API_URL,
-    DEFAULT_REGISTRY,
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
     ConfigProvider,
-    ProjectConfig,
-    ProjectRegistryConfig,
-    ProjectWorkspaceConfig,
+    ContextConfig,
+    ProfileConfig,
+    RegistryConfig,
     StardagConfig,
+    TomlConfig,
     clear_config_cache,
     find_project_config,
     get_config,
-    load_active_registry,
-    load_active_workspace,
     load_config,
-    load_workspace_target_roots,
-    save_active_registry,
-    save_active_workspace,
-    save_workspace_target_roots,
 )
 
 
@@ -46,7 +39,7 @@ def temp_stardag_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def temp_project_dir(tmp_path, monkeypatch):
-    """Create a temporary project directory with .stardag/config.json."""
+    """Create a temporary project directory with .stardag/config.toml."""
     project_dir = tmp_path / "my-project"
     project_dir.mkdir()
     stardag_config_dir = project_dir / ".stardag"
@@ -58,151 +51,69 @@ def temp_project_dir(tmp_path, monkeypatch):
     return project_dir
 
 
-class TestLoadActiveRegistry:
-    def test_returns_default_when_no_file(self, temp_stardag_dir):
-        assert load_active_registry() == DEFAULT_REGISTRY
-
-    def test_returns_saved_registry(self, temp_stardag_dir):
-        save_active_registry("production")
-        assert load_active_registry() == "production"
-
-    def test_strips_whitespace(self, temp_stardag_dir):
-        active_registry_path = temp_stardag_dir / "active_registry"
-        active_registry_path.write_text("  my-registry  \n")
-        assert load_active_registry() == "my-registry"
+def write_toml(path: Path, content: str) -> None:
+    """Write a TOML file, handling tomli-w dependency."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
 
 
-class TestSaveActiveRegistry:
-    def test_creates_directory_if_needed(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        # Directory doesn't exist yet
-        assert not (tmp_path / ".stardag").exists()
+class TestTomlConfig:
+    def test_parses_empty_dict(self):
+        """Test parsing empty config."""
+        config = TomlConfig.from_toml_dict({})
+        assert config.registry == {}
+        assert config.profile == {}
+        assert config.default == {}
 
-        save_active_registry("test-registry")
-
-        assert (tmp_path / ".stardag" / "active_registry").exists()
-        assert (
-            tmp_path / ".stardag" / "active_registry"
-        ).read_text() == "test-registry"
-
-
-class TestActiveWorkspace:
-    def test_returns_none_when_no_file(self, temp_stardag_dir):
-        assert load_active_workspace("local") is None
-
-    def test_returns_saved_workspace(self, temp_stardag_dir):
-        save_active_workspace("local", "ws-123")
-        assert load_active_workspace("local") == "ws-123"
-
-    def test_creates_registry_dir_if_needed(self, temp_stardag_dir):
-        # Registry directory doesn't exist yet
-        assert not (temp_stardag_dir / "registries" / "newregistry").exists()
-
-        save_active_workspace("newregistry", "ws-456")
-
-        assert (
-            temp_stardag_dir / "registries" / "newregistry" / "active_workspace"
-        ).exists()
-        assert load_active_workspace("newregistry") == "ws-456"
-
-
-class TestWorkspaceTargetRoots:
-    def test_returns_empty_when_no_file(self, temp_stardag_dir):
-        result = load_workspace_target_roots("local", "ws-123")
-        assert result == {}
-
-    def test_saves_and_loads_target_roots(self, temp_stardag_dir):
-        target_roots = {"default": "/data/root", "archive": "s3://bucket/archive"}
-        save_workspace_target_roots("local", "ws-123", target_roots)
-        result = load_workspace_target_roots("local", "ws-123")
-        assert result == target_roots
-
-    def test_loads_from_registry_only(self, temp_stardag_dir):
-        """load_workspace_target_roots only loads from registry, not project config."""
-        # Save to registry
-        registry_roots = {"default": "/registry/root"}
-        save_workspace_target_roots("local", "ws-123", registry_roots)
-
-        result = load_workspace_target_roots("local", "ws-123")
-        assert result == registry_roots
-
-
-class TestProjectConfig:
-    def test_nested_structure(self):
-        """Test nested registries/workspaces structure."""
-        config = ProjectConfig(
-            default_registry="central",
-            allowed_organizations=["my-org"],
-            registries={
-                "local": ProjectRegistryConfig(
-                    organization_id="local-org",
-                    default_workspace="dev",
-                    workspaces={
-                        "dev": ProjectWorkspaceConfig(
-                            target_roots={"default": "/local/data"}
-                        ),
-                    },
-                ),
-                "central": ProjectRegistryConfig(
-                    organization_id="central-org",
-                    default_workspace="prod",
-                    workspaces={
-                        "prod": ProjectWorkspaceConfig(
-                            target_roots={"default": "s3://bucket/prod/"}
-                        ),
-                        "staging": ProjectWorkspaceConfig(
-                            target_roots={"default": "s3://bucket/staging/"}
-                        ),
-                    },
-                ),
-            },
+    def test_parses_registries(self):
+        """Test parsing registry configuration."""
+        config = TomlConfig.from_toml_dict(
+            {
+                "registry": {
+                    "local": {"url": "http://localhost:8000"},
+                    "central": {"url": "https://api.stardag.com"},
+                }
+            }
         )
+        assert "local" in config.registry
+        assert config.registry["local"].url == "http://localhost:8000"
+        assert config.registry["central"].url == "https://api.stardag.com"
 
-        assert config.default_registry == "central"
-
-        # Local registry
-        assert config.get_organization_id("local") == "local-org"
-        assert config.get_workspace_id("local") == "dev"
-        assert config.get_workspace_target_roots("local", "dev") == {
-            "default": "/local/data"
-        }
-
-        # Central registry
-        assert config.get_organization_id("central") == "central-org"
-        assert config.get_workspace_id("central") == "prod"
-        assert config.get_workspace_target_roots("central", "prod") == {
-            "default": "s3://bucket/prod/"
-        }
-        assert config.get_workspace_target_roots("central", "staging") == {
-            "default": "s3://bucket/staging/"
-        }
-
-    def test_returns_none_for_unknown_registry(self):
-        """Test that unknown registry returns None."""
-        config = ProjectConfig(
-            registries={
-                "known-registry": ProjectRegistryConfig(
-                    organization_id="known-org",
-                )
-            },
+    def test_parses_profiles(self):
+        """Test parsing profile configuration."""
+        config = TomlConfig.from_toml_dict(
+            {
+                "profile": {
+                    "dev": {
+                        "registry": "local",
+                        "organization": "my-org",
+                        "workspace": "dev-ws",
+                    }
+                }
+            }
         )
+        assert "dev" in config.profile
+        assert config.profile["dev"].registry == "local"
+        assert config.profile["dev"].organization == "my-org"
+        assert config.profile["dev"].workspace == "dev-ws"
 
-        assert config.get_organization_id("unknown-registry") is None
-        assert config.get_workspace_id("unknown-registry") is None
-        assert config.get_workspace_target_roots("unknown-registry", "ws") is None
+    def test_parses_default(self):
+        """Test parsing default profile setting."""
+        config = TomlConfig.from_toml_dict({"default": {"profile": "dev"}})
+        assert config.default.get("profile") == "dev"
 
 
 class TestFindProjectConfig:
     def test_finds_config_in_current_dir(self, temp_project_dir):
-        config_path = temp_project_dir / ".stardag" / "config.json"
-        config_path.write_text("{}")
+        config_path = temp_project_dir / ".stardag" / "config.toml"
+        write_toml(config_path, "[default]\nprofile = 'local'\n")
 
         found = find_project_config()
         assert found == config_path
 
     def test_finds_config_in_parent_dir(self, temp_project_dir, monkeypatch):
-        config_path = temp_project_dir / ".stardag" / "config.json"
-        config_path.write_text("{}")
+        config_path = temp_project_dir / ".stardag" / "config.toml"
+        write_toml(config_path, "[default]\nprofile = 'local'\n")
 
         # Create and change to subdirectory
         subdir = temp_project_dir / "src" / "module"
@@ -227,198 +138,157 @@ class TestLoadConfig:
         assert config.target.roots == {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
         assert config.api.url == DEFAULT_API_URL
         assert config.api.timeout == DEFAULT_API_TIMEOUT
-        assert config.context.registry == DEFAULT_REGISTRY
+        assert config.context.profile is None
+        assert config.context.registry_name is None
         assert config.context.organization_id is None
         assert config.context.workspace_id is None
         assert config.access_token is None
         assert config.api_key is None
 
-    def test_loads_from_registry_config(self, temp_stardag_dir, monkeypatch):
+    def test_loads_from_user_config_toml(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
 
-        # Create registry config
-        registry_dir = temp_stardag_dir / "registries" / "local"
-        registry_dir.mkdir(parents=True)
-        config_path = registry_dir / "config.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "api_url": "http://my-api:9000",
-                    "api_timeout": 60.0,
-                    "organization_id": "org-123",
-                }
-            )
+        # Create user config.toml
+        config_path = temp_stardag_dir / "config.toml"
+        write_toml(
+            config_path,
+            """
+[registry.local]
+url = "http://my-api:9000"
+
+[profile.dev]
+registry = "local"
+organization = "org-123"
+workspace = "ws-456"
+
+[default]
+profile = "dev"
+""",
         )
 
-        # Create active_workspace file
-        (registry_dir / "active_workspace").write_text("ws-456")
-
-        # Create workspace-specific target roots
-        ws_dir = registry_dir / "workspaces" / "ws-456"
-        ws_dir.mkdir(parents=True)
-        (ws_dir / "target_roots.json").write_text(
-            json.dumps({"default": "/custom/path"})
-        )
-
+        clear_config_cache()
         config = load_config(use_project_config=False)
 
-        assert config.api.url == "http://my-api:9000"
-        assert config.api.timeout == 60.0
+        assert config.context.profile == "dev"
+        assert config.context.registry_name == "local"
         assert config.context.organization_id == "org-123"
         assert config.context.workspace_id == "ws-456"
-        assert config.target.roots == {"default": "/custom/path"}
+        assert config.api.url == "http://my-api:9000"
 
-    def test_loads_credentials_from_registry(self, temp_stardag_dir, monkeypatch):
+    def test_env_vars_override_config(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
 
-        # Create registry credentials
-        registry_dir = temp_stardag_dir / "registries" / "local"
-        registry_dir.mkdir(parents=True)
-        creds_path = registry_dir / "credentials.json"
-        creds_path.write_text(
-            json.dumps(
-                {
-                    "access_token": "my-jwt-token",
-                    "refresh_token": "my-refresh-token",
-                }
-            )
+        # Create user config
+        config_path = temp_stardag_dir / "config.toml"
+        write_toml(
+            config_path,
+            """
+[registry.local]
+url = "http://registry-api:9000"
+
+[profile.dev]
+registry = "local"
+organization = "config-org"
+workspace = "config-ws"
+
+[default]
+profile = "dev"
+""",
         )
-
-        config = load_config(use_project_config=False)
-
-        assert config.access_token == "my-jwt-token"
-
-    def test_env_vars_override_registry_config(self, temp_stardag_dir, monkeypatch):
-        monkeypatch.chdir(temp_stardag_dir.parent)
-
-        # Create registry config
-        registry_dir = temp_stardag_dir / "registries" / "local"
-        registry_dir.mkdir(parents=True)
-        config_path = registry_dir / "config.json"
-        config_path.write_text(
-            json.dumps(
-                {
-                    "api_url": "http://registry-api:9000",
-                }
-            )
-        )
-
-        # Create active_workspace file
-        (registry_dir / "active_workspace").write_text("registry-ws")
 
         # Set env vars (should override)
-        monkeypatch.setenv("STARDAG_API_URL", "http://env-api:8080")
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://env-api:8080")
+        monkeypatch.setenv("STARDAG_ORGANIZATION_ID", "env-org")
         monkeypatch.setenv("STARDAG_WORKSPACE_ID", "env-ws")
 
         clear_config_cache()
         config = load_config(use_project_config=False)
 
+        # Direct env vars override profile-based config
         assert config.api.url == "http://env-api:8080"
+        assert config.context.organization_id == "env-org"
         assert config.context.workspace_id == "env-ws"
 
-    def test_project_config_overrides_registry(
+    def test_profile_env_var_selects_profile(self, temp_stardag_dir, monkeypatch):
+        monkeypatch.chdir(temp_stardag_dir.parent)
+
+        # Create config with multiple profiles
+        config_path = temp_stardag_dir / "config.toml"
+        write_toml(
+            config_path,
+            """
+[registry.local]
+url = "http://localhost:8000"
+
+[registry.prod]
+url = "https://api.stardag.com"
+
+[profile.dev]
+registry = "local"
+organization = "dev-org"
+workspace = "dev-ws"
+
+[profile.prod]
+registry = "prod"
+organization = "prod-org"
+workspace = "prod-ws"
+
+[default]
+profile = "dev"
+""",
+        )
+
+        # Select prod profile via env var
+        monkeypatch.setenv("STARDAG_PROFILE", "prod")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.context.profile == "prod"
+        assert config.context.registry_name == "prod"
+        assert config.context.organization_id == "prod-org"
+        assert config.context.workspace_id == "prod-ws"
+        assert config.api.url == "https://api.stardag.com"
+
+    def test_project_config_overrides_user_config(
         self, temp_stardag_dir, temp_project_dir, monkeypatch
     ):
-        # Create registry config
-        registry_dir = temp_stardag_dir / "registries" / "local"
-        registry_dir.mkdir(parents=True)
-        registry_config = registry_dir / "config.json"
-        registry_config.write_text(
-            json.dumps(
-                {
-                    "organization_id": "registry-org",
-                }
-            )
-        )
-        # Create active_workspace file for registry
-        (registry_dir / "active_workspace").write_text("registry-ws")
+        # Create user config
+        user_config = temp_stardag_dir / "config.toml"
+        write_toml(
+            user_config,
+            """
+[registry.local]
+url = "http://localhost:8000"
 
-        # Create project config (overrides organization and workspace via nested structure)
-        project_config = temp_project_dir / ".stardag" / "config.json"
-        project_config.write_text(
-            json.dumps(
-                {
-                    "default_registry": "local",
-                    "registries": {
-                        "local": {
-                            "organization_id": "project-org",
-                            "default_workspace": "project-ws",
-                        }
-                    },
-                }
-            )
+[profile.dev]
+registry = "local"
+organization = "user-org"
+workspace = "user-ws"
+
+[default]
+profile = "dev"
+""",
         )
 
+        # Create project config (overrides)
+        project_config = temp_project_dir / ".stardag" / "config.toml"
+        write_toml(
+            project_config,
+            """
+[profile.dev]
+registry = "local"
+organization = "project-org"
+workspace = "project-ws"
+""",
+        )
+
+        clear_config_cache()
         config = load_config()
 
+        # Project config should override user config
         assert config.context.organization_id == "project-org"
         assert config.context.workspace_id == "project-ws"
-
-    def test_nested_project_config_with_target_roots(
-        self, temp_stardag_dir, temp_project_dir, monkeypatch
-    ):
-        """Test that nested project config provides target roots."""
-        # Create registry config (will be used if project config doesn't have it)
-        registry_dir = temp_stardag_dir / "registries" / "local"
-        registry_dir.mkdir(parents=True)
-        registry_config = registry_dir / "config.json"
-        registry_config.write_text(json.dumps({}))
-
-        # Create nested project config with target roots
-        project_config = temp_project_dir / ".stardag" / "config.json"
-        project_config.write_text(
-            json.dumps(
-                {
-                    "default_registry": "local",
-                    "registries": {
-                        "local": {
-                            "organization_id": "my-org",
-                            "default_workspace": "dev-ws",
-                            "workspaces": {
-                                "dev-ws": {
-                                    "target_roots": {"default": "/project/dev/data"}
-                                }
-                            },
-                        }
-                    },
-                }
-            )
-        )
-
-        config = load_config()
-
-        assert config.context.registry == "local"
-        assert config.context.organization_id == "my-org"
-        assert config.context.workspace_id == "dev-ws"
-        assert config.target.roots == {"default": "/project/dev/data"}
-
-    def test_project_config_can_set_registry(self, temp_stardag_dir, temp_project_dir):
-        # Create production registry config
-        prod_registry_dir = temp_stardag_dir / "registries" / "production"
-        prod_registry_dir.mkdir(parents=True)
-        prod_config = prod_registry_dir / "config.json"
-        prod_config.write_text(
-            json.dumps(
-                {
-                    "api_url": "https://api.stardag.io",
-                }
-            )
-        )
-
-        # Create project config that selects production registry
-        project_config = temp_project_dir / ".stardag" / "config.json"
-        project_config.write_text(
-            json.dumps(
-                {
-                    "default_registry": "production",
-                }
-            )
-        )
-
-        config = load_config()
-
-        assert config.context.registry == "production"
-        assert config.api.url == "https://api.stardag.io"
 
     def test_api_key_from_env_var(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -429,50 +299,26 @@ class TestLoadConfig:
 
         assert config.api_key == "my-api-key"
 
-    def test_allowed_organizations_from_project_config(
-        self, temp_stardag_dir, temp_project_dir
-    ):
-        project_config = temp_project_dir / ".stardag" / "config.json"
-        project_config.write_text(
-            json.dumps(
-                {
-                    "allowed_organizations": ["org-1", "org-2"],
-                }
-            )
+
+class TestContextConfig:
+    def test_default_values(self):
+        ctx = ContextConfig()
+        assert ctx.profile is None
+        assert ctx.registry_name is None
+        assert ctx.organization_id is None
+        assert ctx.workspace_id is None
+
+    def test_with_values(self):
+        ctx = ContextConfig(
+            profile="dev",
+            registry_name="local",
+            organization_id="org-123",
+            workspace_id="ws-456",
         )
-
-        config = load_config()
-
-        assert config.allowed_organizations == ["org-1", "org-2"]
-
-
-class TestStardagConfigValidation:
-    def test_validate_organization_passes_when_allowed(self):
-        config = StardagConfig(allowed_organizations=["org-1", "org-2"])
-        config.validate_organization("org-1")  # Should not raise
-
-    def test_validate_organization_raises_when_not_allowed(self):
-        config = StardagConfig(allowed_organizations=["org-1", "org-2"])
-        with pytest.raises(ValueError, match="not allowed"):
-            config.validate_organization("org-3")
-
-    def test_validate_organization_passes_when_no_restrictions(self):
-        config = StardagConfig()
-        config.validate_organization("any-org")  # Should not raise
-
-    def test_validate_organization_passes_when_slug_matches(self):
-        """Test that validation passes when org_slug matches allowed list."""
-        from stardag.config import ContextConfig
-
-        config = StardagConfig(
-            context=ContextConfig(
-                organization_id="some-uuid-id",
-                organization_slug="my-org-slug",
-            ),
-            allowed_organizations=["my-org-slug", "other-org"],
-        )
-        # ID doesn't match, but slug does - should pass
-        config.validate_organization()  # Should not raise
+        assert ctx.profile == "dev"
+        assert ctx.registry_name == "local"
+        assert ctx.organization_id == "org-123"
+        assert ctx.workspace_id == "ws-456"
 
 
 class TestConfigProvider:
@@ -534,3 +380,23 @@ class TestGetConfig:
 
         # After clearing cache, should be a new instance
         assert config1 is not config2
+
+
+class TestRegistryConfig:
+    def test_default_url(self):
+        config = RegistryConfig()
+        assert config.url == DEFAULT_API_URL
+
+    def test_custom_url(self):
+        config = RegistryConfig(url="https://api.stardag.com")
+        assert config.url == "https://api.stardag.com"
+
+
+class TestProfileConfig:
+    def test_required_fields(self):
+        config = ProfileConfig(
+            registry="local", organization="my-org", workspace="dev-ws"
+        )
+        assert config.registry == "local"
+        assert config.organization == "my-org"
+        assert config.workspace == "dev-ws"
