@@ -5,7 +5,7 @@ This module provides authentication dependencies for the Stardag API.
 Token types:
 - Internal tokens: Org-scoped JWTs minted by /auth/exchange. Required for most
   endpoints.
-- Keycloak tokens: External JWTs from the OIDC provider. Accepted by:
+- OIDC tokens: External JWTs from the OIDC provider. Accepted by:
   - /auth/exchange (to mint internal tokens)
   - /ui/me, /ui/me/invites (bootstrap endpoints before org selection)
 - API keys: Workspace-scoped keys for SDK/automation. Alternative to JWTs.
@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth.jwt import (
     AuthenticationError,
-    TokenPayload as KeycloakTokenPayload,
+    TokenPayload as OIDCTokenPayload,
     get_jwt_validator,
 )
 from stardag_api.auth.tokens import (
@@ -54,7 +54,7 @@ async def get_optional_token(
     Returns None if no token provided, raises HTTPException if token is invalid.
 
     NOTE: This validates INTERNAL tokens only (from /auth/exchange).
-    Keycloak tokens are NOT accepted here.
+    OIDC tokens are NOT accepted here.
     """
     if credentials is None:
         return None
@@ -86,7 +86,7 @@ async def get_token(
     Raises HTTPException if no token provided or token is invalid.
 
     NOTE: This validates INTERNAL tokens only (from /auth/exchange).
-    Keycloak tokens are NOT accepted here.
+    OIDC tokens are NOT accepted here.
     """
     if credentials is None:
         raise HTTPException(
@@ -349,13 +349,13 @@ async def require_sdk_auth(
     return sdk_auth
 
 
-# --- Keycloak Token Authentication (for bootstrap endpoints) ---
+# --- OIDC Token Authentication (for bootstrap endpoints) ---
 
 
-async def get_keycloak_token(
+async def get_oidc_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
-) -> KeycloakTokenPayload:
-    """Get and validate Keycloak JWT token (required).
+) -> OIDCTokenPayload:
+    """Get and validate OIDC JWT token (required).
 
     Used for bootstrap endpoints that need to work before the user has
     selected an organization (e.g., /ui/me, /ui/me/invites).
@@ -373,7 +373,7 @@ async def get_keycloak_token(
     try:
         return await validator.validate_token(credentials.credentials)
     except AuthenticationError as e:
-        logger.warning("Keycloak token validation failed: %s", e)
+        logger.warning("OIDC token validation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
@@ -381,54 +381,49 @@ async def get_keycloak_token(
         ) from e
 
 
-async def get_or_create_user_from_keycloak(
-    keycloak_token: Annotated[KeycloakTokenPayload, Depends(get_keycloak_token)],
+async def get_or_create_user_from_oidc(
+    oidc_token: Annotated[OIDCTokenPayload, Depends(get_oidc_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
-    """Get or create user from Keycloak token claims.
+    """Get or create user from OIDC token claims.
 
     Used for bootstrap endpoints that need user info before org selection.
     Creates user if they don't exist yet (first login).
     """
     # Look up user by external_id (OIDC subject claim)
-    result = await db.execute(
-        select(User).where(User.external_id == keycloak_token.sub)
-    )
+    result = await db.execute(select(User).where(User.external_id == oidc_token.sub))
     user = result.scalar_one_or_none()
 
     if user is not None:
         # Update user info if changed
         updated = False
-        if keycloak_token.email and user.email != keycloak_token.email:
-            user.email = keycloak_token.email
+        if oidc_token.email and user.email != oidc_token.email:
+            user.email = oidc_token.email
             updated = True
-        if (
-            keycloak_token.display_name
-            and user.display_name != keycloak_token.display_name
-        ):
-            user.display_name = keycloak_token.display_name
+        if oidc_token.display_name and user.display_name != oidc_token.display_name:
+            user.display_name = oidc_token.display_name
             updated = True
         if updated:
             await db.commit()
-            logger.info("Updated user %s with new info from Keycloak token", user.id)
+            logger.info("Updated user %s with new info from OIDC token", user.id)
         return user
 
     # Create new user
-    if not keycloak_token.email:
+    if not oidc_token.email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Token must contain email claim for user creation",
         )
 
     user = User(
-        external_id=keycloak_token.sub,
-        email=keycloak_token.email,
-        display_name=keycloak_token.display_name,
+        external_id=oidc_token.sub,
+        email=oidc_token.email,
+        display_name=oidc_token.display_name,
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    logger.info("Created new user %s from Keycloak token", user.id)
+    logger.info("Created new user %s from OIDC token", user.id)
     return user
 
 
@@ -436,13 +431,13 @@ async def get_current_user_flexible(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
-    """Get the current user from either internal token or Keycloak token.
+    """Get the current user from either internal token or OIDC token.
 
     This is for endpoints that need to work in both scenarios:
-    - New users with only a Keycloak token (first login, no org yet)
+    - New users with only an OIDC token (first login, no org yet)
     - Existing users with an org-scoped internal token
 
-    Priority: Internal token first (most common for logged-in users), then Keycloak.
+    Priority: Internal token first (most common for logged-in users), then OIDC.
     """
     if credentials is None:
         raise HTTPException(
@@ -466,58 +461,53 @@ async def get_current_user_flexible(
             )
         return user
     except (TokenExpiredError, TokenInvalidError):
-        # Not a valid internal token, try Keycloak
+        # Not a valid internal token, try OIDC
         pass
 
-    # Try Keycloak token
+    # Try OIDC token
     validator = get_jwt_validator()
     try:
-        keycloak_payload = await validator.validate_token(token_str)
+        oidc_payload = await validator.validate_token(token_str)
     except AuthenticationError as e:
-        logger.warning("Both internal and Keycloak token validation failed: %s", e)
+        logger.warning("Both internal and OIDC token validation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
             headers={"WWW-Authenticate": "Bearer"},
         ) from e
 
-    # Got a valid Keycloak token - get or create user
-    result = await db.execute(
-        select(User).where(User.external_id == keycloak_payload.sub)
-    )
+    # Got a valid OIDC token - get or create user
+    result = await db.execute(select(User).where(User.external_id == oidc_payload.sub))
     user = result.scalar_one_or_none()
 
     if user is not None:
         # Update user info if changed
         updated = False
-        if keycloak_payload.email and user.email != keycloak_payload.email:
-            user.email = keycloak_payload.email
+        if oidc_payload.email and user.email != oidc_payload.email:
+            user.email = oidc_payload.email
             updated = True
-        if (
-            keycloak_payload.display_name
-            and user.display_name != keycloak_payload.display_name
-        ):
-            user.display_name = keycloak_payload.display_name
+        if oidc_payload.display_name and user.display_name != oidc_payload.display_name:
+            user.display_name = oidc_payload.display_name
             updated = True
         if updated:
             await db.commit()
-            logger.info("Updated user %s with new info from Keycloak token", user.id)
+            logger.info("Updated user %s with new info from OIDC token", user.id)
         return user
 
-    # Create new user from Keycloak token
-    if not keycloak_payload.email:
+    # Create new user from OIDC token
+    if not oidc_payload.email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Token must contain email claim for user creation",
         )
 
     user = User(
-        external_id=keycloak_payload.sub,
-        email=keycloak_payload.email,
-        display_name=keycloak_payload.display_name,
+        external_id=oidc_payload.sub,
+        email=oidc_payload.email,
+        display_name=oidc_payload.display_name,
     )
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    logger.info("Created new user %s from Keycloak token", user.id)
+    logger.info("Created new user %s from OIDC token", user.id)
     return user

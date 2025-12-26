@@ -45,7 +45,7 @@ class TokenInvalidError(TokenError):
 class InternalTokenPayload:
     """Payload for internal org-scoped JWT tokens."""
 
-    sub: str  # User ID (internal, not Keycloak external_id)
+    sub: str  # User ID (internal, not OIDC external_id)
     org_id: str  # Organization ID (required for internal tokens)
     iss: str  # Issuer (stardag-api)
     aud: str  # Audience (stardag)
@@ -147,7 +147,7 @@ class InternalTokenManager:
         """Create an org-scoped access token.
 
         Args:
-            user_id: Internal user ID (not Keycloak external_id)
+            user_id: Internal user ID (not OIDC external_id)
             org_id: Organization ID
             additional_claims: Optional additional claims to include
 

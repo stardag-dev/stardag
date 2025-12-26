@@ -1,6 +1,6 @@
-"""UI-specific routes for bootstrap (Keycloak tokens) and authenticated operations.
+"""UI-specific routes for bootstrap (OIDC tokens) and authenticated operations.
 
-Bootstrap endpoints (/me, /me/invites) accept Keycloak tokens directly because
+Bootstrap endpoints (/me, /me/invites) accept OIDC tokens directly because
 they are needed before the user can select an organization for token exchange.
 
 Other UI endpoints require org-scoped internal tokens.
@@ -71,7 +71,7 @@ class PendingInviteResponse(BaseModel):
     invited_by_email: str | None
 
 
-# --- Bootstrap Endpoints (accept Keycloak tokens) ---
+# --- Bootstrap Endpoints (accept OIDC tokens) ---
 
 
 @router.get("/me", response_model=UserProfileWithOrgsResponse)
@@ -81,7 +81,7 @@ async def get_current_user_profile(
 ):
     """Get the current user's profile and organizations.
 
-    This is a bootstrap endpoint that accepts Keycloak tokens directly.
+    This is a bootstrap endpoint that accepts OIDC tokens directly.
     It returns the user's organizations so they can select one for token exchange.
     """
     # Get user's organization memberships
@@ -120,7 +120,7 @@ async def get_pending_invites(
 ):
     """Get pending invites for the current user.
 
-    This is a bootstrap endpoint that accepts Keycloak tokens directly.
+    This is a bootstrap endpoint that accepts OIDC tokens directly.
     """
     result = await db.execute(
         select(Invite, Organization, User)

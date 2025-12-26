@@ -2,7 +2,7 @@
 
 Token types:
 - Internal tokens: Org-scoped JWTs minted by /auth/exchange (used by most endpoints)
-- Keycloak tokens: External JWTs from OIDC provider (for /auth/exchange and bootstrap endpoints)
+- OIDC tokens: External JWTs from OIDC provider (for /auth/exchange and bootstrap endpoints)
 - API keys: Workspace-scoped keys for SDK/automation
 """
 
@@ -13,9 +13,9 @@ from stardag_api.auth.dependencies import (
     get_current_user,
     get_current_user_flexible,
     get_current_user_optional,
-    get_keycloak_token,
+    get_oidc_token,
     get_optional_token,
-    get_or_create_user_from_keycloak,
+    get_or_create_user_from_oidc,
     get_org_id_from_token,
     get_sdk_auth,
     get_token,
@@ -23,7 +23,7 @@ from stardag_api.auth.dependencies import (
     require_sdk_auth,
     verify_workspace_access,
 )
-from stardag_api.auth.jwt import JWTValidator, TokenPayload as KeycloakTokenPayload
+from stardag_api.auth.jwt import JWTValidator, TokenPayload as OIDCTokenPayload
 from stardag_api.auth.tokens import (
     InternalTokenPayload,
     InternalTokenManager,
@@ -44,18 +44,18 @@ __all__ = [
     "get_current_user",
     "get_current_user_flexible",
     "get_current_user_optional",
-    "get_keycloak_token",
+    "get_oidc_token",
     "get_optional_token",
-    "get_or_create_user_from_keycloak",
+    "get_or_create_user_from_oidc",
     "get_org_id_from_token",
     "get_sdk_auth",
     "get_token",
     "require_api_key_auth",
     "require_sdk_auth",
     "verify_workspace_access",
-    # Keycloak JWT validation (for /auth/exchange and bootstrap endpoints)
+    # OIDC JWT validation (for /auth/exchange and bootstrap endpoints)
     "JWTValidator",
-    "KeycloakTokenPayload",
+    "OIDCTokenPayload",
     # Internal tokens
     "InternalTokenPayload",
     "InternalTokenManager",

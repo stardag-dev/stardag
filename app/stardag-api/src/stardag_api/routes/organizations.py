@@ -1,6 +1,6 @@
 """Organization management routes (UI, requires auth).
 
-The create organization endpoint accepts Keycloak tokens (bootstrap endpoint)
+The create organization endpoint accepts OIDC tokens (bootstrap endpoint)
 since users need to create an org before they can do token exchange.
 
 Other endpoints require org-scoped internal tokens.
@@ -263,7 +263,7 @@ async def create_organization(
 ):
     """Create a new organization. Creator becomes owner.
 
-    This is a bootstrap endpoint that accepts Keycloak tokens directly,
+    This is a bootstrap endpoint that accepts OIDC tokens directly,
     since users need to create an org before they can do token exchange.
     """
     # Check org creation limit
@@ -666,7 +666,7 @@ async def accept_invite(
 ):
     """Accept an invite (user accepting their own invite).
 
-    This is a bootstrap endpoint that accepts Keycloak tokens directly,
+    This is a bootstrap endpoint that accepts OIDC tokens directly,
     since users might be accepting their first invite before having any orgs.
     """
     result = await db.execute(
@@ -707,7 +707,7 @@ async def decline_invite(
 ):
     """Decline an invite.
 
-    This is a bootstrap endpoint that accepts Keycloak tokens directly.
+    This is a bootstrap endpoint that accepts OIDC tokens directly.
     """
     result = await db.execute(
         select(Invite).where(
