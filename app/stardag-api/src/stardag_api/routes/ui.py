@@ -1,4 +1,10 @@
-"""UI-specific routes requiring JWT authentication."""
+"""UI-specific routes for bootstrap (Keycloak tokens) and authenticated operations.
+
+Bootstrap endpoints (/me, /me/invites) accept Keycloak tokens directly because
+they are needed before the user can select an organization for token exchange.
+
+Other UI endpoints require org-scoped internal tokens.
+"""
 
 from typing import Annotated
 
@@ -7,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.auth import get_current_user
+from stardag_api.auth import get_or_create_user_from_keycloak
 from stardag_api.db import get_db
 from stardag_api.models import (
     Invite,
@@ -65,15 +71,19 @@ class PendingInviteResponse(BaseModel):
     invited_by_email: str | None
 
 
-# --- Endpoints ---
+# --- Bootstrap Endpoints (accept Keycloak tokens) ---
 
 
 @router.get("/me", response_model=UserProfileWithOrgsResponse)
 async def get_current_user_profile(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_or_create_user_from_keycloak)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Get the current user's profile and organizations."""
+    """Get the current user's profile and organizations.
+
+    This is a bootstrap endpoint that accepts Keycloak tokens directly.
+    It returns the user's organizations so they can select one for token exchange.
+    """
     # Get user's organization memberships
     result = await db.execute(
         select(OrganizationMember, Organization)
@@ -105,10 +115,13 @@ async def get_current_user_profile(
 
 @router.get("/me/invites", response_model=list[PendingInviteResponse])
 async def get_pending_invites(
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_or_create_user_from_keycloak)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Get pending invites for the current user."""
+    """Get pending invites for the current user.
+
+    This is a bootstrap endpoint that accepts Keycloak tokens directly.
+    """
     result = await db.execute(
         select(Invite, Organization, User)
         .join(Organization, Invite.organization_id == Organization.id)
