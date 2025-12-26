@@ -2,7 +2,7 @@
 
 ## Status
 
-active
+~completed (UI org selector deferred)
 
 ## Goal
 
@@ -447,11 +447,28 @@ Implementation notes:
   - [x] Phase 1.5: Updated auth dependencies (`get_org_id_from_token`, `verify_workspace_access`)
   - [x] Phase 1.6: Updated all API routes to use internal tokens
   - All 68 tests passing
-- [ ] Phase 2: SDK/CLI config rewrite
-- [ ] Phase 3: CLI token exchange flow
-- [ ] Phase 4: UI organization selector
-- [ ] Phase 5: Verify API key path
-- [ ] Phase 6: Migration & cleanup
+- [x] Phase 2: SDK/CLI config rewrite
+  - [x] TOML config format (`~/.stardag/config.toml`)
+  - [x] Profile-based configuration (registry, org, workspace tuple)
+  - [x] New env vars: `STARDAG_PROFILE`, `STARDAG_REGISTRY_URL`
+  - [x] New directory structure:
+    - `~/.stardag/credentials/{registry}.json` (refresh tokens)
+    - `~/.stardag/access-token-cache/{registry}__{org}.json`
+    - `~/.stardag/target-root-cache.json`
+  - [x] Removed CLI state files (active_registry, active_workspace)
+  - [x] Updated CLI commands (registry add/list/remove, config profile add/list/use/remove)
+  - [x] Deprecated old functions with warnings
+  - [x] Updated tests for new config system
+- [x] Phase 3: CLI token exchange flow (implemented in Phase 2)
+  - [x] Login flow calls `/auth/exchange` after Keycloak auth
+  - [x] `stardag auth refresh` command for token refresh
+  - [x] Access tokens cached per (registry, org) combo
+- [ ] Phase 4: UI organization selector (deferred - requires frontend work)
+- [x] Phase 5: Verify API key path
+  - [x] `SdkAuth` supports both API key and JWT authentication
+  - [x] API keys workspace-scoped, org inferred from workspace
+  - [x] No changes needed to API key flow
+- [x] Phase 6: Migration & cleanup (clean slate - no migration needed)
 
 ## Notes
 

@@ -12,6 +12,7 @@ import {
   type OrganizationSummary,
   type Workspace,
 } from "../api/organizations";
+import { setCurrentOrgId } from "../api/client";
 import { useAuth } from "./AuthContext";
 
 interface WorkspaceContextType {
@@ -27,6 +28,8 @@ interface WorkspaceContextType {
   setActiveWorkspace: (workspace: Workspace | null) => void;
   // Loading state
   isLoading: boolean;
+  // Token exchange in progress
+  isExchangingToken: boolean;
   // Refresh data, optionally selecting a specific org/workspace by slug
   refresh: (preferOrgSlug?: string, preferWorkspaceSlug?: string) => Promise<void>;
   // User's role in active org
@@ -45,13 +48,18 @@ interface WorkspaceProviderProps {
 }
 
 export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
-  const { isAuthenticated, user } = useAuth();
+  const { isAuthenticated, user, exchangeForOrgToken, isExchangingToken } = useAuth();
 
   const [organizations, setOrganizations] = useState<OrganizationSummary[]>([]);
   const [activeOrg, setActiveOrgState] = useState<OrganizationSummary | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [activeWorkspace, setActiveWorkspaceState] = useState<Workspace | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+
+  // Update client's current org ID when activeOrg changes
+  useEffect(() => {
+    setCurrentOrgId(activeOrg?.id ?? null);
+  }, [activeOrg]);
 
   // Load user's organizations when authenticated
   const loadOrganizations = useCallback(
@@ -61,6 +69,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
         setActiveOrgState(null);
         setWorkspaces([]);
         setActiveWorkspaceState(null);
+        setCurrentOrgId(null);
         return;
       }
 
@@ -86,6 +95,10 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
         if (orgToActivate) {
           setActiveOrgState(orgToActivate);
           localStorage.setItem(STORAGE_KEY_ORG, orgToActivate.id);
+          setCurrentOrgId(orgToActivate.id);
+
+          // Exchange for org-scoped token
+          await exchangeForOrgToken(orgToActivate.id);
 
           // Load workspaces for this org
           const ws = await fetchWorkspaces(orgToActivate.id);
@@ -112,7 +125,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
         setIsLoading(false);
       }
     },
-    [isAuthenticated],
+    [isAuthenticated, exchangeForOrgToken],
   );
 
   useEffect(() => {
@@ -132,34 +145,43 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
   }, [loadOrganizations, user]);
 
   // Set active organization
-  const setActiveOrg = useCallback(async (org: OrganizationSummary | null) => {
-    setActiveOrgState(org);
-    if (org) {
-      localStorage.setItem(STORAGE_KEY_ORG, org.id);
-      // Load workspaces for this org
-      try {
-        const ws = await fetchWorkspaces(org.id);
-        setWorkspaces(ws);
-        // Select first workspace
-        const firstWorkspace = ws[0] || null;
-        setActiveWorkspaceState(firstWorkspace);
-        if (firstWorkspace) {
-          localStorage.setItem(STORAGE_KEY_WORKSPACE, firstWorkspace.id);
-        } else {
-          localStorage.removeItem(STORAGE_KEY_WORKSPACE);
+  const setActiveOrg = useCallback(
+    async (org: OrganizationSummary | null) => {
+      setActiveOrgState(org);
+      if (org) {
+        localStorage.setItem(STORAGE_KEY_ORG, org.id);
+        setCurrentOrgId(org.id);
+
+        // Exchange for org-scoped token
+        await exchangeForOrgToken(org.id);
+
+        // Load workspaces for this org
+        try {
+          const ws = await fetchWorkspaces(org.id);
+          setWorkspaces(ws);
+          // Select first workspace
+          const firstWorkspace = ws[0] || null;
+          setActiveWorkspaceState(firstWorkspace);
+          if (firstWorkspace) {
+            localStorage.setItem(STORAGE_KEY_WORKSPACE, firstWorkspace.id);
+          } else {
+            localStorage.removeItem(STORAGE_KEY_WORKSPACE);
+          }
+        } catch (error) {
+          console.error("Failed to load workspaces:", error);
+          setWorkspaces([]);
+          setActiveWorkspaceState(null);
         }
-      } catch (error) {
-        console.error("Failed to load workspaces:", error);
+      } else {
+        localStorage.removeItem(STORAGE_KEY_ORG);
+        localStorage.removeItem(STORAGE_KEY_WORKSPACE);
+        setCurrentOrgId(null);
         setWorkspaces([]);
         setActiveWorkspaceState(null);
       }
-    } else {
-      localStorage.removeItem(STORAGE_KEY_ORG);
-      localStorage.removeItem(STORAGE_KEY_WORKSPACE);
-      setWorkspaces([]);
-      setActiveWorkspaceState(null);
-    }
-  }, []);
+    },
+    [exchangeForOrgToken],
+  );
 
   // Set active workspace
   const setActiveWorkspace = useCallback((workspace: Workspace | null) => {
@@ -188,6 +210,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     activeWorkspace,
     setActiveWorkspace,
     isLoading,
+    isExchangingToken,
     refresh: loadOrganizations,
     activeOrgRole: activeOrg?.role || null,
     getWorkspacePath,

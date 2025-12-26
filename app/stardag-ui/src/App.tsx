@@ -5,6 +5,7 @@ import { AuthCallback } from "./components/AuthCallback";
 import { CreateOrganization } from "./components/CreateOrganization";
 import { DagGraph } from "./components/DagGraph";
 import { OnboardingModal } from "./components/OnboardingModal";
+import { OrganizationSelector } from "./components/OrganizationSelector";
 import { OrganizationSettings } from "./components/OrganizationSettings";
 import { PendingInvites } from "./components/PendingInvites";
 import { TaskDetail } from "./components/TaskDetail";
@@ -12,7 +13,6 @@ import { TaskFilters } from "./components/TaskFilters";
 import { TaskTable } from "./components/TaskTable";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
-import { WorkspaceSelector } from "./components/WorkspaceSelector";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
@@ -74,12 +74,15 @@ function Dashboard({ onNavigate }: DashboardProps) {
   return (
     <div className="flex h-screen flex-col bg-gray-100 dark:bg-gray-900">
       {/* Header */}
-      <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3">
+      <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2">
         <div className="flex items-center gap-4">
-          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
-            Stardag
-          </h1>
-          <WorkspaceSelector />
+          {/* Slack-like org selector (top-left) */}
+          <OrganizationSelector />
+
+          {/* Separator */}
+          <div className="h-8 w-px bg-gray-200 dark:bg-gray-700" />
+
+          {/* Build selector */}
           {builds.length > 0 && (
             <select
               value={currentBuild?.id ?? ""}
@@ -199,6 +202,7 @@ function AuthConnector({ children }: { children: React.ReactNode }) {
   const { getAccessToken } = useAuth();
 
   useEffect(() => {
+    // Pass the org-aware getAccessToken to the API client
     setAccessTokenGetter(getAccessToken);
   }, [getAccessToken]);
 
