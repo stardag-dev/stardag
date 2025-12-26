@@ -148,23 +148,29 @@ organization = "my-org"
 workspace = "production"
 
 [default]
-registry = "local"
+profile = "local"
 ```
 
 ### File Structure
 
-Configuration is stored in a directory called `.stardag` either in the user's home direcotry or within a specific project:
+Configuration is stored in a directory called `.stardag` either in the user's home directory or within a specific project:
 
 ```
 <USER_HOME>|<PROJECT_ROOT>/.stardag/
 ├── config.toml
-├── credentials/  # important to gitignore in the case of <PROJECT_ROOT>
-|   └── # TODO how to store credentials per each (registry, organization)?
-├── local-target-roots/  # important to gitignore in the case of <PROJECT_ROOT>
-|   └── default/  # default workspace
-|       └── default/  # default target root name
+├── credentials/                   # Per-registry refresh tokens (gitignore in PROJECT_ROOT)
+│   ├── local.json                 # { refresh_token, token_endpoint, client_id }
+│   └── central.json
+├── access-token-cache/            # Short-lived org-scoped JWTs (gitignore in PROJECT_ROOT)
+│   ├── local__default.json        # { access_token, expires_at }
+│   └── central__my-org.json
+├── local-target-roots/            # For local file-based targets (gitignore in PROJECT_ROOT)
+│   └── default/                   # workspace
+│       └── default/               # target root name
 └── target-root-cache.json
 ```
+
+**Credentials model:** Refresh tokens are user-scoped and stored per-registry (not per-organization). The org-scoped access JWTs are minted on demand via the `/auth/exchange` endpoint and cached briefly.
 
 ### Target Roots Cache
 

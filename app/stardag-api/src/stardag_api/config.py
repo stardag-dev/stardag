@@ -8,6 +8,26 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_")
 
 
+class JWTSettings(BaseSettings):
+    """Settings for internal JWT signing and validation."""
+
+    # RSA private key in PEM format (for signing)
+    # Generate with: openssl genrsa -out private.pem 2048
+    private_key: str | None = None
+    # RSA public key in PEM format (for validation, auto-derived if not set)
+    public_key: str | None = None
+    # Issuer claim for internal tokens
+    issuer: str = "stardag-api"
+    # Audience claim for internal tokens
+    audience: str = "stardag"
+    # Access token TTL in minutes
+    access_token_ttl_minutes: int = 10
+    # Key ID for JWKS (auto-generated if not set)
+    key_id: str | None = None
+
+    model_config = SettingsConfigDict(env_prefix="JWT_")
+
+
 class OIDCSettings(BaseSettings):
     """OIDC configuration for JWT validation."""
 
@@ -46,4 +66,5 @@ class OIDCSettings(BaseSettings):
 
 
 settings = Settings()
+jwt_settings = JWTSettings()
 oidc_settings = OIDCSettings()

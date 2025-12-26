@@ -1,4 +1,16 @@
-"""FastAPI dependencies for authentication."""
+"""FastAPI dependencies for authentication.
+
+This module provides authentication dependencies for the Stardag API.
+
+Token types:
+- Internal tokens: Org-scoped JWTs minted by /auth/exchange. Required for all
+  endpoints except /auth/exchange itself.
+- Keycloak tokens: External JWTs from the OIDC provider. Only accepted by
+  /auth/exchange to mint internal tokens.
+- API keys: Workspace-scoped keys for SDK/automation. Alternative to JWTs.
+
+All endpoints (except /auth/exchange) must use internal tokens or API keys.
+"""
 
 import logging
 from dataclasses import dataclass
@@ -6,24 +18,20 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.auth.jwt import (
-    AuthenticationError,
-    TokenPayload,
-    get_jwt_validator,
+from stardag_api.auth.tokens import (
+    InternalTokenPayload,
+    TokenExpiredError,
+    TokenInvalidError,
+    get_token_manager,
 )
 from stardag_api.db import get_db
 from stardag_api.models import (
     ApiKey,
-    Invite,
-    Organization,
-    OrganizationMember,
     User,
     Workspace,
 )
-from stardag_api.models.enums import InviteStatus, OrganizationRole
 from stardag_api.services import api_keys as api_key_service
 
 logger = logging.getLogger(__name__)
@@ -35,18 +43,28 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 async def get_optional_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
-) -> TokenPayload | None:
-    """Get and validate JWT token if present.
+) -> InternalTokenPayload | None:
+    """Get and validate internal JWT token if present.
 
     Returns None if no token provided, raises HTTPException if token is invalid.
+
+    NOTE: This validates INTERNAL tokens only (from /auth/exchange).
+    Keycloak tokens are NOT accepted here.
     """
     if credentials is None:
         return None
 
-    validator = get_jwt_validator()
+    token_manager = get_token_manager()
     try:
-        return await validator.validate_token(credentials.credentials)
-    except AuthenticationError as e:
+        return token_manager.validate_token(credentials.credentials)
+    except TokenExpiredError as e:
+        logger.warning("Token expired: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from e
+    except TokenInvalidError as e:
         logger.warning("Token validation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -57,10 +75,13 @@ async def get_optional_token(
 
 async def get_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
-) -> TokenPayload:
-    """Get and validate JWT token (required).
+) -> InternalTokenPayload:
+    """Get and validate internal JWT token (required).
 
     Raises HTTPException if no token provided or token is invalid.
+
+    NOTE: This validates INTERNAL tokens only (from /auth/exchange).
+    Keycloak tokens are NOT accepted here.
     """
     if credentials is None:
         raise HTTPException(
@@ -69,10 +90,17 @@ async def get_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    validator = get_jwt_validator()
+    token_manager = get_token_manager()
     try:
-        return await validator.validate_token(credentials.credentials)
-    except AuthenticationError as e:
+        return token_manager.validate_token(credentials.credentials)
+    except TokenExpiredError as e:
+        logger.warning("Token expired: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from e
+    except TokenInvalidError as e:
         logger.warning("Token validation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -81,156 +109,75 @@ async def get_token(
         ) from e
 
 
-async def get_or_create_user(
-    db: AsyncSession,
-    token: TokenPayload,
-) -> User:
-    """Get existing user or create new one from token claims.
-
-    This implements user auto-provisioning on first login.
-    """
-    # Look up user by external_id (OIDC subject claim)
-    result = await db.execute(select(User).where(User.external_id == token.sub))
-    user = result.scalar_one_or_none()
-
-    if user is not None:
-        # Update user info if changed (email, name)
-        updated = False
-        if token.email and user.email != token.email:
-            user.email = token.email
-            updated = True
-        if token.display_name and user.display_name != token.display_name:
-            user.display_name = token.display_name
-            updated = True
-        if updated:
-            await db.commit()
-            logger.info("Updated user %s with new info from token", user.id)
-        return user
-
-    # Create new user from token claims
-    if not token.email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Token must contain email claim for user creation",
-        )
-
-    user = User(
-        external_id=token.sub,
-        email=token.email,
-        display_name=token.display_name,
-    )
-    db.add(user)
-    await db.flush()  # Get user.id without committing
-    logger.info("Created new user %s from OIDC token", user.id)
-
-    # Check if user has pending invites
-    pending_invites_result = await db.execute(
-        select(Invite).where(
-            Invite.email == token.email,
-            Invite.status == InviteStatus.PENDING,
-        )
-    )
-    pending_invites = pending_invites_result.scalars().all()
-
-    if pending_invites:
-        # User has pending invites - don't create personal org
-        # They should accept invites to join existing orgs
-        logger.info(
-            "User %s has %d pending invite(s), skipping personal org creation",
-            user.id,
-            len(pending_invites),
-        )
-        await db.commit()
-        await db.refresh(user)
-        return user
-
-    # No pending invites - create a personal organization for the new user
-    username = token.email.split("@")[0]
-    org_name = f"{username}'s Organization"
-    org_slug = _generate_unique_slug(username)
-
-    org = Organization(
-        name=org_name,
-        slug=org_slug,
-        description="Personal organization",
-        created_by_id=user.id,
-    )
-    db.add(org)
-    await db.flush()  # Get org.id
-
-    # Add user as owner of the organization
-    membership = OrganizationMember(
-        organization_id=org.id,
-        user_id=user.id,
-        role=OrganizationRole.OWNER,
-    )
-    db.add(membership)
-
-    # Create default workspace
-    workspace = Workspace(
-        organization_id=org.id,
-        name="Default",
-        slug="default",
-        description="Default workspace",
-    )
-    db.add(workspace)
-
-    await db.commit()
-    await db.refresh(user)
-    logger.info(
-        "Created personal organization %s and workspace for user %s",
-        org.id,
-        user.id,
-    )
-
-    return user
-
-
-def _generate_unique_slug(base: str) -> str:
-    """Generate a URL-safe slug from a base string."""
-    import re
-    import uuid
-
-    # Convert to lowercase, replace non-alphanumeric with hyphens
-    slug = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
-    # Add a short unique suffix to avoid collisions
-    suffix = uuid.uuid4().hex[:6]
-    return f"{slug}-{suffix}"
+async def get_user_by_id(db: AsyncSession, user_id: str) -> User | None:
+    """Get a user by internal ID."""
+    return await db.get(User, user_id)
 
 
 async def get_current_user(
-    token: Annotated[TokenPayload, Depends(get_token)],
+    token: Annotated[InternalTokenPayload, Depends(get_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User:
     """Get the current authenticated user (required).
 
-    Creates user on first login if they don't exist.
-    Raises HTTPException if not authenticated.
+    Internal tokens contain the user's internal ID in the 'sub' claim.
+    Raises HTTPException if not authenticated or user not found.
     """
-    return await get_or_create_user(db, token)
+    user = await get_user_by_id(db, token.sub)
+    if user is None:
+        # This shouldn't happen - token was issued for a valid user
+        logger.error("User %s from token not found in database", token.sub)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    return user
 
 
 async def get_current_user_optional(
-    token: Annotated[TokenPayload | None, Depends(get_optional_token)],
+    token: Annotated[InternalTokenPayload | None, Depends(get_optional_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> User | None:
-    """Get the current user if authenticated, None otherwise.
-
-    Creates user on first login if they don't exist.
-    """
+    """Get the current user if authenticated, None otherwise."""
     if token is None:
         return None
-    return await get_or_create_user(db, token)
+    user = await get_user_by_id(db, token.sub)
+    if user is None:
+        logger.error("User %s from token not found in database", token.sub)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    return user
+
+
+def get_org_id_from_token(
+    token: Annotated[InternalTokenPayload, Depends(get_token)],
+) -> str:
+    """Get the organization ID from the internal token.
+
+    Internal tokens always have org_id - it's required.
+    """
+    return token.org_id
 
 
 async def verify_workspace_access(
     db: AsyncSession,
-    user: User,
     workspace_id: str,
+    token_org_id: str,
 ) -> Workspace:
-    """Verify user has access to a workspace.
+    """Verify workspace exists and belongs to the token's organization.
 
-    Returns the workspace if access is granted, raises HTTPException otherwise.
+    Args:
+        db: Database session
+        workspace_id: Workspace to verify
+        token_org_id: Organization ID from the token (must match workspace's org)
+
+    Returns:
+        The workspace if valid
+
+    Raises:
+        HTTPException: 404 if workspace not found, 403 if org mismatch
     """
     # Get the workspace
     workspace = await db.get(Workspace, workspace_id)
@@ -240,19 +187,11 @@ async def verify_workspace_access(
             detail="Workspace not found",
         )
 
-    # Check if user is a member of the workspace's organization
-    result = await db.execute(
-        select(OrganizationMember).where(
-            OrganizationMember.organization_id == workspace.organization_id,
-            OrganizationMember.user_id == user.id,
-        )
-    )
-    membership = result.scalar_one_or_none()
-
-    if not membership:
+    # Verify workspace belongs to the token's organization
+    if workspace.organization_id != token_org_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to access this workspace",
+            detail="Workspace does not belong to your organization",
         )
 
     return workspace
@@ -324,10 +263,11 @@ async def require_api_key_auth(
 class SdkAuth:
     """Authentication context for SDK endpoints.
 
-    Supports either API key or JWT authentication.
+    Supports either API key or internal JWT authentication.
     """
 
     workspace: Workspace
+    org_id: str  # Organization ID (from token or API key's workspace)
     api_key: ApiKey | None = None
     user: User | None = None
 
@@ -340,14 +280,14 @@ class SdkAuth:
 async def get_sdk_auth(
     db: Annotated[AsyncSession, Depends(get_db)],
     api_key_auth: Annotated[ApiKeyAuth | None, Depends(get_api_key_auth)],
-    token: Annotated[TokenPayload | None, Depends(get_optional_token)],
+    token: Annotated[InternalTokenPayload | None, Depends(get_optional_token)],
     workspace_id: str | None = None,
 ) -> SdkAuth | None:
-    """Get SDK authentication from either API key or JWT token.
+    """Get SDK authentication from either API key or internal JWT token.
 
     Priority:
     1. API key (if X-API-Key header present)
-    2. JWT token + workspace_id parameter
+    2. Internal JWT token + workspace_id parameter
 
     Returns SdkAuth if authenticated, None if no authentication provided.
     Raises HTTPException if authentication is invalid.
@@ -356,12 +296,18 @@ async def get_sdk_auth(
     if api_key_auth is not None:
         return SdkAuth(
             workspace=api_key_auth.workspace,
+            org_id=api_key_auth.workspace.organization_id,
             api_key=api_key_auth.api_key,
         )
 
-    # Fall back to JWT token
+    # Fall back to internal JWT token
     if token is not None:
-        user = await get_or_create_user(db, token)
+        user = await get_user_by_id(db, token.sub)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
 
         # JWT requires workspace_id parameter
         if workspace_id is None:
@@ -370,11 +316,12 @@ async def get_sdk_auth(
                 detail="workspace_id is required when using JWT authentication",
             )
 
-        # Verify user has access to workspace
-        workspace = await verify_workspace_access(db, user, workspace_id)
+        # Verify workspace belongs to the token's organization
+        workspace = await verify_workspace_access(db, workspace_id, token.org_id)
 
         return SdkAuth(
             workspace=workspace,
+            org_id=token.org_id,
             user=user,
         )
 
