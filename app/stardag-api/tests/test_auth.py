@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from stardag_api.auth.dependencies import get_or_create_user_from_keycloak
+from stardag_api.auth.dependencies import get_current_user_flexible
 from stardag_api.auth.jwt import AuthenticationError, JWTValidator, TokenPayload
 from stardag_api.auth.tokens import (
     InternalTokenManager,
@@ -460,12 +460,12 @@ async def test_me_endpoint_returns_user_profile(async_engine):
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_or_create_user_from_keycloak():
+    async def override_get_current_user_flexible():
         return mock_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_or_create_user_from_keycloak] = (
-        override_get_or_create_user_from_keycloak
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
     )
 
     try:
@@ -526,12 +526,12 @@ async def test_me_endpoint_returns_organizations(async_engine):
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_or_create_user_from_keycloak():
+    async def override_get_current_user_flexible():
         return mock_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_or_create_user_from_keycloak] = (
-        override_get_or_create_user_from_keycloak
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
     )
 
     try:
@@ -606,12 +606,12 @@ async def test_me_invites_endpoint(async_engine):
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_or_create_user_from_keycloak():
+    async def override_get_current_user_flexible():
         return mock_invitee
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_or_create_user_from_keycloak] = (
-        override_get_or_create_user_from_keycloak
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
     )
 
     try:

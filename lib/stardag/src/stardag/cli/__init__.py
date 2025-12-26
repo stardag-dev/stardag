@@ -6,11 +6,10 @@ Usage:
     stardag auth status [-r registry]
     stardag auth refresh [-r registry] [-o org]
 
-    stardag registry add <name> --url <url>
-    stardag registry list
-    stardag registry remove <name>
-
     stardag config show
+    stardag config registry add <name> --url <url>
+    stardag config registry list
+    stardag config registry remove <name>
     stardag config profile add <name> -r <registry> -o <org> -w <workspace>
     stardag config profile list
     stardag config profile use <name>
@@ -34,7 +33,7 @@ except ImportError:
         "Typer is required for the CLI. Install with: pip install stardag[cli]"
     )
 
-from stardag.cli import auth, config, registry
+from stardag.cli import auth, config
 
 # Main CLI app
 app = typer.Typer(
@@ -46,7 +45,6 @@ app = typer.Typer(
 # Add subcommands
 app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
-app.add_typer(registry.app, name="registry")
 
 
 @app.command()

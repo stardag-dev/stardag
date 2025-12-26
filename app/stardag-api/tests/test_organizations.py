@@ -4,7 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from stardag_api.auth.dependencies import get_or_create_user_from_keycloak, get_token
+from stardag_api.auth.dependencies import get_current_user_flexible, get_token
 from stardag_api.auth.tokens import InternalTokenPayload
 from stardag_api.db import get_db
 from stardag_api.main import app
@@ -142,12 +142,12 @@ async def test_create_organization(
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_or_create_user_from_keycloak():
+    async def override_get_current_user_flexible():
         return test_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_or_create_user_from_keycloak] = (
-        override_get_or_create_user_from_keycloak
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
     )
 
     try:
@@ -188,12 +188,12 @@ async def test_create_organization_duplicate_slug(
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_or_create_user_from_keycloak():
+    async def override_get_current_user_flexible():
         return test_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_or_create_user_from_keycloak] = (
-        override_get_or_create_user_from_keycloak
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
     )
 
     try:
@@ -607,12 +607,12 @@ async def test_accept_invite(
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_or_create_user_from_keycloak():
+    async def override_get_current_user_flexible():
         return invited_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_or_create_user_from_keycloak] = (
-        override_get_or_create_user_from_keycloak
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
     )
 
     try:

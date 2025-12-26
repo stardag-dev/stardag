@@ -47,11 +47,21 @@ export function useTasks(pageSize = 20): UseTasksReturn {
 
   // Load builds for current workspace
   const loadBuilds = useCallback(async () => {
+    // Don't fetch builds if no workspace is active (user hasn't selected/created org yet)
+    if (!activeWorkspace?.id) {
+      setBuilds([]);
+      setCurrentBuild(null);
+      setAllTasks([]);
+      setGraph(null);
+      setLoading(false);
+      return [];
+    }
+
     try {
       const response = await fetchBuilds({
         page: 1,
         page_size: 50,
-        workspace_id: activeWorkspace?.id,
+        workspace_id: activeWorkspace.id,
       });
       setBuilds(response.builds);
       // Select most recent build if no current build or workspace changed

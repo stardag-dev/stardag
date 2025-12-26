@@ -29,8 +29,8 @@ def registry_add(
     """Add or update a registry.
 
     Examples:
-        stardag registry add local --url http://localhost:8000
-        stardag registry add central --url https://api.stardag.com
+        stardag config registry add local --url http://localhost:8000
+        stardag config registry add central --url https://api.stardag.com
     """
     if not url:
         url = typer.prompt("Registry URL")
@@ -48,7 +48,7 @@ def registry_list() -> None:
     if not registries:
         typer.echo("No registries configured.")
         typer.echo("")
-        typer.echo("Add one with: stardag registry add <name> --url <url>")
+        typer.echo("Add one with: stardag config registry add <name> --url <url>")
         return
 
     typer.echo("Configured registries:")

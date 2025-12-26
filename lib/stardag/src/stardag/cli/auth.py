@@ -349,7 +349,7 @@ def login(
         effective_url = get_registry_url(registry)
         if not effective_url:
             typer.echo(f"Error: Registry '{registry}' not found in config", err=True)
-            typer.echo("Add it with: stardag registry add <name> --url <url>")
+            typer.echo("Add it with: stardag config registry add <name> --url <url>")
             raise typer.Exit(1)
     else:
         # Use default
@@ -393,7 +393,7 @@ def login(
         "client_id": client_id,
         "response_type": "code",
         "redirect_uri": redirect_uri,
-        "scope": "openid profile email offline_access",
+        "scope": "openid profile email",  # Note: offline_access removed for local dev
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
