@@ -133,3 +133,37 @@ Later:
 - [ ] Create a sub project (python package) example-project in lib/examples
 - [ ] worspace config in _project config_ (committed)
 - [ ] Rename profile to registry!?
+
+## Auth cleanup Take Two:
+
+- [x] Fix login flow
+- [ ] Code should not mention `keycloak`!?
+- [ ] URL path sticky when logged out?
+- [x] "Auth callback failed: Error: No matching state found in storage" after first sign in
+- [x] Don't fetch build before an org is selected/created.
+- [ ] `Pattern attribute value ^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$ is not a valid regular expression: Uncaught SyntaxError: Invalid regular expression: /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/v: Invalid character class` on create org modal
+- [ ] `Uncaught TypeError: Cannot read properties of undefined (reading 'control')`
+
+```
+Uncaught TypeError: Cannot read properties of undefined (reading 'control')
+    at content_script.js:1:422999
+    at Array.some (<anonymous>)
+    at shouldOfferCompletionListForField (content_script.js:1:422984)
+    at elementWasFocused (content_script.js:1:423712)
+    at HTMLDocument.focusInEventHandler (content_script.js:1:423069)
+```
+
+- [x] Create a second org yeilds auth error
+- [ ] CLI:
+  - [x] ImportError: tomli-w is required to write TOML files. Install with: pip install tomli-w
+  - [x] `... profile use` should not be an option! -> OK sets as default
+  - [ ] (More user friendly help message on error, ideomatic way only)
+  - [x] What's the logic behind not having registry under config in CLI?
+  - [ ] switching orgs in CLI/profile:
+
+```
+uv run stardag auth refresh
+Refreshing token for local/my-second-org...
+Error exchanging for internal token: Client error '403 Forbidden' for url 'http://localhost:8000/api/v1/auth/exchange'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
+```

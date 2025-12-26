@@ -430,3 +430,94 @@ async def get_or_create_user_from_keycloak(
     await db.refresh(user)
     logger.info("Created new user %s from Keycloak token", user.id)
     return user
+
+
+async def get_current_user_flexible(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Get the current user from either internal token or Keycloak token.
+
+    This is for endpoints that need to work in both scenarios:
+    - New users with only a Keycloak token (first login, no org yet)
+    - Existing users with an org-scoped internal token
+
+    Priority: Internal token first (most common for logged-in users), then Keycloak.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_str = credentials.credentials
+
+    # Try internal token first (most common case for logged-in users)
+    token_manager = get_token_manager()
+    try:
+        internal_payload = token_manager.validate_token(token_str)
+        # Got a valid internal token - look up user by internal ID
+        user = await get_user_by_id(db, internal_payload.sub)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+        return user
+    except (TokenExpiredError, TokenInvalidError):
+        # Not a valid internal token, try Keycloak
+        pass
+
+    # Try Keycloak token
+    validator = get_jwt_validator()
+    try:
+        keycloak_payload = await validator.validate_token(token_str)
+    except AuthenticationError as e:
+        logger.warning("Both internal and Keycloak token validation failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from e
+
+    # Got a valid Keycloak token - get or create user
+    result = await db.execute(
+        select(User).where(User.external_id == keycloak_payload.sub)
+    )
+    user = result.scalar_one_or_none()
+
+    if user is not None:
+        # Update user info if changed
+        updated = False
+        if keycloak_payload.email and user.email != keycloak_payload.email:
+            user.email = keycloak_payload.email
+            updated = True
+        if (
+            keycloak_payload.display_name
+            and user.display_name != keycloak_payload.display_name
+        ):
+            user.display_name = keycloak_payload.display_name
+            updated = True
+        if updated:
+            await db.commit()
+            logger.info("Updated user %s with new info from Keycloak token", user.id)
+        return user
+
+    # Create new user from Keycloak token
+    if not keycloak_payload.email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token must contain email claim for user creation",
+        )
+
+    user = User(
+        external_id=keycloak_payload.sub,
+        email=keycloak_payload.email,
+        display_name=keycloak_payload.display_name,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    logger.info("Created new user %s from Keycloak token", user.id)
+    return user

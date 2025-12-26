@@ -42,9 +42,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Auth routes (JWKS at root, exchange at /api/v1)
-# JWKS endpoint needs to be at /.well-known/jwks.json (standard location)
-app.include_router(auth_router)
+# Auth routes - included twice with different prefixes:
+# - No prefix: JWKS at /.well-known/jwks.json (standard location)
+# - /api/v1 prefix: Exchange at /api/v1/auth/exchange
+app.include_router(auth_router)  # JWKS
+app.include_router(auth_router, prefix="/api/v1")  # Exchange
 
 # UI routes (internal JWT auth required)
 app.include_router(ui_router, prefix="/api/v1")

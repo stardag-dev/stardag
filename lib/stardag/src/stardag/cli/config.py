@@ -1,11 +1,12 @@
 """Configuration commands for Stardag CLI.
 
-Manages profiles and shows current configuration.
+Manages registries, profiles, and shows current configuration.
 Configuration is stored in ~/.stardag/config.toml.
 """
 
 import typer
 
+from stardag.cli import registry
 from stardag.cli.credentials import (
     add_profile,
     get_access_token,
@@ -21,6 +22,9 @@ from stardag.cli.credentials import (
 from stardag.config import get_config
 
 app = typer.Typer(help="Manage Stardag CLI configuration")
+
+
+app.add_typer(registry.app, name="registry")
 
 
 def _get_authenticated_client(registry: str | None = None, org_id: str | None = None):
@@ -141,7 +145,7 @@ def profile_add(
     registries = list_registries()
     if registry not in registries:
         typer.echo(f"Error: Registry '{registry}' not found.", err=True)
-        typer.echo("Add it with: stardag registry add <name> --url <url>")
+        typer.echo("Add it with: stardag config registry add <name> --url <url>")
         raise typer.Exit(1)
 
     add_profile(name, registry, organization, workspace)

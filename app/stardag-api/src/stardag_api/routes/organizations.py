@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from stardag_api.auth import get_current_user, get_or_create_user_from_keycloak
+from stardag_api.auth import get_current_user, get_current_user_flexible
 from stardag_api.db import get_db
 from stardag_api.models import (
     Invite,
@@ -258,7 +258,7 @@ async def require_org_access(
 )
 async def create_organization(
     data: OrganizationCreate,
-    current_user: Annotated[User, Depends(get_or_create_user_from_keycloak)],
+    current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Create a new organization. Creator becomes owner.
@@ -661,7 +661,7 @@ async def cancel_invite(
 @router.post("/invites/{invite_id}/accept", response_model=OrganizationResponse)
 async def accept_invite(
     invite_id: str,
-    current_user: Annotated[User, Depends(get_or_create_user_from_keycloak)],
+    current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Accept an invite (user accepting their own invite).
@@ -702,7 +702,7 @@ async def accept_invite(
 @router.post("/invites/{invite_id}/decline", status_code=status.HTTP_204_NO_CONTENT)
 async def decline_invite(
     invite_id: str,
-    current_user: Annotated[User, Depends(get_or_create_user_from_keycloak)],
+    current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Decline an invite.

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.auth import get_or_create_user_from_keycloak
+from stardag_api.auth import get_current_user_flexible
 from stardag_api.db import get_db
 from stardag_api.models import (
     Invite,
@@ -76,7 +76,7 @@ class PendingInviteResponse(BaseModel):
 
 @router.get("/me", response_model=UserProfileWithOrgsResponse)
 async def get_current_user_profile(
-    current_user: Annotated[User, Depends(get_or_create_user_from_keycloak)],
+    current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Get the current user's profile and organizations.
@@ -115,7 +115,7 @@ async def get_current_user_profile(
 
 @router.get("/me/invites", response_model=list[PendingInviteResponse])
 async def get_pending_invites(
-    current_user: Annotated[User, Depends(get_or_create_user_from_keycloak)],
+    current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Get pending invites for the current user.
