@@ -80,6 +80,11 @@ def get_target_root_cache_path() -> Path:
     return get_stardag_dir() / "target-root-cache.json"
 
 
+def get_id_cache_path() -> Path:
+    """Get the ID cache file path (~/.stardag/id-cache.json)."""
+    return get_stardag_dir() / "id-cache.json"
+
+
 def get_local_target_roots_dir() -> Path:
     """Get the local target roots directory (~/.stardag/local-target-roots)."""
     return get_stardag_dir() / "local-target-roots"
@@ -249,6 +254,111 @@ def update_cached_target_roots(
         }
     )
     save_target_root_cache(cache)
+
+
+# --- ID cache (slug -> UUID mappings) ---
+
+
+class IdCache(BaseModel):
+    """Cache for slug to ID mappings.
+
+    Structure:
+        organizations: {registry_name: {org_slug: org_id}}
+        workspaces: {registry_name: {org_id: {workspace_slug: workspace_id}}}
+    """
+
+    organizations: dict[str, dict[str, str]] = Field(default_factory=dict)
+    workspaces: dict[str, dict[str, dict[str, str]]] = Field(default_factory=dict)
+
+
+def load_id_cache() -> IdCache:
+    """Load the ID cache from disk."""
+    data = load_json_file(get_id_cache_path())
+    if not data:
+        return IdCache()
+    try:
+        return IdCache(**data)
+    except Exception:
+        return IdCache()
+
+
+def save_id_cache(cache: IdCache) -> None:
+    """Save the ID cache to disk."""
+    save_json_file(get_id_cache_path(), cache.model_dump())
+
+
+def get_cached_org_id(registry: str, org_slug: str) -> str | None:
+    """Get cached organization ID for a slug.
+
+    Args:
+        registry: Registry name.
+        org_slug: Organization slug.
+
+    Returns:
+        Organization ID if cached, None otherwise.
+    """
+    cache = load_id_cache()
+    return cache.organizations.get(registry, {}).get(org_slug)
+
+
+def cache_org_id(registry: str, org_slug: str, org_id: str) -> None:
+    """Cache an organization slug to ID mapping.
+
+    Args:
+        registry: Registry name.
+        org_slug: Organization slug.
+        org_id: Organization ID (UUID).
+    """
+    cache = load_id_cache()
+    if registry not in cache.organizations:
+        cache.organizations[registry] = {}
+    cache.organizations[registry][org_slug] = org_id
+    save_id_cache(cache)
+
+
+def get_cached_workspace_id(
+    registry: str, org_id: str, workspace_slug: str
+) -> str | None:
+    """Get cached workspace ID for a slug.
+
+    Args:
+        registry: Registry name.
+        org_id: Organization ID (must be resolved).
+        workspace_slug: Workspace slug.
+
+    Returns:
+        Workspace ID if cached, None otherwise.
+    """
+    cache = load_id_cache()
+    return cache.workspaces.get(registry, {}).get(org_id, {}).get(workspace_slug)
+
+
+def cache_workspace_id(
+    registry: str, org_id: str, workspace_slug: str, workspace_id: str
+) -> None:
+    """Cache a workspace slug to ID mapping.
+
+    Args:
+        registry: Registry name.
+        org_id: Organization ID (must be resolved).
+        workspace_slug: Workspace slug.
+        workspace_id: Workspace ID (UUID).
+    """
+    cache = load_id_cache()
+    if registry not in cache.workspaces:
+        cache.workspaces[registry] = {}
+    if org_id not in cache.workspaces[registry]:
+        cache.workspaces[registry][org_id] = {}
+    cache.workspaces[registry][org_id][workspace_slug] = workspace_id
+    save_id_cache(cache)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """Check if a string looks like a UUID."""
+    import re
+
+    uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    return bool(re.match(uuid_pattern, value.lower()))
 
 
 # --- Pydantic Config Models ---
@@ -490,8 +600,8 @@ def load_config(
         profile = toml_config.profile.get(profile_name)
         if profile:
             registry_name = profile.registry
-            organization_id = profile.organization
-            workspace_id = profile.workspace
+            org_value = profile.organization  # Could be slug or ID
+            workspace_value = profile.workspace  # Could be slug or ID
 
             # Look up registry URL from registry name
             registry_config = toml_config.registry.get(registry_name)
@@ -501,6 +611,43 @@ def load_config(
                 logger.warning(
                     f"Profile '{profile_name}' references unknown registry '{registry_name}'"
                 )
+
+            # Resolve organization slug to ID if needed
+            if _looks_like_uuid(org_value):
+                organization_id = org_value
+            else:
+                # Try to resolve from cache
+                cached_org_id = get_cached_org_id(registry_name, org_value)
+                if cached_org_id:
+                    organization_id = cached_org_id
+                else:
+                    # Store the slug - will need to be resolved at runtime
+                    organization_id = org_value
+                    logger.debug(
+                        f"Organization '{org_value}' is a slug, not cached. "
+                        "Run 'stardag auth refresh' to resolve."
+                    )
+
+            # Resolve workspace slug to ID if needed
+            if _looks_like_uuid(workspace_value):
+                workspace_id = workspace_value
+            elif organization_id and _looks_like_uuid(organization_id):
+                # Can only resolve workspace if we have a resolved org ID
+                cached_ws_id = get_cached_workspace_id(
+                    registry_name, organization_id, workspace_value
+                )
+                if cached_ws_id:
+                    workspace_id = cached_ws_id
+                else:
+                    # Store the slug - will need to be resolved at runtime
+                    workspace_id = workspace_value
+                    logger.debug(
+                        f"Workspace '{workspace_value}' is a slug, not cached. "
+                        "Run 'stardag auth refresh' to resolve."
+                    )
+            else:
+                # Org is not resolved, can't resolve workspace either
+                workspace_id = workspace_value
         else:
             logger.warning(f"Profile '{profile_name}' not found in config")
 

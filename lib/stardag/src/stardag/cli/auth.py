@@ -39,7 +39,7 @@ from stardag.cli.credentials import (
     set_default_profile,
     set_target_roots,
 )
-from stardag.config import get_config
+from stardag.config import cache_org_id, cache_workspace_id, get_config
 
 app = typer.Typer(help="Authentication commands for Stardag API")
 
@@ -488,6 +488,9 @@ def login(
     org_id = org["id"]
     org_slug = org["slug"]
 
+    # Cache org slug -> ID mapping
+    cache_org_id(registry, org_slug, org_id)
+
     # Exchange for internal org-scoped token
     typer.echo(f"Exchanging for org-scoped token ({org_slug})...")
     try:
@@ -533,12 +536,15 @@ def login(
     workspace_id = ws["id"]
     workspace_slug = ws["slug"]
 
+    # Cache workspace slug -> ID mapping
+    cache_workspace_id(registry, org_id, workspace_slug, workspace_id)
+
     # Sync target roots
     _sync_target_roots(effective_url, access_token, org_id, workspace_id)
 
-    # Create profile
+    # Create profile with slugs (not IDs) for readability
     profile_name = f"{registry}-{org_slug}-{workspace_slug}"
-    add_profile(profile_name, registry, org_id, workspace_id)
+    add_profile(profile_name, registry, org_slug, workspace_slug)
     typer.echo(f"Created profile: {profile_name}")
 
     # Set as default if no other profiles

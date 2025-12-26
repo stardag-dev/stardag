@@ -168,5 +168,6 @@ Error exchanging for internal token: Client error '403 Forbidden' for url 'http:
 For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
 ```
 
-- [ ] add separate section for organizations (default to slug as name), then reference by name in profile
-- [ ] reference workspace by slug, since this must be unique within organization?
+- [x] ~~add separate section for organizations (default to slug as name), then reference by name in profile~~
+- [x] ~~reference workspace by slug, since this must be unique within organization?~~
+- [x] Instead: cache slug to id mappings in separate file.

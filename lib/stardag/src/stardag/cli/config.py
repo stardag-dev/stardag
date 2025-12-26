@@ -126,10 +126,10 @@ def profile_add(
     name: str = typer.Argument(..., help="Profile name"),
     registry: str = typer.Option(..., "--registry", "-r", help="Registry name"),
     organization: str = typer.Option(
-        ..., "--organization", "-o", help="Organization ID or slug"
+        ..., "--organization", "-o", help="Organization slug (or ID)"
     ),
     workspace: str = typer.Option(
-        ..., "--workspace", "-w", help="Workspace ID or slug"
+        ..., "--workspace", "-w", help="Workspace slug (or ID)"
     ),
     set_default: bool = typer.Option(
         False, "--default", "-d", help="Set as default profile"
@@ -140,12 +140,12 @@ def profile_add(
     A profile defines the (registry, organization, workspace) tuple
     for easy switching between different contexts.
 
-    Organization and workspace can be specified by ID (UUID) or slug.
-    Slugs will be resolved to IDs automatically if you're authenticated.
+    Organization and workspace should be specified by slug for readability.
+    The IDs are resolved and cached automatically when authenticated.
 
     Examples:
-        stardag config profile add local-dev -r local -o default -w default
-        stardag config profile add prod -r central -o my-org -w production --default
+        stardag config profile add local-dev -r local -o my-org -w development
+        stardag config profile add prod -r central -o my-company -w production --default
     """
     # Verify registry exists
     registries = list_registries()
@@ -154,48 +154,50 @@ def profile_add(
         typer.echo("Add it with: stardag config registry add <name> --url <url>")
         raise typer.Exit(1)
 
-    # Resolve organization slug to ID if needed
+    # Try to resolve and cache organization slug -> ID
+    # This validates the slug exists and populates the cache
     org_id = resolve_org_slug_to_id(registry, organization)
     if org_id is None:
         typer.echo(
-            f"Warning: Could not resolve organization '{organization}'. "
-            "Using as-is (may need to be a valid UUID).",
+            f"Warning: Could not verify organization '{organization}'. "
+            "Run 'stardag auth login' first or check the slug.",
             err=True,
         )
-        org_id = organization
     elif org_id != organization:
-        typer.echo(f"Resolved organization '{organization}' -> {org_id}")
+        typer.echo(f"Verified organization '{organization}' (cached ID)")
 
-    # Resolve workspace slug to ID if needed
-    workspace_id = resolve_workspace_slug_to_id(registry, org_id, workspace)
-    if workspace_id is None:
-        typer.echo(
-            f"Warning: Could not resolve workspace '{workspace}'. "
-            "Using as-is (may need to be a valid UUID).",
-            err=True,
-        )
-        workspace_id = workspace
-    elif workspace_id != workspace:
-        typer.echo(f"Resolved workspace '{workspace}' -> {workspace_id}")
+    # Try to resolve and cache workspace slug -> ID
+    if org_id:
+        workspace_id = resolve_workspace_slug_to_id(registry, org_id, workspace)
+        if workspace_id is None:
+            typer.echo(
+                f"Warning: Could not verify workspace '{workspace}'. "
+                "Run 'stardag auth login' first or check the slug.",
+                err=True,
+            )
+        elif workspace_id != workspace:
+            typer.echo(f"Verified workspace '{workspace}' (cached ID)")
 
-    add_profile(name, registry, org_id, workspace_id)
+    # Store slugs in profile (not IDs) for readability
+    add_profile(name, registry, organization, workspace)
     typer.echo(f"Profile '{name}' added.")
 
     if set_default:
         set_default_profile(name)
         typer.echo("Set as default profile.")
 
-        # Auto-refresh access token
-        typer.echo("Refreshing access token...")
-        token = ensure_access_token(registry, org_id)
-        if token:
-            typer.echo("Access token refreshed successfully.")
-        else:
-            typer.echo(
-                "Warning: Could not refresh access token. "
-                "Run 'stardag auth refresh' to authenticate.",
-                err=True,
-            )
+        # Auto-refresh access token (needs resolved org_id)
+        if org_id:
+            typer.echo("Refreshing access token...")
+            token = ensure_access_token(registry, org_id)
+            if token:
+                typer.echo("Access token refreshed successfully.")
+            else:
+                typer.echo(
+                    "Warning: Could not refresh access token. "
+                    "Run 'stardag auth refresh' to authenticate.",
+                    err=True,
+                )
 
     typer.echo("")
     typer.echo(f"Use with: STARDAG_PROFILE={name}")
@@ -259,7 +261,21 @@ def profile_use(
     # Auto-refresh access token for the new profile
     profile = profiles[name]
     registry = profile["registry"]
-    org_id = profile["organization"]
+    org_slug = profile["organization"]
+    workspace_slug = profile["workspace"]
+
+    # Resolve org slug to ID (needed for token operations)
+    org_id = resolve_org_slug_to_id(registry, org_slug)
+    if org_id is None:
+        typer.echo(
+            f"Warning: Could not resolve organization '{org_slug}'. "
+            "Run 'stardag auth login' to authenticate.",
+            err=True,
+        )
+        return
+
+    # Also resolve workspace to populate cache
+    resolve_workspace_slug_to_id(registry, org_id, workspace_slug)
 
     typer.echo("Refreshing access token...")
     token = ensure_access_token(registry, org_id)
