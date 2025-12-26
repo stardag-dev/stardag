@@ -11,7 +11,7 @@ Each task file should follow this template:
 
 ## Status
 
-[active | paused | completed]
+[draft | backlog | active | paused | completed]
 
 ## Goal
 
