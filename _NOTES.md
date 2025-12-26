@@ -171,3 +171,7 @@ For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/St
 - [x] ~~add separate section for organizations (default to slug as name), then reference by name in profile~~
 - [x] ~~reference workspace by slug, since this must be unique within organization?~~
 - [x] Instead: cache slug to id mappings in separate file.
+
+Removed:
+
+Stardag is built to facilitate explorative and data centric work, such as Data Science/ML/AI experimentation. As such, it aims to make it seamless to move between running tasks and loading outputs in "production" (any hosted/cloud based infrastructure) as well as _locally_ on your working station. (TODO complete: both switching between workspaces, including copying of tasks, and reading (+optionally writing) _from(/to) production_ on your local workstation)
