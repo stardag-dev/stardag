@@ -2,7 +2,7 @@
 
 ## Status
 
-~completed (UI org selector deferred)
+completed
 
 ## Goal
 
@@ -463,7 +463,13 @@ Implementation notes:
   - [x] Login flow calls `/auth/exchange` after Keycloak auth
   - [x] `stardag auth refresh` command for token refresh
   - [x] Access tokens cached per (registry, org) combo
-- [ ] Phase 4: UI organization selector (deferred - requires frontend work)
+- [x] Phase 4: UI organization selector
+  - [x] Added `api/auth.ts` with `exchangeToken()` function
+  - [x] Updated `AuthContext` with org-scoped token handling
+  - [x] Updated `api/client.ts` to use org-scoped tokens
+  - [x] Updated `WorkspaceContext` to trigger token exchange on org switch
+  - [x] Created `OrganizationSelector` component (Slack-like design)
+  - [x] Token caching in localStorage with expiry tracking
 - [x] Phase 5: Verify API key path
   - [x] `SdkAuth` supports both API key and JWT authentication
   - [x] API keys workspace-scoped, org inferred from workspace
