@@ -2,13 +2,17 @@
 
 Supports two authentication modes:
 1. API Key (production): Set STARDAG_API_KEY environment variable
-2. Browser login (local dev): OAuth flow with Keycloak/Cognito + token exchange
+2. Browser login: OAuth/OIDC flow with any compliant provider + token exchange
 
 Token Model:
-- Keycloak tokens are user-scoped (used only for /auth/exchange)
+- OIDC tokens are user-scoped (used only for /auth/exchange)
 - Internal tokens are org-scoped (used for all other API calls)
 - Refresh tokens stored per registry in ~/.stardag/credentials/{registry}.json
 - Access tokens cached per (registry, org) in ~/.stardag/access-token-cache/
+
+Supported OIDC Providers:
+- Local dev: Keycloak
+- Production: AWS Cognito (with Google federation)
 """
 
 import base64
@@ -137,7 +141,7 @@ def _exchange_code_for_tokens(
     redirect_uri: str,
     client_id: str,
 ) -> dict:
-    """Exchange authorization code for Keycloak tokens."""
+    """Exchange authorization code for OIDC tokens."""
     try:
         import httpx
     except ImportError:
@@ -157,12 +161,12 @@ def _exchange_code_for_tokens(
         return response.json()
 
 
-def _refresh_keycloak_token(
+def _refresh_oidc_token(
     token_endpoint: str,
     refresh_token: str,
     client_id: str,
 ) -> dict:
-    """Refresh Keycloak tokens using refresh token."""
+    """Refresh OIDC tokens using refresh token."""
     try:
         import httpx
     except ImportError:
@@ -182,10 +186,10 @@ def _refresh_keycloak_token(
 
 def _exchange_for_internal_token(
     api_url: str,
-    keycloak_token: str,
+    oidc_token: str,
     org_id: str,
 ) -> dict:
-    """Exchange Keycloak token for internal org-scoped token via /auth/exchange."""
+    """Exchange OIDC token for internal org-scoped token via /auth/exchange."""
     try:
         import httpx
     except ImportError:
@@ -195,7 +199,7 @@ def _exchange_for_internal_token(
         response = client.post(
             f"{api_url}/api/v1/auth/exchange",
             json={"org_id": org_id},
-            headers={"Authorization": f"Bearer {keycloak_token}"},
+            headers={"Authorization": f"Bearer {oidc_token}"},
         )
         response.raise_for_status()
         return response.json()
@@ -214,21 +218,19 @@ def _get_oidc_config(issuer: str) -> dict:
         return response.json()
 
 
-def _get_user_organizations(api_url: str, keycloak_token: str) -> list[dict]:
-    """Fetch user's organizations from API."""
+def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
+    """Fetch user's organizations from API using OIDC token."""
     try:
         import httpx
     except ImportError:
         return []
 
     try:
-        # First exchange for an internal token to call /me
-        # But we need an org_id... so we use a special endpoint that accepts Keycloak tokens
-        # For now, use /ui/me which may accept Keycloak tokens directly
+        # Use /ui/me which accepts OIDC tokens directly (before org-scoped exchange)
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
                 f"{api_url}/api/v1/ui/me",
-                headers={"Authorization": f"Bearer {keycloak_token}"},
+                headers={"Authorization": f"Bearer {oidc_token}"},
             )
             if response.status_code == 200:
                 data = response.json()
@@ -315,15 +317,15 @@ def login(
 ) -> None:
     """Login to Stardag API via browser.
 
-    Opens your browser to authenticate with the identity provider (Keycloak/Cognito).
+    Opens your browser to authenticate with the OIDC identity provider.
     After successful login, credentials are stored locally.
 
     The login flow:
-    1. Authenticate with Keycloak via OAuth PKCE
+    1. Authenticate via OIDC (OAuth PKCE flow)
     2. Store refresh token for the registry
     3. Fetch user's organizations
     4. Exchange for org-scoped internal token
-    5. Optionally create a profile for easy access
+    5. Create a profile for easy access
 
     For production/CI, use the STARDAG_API_KEY environment variable instead.
     """
@@ -460,8 +462,8 @@ def login(
     typer.echo(f"Credentials saved to {get_credentials_path(registry)}")
 
     # Fetch organizations and prompt for selection
-    keycloak_token = tokens["access_token"]
-    organizations = _get_user_organizations(effective_url, keycloak_token)
+    oidc_token = tokens["access_token"]
+    organizations = _get_user_organizations(effective_url, oidc_token)
 
     if not organizations:
         typer.echo("")
@@ -495,7 +497,7 @@ def login(
     typer.echo(f"Exchanging for org-scoped token ({org_slug})...")
     try:
         internal_tokens = _exchange_for_internal_token(
-            effective_url, keycloak_token, org_id
+            effective_url, oidc_token, org_id
         )
         access_token = internal_tokens["access_token"]
         expires_in = internal_tokens.get("expires_in", 600)
@@ -689,7 +691,7 @@ def refresh(
 
     typer.echo(f"Refreshing token for {registry_name}/{organization_id}...")
 
-    # Refresh Keycloak token
+    # Refresh OIDC token
     token_endpoint = creds.get("token_endpoint")
     refresh_token = creds.get("refresh_token")
     client_id = creds.get("client_id")
@@ -702,7 +704,7 @@ def refresh(
         raise typer.Exit(1)
 
     try:
-        tokens = _refresh_keycloak_token(
+        tokens = _refresh_oidc_token(
             token_endpoint,
             refresh_token,
             client_id,
@@ -714,7 +716,7 @@ def refresh(
             save_credentials(creds, registry_name)
 
     except Exception as e:
-        typer.echo(f"Error refreshing Keycloak token: {e}", err=True)
+        typer.echo(f"Error refreshing OIDC token: {e}", err=True)
         typer.echo("You may need to login again: stardag auth login")
         raise typer.Exit(1)
 

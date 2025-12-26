@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["auth"])
 
-# Bearer scheme for Keycloak tokens (only used by /auth/exchange)
-keycloak_bearer = HTTPBearer(auto_error=True)
+# Bearer scheme for OIDC tokens (only used by /auth/exchange)
+oidc_bearer = HTTPBearer(auto_error=True)
 
 
 class TokenExchangeRequest(BaseModel):
@@ -43,10 +43,10 @@ class TokenExchangeResponse(BaseModel):
     expires_in: int  # seconds
 
 
-async def get_keycloak_token(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(keycloak_bearer)],
+async def get_oidc_token(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(oidc_bearer)],
 ) -> TokenPayload:
-    """Validate Keycloak JWT and return payload.
+    """Validate OIDC JWT and return payload.
 
     This is only used by the /auth/exchange endpoint.
     All other endpoints use internal tokens.
@@ -55,7 +55,7 @@ async def get_keycloak_token(
     try:
         return await validator.validate_token(credentials.credentials)
     except AuthenticationError as e:
-        logger.warning("Keycloak token validation failed: %s", e)
+        logger.warning("OIDC token validation failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
@@ -64,7 +64,7 @@ async def get_keycloak_token(
 
 
 async def get_or_create_user(db: AsyncSession, token: TokenPayload) -> User:
-    """Get existing user or create new one from Keycloak token claims."""
+    """Get existing user or create new one from OIDC token claims."""
     # Look up user by external_id (OIDC subject claim)
     result = await db.execute(select(User).where(User.external_id == token.sub))
     user = result.scalar_one_or_none()
@@ -98,7 +98,7 @@ async def get_or_create_user(db: AsyncSession, token: TokenPayload) -> User:
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    logger.info("Created new user %s from Keycloak token", user.id)
+    logger.info("Created new user %s from OIDC token", user.id)
     return user
 
 
@@ -115,29 +115,29 @@ async def get_jwks_endpoint():
 @router.post("/auth/exchange", response_model=TokenExchangeResponse)
 async def exchange_token(
     request: TokenExchangeRequest,
-    keycloak_token: Annotated[TokenPayload, Depends(get_keycloak_token)],
+    oidc_token: Annotated[TokenPayload, Depends(get_oidc_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Exchange a Keycloak token for an org-scoped internal token.
+    """Exchange an OIDC token for an org-scoped internal token.
 
-    This is the only endpoint that accepts Keycloak tokens.
+    This is the only endpoint that accepts OIDC tokens directly.
     All other endpoints require internal tokens from this exchange.
 
     Args:
         request: Contains the org_id to scope the token to
-        keycloak_token: Validated Keycloak JWT (from Authorization header)
+        oidc_token: Validated OIDC JWT (from Authorization header)
         db: Database session
 
     Returns:
         Internal access token scoped to the requested organization
 
     Raises:
-        401: Invalid Keycloak token
+        401: Invalid OIDC token
         403: User is not a member of the requested organization
         404: Organization not found
     """
-    # Get or create user from Keycloak token
-    user = await get_or_create_user(db, keycloak_token)
+    # Get or create user from OIDC token
+    user = await get_or_create_user(db, oidc_token)
 
     # Verify user is a member of the requested organization
     result = await db.execute(

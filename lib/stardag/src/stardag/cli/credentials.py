@@ -471,12 +471,12 @@ def get_config_path() -> Path:
 # --- Token Refresh Helpers ---
 
 
-def _refresh_keycloak_token(
+def _refresh_oidc_token(
     token_endpoint: str,
     refresh_token: str,
     client_id: str,
 ) -> dict:
-    """Refresh Keycloak tokens using refresh token.
+    """Refresh OIDC tokens using refresh token.
 
     Returns the token response dict.
     Raises httpx.HTTPStatusError on failure.
@@ -500,10 +500,10 @@ def _refresh_keycloak_token(
 
 def _exchange_for_internal_token(
     api_url: str,
-    keycloak_token: str,
+    oidc_token: str,
     org_id: str,
 ) -> dict:
-    """Exchange Keycloak token for internal org-scoped token.
+    """Exchange OIDC token for internal org-scoped token.
 
     Returns dict with access_token and expires_in.
     Raises httpx.HTTPStatusError on failure.
@@ -517,14 +517,14 @@ def _exchange_for_internal_token(
         response = client.post(
             f"{api_url}/api/v1/auth/exchange",
             json={"org_id": org_id},
-            headers={"Authorization": f"Bearer {keycloak_token}"},
+            headers={"Authorization": f"Bearer {oidc_token}"},
         )
         response.raise_for_status()
         return response.json()
 
 
-def _get_user_organizations(api_url: str, keycloak_token: str) -> list[dict]:
-    """Fetch user's organizations from API using Keycloak token."""
+def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
+    """Fetch user's organizations from API using OIDC token."""
     try:
         import httpx
     except ImportError:
@@ -534,7 +534,7 @@ def _get_user_organizations(api_url: str, keycloak_token: str) -> list[dict]:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
                 f"{api_url}/api/v1/ui/me",
-                headers={"Authorization": f"Bearer {keycloak_token}"},
+                headers={"Authorization": f"Bearer {oidc_token}"},
             )
             if response.status_code == 200:
                 data = response.json()
@@ -606,22 +606,20 @@ def ensure_access_token(
     try:
         # If we have a refresh token, use it
         if refresh_token:
-            tokens = _refresh_keycloak_token(token_endpoint, refresh_token, client_id)
+            tokens = _refresh_oidc_token(token_endpoint, refresh_token, client_id)
 
             # Update stored refresh token if a new one was provided
             if tokens.get("refresh_token"):
                 creds["refresh_token"] = tokens["refresh_token"]
                 save_credentials(creds, registry)
 
-            keycloak_token = tokens["access_token"]
+            oidc_token = tokens["access_token"]
         else:
             # No refresh token - can't refresh
             return None
 
         # Exchange for internal token
-        internal_tokens = _exchange_for_internal_token(
-            registry_url, keycloak_token, org_id
-        )
+        internal_tokens = _exchange_for_internal_token(registry_url, oidc_token, org_id)
         access_token = internal_tokens["access_token"]
         expires_in = internal_tokens.get("expires_in", 600)
 
@@ -637,14 +635,14 @@ def ensure_access_token(
 def resolve_org_slug_to_id(
     registry: str,
     org_slug_or_id: str,
-    keycloak_token: str | None = None,
+    oidc_token: str | None = None,
 ) -> str | None:
     """Resolve an organization slug to its ID.
 
     Args:
         registry: Registry name.
         org_slug_or_id: Organization slug or ID.
-        keycloak_token: Optional Keycloak token. If not provided, will try to refresh.
+        oidc_token: Optional OIDC token. If not provided, will try to refresh.
 
     Returns:
         Organization ID if found, None otherwise.
@@ -657,10 +655,10 @@ def resolve_org_slug_to_id(
     if _looks_like_uuid(org_slug_or_id):
         return org_slug_or_id
 
-    # Need to resolve slug - get Keycloak token if not provided
-    if not keycloak_token:
-        keycloak_token = _get_fresh_keycloak_token(registry)
-        if not keycloak_token:
+    # Need to resolve slug - get OIDC token if not provided
+    if not oidc_token:
+        oidc_token = _get_fresh_oidc_token(registry)
+        if not oidc_token:
             return None
 
     # Get registry URL
@@ -669,7 +667,7 @@ def resolve_org_slug_to_id(
         return None
 
     # Fetch organizations and find matching slug
-    orgs = _get_user_organizations(registry_url, keycloak_token)
+    orgs = _get_user_organizations(registry_url, oidc_token)
     result = None
     for org in orgs:
         org_id = org.get("id")
@@ -736,10 +734,10 @@ def resolve_workspace_slug_to_id(
     return result
 
 
-def _get_fresh_keycloak_token(registry: str) -> str | None:
-    """Get a fresh Keycloak access token by refreshing.
+def _get_fresh_oidc_token(registry: str) -> str | None:
+    """Get a fresh OIDC access token by refreshing.
 
-    Returns the Keycloak access token or None if refresh fails.
+    Returns the OIDC access token or None if refresh fails.
     """
     creds = load_credentials(registry)
     if not creds:
@@ -753,7 +751,7 @@ def _get_fresh_keycloak_token(registry: str) -> str | None:
         return None
 
     try:
-        tokens = _refresh_keycloak_token(token_endpoint, refresh_token, client_id)
+        tokens = _refresh_oidc_token(token_endpoint, refresh_token, client_id)
 
         # Update stored refresh token if a new one was provided
         if tokens.get("refresh_token"):
