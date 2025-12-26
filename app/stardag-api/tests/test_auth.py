@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from stardag_api.auth.dependencies import get_token
+from stardag_api.auth.dependencies import get_or_create_user_from_keycloak
 from stardag_api.auth.jwt import AuthenticationError, JWTValidator, TokenPayload
 from stardag_api.auth.tokens import (
     InternalTokenManager,
@@ -436,12 +436,15 @@ async def test_me_endpoint_requires_auth(unauthenticated_client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_me_endpoint_returns_user_profile(async_engine):
-    """Test that /api/v1/ui/me returns user profile."""
+    """Test that /api/v1/ui/me returns user profile.
+
+    Note: /me is a bootstrap endpoint that accepts Keycloak tokens (not internal tokens).
+    """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
-    # Create a user first (internal tokens use internal user IDs)
+    # Create a user first
     async with async_session_maker() as session:
         user = User(
             external_id="test-user-sub",
@@ -451,19 +454,19 @@ async def test_me_endpoint_returns_user_profile(async_engine):
         session.add(user)
         await session.commit()
         await session.refresh(user)
-        user_id = user.id
-
-    mock_token = _create_mock_internal_token_payload(user_id=user_id, org_id="test-org")
+        mock_user = user
 
     async def override_get_db():
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_token():
-        return mock_token
+    async def override_get_or_create_user_from_keycloak():
+        return mock_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_token] = override_get_token
+    app.dependency_overrides[get_or_create_user_from_keycloak] = (
+        override_get_or_create_user_from_keycloak
+    )
 
     try:
         async with AsyncClient(
@@ -483,7 +486,10 @@ async def test_me_endpoint_returns_user_profile(async_engine):
 
 @pytest.mark.asyncio
 async def test_me_endpoint_returns_organizations(async_engine):
-    """Test that /api/v1/ui/me returns user's organizations."""
+    """Test that /api/v1/ui/me returns user's organizations.
+
+    Note: /me is a bootstrap endpoint that accepts Keycloak tokens (not internal tokens).
+    """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
@@ -498,7 +504,7 @@ async def test_me_endpoint_returns_organizations(async_engine):
         session.add(user)
         await session.commit()
         await session.refresh(user)
-        user_id = user.id
+        mock_user = user
 
         org = Organization(
             name="Test Org",
@@ -507,27 +513,26 @@ async def test_me_endpoint_returns_organizations(async_engine):
         session.add(org)
         await session.commit()
         await session.refresh(org)
-        org_id = org.id
 
         membership = OrganizationMember(
-            organization_id=org_id,
-            user_id=user_id,
+            organization_id=org.id,
+            user_id=user.id,
             role=OrganizationRole.ADMIN,
         )
         session.add(membership)
         await session.commit()
 
-    mock_token = _create_mock_internal_token_payload(user_id=user_id, org_id=org_id)
-
     async def override_get_db():
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_token():
-        return mock_token
+    async def override_get_or_create_user_from_keycloak():
+        return mock_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_token] = override_get_token
+    app.dependency_overrides[get_or_create_user_from_keycloak] = (
+        override_get_or_create_user_from_keycloak
+    )
 
     try:
         async with AsyncClient(
@@ -547,7 +552,11 @@ async def test_me_endpoint_returns_organizations(async_engine):
 
 @pytest.mark.asyncio
 async def test_me_invites_endpoint(async_engine):
-    """Test that /api/v1/ui/me/invites returns pending invites."""
+    """Test that /api/v1/ui/me/invites returns pending invites.
+
+    Note: /me/invites is a bootstrap endpoint that accepts Keycloak tokens
+    (not internal tokens).
+    """
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from stardag_api.models import Invite
@@ -573,7 +582,7 @@ async def test_me_invites_endpoint(async_engine):
         await session.commit()
         await session.refresh(inviter)
         await session.refresh(invitee)
-        invitee_id = invitee.id
+        mock_invitee = invitee
 
         org = Organization(
             name="Inviting Org",
@@ -593,20 +602,17 @@ async def test_me_invites_endpoint(async_engine):
         session.add(invite)
         await session.commit()
 
-    mock_token = _create_mock_internal_token_payload(
-        user_id=invitee_id,
-        org_id="some-org",  # Doesn't matter for invites endpoint
-    )
-
     async def override_get_db():
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_token():
-        return mock_token
+    async def override_get_or_create_user_from_keycloak():
+        return mock_invitee
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_token] = override_get_token
+    app.dependency_overrides[get_or_create_user_from_keycloak] = (
+        override_get_or_create_user_from_keycloak
+    )
 
     try:
         async with AsyncClient(

@@ -106,6 +106,7 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
         SdkAuth,
         get_current_user,
         get_org_id_from_token,
+        get_or_create_user_from_keycloak,
         require_sdk_auth,
     )
     from stardag_api.models import User, Workspace
@@ -141,12 +142,18 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
     async def override_get_current_user() -> User:
         return mock_user
 
+    async def override_get_or_create_user_from_keycloak() -> User:
+        return mock_user
+
     async def override_get_org_id_from_token() -> str:
         return "default"
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[require_sdk_auth] = override_require_sdk_auth
     app.dependency_overrides[get_current_user] = override_get_current_user
+    app.dependency_overrides[get_or_create_user_from_keycloak] = (
+        override_get_or_create_user_from_keycloak
+    )
     app.dependency_overrides[get_org_id_from_token] = override_get_org_id_from_token
 
     async with AsyncClient(

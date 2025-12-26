@@ -4,7 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from stardag_api.auth.dependencies import get_token
+from stardag_api.auth.dependencies import get_or_create_user_from_keycloak, get_token
 from stardag_api.auth.tokens import InternalTokenPayload
 from stardag_api.db import get_db
 from stardag_api.main import app
@@ -131,22 +131,24 @@ async def authenticated_client(async_engine, mock_token_for_user):
 async def test_create_organization(
     async_engine, test_user: User, test_org_with_owner: Organization
 ):
-    """Test creating a new organization."""
+    """Test creating a new organization.
+
+    Note: Creating an organization is a bootstrap endpoint that accepts Keycloak tokens
+    (not internal tokens).
+    """
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_internal_token(
-        user_id=test_user.id,
-        org_id=test_org_with_owner.id,
-    )
 
     async def override_get_db():
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_token():
-        return mock_token
+    async def override_get_or_create_user_from_keycloak():
+        return test_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_token] = override_get_token
+    app.dependency_overrides[get_or_create_user_from_keycloak] = (
+        override_get_or_create_user_from_keycloak
+    )
 
     try:
         async with AsyncClient(
@@ -175,22 +177,24 @@ async def test_create_organization(
 async def test_create_organization_duplicate_slug(
     async_engine, test_user: User, test_org_with_owner: Organization
 ):
-    """Test that duplicate slugs are rejected."""
+    """Test that duplicate slugs are rejected.
+
+    Note: Creating an organization is a bootstrap endpoint that accepts Keycloak tokens
+    (not internal tokens).
+    """
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_internal_token(
-        user_id=test_user.id,
-        org_id=test_org_with_owner.id,
-    )
 
     async def override_get_db():
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_token():
-        return mock_token
+    async def override_get_or_create_user_from_keycloak():
+        return test_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_token] = override_get_token
+    app.dependency_overrides[get_or_create_user_from_keycloak] = (
+        override_get_or_create_user_from_keycloak
+    )
 
     try:
         async with AsyncClient(
@@ -598,21 +602,18 @@ async def test_accept_invite(
         await session.refresh(invite)
         invite_id = invite.id
 
-    # Now the invited user accepts (authenticated via their personal org)
-    mock_token = _create_mock_internal_token(
-        user_id=invited_user.id,
-        org_id=invited_user_org.id,
-    )
-
+    # Now the invited user accepts (authenticated via Keycloak token - bootstrap endpoint)
     async def override_get_db():
         async with async_session_maker() as session:
             yield session
 
-    async def override_get_token():
-        return mock_token
+    async def override_get_or_create_user_from_keycloak():
+        return invited_user
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_token] = override_get_token
+    app.dependency_overrides[get_or_create_user_from_keycloak] = (
+        override_get_or_create_user_from_keycloak
+    )
 
     try:
         async with AsyncClient(

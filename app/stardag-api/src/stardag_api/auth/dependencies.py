@@ -3,13 +3,12 @@
 This module provides authentication dependencies for the Stardag API.
 
 Token types:
-- Internal tokens: Org-scoped JWTs minted by /auth/exchange. Required for all
-  endpoints except /auth/exchange itself.
-- Keycloak tokens: External JWTs from the OIDC provider. Only accepted by
-  /auth/exchange to mint internal tokens.
+- Internal tokens: Org-scoped JWTs minted by /auth/exchange. Required for most
+  endpoints.
+- Keycloak tokens: External JWTs from the OIDC provider. Accepted by:
+  - /auth/exchange (to mint internal tokens)
+  - /ui/me, /ui/me/invites (bootstrap endpoints before org selection)
 - API keys: Workspace-scoped keys for SDK/automation. Alternative to JWTs.
-
-All endpoints (except /auth/exchange) must use internal tokens or API keys.
 """
 
 import logging
@@ -18,8 +17,14 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from stardag_api.auth.jwt import (
+    AuthenticationError,
+    TokenPayload as KeycloakTokenPayload,
+    get_jwt_validator,
+)
 from stardag_api.auth.tokens import (
     InternalTokenPayload,
     TokenExpiredError,
@@ -342,3 +347,86 @@ async def require_sdk_auth(
             headers={"WWW-Authenticate": 'Bearer, ApiKey realm="sdk"'},
         )
     return sdk_auth
+
+
+# --- Keycloak Token Authentication (for bootstrap endpoints) ---
+
+
+async def get_keycloak_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> KeycloakTokenPayload:
+    """Get and validate Keycloak JWT token (required).
+
+    Used for bootstrap endpoints that need to work before the user has
+    selected an organization (e.g., /ui/me, /ui/me/invites).
+
+    Raises HTTPException if no token provided or token is invalid.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    validator = get_jwt_validator()
+    try:
+        return await validator.validate_token(credentials.credentials)
+    except AuthenticationError as e:
+        logger.warning("Keycloak token validation failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from e
+
+
+async def get_or_create_user_from_keycloak(
+    keycloak_token: Annotated[KeycloakTokenPayload, Depends(get_keycloak_token)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User:
+    """Get or create user from Keycloak token claims.
+
+    Used for bootstrap endpoints that need user info before org selection.
+    Creates user if they don't exist yet (first login).
+    """
+    # Look up user by external_id (OIDC subject claim)
+    result = await db.execute(
+        select(User).where(User.external_id == keycloak_token.sub)
+    )
+    user = result.scalar_one_or_none()
+
+    if user is not None:
+        # Update user info if changed
+        updated = False
+        if keycloak_token.email and user.email != keycloak_token.email:
+            user.email = keycloak_token.email
+            updated = True
+        if (
+            keycloak_token.display_name
+            and user.display_name != keycloak_token.display_name
+        ):
+            user.display_name = keycloak_token.display_name
+            updated = True
+        if updated:
+            await db.commit()
+            logger.info("Updated user %s with new info from Keycloak token", user.id)
+        return user
+
+    # Create new user
+    if not keycloak_token.email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token must contain email claim for user creation",
+        )
+
+    user = User(
+        external_id=keycloak_token.sub,
+        email=keycloak_token.email,
+        display_name=keycloak_token.display_name,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    logger.info("Created new user %s from Keycloak token", user.id)
+    return user
