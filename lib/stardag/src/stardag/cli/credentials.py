@@ -14,6 +14,9 @@ from typing import TypedDict
 
 from stardag.config import (
     TomlConfig,
+    _looks_like_uuid,
+    cache_org_id,
+    cache_workspace_id,
     get_access_token_cache_path,
     get_config,
     get_registry_credentials_path,
@@ -646,6 +649,9 @@ def resolve_org_slug_to_id(
     Returns:
         Organization ID if found, None otherwise.
         If input looks like a UUID, returns it unchanged.
+
+    Side effects:
+        Populates the ID cache with all discovered org mappings.
     """
     # If it looks like a UUID, assume it's already an ID
     if _looks_like_uuid(org_slug_or_id):
@@ -664,11 +670,18 @@ def resolve_org_slug_to_id(
 
     # Fetch organizations and find matching slug
     orgs = _get_user_organizations(registry_url, keycloak_token)
+    result = None
     for org in orgs:
-        if org.get("slug") == org_slug_or_id or org.get("id") == org_slug_or_id:
-            return org["id"]
+        org_id = org.get("id")
+        org_slug = org.get("slug")
+        # Cache all discovered orgs
+        if org_id and org_slug:
+            cache_org_id(registry, org_slug, org_id)
+        # Check if this is the one we're looking for
+        if org_slug == org_slug_or_id or org_id == org_slug_or_id:
+            result = org_id
 
-    return None
+    return result
 
 
 def resolve_workspace_slug_to_id(
@@ -688,6 +701,9 @@ def resolve_workspace_slug_to_id(
     Returns:
         Workspace ID if found, None otherwise.
         If input looks like a UUID, returns it unchanged.
+
+    Side effects:
+        Populates the ID cache with all discovered workspace mappings.
     """
     # If it looks like a UUID, assume it's already an ID
     if _looks_like_uuid(workspace_slug_or_id):
@@ -706,22 +722,18 @@ def resolve_workspace_slug_to_id(
 
     # Fetch workspaces and find matching slug
     workspaces = _get_workspaces(registry_url, access_token, org_id)
+    result = None
     for ws in workspaces:
-        if (
-            ws.get("slug") == workspace_slug_or_id
-            or ws.get("id") == workspace_slug_or_id
-        ):
-            return ws["id"]
+        ws_id = ws.get("id")
+        ws_slug = ws.get("slug")
+        # Cache all discovered workspaces
+        if ws_id and ws_slug:
+            cache_workspace_id(registry, org_id, ws_slug, ws_id)
+        # Check if this is the one we're looking for
+        if ws_slug == workspace_slug_or_id or ws_id == workspace_slug_or_id:
+            result = ws_id
 
-    return None
-
-
-def _looks_like_uuid(value: str) -> bool:
-    """Check if a string looks like a UUID."""
-    import re
-
-    uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-    return bool(re.match(uuid_pattern, value.lower()))
+    return result
 
 
 def _get_fresh_keycloak_token(registry: str) -> str | None:
