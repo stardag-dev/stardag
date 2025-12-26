@@ -9,6 +9,7 @@ import typer
 from stardag.cli import registry
 from stardag.cli.credentials import (
     add_profile,
+    ensure_access_token,
     get_access_token,
     get_config_path,
     get_default_profile,
@@ -16,6 +17,8 @@ from stardag.cli.credentials import (
     list_profiles,
     list_registries,
     remove_profile,
+    resolve_org_slug_to_id,
+    resolve_workspace_slug_to_id,
     set_default_profile,
     set_target_roots,
 )
@@ -137,6 +140,9 @@ def profile_add(
     A profile defines the (registry, organization, workspace) tuple
     for easy switching between different contexts.
 
+    Organization and workspace can be specified by ID (UUID) or slug.
+    Slugs will be resolved to IDs automatically if you're authenticated.
+
     Examples:
         stardag config profile add local-dev -r local -o default -w default
         stardag config profile add prod -r central -o my-org -w production --default
@@ -148,12 +154,48 @@ def profile_add(
         typer.echo("Add it with: stardag config registry add <name> --url <url>")
         raise typer.Exit(1)
 
-    add_profile(name, registry, organization, workspace)
+    # Resolve organization slug to ID if needed
+    org_id = resolve_org_slug_to_id(registry, organization)
+    if org_id is None:
+        typer.echo(
+            f"Warning: Could not resolve organization '{organization}'. "
+            "Using as-is (may need to be a valid UUID).",
+            err=True,
+        )
+        org_id = organization
+    elif org_id != organization:
+        typer.echo(f"Resolved organization '{organization}' -> {org_id}")
+
+    # Resolve workspace slug to ID if needed
+    workspace_id = resolve_workspace_slug_to_id(registry, org_id, workspace)
+    if workspace_id is None:
+        typer.echo(
+            f"Warning: Could not resolve workspace '{workspace}'. "
+            "Using as-is (may need to be a valid UUID).",
+            err=True,
+        )
+        workspace_id = workspace
+    elif workspace_id != workspace:
+        typer.echo(f"Resolved workspace '{workspace}' -> {workspace_id}")
+
+    add_profile(name, registry, org_id, workspace_id)
     typer.echo(f"Profile '{name}' added.")
 
     if set_default:
         set_default_profile(name)
         typer.echo("Set as default profile.")
+
+        # Auto-refresh access token
+        typer.echo("Refreshing access token...")
+        token = ensure_access_token(registry, org_id)
+        if token:
+            typer.echo("Access token refreshed successfully.")
+        else:
+            typer.echo(
+                "Warning: Could not refresh access token. "
+                "Run 'stardag auth refresh' to authenticate.",
+                err=True,
+            )
 
     typer.echo("")
     typer.echo(f"Use with: STARDAG_PROFILE={name}")
@@ -204,6 +246,7 @@ def profile_use(
     """Set a profile as the default.
 
     The default profile is used when STARDAG_PROFILE is not set.
+    This command also attempts to refresh the access token for the new profile.
     """
     profiles = list_profiles()
     if name not in profiles:
@@ -212,6 +255,22 @@ def profile_use(
 
     set_default_profile(name)
     typer.echo(f"Default profile set to: {name}")
+
+    # Auto-refresh access token for the new profile
+    profile = profiles[name]
+    registry = profile["registry"]
+    org_id = profile["organization"]
+
+    typer.echo("Refreshing access token...")
+    token = ensure_access_token(registry, org_id)
+    if token:
+        typer.echo("Access token refreshed successfully.")
+    else:
+        typer.echo(
+            "Warning: Could not refresh access token. "
+            "Run 'stardag auth refresh' to authenticate.",
+            err=True,
+        )
 
 
 # --- Target roots commands ---
