@@ -159,7 +159,7 @@ Uncaught TypeError: Cannot read properties of undefined (reading 'control')
   - [x] `... profile use` should not be an option! -> OK sets as default
   - [ ] (More user friendly help message on error, ideomatic way only)
   - [x] What's the logic behind not having registry under config in CLI?
-  - [ ] switching orgs in CLI/profile:
+  - [x] switching orgs in CLI/profile:
 
 ```
 uv run stardag auth refresh
@@ -167,3 +167,6 @@ Refreshing token for local/my-second-org...
 Error exchanging for internal token: Client error '403 Forbidden' for url 'http://localhost:8000/api/v1/auth/exchange'
 For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/403
 ```
+
+- [ ] add separate section for organizations (default to slug as name), then reference by name in profile
+- [ ] reference workspace by slug, since this must be unique within organization?
