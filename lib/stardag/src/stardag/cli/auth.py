@@ -2,7 +2,13 @@
 
 Supports two authentication modes:
 1. API Key (production): Set STARDAG_API_KEY environment variable
-2. Browser login (local dev): OAuth flow with Keycloak/Cognito
+2. Browser login (local dev): OAuth flow with Keycloak/Cognito + token exchange
+
+Token Model:
+- Keycloak tokens are user-scoped (used only for /auth/exchange)
+- Internal tokens are org-scoped (used for all other API calls)
+- Refresh tokens stored per registry in ~/.stardag/credentials/{registry}.json
+- Access tokens cached per (registry, org) in ~/.stardag/access-token-cache/
 """
 
 import base64
@@ -20,17 +26,20 @@ from dataclasses import dataclass
 import typer
 
 from stardag.cli.credentials import (
+    add_profile,
+    add_registry,
     clear_credentials,
     get_config_path,
     get_credentials_path,
-    load_config,
+    get_registry_url,
+    list_profiles,
     load_credentials,
+    save_access_token_cache,
     save_credentials,
-    set_api_url,
-    set_organization_id,
+    set_default_profile,
     set_target_roots,
-    set_workspace_id,
 )
+from stardag.config import get_config
 
 app = typer.Typer(help="Authentication commands for Stardag API")
 
@@ -128,7 +137,7 @@ def _exchange_code_for_tokens(
     redirect_uri: str,
     client_id: str,
 ) -> dict:
-    """Exchange authorization code for tokens."""
+    """Exchange authorization code for Keycloak tokens."""
     try:
         import httpx
     except ImportError:
@@ -148,6 +157,50 @@ def _exchange_code_for_tokens(
         return response.json()
 
 
+def _refresh_keycloak_token(
+    token_endpoint: str,
+    refresh_token: str,
+    client_id: str,
+) -> dict:
+    """Refresh Keycloak tokens using refresh token."""
+    try:
+        import httpx
+    except ImportError:
+        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+    }
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(token_endpoint, data=data)
+        response.raise_for_status()
+        return response.json()
+
+
+def _exchange_for_internal_token(
+    api_url: str,
+    keycloak_token: str,
+    org_id: str,
+) -> dict:
+    """Exchange Keycloak token for internal org-scoped token via /auth/exchange."""
+    try:
+        import httpx
+    except ImportError:
+        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(
+            f"{api_url}/api/v1/auth/exchange",
+            json={"org_id": org_id},
+            headers={"Authorization": f"Bearer {keycloak_token}"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 def _get_oidc_config(issuer: str) -> dict:
     """Fetch OIDC configuration from issuer."""
     try:
@@ -161,136 +214,93 @@ def _get_oidc_config(issuer: str) -> dict:
         return response.json()
 
 
-def _auto_select_context(api_url: str, access_token: str) -> None:
-    """Auto-select organization and workspace after login.
-
-    - If user has exactly one org, auto-select it
-    - After org is selected, auto-select personal workspace if available
-    """
+def _get_user_organizations(api_url: str, keycloak_token: str) -> list[dict]:
+    """Fetch user's organizations from API."""
     try:
         import httpx
     except ImportError:
-        return  # Silent fail if httpx not available
-
-    headers = {"Authorization": f"Bearer {access_token}"}
+        return []
 
     try:
-        with httpx.Client(timeout=10.0, headers=headers) as client:
-            # Fetch user profile with organizations
-            response = client.get(f"{api_url}/api/v1/ui/me")
-            if response.status_code != 200:
-                typer.echo("")
-                typer.echo("Next steps:")
-                typer.echo(
-                    "  1. List your organizations:  stardag config list organizations"
-                )
-                typer.echo(
-                    "  2. Set active organization:  stardag config set organization <org-id>"
-                )
-                return
-
-            data = response.json()
-            organizations = data.get("organizations", [])
-
-            if not organizations:
-                typer.echo("")
-                typer.echo("No organizations found. Create one in the web UI first.")
-                return
-
-            # Auto-select org (first one if multiple)
-            org = organizations[0]
-            set_organization_id(org["id"], org["slug"])
-            typer.echo("")
-            typer.echo(f"Auto-selected organization: {org['name']} ({org['slug']})")
-
-            # Fetch workspaces and auto-select Default workspace
-            org_id = org["id"]
+        # First exchange for an internal token to call /me
+        # But we need an org_id... so we use a special endpoint that accepts Keycloak tokens
+        # For now, use /ui/me which may accept Keycloak tokens directly
+        with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces"
+                f"{api_url}/api/v1/ui/me",
+                headers={"Authorization": f"Bearer {keycloak_token}"},
             )
-            if response.status_code != 200:
-                typer.echo("")
-                typer.echo(
-                    "Set workspace with: stardag config set workspace <workspace-id>"
-                )
-                return
-
-            workspaces = response.json()
-
-            # Look for "Default" workspace (slug "default", not a personal workspace)
-            default_ws = None
-            for ws in workspaces:
-                if ws.get("slug") == "default" and not ws.get("owner_id"):
-                    default_ws = ws
-                    break
-
-            if default_ws:
-                set_workspace_id(default_ws["id"])
-                typer.echo(
-                    f"Auto-selected workspace: {default_ws['name']} ({default_ws['slug']})"
-                )
-
-                # Sync target roots
-                _sync_target_roots_after_login(
-                    client, api_url, org_id, default_ws["id"]
-                )
-
-            # Show available workspaces and help message
-            if workspaces:
-                typer.echo("")
-                typer.echo("Available workspaces:")
-                for ws in workspaces:
-                    personal = " (personal)" if ws.get("owner_id") else ""
-                    marker = " *" if default_ws and ws["id"] == default_ws["id"] else ""
-                    typer.echo(
-                        f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}{marker}"
-                    )
-                typer.echo("")
-                if default_ws:
-                    typer.echo("* = active workspace")
-                typer.echo(
-                    "Switch workspace with: stardag config set workspace <workspace-id-or-slug>"
-                )
-                if len(organizations) > 1:
-                    typer.echo(
-                        "Switch organization with: stardag config set organization <org-id-or-slug>"
-                    )
-
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("organizations", [])
     except Exception:
-        # Silent fail - user can manually set context
-        typer.echo("")
-        typer.echo("Next steps:")
-        typer.echo("  1. List your organizations:  stardag config list organizations")
-        typer.echo(
-            "  2. Set active organization:  stardag config set organization <org-id>"
-        )
+        pass
+    return []
 
 
-def _sync_target_roots_after_login(
-    client, api_url: str, org_id: str, workspace_id: str
-) -> None:
-    """Sync target roots after login."""
+def _get_workspaces(api_url: str, access_token: str, org_id: str) -> list[dict]:
+    """Fetch workspaces for an organization."""
     try:
-        response = client.get(
-            f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/target-roots"
-        )
-        if response.status_code == 200:
-            roots = response.json()
-            target_roots = {root["name"]: root["uri_prefix"] for root in roots}
-            set_target_roots(target_roots)
-            if target_roots:
-                typer.echo(f"Synced {len(target_roots)} target root(s)")
+        import httpx
+    except ImportError:
+        return []
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if response.status_code == 200:
+                return response.json()
     except Exception:
-        pass  # Silent fail
+        pass
+    return []
+
+
+def _sync_target_roots(
+    api_url: str, access_token: str, org_id: str, workspace_id: str
+) -> None:
+    """Sync target roots from server."""
+    try:
+        import httpx
+    except ImportError:
+        return
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(
+                f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/target-roots",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if response.status_code == 200:
+                roots = response.json()
+                target_roots = {root["name"]: root["uri_prefix"] for root in roots}
+                set_target_roots(
+                    target_roots,
+                    registry_url=api_url,
+                    organization_id=org_id,
+                    workspace_id=workspace_id,
+                )
+                if target_roots:
+                    typer.echo(f"Synced {len(target_roots)} target root(s)")
+    except Exception:
+        pass
 
 
 @app.command()
 def login(
+    registry: str = typer.Option(
+        None,
+        "--registry",
+        "-r",
+        help="Registry name to login to (uses default if not specified)",
+    ),
     api_url: str = typer.Option(
-        DEFAULT_API_URL,
+        None,
         "--api-url",
         "-u",
-        help="Base URL of the Stardag API",
+        help="Base URL of the Stardag API (overrides registry URL)",
     ),
     oidc_issuer: str = typer.Option(
         DEFAULT_OIDC_ISSUER,
@@ -308,8 +318,12 @@ def login(
     Opens your browser to authenticate with the identity provider (Keycloak/Cognito).
     After successful login, credentials are stored locally.
 
-    After login, use 'stardag config' commands to set your active organization
-    and workspace.
+    The login flow:
+    1. Authenticate with Keycloak via OAuth PKCE
+    2. Store refresh token for the registry
+    3. Fetch user's organizations
+    4. Exchange for org-scoped internal token
+    5. Optionally create a profile for easy access
 
     For production/CI, use the STARDAG_API_KEY environment variable instead.
     """
@@ -323,6 +337,28 @@ def login(
         typer.echo("  unset STARDAG_API_KEY")
         return
 
+    # Determine registry and URL
+    if api_url:
+        # URL provided directly, create/update registry
+        if not registry:
+            registry = "default"
+        add_registry(registry, api_url)
+        effective_url = api_url.rstrip("/")
+    elif registry:
+        # Look up registry URL
+        effective_url = get_registry_url(registry)
+        if not effective_url:
+            typer.echo(f"Error: Registry '{registry}' not found in config", err=True)
+            typer.echo("Add it with: stardag registry add <name> --url <url>")
+            raise typer.Exit(1)
+    else:
+        # Use default
+        registry = "local"
+        effective_url = DEFAULT_API_URL
+        # Ensure local registry exists
+        add_registry(registry, effective_url)
+
+    typer.echo(f"Logging into registry: {registry} ({effective_url})")
     typer.echo("Fetching OIDC configuration...")
 
     try:
@@ -357,7 +393,7 @@ def login(
         "client_id": client_id,
         "response_type": "code",
         "redirect_uri": redirect_uri,
-        "scope": "openid profile email",
+        "scope": "openid profile email offline_access",
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
@@ -410,39 +446,140 @@ def login(
         typer.echo(f"Error exchanging code for tokens: {e}", err=True)
         raise typer.Exit(1)
 
-    # Save credentials (OAuth tokens only)
+    # Save credentials (refresh token only - per registry)
     creds_to_save: dict[str, str] = {
-        "access_token": tokens["access_token"],
         "token_endpoint": token_endpoint,
         "client_id": client_id,
     }
     if tokens.get("refresh_token"):
         creds_to_save["refresh_token"] = tokens["refresh_token"]
-    save_credentials(creds_to_save)  # type: ignore[arg-type]
-
-    # Save api_url to config
-    set_api_url(api_url)
+    save_credentials(creds_to_save, registry)  # type: ignore[arg-type]
 
     typer.echo("")
     typer.echo("Login successful!")
-    typer.echo(f"Credentials saved to {get_credentials_path()}")
+    typer.echo(f"Credentials saved to {get_credentials_path(registry)}")
 
-    # Auto-select organization and workspace
-    _auto_select_context(api_url, tokens["access_token"])
+    # Fetch organizations and prompt for selection
+    keycloak_token = tokens["access_token"]
+    organizations = _get_user_organizations(effective_url, keycloak_token)
+
+    if not organizations:
+        typer.echo("")
+        typer.echo("No organizations found.")
+        typer.echo("Create one in the web UI or contact your admin.")
+        return
+
+    # Select organization
+    if len(organizations) == 1:
+        org = organizations[0]
+        typer.echo(f"Using organization: {org['name']} ({org['slug']})")
+    else:
+        typer.echo("")
+        typer.echo("Select an organization:")
+        for i, org in enumerate(organizations):
+            typer.echo(f"  {i + 1}. {org['name']} ({org['slug']})")
+
+        choice = typer.prompt("Enter number", type=int, default=1)
+        if choice < 1 or choice > len(organizations):
+            typer.echo("Invalid selection")
+            raise typer.Exit(1)
+        org = organizations[choice - 1]
+
+    org_id = org["id"]
+    org_slug = org["slug"]
+
+    # Exchange for internal org-scoped token
+    typer.echo(f"Exchanging for org-scoped token ({org_slug})...")
+    try:
+        internal_tokens = _exchange_for_internal_token(
+            effective_url, keycloak_token, org_id
+        )
+        access_token = internal_tokens["access_token"]
+        expires_in = internal_tokens.get("expires_in", 600)
+
+        # Cache the access token
+        save_access_token_cache(registry, org_id, access_token, expires_in)
+        typer.echo("Access token cached")
+
+    except Exception as e:
+        typer.echo(f"Warning: Could not get org-scoped token: {e}")
+        typer.echo("You may need to manually create a profile")
+        return
+
+    # Fetch workspaces
+    workspaces = _get_workspaces(effective_url, access_token, org_id)
+
+    if not workspaces:
+        typer.echo("No workspaces found in organization")
+        return
+
+    # Select workspace
+    if len(workspaces) == 1:
+        ws = workspaces[0]
+        typer.echo(f"Using workspace: {ws['name']} ({ws['slug']})")
+    else:
+        typer.echo("")
+        typer.echo("Select a workspace:")
+        for i, ws in enumerate(workspaces):
+            personal = " (personal)" if ws.get("owner_id") else ""
+            typer.echo(f"  {i + 1}. {ws['name']} ({ws['slug']}){personal}")
+
+        choice = typer.prompt("Enter number", type=int, default=1)
+        if choice < 1 or choice > len(workspaces):
+            typer.echo("Invalid selection")
+            raise typer.Exit(1)
+        ws = workspaces[choice - 1]
+
+    workspace_id = ws["id"]
+    workspace_slug = ws["slug"]
+
+    # Sync target roots
+    _sync_target_roots(effective_url, access_token, org_id, workspace_id)
+
+    # Create profile
+    profile_name = f"{registry}-{org_slug}-{workspace_slug}"
+    add_profile(profile_name, registry, org_id, workspace_id)
+    typer.echo(f"Created profile: {profile_name}")
+
+    # Set as default if no other profiles
+    profiles = list_profiles()
+    if len(profiles) == 1:
+        set_default_profile(profile_name)
+        typer.echo("Set as default profile")
+
+    typer.echo("")
+    typer.echo("Setup complete!")
+    typer.echo(f"Use this profile with: STARDAG_PROFILE={profile_name}")
 
 
 @app.command()
-def logout() -> None:
+def logout(
+    registry: str = typer.Option(
+        None,
+        "--registry",
+        "-r",
+        help="Registry to logout from (uses current profile's registry if not specified)",
+    ),
+) -> None:
     """Logout and clear stored credentials."""
-    if clear_credentials():
+    if clear_credentials(registry):
         typer.echo("Credentials cleared successfully.")
     else:
         typer.echo("No credentials found.")
 
 
 @app.command()
-def status() -> None:
+def status(
+    registry: str = typer.Option(
+        None,
+        "--registry",
+        "-r",
+        help="Registry to check (uses current profile if not specified)",
+    ),
+) -> None:
     """Show current authentication status and active context."""
+    config = get_config()
+
     # Check env var first
     env_api_key = os.environ.get("STARDAG_API_KEY")
     if env_api_key:
@@ -453,71 +590,141 @@ def status() -> None:
         typer.echo("Note: API key determines workspace automatically.")
         return
 
-    creds = load_credentials()
+    # Show profile-based status
+    profile = config.context.profile
+    registry_name = registry or config.context.registry_name
 
-    if creds is None:
-        typer.echo("Authentication: Not logged in")
-        typer.echo("")
-        typer.echo("Options:")
-        typer.echo("  1. Set STARDAG_API_KEY environment variable (for production/CI)")
-        typer.echo("  2. Run 'stardag auth login' for browser-based login (local dev)")
-        raise typer.Exit(1)
-
-    config = load_config()
-
-    typer.echo("Authentication: Browser login (JWT)")
-    typer.echo(f"  API URL: {config.get('api_url', 'not set')}")
-
-    access_token = creds.get("access_token", "")
-    if access_token:
-        typer.echo(f"  Token:   {access_token[:20]}...")
+    typer.echo("Configuration:")
+    typer.echo(f"  Config file: {get_config_path()}")
+    if profile:
+        typer.echo(f"  Active profile: {profile}")
     else:
-        typer.echo("  Token:   not set")
-
-    has_refresh = bool(creds.get("refresh_token"))
-    typer.echo(f"  Refresh: {'available' if has_refresh else 'not available'}")
+        typer.echo("  Active profile: (none - using defaults)")
 
     typer.echo("")
     typer.echo("Active Context:")
-
-    org_id = config.get("organization_id")
-    workspace_id = config.get("workspace_id")
-
-    if org_id:
-        typer.echo(f"  Organization: {org_id}")
-    else:
-        typer.echo(
-            "  Organization: not set (run 'stardag config set organization <id>')"
-        )
-
-    if workspace_id:
-        typer.echo(f"  Workspace:    {workspace_id}")
-    else:
-        typer.echo("  Workspace:    not set (run 'stardag config set workspace <id>')")
+    typer.echo(f"  Registry: {registry_name or '(not set)'}")
+    typer.echo(f"  API URL: {config.api.url}")
+    typer.echo(f"  Organization: {config.context.organization_id or '(not set)'}")
+    typer.echo(f"  Workspace: {config.context.workspace_id or '(not set)'}")
 
     typer.echo("")
-    typer.echo(f"Credentials file: {get_credentials_path()}")
-    typer.echo(f"Config file:      {get_config_path()}")
+    typer.echo("Authentication:")
+
+    if not registry_name:
+        typer.echo("  Status: Not configured")
+        typer.echo("")
+        typer.echo("Run 'stardag auth login' to authenticate")
+        return
+
+    creds = load_credentials(registry_name)
+    if creds is None:
+        typer.echo("  Status: Not logged in")
+        typer.echo("")
+        typer.echo(
+            f"Run 'stardag auth login --registry {registry_name}' to authenticate"
+        )
+        return
+
+    typer.echo("  Status: Logged in (has refresh token)")
+    typer.echo(f"  Credentials: {get_credentials_path(registry_name)}")
+
+    # Check for cached access token
+    if config.access_token:
+        typer.echo(f"  Access token: {config.access_token[:20]}... (cached)")
+    else:
+        typer.echo("  Access token: (not cached or expired)")
+
+    typer.echo("")
+    typer.echo("To switch profiles: STARDAG_PROFILE=<profile-name>")
+    typer.echo("To list profiles: stardag profile list")
 
 
 @app.command()
-def configure(
-    api_url: str | None = typer.Option(
+def refresh(
+    registry: str = typer.Option(
         None,
-        "--api-url",
-        "-u",
-        help="Update the API URL",
+        "--registry",
+        "-r",
+        help="Registry to refresh token for",
+    ),
+    org_id: str = typer.Option(
+        None,
+        "--org",
+        "-o",
+        help="Organization ID to get token for",
     ),
 ) -> None:
-    """Update configuration without re-authenticating.
+    """Refresh the access token using stored refresh token."""
+    config = get_config()
+    registry_name = registry or config.context.registry_name
+    organization_id = org_id or config.context.organization_id
 
-    Note: Prefer using 'stardag config set api-url <url>' instead.
-    """
-    if api_url is None:
-        typer.echo("No options provided. Use --api-url to update config.")
-        typer.echo("")
-        typer.echo("Tip: Use 'stardag config set api-url <url>' for configuration.")
+    if not registry_name:
+        typer.echo("Error: No registry specified and no active profile", err=True)
         raise typer.Exit(1)
 
-    set_api_url(api_url)
-    typer.echo(f"Updated API URL: {api_url}")
+    if not organization_id:
+        typer.echo("Error: No organization specified", err=True)
+        raise typer.Exit(1)
+
+    creds = load_credentials(registry_name)
+    if not creds or not creds.get("refresh_token"):
+        typer.echo(
+            "Error: No refresh token found. Run 'stardag auth login' first.", err=True
+        )
+        raise typer.Exit(1)
+
+    # Get registry URL
+    registry_url = get_registry_url(registry_name)
+    if not registry_url:
+        typer.echo(f"Error: Registry '{registry_name}' not found", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Refreshing token for {registry_name}/{organization_id}...")
+
+    # Refresh Keycloak token
+    token_endpoint = creds.get("token_endpoint")
+    refresh_token = creds.get("refresh_token")
+    client_id = creds.get("client_id")
+
+    if not token_endpoint or not refresh_token or not client_id:
+        typer.echo(
+            "Error: Invalid credentials (missing token_endpoint, refresh_token, or client_id).",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        tokens = _refresh_keycloak_token(
+            token_endpoint,
+            refresh_token,
+            client_id,
+        )
+
+        # Update stored refresh token if a new one was provided
+        if tokens.get("refresh_token"):
+            creds["refresh_token"] = tokens["refresh_token"]
+            save_credentials(creds, registry_name)
+
+    except Exception as e:
+        typer.echo(f"Error refreshing Keycloak token: {e}", err=True)
+        typer.echo("You may need to login again: stardag auth login")
+        raise typer.Exit(1)
+
+    # Exchange for internal token
+    try:
+        internal_tokens = _exchange_for_internal_token(
+            registry_url, tokens["access_token"], organization_id
+        )
+        access_token = internal_tokens["access_token"]
+        expires_in = internal_tokens.get("expires_in", 600)
+
+        save_access_token_cache(
+            registry_name, organization_id, access_token, expires_in
+        )
+        typer.echo("Access token refreshed and cached")
+
+    except Exception as e:
+        typer.echo(f"Error exchanging for internal token: {e}", err=True)
+        raise typer.Exit(1)

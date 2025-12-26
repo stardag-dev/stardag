@@ -1,34 +1,35 @@
 """Credential and configuration storage for Stardag CLI.
 
-Stores credentials and config per registry:
-- Credentials (OAuth tokens) in ~/.stardag/registries/{registry}/credentials.json
-- Config (active context) in ~/.stardag/registries/{registry}/config.json
+New storage model:
+- Credentials (refresh tokens) in ~/.stardag/credentials/{registry}.json
+- Access token cache in ~/.stardag/access-token-cache/{registry}__{org}.json
+- Config in ~/.stardag/config.toml (TOML format)
+- Target root cache in ~/.stardag/target-root-cache.json
 """
 
 import json
+import time
 from pathlib import Path
 from typing import TypedDict
 
 from stardag.config import (
-    get_registry_config_path,
+    TomlConfig,
+    get_access_token_cache_path,
+    get_config,
     get_registry_credentials_path,
-    get_registry_dir,
-    load_active_registry,
-    load_active_workspace,
-    load_workspace_target_roots,
-    save_active_registry,
-    save_active_workspace,
-    save_workspace_target_roots,
+    get_user_config_path,
+    load_toml_file,
+    save_toml_file,
+    update_cached_target_roots,
 )
 
 
-# --- Credentials (OAuth tokens) ---
+# --- Credentials (OAuth refresh tokens - per registry) ---
 
 
 class Credentials(TypedDict, total=False):
     """Stored credentials structure (OAuth tokens only)."""
 
-    access_token: str  # JWT access token
     refresh_token: str  # Refresh token for getting new access tokens
     token_endpoint: str  # Token endpoint for refresh
     client_id: str  # OIDC client ID
@@ -38,13 +39,16 @@ def load_credentials(registry: str | None = None) -> Credentials | None:
     """Load credentials from disk.
 
     Args:
-        registry: Registry name. If None, uses active registry.
+        registry: Registry name. If None, uses active registry from config.
 
     Returns:
         Credentials dict if file exists and is valid, None otherwise.
     """
     if registry is None:
-        registry = load_active_registry()
+        config = get_config()
+        registry = config.context.registry_name
+        if not registry:
+            return None
 
     path = get_registry_credentials_path(registry)
     if not path.exists():
@@ -63,10 +67,13 @@ def save_credentials(credentials: Credentials, registry: str | None = None) -> N
 
     Args:
         credentials: Credentials dict to save.
-        registry: Registry name. If None, uses active registry.
+        registry: Registry name. If None, uses active registry from config.
     """
     if registry is None:
-        registry = load_active_registry()
+        config = get_config()
+        registry = config.context.registry_name
+        if not registry:
+            raise ValueError("No registry specified and no active profile")
 
     path = get_registry_credentials_path(registry)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,13 +89,16 @@ def clear_credentials(registry: str | None = None) -> bool:
     """Clear stored credentials.
 
     Args:
-        registry: Registry name. If None, uses active registry.
+        registry: Registry name. If None, uses active registry from config.
 
     Returns:
         True if credentials were cleared, False if no credentials existed.
     """
     if registry is None:
-        registry = load_active_registry()
+        config = get_config()
+        registry = config.context.registry_name
+        if not registry:
+            return False
 
     path = get_registry_credentials_path(registry)
     if path.exists():
@@ -97,196 +107,346 @@ def clear_credentials(registry: str | None = None) -> bool:
     return False
 
 
-def get_access_token(registry: str | None = None) -> str | None:
-    """Get the stored access token."""
+def get_refresh_token(registry: str | None = None) -> str | None:
+    """Get the stored refresh token."""
     creds = load_credentials(registry)
     if creds is None:
         return None
-    return creds.get("access_token")
+    return creds.get("refresh_token")
 
 
-# --- Config (active context - org/workspace selection) ---
+# --- Access Token Cache (short-lived, per registry+org) ---
 
 
-class Config(TypedDict, total=False):
-    """Stored config structure (settings and active context).
+class AccessTokenCache(TypedDict, total=False):
+    """Cached access token structure."""
 
-    Note: workspace_id is stored in active_workspace file, not here.
-    Note: target_roots are stored in workspaces/{workspace_id}/target_roots.json.
-    """
-
-    # API settings
-    api_url: str  # Base URL of the Stardag API
-    timeout: float  # Request timeout in seconds
-
-    # Active context (organization only - workspace is in active_workspace file)
-    organization_id: str  # Active organization ID
-    organization_slug: str  # Active organization slug (for validation)
+    access_token: str  # JWT access token
+    expires_at: float  # Unix timestamp when token expires
 
 
-def load_config(registry: str | None = None) -> Config:
-    """Load config from disk.
+def load_access_token_cache(registry: str, org_id: str) -> AccessTokenCache | None:
+    """Load access token from cache.
 
     Args:
-        registry: Registry name. If None, uses active registry.
+        registry: Registry name.
+        org_id: Organization ID.
 
     Returns:
-        Config dict (empty dict if file doesn't exist).
+        AccessTokenCache dict if file exists and token is valid, None otherwise.
     """
-    if registry is None:
-        registry = load_active_registry()
-
-    path = get_registry_config_path(registry)
+    path = get_access_token_cache_path(registry, org_id)
     if not path.exists():
-        return Config()
+        return None
 
     try:
         with open(path) as f:
             data = json.load(f)
-        return Config(**data)
+        cache = AccessTokenCache(**data)
+
+        # Check if token is expired
+        expires_at = cache.get("expires_at", 0)
+        if expires_at <= time.time():
+            return None
+
+        return cache
     except (json.JSONDecodeError, TypeError, KeyError):
-        return Config()
+        return None
 
 
-def save_config(config: Config, registry: str | None = None) -> None:
-    """Save config to disk.
+def save_access_token_cache(
+    registry: str, org_id: str, access_token: str, expires_in: int
+) -> None:
+    """Save access token to cache.
 
     Args:
-        config: Config dict to save.
-        registry: Registry name. If None, uses active registry.
+        registry: Registry name.
+        org_id: Organization ID.
+        access_token: JWT access token.
+        expires_in: Token TTL in seconds.
     """
-    if registry is None:
-        registry = load_active_registry()
-
-    path = get_registry_config_path(registry)
+    path = get_access_token_cache_path(registry, org_id)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Calculate expiration time (subtract 30s buffer)
+    expires_at = time.time() + expires_in - 30
+
+    cache = AccessTokenCache(
+        access_token=access_token,
+        expires_at=expires_at,
+    )
+
     with open(path, "w") as f:
-        json.dump(config, f, indent=2)
+        json.dump(cache, f, indent=2)
+
+    # Make file readable only by owner (0600)
+    path.chmod(0o600)
 
 
-def clear_config(registry: str | None = None) -> bool:
-    """Clear stored config.
+def clear_access_token_cache(registry: str, org_id: str) -> bool:
+    """Clear cached access token.
 
     Args:
-        registry: Registry name. If None, uses active registry.
+        registry: Registry name.
+        org_id: Organization ID.
 
     Returns:
-        True if config was cleared, False if no config existed.
+        True if cache was cleared, False if no cache existed.
     """
-    if registry is None:
-        registry = load_active_registry()
-
-    path = get_registry_config_path(registry)
+    path = get_access_token_cache_path(registry, org_id)
     if path.exists():
         path.unlink()
         return True
     return False
 
 
-# --- Convenience functions ---
-
-
-def get_api_url(registry: str | None = None) -> str | None:
-    """Get the stored API URL from config."""
-    config = load_config(registry)
-    return config.get("api_url")
-
-
-def set_api_url(api_url: str, registry: str | None = None) -> None:
-    """Set the API URL."""
-    config = load_config(registry)
-    config["api_url"] = api_url.rstrip("/")
-    save_config(config, registry)
-
-
-def get_organization_id(registry: str | None = None) -> str | None:
-    """Get the active organization ID."""
-    config = load_config(registry)
-    return config.get("organization_id")
-
-
-def set_organization_id(
-    org_id: str, org_slug: str | None = None, registry: str | None = None
-) -> None:
-    """Set the active organization ID and slug.
-
-    Note: This does NOT clear the active workspace. Call clear_workspace()
-    separately if you want to clear it when switching organizations.
-    """
-    config = load_config(registry)
-    config["organization_id"] = org_id
-    if org_slug:
-        config["organization_slug"] = org_slug
-    save_config(config, registry)
-
-
-def get_workspace_id(registry: str | None = None) -> str | None:
-    """Get the active workspace ID from the active_workspace file."""
-    if registry is None:
-        registry = load_active_registry()
-    return load_active_workspace(registry)
-
-
-def set_workspace_id(workspace_id: str, registry: str | None = None) -> None:
-    """Set the active workspace ID in the active_workspace file."""
-    if registry is None:
-        registry = load_active_registry()
-    save_active_workspace(registry, workspace_id)
-
-
-def clear_workspace(registry: str | None = None) -> bool:
-    """Clear the active workspace for a registry.
+def get_access_token(
+    registry: str | None = None, org_id: str | None = None
+) -> str | None:
+    """Get a valid access token, loading from cache.
 
     Args:
         registry: Registry name. If None, uses active registry.
+        org_id: Organization ID. If None, uses active org.
 
     Returns:
-        True if workspace was cleared, False if no workspace was set.
+        Access token if available and valid, None otherwise.
     """
+    if registry is None or org_id is None:
+        config = get_config()
+        registry = registry or config.context.registry_name
+        org_id = org_id or config.context.organization_id
+
+    if not registry or not org_id:
+        return None
+
+    cache = load_access_token_cache(registry, org_id)
+    if cache:
+        return cache.get("access_token")
+
+    return None
+
+
+# --- TOML Config Management ---
+
+
+def load_toml_config() -> TomlConfig:
+    """Load the user's TOML config."""
+    data = load_toml_file(get_user_config_path())
+    return TomlConfig.from_toml_dict(data)
+
+
+def save_toml_config(config: TomlConfig) -> None:
+    """Save the user's TOML config."""
+    # Convert back to dict format
+    data: dict = {}
+
+    if config.registry:
+        data["registry"] = {
+            name: {"url": reg.url} for name, reg in config.registry.items()
+        }
+
+    if config.profile:
+        data["profile"] = {
+            name: {
+                "registry": prof.registry,
+                "organization": prof.organization,
+                "workspace": prof.workspace,
+            }
+            for name, prof in config.profile.items()
+        }
+
+    if config.default:
+        data["default"] = config.default
+
+    save_toml_file(get_user_config_path(), data)
+
+
+def get_registry_url(registry: str | None = None) -> str | None:
+    """Get the URL for a registry from config."""
+    config = load_toml_config()
     if registry is None:
-        registry = load_active_registry()
+        # Get from active profile
+        stardag_config = get_config()
+        return stardag_config.api.url
 
-    from stardag.config import get_registry_active_workspace_path
+    reg_config = config.registry.get(registry)
+    if reg_config:
+        return reg_config.url
+    return None
 
-    path = get_registry_active_workspace_path(registry)
-    if path.exists():
-        path.unlink()
+
+def add_registry(name: str, url: str) -> None:
+    """Add or update a registry in config.
+
+    Args:
+        name: Registry name.
+        url: Registry URL.
+    """
+    config = load_toml_config()
+    from stardag.config import RegistryConfig
+
+    config.registry[name] = RegistryConfig(url=url.rstrip("/"))
+    save_toml_config(config)
+
+
+def remove_registry(name: str) -> bool:
+    """Remove a registry from config.
+
+    Args:
+        name: Registry name.
+
+    Returns:
+        True if registry was removed, False if it didn't exist.
+    """
+    config = load_toml_config()
+    if name in config.registry:
+        del config.registry[name]
+        save_toml_config(config)
         return True
     return False
 
 
-def get_timeout(registry: str | None = None) -> float | None:
-    """Get the stored timeout from config."""
-    config = load_config(registry)
-    return config.get("timeout")
+def list_registries() -> dict[str, str]:
+    """List all registries from config.
+
+    Returns:
+        Dict of registry name to URL.
+    """
+    config = load_toml_config()
+    return {name: reg.url for name, reg in config.registry.items()}
 
 
-def set_timeout(timeout: float, registry: str | None = None) -> None:
-    """Set the timeout."""
-    config = load_config(registry)
-    config["timeout"] = timeout
-    save_config(config, registry)
+def add_profile(name: str, registry: str, organization: str, workspace: str) -> None:
+    """Add or update a profile in config.
+
+    Args:
+        name: Profile name.
+        registry: Registry name.
+        organization: Organization ID or slug.
+        workspace: Workspace ID or slug.
+    """
+    config = load_toml_config()
+    from stardag.config import ProfileConfig
+
+    config.profile[name] = ProfileConfig(
+        registry=registry,
+        organization=organization,
+        workspace=workspace,
+    )
+    save_toml_config(config)
 
 
-def get_target_roots(registry: str | None = None) -> dict[str, str]:
-    """Get the target roots for the active workspace."""
-    if registry is None:
-        registry = load_active_registry()
-    workspace_id = load_active_workspace(registry)
-    if not workspace_id:
+def remove_profile(name: str) -> bool:
+    """Remove a profile from config.
+
+    Args:
+        name: Profile name.
+
+    Returns:
+        True if profile was removed, False if it didn't exist.
+    """
+    config = load_toml_config()
+    if name in config.profile:
+        del config.profile[name]
+        save_toml_config(config)
+        return True
+    return False
+
+
+def list_profiles() -> dict[str, dict[str, str]]:
+    """List all profiles from config.
+
+    Returns:
+        Dict of profile name to profile details.
+    """
+    config = load_toml_config()
+    return {
+        name: {
+            "registry": prof.registry,
+            "organization": prof.organization,
+            "workspace": prof.workspace,
+        }
+        for name, prof in config.profile.items()
+    }
+
+
+def get_default_profile() -> str | None:
+    """Get the default profile name from config."""
+    config = load_toml_config()
+    return config.default.get("profile")
+
+
+def set_default_profile(profile: str) -> None:
+    """Set the default profile in config.
+
+    Args:
+        profile: Profile name.
+    """
+    config = load_toml_config()
+    config.default["profile"] = profile
+    save_toml_config(config)
+
+
+# --- Target Roots ---
+
+
+def get_target_roots(
+    registry_url: str | None = None,
+    organization_id: str | None = None,
+    workspace_id: str | None = None,
+) -> dict[str, str]:
+    """Get target roots from cache.
+
+    Args:
+        registry_url: Registry URL. If None, uses active config.
+        organization_id: Organization ID. If None, uses active config.
+        workspace_id: Workspace ID. If None, uses active config.
+
+    Returns:
+        Dict of target root name to URI prefix.
+    """
+    config = get_config()
+    registry_url = registry_url or config.api.url
+    organization_id = organization_id or config.context.organization_id
+    workspace_id = workspace_id or config.context.workspace_id
+
+    if not registry_url or not organization_id or not workspace_id:
         return {}
-    return load_workspace_target_roots(registry, workspace_id)
+
+    from stardag.config import get_cached_target_roots
+
+    return get_cached_target_roots(registry_url, organization_id, workspace_id) or {}
 
 
-def set_target_roots(target_roots: dict[str, str], registry: str | None = None) -> None:
-    """Set the target roots for the active workspace."""
-    if registry is None:
-        registry = load_active_registry()
-    workspace_id = load_active_workspace(registry)
-    if not workspace_id:
-        raise ValueError("No active workspace. Set a workspace first.")
-    save_workspace_target_roots(registry, workspace_id, target_roots)
+def set_target_roots(
+    target_roots: dict[str, str],
+    registry_url: str | None = None,
+    organization_id: str | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Update target roots in cache.
+
+    Args:
+        target_roots: Dict of target root name to URI prefix.
+        registry_url: Registry URL. If None, uses active config.
+        organization_id: Organization ID. If None, uses active config.
+        workspace_id: Workspace ID. If None, uses active config.
+    """
+    config = get_config()
+    registry_url = registry_url or config.api.url
+    organization_id = organization_id or config.context.organization_id
+    workspace_id = workspace_id or config.context.workspace_id
+
+    if not registry_url or not organization_id or not workspace_id:
+        raise ValueError("Registry URL, organization ID, and workspace ID are required")
+
+    update_cached_target_roots(
+        registry_url,
+        organization_id,
+        workspace_id,
+        target_roots,
+    )
 
 
 # --- Path convenience functions (for CLI display) ---
@@ -295,69 +455,11 @@ def set_target_roots(target_roots: dict[str, str], registry: str | None = None) 
 def get_credentials_path(registry: str | None = None) -> Path:
     """Get the path to the credentials file for display purposes."""
     if registry is None:
-        registry = load_active_registry()
+        config = get_config()
+        registry = config.context.registry_name or "local"
     return get_registry_credentials_path(registry)
 
 
-def get_config_path(registry: str | None = None) -> Path:
+def get_config_path() -> Path:
     """Get the path to the config file for display purposes."""
-    if registry is None:
-        registry = load_active_registry()
-    return get_registry_config_path(registry)
-
-
-# --- Registry management ---
-
-
-def list_registries() -> list[str]:
-    """List all available registries."""
-    from stardag.config import get_registries_dir
-
-    registries_dir = get_registries_dir()
-    if not registries_dir.exists():
-        return []
-
-    return [r.name for r in registries_dir.iterdir() if r.is_dir()]
-
-
-def get_active_registry() -> str:
-    """Get the active registry name."""
-    return load_active_registry()
-
-
-def set_active_registry(registry: str) -> None:
-    """Set the active registry."""
-    save_active_registry(registry)
-
-
-def create_registry(registry: str, api_url: str) -> None:
-    """Create a new registry with the given API URL.
-
-    Args:
-        registry: Registry name.
-        api_url: API URL for this registry.
-    """
-    # Ensure registry directory exists
-    registry_dir = get_registry_dir(registry)
-    registry_dir.mkdir(parents=True, exist_ok=True)
-
-    # Set API URL in config
-    set_api_url(api_url, registry)
-
-
-def delete_registry(registry: str) -> bool:
-    """Delete a registry and all its data.
-
-    Args:
-        registry: Registry name.
-
-    Returns:
-        True if registry was deleted, False if it didn't exist.
-    """
-    import shutil
-
-    registry_dir = get_registry_dir(registry)
-    if registry_dir.exists():
-        shutil.rmtree(registry_dir)
-        return True
-    return False
+    return get_user_config_path()

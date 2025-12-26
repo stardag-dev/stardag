@@ -1,6 +1,5 @@
 """Tests for CLI registry management commands."""
 
-import json
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -8,9 +7,9 @@ from unittest import mock
 import pytest
 
 from stardag.cli.credentials import (
-    create_registry,
-    delete_registry,
+    add_registry,
     list_registries,
+    remove_registry,
 )
 
 
@@ -19,92 +18,72 @@ def temp_config_dir():
     """Create a temporary directory for stardag config."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir)
-        registries_dir = tmppath / "registries"
-        registries_dir.mkdir()
+        config_path = tmppath / "config.toml"
 
         # Patch the config module path functions
         with mock.patch("stardag.config.get_stardag_dir", return_value=tmppath):
             with mock.patch(
-                "stardag.config.get_registries_dir", return_value=registries_dir
+                "stardag.config.get_user_config_path", return_value=config_path
             ):
                 with mock.patch(
-                    "stardag.config.get_registry_dir",
-                    side_effect=lambda r: registries_dir / r,
+                    "stardag.cli.credentials.get_user_config_path",
+                    return_value=config_path,
                 ):
-                    with mock.patch(
-                        "stardag.config.get_registry_config_path",
-                        side_effect=lambda r: registries_dir / r / "config.json",
-                    ):
-                        with mock.patch(
-                            "stardag.config.get_registry_credentials_path",
-                            side_effect=lambda r: registries_dir
-                            / r
-                            / "credentials.json",
-                        ):
-                            with mock.patch(
-                                "stardag.config.get_active_registry_path",
-                                return_value=tmppath / "active_registry",
-                            ):
-                                with mock.patch(
-                                    "stardag.config.load_active_registry",
-                                    return_value="default",
-                                ):
-                                    yield tmppath, registries_dir
+                    yield tmppath, config_path
 
 
 class TestListRegistries:
     def test_returns_empty_when_no_registries(self, temp_config_dir):
-        """Test that list_registries returns empty list when no registries exist."""
-        _, registries_dir = temp_config_dir
+        """Test that list_registries returns empty dict when no registries exist."""
+        _, config_path = temp_config_dir
         result = list_registries()
-        assert result == []
+        assert result == {}
 
     def test_returns_registries_when_exist(self, temp_config_dir):
-        """Test that list_registries returns all registry directories."""
-        _, registries_dir = temp_config_dir
-        (registries_dir / "local").mkdir()
-        (registries_dir / "central").mkdir()
+        """Test that list_registries returns all registries."""
+        _, config_path = temp_config_dir
+        add_registry("local", "http://localhost:8000")
+        add_registry("central", "https://api.stardag.com")
 
         result = list_registries()
-        assert set(result) == {"local", "central"}
+        assert result == {
+            "local": "http://localhost:8000",
+            "central": "https://api.stardag.com",
+        }
 
 
-class TestCreateRegistry:
-    def test_creates_registry_directory(self, temp_config_dir):
-        """Test that create_registry creates the registry directory."""
-        _, registries_dir = temp_config_dir
-        create_registry("test-registry", "http://localhost:8000")
+class TestAddRegistry:
+    def test_creates_registry_entry(self, temp_config_dir):
+        """Test that add_registry creates a registry entry in config."""
+        _, config_path = temp_config_dir
+        add_registry("test-registry", "http://localhost:8000")
 
-        registry_dir = registries_dir / "test-registry"
-        assert registry_dir.exists()
+        result = list_registries()
+        assert "test-registry" in result
+        assert result["test-registry"] == "http://localhost:8000"
 
-    def test_creates_config_with_api_url(self, temp_config_dir):
-        """Test that create_registry saves the API URL."""
-        _, registries_dir = temp_config_dir
-        create_registry("test-registry", "http://api.example.com")
+    def test_strips_trailing_slash_from_url(self, temp_config_dir):
+        """Test that add_registry strips trailing slashes from URL."""
+        _, config_path = temp_config_dir
+        add_registry("test-registry", "http://api.example.com/")
 
-        config_path = registries_dir / "test-registry" / "config.json"
-        assert config_path.exists()
-
-        with open(config_path) as f:
-            config = json.load(f)
-        assert config["api_url"] == "http://api.example.com"
+        result = list_registries()
+        assert result["test-registry"] == "http://api.example.com"
 
 
-class TestDeleteRegistry:
-    def test_deletes_existing_registry(self, temp_config_dir):
-        """Test that delete_registry removes the registry directory."""
-        _, registries_dir = temp_config_dir
-        registry_dir = registries_dir / "to-delete"
-        registry_dir.mkdir(parents=True)
-        (registry_dir / "config.json").write_text("{}")
+class TestRemoveRegistry:
+    def test_removes_existing_registry(self, temp_config_dir):
+        """Test that remove_registry removes the registry."""
+        _, config_path = temp_config_dir
+        add_registry("to-delete", "http://localhost:8000")
 
-        result = delete_registry("to-delete")
+        result = remove_registry("to-delete")
 
         assert result is True
-        assert not registry_dir.exists()
+        assert "to-delete" not in list_registries()
 
     def test_returns_false_for_nonexistent_registry(self, temp_config_dir):
-        """Test that delete_registry returns False for nonexistent registry."""
-        result = delete_registry("nonexistent")
+        """Test that remove_registry returns False for nonexistent registry."""
+        _, config_path = temp_config_dir
+        result = remove_registry("nonexistent")
         assert result is False

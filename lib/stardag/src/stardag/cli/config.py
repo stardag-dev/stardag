@@ -1,39 +1,32 @@
 """Configuration commands for Stardag CLI.
 
-Manages the active context (organization and workspace) for SDK operations.
+Manages profiles and shows current configuration.
+Configuration is stored in ~/.stardag/config.toml.
 """
 
 import typer
 
 from stardag.cli.credentials import (
-    clear_workspace,
+    add_profile,
+    get_access_token,
     get_config_path,
-    get_organization_id,
-    get_target_roots,
-    get_workspace_id,
-    load_config,
-    load_credentials,
-    set_api_url,
-    set_organization_id,
+    get_default_profile,
+    get_registry_url,
+    list_profiles,
+    list_registries,
+    remove_profile,
+    set_default_profile,
     set_target_roots,
-    set_timeout,
-    set_workspace_id,
 )
+from stardag.config import get_config
 
 app = typer.Typer(help="Manage Stardag CLI configuration")
 
-# Subcommands for 'set' and 'list'
-set_app = typer.Typer(help="Set configuration values")
-list_app = typer.Typer(help="List available resources")
 
-app.add_typer(set_app, name="set")
-app.add_typer(list_app, name="list")
-
-
-def _get_authenticated_client():
+def _get_authenticated_client(registry: str | None = None, org_id: str | None = None):
     """Get an authenticated HTTP client.
 
-    Returns tuple of (client, api_url) or raises Exit if not authenticated.
+    Returns tuple of (client, api_url, access_token) or raises Exit if not authenticated.
     """
     try:
         import httpx
@@ -43,24 +36,27 @@ def _get_authenticated_client():
         )
         raise typer.Exit(1)
 
-    creds = load_credentials()
-    if creds is None:
-        typer.echo("Error: Not logged in. Run 'stardag auth login' first.", err=True)
-        raise typer.Exit(1)
+    config = get_config()
+    registry_name = registry or config.context.registry_name
+    organization_id = org_id or config.context.organization_id
 
-    access_token = creds.get("access_token")
-    if not access_token:
+    if not registry_name:
         typer.echo(
-            "Error: Invalid credentials. Run 'stardag auth login' again.", err=True
+            "Error: No registry configured. Set STARDAG_PROFILE or run 'stardag auth login'.",
+            err=True,
         )
         raise typer.Exit(1)
 
-    # Get api_url from config (not credentials)
-    config = load_config()
-    api_url = config.get("api_url")
+    api_url = get_registry_url(registry_name)
     if not api_url:
+        typer.echo(f"Error: Registry '{registry_name}' not found.", err=True)
+        raise typer.Exit(1)
+
+    # Get access token from cache
+    access_token = get_access_token(registry_name, organization_id)
+    if not access_token:
         typer.echo(
-            "Error: API URL not configured. Run 'stardag auth login' or 'stardag config set api-url <url>'.",
+            "Error: No access token. Run 'stardag auth refresh' or 'stardag auth login'.",
             err=True,
         )
         raise typer.Exit(1)
@@ -68,233 +64,231 @@ def _get_authenticated_client():
     headers = {"Authorization": f"Bearer {access_token}"}
     client = httpx.Client(timeout=10.0, headers=headers)
 
-    return client, api_url
+    return client, api_url, access_token
 
 
 # --- Main config commands ---
 
 
-@app.command("get")
-def get_config() -> None:
-    """Show current configuration."""
-    config = load_config()
+@app.command("show")
+def show_config() -> None:
+    """Show current configuration and active context."""
+    config = get_config()
 
-    typer.echo("Current Configuration:")
-    typer.echo(
-        f"  API URL:      {config.get('api_url', 'not set (default: http://localhost:8000)')}"
-    )
-    typer.echo(f"  Timeout:      {config.get('timeout', 'not set (default: 30.0)')}")
-    typer.echo(f"  Organization: {config.get('organization_id', 'not set')}")
-    typer.echo(f"  Workspace:    {config.get('workspace_id', 'not set')}")
+    typer.echo("Configuration:")
+    typer.echo(f"  Config file: {get_config_path()}")
+    typer.echo("")
 
-    target_roots = get_target_roots()
-    if target_roots:
-        typer.echo(f"  Target Roots: {len(target_roots)} configured")
+    typer.echo("Active Context:")
+    if config.context.profile:
+        typer.echo(f"  Profile: {config.context.profile}")
     else:
-        typer.echo("  Target Roots: none")
+        typer.echo("  Profile: (none - using env vars or defaults)")
+    typer.echo(f"  Registry: {config.context.registry_name or '(not set)'}")
+    typer.echo(f"  API URL: {config.api.url}")
+    typer.echo(f"  Organization: {config.context.organization_id or '(not set)'}")
+    typer.echo(f"  Workspace: {config.context.workspace_id or '(not set)'}")
 
     typer.echo("")
-    typer.echo(f"Config file: {get_config_path()}")
+    typer.echo("Target Roots:")
+    if config.target.roots:
+        for name, uri_prefix in sorted(config.target.roots.items()):
+            typer.echo(f"  {name}: {uri_prefix}")
+    else:
+        typer.echo("  (none)")
+
+    typer.echo("")
+    typer.echo("Authentication:")
+    if config.api_key:
+        typer.echo("  Method: API Key")
+    elif config.access_token:
+        typer.echo("  Method: JWT")
+        typer.echo(f"  Token: {config.access_token[:20]}...")
+    else:
+        typer.echo("  Method: Not authenticated")
 
 
-# --- Set commands ---
+# --- Profile commands ---
+
+profile_app = typer.Typer(help="Manage profiles")
+app.add_typer(profile_app, name="profile")
 
 
-@set_app.command("api-url")
-def set_api_url_cmd(
-    url: str = typer.Argument(..., help="API URL to set"),
-) -> None:
-    """Set the API URL."""
-    set_api_url(url)
-    typer.echo(f"API URL set to: {url.rstrip('/')}")
-
-
-@set_app.command("timeout")
-def set_timeout_cmd(
-    timeout: float = typer.Argument(..., help="Timeout in seconds"),
-) -> None:
-    """Set the request timeout."""
-    set_timeout(timeout)
-    typer.echo(f"Timeout set to: {timeout}s")
-
-
-def _resolve_organization(
-    client, api_url: str, org_id_or_slug: str
-) -> tuple[str, str | None]:
-    """Resolve an organization ID or slug to an ID and slug.
-
-    Returns tuple of (org_id, org_slug).
-    """
-    # Try to resolve via /me endpoint to get both ID and slug
-    try:
-        response = client.get(f"{api_url}/api/v1/ui/me")
-        if response.status_code == 200:
-            data = response.json()
-            for org in data.get("organizations", []):
-                if org["slug"] == org_id_or_slug or org["id"] == org_id_or_slug:
-                    return str(org["id"]), str(org["slug"])
-    except Exception:
-        pass
-
-    # If we couldn't resolve, assume it's an ID and return without slug
-    return org_id_or_slug, None
-
-
-@set_app.command("organization")
-def set_organization(
-    org_id_or_slug: str = typer.Argument(
-        ..., help="Organization ID or slug to set as active"
+@profile_app.command("add")
+def profile_add(
+    name: str = typer.Argument(..., help="Profile name"),
+    registry: str = typer.Option(..., "--registry", "-r", help="Registry name"),
+    organization: str = typer.Option(
+        ..., "--organization", "-o", help="Organization ID or slug"
+    ),
+    workspace: str = typer.Option(
+        ..., "--workspace", "-w", help="Workspace ID or slug"
+    ),
+    set_default: bool = typer.Option(
+        False, "--default", "-d", help="Set as default profile"
     ),
 ) -> None:
-    """Set the active organization.
+    """Add or update a profile.
 
-    Accepts either an organization ID or slug.
-    This also clears the active workspace (since workspaces belong to organizations).
+    A profile defines the (registry, organization, workspace) tuple
+    for easy switching between different contexts.
+
+    Examples:
+        stardag config profile add local-dev -r local -o default -w default
+        stardag config profile add prod -r central -o my-org -w production --default
     """
-    # Validate the organization exists and user has access
-    client, api_url = _get_authenticated_client()
-
-    try:
-        # Resolve slug to ID and get slug for validation
-        org_id, org_slug = _resolve_organization(client, api_url, org_id_or_slug)
-
-        # Try to get workspaces for this org (validates access)
-        response = client.get(f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces")
-
-        if response.status_code == 404:
-            typer.echo(f"Error: Organization '{org_id_or_slug}' not found.", err=True)
-            raise typer.Exit(1)
-        elif response.status_code == 403:
-            typer.echo(
-                f"Error: You don't have access to organization '{org_id_or_slug}'.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        elif response.status_code != 200:
-            typer.echo(
-                f"Error: Failed to verify organization: {response.status_code}",
-                err=True,
-            )
-            raise typer.Exit(1)
-
-        workspaces = response.json()
-    except Exception as e:
-        if isinstance(e, typer.Exit):
-            raise
-        typer.echo(f"Error: {e}", err=True)
+    # Verify registry exists
+    registries = list_registries()
+    if registry not in registries:
+        typer.echo(f"Error: Registry '{registry}' not found.", err=True)
+        typer.echo("Add it with: stardag registry add <name> --url <url>")
         raise typer.Exit(1)
-    finally:
-        client.close()
 
-    # Clear workspace when changing org (workspaces belong to specific orgs)
-    if clear_workspace():
-        typer.echo("Cleared previous workspace (belongs to different org)")
+    add_profile(name, registry, organization, workspace)
+    typer.echo(f"Profile '{name}' added.")
 
-    set_organization_id(org_id, org_slug)
-    typer.echo(f"Active organization set to: {org_id}")
+    if set_default:
+        set_default_profile(name)
+        typer.echo("Set as default profile.")
 
-    if workspaces:
-        typer.echo("")
-        typer.echo("Available workspaces:")
-        for ws in workspaces:
-            personal = " (personal)" if ws.get("owner_id") else ""
-            typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}")
+    typer.echo("")
+    typer.echo(f"Use with: STARDAG_PROFILE={name}")
+
+
+@profile_app.command("list")
+def profile_list() -> None:
+    """List all configured profiles."""
+    profiles = list_profiles()
+    default = get_default_profile()
+
+    if not profiles:
+        typer.echo("No profiles configured.")
         typer.echo("")
         typer.echo(
-            "Set active workspace with: stardag config set workspace <workspace-id-or-slug>"
+            "Create one with: stardag config profile add <name> -r <registry> -o <org> -w <workspace>"
         )
+        typer.echo("Or run: stardag auth login")
+        return
+
+    typer.echo("Profiles:")
+    typer.echo("")
+    for name, details in profiles.items():
+        is_default = " (default)" if name == default else ""
+        typer.echo(f"  {name}{is_default}")
+        typer.echo(f"    registry: {details['registry']}")
+        typer.echo(f"    organization: {details['organization']}")
+        typer.echo(f"    workspace: {details['workspace']}")
+        typer.echo("")
 
 
-def _sync_target_roots(client, api_url: str, org_id: str, workspace_id: str) -> bool:
-    """Sync target roots from API to local config.
+@profile_app.command("remove")
+def profile_remove(
+    name: str = typer.Argument(..., help="Profile name to remove"),
+) -> None:
+    """Remove a profile from configuration."""
+    if remove_profile(name):
+        typer.echo(f"Profile '{name}' removed.")
+    else:
+        typer.echo(f"Profile '{name}' not found.")
+        raise typer.Exit(1)
 
-    Returns True if sync was successful, False otherwise.
+
+@profile_app.command("use")
+def profile_use(
+    name: str = typer.Argument(..., help="Profile name to set as default"),
+) -> None:
+    """Set a profile as the default.
+
+    The default profile is used when STARDAG_PROFILE is not set.
     """
+    profiles = list_profiles()
+    if name not in profiles:
+        typer.echo(f"Error: Profile '{name}' not found.", err=True)
+        raise typer.Exit(1)
+
+    set_default_profile(name)
+    typer.echo(f"Default profile set to: {name}")
+
+
+# --- Target roots commands ---
+
+target_roots_app = typer.Typer(help="Manage target roots")
+app.add_typer(target_roots_app, name="target-roots")
+
+
+@target_roots_app.command("list")
+def target_roots_list() -> None:
+    """List cached target roots for the active context."""
+    config = get_config()
+    target_roots = config.target.roots
+
+    if not target_roots:
+        typer.echo("No target roots cached.")
+        typer.echo("")
+        typer.echo("Run 'stardag config target-roots sync' to fetch from server.")
+        return
+
+    typer.echo("Target Roots:")
+    for name, uri_prefix in sorted(target_roots.items()):
+        typer.echo(f"  {name}: {uri_prefix}")
+
+
+@target_roots_app.command("sync")
+def target_roots_sync() -> None:
+    """Sync target roots from the API.
+
+    Fetches the latest target roots configuration from the central API
+    for the active workspace.
+    """
+    config = get_config()
+    org_id = config.context.organization_id
+    workspace_id = config.context.workspace_id
+
+    if not org_id:
+        typer.echo(
+            "Error: No organization set. Use a profile or set STARDAG_ORGANIZATION_ID.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not workspace_id:
+        typer.echo(
+            "Error: No workspace set. Use a profile or set STARDAG_WORKSPACE_ID.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    client, api_url, _ = _get_authenticated_client()
+
     try:
+        typer.echo(f"Syncing target roots from {api_url}...")
+
         response = client.get(
             f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/target-roots"
         )
 
         if response.status_code != 200:
             typer.echo(
-                f"Warning: Failed to sync target roots: {response.status_code}",
-                err=True,
+                f"Error: Failed to fetch target roots: {response.status_code}", err=True
             )
-            return False
+            raise typer.Exit(1)
 
         roots = response.json()
         target_roots = {root["name"]: root["uri_prefix"] for root in roots}
-        set_target_roots(target_roots)
-        return True
 
-    except Exception as e:
-        typer.echo(f"Warning: Failed to sync target roots: {e}", err=True)
-        return False
-
-
-@set_app.command("workspace")
-def set_workspace(
-    workspace_id_or_slug: str = typer.Argument(
-        ..., help="Workspace ID or slug to set as active"
-    ),
-) -> None:
-    """Set the active workspace.
-
-    Accepts either a workspace ID or slug.
-    """
-    # Check if organization is set
-    org_id = get_organization_id()
-    if not org_id:
-        typer.echo(
-            "Error: No organization set. Run 'stardag config set organization <id>' first.",
-            err=True,
+        set_target_roots(
+            target_roots,
+            registry_url=api_url,
+            organization_id=org_id,
+            workspace_id=workspace_id,
         )
-        raise typer.Exit(1)
 
-    # Validate the workspace exists and belongs to the active org
-    client, api_url = _get_authenticated_client()
-
-    try:
-        response = client.get(f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces")
-
-        if response.status_code != 200:
-            typer.echo(
-                f"Error: Failed to fetch workspaces: {response.status_code}", err=True
-            )
-            raise typer.Exit(1)
-
-        workspaces = response.json()
-
-        # Resolve slug to ID if needed
-        workspace_id = None
-        for ws in workspaces:
-            if ws["id"] == workspace_id_or_slug or ws["slug"] == workspace_id_or_slug:
-                workspace_id = ws["id"]
-                break
-
-        if workspace_id is None:
-            typer.echo(
-                f"Error: Workspace '{workspace_id_or_slug}' not found in organization.",
-                err=True,
-            )
-            typer.echo("")
-            typer.echo("Available workspaces:")
-            for ws in workspaces:
-                personal = " (personal)" if ws.get("owner_id") else ""
-                typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}")
-            raise typer.Exit(1)
-
-        # Save workspace ID and sync target roots
-        set_workspace_id(workspace_id)
-        typer.echo(f"Active workspace set to: {workspace_id}")
-
-        # Sync target roots from API
-        if _sync_target_roots(client, api_url, org_id, workspace_id):
-            target_roots = get_target_roots()
-            if target_roots:
-                typer.echo(f"Synced {len(target_roots)} target root(s)")
-            else:
-                typer.echo("No target roots configured for this workspace")
+        if target_roots:
+            typer.echo(f"Synced {len(target_roots)} target root(s):")
+            for name, uri_prefix in sorted(target_roots.items()):
+                typer.echo(f"  {name}: {uri_prefix}")
+        else:
+            typer.echo("No target roots configured for this workspace.")
 
     except Exception as e:
         if isinstance(e, typer.Exit):
@@ -305,13 +299,16 @@ def set_workspace(
         client.close()
 
 
-# --- List commands ---
+# --- List commands (legacy, kept for convenience) ---
+
+list_app = typer.Typer(help="List available resources")
+app.add_typer(list_app, name="list")
 
 
 @list_app.command("organizations")
 def list_organizations() -> None:
     """List organizations you have access to."""
-    client, api_url = _get_authenticated_client()
+    client, api_url, _ = _get_authenticated_client()
 
     try:
         response = client.get(f"{api_url}/api/v1/ui/me")
@@ -334,11 +331,10 @@ def list_organizations() -> None:
 
     if not organizations:
         typer.echo("No organizations found.")
-        typer.echo("")
-        typer.echo("Create an organization in the web UI first.")
         return
 
-    current_org = get_organization_id()
+    config = get_config()
+    current_org = config.context.organization_id
 
     typer.echo("Organizations:")
     for org in organizations:
@@ -355,16 +351,17 @@ def list_organizations() -> None:
 @list_app.command("workspaces")
 def list_workspaces() -> None:
     """List workspaces in the active organization."""
-    org_id = get_organization_id()
+    config = get_config()
+    org_id = config.context.organization_id
 
     if not org_id:
         typer.echo(
-            "Error: No organization set. Run 'stardag config set organization <id>' first.",
+            "Error: No organization set. Use a profile or set STARDAG_ORGANIZATION_ID.",
             err=True,
         )
         raise typer.Exit(1)
 
-    client, api_url = _get_authenticated_client()
+    client, api_url, _ = _get_authenticated_client()
 
     try:
         response = client.get(f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces")
@@ -388,79 +385,14 @@ def list_workspaces() -> None:
         typer.echo(f"No workspaces found in organization {org_id}.")
         return
 
-    current_ws = get_workspace_id()
+    current_ws = config.context.workspace_id
 
     typer.echo(f"Workspaces in organization {org_id}:")
     for ws in workspaces:
         marker = " *" if ws["id"] == current_ws else ""
-        typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){marker}")
+        personal = " (personal)" if ws.get("owner_id") else ""
+        typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}{marker}")
 
     if current_ws:
         typer.echo("")
         typer.echo("* = active workspace")
-
-
-@list_app.command("target-roots")
-def list_target_roots_cmd() -> None:
-    """List synced target roots for the active workspace."""
-    target_roots = get_target_roots()
-
-    if not target_roots:
-        typer.echo("No target roots configured.")
-        typer.echo("")
-        typer.echo(
-            "Set a workspace with 'stardag config set workspace <id>' to sync target roots."
-        )
-        return
-
-    typer.echo("Target Roots:")
-    for name, uri_prefix in sorted(target_roots.items()):
-        typer.echo(f"  {name}: {uri_prefix}")
-
-
-# --- Sync command ---
-
-
-@app.command("sync")
-def sync_config() -> None:
-    """Sync workspace settings from the API.
-
-    Fetches the latest target roots configuration from the central API
-    for the active workspace.
-    """
-    org_id = get_organization_id()
-    workspace_id = get_workspace_id()
-
-    if not org_id:
-        typer.echo(
-            "Error: No organization set. Run 'stardag config set organization <id>' first.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    if not workspace_id:
-        typer.echo(
-            "Error: No workspace set. Run 'stardag config set workspace <id>' first.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    client, api_url = _get_authenticated_client()
-
-    try:
-        typer.echo(f"Syncing workspace settings from {api_url}...")
-
-        if _sync_target_roots(client, api_url, org_id, workspace_id):
-            target_roots = get_target_roots()
-            if target_roots:
-                typer.echo(f"Synced {len(target_roots)} target root(s):")
-                for name, uri_prefix in sorted(target_roots.items()):
-                    typer.echo(f"  {name}: {uri_prefix}")
-            else:
-                typer.echo("No target roots configured for this workspace.")
-        else:
-            typer.echo("Warning: Failed to sync target roots.", err=True)
-            raise typer.Exit(1)
-
-    finally:
-        client.close()

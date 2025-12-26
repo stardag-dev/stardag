@@ -88,9 +88,6 @@ def init_registry():
 
     config = config_provider.get()
 
-    # Validate organization against project restrictions
-    config.validate_organization()
-
     # Use API registry if we have authentication or explicit API URL set
     if (
         config.api_key
