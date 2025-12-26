@@ -20,6 +20,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app/stardag-ui
       # Skip pyright hooks in pre-commit (they're informational with || true anyway)
       # Pyright runs separately in tox when needed
       - name: Set environment variable to skip pyright
