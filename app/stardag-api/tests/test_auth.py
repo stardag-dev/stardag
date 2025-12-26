@@ -4,19 +4,22 @@ import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from httpx import ASGITransport, AsyncClient
 
-from stardag_api.auth.dependencies import get_or_create_user, get_token
+from stardag_api.auth.dependencies import get_token
 from stardag_api.auth.jwt import AuthenticationError, JWTValidator, TokenPayload
+from stardag_api.auth.tokens import (
+    InternalTokenManager,
+    InternalTokenPayload,
+    TokenInvalidError,
+)
 from stardag_api.db import get_db
 from stardag_api.main import app
 from stardag_api.models import Organization, OrganizationMember, User
 from stardag_api.models.enums import OrganizationRole
 
 
-# --- TokenPayload tests ---
+# --- Keycloak TokenPayload tests (for /auth/exchange) ---
 
 
 def test_token_payload_from_dict():
@@ -193,7 +196,7 @@ def test_token_payload_display_name_fallback_to_sub():
     assert token.display_name == "user-123"
 
 
-# --- JWTValidator tests ---
+# --- Keycloak JWTValidator tests ---
 
 
 @pytest.mark.asyncio
@@ -290,157 +293,138 @@ async def test_jwt_validator_missing_kid():
     assert "missing key ID" in str(exc_info.value)
 
 
-# --- get_or_create_user tests ---
+# --- Internal Token Manager tests ---
 
 
-@pytest.mark.asyncio
-async def test_get_or_create_user_creates_new_user(async_session: AsyncSession):
-    """Test that get_or_create_user creates a new user."""
-    token = TokenPayload(
-        sub="new-user-external-id",
-        email="newuser@example.com",
-        email_verified=True,
-        name="New User",
-        given_name="New",
-        family_name="User",
-        preferred_username="newuser",
-        iss="https://example.com",
-        aud="stardag-ui",
-        exp=1234567890,
-        iat=1234567800,
-        raw={},
+def test_internal_token_manager_creates_valid_token():
+    """Test that InternalTokenManager creates valid tokens."""
+    manager = InternalTokenManager(
+        issuer="test-issuer",
+        audience="test-audience",
+        access_token_ttl_minutes=10,
     )
 
-    user = await get_or_create_user(async_session, token)
+    token = manager.create_access_token(user_id="user-123", org_id="org-456")
+    assert token is not None
 
-    assert user.external_id == "new-user-external-id"
-    assert user.email == "newuser@example.com"
-    assert user.display_name == "New User"
+    # Validate the token
+    payload = manager.validate_token(token)
+    assert payload.sub == "user-123"
+    assert payload.org_id == "org-456"
+    assert payload.iss == "test-issuer"
+    assert payload.aud == "test-audience"
 
-    # Verify user was persisted
-    result = await async_session.execute(
-        select(User).where(User.external_id == "new-user-external-id")
+
+def test_internal_token_manager_validates_own_tokens():
+    """Test that tokens can be validated by the same manager."""
+    manager = InternalTokenManager()
+
+    token = manager.create_access_token(user_id="user-1", org_id="org-1")
+    payload = manager.validate_token(token)
+
+    assert payload.sub == "user-1"
+    assert payload.org_id == "org-1"
+
+
+def test_internal_token_manager_rejects_invalid_token():
+    """Test that invalid tokens are rejected."""
+    manager = InternalTokenManager()
+
+    with pytest.raises(TokenInvalidError):
+        manager.validate_token("invalid-token")
+
+
+def test_internal_token_manager_rejects_wrong_issuer():
+    """Test that tokens from wrong issuer are rejected."""
+    manager1 = InternalTokenManager(issuer="issuer-1")
+    manager2 = InternalTokenManager(issuer="issuer-2")
+
+    token = manager1.create_access_token(user_id="user-1", org_id="org-1")
+
+    with pytest.raises(TokenInvalidError):
+        manager2.validate_token(token)
+
+
+def test_internal_token_manager_generates_jwks():
+    """Test that JWKS is generated correctly."""
+    manager = InternalTokenManager()
+    jwks = manager.get_jwks()
+
+    assert "keys" in jwks
+    assert len(jwks["keys"]) == 1
+
+    key = jwks["keys"][0]
+    assert key["kty"] == "RSA"
+    assert key["use"] == "sig"
+    assert key["alg"] == "RS256"
+    assert "kid" in key
+    assert "n" in key
+    assert "e" in key
+
+
+def test_internal_token_payload_from_dict():
+    """Test InternalTokenPayload.from_dict."""
+    payload = {
+        "sub": "user-123",
+        "org_id": "org-456",
+        "iss": "stardag-api",
+        "aud": "stardag",
+        "exp": 9999999999,
+        "iat": 1234567890,
+    }
+    token = InternalTokenPayload.from_dict(payload)
+
+    assert token.sub == "user-123"
+    assert token.org_id == "org-456"
+    assert token.iss == "stardag-api"
+    assert token.aud == "stardag"
+
+
+def test_internal_token_payload_requires_org_id():
+    """Test that org_id is required for internal tokens."""
+    payload = {
+        "sub": "user-123",
+        # Missing org_id
+        "iss": "stardag-api",
+        "aud": "stardag",
+        "exp": 9999999999,
+        "iat": 1234567890,
+    }
+    with pytest.raises(TokenInvalidError) as exc_info:
+        InternalTokenPayload.from_dict(payload)
+    assert "org_id" in str(exc_info.value)
+
+
+# --- Helper to create mock internal tokens ---
+
+
+def _create_internal_token(
+    user_id: str,
+    org_id: str,
+    manager: InternalTokenManager | None = None,
+) -> str:
+    """Create a valid internal token for testing."""
+    if manager is None:
+        manager = InternalTokenManager()
+    return manager.create_access_token(user_id=user_id, org_id=org_id)
+
+
+def _create_mock_internal_token_payload(
+    user_id: str = "test-user-id",
+    org_id: str = "test-org-id",
+) -> InternalTokenPayload:
+    """Create a mock internal token payload for dependency overrides."""
+    return InternalTokenPayload(
+        sub=user_id,
+        org_id=org_id,
+        iss="stardag-api",
+        aud="stardag",
+        exp=9999999999,
+        iat=1234567890,
     )
-    persisted_user = result.scalar_one()
-    assert persisted_user.id == user.id
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_user_returns_existing(async_session: AsyncSession):
-    """Test that get_or_create_user returns existing user."""
-    # Create a user first
-    existing_user = User(
-        external_id="existing-external-id",
-        email="existing@example.com",
-        display_name="Existing User",
-    )
-    async_session.add(existing_user)
-    await async_session.commit()
-    await async_session.refresh(existing_user)
-
-    token = TokenPayload(
-        sub="existing-external-id",
-        email="existing@example.com",
-        email_verified=True,
-        name="Existing User",
-        given_name=None,
-        family_name=None,
-        preferred_username=None,
-        iss="https://example.com",
-        aud="stardag-ui",
-        exp=1234567890,
-        iat=1234567800,
-        raw={},
-    )
-
-    user = await get_or_create_user(async_session, token)
-
-    assert user.id == existing_user.id
-    assert user.external_id == "existing-external-id"
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_user_updates_email(async_session: AsyncSession):
-    """Test that get_or_create_user updates email if changed."""
-    # Create a user with old email
-    existing_user = User(
-        external_id="user-with-changed-email",
-        email="old@example.com",
-        display_name="Test User",
-    )
-    async_session.add(existing_user)
-    await async_session.commit()
-
-    token = TokenPayload(
-        sub="user-with-changed-email",
-        email="new@example.com",  # Changed email
-        email_verified=True,
-        name="Test User",
-        given_name=None,
-        family_name=None,
-        preferred_username=None,
-        iss="https://example.com",
-        aud="stardag-ui",
-        exp=1234567890,
-        iat=1234567800,
-        raw={},
-    )
-
-    user = await get_or_create_user(async_session, token)
-
-    assert user.email == "new@example.com"
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_user_requires_email_for_new(async_session: AsyncSession):
-    """Test that get_or_create_user requires email for new users."""
-    token = TokenPayload(
-        sub="user-without-email",
-        email=None,  # No email
-        email_verified=False,
-        name=None,
-        given_name=None,
-        family_name=None,
-        preferred_username=None,
-        iss="https://example.com",
-        aud="stardag-ui",
-        exp=1234567890,
-        iat=1234567800,
-        raw={},
-    )
-
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as exc_info:
-        await get_or_create_user(async_session, token)
-
-    assert exc_info.value.status_code == 400
-    assert "email claim" in str(exc_info.value.detail)
 
 
 # --- /api/v1/ui/me endpoint tests ---
-
-
-def _create_mock_token_payload(
-    sub: str = "test-user-sub",
-    email: str = "test@example.com",
-    name: str = "Test User",
-) -> TokenPayload:
-    """Create a mock token payload for testing."""
-    return TokenPayload(
-        sub=sub,
-        email=email,
-        email_verified=True,
-        name=name,
-        given_name=None,
-        family_name=None,
-        preferred_username=None,
-        iss="https://example.com",
-        aud="stardag-ui",
-        exp=9999999999,
-        iat=1234567800,
-        raw={},
-    )
 
 
 @pytest.mark.asyncio
@@ -457,7 +441,19 @@ async def test_me_endpoint_returns_user_profile(async_engine):
 
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
-    mock_token = _create_mock_token_payload()
+    # Create a user first (internal tokens use internal user IDs)
+    async with async_session_maker() as session:
+        user = User(
+            external_id="test-user-sub",
+            email="test@example.com",
+            display_name="Test User",
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        user_id = user.id
+
+    mock_token = _create_mock_internal_token_payload(user_id=user_id, org_id="test-org")
 
     async def override_get_db():
         async with async_session_maker() as session:
@@ -470,9 +466,7 @@ async def test_me_endpoint_returns_user_profile(async_engine):
     app.dependency_overrides[get_token] = override_get_token
 
     try:
-        from httpx import ASGITransport, AsyncClient as HttpxAsyncClient
-
-        async with HttpxAsyncClient(
+        async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get("/api/v1/ui/me")
@@ -523,11 +517,7 @@ async def test_me_endpoint_returns_organizations(async_engine):
         session.add(membership)
         await session.commit()
 
-    mock_token = _create_mock_token_payload(
-        sub="user-with-org",
-        email="orguser@example.com",
-        name="Org User",
-    )
+    mock_token = _create_mock_internal_token_payload(user_id=user_id, org_id=org_id)
 
     async def override_get_db():
         async with async_session_maker() as session:
@@ -540,9 +530,7 @@ async def test_me_endpoint_returns_organizations(async_engine):
     app.dependency_overrides[get_token] = override_get_token
 
     try:
-        from httpx import ASGITransport, AsyncClient as HttpxAsyncClient
-
-        async with HttpxAsyncClient(
+        async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get("/api/v1/ui/me")
@@ -575,8 +563,17 @@ async def test_me_invites_endpoint(async_engine):
             display_name="Inviter",
         )
         session.add(inviter)
+
+        invitee = User(
+            external_id="invitee-user",
+            email="invitee@example.com",
+            display_name="Invitee",
+        )
+        session.add(invitee)
         await session.commit()
         await session.refresh(inviter)
+        await session.refresh(invitee)
+        invitee_id = invitee.id
 
         org = Organization(
             name="Inviting Org",
@@ -596,10 +593,9 @@ async def test_me_invites_endpoint(async_engine):
         session.add(invite)
         await session.commit()
 
-    mock_token = _create_mock_token_payload(
-        sub="invitee-user",
-        email="invitee@example.com",
-        name="Invitee",
+    mock_token = _create_mock_internal_token_payload(
+        user_id=invitee_id,
+        org_id="some-org",  # Doesn't matter for invites endpoint
     )
 
     async def override_get_db():
@@ -613,9 +609,7 @@ async def test_me_invites_endpoint(async_engine):
     app.dependency_overrides[get_token] = override_get_token
 
     try:
-        from httpx import ASGITransport, AsyncClient as HttpxAsyncClient
-
-        async with HttpxAsyncClient(
+        async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get("/api/v1/ui/me/invites")

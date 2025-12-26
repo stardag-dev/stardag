@@ -5,88 +5,99 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from stardag_api.auth.dependencies import get_token
-from stardag_api.auth.jwt import TokenPayload
+from stardag_api.auth.tokens import InternalTokenPayload
 from stardag_api.db import get_db
 from stardag_api.main import app
 from stardag_api.models import Organization, OrganizationMember, User, Workspace
 from stardag_api.models.enums import OrganizationRole
 
 
-def _create_mock_token(
-    sub: str = "test-user-sub",
-    email: str = "test@example.com",
-    name: str = "Test User",
-) -> TokenPayload:
-    """Create a mock token payload for testing."""
-    return TokenPayload(
-        sub=sub,
-        email=email,
-        email_verified=True,
-        name=name,
-        given_name=None,
-        family_name=None,
-        preferred_username=None,
-        iss="https://example.com",
-        aud="stardag-ui",
+def _create_mock_internal_token(
+    user_id: str,
+    org_id: str,
+) -> InternalTokenPayload:
+    """Create a mock internal token payload for testing.
+
+    Internal tokens use the internal user ID (not external_id from OIDC).
+    """
+    return InternalTokenPayload(
+        sub=user_id,
+        org_id=org_id,
+        iss="stardag-api",
+        aud="stardag",
         exp=9999999999,
         iat=1234567800,
-        raw={},
     )
 
 
 @pytest.fixture
-async def test_user(async_session: AsyncSession) -> User:
-    """Create a test user."""
+async def test_user_with_org(async_session: AsyncSession) -> tuple[User, Organization]:
+    """Create a test user with their own organization.
+
+    Returns (user, organization) tuple. The user is owner of the organization.
+    """
+    # Create user
     user = User(
         external_id="test-org-user",
         email="orgtest@example.com",
         display_name="Org Test User",
     )
     async_session.add(user)
-    await async_session.commit()
-    await async_session.refresh(user)
-    return user
+    await async_session.flush()  # Get user.id
 
-
-@pytest.fixture
-async def test_org_with_owner(
-    async_session: AsyncSession, test_user: User
-) -> Organization:
-    """Create a test organization with the test user as owner."""
+    # Create organization
     org = Organization(
         name="Test Organization",
         slug="test-org",
         description="A test organization",
     )
     async_session.add(org)
-    await async_session.commit()
-    await async_session.refresh(org)
+    await async_session.flush()  # Get org.id
 
+    # Create membership
     membership = OrganizationMember(
         organization_id=org.id,
-        user_id=test_user.id,
+        user_id=user.id,
         role=OrganizationRole.OWNER,
     )
     async_session.add(membership)
 
+    # Create default workspace
     workspace = Workspace(
         organization_id=org.id,
         name="Default",
         slug="default",
     )
     async_session.add(workspace)
-    await async_session.commit()
 
-    return org
+    await async_session.commit()
+    await async_session.refresh(user)
+    await async_session.refresh(org)
+
+    return user, org
 
 
 @pytest.fixture
-def mock_token_for_user(test_user: User):
-    """Create a mock token for the test user."""
-    return _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
-        name=test_user.display_name or "Test User",
+async def test_user(test_user_with_org: tuple[User, Organization]) -> User:
+    """Get the test user (for backwards compatibility with tests)."""
+    return test_user_with_org[0]
+
+
+@pytest.fixture
+async def test_org_with_owner(
+    test_user_with_org: tuple[User, Organization],
+) -> Organization:
+    """Get the test organization (for backwards compatibility with tests)."""
+    return test_user_with_org[1]
+
+
+@pytest.fixture
+def mock_token_for_user(test_user_with_org: tuple[User, Organization]):
+    """Create a mock internal token for the test user."""
+    user, org = test_user_with_org
+    return _create_mock_internal_token(
+        user_id=user.id,
+        org_id=org.id,
     )
 
 
@@ -117,12 +128,14 @@ async def authenticated_client(async_engine, mock_token_for_user):
 
 
 @pytest.mark.asyncio
-async def test_create_organization(async_engine, test_user: User):
+async def test_create_organization(
+    async_engine, test_user: User, test_org_with_owner: Organization
+):
     """Test creating a new organization."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -164,9 +177,9 @@ async def test_create_organization_duplicate_slug(
 ):
     """Test that duplicate slugs are rejected."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -202,9 +215,9 @@ async def test_get_organization(
 ):
     """Test getting organization details."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -238,10 +251,10 @@ async def test_get_organization(
 async def test_get_organization_not_member(
     async_engine, test_org_with_owner: Organization
 ):
-    """Test that non-members can't access organization."""
+    """Test that users can't access organizations they're not a member of."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
-    # Create a different user
+    # Create a different user with their own organization
     async with async_session_maker() as session:
         other_user = User(
             external_id="other-user",
@@ -249,12 +262,29 @@ async def test_get_organization_not_member(
             display_name="Other User",
         )
         session.add(other_user)
+        await session.flush()
+
+        other_org = Organization(
+            name="Other Org",
+            slug="other-org",
+        )
+        session.add(other_org)
+        await session.flush()
+
+        membership = OrganizationMember(
+            organization_id=other_org.id,
+            user_id=other_user.id,
+            role=OrganizationRole.OWNER,
+        )
+        session.add(membership)
         await session.commit()
         await session.refresh(other_user)
+        await session.refresh(other_org)
 
-    mock_token = _create_mock_token(
-        sub=other_user.external_id,
-        email=other_user.email,
+    # Token for other_user scoped to their own org
+    mock_token = _create_mock_internal_token(
+        user_id=other_user.id,
+        org_id=other_org.id,
     )
 
     async def override_get_db():
@@ -286,9 +316,9 @@ async def test_update_organization(
 ):
     """Test updating organization."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -323,9 +353,9 @@ async def test_delete_organization(
 ):
     """Test deleting organization (owner only)."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -360,9 +390,9 @@ async def test_list_workspaces(
 ):
     """Test listing workspaces."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -397,9 +427,9 @@ async def test_create_workspace(
 ):
     """Test creating a workspace."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -442,9 +472,9 @@ async def test_list_members(
 ):
     """Test listing organization members."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -483,9 +513,9 @@ async def test_create_invite(
 ):
     """Test creating an invite."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     async def override_get_db():
@@ -526,7 +556,7 @@ async def test_accept_invite(
     """Test accepting an invite."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
-    # Create another user and an invite for them
+    # Create another user with their own org, and an invite for them
     async with async_session_maker() as session:
         invited_user = User(
             external_id="invited-user",
@@ -534,8 +564,25 @@ async def test_accept_invite(
             display_name="Invited User",
         )
         session.add(invited_user)
+        await session.flush()
+
+        # Create a personal org for the invited user (as would happen on first login)
+        invited_user_org = Organization(
+            name="Invited User's Org",
+            slug="invited-user-org",
+        )
+        session.add(invited_user_org)
+        await session.flush()
+
+        invited_user_membership = OrganizationMember(
+            organization_id=invited_user_org.id,
+            user_id=invited_user.id,
+            role=OrganizationRole.OWNER,
+        )
+        session.add(invited_user_membership)
         await session.commit()
         await session.refresh(invited_user)
+        await session.refresh(invited_user_org)
 
         from stardag_api.models import Invite, InviteStatus
 
@@ -551,10 +598,10 @@ async def test_accept_invite(
         await session.refresh(invite)
         invite_id = invite.id
 
-    # Now the invited user accepts
-    mock_token = _create_mock_token(
-        sub=invited_user.external_id,
-        email=invited_user.email,
+    # Now the invited user accepts (authenticated via their personal org)
+    mock_token = _create_mock_internal_token(
+        user_id=invited_user.id,
+        org_id=invited_user_org.id,
     )
 
     async def override_get_db():
@@ -591,9 +638,9 @@ async def test_create_target_root(
 ):
     """Test creating a target root in a workspace."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     # Get the workspace ID
@@ -645,9 +692,9 @@ async def test_list_target_roots(
 ):
     """Test listing target roots in a workspace."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     # Get the workspace ID and create a target root
@@ -703,9 +750,9 @@ async def test_update_target_root(
 ):
     """Test updating a target root."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     # Get the workspace ID and create a target root
@@ -766,9 +813,9 @@ async def test_delete_target_root(
 ):
     """Test deleting a target root."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     # Get the workspace ID and create a target root
@@ -830,9 +877,9 @@ async def test_create_target_root_duplicate_name(
 ):
     """Test that duplicate target root names in same workspace are rejected."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
-    mock_token = _create_mock_token(
-        sub=test_user.external_id,
-        email=test_user.email,
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        org_id=test_org_with_owner.id,
     )
 
     # Get the workspace ID and create a target root

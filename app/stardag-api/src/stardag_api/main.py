@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from stardag_api.db import engine
 from stardag_api.models import Base
 from stardag_api.routes import (
+    auth_router,
     builds_router,
     organizations_router,
     target_roots_router,
@@ -41,11 +42,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# UI routes (JWT auth required)
+# Auth routes (JWKS at root, exchange at /api/v1)
+# JWKS endpoint needs to be at /.well-known/jwks.json (standard location)
+app.include_router(auth_router)
+
+# UI routes (internal JWT auth required)
 app.include_router(ui_router, prefix="/api/v1")
 app.include_router(organizations_router, prefix="/api/v1")
 
-# SDK routes (API key or JWT auth)
+# SDK routes (API key or internal JWT auth)
 app.include_router(builds_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(target_roots_router, prefix="/api/v1")

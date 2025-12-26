@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.auth import (
     SdkAuth,
     get_current_user,
+    get_org_id_from_token,
     require_sdk_auth,
     verify_workspace_access,
 )
@@ -103,13 +104,14 @@ async def create_build(
 async def list_builds(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    org_id: str = Depends(get_org_id_from_token),
     workspace_id: str = Query(..., description="Workspace ID to list builds from"),
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
     """List builds in a workspace (requires authentication)."""
-    # Verify user has access to this workspace
-    await verify_workspace_access(db, user, workspace_id)
+    # Verify workspace belongs to the token's organization
+    await verify_workspace_access(db, workspace_id, org_id)
 
     query = select(Build).where(Build.workspace_id == workspace_id)
     count_query = (
@@ -161,14 +163,15 @@ async def get_build(
     build_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    org_id: str = Depends(get_org_id_from_token),
 ):
     """Get a build by ID with derived status (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify user has access to the build's workspace
-    await verify_workspace_access(db, user, build.workspace_id)
+    # Verify workspace belongs to the token's organization
+    await verify_workspace_access(db, build.workspace_id, org_id)
 
     status, started_at, completed_at = await get_build_status(db, build.id)
 
@@ -546,14 +549,15 @@ async def list_tasks_in_build(
     build_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    org_id: str = Depends(get_org_id_from_token),
 ):
     """List all tasks in a build with their status (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify user has access to the build's workspace
-    await verify_workspace_access(db, user, build.workspace_id)
+    # Verify workspace belongs to the token's organization
+    await verify_workspace_access(db, build.workspace_id, org_id)
 
     # Get distinct task IDs that have events in this build
     task_ids_subquery = (
@@ -601,14 +605,15 @@ async def list_build_events(
     build_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    org_id: str = Depends(get_org_id_from_token),
 ):
     """List all events for a build (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify user has access to the build's workspace
-    await verify_workspace_access(db, user, build.workspace_id)
+    # Verify workspace belongs to the token's organization
+    await verify_workspace_access(db, build.workspace_id, org_id)
 
     result = await db.execute(
         select(Event).where(Event.build_id == build_id).order_by(Event.created_at.asc())
@@ -634,14 +639,15 @@ async def get_build_graph(
     build_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
+    org_id: str = Depends(get_org_id_from_token),
 ):
     """Get the task graph for a build (requires authentication)."""
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify user has access to the build's workspace
-    await verify_workspace_access(db, user, build.workspace_id)
+    # Verify workspace belongs to the token's organization
+    await verify_workspace_access(db, build.workspace_id, org_id)
 
     # Get distinct task IDs that have events in this build
     task_ids_subquery = (
