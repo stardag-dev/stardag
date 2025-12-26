@@ -23,20 +23,14 @@ Registry (API Backend)
 
 ### Registries
 
-A **registry** represents a connection to a specific Stardag API backend. Each registry contains:
-
-- API URL (where the backend is running)
-- Credentials (OAuth tokens or API key)
-- Cached workspace settings
-
-Registries are stored in `~/.stardag/registries/{registry_name}/`.
+A **registry** represents a connection to a specific Stardag API backend. Each registry is defined by an (API) URL and the stardag CLI manages credentials for the respective registry (and organization):
 
 **Common registry setup:**
 
-| Registry  | API URL                  | Use Case                              |
-| --------- | ------------------------ | ------------------------------------- |
-| `local`   | `http://localhost:8000`  | Local development with docker-compose |
-| `central` | `https://api.stardag.io` | Central SAAS deployment               |
+| Registry          | API URL                   | Use Case                              |
+| ----------------- | ------------------------- | ------------------------------------- |
+| `local`           | `http://localhost:8000`   | Local development with docker-compose |
+| `central\|remote` | `https://api.stardag.com` | Central SAAS deployment               |
 
 For self-hosted deployments, you might have additional registries:
 
@@ -79,7 +73,7 @@ Example target roots for a workspace:
 | `default` | `s3://company-bucket/stardag/prod/` | Primary storage   |
 | `archive` | `s3://company-archive/stardag/`     | Long-term storage |
 
-Target roots are:
+The target root configuration is:
 
 - **Defined centrally** in the workspace settings (via UI or API)
 - **Cached locally** for offline access
@@ -90,8 +84,8 @@ Target roots are:
 Stardag resolves configuration values in this priority order (highest to lowest):
 
 1. **Environment variables** (`STARDAG_*`)
-2. **Project config** (`.stardag/config.json` in repository root)
-3. **Registry config** (`~/.stardag/registries/{registry}/config.json`)
+2. **Project config** (`.stardag/config.toml` in a repository/project root directory, ~~or a `[tool.stardag]` section in your `pyproject.toml` file.~~[NOTE this might be added LATER])
+3. **User config** (`~/.stardag/config.toml`)
 4. **Defaults**
 
 This allows:
@@ -100,160 +94,109 @@ This allows:
 - Projects to set sensible defaults for all contributors
 - Users to have personal preferences that apply across projects
 
-## File Structure
+_NOTE: Providing the environment variables `STARDAG_REGISTRY_URL`, `STARDAG_API_KEY` and `STARDAG_WORKSPACE` is sufficent to fully specify, and override, all other configuration related to registry, organization and workspace. This is what you will normally provide when building tasks in a production worker._
 
-### User Configuration
+_NOTE: A `.stardag/config.toml` file ~~or a `[tool.stardag]` section in a `pyproject.toml` file~~ [NOTE this might be added later] in any parent directpry of current working directory when code is executed, always fully override the one specified in the user's home directory._
 
-```
-~/.stardag/
-├── active_registry              # Contains active registry name (e.g., "central")
-└── registries/
-    ├── local/
-    │   ├── active_workspace    # Contains the active workspace in this registry
-    │   ├── config.json         # API URL, other *shared* settings (can be overriden in project config)
-    │   ├── credentials.json    # OAuth tokens
-    │   └── workspaces/
-    |       └── README.md      # Explaining content optional
-    │       └── {workspace_id}/
-    │           └── target_roots.json
-    └── central/
-    │   ├── active_workspace
-        ├── config.json
-        ├── credentials.json
-        └── workspaces/
-            └── {workspace_id}/
-                └── target_roots.json
-```
+## Local Configuration and Active Profile
 
-### Project Configuration
+Stardag is built to facilitate explorative and data centric work, such as Data Science/ML/AI experimentation. As such, it aims to make it seamless to move between running tasks and loading outputs in "production" (any hosted/cloud based infrastructure) as well as _locally_ on your working station. (TODO complete: both switching between workspaces, including copying of tasks, and reading (+optionally writing) _from(/to) production_ on your local workstation)
 
-```
-your-project/
-├── .stardag/
-│   └── config.json             # Project-specific settings
-├── src/
-└── ...
+For the latter use case, Stardag provides a CLI and configuration files to easilly get setup and switch between registries, organization and workspaces.
+
+### Active Profile
+
+Whenever code is executed which builds or loads `Task`s, or when you interact with the Registry API, there must be an _active profile_ that defines which registry, organization and worspace is in use. As of before, in production workers, providing the environment variables `STARDAG_REGISTRY_URL`, `STARDAG_API_KEY` and `STARDAG_WORKSPACE_ID` is sufficient and the recommeneded way to define the active context and handle authentication.
+
+When building or loading tasks locally, it is recommended to authenticate and create predefined profiles via the `stardag` CLI or directly in the `.stardag/config.toml` or the CLI. This way you it is enough to set the environment variable `STARDAG_PROFILE="my-profile"` rather than `STARDAG_REGISTRY_URL`, `STARDAG_ORGANIZAION_ID` and `STARDAG_WORKSPACE_ID`.
+
+To get started, run:
+
+```sh
+stardag registry add local --url "http://localhost:3000"
+stardag auth loging [--registry=local]
+stardag profile add local [-r|--registry=local] [-o|--organization="my-org-slug"] [-w|--workspace="my-workspace-slug"]
 ```
 
-## Configuration Files
+Or edit the config.toml directly, see an example below:
 
-### Registry Config (`~/.stardag/registries/{registry}/config.json`)
+```toml
+[registry.local]
+url = "http://localhost:3000"
+
+[registry.central]
+url = "https://api.startdag.com"
+
+[profile.local]
+registry = "local"
+organization = "default"
+workspace = "default"
+
+[profile.central-individual]
+registry = "central"
+organization = "my-org"
+workspace = "default-username"
+
+[profile.central-dev]
+registry = "central"
+organization = "my-org"
+workspace = "developement"
+
+[profile.central-prod]
+registry = "central"
+organization = "my-org"
+workspace = "production"
+
+[default]
+registry = "local"
+```
+
+### File Structure
+
+Configuration is stored in a directory called `.stardag` either in the user's home direcotry or within a specific project:
+
+```
+<USER_HOME>|<PROJECT_ROOT>/.stardag/
+├── config.toml
+├── credentials/  # important to gitignore in the case of <PROJECT_ROOT>
+|   └── # TODO how to store credentials per each (registry, organization)?
+├── local-target-roots/  # important to gitignore in the case of <PROJECT_ROOT>
+|   └── default/  # default workspace
+|       └── default/  # default target root name
+└── target-root-cache.json
+```
+
+### Target Roots Cache
+
+Target roots are defined centrally in workspace settings to ensure consistency across team members. The SDK validates local cache against central configuration. Target root cache is stored as a flat array on the format:
 
 ```json
-{
-  "api_url": "https://api.stardag.io",
-  "timeout": 30.0,
-  "organization_id": "org_abc123",
-  "workspace_id": "ws_def456"
-}
-```
-
-### Registry Credentials (`~/.stardag/registries/{registry}/credentials.json`)
-
-```json
-{
-  "access_token": "eyJ...",
-  "refresh_token": "eyJ...",
-  "token_endpoint": "https://auth.stardag.io/token",
-  "client_id": "stardag-cli"
-}
-```
-
-### Project Config (`.stardag/config.json`)
-
-Defines per-registry settings with optional workspace configurations.
-
-**Simple example** (single registry):
-
-```json
-{
-  "default_registry": "local",
-  "allowed_organizations": ["my-org-slug"],
-  "registries": {
-    "local": {
-      "organization_id": "my-org-slug"
+[
+  {
+    "registry_url": "...",
+    "organization_id": "...",
+    "workspace_id": "...",
+    "target_roots": {
+      "name-1": "uri-prefix-1"
+      // ...
     }
   }
-}
+]
 ```
 
-**Full example** (multiple registries and workspaces):
-
-```json
-{
-  "default_registry": "central",
-  "allowed_organizations": ["my-org-slug"],
-  "registries": {
-    "local": {
-      "organization_id": "local-dev-org",
-      "default_workspace": "dev",
-      "workspaces": {
-        "dev": {
-          "target_roots": {
-            "default": "/local/data/dev"
-          }
-        }
-      }
-    },
-    "central": {
-      "organization_id": "my-org-slug",
-      "default_workspace": "project-prod",
-      "workspaces": {
-        "project-prod": {
-          "target_roots": {
-            "default": "s3://company-bucket/prod/"
-          }
-        },
-        "project-staging": {
-          "target_roots": {
-            "default": "s3://company-bucket/staging/"
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-**Top-level fields:**
-
-| Field                   | Description                                             |
-| ----------------------- | ------------------------------------------------------- |
-| `default_registry`      | Which registry to use by default for this project       |
-| `allowed_organizations` | Restrict which organizations can be used (safety check) |
-| `registries`            | Per-registry configuration with workspaces              |
-
-**Per-registry fields** (in `registries.{registry_name}`):
-
-| Field               | Description                           |
-| ------------------- | ------------------------------------- |
-| `organization_id`   | Organization for this registry        |
-| `default_workspace` | Default workspace for this registry   |
-| `workspaces`        | Per-workspace settings (target roots) |
-
-### Workspace Target Roots (`~/.stardag/registries/{registry}/workspaces/{workspace_id}/target_roots.json`)
-
-```json
-{
-  "default": "s3://company-bucket/stardag/prod/",
-  "archive": "s3://company-archive/stardag/"
-}
-```
-
-This file is synced from the central API when you set a workspace. Target roots can also be defined in the project's `.stardag/config.json` (nested structure) for team consistency.
+See the [Target Roots Syncronization](#target-roots-synchronization) for further details.
 
 ## Environment Variables
 
 All configuration can be overridden via environment variables:
 
-| Variable                      | Description                         |
-| ----------------------------- | ----------------------------------- |
-| `STARDAG_REGISTRY`            | Active registry name                |
-| `STARDAG_API_URL`             | API backend URL                     |
-| `STARDAG_API_KEY`             | API key (for CI/CD, bypasses OAuth) |
-| `STARDAG_ORGANIZATION_ID`     | Active organization ID              |
-| `STARDAG_WORKSPACE_ID`        | Active workspace ID                 |
-| `STARDAG_TARGET_ROOT__{NAME}` | Override specific target root       |
+| Variable                         | Description                                             |
+| -------------------------------- | ------------------------------------------------------- |
+| `STARDAG_REGISTRY_URL`           | Registry API backend URL                                |
+| `STARDAG_REGISTRY_API_KEY`       | API key                                                 |
+| `STARDAG_ORGANIZATION_ID`        | Active organization ID                                  |
+| `STARDAG_WORKSPACE_ID`           | Active workspace ID                                     |
+| `STARDAG_TARGET_ROOTS[__{NAME}]` | Override specific target root (json string or per name) |
 
 ## CLI Commands
 
@@ -263,20 +206,21 @@ All configuration can be overridden via environment variables:
 # List available registries
 stardag registry list
 
-# Add a new registry
-stardag registry add central --api-url https://api.stardag.io
+# Add a new registry (provide url as arg or get prompted to provide as input)
+stardag registry add central [--url https://api.stardag.com]
+```
 
-# Switch active registry
-stardag registry use central
+### Profile Management
 
-# Show current registry
-stardag registry current
+```bash
+# Add a new profile (provide args or get prompted to provide them as inputs/select from available)
+stardag profile add local [-r|--registry=local] [-o|--organization="my-org-slug"] [-w|--workspace="my-workspace-slug"]
 ```
 
 ### Authentication
 
 ```bash
-# Login (opens browser for OAuth)
+# Login (opens browser for OAuth, uses https://api.stardag.com by default unless provided)
 stardag auth login
 
 # Login to specific registry
@@ -286,136 +230,30 @@ stardag auth login --registry central
 stardag auth status
 
 # Logout
-stardag auth logout
+stardag auth logout [--registry]
 ```
 
-### Organization & Workspace
+### Organization, Workspace and Target Roots
 
 ```bash
-# List organizations (in current registry)
-stardag config list organizations
+# List organizations (in current registry, defined by `STARDAG_REGISTRY_URL` or `STARDAG_PROFILE`, unless provided as arg)
+stardag organizations list [--registry]
 
-# Set active organization (by ID or slug)
-stardag config set organization my-org-slug
-
-# List workspaces (in active organization)
-stardag config list workspaces
-
-# Set active workspace (by ID or slug)
-stardag config set workspace myproject-prod
+# List workspaces (in current registry and organization, defined by `STARDAG_REGISTRY_URL` and `STARDAG_ORGANIZATION_ID` or `STARDAG_PROFILE` unless provided as arg)
+stardag workspaces list [--registry] [--organization]
 
 # Sync workspace settings from server
-stardag config sync
+stardag target-roots list [--registry] [--organization] [--workspace]
+
+# Sync and verify target roots with registry
+stardag target-roots sync [--registry] [--organization] [--workspace]
 ```
 
-### Show Current Configuration
-
-```bash
-# Show resolved configuration
-stardag config show
-```
-
-## Common Patterns
-
-### Pattern 1: Local Development + Central Production
-
-Most common setup for individual developers or small teams:
-
-```bash
-# Setup local registry (docker-compose)
-stardag registry add local --api-url http://localhost:8000
-
-# Setup central registry (SAAS)
-stardag registry add central --api-url https://api.stardag.io
-stardag registry use central
-stardag auth login
-
-# In your project, set defaults
-# .stardag/config.json:
-{
-  "default_registry": "central",
-  "registries": {
-    "central": {
-      "workspace_id": "ws_your_workspace"
-    }
-  }
-}
-```
-
-**Workflow:**
-
-- Daily work: Uses `central` registry automatically (from project config)
-- Testing stardag itself: `stardag registry use local`
-
-### Pattern 2: Multi-Stage Deployment
-
-For projects with staging and production environments:
-
-```bash
-# Create workspaces in UI:
-# - myproject-staging
-# - myproject-prod
-
-# For staging deployment (CI/CD):
-export STARDAG_WORKSPACE_ID=ws_staging_id
-export STARDAG_API_KEY=key_for_staging
-
-# For production deployment (CI/CD):
-export STARDAG_WORKSPACE_ID=ws_prod_id
-export STARDAG_API_KEY=key_for_prod
-```
-
-### Pattern 3: Multi-Organization Safety
-
-For consultants or developers working across multiple client organizations:
-
-```json
-// Project A: .stardag/config.json
-{
-  "default_registry": "central",
-  "registries": {
-    "central": {
-      "organization_id": "org_client_a"
-    }
-  },
-  "allowed_organizations": ["org_client_a"]
-}
-
-// Project B: .stardag/config.json
-{
-  "default_registry": "central",
-  "registries": {
-    "central": {
-      "organization_id": "org_client_b"
-    }
-  },
-  "allowed_organizations": ["org_client_b"]
-}
-```
-
-This prevents accidentally running builds against the wrong organization.
-
-### Pattern 4: Personal Development Workspace
-
-Each user automatically gets a personal workspace (`personal-{username}`) in every organization they join. Use this for:
-
-- Experimenting with task definitions
-- Testing changes before merging
-- Running ad-hoc analysis
-
-```bash
-# Switch to personal workspace
-stardag config set workspace personal-anders
-
-# Run experimental build
-python my_experiment.py
-```
-
-## Target Root Synchronization
+## Target Roots Synchronization
 
 Target roots are defined centrally in workspace settings to ensure consistency across team members. The SDK validates local cache against central configuration:
 
-**On login / `stardag config sync`:**
+**On login / `stardag target-roots sync`:**
 
 - Fetches latest target roots from server
 - Updates local cache
@@ -452,23 +290,7 @@ Modifying or deleting existing target roots is discouraged because:
 Your local cache doesn't match the server. Run:
 
 ```bash
-stardag config sync
-```
-
-### "Organization not allowed" error
-
-The project's `.stardag/config.json` restricts allowed organizations. Either:
-
-1. Switch to an allowed organization
-2. Update the project config (if you have permission)
-
-### "No active workspace" error
-
-Set a workspace:
-
-```bash
-stardag config list workspaces
-stardag config set workspace <workspace-slug>
+stardag stardag target-roots sync
 ```
 
 ### Working offline
