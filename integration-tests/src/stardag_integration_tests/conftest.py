@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
-from docker_fixtures import (
+from .docker_fixtures import (
     TEST_USER_EMAIL,
     TEST_USER_PASSWORD,
     TEST_USER_USERNAME,

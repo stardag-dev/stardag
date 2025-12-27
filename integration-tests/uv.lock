@@ -530,7 +530,7 @@ wheels = [
 
 [[package]]
 name = "stardag"
-source = { editable = "../../lib/stardag" }
+source = { editable = "../lib/stardag" }
 dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -598,7 +598,7 @@ requires-dist = [
     { name = "pytest-playwright", marker = "extra == 'browser'", specifier = ">=0.5" },
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "stardag", editable = "../../lib/stardag" },
+    { name = "stardag", editable = "../lib/stardag" },
 ]
 provides-extras = ["browser"]
 
