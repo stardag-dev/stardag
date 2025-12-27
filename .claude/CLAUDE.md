@@ -59,8 +59,8 @@ Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/READ
   - [auth](./tasks/registry-service/auth.md) - Production grad auth and org/user/workspace management (~completed)
   - [config-and-auth-cleanup](./tasks/registry-service/config-and-auth-cleanup.md) (paused)
   - [config-and-auth-cleanup-take-two](./tasks/registry-service/config-and-auth-cleanup-take-two.md) (completed)
-  - [int](./tasks/registry-service/integration-tests.md) (active)
-  - [aws-deployment.md](./tasks/registry-service/aws-deployment.md) (draft)
+  - [integration-tests](./tasks/registry-service/integration-tests.md) (completed)
+  - [aws-deployment](./tasks/registry-service/aws-deployment.md) (draft)
 
 ## Code Style
 
