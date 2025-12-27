@@ -105,34 +105,28 @@ class TestTokenTypeValidation:
         )
         assert response.status_code == 200
 
-    def test_tasks_with_oidc_token(
+    def test_tasks_rejects_oidc_token(
         self,
         docker_services: ServiceEndpoints,
         oidc_token: TokenSet,
         test_workspace_id: str,
     ) -> None:
-        """Test /tasks endpoint behavior with OIDC tokens.
-
-        NOTE: Currently /tasks allows unauthenticated access and returns
-        empty results when no workspace_id is provided. This may be
-        intentional for public task discovery or a bug.
-        """
+        """Test /tasks endpoint rejects OIDC tokens (requires internal token or API key)."""
         response = httpx.get(
             f"{docker_services.api}/api/v1/tasks",
             params={"workspace_id": test_workspace_id},
             headers={"Authorization": f"Bearer {oidc_token.access_token}"},
             timeout=30.0,
         )
-        # Tasks endpoint currently allows access with OIDC token
-        # This returns 200 but may filter results based on token type
-        assert response.status_code == 200
+        # Tasks endpoint requires internal token or API key
+        assert response.status_code == 401
 
     def test_tasks_accepts_internal_token(
         self,
         internal_authenticated_client: httpx.Client,
         test_workspace_id: str,
     ) -> None:
-        """Test that /tasks accepts internal tokens."""
+        """Test that /tasks accepts internal tokens with workspace_id."""
         response = internal_authenticated_client.get(
             "/api/v1/tasks",
             params={"workspace_id": test_workspace_id},
@@ -164,9 +158,8 @@ class TestTokenTypeValidation:
 class TestApiKeyAuth:
     """Tests for API key authentication.
 
-    NOTE: Currently only write endpoints (POST /builds, etc.) support API key auth.
-    Read endpoints (GET /builds) require internal JWT tokens.
-    The /tasks endpoint has no authentication at all.
+    API keys provide workspace-scoped authentication for SDK operations.
+    Both read and write endpoints support API key auth.
     """
 
     def test_create_api_key(
@@ -221,18 +214,14 @@ class TestApiKeyAuth:
         assert "id" in data
         assert "workspace_id" in data
 
-    def test_api_key_auth_get_builds_not_supported(
+    def test_api_key_auth_get_builds_works(
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
         test_workspace_id: str,
     ) -> None:
-        """Test that GET /builds does NOT support API key auth (requires JWT).
-
-        This documents current behavior - GET endpoints use get_current_user
-        which requires internal JWT, not API key auth.
-        """
+        """Test that GET /builds supports API key auth."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
@@ -242,15 +231,44 @@ class TestApiKeyAuth:
         assert response.status_code == 201
         api_key = response.json()["key"]
 
-        # Try to use the API key to GET builds - this should fail
+        # Use the API key to GET builds - this should work
         response = httpx.get(
             f"{docker_services.api}/api/v1/builds",
             headers={"X-API-Key": api_key},
-            params={"workspace_id": test_workspace_id},
             timeout=30.0,
         )
-        # Currently GET /builds requires JWT auth, not API key
-        assert response.status_code == 401
+        # API key auth works for GET /builds (workspace comes from key)
+        assert response.status_code == 200
+        data = response.json()
+        assert "builds" in data
+
+    def test_api_key_auth_get_tasks_works(
+        self,
+        internal_authenticated_client: httpx.Client,
+        docker_services: ServiceEndpoints,
+        test_organization_id: str,
+        test_workspace_id: str,
+    ) -> None:
+        """Test that GET /tasks supports API key auth."""
+        # Create an API key
+        response = internal_authenticated_client.post(
+            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/workspaces/{test_workspace_id}/api-keys",
+            json={"name": "Tasks Test Key"},
+        )
+        assert response.status_code == 201
+        api_key = response.json()["key"]
+
+        # Use the API key to GET tasks - this should work
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/tasks",
+            headers={"X-API-Key": api_key},
+            timeout=30.0,
+        )
+        # API key auth works for GET /tasks (workspace comes from key)
+        assert response.status_code == 200
+        data = response.json()
+        assert "tasks" in data
 
     def test_invalid_api_key_rejected(
         self,
@@ -269,9 +287,8 @@ class TestApiKeyAuth:
 class TestEndpointAccess:
     """Tests for endpoint access control.
 
-    NOTE: Some endpoints have incomplete auth implementation:
-    - /tasks has NO authentication (completely open) - TODO: fix
-    - GET /builds requires JWT but not API key - TODO: add API key support
+    All SDK endpoints require authentication via API key or JWT token.
+    UI bootstrap endpoints (/ui/me) accept OIDC tokens.
     """
 
     def test_protected_endpoints_require_auth(
@@ -279,28 +296,15 @@ class TestEndpointAccess:
         unauthenticated_client: httpx.Client,
     ) -> None:
         """Test that protected endpoints return 401 without auth."""
-        # NOTE: /tasks is intentionally excluded - it currently has no auth
         endpoints = [
             "/api/v1/builds",
+            "/api/v1/tasks",
             "/api/v1/ui/me",
         ]
 
         for endpoint in endpoints:
             response = unauthenticated_client.get(endpoint)
             assert response.status_code == 401, f"{endpoint} should require auth"
-
-    def test_tasks_endpoint_has_no_auth(
-        self,
-        unauthenticated_client: httpx.Client,
-    ) -> None:
-        """Test that /tasks currently allows unauthenticated access.
-
-        NOTE: This documents current behavior. The /tasks endpoint should
-        probably require authentication - this is tracked as a bug to fix.
-        """
-        response = unauthenticated_client.get("/api/v1/tasks")
-        # Currently allows unauthenticated access (bug)
-        assert response.status_code == 200
 
     def test_router_prefixes_correct(
         self,
@@ -314,7 +318,7 @@ class TestEndpointAccess:
             ("/api/v1/auth/exchange", 401),  # Auth router (POST only, so 401 for GET)
             ("/api/v1/ui/me", 401),  # UI router
             ("/api/v1/builds", 401),  # Builds router
-            ("/api/v1/tasks", 200),  # Tasks router (no auth currently)
+            ("/api/v1/tasks", 401),  # Tasks router
         ]
 
         for path, expected_status in endpoints_to_check:

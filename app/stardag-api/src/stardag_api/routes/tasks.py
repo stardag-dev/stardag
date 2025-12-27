@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
 from stardag_api.models import Task
 from stardag_api.schemas import TaskListResponse, TaskResponse
@@ -15,14 +16,19 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 @router.get("", response_model=TaskListResponse)
 async def list_tasks(
-    db: AsyncSession = Depends(get_db),
-    workspace_id: str = "default",
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     task_family: str | None = None,
     task_namespace: str | None = None,
 ):
-    """List tasks in a workspace."""
+    """List tasks in a workspace.
+
+    Requires authentication via API key or JWT token with workspace_id.
+    The workspace is determined from the authentication context.
+    """
+    workspace_id = auth.workspace_id
     query = select(Task).where(Task.workspace_id == workspace_id)
     count_query = (
         select(func.count()).select_from(Task).where(Task.workspace_id == workspace_id)
@@ -67,13 +73,17 @@ async def list_tasks(
 @router.get("/{task_id}", response_model=TaskResponse)
 async def get_task(
     task_id: str,
-    workspace_id: str = "default",
-    db: AsyncSession = Depends(get_db),
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Get a task by its task_id (hash) in a workspace."""
+    """Get a task by its task_id (hash) in a workspace.
+
+    Requires authentication via API key or JWT token with workspace_id.
+    The workspace is determined from the authentication context.
+    """
     result = await db.execute(
         select(Task)
-        .where(Task.workspace_id == workspace_id)
+        .where(Task.workspace_id == auth.workspace_id)
         .where(Task.task_id == task_id)
     )
     task = result.scalar_one_or_none()
