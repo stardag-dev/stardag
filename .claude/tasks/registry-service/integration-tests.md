@@ -1,6 +1,6 @@
 ## Status
 
-active
+completed
 
 ## Goal
 
@@ -8,289 +8,218 @@ Get automated end-to-end testing of all critical user journeys. Including the in
 
 Implement tests such that all relevant output/logs are captured and printed out when a test is failing. This is to facilitate AI-Agent based coding/self-verification.
 
-## Instructions
-
-Make a detailed plan for how to get close to complete test coverage. Identify the biggest gaps, categorize them and turn them into an implementation plan.
-
-Some guidelines:
-
-- Priority to add coverage to each components _independent unit tests_, but end-to-end integration tests are a necessary complement.
-- For integration testing we should rely on a/the docker-compose setup primarily.
-- Integration tests should be kept in a separate _python package_, and to the extent possible we should use _Python_ and standard pytest conventions to script the integration tests. We can for example write fixtures to bring up/down docker compose and seed the DB etc.
-- We will need to to do _browser based testing_ to really verify frontend functionality. For this we should likely use [playwright-python](https://github.com/microsoft/playwright-python) for ease of use in python scripting.
-- The tests need to run in GitHub workflows (eventually), headless browser dependencies _might_ (but not necessarily) need to be dockerized as well.
-
-## Context
-
-### Bugs Encountered in Recent Auth Development Session
-
-The following bugs were discovered during manual testing of the auth flow. Each represents a gap in automated test coverage:
-
-1. **401 on `/builds` endpoint before org selection**
-
-   - UI made API calls before user had completed org selection
-   - Token was OIDC (user-scoped) but endpoint expected internal (org-scoped) token
-   - _Test needed_: Verify UI doesn't call protected endpoints before org selection
-
-2. **404 on `/api/v1/auth/exchange`**
-
-   - Router was mounted without the `/api/v1` prefix
-   - _Test needed_: Verify all routers are mounted with correct prefixes
-
-3. **"Unable to find key with ID" error**
-
-   - API tried to validate OIDC token against internal JWKS
-   - Endpoint expected internal token but received OIDC token
-   - _Test needed_: Each endpoint should reject wrong token type with clear error
-
-4. **ImportError: tomli-w in CLI**
-
-   - CLI dependency not included in package
-   - _Test needed_: CLI commands should be importable/runnable without import errors
-
-5. **400 "Offline tokens not allowed" on OIDC exchange**
-
-   - OIDC provider configuration issue (Keycloak `offline_access` scope)
-   - _Test needed_: Full OAuth PKCE flow with OIDC provider
-
-6. **CLI command structure mismatch with docs**
-
-   - Docs showed `stardag registry` but CLI was `stardag config registry`
-   - _Test needed_: CLI command structure matches documentation
-
-7. **403 when profile stored slugs instead of UUIDs**
-   - Profile config stored slugs but API expected UUIDs
-   - Fixed by adding ID cache that resolves slugs to IDs
-   - _Test needed_: Profile with slugs works correctly after slug-to-ID resolution
-
-### Current Test Coverage
-
-| Component           | Unit Tests | Integration Tests | Notes                                 |
-| ------------------- | ---------- | ----------------- | ------------------------------------- |
-| API - Auth          | ✅ Good    | ❌ None           | Token validation, JWKS caching tested |
-| API - Builds/Tasks  | ✅ Basic   | ❌ None           | Mocked auth only                      |
-| API - Organizations | ✅ Basic   | ❌ None           | Mocked auth only                      |
-| SDK - Config        | ✅ Good    | ❌ None           | Profile/registry parsing tested       |
-| SDK - CLI Registry  | ✅ Basic   | ❌ None           | CRUD operations tested                |
-| SDK - CLI Auth      | ❌ None    | ❌ None           | **Critical gap**                      |
-| SDK - CLI Profiles  | ❌ None    | ❌ None           | **Critical gap**                      |
-| Frontend            | ❌ None    | ❌ None           | **Critical gap**                      |
-| Full Auth Flow      | ❌ None    | ❌ None           | **Critical gap**                      |
-
-### Existing Test Infrastructure
-
-- **API tests** (`app/stardag-api/tests/`)
-
-  - Uses in-memory SQLite
-  - Mocks auth dependencies (bypasses real token validation)
-  - PostgreSQL fixture available but skipped without env var
-
-- **SDK tests** (`lib/stardag/tests/`)
-
-  - Unit tests with mocked file system
-  - No integration with real API
-
-- **E2E script** (`scripts/e2e-test.sh`)
-  - Shell script, brings up docker-compose
-  - Basic curl checks (health, builds count)
-  - No browser testing, no auth flow
-
-## Execution Plan
-
-### Summary Of Preparatory Analysis
-
-The biggest coverage gaps are:
-
-1. **Full authentication flow**: OIDC → token exchange → internal token → API access
-2. **CLI integration**: Commands running against real API
-3. **Frontend**: No tests at all (React app)
-4. **Token type validation**: Endpoints accepting wrong token types
-5. **Profile/context resolution**: Slug → ID resolution, profile switching
-
-### Plan
-
-#### Phase 1: Test Infrastructure Setup
-
-1. **Create integration test package** (`tests/integration/`)
-
-   ```
-   tests/
-   └── integration/
-       ├── __init__.py
-       ├── conftest.py           # Shared fixtures
-       ├── docker_fixtures.py    # Docker compose management
-       ├── test_api_auth.py      # API auth flow tests
-       ├── test_cli_auth.py      # CLI auth flow tests
-       ├── test_cli_config.py    # CLI config/profile tests
-       └── test_frontend/        # Playwright browser tests
-           ├── __init__.py
-           ├── conftest.py
-           └── test_login_flow.py
-   ```
-
-2. **Docker compose fixture** (`docker_fixtures.py`)
-
-   - Bring up API, DB, Keycloak (OIDC provider)
-   - Wait for health endpoints
-   - Provide cleanup on teardown
-   - Support parallel test isolation (unique workspace per test)
-
-3. **Test user fixture**
-   - Create test user in Keycloak
-   - Provide credentials for automated login
-
-#### Phase 2: API Integration Tests
-
-4. **Token type validation tests** (`test_api_auth.py`)
-
-   - [ ] `/api/v1/auth/exchange` accepts only OIDC tokens
-   - [ ] `/api/v1/builds` rejects OIDC tokens with 401
-   - [ ] `/api/v1/builds` accepts internal tokens
-   - [ ] `/api/v1/ui/me` accepts both token types
-   - [ ] API key auth works for SDK endpoints
-
-5. **API endpoint access tests**
-   - [ ] Verify all routers mounted with correct prefixes
-   - [ ] Protected endpoints return 401 without auth
-   - [ ] Protected endpoints return 403 for wrong org
-
-#### Phase 3: CLI Integration Tests
-
-6. **CLI auth tests** (`test_cli_auth.py`)
-
-   - [ ] `stardag auth login` opens browser, receives callback
-   - [ ] `stardag auth status` shows logged in state
-   - [ ] `stardag auth refresh` refreshes tokens
-   - [ ] `stardag auth logout` clears credentials
-
-7. **CLI config tests** (`test_cli_config.py`)
-
-   - [ ] `stardag config registry add/list/remove` works
-   - [ ] `stardag config profile add` with slugs resolves to IDs
-   - [ ] `stardag config profile use` switches context and refreshes token
-   - [ ] `stardag config show` displays current context
-
-8. **CLI importability tests**
-   - [ ] All CLI modules import without error
-   - [ ] All dependencies available
-
-#### Phase 4: Frontend Browser Tests (Playwright)
-
-9. **Login flow tests** (`test_frontend/test_login_flow.py`)
-
-   - [ ] User can navigate to login
-   - [ ] OAuth redirect to OIDC provider works
-   - [ ] After login, redirected back to app
-   - [ ] User info displayed after login
-   - [ ] Organization selector works
-   - [ ] Protected pages accessible after org selection
-   - [ ] Protected pages inaccessible before org selection
-
-10. **Build/Task UI tests**
-    - [ ] Builds list loads after auth
-    - [ ] Tasks list loads after auth
-    - [ ] Workspace switching updates data
-
-#### Phase 5: Full Flow Integration Tests
-
-11. **SDK → API → UI round trip**
-
-    - [ ] SDK registers task/build
-    - [ ] UI displays the registered build
-    - [ ] Status updates propagate
-
-12. **Profile-based workflow**
-    - [ ] Create profile with slugs via CLI
-    - [ ] SDK uses resolved config to register build
-    - [ ] API receives correct workspace_id
-
-### Implementation Order
-
-1. **Infra first**: Docker fixtures, conftest setup (1-3)
-2. **API auth**: Critical for unblocking other tests (4-5)
-3. **CLI auth**: Tests the full OAuth flow (6-8)
-4. **Frontend**: Validates user-facing auth experience (9-10)
-5. **Full flow**: End-to-end validation (11-12)
-
-## Decisions
-
-1. **Use pytest-playwright** for browser tests
-
-   - Pro: Python ecosystem, shared fixtures with API tests
-   - Con: Slightly less mature than JS playwright
-
-2. **Keep integration tests in separate package**
-
-   - Pro: Clear separation, different dependencies
-   - Con: Some code duplication with unit test fixtures
-
-3. **Run Keycloak in docker-compose for tests**
-
-   - Pro: Tests real OIDC flow
-   - Con: Slower startup, may need pre-configured realm export
-
-4. **Test with real PostgreSQL** (not SQLite)
-   - Pro: Catches DB-specific issues
-   - Con: Slower than in-memory SQLite
-
-## Progress
-
-- [x] Analysis of current test coverage
-- [x] Identification of bugs/gaps from auth session
-- [x] Detailed execution plan created
-- [x] Test infrastructure setup (Phase 1)
-  - [x] Created `tests/integration/` package structure
-  - [x] Created `pyproject.toml` with dependencies
-  - [x] Created `docker_fixtures.py` for service management
-  - [x] Created `conftest.py` with auth/org/workspace fixtures
-  - [x] Added `stardag-test` OIDC client for password grant
-  - [x] Updated `tox.ini` with integration test envs
-  - [x] Verified with 11 smoke tests passing
-- [ ] API integration tests (Phase 2)
-- [ ] CLI integration tests (Phase 3)
-- [ ] Frontend browser tests (Phase 4)
-- [ ] Full flow tests (Phase 5)
-
-## Notes
-
-### Key Files to Reference
-
-- `app/stardag-api/tests/conftest.py` - Existing API test fixtures
-- `lib/stardag/tests/test_config.py` - Config unit tests
-- `scripts/e2e-test.sh` - Current E2E approach
-- `docker-compose.yml` - Service definitions
-
-### Dependencies to Add
-
-```toml
-# pyproject.toml for integration tests
-[project.optional-dependencies]
-integration = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "playwright>=1.40",
-    "pytest-playwright>=0.4",
-    "httpx>=0.26",
-    "python-dotenv>=1.0",
-]
+## Summary
+
+Integration tests are now fully implemented and running in CI. The test suite covers:
+
+- **API authentication**: Token exchange, token type validation, API key auth
+- **CLI functionality**: All CLI commands (auth, config, registry, profile management)
+- **SDK build workflows**: Simple DAG and diamond DAG tests using APIRegistry
+- **Full flow tests**: End-to-end build workflows, cross-component validation
+- **Browser tests** (optional): Basic Playwright tests for UI flows
+
+### Test Results
+
+| Test File         | Tests | Status  | Notes                              |
+| ----------------- | ----- | ------- | ---------------------------------- |
+| test_smoke.py     | 11    | Passing | Service health, fixture validation |
+| test_api_auth.py  | 15    | Passing | Token validation, API key auth     |
+| test_full_flow.py | 12    | Passing | Build workflows, SDK integration   |
+| test_cli.py       | 16    | Passing | CLI commands with docker services  |
+| test_browser.py   | 10    | Skipped | Optional, separate CI job          |
+
+### Package Structure
+
+```
+integration-tests/
+├── pyproject.toml          # Package config with stardag[cli,api] dependency
+├── pyrightconfig.json      # Type checking config (excludes browser tests)
+├── src/
+│   └── stardag_integration_tests/
+│       ├── __init__.py
+│       ├── conftest.py     # Re-exports fixtures for pytest
+│       └── docker_fixtures.py  # Docker service management
+└── tests/
+    ├── conftest.py         # Test fixtures (auth, org, workspace)
+    ├── test_smoke.py       # Basic health checks
+    ├── test_api_auth.py    # API authentication tests
+    ├── test_full_flow.py   # End-to-end workflow tests
+    ├── test_cli.py         # CLI integration tests
+    └── test_browser.py     # Playwright browser tests (optional)
 ```
 
-### Playwright Setup
+### CI Integration
+
+Two CI jobs added to `.github/workflows/ci.yml`:
+
+1. **integration-tests**: Runs all non-browser tests via `tox -e integration`
+2. **integration-tests-browser**: Runs browser tests via `tox -e integration-browser`
+
+Both jobs:
+
+- Build and start docker-compose services
+- Wait for Keycloak (OIDC discovery endpoint) and API health
+- Run tests with proper fixtures
+- Show docker logs on failure
+
+## Implementation Details
+
+### Phase 1: Test Infrastructure (COMPLETED)
+
+- Created separate `integration-tests/` package following project conventions
+- Docker fixtures manage service lifecycle with health checks
+- Auth fixtures provide OIDC tokens, internal tokens, and API keys
+- Test user fixture leverages Keycloak password grant for automation
+- Tox environments: `integration`, `integration-browser`, `integration-pyright`
+
+### Phase 2: API Integration Tests (COMPLETED)
+
+File: `tests/test_api_auth.py`
+
+- [x] `/api/v1/auth/exchange` accepts only OIDC tokens
+- [x] `/api/v1/auth/exchange` rejects internal tokens (401)
+- [x] `/api/v1/auth/exchange` rejects invalid tokens (401)
+- [x] `/api/v1/auth/exchange` requires org_id (422)
+- [x] `/api/v1/builds` rejects OIDC tokens (401)
+- [x] `/api/v1/builds` accepts internal tokens
+- [x] `/api/v1/tasks` rejects OIDC tokens (401)
+- [x] `/api/v1/tasks` accepts internal tokens
+- [x] `/api/v1/ui/me` accepts OIDC tokens (bootstrap endpoint)
+- [x] `/api/v1/ui/me` accepts internal tokens
+- [x] API key creation works
+- [x] API key auth works for POST /builds
+- [x] API key auth works for GET /builds
+- [x] API key auth works for GET /tasks
+- [x] Invalid API keys rejected (401)
+
+File: `tests/test_api_auth.py` (TestEndpointAccess class)
+
+- [x] All protected endpoints return 401 without auth
+- [x] Router prefixes verified (/health, /api/v1/auth, /api/v1/ui, etc.)
+- [x] Wrong org/workspace returns 403 or 404
+
+### Phase 3: CLI Integration Tests (COMPLETED)
+
+File: `tests/test_cli.py`
+
+- [x] `stardag version` works
+- [x] `stardag --help` shows commands
+- [x] `stardag auth --help` shows auth subcommands
+- [x] `stardag config --help` shows config subcommands
+- [x] `stardag config show` works without profile
+- [x] `stardag auth status` works without credentials
+- [x] `stardag config show` shows API key when set via env
+- [x] `stardag auth status` shows API key status
+- [x] Registry URL from env respected
+- [x] Config with multiple env vars works
+- [x] `stardag config registry list/add/remove` works
+- [x] `stardag config profile list` works
+- [x] `stardag config profile add` requires valid registry
+- [x] `stardag auth login` with API key set shows message
+- [x] `stardag auth logout` without credentials works
+
+**Note**: Full OAuth browser flow (`stardag auth login`) not fully tested due to browser interaction requirement. Tests verify the CLI handles various auth states correctly.
+
+### Phase 4: Frontend Browser Tests (PARTIALLY COMPLETED - OPTIONAL)
+
+File: `tests/test_browser.py`
+
+Browser tests exist but are optional (in separate CI job):
+
+- [x] Login page loads
+- [x] OAuth redirect to Keycloak works
+- [x] After login, redirected back with user info
+- [x] Organization selector displayed
+- [x] Workspace switching works
+- [x] Builds page loads with data
+- [x] Tasks page loads
+- [x] API error handling in UI
+
+**Remaining TODOs** (nice-to-have):
+
+- [ ] Test logout flow
+- [ ] Test token refresh (session expiry)
+- [ ] Test deep linking (direct URL access)
+
+### Phase 5: Full Flow Integration Tests (COMPLETED)
+
+File: `tests/test_full_flow.py`
+
+- [x] Create build and verify in list
+- [x] Create build with tasks via API key
+- [x] Complete build workflow (create → complete → verify status)
+- [x] API key workflow (full CRUD)
+- [x] Organization info accessible after auth
+- [x] Workspace listing works
+- [x] OIDC → internal token exchange
+- [x] API key created via UI works for SDK
+- [x] Builds visible across auth methods
+
+SDK Build Tests:
+
+- [x] Simple 3-task DAG build with APIRegistry
+- [x] Diamond DAG build (shared dependencies)
+- [x] All tasks registered and marked completed
+- [x] Graph structure verified (nodes and edges)
+
+## Known Issues / Remaining TODOs
+
+### Non-Critical (Nice-to-Have)
+
+1. **CLI auth login browser flow**: The interactive OAuth flow requires browser interaction. Tests verify the CLI handles auth states but don't fully automate the browser redirect flow. Could add Playwright-based CLI login test if needed.
+
+2. **Browser test coverage**: Basic flows covered, but could expand to cover:
+
+   - Logout flow
+   - Token refresh handling
+   - Error states (network failures, etc.)
+
+3. **Profile slug resolution tests**: The CLI supports slugs (e.g., `my-org/my-workspace`) but integration tests primarily use UUIDs. Could add tests verifying slug → UUID resolution works end-to-end.
+
+4. **Parallel test isolation**: Currently tests share org/workspace created by first test. For true isolation, could create unique workspace per test, but this adds overhead.
+
+### Fixed Issues
+
+- Keycloak health check in CI (was checking wrong port)
+- CLI missing `[cli,api]` extras in integration-tests
+- GET /builds/{build_id} missing workspace_id parameter
+- CLI tests running from wrong directory
+
+## Decisions Made
+
+1. **Separate integration-tests package**: Follows same structure as other packages (`src/`, `tests/`), clear separation from unit tests.
+
+2. **Browser tests optional**: Marked as separate CI job since they're slow and require Playwright installation. Non-browser tests run in main integration job.
+
+3. **Password grant for test automation**: Using Keycloak `stardag-test` client with password grant (direct access) for automated token acquisition. Avoids browser interaction in most tests.
+
+4. **Real PostgreSQL**: Tests run against real PostgreSQL in docker, catches DB-specific issues.
+
+5. **Service reuse**: Docker services left running between tests for speed. Fixtures detect and reuse existing org/workspace.
+
+## Running Tests Locally
 
 ```bash
-# Install browsers
-playwright install chromium
+# Start docker services
+cd docker && docker compose up -d
 
-# Or in CI
-playwright install --with-deps chromium
+# Wait for services
+# ... (or use scripts/e2e-test.sh for full setup)
+
+# Run integration tests
+tox -e integration
+
+# Run with browser tests (requires playwright install)
+tox -e integration-browser
+
+# Run specific test file
+cd integration-tests && uv run pytest tests/test_api_auth.py -v
 ```
 
-### Environment Variables for Tests
+## Files Changed
 
-```bash
-# Point to test docker-compose services
-STARDAG_API_URL=http://localhost:8000
-KEYCLOAK_URL=http://localhost:8080
-TEST_USER_EMAIL=test@example.com
-TEST_USER_PASSWORD=testpass
-```
+- `integration-tests/` - New package with all integration tests
+- `tox.ini` - Added integration, integration-browser, integration-pyright envs
+- `.github/workflows/ci.yml` - Added integration-tests and integration-tests-browser jobs
+- `docker-compose.yml` - No changes needed (already had all services)
+- `docker/keycloak/realm-export.json` - Added stardag-test client for password grant
