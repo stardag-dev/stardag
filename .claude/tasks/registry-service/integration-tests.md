@@ -238,11 +238,18 @@ The biggest coverage gaps are:
 - [x] Analysis of current test coverage
 - [x] Identification of bugs/gaps from auth session
 - [x] Detailed execution plan created
-- [ ] Test infrastructure setup
-- [ ] API integration tests
-- [ ] CLI integration tests
-- [ ] Frontend browser tests
-- [ ] Full flow tests
+- [x] Test infrastructure setup (Phase 1)
+  - [x] Created `tests/integration/` package structure
+  - [x] Created `pyproject.toml` with dependencies
+  - [x] Created `docker_fixtures.py` for service management
+  - [x] Created `conftest.py` with auth/org/workspace fixtures
+  - [x] Added `stardag-test` OIDC client for password grant
+  - [x] Updated `tox.ini` with integration test envs
+  - [x] Verified with 11 smoke tests passing
+- [ ] API integration tests (Phase 2)
+- [ ] CLI integration tests (Phase 3)
+- [ ] Frontend browser tests (Phase 4)
+- [ ] Full flow tests (Phase 5)
 
 ## Notes
 

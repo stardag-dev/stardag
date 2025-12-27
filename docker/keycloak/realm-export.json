@@ -92,6 +92,37 @@
           }
         }
       ]
+    },
+    {
+      "clientId": "stardag-test",
+      "name": "Stardag Test Client",
+      "description": "Test client with direct access grants for integration tests",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {},
+      "defaultClientScopes": ["web-origins", "acr", "profile", "email", "openid"],
+      "optionalClientScopes": ["address", "phone", "offline_access"],
+      "protocolMappers": [
+        {
+          "name": "subject",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "id",
+            "claim.name": "sub",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "users": [
