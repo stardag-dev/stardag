@@ -1,6 +1,6 @@
 ## Status
 
-ready
+active
 
 ## Goal
 
