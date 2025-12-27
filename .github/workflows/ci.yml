@@ -124,7 +124,8 @@ jobs:
         run: |
           echo "Waiting for Keycloak..."
           for i in {1..60}; do
-            if curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
+            # Use OIDC discovery endpoint - health endpoint is on port 9000 which is not exposed
+            if curl -sf http://localhost:8080/realms/stardag/.well-known/openid-configuration > /dev/null 2>&1; then
               echo "Keycloak is ready!"
               break
             fi
@@ -198,7 +199,8 @@ jobs:
         run: |
           echo "Waiting for Keycloak..."
           for i in {1..60}; do
-            if curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
+            # Use OIDC discovery endpoint - health endpoint is on port 9000 which is not exposed
+            if curl -sf http://localhost:8080/realms/stardag/.well-known/openid-configuration > /dev/null 2>&1; then
               echo "Keycloak is ready!"
               break
             fi
