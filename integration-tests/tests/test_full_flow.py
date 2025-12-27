@@ -45,7 +45,10 @@ class TestBuildWorkflow:
         assert build_id in build_ids
 
         # Get build details
-        response = internal_authenticated_client.get(f"/api/v1/builds/{build_id}")
+        response = internal_authenticated_client.get(
+            f"/api/v1/builds/{build_id}",
+            params={"workspace_id": test_workspace_id},
+        )
         assert response.status_code == 200
         build_detail = response.json()
         assert build_detail["id"] == build_id
@@ -135,7 +138,10 @@ class TestBuildWorkflow:
         assert response.status_code == 200, f"Complete build failed: {response.text}"
 
         # Verify build is completed
-        response = internal_authenticated_client.get(f"/api/v1/builds/{build_id}")
+        response = internal_authenticated_client.get(
+            f"/api/v1/builds/{build_id}",
+            params={"workspace_id": test_workspace_id},
+        )
         assert response.status_code == 200
         build = response.json()
         assert build["status"] == "completed"
