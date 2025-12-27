@@ -18,7 +18,7 @@ except ImportError:
     Page = None  # type: ignore
     expect = None  # type: ignore
 
-from docker_fixtures import (
+from stardag_integration_tests.docker_fixtures import (
     TEST_USER_EMAIL,
     TEST_USER_PASSWORD,
     ServiceEndpoints,

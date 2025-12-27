@@ -5,8 +5,11 @@ These tests verify complete workflows across API, SDK, and UI components.
 
 import httpx
 
-from conftest import TokenSet, exchange_oidc_for_internal_token
-from docker_fixtures import ServiceEndpoints
+from stardag_integration_tests.conftest import (
+    TokenSet,
+    exchange_oidc_for_internal_token,
+)
+from stardag_integration_tests.docker_fixtures import ServiceEndpoints
 
 
 class TestBuildWorkflow:

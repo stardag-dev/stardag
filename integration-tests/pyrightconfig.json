@@ -1,0 +1,6 @@
+{
+  "include": ["src", "tests"],
+  "exclude": ["**/__pycache__", ".venv", "**/.pytest_cache", "tests/test_browser.py"],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic"
+}

@@ -86,3 +86,158 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app/stardag-ui
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: app/stardag-ui
+
+      - name: Start docker-compose services
+        run: docker compose up -d --build
+        working-directory: docker
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for Keycloak..."
+          for i in {1..60}; do
+            if curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "Keycloak is ready!"
+              break
+            fi
+            echo "Waiting for Keycloak... ($i/60)"
+            sleep 5
+          done
+
+          echo "Waiting for API..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "API is ready!"
+              break
+            fi
+            echo "Waiting for API... ($i/30)"
+            sleep 2
+          done
+
+      - name: Install tox
+        run: pip install tox
+
+      - name: Run integration tests
+        run: tox -e integration
+
+      - name: Run integration tests pyright
+        run: tox -e integration-pyright
+
+      - name: Show docker logs on failure
+        if: failure()
+        run: docker compose logs
+        working-directory: docker
+
+      - name: Stop docker-compose services
+        if: always()
+        run: docker compose down -v
+        working-directory: docker
+
+  integration-tests-browser:
+    name: Integration Tests (Browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app/stardag-ui
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: app/stardag-ui
+
+      - name: Start docker-compose services
+        run: docker compose up -d --build
+        working-directory: docker
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for Keycloak..."
+          for i in {1..60}; do
+            if curl -sf http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "Keycloak is ready!"
+              break
+            fi
+            echo "Waiting for Keycloak... ($i/60)"
+            sleep 5
+          done
+
+          echo "Waiting for API..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "API is ready!"
+              break
+            fi
+            echo "Waiting for API... ($i/30)"
+            sleep 2
+          done
+
+          echo "Waiting for UI..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "UI is ready!"
+              break
+            fi
+            echo "Waiting for UI... ($i/30)"
+            sleep 2
+          done
+
+      - name: Install tox
+        run: pip install tox
+
+      - name: Run browser integration tests
+        run: tox -e integration-browser
+
+      - name: Show docker logs on failure
+        if: failure()
+        run: docker compose logs
+        working-directory: docker
+
+      - name: Stop docker-compose services
+        if: always()
+        run: docker compose down -v
+        working-directory: docker

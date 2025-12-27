@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-from docker_fixtures import ServiceEndpoints
+from stardag_integration_tests.docker_fixtures import ServiceEndpoints
 
 
 def run_stardag_cli(

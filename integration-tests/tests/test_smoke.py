@@ -5,7 +5,7 @@ These tests verify basic connectivity to docker-compose services.
 
 import httpx
 
-from docker_fixtures import ServiceEndpoints
+from stardag_integration_tests.docker_fixtures import ServiceEndpoints
 
 
 class TestDockerServices:
