@@ -44,8 +44,14 @@ def run_stardag_cli(
     )
 
     if check and result.returncode != 0:
+        # Include stderr in error message for better debugging
+        error_msg = (
+            f"Command {cmd} failed with exit code {result.returncode}\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
         raise subprocess.CalledProcessError(
-            result.returncode, cmd, result.stdout, result.stderr
+            result.returncode, cmd, result.stdout, error_msg
         )
 
     return result
