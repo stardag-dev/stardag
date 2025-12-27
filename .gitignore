@@ -27,3 +27,6 @@ _build/
 
 # Node.js
 node_modules/
+
+# AWS CDK deployment config (contains secrets)
+infra/aws-cdk/.env.deploy
