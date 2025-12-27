@@ -22,10 +22,10 @@ def run_stardag_cli(
 ) -> subprocess.CompletedProcess[str]:
     """Run the stardag CLI with given arguments.
 
-    Uses the lib/stardag package directly via uv run stardag command.
+    Uses the stardag package installed in integration-tests via uv run stardag command.
     """
-    # Use the lib/stardag directory for running CLI
-    stardag_dir = Path(__file__).parent.parent.parent / "lib" / "stardag"
+    # Use the integration-tests directory where stardag is installed as a dependency
+    integration_tests_dir = Path(__file__).parent.parent
 
     # Merge environment
     full_env = os.environ.copy()
@@ -36,7 +36,7 @@ def run_stardag_cli(
     cmd = ["uv", "run", "stardag", *args]
     result = subprocess.run(
         cmd,
-        cwd=str(cwd or stardag_dir),
+        cwd=str(cwd or integration_tests_dir),
         capture_output=True,
         text=True,
         env=full_env,
