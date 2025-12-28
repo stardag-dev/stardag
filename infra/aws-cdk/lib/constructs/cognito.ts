@@ -170,9 +170,11 @@ export class StardagCognito extends Construct {
         ],
         callbackUrls: [
           `https://${uiDomain}/callback`,
-          // Local development
+          // Local development (UI)
           "http://localhost:3000/callback",
           "http://localhost:5173/callback",
+          // Local development (CLI/SDK PKCE flow)
+          "http://localhost:8400/callback",
         ],
         logoutUrls: [
           `https://${uiDomain}`,

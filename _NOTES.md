@@ -175,3 +175,12 @@ For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/St
 Removed:
 
 Stardag is built to facilitate explorative and data centric work, such as Data Science/ML/AI experimentation. As such, it aims to make it seamless to move between running tasks and loading outputs in "production" (any hosted/cloud based infrastructure) as well as _locally_ on your working station. (TODO complete: both switching between workspaces, including copying of tasks, and reading (+optionally writing) _from(/to) production_ on your local workstation)
+
+AUTH CENTRAL
+
+- [x] Don't require access to all registries to log in!?
+- [ ] SDK auth, active profile via env var bu says see result at localhost!?
+- [ ] Failed to fetch tasks
+- [ ] Creating a new profile even though an identical exists?
+- [ ] Redact access token from config repr -> `Secret`
+- [ ] Fail loudly if profile (from env var) is not available in config

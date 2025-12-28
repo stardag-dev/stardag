@@ -18,6 +18,7 @@ from stardag_api.auth.tokens import (
     get_jwks,
     get_token_manager,
 )
+from stardag_api.config import oidc_settings
 from stardag_api.db import get_db
 from stardag_api.models import OrganizationMember, User
 
@@ -27,6 +28,13 @@ router = APIRouter(tags=["auth"])
 
 # Bearer scheme for OIDC tokens (only used by /auth/exchange)
 oidc_bearer = HTTPBearer(auto_error=True)
+
+
+class AuthConfigResponse(BaseModel):
+    """OIDC configuration for SDK/CLI clients."""
+
+    oidc_issuer: str
+    oidc_client_id: str
 
 
 class TokenExchangeRequest(BaseModel):
@@ -110,6 +118,20 @@ async def get_jwks_endpoint():
     Clients can use this to validate tokens without calling the API.
     """
     return get_jwks()
+
+
+@router.get("/auth/config", response_model=AuthConfigResponse)
+async def get_auth_config():
+    """Get OIDC configuration for SDK/CLI clients.
+
+    Returns the OIDC issuer and client ID that clients should use
+    for authentication. This allows the CLI to dynamically discover
+    the correct OIDC provider for each registry.
+    """
+    return AuthConfigResponse(
+        oidc_issuer=oidc_settings.client_issuer_url,
+        oidc_client_id=oidc_settings.sdk_client_id,
+    )
 
 
 @router.post("/auth/exchange", response_model=TokenExchangeResponse)

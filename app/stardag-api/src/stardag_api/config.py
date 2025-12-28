@@ -66,6 +66,8 @@ class OIDCSettings(BaseSettings):
     jwks_url: str | None = None
     # Cache JWKS for this many seconds
     jwks_cache_ttl: int = 300
+    # OIDC client ID for SDK/CLI authentication
+    sdk_client_id: str = "stardag-sdk"
 
     model_config = SettingsConfigDict(env_prefix="OIDC_")
 
@@ -88,6 +90,14 @@ class OIDCSettings(BaseSettings):
         if self.external_issuer_url and self.external_issuer_url != self.issuer_url:
             issuers.append(self.external_issuer_url)
         return issuers
+
+    @property
+    def client_issuer_url(self) -> str:
+        """Get the issuer URL that clients (SDK/CLI) should use.
+
+        Returns external_issuer_url if set, otherwise issuer_url.
+        """
+        return self.external_issuer_url or self.issuer_url
 
 
 settings = Settings()
