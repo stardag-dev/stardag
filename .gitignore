@@ -30,3 +30,6 @@ node_modules/
 
 # AWS CDK deployment config (contains secrets)
 infra/aws-cdk/.env.deploy
+
+# Private deployment documentation (contains account-specific info)
+infra/PRIVATE_README.md
