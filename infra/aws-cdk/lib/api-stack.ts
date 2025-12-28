@@ -105,10 +105,13 @@ export class ApiStack extends cdk.Stack {
         STARDAG_API_DATABASE_HOST: foundation.dbClusterEndpoint,
         STARDAG_API_DATABASE_PORT: foundation.dbPort.toString(),
         STARDAG_API_DATABASE_NAME: foundation.dbName,
-        // OIDC config
+        // OIDC config - Cognito uses different JWKS path than Keycloak
         OIDC_ISSUER_URL: foundation.cognitoIssuerUrl,
         OIDC_EXTERNAL_ISSUER_URL: foundation.cognitoIssuerUrl,
         OIDC_AUDIENCE: foundation.cognitoClientId,
+        // Cognito JWKS URL format: {issuer}/.well-known/jwks.json
+        // (different from Keycloak which uses /protocol/openid-connect/certs)
+        OIDC_JWKS_URL: `${foundation.cognitoIssuerUrl}/.well-known/jwks.json`,
         // CORS
         STARDAG_API_CORS_ORIGINS: `https://${config.uiDomain},http://localhost:3000,http://localhost:5173`,
       },
