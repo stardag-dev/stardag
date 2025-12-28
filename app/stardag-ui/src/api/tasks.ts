@@ -6,8 +6,9 @@ import type {
   TaskStatus,
 } from "../types/task";
 import { fetchWithAuth } from "./client";
+import { API_V1 } from "./config";
 
-const API_BASE = "/api/v1";
+const API_BASE = API_V1;
 
 // Build API
 

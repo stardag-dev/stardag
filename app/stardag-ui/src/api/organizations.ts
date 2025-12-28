@@ -1,6 +1,7 @@
 import { fetchWithAuth } from "./client";
+import { API_V1_UI } from "./config";
 
-const API_BASE = "/api/v1/ui";
+const API_BASE = API_V1_UI;
 
 // --- Types ---
 

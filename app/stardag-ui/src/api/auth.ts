@@ -1,6 +1,7 @@
 // Authentication API functions
+import { API_V1 } from "./config";
 
-const API_BASE = "/api/v1";
+const API_BASE = API_V1;
 
 export interface TokenExchangeResponse {
   access_token: string;
