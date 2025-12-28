@@ -25,11 +25,11 @@ interface AuthContextType {
   isAuthenticated: boolean;
   login: () => Promise<void>;
   logout: () => Promise<void>;
-  // Get the Keycloak token (for token exchange only)
-  getKeycloakToken: () => Promise<string | null>;
+  // Get the OIDC access token (for token exchange only)
+  getOidcAccessToken: () => Promise<string | null>;
   // Get org-scoped access token for API calls
   getAccessToken: (orgId: string | null) => Promise<string | null>;
-  // Exchange Keycloak token for org-scoped token
+  // Exchange OIDC token for org-scoped token
   exchangeForOrgToken: (orgId: string) => Promise<string | null>;
   // Current org for which we have a valid token
   currentTokenOrgId: string | null;
@@ -165,8 +165,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   }, [manager]);
 
-  // Get Keycloak/OIDC access token (for token exchange)
-  const getKeycloakToken = useCallback(async (): Promise<string | null> => {
+  // Get OIDC access token (for token exchange)
+  const getOidcAccessToken = useCallback(async (): Promise<string | null> => {
     if (!manager) return null;
 
     try {
@@ -182,7 +182,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   }, [manager]);
 
-  // Exchange Keycloak token for org-scoped token
+  // Exchange OIDC token for org-scoped token
   const exchangeForOrgToken = useCallback(
     async (orgId: string): Promise<string | null> => {
       // Check cache first
@@ -192,16 +192,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
         return cached.accessToken;
       }
 
-      // Get Keycloak token
-      const keycloakToken = await getKeycloakToken();
-      if (!keycloakToken) {
-        console.warn("No Keycloak token available for exchange");
+      // Get OIDC access token
+      const oidcToken = await getOidcAccessToken();
+      if (!oidcToken) {
+        console.warn("No OIDC token available for exchange");
         return null;
       }
 
       setIsExchangingToken(true);
       try {
-        const response = await exchangeToken(keycloakToken, orgId);
+        const response = await exchangeToken(oidcToken, orgId);
         storeOrgToken(orgId, response.access_token, response.expires_in);
         setCurrentTokenOrgId(orgId);
         return response.access_token;
@@ -213,7 +213,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         setIsExchangingToken(false);
       }
     },
-    [getKeycloakToken],
+    [getOidcAccessToken],
   );
 
   // Get access token for API calls (org-scoped if orgId provided)
@@ -245,7 +245,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     isAuthenticated: !!user && !user.expired,
     login,
     logout,
-    getKeycloakToken,
+    getOidcAccessToken,
     getAccessToken,
     exchangeForOrgToken,
     currentTokenOrgId,

@@ -176,6 +176,10 @@ class JWTValidator:
                     "verify_aud": False,  # We verify manually below
                     "verify_iss": True,
                     "verify_exp": True,
+                    # Skip at_hash validation - ID tokens contain at_hash but we
+                    # may receive ID tokens without the corresponding access token
+                    # (e.g., for bootstrap endpoints that need user claims)
+                    "verify_at_hash": False,
                 },
             )
 

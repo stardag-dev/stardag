@@ -30,7 +30,7 @@ export async function fetchWithAuth(
   // Add auth header if we have a token getter
   if (getAccessTokenFn) {
     try {
-      // Use org-scoped token if org is set, otherwise use Keycloak token
+      // Use org-scoped token if org is set, otherwise use OIDC ID token
       const token = await getAccessTokenFn(currentOrgId);
       if (token) {
         headers.set("Authorization", `Bearer ${token}`);

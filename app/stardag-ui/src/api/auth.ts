@@ -10,21 +10,21 @@ export interface TokenExchangeResponse {
 }
 
 /**
- * Exchange a Keycloak token for an org-scoped internal token.
+ * Exchange an OIDC token for an org-scoped internal token.
  *
- * @param keycloakToken - The Keycloak access token
+ * @param oidcToken - The OIDC access token from the identity provider
  * @param orgId - The organization ID to scope the token to
  * @returns The org-scoped internal access token
  */
 export async function exchangeToken(
-  keycloakToken: string,
+  oidcToken: string,
   orgId: string,
 ): Promise<TokenExchangeResponse> {
   const response = await fetch(`${API_BASE}/auth/exchange`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${keycloakToken}`,
+      Authorization: `Bearer ${oidcToken}`,
     },
     body: JSON.stringify({ org_id: orgId }),
   });
