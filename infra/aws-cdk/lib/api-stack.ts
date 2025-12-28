@@ -109,6 +109,8 @@ export class ApiStack extends cdk.Stack {
         OIDC_ISSUER_URL: foundation.cognitoIssuerUrl,
         OIDC_EXTERNAL_ISSUER_URL: foundation.cognitoIssuerUrl,
         OIDC_AUDIENCE: foundation.cognitoClientId,
+        // SDK client ID (same Cognito client used for both UI and SDK)
+        OIDC_SDK_CLIENT_ID: foundation.cognitoClientId,
         // Cognito JWKS URL format: {issuer}/.well-known/jwks.json
         // (different from Keycloak which uses /protocol/openid-connect/certs)
         OIDC_JWKS_URL: `${foundation.cognitoIssuerUrl}/.well-known/jwks.json`,

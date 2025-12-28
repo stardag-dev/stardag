@@ -47,9 +47,9 @@ from stardag.config import cache_org_id, cache_workspace_id, get_config
 
 app = typer.Typer(help="Authentication commands for Stardag API")
 
-# Default OIDC configuration for local Keycloak
-DEFAULT_OIDC_ISSUER = "http://localhost:8080/realms/stardag"
-DEFAULT_OIDC_CLIENT_ID = "stardag-sdk"
+# Default OIDC configuration for local development (Keycloak)
+LOCAL_OIDC_ISSUER = "http://localhost:8080/realms/stardag"
+LOCAL_OIDC_CLIENT_ID = "stardag-sdk"
 DEFAULT_API_URL = "http://localhost:8000"
 CALLBACK_PORT = 8400
 
@@ -205,6 +205,25 @@ def _exchange_for_internal_token(
         return response.json()
 
 
+def _get_auth_config_from_registry(api_url: str) -> dict | None:
+    """Fetch OIDC configuration from registry server.
+
+    Returns dict with 'oidc_issuer' and 'oidc_client_id', or None if unavailable.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(f"{api_url}/api/v1/auth/config")
+            response.raise_for_status()
+            return response.json()
+    except Exception:
+        return None
+
+
 def _get_oidc_config(issuer: str) -> dict:
     """Fetch OIDC configuration from issuer."""
     try:
@@ -305,14 +324,14 @@ def login(
         help="Base URL of the Stardag API (overrides registry URL)",
     ),
     oidc_issuer: str = typer.Option(
-        DEFAULT_OIDC_ISSUER,
+        None,
         "--oidc-issuer",
-        help="OIDC issuer URL (e.g., Keycloak realm URL)",
+        help="OIDC issuer URL (overrides registry config)",
     ),
     client_id: str = typer.Option(
-        DEFAULT_OIDC_CLIENT_ID,
+        None,
         "--client-id",
-        help="OIDC client ID",
+        help="OIDC client ID (overrides registry config)",
     ),
 ) -> None:
     """Login to Stardag API via browser.
@@ -321,11 +340,12 @@ def login(
     After successful login, credentials are stored locally.
 
     The login flow:
-    1. Authenticate via OIDC (OAuth PKCE flow)
-    2. Store refresh token for the registry
-    3. Fetch user's organizations
-    4. Exchange for org-scoped internal token
-    5. Create a profile for easy access
+    1. Fetch OIDC configuration from the registry server
+    2. Authenticate via OIDC (OAuth PKCE flow)
+    3. Store refresh token for the registry
+    4. Fetch user's organizations
+    5. Exchange for org-scoped internal token
+    6. Create a profile for easy access
 
     For production/CI, use the STARDAG_API_KEY environment variable instead.
     """
@@ -361,17 +381,67 @@ def login(
         add_registry(registry, effective_url)
 
     typer.echo(f"Logging into registry: {registry} ({effective_url})")
+
+    # Determine OIDC issuer and client ID
+    # Priority: CLI args > registry config > local defaults
+    effective_issuer = oidc_issuer
+    effective_client_id = client_id
+
+    if not effective_issuer or not effective_client_id:
+        typer.echo("Fetching auth configuration from registry...")
+        auth_config = _get_auth_config_from_registry(effective_url)
+
+        if auth_config:
+            if not effective_issuer:
+                effective_issuer = auth_config.get("oidc_issuer")
+            if not effective_client_id:
+                effective_client_id = auth_config.get("oidc_client_id")
+            typer.echo(f"Using OIDC issuer: {effective_issuer}")
+        else:
+            # Fall back to local defaults only if registry is "local"
+            if registry == "local":
+                typer.echo("Using local development defaults")
+                if not effective_issuer:
+                    effective_issuer = LOCAL_OIDC_ISSUER
+                if not effective_client_id:
+                    effective_client_id = LOCAL_OIDC_CLIENT_ID
+            else:
+                typer.echo(
+                    f"Error: Could not fetch auth config from {effective_url}",
+                    err=True,
+                )
+                typer.echo(
+                    "The registry server may not support the /auth/config endpoint.",
+                    err=True,
+                )
+                typer.echo("")
+                typer.echo("You can manually specify OIDC settings:")
+                typer.echo(
+                    f"  stardag auth login -r {registry} "
+                    "--oidc-issuer <issuer-url> --client-id <client-id>"
+                )
+                raise typer.Exit(1)
+
+    # Ensure we have both values
+    if not effective_issuer or not effective_client_id:
+        typer.echo("Error: Could not determine OIDC configuration", err=True)
+        raise typer.Exit(1)
+
     typer.echo("Fetching OIDC configuration...")
 
     try:
-        oidc_config = _get_oidc_config(oidc_issuer)
+        oidc_config = _get_oidc_config(effective_issuer)
     except Exception as e:
         typer.echo(
-            f"Error: Could not fetch OIDC configuration from {oidc_issuer}", err=True
+            f"Error: Could not fetch OIDC configuration from {effective_issuer}",
+            err=True,
         )
         typer.echo(f"  {e}", err=True)
         typer.echo("")
-        typer.echo("Make sure Keycloak is running (docker compose up keycloak)")
+        if registry == "local":
+            typer.echo("Make sure Keycloak is running (docker compose up keycloak)")
+        else:
+            typer.echo("Check that the OIDC issuer is accessible.")
         raise typer.Exit(1)
 
     auth_endpoint = oidc_config["authorization_endpoint"]
@@ -392,7 +462,7 @@ def login(
     # Build authorization URL
     state = secrets.token_urlsafe(16)
     auth_params = {
-        "client_id": client_id,
+        "client_id": effective_client_id,
         "response_type": "code",
         "redirect_uri": redirect_uri,
         "scope": "openid profile email",  # Note: offline_access removed for local dev
@@ -442,7 +512,7 @@ def login(
             code=result.code,
             code_verifier=code_verifier,
             redirect_uri=redirect_uri,
-            client_id=client_id,
+            client_id=effective_client_id,
         )
     except Exception as e:
         typer.echo(f"Error exchanging code for tokens: {e}", err=True)
@@ -451,7 +521,7 @@ def login(
     # Save credentials (refresh token only - per registry)
     creds_to_save: dict[str, str] = {
         "token_endpoint": token_endpoint,
-        "client_id": client_id,
+        "client_id": effective_client_id,
     }
     if tokens.get("refresh_token"):
         creds_to_save["refresh_token"] = tokens["refresh_token"]
