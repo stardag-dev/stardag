@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from stardag_api.config import settings
 from stardag_api.db import engine
 from stardag_api.models import Base
 from stardag_api.routes import (
@@ -30,13 +31,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for frontend (both dev server and nginx)
+# CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite dev server
-        "http://localhost:3000",  # Nginx (docker-compose)
-    ],
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -28,6 +28,10 @@
     {
       "path": "app/stardag-ui",
       "name": "app/stardag-ui"
+    },
+    {
+      "path": "infra",
+      "name": "infra"
     }
   ],
   "settings": {

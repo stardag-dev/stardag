@@ -2,10 +2,35 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+asyncpg://stardag:stardag@localhost:5432/stardag"
+    # Database configuration - can use either database_url or individual params
+    database_url: str | None = None
+    database_host: str = "localhost"
+    database_port: int = 5432
+    database_name: str = "stardag"
+    database_user: str = "stardag"
+    database_password: str = "stardag"
+
     debug: bool = False
 
+    # CORS origins (comma-separated)
+    cors_origins: str = "http://localhost:5173,http://localhost:3000"
+
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_")
+
+    @property
+    def effective_database_url(self) -> str:
+        """Get database URL, constructing from individual params if not set."""
+        if self.database_url:
+            return self.database_url
+        return (
+            f"postgresql+asyncpg://{self.database_user}:{self.database_password}"
+            f"@{self.database_host}:{self.database_port}/{self.database_name}"
+        )
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Get list of allowed CORS origins."""
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 class JWTSettings(BaseSettings):
