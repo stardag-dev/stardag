@@ -132,7 +132,11 @@ export class ApiStack extends cdk.Stack {
         },
       ],
       healthCheck: {
-        command: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+        // Use Python since curl is not installed in python:3.11-slim
+        command: [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1",
+        ],
         interval: cdk.Duration.seconds(30),
         timeout: cdk.Duration.seconds(5),
         retries: 3,
