@@ -119,7 +119,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
       console.warn("Auth not configured");
       return;
     }
+    console.log("[OIDC] Login initiated, calling signinRedirect...");
+    // Log localStorage state before redirect
+    const oidcKeys = Object.keys(localStorage).filter((k) => k.startsWith("oidc."));
+    console.log("[OIDC] localStorage oidc keys before redirect:", oidcKeys);
     await manager.signinRedirect();
+    // Note: This line won't execute since signinRedirect navigates away
+    console.log("[OIDC] signinRedirect completed (shouldn't see this)");
   }, [manager]);
 
   const logout = useCallback(async () => {
@@ -140,7 +146,26 @@ export function AuthProvider({ children }: AuthProviderProps) {
     await manager.signoutRedirect();
   }, [manager]);
 
-  // Get Keycloak token (for token exchange)
+  // Get OIDC ID token (contains user claims like email, name)
+  // Used for bootstrap endpoints (/ui/me, /ui/me/invites) before org selection
+  const getIdToken = useCallback(async (): Promise<string | null> => {
+    if (!manager) return null;
+
+    try {
+      const user = await manager.getUser();
+      if (user && !user.expired && user.id_token) {
+        console.log("[Auth] Using ID token for bootstrap endpoint");
+        return user.id_token;
+      }
+      // Try silent renew
+      const renewedUser = await manager.signinSilent();
+      return renewedUser?.id_token ?? null;
+    } catch {
+      return null;
+    }
+  }, [manager]);
+
+  // Get Keycloak/OIDC access token (for token exchange)
   const getKeycloakToken = useCallback(async (): Promise<string | null> => {
     if (!manager) return null;
 
@@ -194,10 +219,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
   // Get access token for API calls (org-scoped if orgId provided)
   const getAccessToken = useCallback(
     async (orgId: string | null): Promise<string | null> => {
-      // If no org specified, fall back to Keycloak token
-      // (only for endpoints that don't need org scope, like /me)
+      // If no org specified, use ID token for bootstrap endpoints
+      // (ID token contains email/name claims needed by /ui/me endpoints)
+      // NOTE: Access token doesn't have user claims in Cognito
       if (!orgId) {
-        return getKeycloakToken();
+        return getIdToken();
       }
 
       // Check if we have a valid cached token for this org
@@ -210,7 +236,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       // Need to exchange for a new token
       return exchangeForOrgToken(orgId);
     },
-    [getKeycloakToken, exchangeForOrgToken],
+    [getIdToken, exchangeForOrgToken],
   );
 
   const value: AuthContextType = {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { handleAuthCallback } from "../auth/userManager";
 
 interface AuthCallbackProps {
@@ -8,11 +8,21 @@ interface AuthCallbackProps {
 
 export function AuthCallback({ onSuccess, onError }: AuthCallbackProps) {
   const [error, setError] = useState<string | null>(null);
+  const processedRef = useRef(false);
 
   useEffect(() => {
+    // Prevent double-processing (React StrictMode or re-renders)
+    if (processedRef.current) {
+      console.log("[AuthCallback] Already processed, skipping");
+      return;
+    }
+    processedRef.current = true;
+
     async function processCallback() {
       try {
         await handleAuthCallback();
+        // Clear URL params after successful callback to prevent re-processing on refresh
+        window.history.replaceState({}, "", window.location.pathname);
         onSuccess();
       } catch (err) {
         const errorMessage =
