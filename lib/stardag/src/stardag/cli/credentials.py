@@ -110,6 +110,24 @@ def clear_credentials(registry: str | None = None) -> bool:
     return False
 
 
+def list_registries_with_credentials() -> list[str]:
+    """List registries that have stored credentials.
+
+    Returns:
+        List of registry names with credentials files.
+    """
+    from stardag.config import get_credentials_dir
+
+    creds_dir = get_credentials_dir()
+    if not creds_dir.exists():
+        return []
+
+    registries = []
+    for path in creds_dir.glob("*.json"):
+        registries.append(path.stem)
+    return sorted(registries)
+
+
 def get_refresh_token(registry: str | None = None) -> str | None:
     """Get the stored refresh token."""
     creds = load_credentials(registry)
@@ -378,6 +396,49 @@ def get_default_profile() -> str | None:
     """Get the default profile name from config."""
     config = load_toml_config()
     return config.default.get("profile")
+
+
+def get_active_profile() -> tuple[str | None, str | None]:
+    """Get the currently active profile name and source.
+
+    Returns:
+        Tuple of (profile_name, source) where source is one of:
+        - "env" if set via STARDAG_PROFILE environment variable
+        - "default" if set via [default] in config
+        - None if no active profile
+    """
+    import os
+
+    # Check env var first
+    env_profile = os.environ.get("STARDAG_PROFILE")
+    if env_profile:
+        return env_profile, "env"
+
+    # Check config default
+    default = get_default_profile()
+    if default:
+        return default, "default"
+
+    return None, None
+
+
+def find_matching_profile(
+    registry: str, organization: str, workspace: str
+) -> str | None:
+    """Find a profile that matches the given settings.
+
+    Returns:
+        Profile name if a matching profile exists, None otherwise.
+    """
+    profiles = list_profiles()
+    for name, details in profiles.items():
+        if (
+            details["registry"] == registry
+            and details["organization"] == organization
+            and details["workspace"] == workspace
+        ):
+            return name
+    return None
 
 
 def set_default_profile(profile: str) -> None:

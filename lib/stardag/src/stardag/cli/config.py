@@ -11,8 +11,8 @@ from stardag.cli.credentials import (
     add_profile,
     ensure_access_token,
     get_access_token,
+    get_active_profile,
     get_config_path,
-    get_default_profile,
     get_registry_url,
     list_profiles,
     list_registries,
@@ -207,7 +207,7 @@ def profile_add(
 def profile_list() -> None:
     """List all configured profiles."""
     profiles = list_profiles()
-    default = get_default_profile()
+    active_profile, active_source = get_active_profile()
 
     if not profiles:
         typer.echo("No profiles configured.")
@@ -221,12 +221,23 @@ def profile_list() -> None:
     typer.echo("Profiles:")
     typer.echo("")
     for name, details in profiles.items():
-        is_default = " (default)" if name == default else ""
-        typer.echo(f"  {name}{is_default}")
+        is_active = " *" if name == active_profile else ""
+        typer.echo(f"  {name}{is_active}")
         typer.echo(f"    registry: {details['registry']}")
         typer.echo(f"    organization: {details['organization']}")
         typer.echo(f"    workspace: {details['workspace']}")
         typer.echo("")
+
+    # Show explanation of active profile
+    typer.echo("")
+    if active_profile and active_source == "env":
+        typer.echo(f"* active profile (via STARDAG_PROFILE={active_profile})")
+    elif active_profile and active_source == "default":
+        typer.echo(f"* active profile (via [default] in {get_config_path()})")
+    else:
+        typer.echo("No active profile. To set one:")
+        typer.echo("  - Set env var: export STARDAG_PROFILE=<profile-name>")
+        typer.echo("  - Or set default: stardag config profile use <profile-name>")
 
 
 @profile_app.command("remove")

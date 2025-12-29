@@ -181,7 +181,17 @@ AUTH CENTRAL
 - [x] Don't require access to all registries to log in!?
 - [x] SDK auth, active profile via env var bu says see result at localhost!?
 - [x] Failed to fetch tasks
-- [ ] Creating a new profile even though an identical exists?
+- [x] Creating a new profile even though an identical exists?
+
+Ok, CLI auth fixes:
+
+1. when I run `(uv run) stardag auth login`, if a profile is active via env var `STARDAG_PROFILE=...`, we should default to using _that profiles registry_ to login if --registry not provided explicitly) (now it defaults to localhost or perhaps the [default] from config).
+2. When I run the command `(uv run) stardag config profile list` the result should show which profile is active, if any, with an asterisk `*` after. If a profile is active, there should be an explaining comment below: `"* - active profile via env var STARDAG_PROFILE/via [default] in <path to used config>"` (which ever is the case), if no profile active replace the last part with a helpful message on how to set the active profile.
+3. If no active profile and no `--registry` arg, and multiple registries, ask the user which to use (with a hint that this can be provided as an arg or set the active profile first).
+4. When a profile is active, on login, don't ask the user to select organization and/or workspace - just confirm which profile is in use (and how to switch).
+5. In fact that prompt flow should only be used when _no_ profile exists (first time login basically), if at least one profile exists prompt the user to active that or create a new one (with helpfull instruction on how to using the CLI).
+6. Partly less relevant after previous fixes, but when a new profile is created by the login flow, it says "Created profile: central-my-org-personal-anders-bjorn-huss" even though this profile already exists -> generally when a new profile is created a. never write "Created profile" if an identical exists, if a new one is created explicitly with a new name, but with identical content/settings: warn/inform the user about this and ask for confirmation if they still want to created the "duplicate with new name".
+
 - [ ] Redact access token from config repr -> `Secret`
 - [ ] Fail loudly if profile (from env var) is not available in config
 

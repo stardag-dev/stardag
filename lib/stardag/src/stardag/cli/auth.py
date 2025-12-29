@@ -33,10 +33,14 @@ from stardag.cli.credentials import (
     add_profile,
     add_registry,
     clear_credentials,
+    find_matching_profile,
+    get_active_profile,
     get_config_path,
     get_credentials_path,
     get_registry_url,
     list_profiles,
+    list_registries,
+    list_registries_with_credentials,
     load_credentials,
     save_access_token_cache,
     save_credentials,
@@ -309,13 +313,88 @@ def _sync_target_roots(
         pass
 
 
+def _determine_registry(
+    registry_arg: str | None, api_url_arg: str | None
+) -> tuple[str, str]:
+    """Determine which registry to use for login.
+
+    Priority:
+    1. --api-url argument (creates/updates registry)
+    2. --registry argument
+    3. Active profile's registry (from STARDAG_PROFILE or default)
+    4. Prompt user if multiple registries exist
+    5. Fall back to "local" with default URL
+
+    Returns:
+        Tuple of (registry_name, registry_url)
+    """
+    # 1. URL provided directly
+    if api_url_arg:
+        registry_name = registry_arg or "default"
+        add_registry(registry_name, api_url_arg)
+        return registry_name, api_url_arg.rstrip("/")
+
+    # 2. Registry name provided
+    if registry_arg:
+        effective_url = get_registry_url(registry_arg)
+        if not effective_url:
+            typer.echo(
+                f"Error: Registry '{registry_arg}' not found in config", err=True
+            )
+            typer.echo("Add it with: stardag config registry add <name> --url <url>")
+            raise typer.Exit(1)
+        return registry_arg, effective_url
+
+    # 3. Check active profile
+    active_profile, active_source = get_active_profile()
+    if active_profile:
+        profiles = list_profiles()
+        if active_profile in profiles:
+            profile_registry = profiles[active_profile]["registry"]
+            effective_url = get_registry_url(profile_registry)
+            if effective_url:
+                return profile_registry, effective_url
+
+    # 4. Check available registries
+    registries = list_registries()
+    if len(registries) == 0:
+        # No registries configured, use local default
+        add_registry("local", DEFAULT_API_URL)
+        return "local", DEFAULT_API_URL
+    elif len(registries) == 1:
+        # Only one registry, use it
+        registry_name = list(registries.keys())[0]
+        return registry_name, registries[registry_name]
+    else:
+        # Multiple registries, prompt user
+        typer.echo("Multiple registries configured. Select one:")
+        typer.echo("")
+        registry_names = list(registries.keys())
+        for i, name in enumerate(registry_names):
+            typer.echo(f"  {i + 1}. {name} ({registries[name]})")
+        typer.echo("")
+        typer.echo("Hint: Use --registry <name> to skip this prompt,")
+        typer.echo(
+            "      or set a default profile with: stardag config profile use <profile>,"
+            "      or set an active profile with: export STARDAG_PROFILE=<profile>"
+        )
+        typer.echo("")
+
+        choice = typer.prompt("Enter number", type=int, default=1)
+        if choice < 1 or choice > len(registry_names):
+            typer.echo("Invalid selection")
+            raise typer.Exit(1)
+        registry_name = registry_names[choice - 1]
+        return registry_name, registries[registry_name]
+
+
 @app.command()
 def login(
     registry: str = typer.Option(
         None,
         "--registry",
         "-r",
-        help="Registry name to login to (uses default if not specified)",
+        help="Registry name to login to (uses active profile's registry if not specified)",
     ),
     api_url: str = typer.Option(
         None,
@@ -339,13 +418,12 @@ def login(
     Opens your browser to authenticate with the OIDC identity provider.
     After successful login, credentials are stored locally.
 
-    The login flow:
-    1. Fetch OIDC configuration from the registry server
-    2. Authenticate via OIDC (OAuth PKCE flow)
-    3. Store refresh token for the registry
-    4. Fetch user's organizations
-    5. Exchange for org-scoped internal token
-    6. Create a profile for easy access
+    If a profile is active (via STARDAG_PROFILE or default), this command
+    will refresh credentials for that profile's registry without prompting
+    for organization/workspace selection.
+
+    For first-time setup (no profiles), you'll be guided through org/workspace
+    selection to create your first profile.
 
     For production/CI, use the STARDAG_API_KEY environment variable instead.
     """
@@ -359,28 +437,19 @@ def login(
         typer.echo("  unset STARDAG_API_KEY")
         return
 
-    # Determine registry and URL
-    if api_url:
-        # URL provided directly, create/update registry
-        if not registry:
-            registry = "default"
-        add_registry(registry, api_url)
-        effective_url = api_url.rstrip("/")
-    elif registry:
-        # Look up registry URL
-        effective_url = get_registry_url(registry)
-        if not effective_url:
-            typer.echo(f"Error: Registry '{registry}' not found in config", err=True)
-            typer.echo("Add it with: stardag config registry add <name> --url <url>")
-            raise typer.Exit(1)
-    else:
-        # Use default
-        registry = "local"
-        effective_url = DEFAULT_API_URL
-        # Ensure local registry exists
-        add_registry(registry, effective_url)
+    # Determine which registry to use
+    effective_registry, effective_url = _determine_registry(registry, api_url)
 
-    typer.echo(f"Logging into registry: {registry} ({effective_url})")
+    # Check if we have an active profile for this registry
+    active_profile, active_source = get_active_profile()
+    profiles = list_profiles()
+    has_active_profile_for_registry = (
+        active_profile
+        and active_profile in profiles
+        and profiles[active_profile]["registry"] == effective_registry
+    )
+
+    typer.echo(f"Logging into registry: {effective_registry} ({effective_url})")
 
     # Determine OIDC issuer and client ID
     # Priority: CLI args > registry config > local defaults
@@ -399,7 +468,7 @@ def login(
             typer.echo(f"Using OIDC issuer: {effective_issuer}")
         else:
             # Fall back to local defaults only if registry is "local"
-            if registry == "local":
+            if effective_registry == "local":
                 typer.echo("Using local development defaults")
                 if not effective_issuer:
                     effective_issuer = LOCAL_OIDC_ISSUER
@@ -417,7 +486,7 @@ def login(
                 typer.echo("")
                 typer.echo("You can manually specify OIDC settings:")
                 typer.echo(
-                    f"  stardag auth login -r {registry} "
+                    f"  stardag auth login -r {effective_registry} "
                     "--oidc-issuer <issuer-url> --client-id <client-id>"
                 )
                 raise typer.Exit(1)
@@ -438,7 +507,7 @@ def login(
         )
         typer.echo(f"  {e}", err=True)
         typer.echo("")
-        if registry == "local":
+        if effective_registry == "local":
             typer.echo("Make sure Keycloak is running (docker compose up keycloak)")
         else:
             typer.echo("Check that the OIDC issuer is accessible.")
@@ -525,12 +594,59 @@ def login(
     }
     if tokens.get("refresh_token"):
         creds_to_save["refresh_token"] = tokens["refresh_token"]
-    save_credentials(creds_to_save, registry)  # type: ignore[arg-type]
+    save_credentials(creds_to_save, effective_registry)  # type: ignore[arg-type]
 
     typer.echo("")
     typer.echo("Login successful!")
-    typer.echo(f"Credentials saved to {get_credentials_path(registry)}")
+    typer.echo(f"Credentials saved to {get_credentials_path(effective_registry)}")
 
+    # If we have an active profile for this registry, just confirm it
+    if has_active_profile_for_registry and active_profile:
+        profile_details = profiles[active_profile]
+        org_slug = profile_details["organization"]
+        workspace_slug = profile_details["workspace"]
+
+        typer.echo("")
+        typer.echo(f"Active profile: {active_profile}")
+        typer.echo(f"  Organization: {org_slug}")
+        typer.echo(f"  Workspace: {workspace_slug}")
+
+        if active_source == "env":
+            typer.echo("")
+            typer.echo(f"(Active via STARDAG_PROFILE={active_profile})")
+        else:
+            typer.echo("")
+            typer.echo("(Active via [default] in config)")
+
+        typer.echo("")
+        typer.echo("To switch profiles:")
+        typer.echo("  - Set env var: export STARDAG_PROFILE=<profile-name>")
+        typer.echo("  - Or set default: stardag config profile use <profile-name>")
+        typer.echo("  - List profiles: stardag config profile list")
+        return
+
+    # Check if any profiles exist
+    if profiles:
+        # Profiles exist but none active for this registry
+        # Show existing profiles and how to use/create them
+        typer.echo("")
+        typer.echo("Existing profiles:")
+        for name, details in profiles.items():
+            typer.echo(f"  - {name} (registry: {details['registry']})")
+
+        typer.echo("")
+        typer.echo("To activate an existing profile:")
+        typer.echo("  export STARDAG_PROFILE=<profile-name>")
+        typer.echo("  # or: stardag config profile use <profile-name>")
+        typer.echo("")
+        typer.echo("To create a new profile:")
+        typer.echo(
+            "  stardag config profile add <name> "
+            f"-r {effective_registry} -o <org-slug> -w <workspace-slug>"
+        )
+        return
+
+    # First-time setup (no profiles exist)
     # Fetch organizations and prompt for selection
     oidc_token = tokens["access_token"]
     organizations = _get_user_organizations(effective_url, oidc_token)
@@ -561,7 +677,7 @@ def login(
     org_slug = org["slug"]
 
     # Cache org slug -> ID mapping
-    cache_org_id(registry, org_slug, org_id)
+    cache_org_id(effective_registry, org_slug, org_id)
 
     # Exchange for internal org-scoped token
     typer.echo(f"Exchanging for org-scoped token ({org_slug})...")
@@ -573,7 +689,7 @@ def login(
         expires_in = internal_tokens.get("expires_in", 600)
 
         # Cache the access token
-        save_access_token_cache(registry, org_id, access_token, expires_in)
+        save_access_token_cache(effective_registry, org_id, access_token, expires_in)
         typer.echo("Access token cached")
 
     except Exception as e:
@@ -609,25 +725,43 @@ def login(
     workspace_slug = ws["slug"]
 
     # Cache workspace slug -> ID mapping
-    cache_workspace_id(registry, org_id, workspace_slug, workspace_id)
+    cache_workspace_id(effective_registry, org_id, workspace_slug, workspace_id)
 
     # Sync target roots
     _sync_target_roots(effective_url, access_token, org_id, workspace_id)
 
-    # Create profile with slugs (not IDs) for readability
-    profile_name = f"{registry}-{org_slug}-{workspace_slug}"
-    add_profile(profile_name, registry, org_slug, workspace_slug)
-    typer.echo(f"Created profile: {profile_name}")
+    # Check if a matching profile already exists
+    existing_profile = find_matching_profile(
+        effective_registry, org_slug, workspace_slug
+    )
 
-    # Set as default if no other profiles
-    profiles = list_profiles()
-    if len(profiles) == 1:
-        set_default_profile(profile_name)
-        typer.echo("Set as default profile")
+    if existing_profile:
+        # Profile with identical settings already exists
+        typer.echo("")
+        typer.echo(f"Profile '{existing_profile}' already exists with these settings.")
 
-    typer.echo("")
-    typer.echo("Setup complete!")
-    typer.echo(f"Use this profile with: STARDAG_PROFILE={profile_name}")
+        # Set as default if it's the only profile or if no default
+        if len(profiles) == 0 or get_active_profile()[0] is None:
+            set_default_profile(existing_profile)
+            typer.echo("Set as default profile")
+
+        typer.echo("")
+        typer.echo("Setup complete!")
+        typer.echo(f"Use this profile with: STARDAG_PROFILE={existing_profile}")
+    else:
+        # Create new profile with slugs (not IDs) for readability
+        profile_name = f"{effective_registry}-{org_slug}-{workspace_slug}"
+        add_profile(profile_name, effective_registry, org_slug, workspace_slug)
+        typer.echo(f"Created profile: {profile_name}")
+
+        # Set as default if no other profiles
+        if len(profiles) == 0:
+            set_default_profile(profile_name)
+            typer.echo("Set as default profile")
+
+        typer.echo("")
+        typer.echo("Setup complete!")
+        typer.echo(f"Use this profile with: STARDAG_PROFILE={profile_name}")
 
 
 @app.command()
@@ -638,12 +772,88 @@ def logout(
         "-r",
         help="Registry to logout from (uses current profile's registry if not specified)",
     ),
+    all_registries: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Logout from all registries",
+    ),
 ) -> None:
     """Logout and clear stored credentials."""
-    if clear_credentials(registry):
-        typer.echo("Credentials cleared successfully.")
+    # Handle --all flag
+    if all_registries:
+        registries_with_creds = list_registries_with_credentials()
+        if not registries_with_creds:
+            typer.echo("No credentials found.")
+            return
+
+        for reg in registries_with_creds:
+            clear_credentials(reg)
+            typer.echo(f"Cleared credentials for: {reg}")
+
+        typer.echo("")
+        typer.echo("Logged out from all registries.")
+        return
+
+    # Determine which registry to logout from
+    effective_registry = registry
+
+    if not effective_registry:
+        # Check active profile first
+        active_profile, _ = get_active_profile()
+        if active_profile:
+            profiles = list_profiles()
+            if active_profile in profiles:
+                effective_registry = profiles[active_profile]["registry"]
+
+    if not effective_registry:
+        # No active profile, check which registries have credentials
+        registries_with_creds = list_registries_with_credentials()
+
+        if not registries_with_creds:
+            typer.echo("No credentials found.")
+            return
+
+        if len(registries_with_creds) == 1:
+            effective_registry = registries_with_creds[0]
+        else:
+            # Multiple registries with credentials, prompt user
+            typer.echo("Multiple registries have stored credentials:")
+            typer.echo("")
+            for i, reg in enumerate(registries_with_creds):
+                typer.echo(f"  {i + 1}. {reg}")
+            typer.echo(f"  {len(registries_with_creds) + 1}. All registries")
+            typer.echo("")
+
+            choice = typer.prompt("Select registry to logout from", type=int, default=1)
+            if choice < 1 or choice > len(registries_with_creds) + 1:
+                typer.echo("Invalid selection")
+                raise typer.Exit(1)
+
+            if choice == len(registries_with_creds) + 1:
+                # Logout from all
+                for reg in registries_with_creds:
+                    clear_credentials(reg)
+                    typer.echo(f"Cleared credentials for: {reg}")
+                typer.echo("")
+                typer.echo("Logged out from all registries.")
+                return
+
+            effective_registry = registries_with_creds[choice - 1]
+
+    # Clear credentials for the selected registry
+    if clear_credentials(effective_registry):
+        typer.echo(f"Credentials cleared for: {effective_registry}")
     else:
-        typer.echo("No credentials found.")
+        typer.echo(f"No credentials found for: {effective_registry}")
+
+    # Show remaining credentials
+    remaining = list_registries_with_credentials()
+    if remaining:
+        typer.echo("")
+        typer.echo("Still logged in to:")
+        for reg in remaining:
+            typer.echo(f"  - {reg}")
 
 
 @app.command()
@@ -668,54 +878,94 @@ def status(
         typer.echo("Note: API key determines workspace automatically.")
         return
 
-    # Show profile-based status
-    profile = config.context.profile
-    registry_name = registry or config.context.registry_name
+    # Get active profile info
+    active_profile, active_source = get_active_profile()
+    profiles = list_profiles()
 
     typer.echo("Configuration:")
     typer.echo(f"  Config file: {get_config_path()}")
-    if profile:
-        typer.echo(f"  Active profile: {profile}")
-    else:
-        typer.echo("  Active profile: (none - using defaults)")
 
-    typer.echo("")
-    typer.echo("Active Context:")
-    typer.echo(f"  Registry: {registry_name or '(not set)'}")
-    typer.echo(f"  API URL: {config.api.url}")
-    typer.echo(f"  Organization: {config.context.organization_id or '(not set)'}")
-    typer.echo(f"  Workspace: {config.context.workspace_id or '(not set)'}")
+    if active_profile and active_profile in profiles:
+        if active_source == "env":
+            typer.echo(f"  Active profile: {active_profile} (via STARDAG_PROFILE)")
+        else:
+            typer.echo(f"  Active profile: {active_profile} (via [default] in config)")
 
-    typer.echo("")
-    typer.echo("Authentication:")
+        profile_details = profiles[active_profile]
+        registry_name = registry or profile_details["registry"]
+        registry_url = get_registry_url(registry_name)
 
-    if not registry_name:
-        typer.echo("  Status: Not configured")
         typer.echo("")
-        typer.echo("Run 'stardag auth login' to authenticate")
-        return
+        typer.echo("Active Context:")
+        typer.echo(f"  Registry: {registry_name}")
+        if registry_url:
+            typer.echo(f"  API URL: {registry_url}")
+        typer.echo(f"  Organization: {profile_details['organization']}")
+        typer.echo(f"  Workspace: {profile_details['workspace']}")
 
-    creds = load_credentials(registry_name)
-    if creds is None:
-        typer.echo("  Status: Not logged in")
         typer.echo("")
-        typer.echo(
-            f"Run 'stardag auth login --registry {registry_name}' to authenticate"
-        )
-        return
+        typer.echo("Authentication:")
 
-    typer.echo("  Status: Logged in (has refresh token)")
-    typer.echo(f"  Credentials: {get_credentials_path(registry_name)}")
+        creds = load_credentials(registry_name)
+        if creds:
+            typer.echo(f"  Status: Logged in to {registry_name}")
+            typer.echo(f"  Credentials: {get_credentials_path(registry_name)}")
 
-    # Check for cached access token
-    if config.access_token:
-        typer.echo(f"  Access token: {config.access_token[:20]}... (cached)")
+            # Check for cached access token
+            if config.access_token:
+                typer.echo(f"  Access token: {config.access_token[:20]}... (cached)")
+            else:
+                typer.echo("  Access token: (not cached or expired)")
+        else:
+            typer.echo(f"  Status: Not logged in to {registry_name}")
+            typer.echo("")
+            typer.echo("Run 'stardag auth login' to authenticate")
+
+        typer.echo("")
+        typer.echo("To switch profiles: export STARDAG_PROFILE=<name>")
+        typer.echo("To list profiles: stardag config profile list")
+
     else:
-        typer.echo("  Access token: (not cached or expired)")
+        # No active profile
+        typer.echo("  Active profile: (none)")
 
-    typer.echo("")
-    typer.echo("To switch profiles: STARDAG_PROFILE=<profile-name>")
-    typer.echo("To list profiles: stardag profile list")
+        typer.echo("")
+        typer.echo("Authentication:")
+
+        # Show all registries with credentials
+        registries_with_creds = list_registries_with_credentials()
+
+        if registries_with_creds:
+            typer.echo("  Logged in to:")
+            for reg in registries_with_creds:
+                reg_url = get_registry_url(reg)
+                if reg_url:
+                    typer.echo(f"    - {reg} ({reg_url})")
+                else:
+                    typer.echo(f"    - {reg}")
+        else:
+            typer.echo("  Status: Not logged in to any registry")
+            typer.echo("")
+            typer.echo("Run 'stardag auth login' to authenticate")
+            return
+
+        typer.echo("")
+        if profiles:
+            typer.echo("To activate a profile:")
+            typer.echo("  export STARDAG_PROFILE=<name>")
+            typer.echo("  # or: stardag config profile use <name>")
+            typer.echo("")
+            typer.echo("Available profiles:")
+            for name in profiles:
+                typer.echo(f"  - {name}")
+        else:
+            typer.echo("No profiles configured.")
+            typer.echo("")
+            typer.echo("To create a profile:")
+            typer.echo(
+                "  stardag config profile add <name> -r <registry> -o <org> -w <workspace>"
+            )
+            typer.echo("  # or run: stardag auth login (for first-time setup)")
 
 
 @app.command()
