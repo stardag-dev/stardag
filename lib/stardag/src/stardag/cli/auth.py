@@ -30,10 +30,12 @@ from dataclasses import dataclass
 import typer
 
 from stardag.cli.credentials import (
+    InvalidProfileError,
     add_profile,
     add_registry,
     clear_credentials,
     find_matching_profile,
+    get_access_token,
     get_active_profile,
     get_config_path,
     get_credentials_path,
@@ -42,14 +44,29 @@ from stardag.cli.credentials import (
     list_registries,
     list_registries_with_credentials,
     load_credentials,
+    resolve_org_slug_to_id,
     save_access_token_cache,
     save_credentials,
     set_default_profile,
     set_target_roots,
+    validate_active_profile,
 )
 from stardag.config import cache_org_id, cache_workspace_id, get_config
 
 app = typer.Typer(help="Authentication commands for Stardag API")
+
+
+def _validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:
+    """Validate active profile and exit with error if invalid.
+
+    Wrapper around validate_active_profile() that handles CLI error output.
+    """
+    try:
+        return validate_active_profile()
+    except InvalidProfileError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+
 
 # Default OIDC configuration for local development (Keycloak)
 LOCAL_OIDC_ISSUER = "http://localhost:8080/realms/stardag"
@@ -345,15 +362,15 @@ def _determine_registry(
             raise typer.Exit(1)
         return registry_arg, effective_url
 
-    # 3. Check active profile
-    active_profile, active_source = get_active_profile()
+    # 3. Check active profile (with validation)
+    active_profile, _ = _validate_active_profile_cli()
+
     if active_profile:
         profiles = list_profiles()
-        if active_profile in profiles:
-            profile_registry = profiles[active_profile]["registry"]
-            effective_url = get_registry_url(profile_registry)
-            if effective_url:
-                return profile_registry, effective_url
+        profile_registry = profiles[active_profile]["registry"]
+        effective_url = get_registry_url(profile_registry)
+        if effective_url:
+            return profile_registry, effective_url
 
     # 4. Check available registries
     registries = list_registries()
@@ -375,8 +392,8 @@ def _determine_registry(
         typer.echo("")
         typer.echo("Hint: Use --registry <name> to skip this prompt,")
         typer.echo(
-            "      or set a default profile with: stardag config profile use <profile>,"
-            "      or set an active profile with: export STARDAG_PROFILE=<profile>"
+            "  or set a default profile with: stardag config profile use <profile>,\n"
+            "  or set an active profile with: export STARDAG_PROFILE=<profile>"
         )
         typer.echo("")
 
@@ -799,12 +816,12 @@ def logout(
     effective_registry = registry
 
     if not effective_registry:
-        # Check active profile first
-        active_profile, _ = get_active_profile()
+        # Check active profile first (with validation)
+        active_profile, _ = _validate_active_profile_cli()
+
         if active_profile:
             profiles = list_profiles()
-            if active_profile in profiles:
-                effective_registry = profiles[active_profile]["registry"]
+            effective_registry = profiles[active_profile]["registry"]
 
     if not effective_registry:
         # No active profile, check which registries have credentials
@@ -866,9 +883,7 @@ def status(
     ),
 ) -> None:
     """Show current authentication status and active context."""
-    config = get_config()
-
-    # Check env var first
+    # Check env var first (before profile validation)
     env_api_key = os.environ.get("STARDAG_API_KEY")
     if env_api_key:
         prefix = env_api_key[:11] if len(env_api_key) > 11 else env_api_key[:4]
@@ -878,14 +893,14 @@ def status(
         typer.echo("Note: API key determines workspace automatically.")
         return
 
-    # Get active profile info
-    active_profile, active_source = get_active_profile()
+    # Validate active profile if set
+    active_profile, active_source = _validate_active_profile_cli()
     profiles = list_profiles()
 
     typer.echo("Configuration:")
     typer.echo(f"  Config file: {get_config_path()}")
 
-    if active_profile and active_profile in profiles:
+    if active_profile:
         if active_source == "env":
             typer.echo(f"  Active profile: {active_profile} (via STARDAG_PROFILE)")
         else:
@@ -912,8 +927,12 @@ def status(
             typer.echo(f"  Credentials: {get_credentials_path(registry_name)}")
 
             # Check for cached access token
-            if config.access_token:
-                typer.echo(f"  Access token: {config.access_token[:20]}... (cached)")
+            # Need to resolve org slug to ID to check token cache
+            org_slug = profile_details["organization"]
+            org_id = resolve_org_slug_to_id(registry_name, org_slug)
+            access_token = get_access_token(registry_name, org_id) if org_id else None
+            if access_token:
+                typer.echo(f"  Access token: {access_token[:20]}... (cached)")
             else:
                 typer.echo("  Access token: (not cached or expired)")
         else:
@@ -984,6 +1003,10 @@ def refresh(
     ),
 ) -> None:
     """Refresh the access token using stored refresh token."""
+    # Validate active profile if we're going to use it
+    if not registry or not org_id:
+        _validate_active_profile_cli()
+
     config = get_config()
     registry_name = registry or config.context.registry_name
     organization_id = org_id or config.context.organization_id

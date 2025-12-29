@@ -441,6 +441,68 @@ def find_matching_profile(
     return None
 
 
+class InvalidProfileError(Exception):
+    """Raised when STARDAG_PROFILE is set to a non-existent profile."""
+
+    def __init__(self, profile_name: str, available_profiles: list[str], source: str):
+        self.profile_name = profile_name
+        self.available_profiles = available_profiles
+        self.source = source
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        if self.source == "env":
+            source_hint = f"STARDAG_PROFILE={self.profile_name}"
+        else:
+            source_hint = f'[default] profile = "{self.profile_name}" in config'
+
+        msg = f"Profile '{self.profile_name}' not found ({source_hint})."
+
+        if self.available_profiles:
+            msg += "\n\nAvailable profiles:"
+            for name in self.available_profiles:
+                msg += f"\n  - {name}"
+            msg += "\n\nTo fix:"
+            msg += "\n  - Set a valid profile: export STARDAG_PROFILE=<name>"
+            msg += "\n  - Or create the missing profile: stardag config profile add ..."
+        else:
+            msg += "\n\nNo profiles configured."
+            msg += "\n\nTo fix:"
+            msg += "\n  - Unset the env var: unset STARDAG_PROFILE"
+            msg += "\n  - Or create a profile: stardag config profile add ..."
+            msg += "\n  - Or run: stardag auth login"
+
+        return msg
+
+
+def validate_active_profile() -> tuple[str, str] | tuple[None, None]:
+    """Validate that the active profile exists in the config.
+
+    Returns:
+        Tuple of (profile_name, source) if valid or no profile set.
+
+    Raises:
+        InvalidProfileError: If STARDAG_PROFILE is set to a non-existent profile.
+    """
+    profile_name, source = get_active_profile()
+
+    if profile_name is None:
+        return None, None
+
+    # When profile_name is set, source is always "env" or "default"
+    assert source is not None
+
+    profiles = list_profiles()
+    if profile_name not in profiles:
+        raise InvalidProfileError(
+            profile_name=profile_name,
+            available_profiles=list(profiles.keys()),
+            source=source,
+        )
+
+    return profile_name, source
+
+
 def set_default_profile(profile: str) -> None:
     """Set the default profile in config.
 
