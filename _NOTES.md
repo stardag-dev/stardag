@@ -179,8 +179,10 @@ Stardag is built to facilitate explorative and data centric work, such as Data S
 AUTH CENTRAL
 
 - [x] Don't require access to all registries to log in!?
-- [ ] SDK auth, active profile via env var bu says see result at localhost!?
-- [ ] Failed to fetch tasks
+- [x] SDK auth, active profile via env var bu says see result at localhost!?
+- [x] Failed to fetch tasks
 - [ ] Creating a new profile even though an identical exists?
 - [ ] Redact access token from config repr -> `Secret`
 - [ ] Fail loudly if profile (from env var) is not available in config
+
+- [ ] An error was encountered with the requested page. Required String parameter 'client_id' is not present (when log out and in again)
