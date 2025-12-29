@@ -1,0 +1,170 @@
+site_name: Stardag
+site_description: Declarative and composable DAG framework for Python with persistent asset management
+site_url: https://andhus.github.io/stardag/ # TODO: Update to https://docs.stardag.com when custom domain is configured
+repo_name: andhus/stardag
+repo_url: https://github.com/andhus/stardag
+edit_uri: edit/main/docs/docs/
+
+# Branding - centralized for easy updates
+# Colors extracted from app/stardag-ui
+# Primary: Blue-600 (#2563eb), Blue-700 (#1d4ed8)
+# See .claude/tasks/hosted-docs.md for full color palette
+
+theme:
+  name: material
+  # TODO: Add custom logo when available
+  # logo: assets/logo.svg
+  # favicon: assets/favicon.png
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+  features:
+    - navigation.instant
+    - navigation.instant.prefetch
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+
+plugins:
+  - search
+  - section-index
+  # mkdocstrings for API reference
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: ["../lib/stardag/src"]
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            separate_signature: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+            docstring_section_style: spacy
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink:
+      normalize_issue_symbols: true
+      repo_url_shorthand: true
+      user: andhus
+      repo: stardag
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+      combine_header_slug: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+# TODO: Enable analytics when ready
+# extra:
+#   analytics:
+#     provider: google
+#     property: G-XXXXXXXXXX
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/andhus/stardag
+  # Status colors (matching UI)
+  # pending: yellow, running: blue, completed: green, failed: red
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - getting-started/index.md
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Your First DAG: getting-started/first-dag.md
+  - Concepts:
+      - concepts/index.md
+      - Tasks: concepts/tasks.md
+      - Dependencies: concepts/dependencies.md
+      - Parameter Hashing: concepts/parameter-hashing.md
+      - Targets: concepts/targets.md
+      - Build & Execution: concepts/build-execution.md
+  - How-To Guides:
+      - how-to/index.md
+      - Define Tasks: how-to/define-tasks.md
+      - Configure Storage: how-to/configure-storage.md
+      - Use the API Registry: how-to/use-api-registry.md
+      - Integrate with Prefect: how-to/integrate-prefect.md
+      - Integrate with Modal: how-to/integrate-modal.md
+  - Configuration:
+      - configuration/index.md
+      - Profiles: configuration/profiles.md
+      - Workspaces: configuration/workspaces.md
+      - CLI Reference: configuration/cli.md
+  - Platform:
+      - platform/index.md
+      - API Service: platform/api.md
+      - Web UI: platform/ui.md
+      - Self-Hosting: platform/self-hosting.md
+  - Reference:
+      - reference/index.md
+      - API Reference: reference/api.md
+      - Exceptions: reference/exceptions.md

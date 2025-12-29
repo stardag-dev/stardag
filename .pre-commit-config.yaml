@@ -4,13 +4,16 @@ repos:
     hooks:
       - id: prettier
         args: [--prose-wrap=preserve, --print-width=88]
+        exclude: ^docs/site/|^docs/docs/reference/api\.md$
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.10
     hooks:
       - id: ruff
         args:
           - --fix
+        exclude: ^docs/site/
       - id: ruff-format
+        exclude: ^docs/site/
   # Pyright hooks - one per Python package, each using its own .venv
   - repo: local
     hooks:

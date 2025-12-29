@@ -28,6 +28,9 @@ _build/
 # Node.js
 node_modules/
 
+# MkDocs build output
+docs/site/
+
 # AWS CDK deployment config (contains secrets)
 infra/aws-cdk/.env.deploy
 
