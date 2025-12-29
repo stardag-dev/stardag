@@ -82,7 +82,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
 
   // Load tasks for current build (no filtering - get all)
   const loadTasks = useCallback(async () => {
-    if (!currentBuild) {
+    if (!currentBuild || !activeWorkspace?.id) {
       setLoading(false);
       return;
     }
@@ -92,8 +92,8 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     try {
       // Fetch all tasks and graph in parallel
       const [tasksData, graphData] = await Promise.all([
-        fetchTasksInBuild(currentBuild.id),
-        fetchBuildGraph(currentBuild.id),
+        fetchTasksInBuild(currentBuild.id, { workspace_id: activeWorkspace.id }),
+        fetchBuildGraph(currentBuild.id, activeWorkspace.id),
       ]);
 
       setAllTasks(tasksData);
@@ -103,7 +103,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     } finally {
       setLoading(false);
     }
-  }, [currentBuild]);
+  }, [currentBuild, activeWorkspace?.id]);
 
   // Load builds when workspace changes
   useEffect(() => {
