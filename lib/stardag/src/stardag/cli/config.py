@@ -8,10 +8,10 @@ import typer
 
 from stardag.cli import registry
 from stardag.cli.credentials import (
+    InvalidProfileError,
     add_profile,
     ensure_access_token,
     get_access_token,
-    get_active_profile,
     get_config_path,
     get_registry_url,
     list_profiles,
@@ -21,6 +21,7 @@ from stardag.cli.credentials import (
     resolve_workspace_slug_to_id,
     set_default_profile,
     set_target_roots,
+    validate_active_profile,
 )
 from stardag.config import get_config
 
@@ -28,6 +29,18 @@ app = typer.Typer(help="Manage Stardag CLI configuration")
 
 
 app.add_typer(registry.app, name="registry")
+
+
+def _validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:
+    """Validate active profile and exit with error if invalid.
+
+    Wrapper around validate_active_profile() that handles CLI error output.
+    """
+    try:
+        return validate_active_profile()
+    except InvalidProfileError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
 
 
 def _get_authenticated_client(registry: str | None = None, org_id: str | None = None):
@@ -42,6 +55,10 @@ def _get_authenticated_client(registry: str | None = None, org_id: str | None = 
             "Error: httpx is required. Install with: pip install stardag[cli]", err=True
         )
         raise typer.Exit(1)
+
+    # Validate active profile if we're going to use it
+    if not registry or not org_id:
+        _validate_active_profile_cli()
 
     config = get_config()
     registry_name = registry or config.context.registry_name
@@ -80,6 +97,7 @@ def _get_authenticated_client(registry: str | None = None, org_id: str | None = 
 @app.command("show")
 def show_config() -> None:
     """Show current configuration and active context."""
+    _validate_active_profile_cli()
     config = get_config()
 
     typer.echo("Configuration:")
@@ -207,7 +225,7 @@ def profile_add(
 def profile_list() -> None:
     """List all configured profiles."""
     profiles = list_profiles()
-    active_profile, active_source = get_active_profile()
+    active_profile, active_source = _validate_active_profile_cli()
 
     if not profiles:
         typer.echo("No profiles configured.")
@@ -309,6 +327,7 @@ app.add_typer(target_roots_app, name="target-roots")
 @target_roots_app.command("list")
 def target_roots_list() -> None:
     """List cached target roots for the active context."""
+    _validate_active_profile_cli()
     config = get_config()
     target_roots = config.target.roots
 
@@ -330,6 +349,7 @@ def target_roots_sync() -> None:
     Fetches the latest target roots configuration from the central API
     for the active workspace.
     """
+    _validate_active_profile_cli()
     config = get_config()
     org_id = config.context.organization_id
     workspace_id = config.context.workspace_id
