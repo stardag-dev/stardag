@@ -47,6 +47,7 @@ export async function fetchBuild(buildId: string): Promise<Build> {
 export interface TaskFilters {
   task_family?: string;
   status?: TaskStatus;
+  workspace_id?: string;
 }
 
 export async function fetchTasksInBuild(
@@ -56,6 +57,7 @@ export async function fetchTasksInBuild(
   const params = new URLSearchParams();
   if (filters.task_family) params.set("task_family", filters.task_family);
   if (filters.status) params.set("status", filters.status);
+  if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
 
   const url = `${API_BASE}/builds/${buildId}/tasks?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -65,8 +67,15 @@ export async function fetchTasksInBuild(
   return response.json();
 }
 
-export async function fetchBuildGraph(buildId: string): Promise<TaskGraphResponse> {
-  const response = await fetchWithAuth(`${API_BASE}/builds/${buildId}/graph`);
+export async function fetchBuildGraph(
+  buildId: string,
+  workspaceId?: string,
+): Promise<TaskGraphResponse> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+
+  const url = `${API_BASE}/builds/${buildId}/graph?${params.toString()}`;
+  const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch graph: ${response.statusText}`);
   }
