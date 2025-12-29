@@ -7,6 +7,7 @@ To run this demo:
 """
 
 import stardag as sd
+from stardag.config import load_config
 
 
 @sd.task
@@ -29,6 +30,9 @@ def add_and_format(a: int, b: int) -> str:
 
 
 def main():
+    # Load configuration
+    config = load_config()
+    print("Configuration loaded. Running agaist Registry at:", config.api.url)
     # Create a simple DAG:
     # add(1, 2) -> multiply(*2) -> add_with(multiply(3, 4)) -> format
     step1 = add_numbers(a=1, b=2)  # = 3
@@ -47,7 +51,15 @@ def main():
     result = final_task.result()
 
     print(f"Result: {result}")
-    print("\nCheck the UI at http://localhost:3000 to see the registered tasks!")
+
+    ui_url = None
+    if config.api.url == "http://localhost:8000":
+        ui_url = "http://localhost:3000"
+    elif config.api.url == "https://api.stardag.com":
+        ui_url = "https://app.stardag.com"
+
+    if ui_url:
+        print(f"\nCheck the UI at {ui_url} to see the registered tasks!")
 
 
 if __name__ == "__main__":
