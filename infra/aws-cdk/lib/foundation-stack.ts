@@ -82,8 +82,6 @@ export class FoundationStack extends cdk.Stack {
     // =============================================================
     const cognito = new StardagCognito(this, "Cognito", {
       uiDomain: config.uiDomain,
-      githubClientId: config.githubClientId,
-      githubClientSecret: config.githubClientSecret,
       googleClientId: config.googleClientId,
       googleClientSecret: config.googleClientSecret,
       domainPrefix: "stardag",

@@ -9,16 +9,10 @@ export interface StardagCognitoProps {
   uiDomain: string;
 
   /**
-   * GitHub OAuth credentials
+   * Google OAuth credentials
    */
-  githubClientId: string;
-  githubClientSecret: string;
-
-  /**
-   * Optional: Google OAuth credentials
-   */
-  googleClientId?: string;
-  googleClientSecret?: string;
+  googleClientId: string;
+  googleClientSecret: string;
 
   /**
    * Cognito domain prefix (must be globally unique)
@@ -31,15 +25,15 @@ export class StardagCognito extends Construct {
   public readonly userPool: cognito.UserPool;
   public readonly userPoolClient: cognito.UserPoolClient;
   public readonly userPoolDomain: cognito.UserPoolDomain;
-  public readonly githubIdp: cognito.UserPoolIdentityProviderOidc;
+  public readonly googleIdp: cognito.UserPoolIdentityProviderGoogle;
 
   constructor(scope: Construct, id: string, props: StardagCognitoProps) {
     super(scope, id);
 
     const {
       uiDomain,
-      githubClientId,
-      githubClientSecret,
+      googleClientId,
+      googleClientSecret,
       domainPrefix = "stardag",
     } = props;
 
@@ -111,36 +105,27 @@ export class StardagCognito extends Construct {
     });
 
     // =============================================================
-    // GitHub Identity Provider (OIDC)
+    // Google Identity Provider (native Cognito support)
     // =============================================================
-    this.githubIdp = new cognito.UserPoolIdentityProviderOidc(this, "GitHubIdp", {
-      userPool: this.userPool,
-      name: "GitHub",
+    this.googleIdp = new cognito.UserPoolIdentityProviderGoogle(
+      this,
+      "GoogleIdp",
+      {
+        userPool: this.userPool,
+        clientId: googleClientId,
+        clientSecretValue: cdk.SecretValue.unsafePlainText(googleClientSecret),
 
-      // GitHub OAuth endpoints
-      clientId: githubClientId,
-      clientSecret: githubClientSecret,
-      issuerUrl: "https://github.com", // Note: GitHub doesn't have standard OIDC discovery
+        // Scopes to request from Google
+        scopes: ["email", "profile", "openid"],
 
-      // GitHub uses custom endpoints (not standard OIDC discovery)
-      endpoints: {
-        authorization: "https://github.com/login/oauth/authorize",
-        token: "https://github.com/login/oauth/access_token",
-        userInfo: "https://api.github.com/user",
-        jwksUri: "https://token.actions.githubusercontent.com/.well-known/jwks", // Not used for OAuth but required
+        // Attribute mapping from Google to Cognito
+        attributeMapping: {
+          email: cognito.ProviderAttribute.GOOGLE_EMAIL,
+          fullname: cognito.ProviderAttribute.GOOGLE_NAME,
+          profilePicture: cognito.ProviderAttribute.GOOGLE_PICTURE,
+        },
       },
-
-      // Scopes to request from GitHub
-      scopes: ["openid", "user:email", "read:user"],
-
-      // Attribute mapping from GitHub to Cognito
-      attributeMapping: {
-        email: cognito.ProviderAttribute.other("email"),
-        fullname: cognito.ProviderAttribute.other("name"),
-        profilePicture: cognito.ProviderAttribute.other("avatar_url"),
-        preferredUsername: cognito.ProviderAttribute.other("login"),
-      },
-    });
+    );
 
     // =============================================================
     // User Pool Client (for UI app)
@@ -195,12 +180,12 @@ export class StardagCognito extends Construct {
       // Supported identity providers
       supportedIdentityProviders: [
         cognito.UserPoolClientIdentityProvider.COGNITO,
-        cognito.UserPoolClientIdentityProvider.custom("GitHub"),
+        cognito.UserPoolClientIdentityProvider.GOOGLE,
       ],
     });
 
     // Ensure IdP is created before the client references it
-    this.userPoolClient.node.addDependency(this.githubIdp);
+    this.userPoolClient.node.addDependency(this.googleIdp);
 
     // =============================================================
     // Outputs
@@ -229,12 +214,6 @@ export class StardagCognito extends Construct {
       value: `https://cognito-idp.${region}.amazonaws.com/${this.userPool.userPoolId}`,
       description: "OIDC Issuer URL (for API JWT validation)",
       exportName: "StardagOidcIssuerUrl",
-    });
-
-    new cdk.CfnOutput(this, "GitHubCallbackUrl", {
-      value: `https://${domainPrefix}.auth.${region}.amazoncognito.com/oauth2/idpresponse`,
-      description: "GitHub OAuth callback URL (update in GitHub OAuth App settings)",
-      exportName: "StardagGitHubCallbackUrl",
     });
   }
 

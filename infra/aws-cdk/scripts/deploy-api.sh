@@ -24,7 +24,7 @@ echo ""
 # Get ECR repository URI from CloudFormation exports
 echo "=== Getting ECR repository URI ==="
 ECR_URI=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
-    --query "Exports[?Name=='StardagApiRepositoryUri'].Value" \
+    --query "Exports[?Name=='StardagEcrRepositoryUri'].Value" \
     --output text \
     --region $AWS_REGION)
 

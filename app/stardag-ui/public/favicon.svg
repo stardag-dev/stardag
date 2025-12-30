@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Asterisk shape rendered as paths for favicon compatibility -->
+  <g fill="#374151" transform="translate(16,16)">
+    <!-- Vertical bar -->
+    <rect x="-2" y="-11" width="4" height="22" rx="1"/>
+    <!-- Diagonal bars (rotated) -->
+    <rect x="-2" y="-11" width="4" height="22" rx="1" transform="rotate(60)"/>
+    <rect x="-2" y="-11" width="4" height="22" rx="1" transform="rotate(120)"/>
+  </g>
+</svg>

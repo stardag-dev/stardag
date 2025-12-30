@@ -34,13 +34,9 @@ export interface StardagConfig {
   apiDomain: string;
   uiDomain: string;
 
-  // GitHub OAuth
-  githubClientId: string;
-  githubClientSecret: string;
-
-  // Optional: Google OAuth
-  googleClientId?: string;
-  googleClientSecret?: string;
+  // Google OAuth
+  googleClientId: string;
+  googleClientSecret: string;
 }
 
 export function loadConfig(): StardagConfig {
@@ -63,13 +59,9 @@ export function loadConfig(): StardagConfig {
     apiDomain: `${apiSubdomain}.${domainName}`,
     uiDomain: `${uiSubdomain}.${domainName}`,
 
-    // GitHub OAuth
-    githubClientId: requireEnv("GITHUB_CLIENT_ID"),
-    githubClientSecret: requireEnv("GITHUB_CLIENT_SECRET"),
-
-    // Optional: Google OAuth
-    googleClientId: process.env.GOOGLE_CLIENT_ID,
-    googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    // Google OAuth
+    googleClientId: requireEnv("GOOGLE_CLIENT_ID"),
+    googleClientSecret: requireEnv("GOOGLE_CLIENT_SECRET"),
   };
 }
 
