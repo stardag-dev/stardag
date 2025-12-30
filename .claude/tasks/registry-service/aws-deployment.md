@@ -111,6 +111,30 @@ healthCheck: {
 
 **Solution:** Delete stuck stack and redeploy. ECS service stabilization can take 5+ minutes.
 
+### 5. Cognito Logout Missing client_id
+
+**Problem:** Clicking logout redirected to Cognito `/error` page with "Required String parameter 'client_id' is not present".
+
+**Root Cause:** Amazon Cognito's logout endpoint doesn't follow the standard OIDC logout flow. It requires:
+
+- `client_id` parameter (not in standard OIDC)
+- `logout_uri` instead of `post_logout_redirect_uri`
+
+The `oidc-client-ts` library sends standard OIDC parameters which Cognito rejects.
+
+**Solution:** Added Cognito-specific logout handling in the UI:
+
+1. Added `VITE_COGNITO_DOMAIN` environment variable (e.g., `stardag.auth.us-east-1.amazoncognito.com`)
+2. Detect Cognito vs Keycloak by checking if issuer contains "cognito-idp"
+3. For Cognito: use `manager.removeUser()` then redirect to `https://{domain}/logout?client_id={id}&logout_uri={uri}`
+4. For Keycloak: use standard `manager.signoutRedirect()`
+
+Files changed:
+
+- `app/stardag-ui/src/auth/config.ts` - added `COGNITO_DOMAIN`, `isCognitoIssuer()`, `getCognitoLogoutUrl()`
+- `app/stardag-ui/src/context/AuthContext.tsx` - updated `logout()` to handle Cognito specially
+- `infra/aws-cdk/scripts/deploy-ui.sh` - fetch and pass `VITE_COGNITO_DOMAIN`
+
 ## Architecture
 
 ```
@@ -175,6 +199,7 @@ infra/aws-cdk/
 - `VITE_API_BASE_URL` - https://api.stardag.com
 - `VITE_OIDC_ISSUER` - Cognito issuer URL
 - `VITE_OIDC_CLIENT_ID` - Cognito client ID
+- `VITE_COGNITO_DOMAIN` - Cognito hosted UI domain (required for logout, e.g., `stardag.auth.us-east-1.amazoncognito.com`)
 
 ## Progress (Completed)
 
@@ -251,6 +276,7 @@ cd app/stardag-ui
 VITE_API_BASE_URL=https://api.stardag.com \
 VITE_OIDC_ISSUER=https://cognito-idp.us-east-1.amazonaws.com/us-east-1_3BInI6b9g \
 VITE_OIDC_CLIENT_ID=7i4eji14kj5oikpup78fqkt8s2 \
+VITE_COGNITO_DOMAIN=stardag.auth.us-east-1.amazoncognito.com \
 npm run build
 AWS_PROFILE=stardag aws s3 sync ./dist s3://stardag-ui-763997220528 --delete
 AWS_PROFILE=stardag aws cloudfront create-invalidation --distribution-id E215AUJ1JU6H4S --paths "/*"
