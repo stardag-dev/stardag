@@ -12,8 +12,8 @@ const mockConfig = {
   uiSubdomain: "app",
   apiDomain: "api.example.com",
   uiDomain: "app.example.com",
-  githubClientId: "test-client-id",
-  githubClientSecret: "test-client-secret",
+  googleClientId: "test-client-id.apps.googleusercontent.com",
+  googleClientSecret: "test-client-secret",
 };
 
 describe("StardagStack", () => {
@@ -82,14 +82,14 @@ describe("StardagStack", () => {
       template.hasResourceProperties("AWS::Cognito::UserPoolClient", {
         AllowedOAuthFlows: ["code"],
         AllowedOAuthScopes: ["openid", "email", "profile"],
-        SupportedIdentityProviders: ["COGNITO", "GitHub"],
+        SupportedIdentityProviders: ["COGNITO", "Google"],
       });
     });
 
-    test("creates GitHub Identity Provider", () => {
+    test("creates Google Identity Provider", () => {
       template.hasResourceProperties("AWS::Cognito::UserPoolIdentityProvider", {
-        ProviderName: "GitHub",
-        ProviderType: "OIDC",
+        ProviderName: "Google",
+        ProviderType: "Google",
       });
     });
   });

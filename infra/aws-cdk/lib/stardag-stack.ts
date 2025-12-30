@@ -49,8 +49,6 @@ export class StardagStack extends cdk.Stack {
 
     this.cognito = new StardagCognito(this, "Cognito", {
       uiDomain: config.uiDomain,
-      githubClientId: config.githubClientId,
-      githubClientSecret: config.githubClientSecret,
       googleClientId: config.googleClientId,
       googleClientSecret: config.googleClientSecret,
       domainPrefix: "stardag", // Must be globally unique

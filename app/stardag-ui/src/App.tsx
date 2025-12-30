@@ -4,6 +4,7 @@ import { setAccessTokenGetter } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
 import { CreateOrganization } from "./components/CreateOrganization";
 import { DagGraph } from "./components/DagGraph";
+import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { OrganizationSelector } from "./components/OrganizationSelector";
 import { OrganizationSettings } from "./components/OrganizationSettings";
@@ -236,9 +237,9 @@ function InvitesPage({ onNavigate }: InvitesPageProps) {
         <div className="flex items-center gap-4">
           <button
             onClick={() => onNavigate("/")}
-            className="text-xl font-bold text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400"
+            className="text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400"
           >
-            Stardag
+            <Logo size="md" />
           </button>
         </div>
         <div className="flex items-center gap-3">
@@ -272,7 +273,7 @@ function LandingPage() {
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 flex flex-col">
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-4">
-        <h1 className="text-2xl font-bold text-white">Stardag</h1>
+        <Logo size="lg" className="text-white" />
         <button
           onClick={login}
           className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
@@ -284,13 +285,16 @@ function LandingPage() {
       {/* Hero */}
       <main className="flex-1 flex items-center justify-center px-6">
         <div className="max-w-2xl text-center">
-          <h2 className="text-5xl font-bold text-white mb-6">
+          <div className="mb-6">
+            <Logo size="xl" className="text-white" />
+          </div>
+          <h2 className="text-3xl font-bold text-white mb-6">
             Declarative DAG Framework
           </h2>
           <p className="text-xl text-gray-300 mb-8">
-            Build composable data pipelines with type-safe tasks, deterministic outputs,
-            and bottom-up execution. Track, monitor, and manage your workflows with
-            ease.
+            Build composable data pipelines with type-safe tasks, deterministic
+            outputs, and bottom-up execution. Track, monitor, and manage your
+            workflows with ease.
           </p>
           <div className="flex gap-4 justify-center">
             <button
@@ -331,8 +335,8 @@ function LandingPage() {
                 Composable Tasks
               </h3>
               <p className="text-gray-400 text-sm">
-                Build complex pipelines from simple, reusable task components with full
-                type safety.
+                Build complex pipelines from simple, reusable task components
+                with full type safety.
               </p>
             </div>
             <div className="bg-gray-800/50 rounded-lg p-6">
@@ -355,8 +359,8 @@ function LandingPage() {
                 Deterministic Outputs
               </h3>
               <p className="text-gray-400 text-sm">
-                Parameter-based hashing ensures reproducible builds and efficient
-                caching.
+                Parameter-based hashing ensures reproducible builds and
+                efficient caching.
               </p>
             </div>
             <div className="bg-gray-800/50 rounded-lg p-6">
@@ -375,7 +379,9 @@ function LandingPage() {
                   />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold text-white mb-2">Smart Execution</h3>
+              <h3 className="text-lg font-semibold text-white mb-2">
+                Smart Execution
+              </h3>
               <p className="text-gray-400 text-sm">
                 Bottom-up, Makefile-style execution builds only what's needed.
               </p>

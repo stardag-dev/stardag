@@ -8,6 +8,7 @@ This file tracks new permissions granted during this session for later review.
 - [ ] npx tsc commands
 - [ ] npm run build
 - [ ] ./node_modules/.bin/tsc
+- [ ] npm ci
 
 ## Session Notes
 

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { createOrganization } from "../api/organizations";
 import { useWorkspace } from "../context/WorkspaceContext";
+import { Logo } from "./Logo";
 import { ThemeToggle } from "./ThemeToggle";
 import { UserMenu } from "./UserMenu";
 
@@ -52,7 +53,9 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
       onNavigate(`/${orgSlug}`);
     } catch (err) {
       console.error("Failed to create organization:", err);
-      setError(err instanceof Error ? err.message : "Failed to create organization");
+      setError(
+        err instanceof Error ? err.message : "Failed to create organization",
+      );
     } finally {
       setLoading(false);
     }
@@ -65,9 +68,9 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
         <div className="flex items-center gap-4">
           <button
             onClick={() => onNavigate("/")}
-            className="text-xl font-bold text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400"
+            className="text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400"
           >
-            Stardag
+            <Logo size="md" />
           </button>
         </div>
         <div className="flex items-center gap-3">

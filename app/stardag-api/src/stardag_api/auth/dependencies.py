@@ -389,6 +389,9 @@ async def get_or_create_user_from_oidc(
 
     Used for bootstrap endpoints that need user info before org selection.
     Creates user if they don't exist yet (first login).
+
+    If the user changed identity providers (same email, different external_id),
+    we update the external_id to match the current provider.
     """
     # Look up user by external_id (OIDC subject claim)
     result = await db.execute(select(User).where(User.external_id == oidc_token.sub))
@@ -407,6 +410,26 @@ async def get_or_create_user_from_oidc(
             await db.commit()
             logger.info("Updated user %s with new info from OIDC token", user.id)
         return user
+
+    # User not found by external_id - check if they exist by email
+    # This handles identity provider changes (same email, different subject)
+    if oidc_token.email:
+        result = await db.execute(select(User).where(User.email == oidc_token.email))
+        user = result.scalar_one_or_none()
+
+        if user is not None:
+            # Found user by email - update external_id to new provider
+            logger.info(
+                "User %s changed identity provider (old external_id: %s, new: %s)",
+                user.id,
+                user.external_id,
+                oidc_token.sub,
+            )
+            user.external_id = oidc_token.sub
+            if oidc_token.display_name and user.display_name != oidc_token.display_name:
+                user.display_name = oidc_token.display_name
+            await db.commit()
+            return user
 
     # Create new user
     if not oidc_token.email:
@@ -493,6 +516,26 @@ async def get_current_user_flexible(
             await db.commit()
             logger.info("Updated user %s with new info from OIDC token", user.id)
         return user
+
+    # User not found by external_id - check if they exist by email
+    # This handles identity provider changes (same email, different subject)
+    if oidc_payload.email:
+        result = await db.execute(select(User).where(User.email == oidc_payload.email))
+        user = result.scalar_one_or_none()
+
+        if user is not None:
+            # Found user by email - update external_id to new provider
+            logger.info(
+                "User %s changed identity provider (old external_id: %s, new: %s)",
+                user.id,
+                user.external_id,
+                oidc_payload.sub,
+            )
+            user.external_id = oidc_payload.sub
+            if oidc_payload.display_name and user.display_name != oidc_payload.display_name:
+                user.display_name = oidc_payload.display_name
+            await db.commit()
+            return user
 
     # Create new user from OIDC token
     if not oidc_payload.email:
