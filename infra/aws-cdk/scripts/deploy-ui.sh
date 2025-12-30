@@ -8,13 +8,25 @@ REPO_ROOT="$(cd "$CDK_DIR/../.." && pwd)"
 
 cd "$CDK_DIR"
 
-# Load config
-if [ -f .env.deploy ]; then
-    export $(grep -v '^#' .env.deploy | xargs)
+# Load config (required)
+if [ ! -f .env.deploy ]; then
+    echo "ERROR: .env.deploy file not found in $CDK_DIR"
+    echo "This file is required and should contain at minimum:"
+    echo "  DOMAIN_NAME=your-domain.com"
+    echo ""
+    echo "See .env.deploy.example for a template."
+    exit 1
 fi
+export $(grep -v '^#' .env.deploy | xargs)
 
 AWS_PROFILE="${AWS_PROFILE:-stardag}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
+
+# Validate required variables
+if [ -z "$DOMAIN_NAME" ]; then
+    echo "ERROR: DOMAIN_NAME is not set in .env.deploy"
+    exit 1
+fi
 
 echo "=== Building and Deploying UI ==="
 echo "AWS Profile: $AWS_PROFILE"
@@ -53,6 +65,11 @@ COGNITO_CLIENT_ID=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
     --output text \
     --region $AWS_REGION 2>/dev/null || echo "")
 
+COGNITO_DOMAIN=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+    --query "Exports[?Name=='StardagCognitoDomain'].Value" \
+    --output text \
+    --region $AWS_REGION 2>/dev/null || echo "")
+
 # Build the UI
 echo "=== Building UI ==="
 cd "$REPO_ROOT/app/stardag-ui"
@@ -61,12 +78,15 @@ cd "$REPO_ROOT/app/stardag-ui"
 export VITE_OIDC_ISSUER="https://cognito-idp.${AWS_REGION}.amazonaws.com/${COGNITO_USER_POOL_ID}"
 export VITE_OIDC_CLIENT_ID="${COGNITO_CLIENT_ID}"
 export VITE_OIDC_REDIRECT_URI="https://${UI_SUBDOMAIN:-app}.${DOMAIN_NAME}/callback"
-export VITE_API_URL="https://${API_SUBDOMAIN:-api}.${DOMAIN_NAME}"
+export VITE_API_BASE_URL="https://${API_SUBDOMAIN:-api}.${DOMAIN_NAME}"
+# Cognito domain for logout (Cognito uses non-standard logout endpoint)
+export VITE_COGNITO_DOMAIN="${COGNITO_DOMAIN}"
 
 echo "OIDC Issuer: $VITE_OIDC_ISSUER"
 echo "OIDC Client ID: $VITE_OIDC_CLIENT_ID"
 echo "OIDC Redirect URI: $VITE_OIDC_REDIRECT_URI"
-echo "API URL: $VITE_API_URL"
+echo "API Base URL: $VITE_API_BASE_URL"
+echo "Cognito Domain: $VITE_COGNITO_DOMAIN"
 echo ""
 
 # Install dependencies and build
