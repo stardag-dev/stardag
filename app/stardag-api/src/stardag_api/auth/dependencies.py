@@ -532,7 +532,10 @@ async def get_current_user_flexible(
                 oidc_payload.sub,
             )
             user.external_id = oidc_payload.sub
-            if oidc_payload.display_name and user.display_name != oidc_payload.display_name:
+            if (
+                oidc_payload.display_name
+                and user.display_name != oidc_payload.display_name
+            ):
                 user.display_name = oidc_payload.display_name
             await db.commit()
             return user

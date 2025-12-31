@@ -107,25 +107,21 @@ export class StardagCognito extends Construct {
     // =============================================================
     // Google Identity Provider (native Cognito support)
     // =============================================================
-    this.googleIdp = new cognito.UserPoolIdentityProviderGoogle(
-      this,
-      "GoogleIdp",
-      {
-        userPool: this.userPool,
-        clientId: googleClientId,
-        clientSecretValue: cdk.SecretValue.unsafePlainText(googleClientSecret),
+    this.googleIdp = new cognito.UserPoolIdentityProviderGoogle(this, "GoogleIdp", {
+      userPool: this.userPool,
+      clientId: googleClientId,
+      clientSecretValue: cdk.SecretValue.unsafePlainText(googleClientSecret),
 
-        // Scopes to request from Google
-        scopes: ["email", "profile", "openid"],
+      // Scopes to request from Google
+      scopes: ["email", "profile", "openid"],
 
-        // Attribute mapping from Google to Cognito
-        attributeMapping: {
-          email: cognito.ProviderAttribute.GOOGLE_EMAIL,
-          fullname: cognito.ProviderAttribute.GOOGLE_NAME,
-          profilePicture: cognito.ProviderAttribute.GOOGLE_PICTURE,
-        },
+      // Attribute mapping from Google to Cognito
+      attributeMapping: {
+        email: cognito.ProviderAttribute.GOOGLE_EMAIL,
+        fullname: cognito.ProviderAttribute.GOOGLE_NAME,
+        profilePicture: cognito.ProviderAttribute.GOOGLE_PICTURE,
       },
-    );
+    });
 
     // =============================================================
     // User Pool Client (for UI app)

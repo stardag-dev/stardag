@@ -61,10 +61,7 @@ function getStoredOrgToken(orgId: string): OrgToken | null {
 function storeOrgToken(orgId: string, token: string, expiresIn: number): void {
   const expiresAt = Date.now() + expiresIn * 1000;
   localStorage.setItem(`${ACCESS_TOKEN_STORAGE_PREFIX}${orgId}`, token);
-  localStorage.setItem(
-    `${TOKEN_EXPIRY_STORAGE_PREFIX}${orgId}`,
-    expiresAt.toString(),
-  );
+  localStorage.setItem(`${TOKEN_EXPIRY_STORAGE_PREFIX}${orgId}`, expiresAt.toString());
 }
 
 function clearOrgToken(orgId: string): void {
@@ -75,9 +72,7 @@ function clearOrgToken(orgId: string): void {
 export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [currentTokenOrgId, setCurrentTokenOrgId] = useState<string | null>(
-    null,
-  );
+  const [currentTokenOrgId, setCurrentTokenOrgId] = useState<string | null>(null);
   const [isExchangingToken, setIsExchangingToken] = useState(false);
 
   const manager = getUserManager();
@@ -127,9 +122,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
     console.log("[OIDC] Login initiated, calling signinRedirect...");
     // Log localStorage state before redirect
-    const oidcKeys = Object.keys(localStorage).filter((k) =>
-      k.startsWith("oidc."),
-    );
+    const oidcKeys = Object.keys(localStorage).filter((k) => k.startsWith("oidc."));
     console.log("[OIDC] localStorage oidc keys before redirect:", oidcKeys);
     await manager.signinRedirect();
     // Note: This line won't execute since signinRedirect navigates away
