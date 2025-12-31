@@ -197,7 +197,7 @@ Ok, CLI auth fixes:
 
 - [ ] An error was encountered with the requested page. Required String parameter 'client_id' is not present (when log out and in again)
 
-
 Logos
+
 - [ ] Make favicon white on black circle background
-- [ ] not *dag in Title on landing page
+- [ ] not \*dag in Title on landing page

@@ -292,9 +292,9 @@ function LandingPage() {
             Declarative DAG Framework
           </h2>
           <p className="text-xl text-gray-300 mb-8">
-            Build composable data pipelines with type-safe tasks, deterministic
-            outputs, and bottom-up execution. Track, monitor, and manage your
-            workflows with ease.
+            Build composable data pipelines with type-safe tasks, deterministic outputs,
+            and bottom-up execution. Track, monitor, and manage your workflows with
+            ease.
           </p>
           <div className="flex gap-4 justify-center">
             <button
@@ -335,8 +335,8 @@ function LandingPage() {
                 Composable Tasks
               </h3>
               <p className="text-gray-400 text-sm">
-                Build complex pipelines from simple, reusable task components
-                with full type safety.
+                Build complex pipelines from simple, reusable task components with full
+                type safety.
               </p>
             </div>
             <div className="bg-gray-800/50 rounded-lg p-6">
@@ -359,8 +359,8 @@ function LandingPage() {
                 Deterministic Outputs
               </h3>
               <p className="text-gray-400 text-sm">
-                Parameter-based hashing ensures reproducible builds and
-                efficient caching.
+                Parameter-based hashing ensures reproducible builds and efficient
+                caching.
               </p>
             </div>
             <div className="bg-gray-800/50 rounded-lg p-6">
@@ -379,9 +379,7 @@ function LandingPage() {
                   />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold text-white mb-2">
-                Smart Execution
-              </h3>
+              <h3 className="text-lg font-semibold text-white mb-2">Smart Execution</h3>
               <p className="text-gray-400 text-sm">
                 Bottom-up, Makefile-style execution builds only what's needed.
               </p>

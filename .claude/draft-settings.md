@@ -25,11 +25,13 @@ This file tracks new permissions granted during this session for later review.
 **Solution**: Added Cognito-specific logout handling:
 
 1. `app/stardag-ui/src/auth/config.ts` - Added:
+
    - `COGNITO_DOMAIN` env var
    - `isCognitoIssuer()` - detect Cognito vs Keycloak
    - `getCognitoLogoutUrl()` - construct Cognito logout URL
 
 2. `app/stardag-ui/src/context/AuthContext.tsx` - Updated `logout()` to:
+
    - Use Cognito-specific URL when `isCognitoIssuer()` returns true
    - Fall back to standard OIDC logout for Keycloak
 

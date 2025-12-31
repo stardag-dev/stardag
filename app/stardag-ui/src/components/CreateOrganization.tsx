@@ -53,9 +53,7 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
       onNavigate(`/${orgSlug}`);
     } catch (err) {
       console.error("Failed to create organization:", err);
-      setError(
-        err instanceof Error ? err.message : "Failed to create organization",
-      );
+      setError(err instanceof Error ? err.message : "Failed to create organization");
     } finally {
       setLoading(false);
     }

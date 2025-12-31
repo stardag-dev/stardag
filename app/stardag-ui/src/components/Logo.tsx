@@ -15,11 +15,7 @@ const sizeClasses = {
  * Stardag logo component using IBM Plex Mono font.
  * Displays "*dag" or just "*" depending on showText prop.
  */
-export function Logo({
-  size = "md",
-  showText = true,
-  className = "",
-}: LogoProps) {
+export function Logo({ size = "md", showText = true, className = "" }: LogoProps) {
   return (
     <span
       className={`font-mono font-medium select-none ${sizeClasses[size]} ${className}`}
@@ -33,9 +29,6 @@ export function Logo({
 /**
  * Just the asterisk icon for compact displays.
  */
-export function LogoIcon({
-  size = "md",
-  className = "",
-}: Omit<LogoProps, "showText">) {
+export function LogoIcon({ size = "md", className = "" }: Omit<LogoProps, "showText">) {
   return <Logo size={size} showText={false} className={className} />;
 }
