@@ -78,7 +78,7 @@ class _TypeRegistry:
         cls: Type[BaseModel],
         type_override: str | None,
         namespace_override: str | None,
-    ):
+    ) -> TypeId:
         if cls in self._class_to_type_id:
             raise ValueError(f"Class already registered: {cls}")
 
@@ -105,7 +105,7 @@ class _TypeRegistry:
                 logger.info(
                     f"Task class already registered: {cls} (type_id: {type_id})"
                 )
-                return
+                return type_id
 
             raise ValueError(
                 "A task is already registered for the "
@@ -114,6 +114,8 @@ class _TypeRegistry:
                 f"New: {cls.__module__}.{cls.__name__}"
             )
         self._type_id_to_class[type_id] = cls
+
+        return type_id
 
     def _resolve_type_id(
         self,
@@ -245,7 +247,7 @@ class PolymorphicRoot(BaseModel):
                 if PolymorphicRoot in getattr(base, "__bases__", ())
             )
             if cls is not family and not is_generic_model(cls):
-                family._registry().add(
+                cls.__type_id__ = family._registry().add(
                     cls,
                     # TODO pass overrides from class args
                     type_override=type_override,

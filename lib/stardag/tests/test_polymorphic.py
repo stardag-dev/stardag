@@ -135,6 +135,10 @@ def test_smoke():
     }
     assert tool_registry._type_id_to_class == expected_tool_type_id_to_class
 
+    # serialize back to dict
+    serialized = container.model_dump()
+    assert serialized == container_data
+
 
 def test_root_is_generic():
     T = TypeVar("T")
