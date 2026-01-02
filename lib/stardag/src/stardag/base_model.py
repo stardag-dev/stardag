@@ -30,9 +30,6 @@ SerializationContextMode = Literal["hash", None]
 ValidationContextMode = Literal["compat", None]
 CONTEXT_MODE_KEY = "mode"
 
-TYPE_NS_KEY = "__ns__"
-TYPE_NAME_KEY = "__name__"
-
 
 _UNSET = object()
 
@@ -43,12 +40,6 @@ class StardagField:
 
     compat_default: Any = _UNSET
     hash_exclude: bool = False
-
-
-@dataclass(frozen=True)
-class TypeId:
-    namespace: str
-    name: str
 
 
 class StardagBaseModel(BaseModel):
