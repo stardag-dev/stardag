@@ -4,8 +4,8 @@ from typing import Generic, TypeVar
 from pydantic import BaseModel, TypeAdapter
 
 from stardag.polymorphic import (
-    NAMESPACE_KEY,
-    TYPE_KEY,
+    TYPE_NAME_KEY,
+    TYPE_NAMESPACE_KEY,
     PolymorphicRoot,
     SubClass,
     TypeId,
@@ -59,26 +59,26 @@ def test_smoke():
         tool: SubClass[Tool]
 
     dog_data = {
-        NAMESPACE_KEY: "",
-        TYPE_KEY: "Dog",
+        TYPE_NAMESPACE_KEY: "",
+        TYPE_NAME_KEY: "Dog",
         "bark_volume": 10,
     }
 
     cat_data = {
-        NAMESPACE_KEY: "",
-        TYPE_KEY: "Cat",
+        TYPE_NAMESPACE_KEY: "",
+        TYPE_NAME_KEY: "Cat",
         "mood": "happy",
     }
 
     parrot_data = {
-        NAMESPACE_KEY: "",
-        TYPE_KEY: "Parrot",
+        TYPE_NAMESPACE_KEY: "",
+        TYPE_NAME_KEY: "Parrot",
         "vocabulary_size": 50,
     }
 
     tool_data = {
-        NAMESPACE_KEY: "",
-        TYPE_KEY: "Hammer",
+        TYPE_NAMESPACE_KEY: "",
+        TYPE_NAME_KEY: "Hammer",
         "weight_kg": 2.5,
     }
 
@@ -153,8 +153,8 @@ def test_root_is_generic():
         pass
 
     data = {
-        NAMESPACE_KEY: "",
-        TYPE_KEY: "IntWrapper",
+        TYPE_NAMESPACE_KEY: "",
+        TYPE_NAME_KEY: "IntWrapper",
         "value": 42,
     }
 
@@ -166,3 +166,55 @@ def test_root_is_generic():
         TypeId(namespace="", name="IntWrapper"): IntWrapper,
         TypeId(namespace="", name="StrWrapper"): StrWrapper,
     }
+
+
+def test_type_namespace_handling():
+    class Root(PolymorphicRoot):
+        pass
+
+    class ChildA(Root):
+        pass
+
+    class ChildB(Root, type_namespace="custom_namespace_b"):
+        pass
+
+    class ChildC(Root):
+        __type_namespace__ = "custom_namespace_c"
+
+    registry = Root._registry()
+    expected = {
+        TypeId(namespace="", name="ChildA"): ChildA,
+        TypeId(namespace="custom_namespace_b", name="ChildB"): ChildB,
+        TypeId(namespace="custom_namespace_c", name="ChildC"): ChildC,
+    }
+    assert registry._type_id_to_class == expected
+
+    assert ChildA.__type_namespace__ == ""
+    assert ChildB.__type_namespace__ == "custom_namespace_b"
+    assert ChildC.__type_namespace__ == "custom_namespace_c"
+
+
+def test_type_name_handling():
+    class Root(PolymorphicRoot):
+        pass
+
+    class ChildA(Root):
+        pass
+
+    class ChildB(Root, type_name="CustomTypeB"):
+        pass
+
+    class ChildC(Root):
+        __type_name__ = "CustomTypeC"
+
+    registry = Root._registry()
+    expected = {
+        TypeId(namespace="", name="ChildA"): ChildA,
+        TypeId(namespace="", name="CustomTypeB"): ChildB,
+        TypeId(namespace="", name="CustomTypeC"): ChildC,
+    }
+    assert registry._type_id_to_class == expected
+
+    assert ChildA.__type_name__ == "ChildA"
+    assert ChildB.__type_name__ == "CustomTypeB"
+    assert ChildC.__type_name__ == "CustomTypeC"
