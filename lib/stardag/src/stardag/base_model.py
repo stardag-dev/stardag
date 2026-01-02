@@ -93,9 +93,14 @@ class StardagBaseModel(BaseModel):
     def _wrap_serialize(self, handler, info: SerializationInfo):
         """If mode="hash", drop fields with BackwardCompat default values."""
         data = handler(self)
-        return self._handle_hash_mode_exclusions(data, info)
+        data = self._serialize_extra(data, info)
+        return self._handle_hash_mode(data, info)
 
-    def _handle_hash_mode_exclusions(self, data: Any, info: SerializationInfo) -> Any:
+    def _serialize_extra(self, data: Any, info: SerializationInfo) -> Any:
+        """Allow for injection of additional serialization logic."""
+        return data
+
+    def _handle_hash_mode(self, data: Any, info: SerializationInfo) -> Any:
         mode: SerializationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
         )
@@ -117,7 +122,12 @@ class StardagBaseModel(BaseModel):
 
             out[name] = value
 
-        return out
+        return self._hash_mode_finalize(out, info)
+
+    def _hash_mode_finalize(self, data: dict[str, Any], info: SerializationInfo) -> Any:
+        """Final cleanup for hash mode serialization."""
+        # Currently no-op, but could be used for additional processing if needed.
+        return data
 
 
 _AnnotationType = TypeVar("_AnnotationType")

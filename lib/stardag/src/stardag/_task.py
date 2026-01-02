@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import cached_property, total_ordering
 from hashlib import sha1
 from typing import (
+    Any,
     ClassVar,
     Generator,
     Generic,
@@ -18,7 +19,7 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, SerializationInfo
 from typing_extensions import TypeAlias, Union
 
 from stardag.base_model import CONTEXT_MODE_KEY
@@ -93,16 +94,27 @@ class TaskBase(
 
     @cached_property
     def id(self) -> str:
-        jsonable = self._id_hashable_jsonable()
-        return get_str_hash(_hash_safe_json_dumps(jsonable))
-
-    def _id_hashable_jsonable(self) -> dict:
         return self.model_dump(
             mode="json",
             context={CONTEXT_MODE_KEY: "hash"},
-        )
+        )["id"]
 
-    def __lt__(self, other: "Task") -> bool:
+    def _id_hashable_jsonable(self) -> dict[str, Any]:
+        original_method = self._hash_mode_finalize
+        try:
+            self._hash_mode_finalize = lambda data, info: data
+            return self.model_dump(
+                mode="json",
+                context={CONTEXT_MODE_KEY: "hash"},
+            )
+        finally:
+            self._hash_mode_finalize = original_method
+
+    def _hash_mode_finalize(self, data: dict[str, Any], info: SerializationInfo) -> Any:
+        """Final cleanup for hash mode serialization."""
+        return {"id": get_str_hash(_hash_safe_json_dumps(data))}
+
+    def __lt__(self, other: "TaskBase") -> bool:
         return self.id < other.id
 
 

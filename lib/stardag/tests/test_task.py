@@ -2,7 +2,7 @@ from typing import Annotated
 
 import pytest
 
-from stardag._task import TaskBase
+from stardag._task import TaskBase, _hash_safe_json_dumps, get_str_hash
 from stardag.base_model import StardagField
 from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY
 
@@ -134,17 +134,16 @@ class WithNestedTask(MockBaseTask):
                 "a": 10,
             },
         ),
-        # TODO!
-        # (
-        #     "nested task should be hash serialized as task id",
-        #     WithNestedTask(task=BasicTask(a=7)),
-        #     {
-        #         TYPE_NAME_KEY: "WithNestedTask",
-        #         TYPE_NAMESPACE_KEY: "",
-        #         "version": "",
-        #         "task": BasicTask(a=7).id,
-        #     },
-        # ),
+        (
+            'nested task should be hash serialized as {"id": task.id}',
+            WithNestedTask(task=BasicTask(a=7)),
+            {
+                TYPE_NAME_KEY: "WithNestedTask",
+                TYPE_NAMESPACE_KEY: "",
+                "version": "",
+                "task": {"id": BasicTask(a=7).id},
+            },
+        ),
     ],
 )
 def test__id_hashable_jsonable(
@@ -152,4 +151,9 @@ def test__id_hashable_jsonable(
     task: TaskBase,
     expected_hashable_jsonable: dict,
 ):
-    assert task._id_hashable_jsonable() == expected_hashable_jsonable
+    assert (
+        task._id_hashable_jsonable() == expected_hashable_jsonable
+    ), f"Unexpected id_hashable_jsonable: {description}"
+    assert task.id == get_str_hash(
+        _hash_safe_json_dumps(expected_hashable_jsonable)
+    ), f"Unexpected id: {description}"
