@@ -1,134 +1,155 @@
-import typing
+from typing import Annotated
 
 import pytest
 
-from stardag._auto_task import AutoTask
-from stardag._base import (
-    _REGISTER,
-    Task,
-    TaskStruct,
-    flatten_task_struct,
-    get_namespace_family,
-)
-from stardag._decorator import task as task_decorator
-from stardag._parameter import (
-    IDHasher,
-    IDHashExclude,
-    IDHashInclude,
-    _ParameterConfig,
-    always_include,
-)
-from stardag.utils.testing.namepace import (
-    ClearNamespaceByArg,
-    ClearNamespaceByDunder,
-    CustomFamilyByArgFromIntermediate,
-    CustomFamilyByArgFromIntermediateChild,
-    CustomFamilyByArgFromTask,
-    CustomFamilyByArgFromTaskChild,
-    CustomFamilyByDUnder,
-    CustomFamilyByDUnderChild,
-    OverrideNamespaceByArg,
-    OverrideNamespaceByArgChild,
-    OverrideNamespaceByDUnder,
-    OverrideNamespaceByDUnderChild,
-    UnspecifiedNamespace,
-)
-from stardag.utils.testing.simple_dag import LeafTask
+from stardag._task import TaskBase
+from stardag.base_model import StardagField
+from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY
 
 
-class MockTask(AutoTask[str]):
+class MockBaseTask(TaskBase):
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+def test_task_base_subclassing():
+    task = MockBaseTask()
+    assert isinstance(task, TaskBase)
+    assert task.complete() is True
+    assert task.run() is None
+
+    class TaskNoComplete(TaskBase):
+        def run(self) -> None:
+            pass
+
+    with pytest.raises(
+        TypeError,
+        match="Can't instantiate abstract class TaskNoComplete without an implementation for abstract method 'complete'",
+    ):
+        TaskNoComplete()  # type: ignore
+
+    class TaskNoRun(TaskBase):
+        def complete(self) -> bool:
+            return False
+
+    with pytest.raises(
+        TypeError,
+        match="Can't instantiate abstract class TaskNoRun without an implementation for abstract method 'run'",
+    ):
+        TaskNoRun()  # type: ignore
+
+
+def test_run_version_checked():
+    class VersionedTask(MockBaseTask):
+        __version__ = "1.0"
+
+        version: str = "1.0"
+
+    task = VersionedTask(version="1.0")
+    # Should not raise
+    task.run_version_checked()
+
+    task_invalid = VersionedTask(version="2.0")
+    with pytest.raises(ValueError, match="TODO"):
+        task_invalid.run_version_checked()
+
+
+def test_dynamic_deps():
+    class DynamicDepsTask(TaskBase):
+        a: int = 3
+
+        def complete(self) -> bool:
+            return True
+
+        def run(self):
+            yield DynamicDepsTask(a=self.a - 1)
+
+    class StaticDepsTask(MockBaseTask):
+        pass
+
+    dynamic_task = DynamicDepsTask()
+    static_task = StaticDepsTask()
+
+    assert dynamic_task.has_dynamic_deps() is True
+    assert static_task.has_dynamic_deps() is False
+
+
+class BasicTask(MockBaseTask):
     a: int
-    b: IDHashExclude[str]
 
 
-def test_parameter():
-    assert MockTask._param_configs["a"] == _ParameterConfig(
-        id_hash_include=always_include, id_hasher=IDHasher().init(int)
-    )
-    assert MockTask._param_configs["b"] == _ParameterConfig(
-        id_hash_include=IDHashInclude(False),
-        id_hasher=IDHasher().init(
-            typing.Annotated[str, IDHashInclude(False)],  # type: ignore
-        ),
-    )
+class HashExcludeTask(MockBaseTask):
+    a: Annotated[int, StardagField(hash_exclude=True)]
 
 
-_testing_module = "stardag.utils.testing"
+class CompatDefaultTask(MockBaseTask):
+    a: Annotated[int, StardagField(compat_default=42)]
+
+
+class WithNestedTask(MockBaseTask):
+    task: BasicTask
 
 
 @pytest.mark.parametrize(
-    "task_class,expected_namespace_family",
-    [
-        # namespace
-        (MockTask, "MockTask"),
-        (LeafTask, f"{_testing_module}.simple_dag.LeafTask"),
-        (UnspecifiedNamespace, f"{_testing_module}.UnspecifiedNamespace"),
-        # namespace override by dunder
-        (OverrideNamespaceByDUnder, "override_namespace.OverrideNamespaceByDUnder"),
-        (ClearNamespaceByDunder, "ClearNamespaceByDunder"),
-        (
-            OverrideNamespaceByDUnderChild,
-            "override_namespace.OverrideNamespaceByDUnderChild",
-        ),
-        # namespace override by arg
-        (OverrideNamespaceByArg, "override_namespace.OverrideNamespaceByArg"),
-        (ClearNamespaceByArg, "ClearNamespaceByArg"),
-        (
-            OverrideNamespaceByArgChild,
-            f"{_testing_module}.OverrideNamespaceByArgChild",
-        ),
-        # family override
-        (CustomFamilyByArgFromIntermediate, f"{_testing_module}.custom_family"),
-        (
-            CustomFamilyByArgFromIntermediateChild,
-            f"{_testing_module}.CustomFamilyByArgFromIntermediateChild",
-        ),
-        (CustomFamilyByArgFromTask, f"{_testing_module}.custom_family_2"),
-        (
-            CustomFamilyByArgFromTaskChild,
-            f"{_testing_module}.CustomFamilyByArgFromTaskChild",
-        ),
-        (CustomFamilyByDUnder, f"{_testing_module}.custom_family_3"),
-        (CustomFamilyByDUnderChild, f"{_testing_module}.custom_family_3_child"),
-    ],
-)
-def test_auto_namespace(task_class: typing.Type[Task], expected_namespace_family):
-    assert task_class.get_namespace_family() == expected_namespace_family
-    namespace = task_class.get_namespace()
-    family = task_class.get_family()
-    assert get_namespace_family(namespace, family) == expected_namespace_family
-    assert _REGISTER.get(namespace, family) == task_class
-
-
-@task_decorator
-def mock_task(key: str) -> str:
-    return key
-
-
-@pytest.mark.parametrize(
-    "task_struct, expected",
+    "description, task, expected_hashable_jsonable",
     [
         (
-            mock_task(key="a"),
-            [mock_task(key="a")],
+            "basic task should include all fields",
+            BasicTask(a=5),
+            {
+                TYPE_NAME_KEY: "BasicTask",
+                TYPE_NAMESPACE_KEY: "",
+                "version": "",
+                "a": 5,
+            },
         ),
         (
-            [mock_task(key="a"), mock_task(key="b")],
-            [mock_task(key="a"), mock_task(key="b")],
+            "hash exclude (a) should be excluded",
+            HashExcludeTask(a=10),
+            {
+                TYPE_NAME_KEY: "HashExcludeTask",
+                TYPE_NAMESPACE_KEY: "",
+                "version": "",
+            },
         ),
         (
-            {"a": mock_task(key="a"), "b": mock_task(key="b")},
-            [mock_task(key="a"), mock_task(key="b")],
+            "compat default (a == compat_default) should be excluded",
+            CompatDefaultTask(a=42),
+            {
+                TYPE_NAME_KEY: "CompatDefaultTask",
+                TYPE_NAMESPACE_KEY: "",
+                "version": "",
+            },
         ),
         (
-            {"a": mock_task(key="a"), "b": [mock_task(key="b"), mock_task(key="c")]},
-            [mock_task(key="a"), mock_task(key="b"), mock_task(key="c")],
+            "compat default (a != compat_default) should be included",
+            CompatDefaultTask(a=10),
+            {
+                TYPE_NAME_KEY: "CompatDefaultTask",
+                TYPE_NAMESPACE_KEY: "",
+                "version": "",
+                "a": 10,
+            },
         ),
-        (
-            [mock_task(key="a"), {"b": mock_task(key="b"), "c": mock_task(key="c")}],
-            [mock_task(key="a"), mock_task(key="b"), mock_task(key="c")],
-        ),
+        # TODO!
+        # (
+        #     "nested task should be hash serialized as task id",
+        #     WithNestedTask(task=BasicTask(a=7)),
+        #     {
+        #         TYPE_NAME_KEY: "WithNestedTask",
+        #         TYPE_NAMESPACE_KEY: "",
+        #         "version": "",
+        #         "task": BasicTask(a=7).id,
+        #     },
+        # ),
     ],
 )
-def test_flatten_task_struct(task_struct: TaskStruct, expected: list[Task]):
-    assert flatten_task_struct(task_struct) == expected
+def test__id_hashable_jsonable(
+    description: str,
+    task: TaskBase,
+    expected_hashable_jsonable: dict,
+):
+    assert task._id_hashable_jsonable() == expected_hashable_jsonable

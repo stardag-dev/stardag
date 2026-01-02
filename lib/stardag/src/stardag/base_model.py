@@ -64,7 +64,7 @@ class StardagBaseModel(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _inject_compat_defaults(cls, data: Any, info):
+    def _before_validate(cls, data: Any, info):
         """If mode="compat" and value is missing, use Compatability default."""
         mode: ValidationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
@@ -90,9 +90,12 @@ class StardagBaseModel(BaseModel):
         return data
 
     @model_serializer(mode="wrap")
-    def _hash_drop_defaults(self, handler, info: SerializationInfo):
+    def _wrap_serialize(self, handler, info: SerializationInfo):
         """If mode="hash", drop fields with BackwardCompat default values."""
         data = handler(self)
+        return self._handle_hash_mode_exclusions(data, info)
+
+    def _handle_hash_mode_exclusions(self, data: Any, info: SerializationInfo) -> Any:
         mode: SerializationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None
         )

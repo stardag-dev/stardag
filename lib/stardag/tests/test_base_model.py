@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from stardag.base_model import (
     CONTEXT_MODE_KEY,
+    SerializationContextMode,
     StardagBaseModel,
     StardagField,
     ValidationContextMode,
@@ -194,5 +195,65 @@ def test_stardag_base_model_validate(
         actual = cls.model_validate(
             data,
             context=({CONTEXT_MODE_KEY: mode} if mode else None),
+        )
+        assert actual == expected, f"Failed: {description}"
+
+
+class ModelWithHashExclude(StardagBaseModel):
+    a: Annotated[int, StardagField(hash_exclude=True)]
+    b: int
+
+
+@pytest.mark.parametrize(
+    "description,instance,mode,expected",
+    [
+        (
+            "plain model",
+            ModelPlain(a=10),
+            None,
+            {"a": 10},
+        ),
+        (
+            "with compat default",
+            ModelWithCompatDefault(a=0),
+            None,
+            {"a": 0},
+        ),
+        (
+            "with compat default",
+            ModelWithCompatDefault(a=0),
+            "hash",
+            {},
+        ),
+        (
+            "with hash exclude",
+            ModelWithHashExclude(a=5, b=10),
+            None,
+            {"a": 5, "b": 10},
+        ),
+        (
+            "with hash exclude hash mode",
+            ModelWithHashExclude(a=5, b=10),
+            "hash",
+            {"b": 10},
+        ),
+    ],
+)
+def test_stardag_base_model_serialize(
+    description: str,
+    instance: StardagBaseModel,
+    mode: SerializationContextMode,
+    expected: dict | pytest.RaisesExc,
+):
+    if isinstance(expected, pytest.RaisesExc):
+        with expected:
+            instance.model_dump(
+                mode="json",
+                context={CONTEXT_MODE_KEY: mode},
+            )
+    else:
+        actual = instance.model_dump(
+            mode="json",
+            context={CONTEXT_MODE_KEY: mode},
         )
         assert actual == expected, f"Failed: {description}"
