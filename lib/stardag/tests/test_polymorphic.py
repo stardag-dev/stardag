@@ -3,7 +3,13 @@ from typing import Generic, TypeVar
 
 from pydantic import BaseModel
 
-from stardag.polymorphic import PolymorphicRoot, SubClass
+from stardag.polymorphic import (
+    NAMESPACE_KEY,
+    TYPE_KEY,
+    PolymorphicRoot,
+    SubClass,
+    TypeId,
+)
 
 
 def test_smoke():
@@ -42,20 +48,20 @@ def test_smoke():
         bird: SubClass[BirdBase]
 
     dog_data = {
-        "__namespace__": "",
-        "__name__": "Dog",
+        NAMESPACE_KEY: "",
+        TYPE_KEY: "Dog",
         "bark_volume": 10,
     }
 
     cat_data = {
-        "__namespace__": "",
-        "__name__": "Cat",
+        NAMESPACE_KEY: "",
+        TYPE_KEY: "Cat",
         "mood": "happy",
     }
 
     parrot_data = {
-        "__namespace__": "",
-        "__name__": "Parrot",
+        NAMESPACE_KEY: "",
+        TYPE_KEY: "Parrot",
         "vocabulary_size": 50,
     }
 
@@ -83,8 +89,18 @@ def test_smoke():
     assert isinstance(container.bird, Parrot)
     assert container.bird.vocabulary_size == 50
 
-    assert Dog._registry() is Animal._registry()
-    assert Cat._registry() is Animal._registry()
-    assert BirdBase._registry() is Animal._registry()
-    assert Parrot._registry() is BirdBase._registry()
-    assert Sparrow._registry() is BirdBase._registry()
+    registry = Animal._registry()
+    assert Dog._registry() is registry
+    assert Cat._registry() is registry
+    assert BirdBase._registry() is registry
+    assert Parrot._registry() is registry
+    assert Sparrow._registry() is registry
+
+    expected_type_id_to_class = {
+        TypeId(namespace="", name="Dog"): Dog,
+        TypeId(namespace="", name="Cat"): Cat,
+        TypeId(namespace="", name="Parrot"): Parrot,
+        TypeId(namespace="", name="Sparrow"): Sparrow,
+    }
+
+    assert registry._type_id_to_class == expected_type_id_to_class
