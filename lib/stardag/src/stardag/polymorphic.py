@@ -23,8 +23,8 @@ from pydantic_core import core_schema
 
 logger = logging.getLogger(__name__)
 
-NAMESPACE_KEY = "__namespace__"
-TYPE_KEY = "__type__"
+TYPE_NAMESPACE_KEY = "__type_namespace__"
+TYPE_NAME_KEY = "__type_name__"
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,7 @@ class _TypeRegistry:
     def add(
         self,
         cls: Type[BaseModel],
-        type_override: str | None,
+        name_override: str | None,
         namespace_override: str | None,
     ) -> TypeId:
         if cls in self._class_to_type_id:
@@ -84,7 +84,7 @@ class _TypeRegistry:
 
         type_id = self._resolve_type_id(
             cls,
-            type_override=type_override,
+            name_override=name_override,
             namespace_override=namespace_override,
         )
         self._class_to_type_id[cls] = type_id
@@ -102,13 +102,11 @@ class _TypeRegistry:
                 existing.__name__ == cls.__name__
             ):
                 # NOTE/TODO issue when cloudpickling
-                logger.info(
-                    f"Task class already registered: {cls} (type_id: {type_id})"
-                )
+                logger.info(f"Class already registered: {cls} (type_id: {type_id})")
                 return type_id
 
             raise ValueError(
-                "A task is already registered for the "
+                "A class is already registered for the "
                 f'type_id "{type_id}".\n'
                 f"Existing: {existing.__module__}.{existing.__name__}\n"
                 f"New: {cls.__module__}.{cls.__name__}"
@@ -120,28 +118,28 @@ class _TypeRegistry:
     def _resolve_type_id(
         self,
         cls: Type[BaseModel],
-        type_override: str | None,
+        name_override: str | None,
         namespace_override: str | None,
     ) -> TypeId:
         return TypeId(
-            name=self._resolve_type(cls, type_override=type_override),
+            name=self._resolve_name(cls, name_override=name_override),
             namespace=self._resolve_namespace(
                 cls,
                 namespace_override=namespace_override,
             ),
         )
 
-    def _resolve_type(
+    def _resolve_name(
         self,
         cls: Type[BaseModel],
-        type_override: str | None,
+        name_override: str | None,
     ) -> str:
-        if type_override is not None:
-            return type_override
+        if name_override is not None:
+            return name_override
 
         return getattr(
             cls,
-            "__type__",
+            TYPE_NAME_KEY,
             cls.__name__,
         )
 
@@ -153,7 +151,7 @@ class _TypeRegistry:
         if namespace_override is not None:
             return namespace_override
 
-        cls_namespace = getattr(cls, "__namespace__", None)
+        cls_namespace = getattr(cls, TYPE_NAMESPACE_KEY, None)
         if cls_namespace is not None:
             # Already set explicitly on task class
             return cls_namespace
@@ -177,12 +175,12 @@ def is_generic_model(cls: Type[BaseModel]) -> bool:
     return False
 
 
-_TPoly = TypeVar("_TPoly", bound="PolymorphicRoot")
+_TPolymorphicRoot = TypeVar("_TPolymorphicRoot", bound="PolymorphicRoot")
 
-_T = TypeVar("_T", bound=BaseModel)
+_TBaseModel = TypeVar("_TBaseModel", bound=BaseModel)
 
 
-class _Generic(Generic[_T]):
+class _Generic(Generic[_TBaseModel]):
     pass
 
 
@@ -199,8 +197,8 @@ class PolymorphicRoot(BaseModel):
 
     if TYPE_CHECKING:
         # Optionally set on subclasses to override default type id resolution
-        __namespace__: ClassVar[str]
-        __type__: ClassVar[str]
+        __type_namespace__: ClassVar[str]
+        __type_name__: ClassVar[str]
 
     @classmethod
     def _registry(cls) -> _TypeRegistry:
@@ -209,7 +207,9 @@ class PolymorphicRoot(BaseModel):
         return cls.__registry__
 
     @classmethod
-    def resolve(cls: type[_TPoly], namespace: str, name: str) -> type[_TPoly]:
+    def resolve(
+        cls: type[_TPolymorphicRoot], namespace: str, name: str
+    ) -> type[_TPolymorphicRoot]:
         type_id = TypeId(namespace=namespace, name=name)
         sub = cls._registry().get_class(type_id)
         # narrow + safety: only allow subclasses of the annotated base
@@ -220,8 +220,8 @@ class PolymorphicRoot(BaseModel):
     @classmethod
     def __init_subclass__(
         cls,
-        type_override: str | None = None,
-        namespace_override: str | None = None,
+        type_name: str | None = None,
+        type_namespace: str | None = None,
         **kwargs: Any,
     ) -> None:
         # Need to avoid forwarding the family and namespace kwarg to the BaseModel
@@ -230,8 +230,8 @@ class PolymorphicRoot(BaseModel):
     @classmethod
     def __pydantic_init_subclass__(
         cls,
-        type_override: str | None = None,
-        namespace_override: str | None = None,
+        type_name: str | None = None,
+        type_namespace: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__pydantic_init_subclass__(**kwargs)
@@ -250,9 +250,11 @@ class PolymorphicRoot(BaseModel):
                 cls.__type_id__ = family._registry().add(
                     cls,
                     # TODO pass overrides from class args
-                    type_override=type_override,
-                    namespace_override=namespace_override,
+                    name_override=type_name,
+                    namespace_override=type_namespace,
                 )
+                cls.__type_namespace__ = cls.__type_id__.namespace
+                cls.__type_name__ = cls.__type_id__.name
 
     def __class_getitem__(
         cls: Type[BaseModel],
@@ -273,8 +275,8 @@ class PolymorphicRoot(BaseModel):
         if isinstance(data, dict):
             tid = self.__class__.__type_id__
             data = dict(data)
-            data[NAMESPACE_KEY] = tid.namespace
-            data[TYPE_KEY] = tid.name
+            data[TYPE_NAMESPACE_KEY] = tid.namespace
+            data[TYPE_NAME_KEY] = tid.name
         return data
 
 
@@ -305,18 +307,18 @@ class Polymorphic:
             if not isinstance(v, dict):
                 return base.model_validate(v, context=info.context)
 
-            namespace = v.get(NAMESPACE_KEY)
-            name = v.get(TYPE_KEY)
+            namespace = v.get(TYPE_NAMESPACE_KEY)
+            name = v.get(TYPE_NAME_KEY)
             if namespace is None or name is None:
                 raise ValueError(
-                    f"Missing discriminator keys: {NAMESPACE_KEY}, {TYPE_KEY}"
+                    f"Missing discriminator keys: {TYPE_NAMESPACE_KEY}, {TYPE_NAME_KEY}"
                 )
 
             subcls = base.resolve(str(namespace), str(name))
 
             payload = dict(v)
-            payload.pop(NAMESPACE_KEY, None)
-            payload.pop(TYPE_KEY, None)
+            payload.pop(TYPE_NAMESPACE_KEY, None)
+            payload.pop(TYPE_NAME_KEY, None)
 
             return subcls.model_validate(payload, context=info.context)
 
@@ -331,11 +333,7 @@ class Polymorphic:
 
 
 class _SubClass:
-    """
-    Sugar:
-      - SubClass[T]                          -> Annotated[T, Polymorphic()]
-      - SubClass[T, {"strict_tags": True}]   -> Annotated[T, Polymorphic(strict_tags=True)]
-    """
+    """Syntactic sugar: `SubClass[T] -> Annotated[T, Polymorphic()]`"""
 
     def __class_getitem__(cls, item):
         # If suport for kwargs needed in future:
@@ -349,9 +347,7 @@ class _SubClass:
         return Annotated[item, Polymorphic()]
 
 
-_T = TypeVar("_T", bound=PolymorphicRoot)
-
 if typing.TYPE_CHECKING:
-    SubClass: typing.TypeAlias = typing.Annotated[_T, "polymorphic"]
+    SubClass: typing.TypeAlias = typing.Annotated[_TBaseModel, "polymorphic"]
 else:
     SubClass = _SubClass
