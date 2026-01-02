@@ -1,7 +1,7 @@
 from abc import abstractmethod
 from typing import Generic, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from stardag.polymorphic import (
     NAMESPACE_KEY,
@@ -134,3 +134,31 @@ def test_smoke():
         TypeId(namespace="", name="Screwdriver"): Screwdriver,
     }
     assert tool_registry._type_id_to_class == expected_tool_type_id_to_class
+
+
+def test_root_is_generic():
+    T = TypeVar("T")
+
+    class Wrapper(PolymorphicRoot, Generic[T]):
+        value: T
+
+    class IntWrapper(Wrapper[int]):
+        pass
+
+    class StrWrapper(Wrapper[str]):
+        pass
+
+    data = {
+        NAMESPACE_KEY: "",
+        TYPE_KEY: "IntWrapper",
+        "value": 42,
+    }
+
+    wrapped = TypeAdapter(SubClass[Wrapper]).validate_python(data)
+    assert isinstance(wrapped, IntWrapper)
+    assert wrapped.value == 42
+
+    assert Wrapper._registry()._type_id_to_class == {
+        TypeId(namespace="", name="IntWrapper"): IntWrapper,
+        TypeId(namespace="", name="StrWrapper"): StrWrapper,
+    }
