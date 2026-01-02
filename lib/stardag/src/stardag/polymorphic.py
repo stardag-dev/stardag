@@ -17,9 +17,12 @@ from pydantic import (
     BaseModel,
     GetCoreSchemaHandler,
     SerializationInfo,
+    SerializerFunctionWrapHandler,
     model_serializer,
 )
 from pydantic_core import core_schema
+
+from stardag.base_model import StardagBaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -122,25 +125,11 @@ class _TypeRegistry:
         namespace_override: str | None,
     ) -> TypeId:
         return TypeId(
-            name=self._resolve_name(cls, name_override=name_override),
+            name=name_override or cls.__name__,
             namespace=self._resolve_namespace(
                 cls,
                 namespace_override=namespace_override,
             ),
-        )
-
-    def _resolve_name(
-        self,
-        cls: Type[BaseModel],
-        name_override: str | None,
-    ) -> str:
-        if name_override is not None:
-            return name_override
-
-        return getattr(
-            cls,
-            TYPE_NAME_KEY,
-            cls.__name__,
         )
 
     def _resolve_namespace(
@@ -177,14 +166,14 @@ def is_generic_model(cls: Type[BaseModel]) -> bool:
 
 _TPolymorphicRoot = TypeVar("_TPolymorphicRoot", bound="PolymorphicRoot")
 
-_TBaseModel = TypeVar("_TBaseModel", bound=BaseModel)
+_TBaseModel = TypeVar("_TBaseModel", bound=StardagBaseModel)
 
 
 class _Generic(Generic[_TBaseModel]):
     pass
 
 
-class PolymorphicRoot(BaseModel):
+class PolymorphicRoot(StardagBaseModel):
     """
     Base class for a polymorphic family.
     Each subclass family has its own registry stored on the base class.
@@ -198,7 +187,6 @@ class PolymorphicRoot(BaseModel):
     if TYPE_CHECKING:
         # Optionally set on subclasses to override default type id resolution
         __type_namespace__: ClassVar[str]
-        __type_name__: ClassVar[str]
 
     @classmethod
     def _registry(cls) -> _TypeRegistry:
@@ -253,8 +241,6 @@ class PolymorphicRoot(BaseModel):
                     name_override=type_name,
                     namespace_override=type_namespace,
                 )
-                cls.__type_namespace__ = cls.__type_id__.namespace
-                cls.__type_name__ = cls.__type_id__.name
 
     def __class_getitem__(
         cls: Type[BaseModel],
@@ -269,15 +255,29 @@ class PolymorphicRoot(BaseModel):
         return create_model
 
     @model_serializer(mode="wrap")
-    def _tag_discriminator(self, handler, info: SerializationInfo):
+    def _tag_discriminator(
+        self,
+        handler: SerializerFunctionWrapHandler,
+        info: SerializationInfo,
+    ):
         """Always add discriminator keys. This runs for all subclasses too."""
-        data = handler(self)
+        data = self._handle_hash_mode_exclusions(handler(self), info)
         if isinstance(data, dict):
             tid = self.__class__.__type_id__
             data = dict(data)
             data[TYPE_NAMESPACE_KEY] = tid.namespace
             data[TYPE_NAME_KEY] = tid.name
         return data
+
+    @classmethod
+    def get_type_name(cls) -> str:
+        """Get the type name for this class."""
+        return cls.__type_id__.name
+
+    @classmethod
+    def get_type_namespace(cls) -> str:
+        """Get the type namespace for this class."""
+        return cls.__type_id__.namespace
 
 
 class Polymorphic:

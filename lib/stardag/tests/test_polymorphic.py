@@ -189,9 +189,25 @@ def test_type_namespace_handling():
     }
     assert registry._type_id_to_class == expected
 
-    assert ChildA.__type_namespace__ == ""
-    assert ChildB.__type_namespace__ == "custom_namespace_b"
-    assert ChildC.__type_namespace__ == "custom_namespace_c"
+    assert ChildA.get_type_namespace() == ""
+    assert ChildB.get_type_namespace() == "custom_namespace_b"
+    assert ChildC.get_type_namespace() == "custom_namespace_c"
+
+    # Class arg type_namespace does not propagate to subclasses
+    class ChildB_A(ChildB):
+        pass
+
+    assert (
+        ChildB_A.get_type_namespace() == ""
+    ), "Subclass should not inherit type_namespace from class arg"
+
+    # Class var __type_namespace__ propagates to subclasses
+    class ChildC_A(ChildC):
+        pass
+
+    assert (
+        ChildC_A.get_type_namespace() == "custom_namespace_c"
+    ), "Subclass should inherit __type_namespace__"
 
 
 def test_type_name_handling():
@@ -204,17 +220,12 @@ def test_type_name_handling():
     class ChildB(Root, type_name="CustomTypeB"):
         pass
 
-    class ChildC(Root):
-        __type_name__ = "CustomTypeC"
-
     registry = Root._registry()
     expected = {
         TypeId(namespace="", name="ChildA"): ChildA,
         TypeId(namespace="", name="CustomTypeB"): ChildB,
-        TypeId(namespace="", name="CustomTypeC"): ChildC,
     }
     assert registry._type_id_to_class == expected
 
-    assert ChildA.__type_name__ == "ChildA"
-    assert ChildB.__type_name__ == "CustomTypeB"
-    assert ChildC.__type_name__ == "CustomTypeC"
+    assert ChildA.get_type_name() == "ChildA"
+    assert ChildB.get_type_name() == "CustomTypeB"
