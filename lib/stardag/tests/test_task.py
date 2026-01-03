@@ -30,7 +30,9 @@ def test_task_base_subclassing():
 
     with pytest.raises(
         TypeError,
-        match="Can't instantiate abstract class TaskNoComplete without an implementation for abstract method 'complete'",
+        # NOTE message varies between Python versions (full below ok for >=3.11)
+        # match="Can't instantiate abstract class TaskNoComplete without an implementation for abstract method 'complete'",
+        match="Can't instantiate abstract class TaskNoComplete",
     ):
         TaskNoComplete()  # type: ignore
 
@@ -40,7 +42,9 @@ def test_task_base_subclassing():
 
     with pytest.raises(
         TypeError,
-        match="Can't instantiate abstract class TaskNoRun without an implementation for abstract method 'run'",
+        # NOTE message varies between Python versions (full below ok for >=3.11)
+        # match="Can't instantiate abstract class TaskNoRun without an implementation for abstract method 'run'",
+        match="Can't instantiate abstract class TaskNoRun",
     ):
         TaskNoRun()  # type: ignore
 
