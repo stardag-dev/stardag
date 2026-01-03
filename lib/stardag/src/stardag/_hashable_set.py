@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, Any, Callable, TypeVar, get_args
 
-from pydantic import GetCoreSchemaHandler
-from pydantic_core import SchemaSerializer, core_schema
+from pydantic import GetCoreSchemaHandler, TypeAdapter
+from pydantic_core import core_schema
 
 from stardag.base_model import CONTEXT_MODE_KEY, SerializationContextMode
 
@@ -28,21 +28,20 @@ class HashSafeSetSerializer:
         args = get_args(source_type)
         item_type = args[0] if args else Any
 
-        # Generate schema for item type to get proper item serialization
-        item_schema = handler.generate_schema(item_type)
-
         # Build the full schema for the frozenset
         schema = handler(source_type)
 
-        comparator = self.sort_key
+        # Create TypeAdapter once at schema-building time (not per-call).
+        # TypeAdapter properly includes all definitions needed for complex types.
+        item_adapter = TypeAdapter(item_type)
+
+        sort_key = self.sort_key
 
         def serialize_set(v: frozenset, info) -> list:
-            # Use SchemaSerializer to serialize individual items
-            item_serializer = SchemaSerializer(item_schema)
             serialized_items = [
                 (
                     item,
-                    item_serializer.to_python(
+                    item_adapter.dump_python(
                         item, mode=info.mode, context=info.context
                     ),
                 )
@@ -53,7 +52,7 @@ class HashSafeSetSerializer:
                 info.context.get(CONTEXT_MODE_KEY) if info.context else None
             )
             if mode == "hash":
-                serialized_items.sort(key=lambda x: comparator(x[0]))
+                serialized_items.sort(key=lambda x: sort_key(x[0]))
 
             return [item[1] for item in serialized_items]
 
