@@ -4,8 +4,8 @@ import pytest
 
 from stardag._task import TaskBase
 from stardag._task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
-from stardag.base_model import StardagField
-from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY
+from stardag.base_model import StardagBaseModel, StardagField
+from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY, SubClass
 
 
 class MockBaseTask(TaskBase):
@@ -94,6 +94,16 @@ class WithNestedTask(MockBaseTask):
     task: BasicTask
 
 
+class NonTaskModel(StardagBaseModel):
+    a: Annotated[int, StardagField(hash_exclude=True)]
+    b: Annotated[str, StardagField(compat_default="default")]
+    tasks: tuple[SubClass[TaskBase], ...]
+
+
+class ComplexNestedTask(MockBaseTask):
+    model: NonTaskModel
+
+
 @pytest.mark.parametrize(
     "description, task, expected_task_id_jsonable",
     [
@@ -145,6 +155,31 @@ class WithNestedTask(MockBaseTask):
                 "task": {"id": str(BasicTask(a=7).id)},
             },
         ),
+        (
+            "complex nested task with various hash/compat exclusions",
+            ComplexNestedTask(
+                model=NonTaskModel(
+                    a=1,
+                    b="non-default",
+                    tasks=(
+                        BasicTask(a=3),
+                        WithNestedTask(task=BasicTask(a=4)),
+                    ),
+                )
+            ),
+            {
+                TYPE_NAME_KEY: "ComplexNestedTask",
+                TYPE_NAMESPACE_KEY: "",
+                "version": "",
+                "model": {
+                    "b": "non-default",
+                    "tasks": [
+                        {"id": str(BasicTask(a=3).id)},
+                        {"id": str(WithNestedTask(task=BasicTask(a=4)).id)},
+                    ],
+                },
+            },
+        ),
     ],
 )
 def test__id_hashable_jsonable(
@@ -158,3 +193,24 @@ def test__id_hashable_jsonable(
     assert task.id == _get_task_id_from_jsonable(
         expected_task_id_jsonable
     ), f"Unexpected id: {description}"
+
+    # verify serialization roundtrip
+
+    task_reconstructed_dict_python = task.__class__.model_validate(
+        task.model_dump(mode="python")
+    )
+    assert (
+        task == task_reconstructed_dict_python
+    ), f"Dict (python mode) Serialization roundtrip failed: {description}"
+
+    task_reconstructed_dict_json = task.__class__.model_validate(
+        task.model_dump(mode="json")
+    )
+    assert (
+        task == task_reconstructed_dict_json
+    ), f"Dict (json mode) Serialization roundtrip failed: {description}"
+
+    task_reconstructed_json = task.__class__.model_validate_json(task.model_dump_json())
+    assert (
+        task == task_reconstructed_json
+    ), f"JSON Serialization roundtrip failed: {description}"
