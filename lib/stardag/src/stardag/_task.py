@@ -1,12 +1,10 @@
 import abc
 import inspect
-import json
 import logging
 from abc import abstractmethod
 from collections import abc as collections_abc
 from dataclasses import dataclass
 from functools import cached_property, total_ordering
-from hashlib import sha1
 from typing import (
     Any,
     ClassVar,
@@ -18,36 +16,20 @@ from typing import (
     TypeVar,
     runtime_checkable,
 )
+from uuid import UUID
 
 from pydantic import ConfigDict, Field, SerializationInfo
 from typing_extensions import TypeAlias, Union
 
+from stardag._task_id import _get_task_id_from_jsonable
 from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.polymorphic import PolymorphicRoot
 
 logger = logging.getLogger(__name__)
 
 
-@runtime_checkable
-class Target(Protocol):
-    def exists(self) -> bool: ...
-
-
-TargetT = TypeVar("TargetT", bound=Target, covariant=True)
-
 TaskStruct: TypeAlias = Union[
     "TaskBase", Sequence["TaskStruct"], Mapping[str, "TaskStruct"]
-]
-
-# The type allowed for tasks to declare their dependencies. Note that it would be
-# enough with just list[Task], but allowing these types are only for visualization
-# purposes and dev UX - it allows for grouping and labeling of the incoming "edges"
-# in the DAG.
-TaskDeps: TypeAlias = Union[
-    "TaskBase",
-    Sequence["TaskBase"],
-    Mapping[str, "TaskBase"],
-    Mapping[str, Union[Sequence["TaskBase"], "TaskBase"]],
 ]
 
 
@@ -75,7 +57,7 @@ class TaskBase(
         ...
 
     @abstractmethod
-    def run(self) -> None | Generator[TaskDeps, None, None]:
+    def run(self) -> None | Generator[TaskStruct, None, None]:
         """Execute the task logic."""
         ...
 
@@ -85,7 +67,7 @@ class TaskBase(
 
         self.run()
 
-    def requires(self) -> TaskDeps | None:
+    def requires(self) -> TaskStruct | None:
         return None
 
     @classmethod
@@ -93,29 +75,29 @@ class TaskBase(
         return inspect.isgeneratorfunction(cls.run)
 
     @cached_property
-    def id(self) -> str:
-        return self.model_dump(
-            mode="json",
-            context={CONTEXT_MODE_KEY: "hash"},
-        )["id"]
-
-    def _id_hashable_jsonable(self) -> dict[str, Any]:
-        original_method = self._hash_mode_finalize
-        try:
-            self._hash_mode_finalize = lambda data, info: data
-            return self.model_dump(
+    def id(self) -> UUID:
+        return UUID(
+            self.model_dump(
                 mode="json",
                 context={CONTEXT_MODE_KEY: "hash"},
-            )
-        finally:
-            self._hash_mode_finalize = original_method
+            )["id"]
+        )
 
     def _hash_mode_finalize(self, data: dict[str, Any], info: SerializationInfo) -> Any:
-        """Final cleanup for hash mode serialization."""
-        return {"id": get_str_hash(_hash_safe_json_dumps(data))}
+        """Make hash mode serialization of tasks a container of just their ID."""
+        # NOTE: UUID is stringified to match serialization mode "json"
+        return {"id": str(_get_task_id_from_jsonable(data))}
 
     def __lt__(self, other: "TaskBase") -> bool:
         return self.id < other.id
+
+
+@runtime_checkable
+class Target(Protocol):
+    def exists(self) -> bool: ...
+
+
+TargetT = TypeVar("TargetT", bound=Target, covariant=True)
 
 
 class Task(TaskBase, Generic[TargetT], metaclass=abc.ABCMeta):
@@ -127,20 +109,6 @@ class Task(TaskBase, Generic[TargetT], metaclass=abc.ABCMeta):
     def output(self) -> TargetT:
         """The task output target."""
         ...
-
-
-def _hash_safe_json_dumps(obj):
-    """Fixed separators and (deep) sort_keys for stable hash."""
-    return json.dumps(
-        obj,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-
-def get_str_hash(str_: str) -> str:
-    # TODO truncate / convert to UUID?
-    return sha1(str_.encode("utf-8")).hexdigest()
 
 
 def flatten_task_struct(task_struct: TaskStruct) -> list[TaskBase]:
@@ -174,7 +142,7 @@ def flatten_task_struct(task_struct: TaskStruct) -> list[TaskBase]:
 class TaskRef:
     type_name: str
     version: str | None
-    id: str
+    id: UUID
 
     @classmethod
     def from_task(cls, task: TaskBase) -> "TaskRef":
@@ -187,7 +155,7 @@ class TaskRef:
     @property
     def slug(self) -> str:
         version_slug = f"v{self.version}" if self.version else ""
-        return f"{self.type_name}-{version_slug}-{self.id[:8]}"
+        return f"{self.type_name}-{version_slug}-{str(self.id)[:8]}"
 
     def __str__(self) -> str:
         return self.slug
