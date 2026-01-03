@@ -1,5 +1,6 @@
 import logging
 import typing
+import warnings
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -7,6 +8,7 @@ from typing import (
     Any,
     ClassVar,
     Generic,
+    Literal,
     Tuple,
     Type,
     TypeVar,
@@ -25,6 +27,8 @@ from pydantic_core import core_schema
 from stardag.base_model import StardagBaseModel
 
 logger = logging.getLogger(__name__)
+
+OnGenericTypeMismatch = Literal["raise", "warn", "ignore"]
 
 
 def _is_type_compatible(expected: Any, actual: Any) -> bool:
@@ -384,7 +388,20 @@ class PolymorphicRoot(StardagBaseModel):
 
 
 class Polymorphic:
-    """Pydantic annotation for polymorphic validation of PolymorphicRoot subclasses."""
+    """Pydantic annotation for polymorphic validation of PolymorphicRoot subclasses.
+
+    Args:
+        on_type_mismatch: Behavior when generic type args don't match.
+            - "raise" (default): Raise a ValidationError
+            - "warn": Log a warning but accept the value
+            - "ignore": Silently accept the value
+    """
+
+    def __init__(
+        self,
+        on_generic_type_mismatch: OnGenericTypeMismatch = "raise",
+    ) -> None:
+        self.on_generic_type_mismatch = on_generic_type_mismatch
 
     def __get_pydantic_core_schema__(
         self,
@@ -408,6 +425,8 @@ class Polymorphic:
             pydantic_meta.get("origin") if pydantic_meta else None
         ) or source_type
 
+        on_generic_type_mismatch = self.on_generic_type_mismatch
+
         def dispatch(v: Any, info):
             if isinstance(v, base_origin):
                 # Best-effort generic args check for already-instantiated values
@@ -415,10 +434,14 @@ class Polymorphic:
                     source_type, type(v)
                 )
                 if not is_compatible:
-                    raise ValueError(
+                    message = (
                         f"Value of type {type(v).__name__} is not compatible with "
                         f"expected type {source_type}: {error_msg}"
                     )
+                    if on_generic_type_mismatch == "raise":
+                        raise ValueError(message)
+                    elif on_generic_type_mismatch == "warn":
+                        warnings.warn(message, UserWarning, stacklevel=2)
                 return v
 
             if not isinstance(v, dict):
