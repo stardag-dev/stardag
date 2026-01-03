@@ -11,16 +11,14 @@ from typing import (
     Generator,
     Generic,
     Mapping,
-    Protocol,
     Sequence,
-    TypeVar,
-    runtime_checkable,
 )
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, SerializationInfo
 from typing_extensions import TypeAlias, Union
 
+from stardag._target_base import TargetType
 from stardag._task_id import _get_task_id_from_jsonable
 from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.polymorphic import PolymorphicRoot
@@ -92,21 +90,34 @@ class BaseTask(
         return self.id < other.id
 
 
-@runtime_checkable
-class Target(Protocol):
-    def exists(self) -> bool: ...
+def auto_namespace(scope: str):
+    """Set the task namespace for the module to the module import path.
+
+    Usage:
+    ```python
+    import stardag as sd
+
+    sd.auto_namespace(__name__)
+
+    class MyTask(Task):
+        ...
+    ```
+    """
+    module = scope
+    BaseTask._registry().add_namespace(module, module)
 
 
-TargetT = TypeVar("TargetT", bound=Target, covariant=True)
+def namespace(namespace: str, scope: str):
+    BaseTask._registry().add_namespace(scope, namespace)
 
 
-class Task(BaseTask, Generic[TargetT], metaclass=abc.ABCMeta):
+class Task(BaseTask, Generic[TargetType]):
     def complete(self) -> bool:
         """Check if the task is complete."""
         return self.output().exists()
 
     @abstractmethod
-    def output(self) -> TargetT:
+    def output(self) -> TargetType:
         """The task output target."""
         ...
 

@@ -252,22 +252,6 @@ class PolymorphicRoot(StardagBaseModel):
         create_model.__orig_class__ = _Generic[params]  # type: ignore
         return create_model
 
-    # @model_serializer(mode="wrap")
-    # def _tag_discriminator(
-    #     self,
-    #     handler: SerializerFunctionWrapHandler,
-    #     info: SerializationInfo,
-    # ):
-    #     """Always add discriminator keys. This runs for all subclasses too."""
-    #     # data = self._handle_hash_mode_exclusions(handler(self), info)
-    #     data = self._wrap_serialize(handler, info)
-    #     if isinstance(data, dict):
-    #         tid = self.__class__.__type_id__
-    #         data = dict(data)
-    #         data[TYPE_NAMESPACE_KEY] = tid.namespace
-    #         data[TYPE_NAME_KEY] = tid.name
-    #     return data
-
     def _serialize_extra(
         self,
         data: Any,

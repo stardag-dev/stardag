@@ -2,10 +2,12 @@ from typing import Annotated
 
 import pytest
 
-from stardag._task import BaseTask
+from stardag._task import BaseTask, Task
 from stardag._task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY, SubClass
+from stardag.target._in_memory import InMemoryTarget
+from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 
 
 class MockBaseTask(BaseTask):
@@ -195,22 +197,21 @@ def test__id_hashable_jsonable(
     ), f"Unexpected id: {description}"
 
     # verify serialization roundtrip
+    assert_serialize_validate_roundtrip(task.__class__, task)
 
-    task_reconstructed_dict_python = task.__class__.model_validate(
-        task.model_dump(mode="python")
-    )
-    assert (
-        task == task_reconstructed_dict_python
-    ), f"Dict (python mode) Serialization roundtrip failed: {description}"
 
-    task_reconstructed_dict_json = task.__class__.model_validate(
-        task.model_dump(mode="json")
-    )
-    assert (
-        task == task_reconstructed_dict_json
-    ), f"Dict (json mode) Serialization roundtrip failed: {description}"
+class TaskWithTarget(Task[InMemoryTarget[str]]):
+    data: str = "hello world"
 
-    task_reconstructed_json = task.__class__.model_validate_json(task.model_dump_json())
-    assert (
-        task == task_reconstructed_json
-    ), f"JSON Serialization roundtrip failed: {description}"
+    def run(self) -> None:
+        self.output().save(self.data)
+
+    def output(self) -> InMemoryTarget[str]:
+        return InMemoryTarget(key=self.id)
+
+
+def test_task_with_target_serialization():
+    task = TaskWithTarget(data="test data")
+
+    # verify serialization/deserialization roundtrip
+    assert_serialize_validate_roundtrip(TaskWithTarget, task)
