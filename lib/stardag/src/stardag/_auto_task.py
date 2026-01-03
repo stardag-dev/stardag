@@ -16,7 +16,7 @@ class AutoTask(
         super().__pydantic_init_subclass__(**kwargs)
         # get generic type of self
         loaded_t = typing.get_args(cls.__orig_class__)[0]
-        if type(loaded_t) != typing.TypeVar:
+        if type(loaded_t) != typing.TypeVar:  # noqa: E721
             cls._serializer = get_serializer(loaded_t)
 
     @property

@@ -55,15 +55,15 @@ def test_hashable_set_serialization_complex_type():
         CustomHashTask(a=2),
     ]
     values_sorted = sorted(values)
-    assert (
-        values != values_sorted
-    ), "Precondition failed: values should be in non-sorted order"
+    assert values != values_sorted, (
+        "Precondition failed: values should be in non-sorted order"
+    )
 
     expected_dumped = [{"id": str(task.id)} for task in values_sorted]
 
     dumped = TypeAdapter(annotation).dump_python(
         frozenset(values), mode="json", context={CONTEXT_MODE_KEY: "hash"}
     )
-    assert (
-        dumped == expected_dumped
-    ), "Unexpected serialization for HashableSet of complex type"
+    assert dumped == expected_dumped, (
+        "Unexpected serialization for HashableSet of complex type"
+    )

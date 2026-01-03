@@ -193,12 +193,12 @@ def test__id_hashable_jsonable(
     task: BaseTask,
     expected_task_id_jsonable: dict,
 ):
-    assert (
-        _get_task_id_jsonable(task) == expected_task_id_jsonable
-    ), f"Unexpected id_hashable_jsonable: {description}"
-    assert task.id == _get_task_id_from_jsonable(
-        expected_task_id_jsonable
-    ), f"Unexpected id: {description}"
+    assert _get_task_id_jsonable(task) == expected_task_id_jsonable, (
+        f"Unexpected id_hashable_jsonable: {description}"
+    )
+    assert task.id == _get_task_id_from_jsonable(expected_task_id_jsonable), (
+        f"Unexpected id: {description}"
+    )
 
     # verify serialization roundtrip
     assert_serialize_validate_roundtrip(task.__class__, task)
