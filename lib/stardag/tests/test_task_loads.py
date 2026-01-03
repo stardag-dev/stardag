@@ -6,10 +6,9 @@ from pydantic import ValidationError
 from stardag._task import BaseTask, Task
 from stardag._task_loads import TaskLoads
 from stardag.base_model import StardagField
-from stardag.polymorphic import SubClass
-from stardag.target import InMemoryTarget, LoadableTarget, LoadableSaveableTarget
+from stardag.polymorphic import Polymorphic, SubClass
+from stardag.target import InMemoryTarget, LoadableSaveableTarget, LoadableTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
-
 
 # =============================================================================
 # Task classes for testing various generic type scenarios
@@ -252,3 +251,61 @@ def test_nested_generic_compatible():
     """Tasks with nested generics should work when types match."""
     container = ContainerTaskLoadsListStr(task=LoadsListStrTask())
     assert_serialize_validate_roundtrip(ContainerTaskLoadsListStr, container)
+
+
+# =============================================================================
+# Tests for on_type_mismatch parameter
+# =============================================================================
+
+
+class ContainerWithWarnOnMismatch(BaseTask):
+    """Container that warns on type mismatch instead of raising."""
+
+    task: Annotated[
+        Task[LoadableTarget[str]], Polymorphic(on_generic_type_mismatch="warn")
+    ]
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+class ContainerWithIgnoreOnMismatch(BaseTask):
+    """Container that ignores type mismatches."""
+
+    task: Annotated[
+        Task[LoadableTarget[str]], Polymorphic(on_generic_type_mismatch="ignore")
+    ]
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+def test_on_type_mismatch_warn():
+    """on_type_mismatch='warn' should emit warning but accept value."""
+    with pytest.warns(UserWarning, match="LoadsIntTask.*not compatible"):
+        container = ContainerWithWarnOnMismatch(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+
+    # Value should be accepted
+    assert isinstance(container.task, LoadsIntTask)
+
+
+def test_on_type_mismatch_ignore():
+    """on_type_mismatch='ignore' should silently accept mismatched value."""
+    # Should not raise or warn
+    container = ContainerWithIgnoreOnMismatch(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+
+    # Value should be accepted
+    assert isinstance(container.task, LoadsIntTask)
+
+
+def test_on_type_mismatch_raise_is_default():
+    """on_type_mismatch='raise' is the default behavior."""
+    # ContainerTaskLoadsStr uses TaskLoads which uses Polymorphic() with default
+    with pytest.raises(ValidationError):
+        ContainerTaskLoadsStr(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
