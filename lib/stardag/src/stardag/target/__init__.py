@@ -1,3 +1,4 @@
+from stardag._target_base import Target
 from stardag.target._base import (
     CachedRemoteFileSystem,
     DirectoryTarget,
@@ -11,7 +12,6 @@ from stardag.target._base import (
     RemoteFileSystemABC,
     RemoteFileSystemTarget,
     SaveableTarget,
-    Target,
 )
 from stardag.target._factory import (
     TargetFactory,

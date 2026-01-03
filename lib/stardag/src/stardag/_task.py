@@ -122,13 +122,16 @@ class Task(BaseTask, Generic[TargetType]):
         ...
 
 
-def flatten_task_struct(task_struct: TaskStruct) -> list[BaseTask]:
+def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:
     """Flatten a TaskStruct into a list of Tasks.
 
     TaskStruct: TypeAlias = Union[
         "TaskBase", Sequence["TaskStruct"], Mapping[str, "TaskStruct"]
     ]
     """
+    if task_struct is None:
+        return []
+
     if isinstance(task_struct, BaseTask):
         return [task_struct]
 

@@ -4,8 +4,8 @@ import typing
 from pydantic import create_model
 
 from stardag._auto_task import AutoTask
-from stardag._base import Task
-from stardag._task_parameter import TaskLoads
+from stardag._task import Task
+from stardag._task_loads import TaskLoads
 
 LoadedT = typing.TypeVar("LoadedT")
 FuncT = typing.TypeVar("FuncT", bound=typing.Callable)

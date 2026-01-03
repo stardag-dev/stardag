@@ -2,7 +2,7 @@
 
 import logging
 
-from stardag._base import Task
+from stardag._task import BaseTask, flatten_task_struct
 from stardag.build.registry import RegistryABC, get_git_commit_hash
 from stardag.config import config_provider
 from stardag.exceptions import (
@@ -177,7 +177,7 @@ class APIRegistry(RegistryABC):
 
     def start_build(
         self,
-        root_tasks: list[Task] | None = None,
+        root_tasks: list[BaseTask] | None = None,
         description: str | None = None,
     ) -> str:
         """Start a new build and return its ID.
@@ -187,7 +187,7 @@ class APIRegistry(RegistryABC):
         """
         build_data = {
             "commit_hash": get_git_commit_hash(),
-            "root_task_ids": [t.task_id for t in (root_tasks or [])],
+            "root_task_ids": [task.id for task in (root_tasks or [])],
             "description": description,
         }
 
@@ -232,19 +232,22 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Fail build")
         logger.info(f"Marked build as failed: {self._build_id}")
 
-    def register(self, task: Task) -> None:
+    def register(self, task: BaseTask) -> None:
         """Register a task with the API service within the current build."""
         if self._build_id is None:
             # Auto-start a build if none exists
             self.start_build(root_tasks=[task])
 
         task_data = {
-            "task_id": task.task_id,
-            "task_namespace": task.get_namespace(),
-            "task_family": task.get_family(),
+            # TODO: rename keys (drop "task_" prefix)
+            "task_id": task.id,
+            "task_namespace": task.get_type_namespace(),
+            "task_family": task.get_type_name(),
             "task_data": task.model_dump(mode="json"),
-            "version": None,
-            "dependency_task_ids": [dep.task_id for dep in task.deps()],
+            "version": task.version,
+            "dependency_task_ids": [
+                dep.id for dep in flatten_task_struct(task.requires())
+            ],
         }
 
         response = self.client.post(
@@ -252,9 +255,9 @@ class APIRegistry(RegistryABC):
             json=task_data,
             params=self._get_params(),
         )
-        self._handle_response_error(response, f"Register task {task.task_id}")
+        self._handle_response_error(response, f"Register task {task.id}")
 
-    def start(self, task: Task) -> None:
+    def start(self, task: BaseTask) -> None:
         """Mark a task as started within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot start task")
@@ -264,24 +267,24 @@ class APIRegistry(RegistryABC):
         self.register(task)
 
         response = self.client.post(
-            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/start",
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/start",
             params=self._get_params(),
         )
-        self._handle_response_error(response, f"Start task {task.task_id}")
+        self._handle_response_error(response, f"Start task {task.id}")
 
-    def complete(self, task: Task) -> None:
+    def complete(self, task: BaseTask) -> None:
         """Mark a task as completed within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot complete task")
             return
 
         response = self.client.post(
-            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/complete",
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/complete",
             params=self._get_params(),
         )
-        self._handle_response_error(response, f"Complete task {task.task_id}")
+        self._handle_response_error(response, f"Complete task {task.id}")
 
-    def fail(self, task: Task, error_message: str | None = None) -> None:
+    def fail(self, task: BaseTask, error_message: str | None = None) -> None:
         """Mark a task as failed within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot fail task")
@@ -291,10 +294,10 @@ class APIRegistry(RegistryABC):
         if error_message:
             params["error_message"] = error_message
         response = self.client.post(
-            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.task_id}/fail",
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/fail",
             params=params,
         )
-        self._handle_response_error(response, f"Fail task {task.task_id}")
+        self._handle_response_error(response, f"Fail task {task.id}")
 
     def close(self) -> None:
         """Close the HTTP client."""

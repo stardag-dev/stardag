@@ -1,6 +1,6 @@
 from stardag._auto_task import AutoTask
-from stardag._base import Task, auto_namespace
-from stardag._task_parameter import TaskParam
+from stardag._task import Task, auto_namespace
+from stardag.polymorphic import SubClass
 from stardag.target import LoadableTarget
 
 LeafTaskLoadedT = dict[str, str | int | None]
@@ -35,7 +35,7 @@ RootTaskLoadedT = dict[str, ParentTaskLoadedT]
 
 
 class RootTask(AutoTask[RootTaskLoadedT]):
-    parent_task: TaskParam[Task[LoadableTarget[ParentTaskLoadedT]]]
+    parent_task: SubClass[Task[LoadableTarget[ParentTaskLoadedT]]]
 
     def requires(self):
         return self.parent_task

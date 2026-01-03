@@ -1,6 +1,6 @@
 import typing
 
-from stardag._base import Task
+from stardag._task import Task
 from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
 from stardag.target.serialize import get_serializer
 
@@ -15,7 +15,7 @@ class AutoTask(
     def __pydantic_init_subclass__(cls, **kwargs: typing.Any) -> None:  # type: ignore
         super().__pydantic_init_subclass__(**kwargs)
         # get generic type of self
-        loaded_t = typing.get_args(cls.__orig_class__)[0]
+        loaded_t = typing.get_args(cls.__orig_class__)[0]  # type: ignore TODO
         if type(loaded_t) != typing.TypeVar:  # noqa: E721
             cls._serializer = get_serializer(loaded_t)
 
@@ -46,18 +46,19 @@ class AutoTask(
 
     @property
     def _relpath(self) -> str:
+        task_id_str = str(self.id)
         relpath = "/".join(
             [
                 part
                 for part in [
                     self._relpath_base,
-                    self.get_namespace().replace(".", "/"),
-                    self.get_family(),
+                    self.get_type_namespace().replace(".", "/"),
+                    self.get_type_name(),
                     f"v{self.version}" if self.version else "",
                     self._relpath_extra,
-                    self.task_id[:2],
-                    self.task_id[2:4],
-                    self.task_id,
+                    task_id_str[:2],
+                    task_id_str[2:4],
+                    task_id_str,
                     self._relpath_filename,
                 ]
                 if part

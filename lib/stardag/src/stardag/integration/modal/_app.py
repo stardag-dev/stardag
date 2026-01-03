@@ -5,7 +5,7 @@ import typing
 import modal
 from modal.gpu import GPU_T
 
-from stardag import Task, build
+from stardag import BaseTask, build
 from stardag.build.task_runner import AsyncTaskRunner, TaskRunner
 from stardag.integration.modal._config import modal_config_provider
 
@@ -37,10 +37,10 @@ class FunctionSettings(typing.TypedDict, total=False):
     # TODO add the rest of the function settings
 
 
-WorkerSelector = typing.Callable[[Task], str]
+WorkerSelector = typing.Callable[[BaseTask], str]
 
 
-def _default_worker_selector(task: Task) -> str:
+def _default_worker_selector(task: BaseTask) -> str:
     return "default"
 
 
@@ -78,7 +78,7 @@ class ModalTaskRunner(TaskRunner):
 
 
 def _build(
-    task: Task,
+    task: BaseTask,
     worker_selector: WorkerSelector,
     modal_app_name: str,
 ):
@@ -126,11 +126,13 @@ class ModalAsyncTaskRunner(AsyncTaskRunner):
 
 
 async def _prefect_build(
-    task: Task,
+    task: BaseTask,
     worker_selector: WorkerSelector,
     modal_app_name: str,
-    on_complete_callback: typing.Callable[[Task], typing.Awaitable[None]] | None = None,
-    before_run_callback: typing.Callable[[Task], typing.Awaitable[None]] | None = None,
+    on_complete_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
+    | None = None,
+    before_run_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
+    | None = None,
 ):
     if (
         prefect_build_flow is None
@@ -152,12 +154,12 @@ async def _prefect_build(
     )
     logger.info(f"Building root task: {repr(task)}")
     await prefect_build_flow.with_options(
-        name=f"stardag-build-{task.get_namespace_family()}"
+        name=f"stardag-build-{task.get_type_namespace()}:{task.get_type_name()}"
     )(task, task_runner=task_runner)
     logger.info(f"Completed building root task {repr(task)}")
 
 
-def _run(task: Task):
+def _run(task: BaseTask):
     _setup_logging()
     logger.info(f"Running task: {repr(task)}")
     try:
@@ -221,14 +223,18 @@ class StardagApp:
                 }
             )(_run)
 
-    def build_remote(self, task: Task, worker_selector: WorkerSelector | None = None):
+    def build_remote(
+        self, task: BaseTask, worker_selector: WorkerSelector | None = None
+    ):
         return self.modal_app.registered_functions["build"].remote(
             task=task,
             worker_selector=worker_selector or self.worker_selector,
             modal_app_name=self.name,
         )
 
-    def build_spawn(self, task: Task, worker_selector: WorkerSelector | None = None):
+    def build_spawn(
+        self, task: BaseTask, worker_selector: WorkerSelector | None = None
+    ):
         build_function = modal.Function.from_name(
             app_name=self.name,
             name="build",
@@ -253,8 +259,8 @@ class WorkerSelectorByFamily:
         self.family_to_worker = family_to_worker
         self.default_worker = default_worker
 
-    def __call__(self, task: Task) -> str:
-        return self.family_to_worker.get(task.get_family(), self.default_worker)
+    def __call__(self, task: BaseTask) -> str:
+        return self.family_to_worker.get(task.get_type_name(), self.default_worker)
 
     def __repr__(self):
         return (

@@ -1,7 +1,7 @@
-from stardag._base import Task
+from stardag._task import BaseTask
 
 
-class _DoNothing(Task[None]):
+class _DoNothing(BaseTask):
     def complete(self) -> bool:
         return True
 
@@ -14,22 +14,22 @@ class UnspecifiedNamespace(_DoNothing):
 
 
 class OverrideNamespaceByDUnder(_DoNothing):
-    __namespace__ = "override_namespace"
+    __type_namespace__ = "override_namespace"
 
 
 class ClearNamespaceByDunder(_DoNothing):
-    __namespace__ = ""
+    __type_namespace__ = ""
 
 
 class OverrideNamespaceByDUnderChild(OverrideNamespaceByDUnder):
     pass
 
 
-class OverrideNamespaceByArg(_DoNothing, namespace_override="override_namespace"):
+class OverrideNamespaceByArg(_DoNothing, type_namespace="override_namespace"):
     pass
 
 
-class ClearNamespaceByArg(_DoNothing, namespace_override=""):
+class ClearNamespaceByArg(_DoNothing, type_namespace=""):
     pass
 
 
@@ -37,13 +37,13 @@ class OverrideNamespaceByArgChild(OverrideNamespaceByArg):
     pass
 
 
-class CustomFamilyByArgFromIntermediate(_DoNothing, family_override="custom_family"):
+class CustomFamilyByArgFromIntermediate(_DoNothing, type_name="custom_family"):
     """Uses family_override with intermediate task implementation inheritance."""
 
     pass
 
 
-class CustomFamilyByArgFromTask(Task[None], family_override="custom_family_2"):
+class CustomFamilyByArgFromTask(BaseTask, type_name="custom_family_2"):
     """Uses family_override with base task."""
 
     def complete(self) -> bool:

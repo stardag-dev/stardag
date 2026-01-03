@@ -1,7 +1,7 @@
 import pytest
 
-from stardag._base import Task
 from stardag._decorator import Depends, task
+from stardag._task import Task
 from stardag.target import LoadableTarget
 
 
@@ -10,8 +10,8 @@ def test_basic(default_in_memory_fs_target):
     def add(a: int, b: int) -> int:
         return a + b
 
-    assert add.__version__ is None
-    assert add.model_fields["version"].default is None
+    assert add.__version__ == ""
+    assert add.model_fields["version"].default == ""
 
     add_b_task = add(a=2, b=3)
     add_task = add(a=1, b=add_b_task)
@@ -31,7 +31,7 @@ def test_basic(default_in_memory_fs_target):
 
 def test_with_params(default_in_memory_fs_target):
     def val_or_id(task):
-        return task.task_id if isinstance(task, Task) else task
+        return task.id if isinstance(task, Task) else task
 
     @task(
         version="1",
@@ -66,7 +66,7 @@ def test_with_params(default_in_memory_fs_target):
     assert add_task.b._relpath.startswith("add_task/")  # type: ignore
     assert (
         add_task.output().path
-        == f"in-memory://add_task/add2/v1/1_{add_b_task.task_id}/result.txt"
+        == f"in-memory://add_task/add2/v1/1_{add_b_task.id}/result.txt"
     )
 
 
