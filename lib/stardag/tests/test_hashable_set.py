@@ -8,16 +8,6 @@ from stardag._task import BaseTask
 from stardag.base_model import CONTEXT_MODE_KEY, StardagField
 
 
-class CustomHashTask(BaseTask):
-    a: Annotated[int, StardagField(hash_exclude=True)]
-
-    def complete(self) -> bool:
-        return True
-
-    def run(self) -> None:
-        pass
-
-
 @pytest.mark.parametrize(
     "description, annotation, values, expected_values",
     [
@@ -32,15 +22,6 @@ class CustomHashTask(BaseTask):
             [3, "a", 2, "b", 1],
             [1, 2, 3, "a", "b"],
         ),
-        # (
-        #     "set of tasks (with hash_exclude)",
-        #     HashableSet[CustomHashTask],
-        #     [CustomHashTask(a=2), CustomHashTask(a=1)],
-        #     [
-        #         {"id": str(task.id)}
-        #         for task in sorted([CustomHashTask(a=2), CustomHashTask(a=1)])
-        #     ],
-        # ),
     ],
 )
 def test_hashable_set_serialization(
@@ -53,3 +34,36 @@ def test_hashable_set_serialization(
         frozenset(values), mode="json", context={CONTEXT_MODE_KEY: "hash"}
     )
     assert dumped == expected_values, f"Failed: {description}"
+
+
+class CustomHashTask(BaseTask):
+    a: int
+    b: Annotated[str, StardagField(hash_exclude=True)] = "constant"
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+def test_hashable_set_serialization_complex_type():
+    annotation = HashableSet[CustomHashTask]
+    values = [
+        CustomHashTask(a=3),
+        CustomHashTask(a=1),
+        CustomHashTask(a=2),
+    ]
+    values_sorted = sorted(values)
+    assert (
+        values != values_sorted
+    ), "Precondition failed: values should be in non-sorted order"
+
+    expected_dumped = [{"id": str(task.id)} for task in values_sorted]
+
+    dumped = TypeAdapter(annotation).dump_python(
+        frozenset(values), mode="json", context={CONTEXT_MODE_KEY: "hash"}
+    )
+    assert (
+        dumped == expected_dumped
+    ), "Unexpected serialization for HashableSet of complex type"
