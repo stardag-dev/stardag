@@ -73,6 +73,11 @@ def _is_type_compatible(expected: Any, actual: Any) -> bool:
 
         return True
 
+    # One is generic, the other is not - incompatible
+    # e.g., str vs list[str], or list[int] vs int
+    if (expected_origin is None) != (actual_origin is None):
+        return False
+
     # Handle simple class types
     if isinstance(expected, type) and isinstance(actual, type):
         return issubclass(actual, expected)
