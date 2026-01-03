@@ -29,12 +29,12 @@ logger = logging.getLogger(__name__)
 
 
 TaskStruct: TypeAlias = Union[
-    "TaskBase", Sequence["TaskStruct"], Mapping[str, "TaskStruct"]
+    "BaseTask", Sequence["TaskStruct"], Mapping[str, "TaskStruct"]
 ]
 
 
 @total_ordering
-class TaskBase(
+class BaseTask(
     PolymorphicRoot,
     metaclass=abc.ABCMeta,
 ):
@@ -88,7 +88,7 @@ class TaskBase(
         # NOTE: UUID is stringified to match serialization mode "json"
         return {"id": str(_get_task_id_from_jsonable(data))}
 
-    def __lt__(self, other: "TaskBase") -> bool:
+    def __lt__(self, other: "BaseTask") -> bool:
         return self.id < other.id
 
 
@@ -100,7 +100,7 @@ class Target(Protocol):
 TargetT = TypeVar("TargetT", bound=Target, covariant=True)
 
 
-class Task(TaskBase, Generic[TargetT], metaclass=abc.ABCMeta):
+class Task(BaseTask, Generic[TargetT], metaclass=abc.ABCMeta):
     def complete(self) -> bool:
         """Check if the task is complete."""
         return self.output().exists()
@@ -111,14 +111,14 @@ class Task(TaskBase, Generic[TargetT], metaclass=abc.ABCMeta):
         ...
 
 
-def flatten_task_struct(task_struct: TaskStruct) -> list[TaskBase]:
+def flatten_task_struct(task_struct: TaskStruct) -> list[BaseTask]:
     """Flatten a TaskStruct into a list of Tasks.
 
     TaskStruct: TypeAlias = Union[
         "TaskBase", Sequence["TaskStruct"], Mapping[str, "TaskStruct"]
     ]
     """
-    if isinstance(task_struct, TaskBase):
+    if isinstance(task_struct, BaseTask):
         return [task_struct]
 
     if isinstance(task_struct, collections_abc.Sequence):
@@ -145,7 +145,7 @@ class TaskRef:
     id: UUID
 
     @classmethod
-    def from_task(cls, task: TaskBase) -> "TaskRef":
+    def from_task(cls, task: BaseTask) -> "TaskRef":
         return cls(
             type_name=task.get_type_name(),
             version=task.version,

@@ -6,7 +6,7 @@ from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
-    from stardag._task import TaskBase
+    from stardag._task import BaseTask
 
 # Never change this value, it is used to generate stable UUID5 ids for tasks
 _DEFAULT_TASK_UUID5_NAMESPACE = UUID("9ca26b27-f7ee-4044-8b3c-e335dc5778dc")
@@ -45,7 +45,7 @@ def _get_task_id_from_jsonable(data: dict) -> UUID:
     )
 
 
-def _get_task_id_jsonable(task: "TaskBase") -> dict[str, Any]:
+def _get_task_id_jsonable(task: "BaseTask") -> dict[str, Any]:
     """Get the hash mode JSONable representation of a task used to generate the task id.
 
     This is a testing util *bypassing/excluding* the `_hash_mode_finalize` logic."""
