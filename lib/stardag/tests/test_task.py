@@ -2,13 +2,13 @@ from typing import Annotated
 
 import pytest
 
-from stardag._task import TaskBase
+from stardag._task import BaseTask
 from stardag._task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY, SubClass
 
 
-class MockBaseTask(TaskBase):
+class MockBaseTask(BaseTask):
     def complete(self) -> bool:
         return True
 
@@ -18,11 +18,11 @@ class MockBaseTask(TaskBase):
 
 def test_task_base_subclassing():
     task = MockBaseTask()
-    assert isinstance(task, TaskBase)
+    assert isinstance(task, BaseTask)
     assert task.complete() is True
     assert task.run() is None
 
-    class TaskNoComplete(TaskBase):
+    class TaskNoComplete(BaseTask):
         def run(self) -> None:
             pass
 
@@ -32,7 +32,7 @@ def test_task_base_subclassing():
     ):
         TaskNoComplete()  # type: ignore
 
-    class TaskNoRun(TaskBase):
+    class TaskNoRun(BaseTask):
         def complete(self) -> bool:
             return False
 
@@ -59,7 +59,7 @@ def test_run_version_checked():
 
 
 def test_dynamic_deps():
-    class DynamicDepsTask(TaskBase):
+    class DynamicDepsTask(BaseTask):
         a: int = 3
 
         def complete(self) -> bool:
@@ -97,7 +97,7 @@ class WithNestedTask(MockBaseTask):
 class NonTaskModel(StardagBaseModel):
     a: Annotated[int, StardagField(hash_exclude=True)]
     b: Annotated[str, StardagField(compat_default="default")]
-    tasks: tuple[SubClass[TaskBase], ...]
+    tasks: tuple[SubClass[BaseTask], ...]
 
 
 class ComplexNestedTask(MockBaseTask):
@@ -184,7 +184,7 @@ class ComplexNestedTask(MockBaseTask):
 )
 def test__id_hashable_jsonable(
     description: str,
-    task: TaskBase,
+    task: BaseTask,
     expected_task_id_jsonable: dict,
 ):
     assert (
