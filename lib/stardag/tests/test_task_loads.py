@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from stardag._task import BaseTask, Task
 from stardag._task_loads import TaskLoads
 from stardag.target import InMemoryTarget, LoadableTarget
@@ -39,5 +42,14 @@ def test_task_loads():
     # test serialization/deserialization roundtrip
     assert_serialize_validate_roundtrip(ContainerTask, container_task)
 
-    # container_task_int = ContainerTask(task=LoadsIntTask())
-    # assert_serialize_validate_roundtrip(ContainerTask, container_task_int)
+
+def test_task_loads_type_mismatch():
+    """Runtime should catch generic type mismatches that pyright also detects."""
+    with pytest.raises(ValidationError) as exc_info:
+        ContainerTask(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+
+    # Verify the error message mentions the type mismatch
+    error_str = str(exc_info.value)
+    assert "LoadsIntTask" in error_str
+    assert "LoadableTarget[str]" in error_str
+    assert "LoadableTarget[int]" in error_str

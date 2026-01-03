@@ -11,6 +11,8 @@ from typing import (
     Type,
     TypeVar,
     Union,
+    get_args,
+    get_origin,
 )
 
 from pydantic import (
@@ -23,6 +25,106 @@ from pydantic_core import core_schema
 from stardag.base_model import StardagBaseModel
 
 logger = logging.getLogger(__name__)
+
+
+def _is_type_compatible(expected: Any, actual: Any) -> bool:
+    """
+    Best-effort check if actual type is compatible with expected type.
+
+    Returns True if compatible or if we can't determine compatibility.
+    Returns False only for obvious mismatches.
+    """
+    # TypeVars match anything
+    if isinstance(expected, TypeVar):
+        return True
+    if isinstance(actual, TypeVar):
+        return True
+
+    # Same type is always compatible
+    if expected is actual:
+        return True
+    if expected == actual:
+        return True
+
+    # Handle generic types (e.g., LoadableTarget[str] vs LoadableTarget[int])
+    expected_origin = get_origin(expected)
+    actual_origin = get_origin(actual)
+
+    if expected_origin is not None and actual_origin is not None:
+        # Both are generic types - check origin compatibility
+        if expected_origin is not actual_origin:
+            # Different origins - check if actual_origin is subclass of expected_origin
+            if isinstance(expected_origin, type) and isinstance(actual_origin, type):
+                if not issubclass(actual_origin, expected_origin):
+                    return False
+            else:
+                return False
+
+        # Check args recursively
+        expected_args = get_args(expected)
+        actual_args = get_args(actual)
+
+        if len(expected_args) != len(actual_args):
+            return False
+
+        for exp_arg, act_arg in zip(expected_args, actual_args):
+            if not _is_type_compatible(exp_arg, act_arg):
+                return False
+
+        return True
+
+    # Handle simple class types
+    if isinstance(expected, type) and isinstance(actual, type):
+        return issubclass(actual, expected)
+
+    # Can't determine - assume compatible
+    return True
+
+
+def _check_generic_args_compatibility(
+    source_type: type, value_cls: type
+) -> tuple[bool, str]:
+    """
+    Check if value_cls's generic args are compatible with source_type's expected args.
+
+    Returns (is_compatible, error_message).
+    error_message is empty string if compatible or if check is inconclusive.
+    """
+    # Get expected args from source_type's pydantic metadata
+    pydantic_meta = getattr(source_type, "__pydantic_generic_metadata__", None)
+    if pydantic_meta is None:
+        return True, ""
+
+    expected_args = pydantic_meta.get("args", ())
+    if not expected_args:
+        return True, ""
+
+    # Get actual args from value_cls's __orig_class__ (set by PolymorphicRoot.__class_getitem__)
+    orig_class = getattr(value_cls, "__orig_class__", None)
+    if orig_class is None:
+        return True, ""
+
+    actual_args = get_args(orig_class)
+    if not actual_args:
+        return True, ""
+
+    # Compare args
+    if len(expected_args) != len(actual_args):
+        return (
+            False,
+            f"Generic arity mismatch: expected {len(expected_args)} type args, "
+            f"got {len(actual_args)}",
+        )
+
+    for i, (exp, act) in enumerate(zip(expected_args, actual_args)):
+        if not _is_type_compatible(exp, act):
+            return (
+                False,
+                f"Generic type mismatch at position {i}: expected {exp}, got {act}",
+            )
+
+    return True, ""
+
 
 TYPE_NAMESPACE_KEY = "__type_namespace__"
 TYPE_NAME_KEY = "__type_name__"
@@ -277,7 +379,7 @@ class PolymorphicRoot(StardagBaseModel):
 
 
 class Polymorphic:
-    """TODO"""
+    """Pydantic annotation for polymorphic validation of PolymorphicRoot subclasses."""
 
     def __get_pydantic_core_schema__(
         self,
@@ -294,14 +396,28 @@ class Polymorphic:
                 "Polymorphic() can only be used with PolymorphicRoot subclasses"
             )
 
-        base: type[PolymorphicRoot] = source_type
+        # For parameterized generics like Task[LoadableTarget[str]], get the origin class
+        # (Task) for isinstance checks, but keep source_type for generic args checking
+        pydantic_meta = getattr(source_type, "__pydantic_generic_metadata__", None)
+        base_origin: type[PolymorphicRoot] = (
+            pydantic_meta.get("origin") if pydantic_meta else None
+        ) or source_type
 
         def dispatch(v: Any, info):
-            if isinstance(v, base):
+            if isinstance(v, base_origin):
+                # Best-effort generic args check for already-instantiated values
+                is_compatible, error_msg = _check_generic_args_compatibility(
+                    source_type, type(v)
+                )
+                if not is_compatible:
+                    raise ValueError(
+                        f"Value of type {type(v).__name__} is not compatible with "
+                        f"expected type {source_type}: {error_msg}"
+                    )
                 return v
 
             if not isinstance(v, dict):
-                return base.model_validate(v, context=info.context)
+                return base_origin.model_validate(v, context=info.context)
 
             namespace = v.get(TYPE_NAMESPACE_KEY)
             name = v.get(TYPE_NAME_KEY)
@@ -310,7 +426,7 @@ class Polymorphic:
                     f"Missing discriminator keys: {TYPE_NAMESPACE_KEY}, {TYPE_NAME_KEY}"
                 )
 
-            subcls = base.resolve(str(namespace), str(name))
+            subcls = base_origin.resolve(str(namespace), str(name))
 
             payload = dict(v)
             payload.pop(TYPE_NAMESPACE_KEY, None)
