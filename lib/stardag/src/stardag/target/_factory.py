@@ -1,12 +1,11 @@
 import json
 import typing
 
-from stardag._base import Task
+from stardag._task import BaseTask
 from stardag.config import DEFAULT_TARGET_ROOT_KEY, config_provider
 from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
 from stardag.target._base import RemoteFileSystemTarget
 from stardag.utils.resource_provider import resource_provider
-
 
 # A class or callable that takes a (fully qualifed/"absolute") path (/uri) and returns
 # a FileSystemTarget.
@@ -64,7 +63,7 @@ class TargetFactory:
     def get_target(
         self,
         relpath: str,
-        task: Task | None = None,  # noqa
+        task: BaseTask | None = None,  # noqa
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
     ) -> FileSystemTarget:
         """Get a file system target.
@@ -90,7 +89,7 @@ class TargetFactory:
     def get_directory_target(
         self,
         relpath: str,
-        task: Task | None = None,  # noqa
+        task: BaseTask | None = None,  # noqa
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
     ) -> DirectoryTarget:
         """Get a directory target.
@@ -154,7 +153,7 @@ target_factory_provider = resource_provider(
 
 def get_target(
     relpath: str,
-    task: Task | None = None,
+    task: BaseTask | None = None,
     target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
 ) -> FileSystemTarget:
     return target_factory_provider.get().get_target(
@@ -166,7 +165,7 @@ def get_target(
 
 def get_directory_target(
     relpath: str,
-    task: Task | None = None,
+    task: BaseTask | None = None,
     target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
 ) -> DirectoryTarget:
     return target_factory_provider.get().get_directory_target(

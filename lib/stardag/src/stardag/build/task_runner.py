@@ -1,10 +1,10 @@
 import typing
 
-from stardag._base import Task, TaskDeps
+from stardag._task import BaseTask, TaskStruct
 from stardag.build.registry import NoOpRegistry, RegistryABC
 
-RunCallback = typing.Callable[[Task], None]
-AsyncRunCallback = typing.Callable[[Task], typing.Awaitable[None]]
+RunCallback = typing.Callable[[BaseTask], None]
+AsyncRunCallback = typing.Callable[[BaseTask], typing.Awaitable[None]]
 
 
 class TaskRunner:
@@ -19,7 +19,7 @@ class TaskRunner:
         self.on_complete_callback = on_complete_callback
         self.registry = registry or NoOpRegistry()
 
-    def run(self, task: Task) -> typing.Generator[TaskDeps, None, None] | None:
+    def run(self, task: BaseTask) -> typing.Generator[TaskStruct, None, None] | None:
         # Notify registry that task is starting
         if hasattr(self.registry, "start"):
             self.registry.start(task)  # type: ignore
@@ -32,7 +32,7 @@ class TaskRunner:
 
             # check if res is a generator -> task is not complete
             if hasattr(res, "__next__"):
-                res = typing.cast(typing.Generator[TaskDeps, None, None], res)
+                res = typing.cast(typing.Generator[TaskStruct, None, None], res)
                 return res
 
             # Task completed successfully
@@ -52,7 +52,9 @@ class TaskRunner:
                 self.registry.fail(task, str(e))  # type: ignore
             raise
 
-    def _run_task(self, task: Task) -> typing.Generator[TaskDeps, None, None] | None:
+    def _run_task(
+        self, task: BaseTask
+    ) -> typing.Generator[TaskStruct, None, None] | None:
         return task.run()
 
 
@@ -67,7 +69,9 @@ class AsyncTaskRunner:
         self.on_complete_callback = on_complete_callback
         self.registry = registry or NoOpRegistry()
 
-    async def run(self, task: Task) -> typing.Generator[TaskDeps, None, None] | None:
+    async def run(
+        self, task: BaseTask
+    ) -> typing.Generator[TaskStruct, None, None] | None:
         # Notify registry that task is starting
         if hasattr(self.registry, "start"):
             self.registry.start(task)  # type: ignore
@@ -84,7 +88,7 @@ class AsyncTaskRunner:
 
             # check if res is a generator -> task is not complete
             if hasattr(res, "__next__"):
-                res = typing.cast(typing.Generator[TaskDeps, None, None], res)
+                res = typing.cast(typing.Generator[TaskStruct, None, None], res)
                 return res
 
             # Task completed successfully
@@ -105,6 +109,6 @@ class AsyncTaskRunner:
             raise
 
     async def _run_task(
-        self, task: Task
-    ) -> typing.Generator[TaskDeps, None, None] | None:
+        self, task: BaseTask
+    ) -> typing.Generator[TaskStruct, None, None] | None:
         return task.run()

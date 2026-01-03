@@ -1,13 +1,36 @@
-from typing import Annotated
+from typing import Annotated, Type
 
 import pytest
 
-from stardag._task import BaseTask, Task
+from stardag._auto_task import AutoTask
+from stardag._decorator import task as task_decorator
+from stardag._task import (
+    BaseTask,
+    Task,
+    TaskStruct,
+    flatten_task_struct,
+)
 from stardag._task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
-from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY, SubClass
+from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY, SubClass, TypeId
 from stardag.target._in_memory import InMemoryTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
+from stardag.utils.testing.namepace import (
+    ClearNamespaceByArg,
+    ClearNamespaceByDunder,
+    CustomFamilyByArgFromIntermediate,
+    CustomFamilyByArgFromIntermediateChild,
+    CustomFamilyByArgFromTask,
+    CustomFamilyByArgFromTaskChild,
+    CustomFamilyByDUnder,
+    CustomFamilyByDUnderChild,
+    OverrideNamespaceByArg,
+    OverrideNamespaceByArgChild,
+    OverrideNamespaceByDUnder,
+    OverrideNamespaceByDUnderChild,
+    UnspecifiedNamespace,
+)
+from stardag.utils.testing.simple_dag import LeafTask
 
 
 class MockBaseTask(BaseTask):
@@ -219,3 +242,113 @@ def test_task_with_target_serialization():
 
     # verify serialization/deserialization roundtrip
     assert_serialize_validate_roundtrip(TaskWithTarget, task)
+
+
+class MockTask(AutoTask[str]):
+    a: int
+
+
+_testing_module = "stardag.utils.testing"
+
+
+@pytest.mark.parametrize(
+    "task_class,expected_type_id",
+    [
+        # namespace
+        (MockTask, TypeId(namespace="", name="MockTask")),
+        (LeafTask, TypeId(namespace=_testing_module + ".simple_dag", name="LeafTask")),
+        (
+            UnspecifiedNamespace,
+            TypeId(namespace=_testing_module, name="UnspecifiedNamespace"),
+        ),
+        # namespace override by dunder
+        (
+            OverrideNamespaceByDUnder,
+            TypeId(namespace="override_namespace", name="OverrideNamespaceByDUnder"),
+        ),
+        (ClearNamespaceByDunder, TypeId(namespace="", name="ClearNamespaceByDunder")),
+        (
+            OverrideNamespaceByDUnderChild,
+            TypeId(
+                namespace="override_namespace", name="OverrideNamespaceByDUnderChild"
+            ),
+        ),
+        # namespace override by arg
+        (
+            OverrideNamespaceByArg,
+            TypeId(namespace="override_namespace", name="OverrideNamespaceByArg"),
+        ),
+        (ClearNamespaceByArg, TypeId(namespace="", name="ClearNamespaceByArg")),
+        (
+            OverrideNamespaceByArgChild,
+            TypeId(namespace=_testing_module, name="OverrideNamespaceByArgChild"),
+        ),
+        # family override
+        (
+            CustomFamilyByArgFromIntermediate,
+            TypeId(namespace=_testing_module, name="custom_family"),
+        ),
+        (
+            CustomFamilyByArgFromIntermediateChild,
+            TypeId(
+                namespace=_testing_module, name="CustomFamilyByArgFromIntermediateChild"
+            ),
+        ),
+        (
+            CustomFamilyByArgFromTask,
+            TypeId(namespace=_testing_module, name="custom_family_2"),
+        ),
+        (
+            CustomFamilyByArgFromTaskChild,
+            TypeId(namespace=_testing_module, name="CustomFamilyByArgFromTaskChild"),
+        ),
+        (
+            CustomFamilyByDUnder,
+            TypeId(namespace=_testing_module, name="custom_family_3"),
+        ),
+        (
+            CustomFamilyByDUnderChild,
+            TypeId(namespace=_testing_module, name="custom_family_3_child"),
+        ),
+    ],
+)
+def test_auto_namespace(task_class: Type[Task], expected_type_id: TypeId):
+    assert task_class.__type_id__ == expected_type_id
+    namespace = task_class.get_type_namespace()
+    type_name = task_class.get_type_name()
+    assert TypeId(namespace, type_name) == expected_type_id
+    assert BaseTask._registry().get_class(expected_type_id) == task_class
+
+
+@task_decorator
+def mock_task(key: str) -> str:
+    return key
+
+
+@pytest.mark.parametrize(
+    "task_struct, expected",
+    [
+        (
+            mock_task(key="a"),
+            [mock_task(key="a")],
+        ),
+        (
+            [mock_task(key="a"), mock_task(key="b")],
+            [mock_task(key="a"), mock_task(key="b")],
+        ),
+        (
+            {"a": mock_task(key="a"), "b": mock_task(key="b")},
+            [mock_task(key="a"), mock_task(key="b")],
+        ),
+        (
+            {"a": mock_task(key="a"), "b": [mock_task(key="b"), mock_task(key="c")]},
+            [mock_task(key="a"), mock_task(key="b"), mock_task(key="c")],
+        ),
+        (
+            [mock_task(key="a"), {"b": mock_task(key="b"), "c": mock_task(key="c")}],
+            [mock_task(key="a"), mock_task(key="b"), mock_task(key="c")],
+        ),
+    ],
+)
+def test_flatten_task_struct(task_struct: TaskStruct, expected: list[Task]):
+    assert flatten_task_struct(task_struct) == expected

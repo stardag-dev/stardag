@@ -4,28 +4,29 @@ import getpass
 import os
 import subprocess
 from functools import lru_cache
+from uuid import UUID
 
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from stardag._base import Task
-from stardag._task_parameter import TaskParam
+from stardag._task import BaseTask
+from stardag.polymorphic import SubClass
 from stardag.target import get_target
 from stardag.utils.resource_provider import resource_provider
 
 
 class RegisterdTaskEnvelope(BaseModel):
-    task: TaskParam[Task]
-    task_id: str
+    task: SubClass[BaseTask]
+    task_id: UUID
     user: str
     created_at: datetime.datetime
     commit_hash: str
 
     @classmethod
-    def new(cls, task: Task):
+    def new(cls, task: BaseTask):
         return cls(
             task=task,
-            task_id=task.task_id,
+            task_id=task.id,
             user=getpass.getuser(),
             created_at=datetime.datetime.now(datetime.timezone.utc),
             commit_hash=get_git_commit_hash(),
@@ -34,7 +35,7 @@ class RegisterdTaskEnvelope(BaseModel):
 
 class RegistryABC(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def register(self, task: Task):
+    def register(self, task: BaseTask):
         pass
 
 
@@ -48,14 +49,14 @@ class FileSystemRegistry(RegistryABC):
     def __init__(self, registry_root: str):
         self.registry_root = registry_root.removesuffix("/") + "/"
 
-    def register(self, task: Task):
+    def register(self, task: BaseTask):
         envelope = RegisterdTaskEnvelope.new(task)
-        target = self._get_target(task.task_id)
+        target = self._get_target(str(task.id))
         with target.open("w") as handle:
             handle.write(envelope.model_dump_json())
 
-    def is_registered(self, task: Task):
-        target = self._get_target(task.task_id)
+    def is_registered(self, task: BaseTask):
+        target = self._get_target(str(task.id))
         return target.exists()
 
     def get(self, task_id: str) -> RegisterdTaskEnvelope | None:
@@ -77,7 +78,7 @@ class FileSystemRegistry(RegistryABC):
 
 
 class NoOpRegistry(RegistryABC):
-    def register(self, task: Task):
+    def register(self, task: BaseTask):
         pass
 
 

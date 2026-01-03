@@ -1,19 +1,17 @@
 from importlib.metadata import version
 
-from pydantic import TypeAdapter
-
 from stardag._auto_task import AutoTask
-from stardag._base import (
+from stardag._decorator import Depends, task
+from stardag._hashable_set import HashableSet, HashSafeSetSerializer
+from stardag._task import (
+    BaseTask,
     Task,
-    TaskDeps,
-    TaskIDRef,
+    TaskRef,
     TaskStruct,
     auto_namespace,
     namespace,
 )
-from stardag._decorator import Depends, task
-from stardag._parameter import IDHasher, IDHasherABC, IDHashInclude, IDHashIncludeABC
-from stardag._task_parameter import TaskLoads, TaskParam, TaskSet
+from stardag._task_loads import TaskLoads
 from stardag.build.registry import registry_provider
 from stardag.build.sequential import build
 from stardag.exceptions import (
@@ -34,9 +32,6 @@ from stardag.target import (
 
 __version__ = version("stardag")
 
-task_type_adapter = TypeAdapter(TaskParam[Task])
-tasks_type_adapter = TypeAdapter(list[TaskParam[Task]])
-
 
 __all__ = [
     "__version__",
@@ -45,30 +40,24 @@ __all__ = [
     "AuthorizationError",
     "auto_namespace",
     "AutoTask",
+    "BaseTask",
     "build",
     "Depends",
     "DirectoryTarget",
     "FileSystemTarget",
     "get_directory_target",
     "get_target",
-    "IDHasher",
-    "IDHashInclude",
-    "IDHasherABC",
-    "IDHashIncludeABC",
     "LocalTarget",
     "namespace",
     "registry_provider",
     "StardagError",
     "Task",
-    "TaskDeps",
-    "TaskIDRef",
+    "TaskRef",
     "TaskLoads",
-    "TaskParam",
-    "TaskSet",
+    "HashableSet",
+    "HashSafeSetSerializer",
     "TaskStruct",
     "target_factory_provider",
     "task",
-    "task_type_adapter",
-    "tasks_type_adapter",
     "TokenExpiredError",
 ]

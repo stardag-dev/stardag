@@ -1,6 +1,6 @@
 from stardag._auto_task import AutoTask
-from stardag._base import auto_namespace
-from stardag._task_parameter import TaskLoads
+from stardag._task import auto_namespace
+from stardag._task_loads import TaskLoads
 
 auto_namespace(__name__)
 

@@ -1,12 +1,13 @@
 import asyncio
 import logging
+from uuid import UUID
 
 from prefect import flow
 from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
-from stardag._base import Task, flatten_task_struct
+from stardag._task import BaseTask, TaskRef, flatten_task_struct
 from stardag.build.registry import RegistryABC, registry_provider
 from stardag.build.task_runner import AsyncRunCallback, AsyncTaskRunner
 from stardag.integration.prefect.utils import format_key
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 @flow
-async def build_flow(task: Task, **kwargs):
+async def build_flow(task: BaseTask, **kwargs):
     """A flow that builds any stardag Task.
 
     NOTE that since task is a Pydantic model, if is serialized correctly as JSON by
@@ -26,7 +27,7 @@ async def build_flow(task: Task, **kwargs):
 
 
 async def build(
-    task: Task,
+    task: BaseTask,
     *,
     task_runner: AsyncTaskRunner | None = None,
     # TODO clean up duplicate arg options
@@ -92,45 +93,45 @@ async def build(
 
 
 async def build_dag_recursive(
-    task: Task,
+    task: BaseTask,
     *,
     task_runner: AsyncTaskRunner,
-    task_id_to_future: dict[str, PrefectConcurrentFuture | None],
+    task_id_to_future: dict[UUID, PrefectConcurrentFuture | None],
     task_id_to_dynamic_future: dict[
-        str, PrefectConcurrentFuture
+        UUID, PrefectConcurrentFuture
     ],  # dynamic tasks tentative run
     task_id_to_dynamic_deps: dict[
-        str, tuple[list[Task], PrefectConcurrentFuture]
+        UUID, tuple[list[BaseTask], PrefectConcurrentFuture]
     ],  # dynamic tasks' dependencies
-    visited: set[str],  # check for cyclic dependencies
+    visited: set[UUID],  # check for cyclic dependencies
 ) -> (
     PrefectConcurrentFuture | None
 ):  # None means could not be scheduled yet, because has dynamic dep task as upstream
     """Translates a stardag task-DAG into Prefect flow logic."""
-    # print(f"\nBuilding task {task.task_id}")
+    # print(f"\nBuilding task {task.id}")
     # pprint(task_id_to_future)
     # pprint(task_id_to_dynamic_future)
     # pprint(task_id_to_dynamic_deps)
     # print()
 
     # Cycle detection
-    if task.task_id in visited:
+    if task.id in visited:
         raise ValueError("Cyclic dependencies detected")
 
     # Hitting a built "branch"
-    already_built_future = task_id_to_future.get(task.task_id, None)
+    already_built_future = task_id_to_future.get(task.id, None)
     if already_built_future is not None:
         return already_built_future
 
-    already_built_dynamic_future = task_id_to_dynamic_future.get(task.task_id, None)
+    already_built_dynamic_future = task_id_to_dynamic_future.get(task.id, None)
     if already_built_dynamic_future is not None:
         return None
 
+    task_ref = TaskRef.from_task(task)
+
     # Recurse dependencies
-    dynamic_deps, prev_dynamic_future = task_id_to_dynamic_deps.get(
-        task.task_id, ([], None)
-    )
-    upstream_tasks = task.deps() + dynamic_deps
+    dynamic_deps, prev_dynamic_future = task_id_to_dynamic_deps.get(task.id, ([], None))
+    upstream_tasks = flatten_task_struct(task.requires()) + dynamic_deps
     upstream_build_results = [
         await build_dag_recursive(
             dep,
@@ -138,7 +139,7 @@ async def build_dag_recursive(
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
-            visited=visited | {task.task_id},
+            visited=visited | {task.id},
         )
         for dep in upstream_tasks
     ]
@@ -149,7 +150,7 @@ async def build_dag_recursive(
 
     if task.has_dynamic_deps():
 
-        @prefect_task(name=f"{task.id_ref.slug}-dynamic")
+        @prefect_task(name=f"{task_ref.slug}-dynamic")
         async def stardag_dynamic_task():
             # TODO: concurrency lock
             if not task.complete():
@@ -168,25 +169,25 @@ async def build_dag_recursive(
                         completed = [dep.complete() for dep in deps]
                         logger.debug(f"Deps: {deps}, completed: {completed}")
 
-                    return task.task_id, deps
+                    return task.id, deps
 
                 except StopIteration:
                     logger.debug("Task completed")
-                    return task.task_id, None
+                    return task.id, None
 
         extra_deps = [prev_dynamic_future] if prev_dynamic_future is not None else []
         future = stardag_dynamic_task.submit(  # type: ignore
             wait_for=upstream_build_results + extra_deps
         )
-        task_id_to_dynamic_future[task.task_id] = future
+        task_id_to_dynamic_future[task.id] = future
 
         # signal that this task has dynamic deps, we can't build downstream tasks yet
         return None
 
     @prefect_task(
-        name=task.id_ref.slug,
+        name=task_ref.slug,
         # TODO caching. Make sure to include environment (stardag root) in cache key
-        # cache_key_fn=lambda *args, **kwargs: task.task_id
+        # cache_key_fn=lambda *args, **kwargs: task.id
     )
     async def stardag_task():
         # TODO: concurrency lock
@@ -198,10 +199,10 @@ async def build_dag_recursive(
                     "Tasks with dynamic deps should be executed separately."
                 )
 
-        return task.task_id
+        return task.id
 
     future = stardag_task.submit(wait_for=upstream_build_results)  # type: ignore
-    task_id_to_future[task.task_id] = future
+    task_id_to_future[task.id] = future
 
     return future
 
@@ -213,10 +214,15 @@ async def _completed_prefect_future(
     return key, future
 
 
-async def create_markdown(task: Task):
-    output_path = getattr(task.output(), "path", None)
-    markdown = f"""# {task.id_ref.slug}
-**Task id**: `{task.task_id}`
+async def create_markdown(task: BaseTask):
+    output = getattr(task, "output", None)
+    if output is None:
+        output_path = "N/A"
+    else:
+        output_path = getattr(output, "path", "N/A")
+
+    markdown = f"""# {TaskRef.from_task(task).slug}
+**Task id**: `{task.id}`
 **Task class**: `{task.__module__}.{task.__class__.__name__}`
 **Output path**: [{output_path}]({output_path})
 **Task spec**
@@ -226,8 +232,8 @@ async def create_markdown(task: Task):
 """
 
     await create_markdown_artifact(  # type: ignore
-        key=format_key(f"{task.id_ref.slug}-spec"),
-        description=f"Task spec for {task.task_id}",
+        key=format_key(f"{TaskRef.from_task(task).slug}-spec"),
+        description=f"Task spec for {task.id}",
         markdown=markdown,
     )
 
