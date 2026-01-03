@@ -22,6 +22,6 @@ def assert_serialize_validate_roundtrip(
         elif fmt == "json":
             dumped = type_adapter.dump_json(value)
             reconstructed = type_adapter.validate_json(dumped)
-            assert (
-                value == reconstructed
-            ), f"Serialization/validation roundtrip failed for format '{fmt}'"
+            assert value == reconstructed, (
+                f"Serialization/validation roundtrip failed for format '{fmt}'"
+            )

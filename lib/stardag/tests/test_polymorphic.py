@@ -197,17 +197,17 @@ def test_type_namespace_handling():
     class ChildB_A(ChildB):
         pass
 
-    assert (
-        ChildB_A.get_type_namespace() == ""
-    ), "Subclass should not inherit type_namespace from class arg"
+    assert ChildB_A.get_type_namespace() == "", (
+        "Subclass should not inherit type_namespace from class arg"
+    )
 
     # Class var __type_namespace__ propagates to subclasses
     class ChildC_A(ChildC):
         pass
 
-    assert (
-        ChildC_A.get_type_namespace() == "custom_namespace_c"
-    ), "Subclass should inherit __type_namespace__"
+    assert ChildC_A.get_type_namespace() == "custom_namespace_c", (
+        "Subclass should inherit __type_namespace__"
+    )
 
 
 def test_type_name_handling():

@@ -107,7 +107,7 @@ class Serializable(
 class PlainTextSerializer(Serializer[str]):
     @classmethod
     def type_checked_init(cls, annotation: typing.Type[str]) -> Self:
-        if strip_annotation(annotation) != str:
+        if strip_annotation(annotation) != str:  # noqa: E721
             raise ValueError(f"{annotation} must be str.")
         return cls()
 
@@ -127,7 +127,7 @@ class PlainTextSerializer(Serializer[str]):
         return "txt"
 
     def __eq__(self, value: object) -> bool:
-        return type(self) == type(value)
+        return type(self) == type(value)  # noqa: E721
 
 
 class JSONSerializer(Serializer[LoadedT]):
@@ -158,7 +158,7 @@ class JSONSerializer(Serializer[LoadedT]):
 
     def __eq__(self, value: object) -> bool:
         return (
-            type(self) == type(value)
+            type(self) == type(value)  # noqa: E721
             and isinstance(value, JSONSerializer)
             and self.type_adapter.core_schema == value.type_adapter.core_schema
         )
@@ -186,7 +186,7 @@ class PickleSerializer(Serializer[LoadedT]):
         return "pkl"
 
     def __eq__(self, value: object) -> bool:
-        return type(self) == type(value)
+        return type(self) == type(value)  # noqa: E721
 
 
 class PandasDataFrameCSVSerializer(Serializer[DataFrame]):
@@ -199,7 +199,7 @@ class PandasDataFrameCSVSerializer(Serializer[DataFrame]):
 
     @classmethod
     def type_checked_init(cls, annotation: typing.Type[DataFrame]) -> Self:
-        if strip_annotation(annotation) != DataFrame:
+        if strip_annotation(annotation) != DataFrame:  # noqa: E721
             raise ValueError(f"{annotation} must be DataFrame.")
         return cls()
 
@@ -219,7 +219,7 @@ class PandasDataFrameCSVSerializer(Serializer[DataFrame]):
         return "csv"
 
     def __eq__(self, value: object) -> bool:
-        return type(self) == type(value)
+        return type(self) == type(value)  # noqa: E721
 
 
 @typing.runtime_checkable
@@ -261,7 +261,7 @@ class SelfSerializer(Serializer[SelfSerializing]):
 
     def __eq__(self, value: object) -> bool:
         return (
-            type(self) == type(value)
+            type(self) == type(value)  # noqa: E721
             and isinstance(value, SelfSerializer)
             and self.class_ == value.class_
         )

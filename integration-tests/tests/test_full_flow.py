@@ -592,9 +592,9 @@ class TestSDKBuildWorkflow:
 
                 # All tasks should be completed
                 for task in tasks:
-                    assert (
-                        task["status"] == "completed"
-                    ), f"{task['task_family']} not completed"
+                    assert task["status"] == "completed", (
+                        f"{task['task_family']} not completed"
+                    )
 
                 # Verify the task graph structure
                 response = httpx.get(
