@@ -1,4 +1,5 @@
 import logging
+import types
 import typing
 import warnings
 from dataclasses import dataclass
@@ -7,7 +8,6 @@ from typing import (
     Annotated,
     Any,
     ClassVar,
-    Generic,
     Literal,
     Tuple,
     Type,
@@ -108,14 +108,24 @@ def _check_generic_args_compatibility(
     if not expected_args:
         return True, ""
 
+    expected_origin = pydantic_meta.get("origin")
+
     # Get actual args from value_cls's __orig_class__ (set by PolymorphicRoot.__class_getitem__)
     orig_class = getattr(value_cls, "__orig_class__", None)
     if orig_class is None:
         return True, ""
 
+    actual_origin = get_origin(orig_class)
     actual_args = get_args(orig_class)
     if not actual_args:
         return True, ""
+
+    # Only compare args if origins match - different origins (e.g., Task vs AutoTask)
+    # have different parameterization semantics, so comparing their args is invalid
+    if expected_origin is not None and actual_origin is not None:
+        if expected_origin is not actual_origin:
+            # Different origins - can't reliably compare args
+            return True, ""
 
     # Compare args
     if len(expected_args) != len(actual_args):
@@ -234,12 +244,27 @@ class _TypeRegistry:
         namespace_override: str | None,
     ) -> TypeId:
         return TypeId(
-            name=name_override or cls.__name__,
+            name=self._resolve_name(cls, name_override),
             namespace=self._resolve_namespace(
                 cls,
                 namespace_override=namespace_override,
             ),
         )
+
+    def _resolve_name(
+        self,
+        cls: Type[BaseModel],
+        name_override: str | None,
+    ) -> str:
+        if name_override is not None:
+            return name_override
+
+        cls_name = getattr(cls, TYPE_NAME_KEY, None)
+        if cls_name is not None:
+            # Already set explicitly on task class
+            return cls_name
+
+        return cls.__name__
 
     def _resolve_namespace(
         self,
@@ -274,12 +299,7 @@ def is_generic_model(cls: Type[BaseModel]) -> bool:
 
 
 _TPolymorphicRoot = TypeVar("_TPolymorphicRoot", bound="PolymorphicRoot")
-
 _TBaseModel = TypeVar("_TBaseModel", bound=StardagBaseModel)
-
-
-class _Generic(Generic[_TBaseModel]):
-    pass
 
 
 class PolymorphicRoot(StardagBaseModel):
@@ -360,7 +380,10 @@ class PolymorphicRoot(StardagBaseModel):
         """
         create_model = super().__class_getitem__(params)  # type: ignore
 
-        create_model.__orig_class__ = _Generic[params]  # type: ignore
+        # Store params so get_args(cls.__orig_class__) returns them
+        # Using types.GenericAlias so get_args() works correctly
+        args = params if isinstance(params, tuple) else (params,)
+        create_model.__orig_class__ = types.GenericAlias(cls, args)  # type: ignore
         return create_model
 
     def _serialize_extra(
