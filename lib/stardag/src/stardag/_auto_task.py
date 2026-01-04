@@ -15,7 +15,13 @@ class AutoTask(
     def __pydantic_init_subclass__(cls, **kwargs: typing.Any) -> None:  # type: ignore
         super().__pydantic_init_subclass__(**kwargs)
         # get generic type of self
-        loaded_t = typing.get_args(cls.__orig_class__)[0]  # type: ignore TODO
+        orig_class = getattr(cls, "__orig_class__", None)
+        if orig_class is None:
+            return
+        args = typing.get_args(orig_class)
+        if not args:
+            return
+        loaded_t = args[0]
         if type(loaded_t) != typing.TypeVar:  # noqa: E721
             cls._serializer = get_serializer(loaded_t)
 

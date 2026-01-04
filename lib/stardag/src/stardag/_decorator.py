@@ -83,7 +83,7 @@ def task(
     _func: typing.Callable[_PWrapped, LoadedT],
     *,
     family: str | None = None,
-    version: str = "0",
+    version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
@@ -92,7 +92,7 @@ def task(
 def task(
     *,
     family: str | None = None,
-    version: str = "0",
+    version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> _TaskWrapper: ...
 
@@ -101,7 +101,7 @@ def task(
     _func: typing.Callable[_PWrapped, LoadedT] | None = None,
     *,
     family: str | None = None,
-    version: str | None = None,
+    version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]] | _TaskWrapper:
     def wrapper(
@@ -121,7 +121,7 @@ def task(
             family or _func.__name__,
             __base__=_FunctionTask[return_type, _PWrapped],
             __module__=_func.__module__,
-            version=(str | None, version),
+            version=(str, version),
             **{  # type: ignore
                 name: (
                     _get_param_annotation(arg.annotation),

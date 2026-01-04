@@ -57,17 +57,17 @@ class CustomFamilyByDUnder(_DoNothing):
     """Children would have to override either namespace or family (almost never makes
     sense to use this)"""
 
-    __family__ = "custom_family_3"
+    __type_name__ = "custom_family_3"
 
 
 class CustomFamilyByArgFromIntermediateChild(CustomFamilyByArgFromIntermediate):
-    """Should not inherit family_override."""
+    """Should not inherit type_name."""
 
     pass
 
 
 class CustomFamilyByArgFromTaskChild(CustomFamilyByArgFromTask):
-    """Should not inherit family_override."""
+    """Should not inherit type_name."""
 
     pass
 
@@ -75,15 +75,15 @@ class CustomFamilyByArgFromTaskChild(CustomFamilyByArgFromTask):
 try:
 
     class CustomFamilyByDUnderChild(CustomFamilyByDUnder):  # type: ignore
-        """Must override __family__."""
+        """Must override __type_name__."""
 
         pass
 
 except ValueError:
 
     class CustomFamilyByDUnderChild(
-        CustomFamilyByDUnder, family_override="custom_family_3_child"
+        CustomFamilyByDUnder, type_name="custom_family_3_child"
     ):
-        """Must override __family__."""
+        """Must override __type_name__."""
 
         pass
