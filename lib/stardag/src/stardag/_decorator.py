@@ -82,7 +82,7 @@ class RelpathSettings(typing.TypedDict):
 def task(
     _func: typing.Callable[_PWrapped, LoadedT],
     *,
-    family: str | None = None,
+    name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
@@ -91,7 +91,7 @@ def task(
 @typing.overload
 def task(
     *,
-    family: str | None = None,
+    name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> _TaskWrapper: ...
@@ -100,7 +100,7 @@ def task(
 def task(
     _func: typing.Callable[_PWrapped, LoadedT] | None = None,
     *,
-    family: str | None = None,
+    name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]] | _TaskWrapper:
@@ -118,7 +118,7 @@ def task(
             raise ValueError("All arguments must have annotations")
 
         task_class = create_model(
-            family or _func.__name__,
+            name or _func.__name__,
             __base__=_FunctionTask[return_type, _PWrapped],
             __module__=_func.__module__,
             version=(str, version),

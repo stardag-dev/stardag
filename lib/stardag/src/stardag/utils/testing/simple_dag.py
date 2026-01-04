@@ -51,21 +51,21 @@ def get_simple_dag():
 
 
 def get_simple_dag_expected_root_output():
-    # Key order: __type_namespace__/__type_name__ (prepended by _serialize_extra),
+    # Key order: __namespace/__name (prepended by _serialize_extra),
     # version (from BaseTask), param_a/param_b (from LeafTask)
     return {
         "parent_task": {
             "leaf_tasks": [
                 {
-                    "__type_namespace__": __name__,
-                    "__type_name__": "LeafTask",
+                    "__namespace": __name__,
+                    "__name": "LeafTask",
                     "version": "",
                     "param_a": 1,
                     "param_b": "a",
                 },
                 {
-                    "__type_namespace__": __name__,
-                    "__type_name__": "LeafTask",
+                    "__namespace": __name__,
+                    "__name": "LeafTask",
                     "version": "",
                     "param_a": 2,
                     "param_b": "b",

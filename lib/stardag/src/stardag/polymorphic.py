@@ -145,8 +145,8 @@ def _check_generic_args_compatibility(
     return True, ""
 
 
-TYPE_NAMESPACE_KEY = "__type_namespace__"
-TYPE_NAME_KEY = "__type_name__"
+NAMESPACE_KEY = "__namespace"
+NAME_KEY = "__name"
 
 
 @dataclass(frozen=True)
@@ -233,16 +233,6 @@ class _TypeRegistry:
                 f"Existing: {existing.__module__}.{existing.__name__}\n"
                 f"New: {cls.__module__}.{cls.__name__}"
             )
-            # TODO consider remoing support for explicit __type_name__?
-            explicit_type_name = getattr(cls, "__type_name__", None)
-            if explicit_type_name is not None:
-                error_msg += (
-                    f"\n(Note: The new class has an explicit __type_name__ "
-                    f'set to "{explicit_type_name}". If this is set in a superclass, '
-                    "you must override it in all subclasses to avoid conflicts. "
-                    "please consider passing type_name via args to the class "
-                    "constructor in the superclass instead.)"
-                )
             raise ValueError(error_msg)
         self._type_id_to_class[type_id] = cls
 
@@ -270,11 +260,7 @@ class _TypeRegistry:
         if name_override is not None:
             return name_override
 
-        cls_name = getattr(cls, TYPE_NAME_KEY, None)
-        if cls_name is not None:
-            # Already set explicitly on task class
-            return cls_name
-
+        # Use Python's built-in class __name__
         return cls.__name__
 
     def _resolve_namespace(
@@ -285,9 +271,9 @@ class _TypeRegistry:
         if namespace_override is not None:
             return namespace_override
 
-        cls_namespace = getattr(cls, TYPE_NAMESPACE_KEY, None)
+        cls_namespace = getattr(cls, "__namespace__", None)
         if cls_namespace is not None:
-            # Already set explicitly on task class
+            # Already set explicitly on class
             return cls_namespace
 
         # check if set by module or any parent module
@@ -320,27 +306,27 @@ class PolymorphicRoot(StardagBaseModel):
     automatically registered unless they are generic models.
 
     Subclasses can override the default type id resolution by either providing the
-    class constructor arguments `type_name` and `type_namespace` or setting the class
-    variables `__type_namespace__` and `__type_name__`. NOTE that if the (latter) class
-    variables are set directly, all subclasses will inherit the same values, so these
-    should typlically only be used for final leaf classes.
+    class constructor arguments `name_override` and `namespace_override` or setting
+    the class variable `__namespace__`. NOTE that if the class variable is set
+    directly, all subclasses will inherit the same value, so it should typically
+    only be used for the family root class.
 
     Namespace can also be registered per-module via the registry of the base class
     extending PolymorphicRoot (TODO: make _registry a public API for this).
 
     Args:
-        type_name: Optional explicit type name for this class. If None, the class name
-            is used.
-        type_namespace: Optional explicit type namespace for this class. If None, the
-            module name (or registered module namespace) is used.
+        name_override: Optional explicit name for this class. If None, the class
+            `__name__` is used.
+        namespace_override: Optional explicit namespace for this class. If None,
+            the module name (or registered module namespace) is used.
     """
 
     # IMPORTANT: per-family registry lives on the base class
     __registry__: ClassVar[_TypeRegistry] = _TypeRegistry()
 
     if TYPE_CHECKING:
-        # Optionally set on subclasses to override default type id resolution
-        __type_namespace__: ClassVar[str]
+        # Optionally set on subclasses to override default namespace resolution
+        __namespace__: ClassVar[str]
         __type_id__: ClassVar[TypeId]
 
     @classmethod
@@ -363,18 +349,18 @@ class PolymorphicRoot(StardagBaseModel):
     @classmethod
     def __init_subclass__(
         cls,
-        type_name: str | None = None,
-        type_namespace: str | None = None,
+        name_override: str | None = None,
+        namespace_override: str | None = None,
         **kwargs: Any,
     ) -> None:
-        # Need to avoid forwarding the family and namespace kwarg to the BaseModel
+        # Need to avoid forwarding name_override and namespace_override to BaseModel
         super().__init_subclass__(**kwargs)
 
     @classmethod
     def __pydantic_init_subclass__(
         cls,
-        type_name: str | None = None,
-        type_namespace: str | None = None,
+        name_override: str | None = None,
+        namespace_override: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__pydantic_init_subclass__(**kwargs)
@@ -392,9 +378,8 @@ class PolymorphicRoot(StardagBaseModel):
             if cls is not family and not is_generic_model(cls):
                 cls.__type_id__ = family._registry().add(
                     cls,
-                    # TODO pass overrides from class args
-                    name_override=type_name,
-                    namespace_override=type_namespace,
+                    name_override=name_override,
+                    namespace_override=namespace_override,
                 )
 
     def __class_getitem__(
@@ -421,20 +406,20 @@ class PolymorphicRoot(StardagBaseModel):
         if isinstance(data, dict):
             tid = self.__class__.__type_id__
             data = {
-                TYPE_NAMESPACE_KEY: tid.namespace,
-                TYPE_NAME_KEY: tid.name,
+                NAMESPACE_KEY: tid.namespace,
+                NAME_KEY: tid.name,
                 **data,
             }
         return data
 
     @classmethod
-    def get_type_name(cls) -> str:
-        """Get the type name for this class."""
+    def get_name(cls) -> str:
+        """Get the name for this class."""
         return cls.__type_id__.name
 
     @classmethod
-    def get_type_namespace(cls) -> str:
-        """Get the type namespace for this class."""
+    def get_namespace(cls) -> str:
+        """Get the namespace for this class."""
         return cls.__type_id__.namespace
 
 
@@ -498,18 +483,18 @@ class Polymorphic:
             if not isinstance(v, dict):
                 return base_origin.model_validate(v, context=info.context)
 
-            namespace = v.get(TYPE_NAMESPACE_KEY)
-            name = v.get(TYPE_NAME_KEY)
+            namespace = v.get(NAMESPACE_KEY)
+            name = v.get(NAME_KEY)
             if namespace is None or name is None:
                 raise ValueError(
-                    f"Missing discriminator keys: {TYPE_NAMESPACE_KEY}, {TYPE_NAME_KEY}"
+                    f"Missing discriminator keys: {NAMESPACE_KEY}, {NAME_KEY}"
                 )
 
             subcls = base_origin.resolve(str(namespace), str(name))
 
             payload = dict(v)
-            payload.pop(TYPE_NAMESPACE_KEY, None)
-            payload.pop(TYPE_NAME_KEY, None)
+            payload.pop(NAMESPACE_KEY, None)
+            payload.pop(NAME_KEY, None)
 
             return subcls.model_validate(payload, context=info.context)
 

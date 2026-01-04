@@ -1,11 +1,11 @@
 import stardag as sd
 
 
-@sd.task(family="Range")
+@sd.task(name="Range")
 def get_range(limit: int) -> list[int]:
     return list(range(limit))
 
 
-@sd.task(family="Sum")
+@sd.task(name="Sum")
 def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)

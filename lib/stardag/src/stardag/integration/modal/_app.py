@@ -154,7 +154,7 @@ async def _prefect_build(
     )
     logger.info(f"Building root task: {repr(task)}")
     await prefect_build_flow.with_options(
-        name=f"stardag-build-{task.get_type_namespace()}:{task.get_type_name()}"
+        name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
     )(task, task_runner=task_runner)
     logger.info(f"Completed building root task {repr(task)}")
 
@@ -254,15 +254,20 @@ class StardagApp:
         return self.modal_app.name
 
 
-class WorkerSelectorByFamily:
-    def __init__(self, family_to_worker: dict[str, str], default_worker: str):
-        self.family_to_worker = family_to_worker
+class WorkerSelectorByName:
+    def __init__(self, name_to_worker: dict[str, str], default_worker: str):
+        self.name_to_worker = name_to_worker
         self.default_worker = default_worker
 
     def __call__(self, task: BaseTask) -> str:
-        return self.family_to_worker.get(task.get_type_name(), self.default_worker)
+        return self.name_to_worker.get(task.get_name(), self.default_worker)
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__}({self.family_to_worker}, {self.default_worker})"
+            f"{self.__class__.__name__}({self.name_to_worker}, {self.default_worker})"
         )
+
+
+# Backwards compatibility aliases
+WorkerSelectorByTypeName = WorkerSelectorByName
+WorkerSelectorByFamily = WorkerSelectorByName

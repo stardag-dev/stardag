@@ -187,7 +187,7 @@ class APIRegistry(RegistryABC):
         """
         build_data = {
             "commit_hash": get_git_commit_hash(),
-            "root_task_ids": [task.id for task in (root_tasks or [])],
+            "root_task_ids": [str(task.id) for task in (root_tasks or [])],
             "description": description,
         }
 
@@ -240,13 +240,13 @@ class APIRegistry(RegistryABC):
 
         task_data = {
             # TODO: rename keys (drop "task_" prefix)
-            "task_id": task.id,
-            "task_namespace": task.get_type_namespace(),
-            "task_family": task.get_type_name(),
+            "task_id": str(task.id),
+            "task_namespace": task.get_namespace(),
+            "task_name": task.get_name(),
             "task_data": task.model_dump(mode="json"),
             "version": task.version,
             "dependency_task_ids": [
-                dep.id for dep in flatten_task_struct(task.requires())
+                str(dep.id) for dep in flatten_task_struct(task.requires())
             ],
         }
 

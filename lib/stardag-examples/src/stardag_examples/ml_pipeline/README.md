@@ -64,7 +64,7 @@ with the output (something like)
             "version": "0",
             "date": "2024-09-29",
             "snapshot_slug": "default",
-            "__family__": "Dump",
+            "__name": "Dump",
             "__namespace__": "examples.ml_pipeline.class_api"
           },
           "params": {
@@ -74,7 +74,7 @@ with the output (something like)
               1.0
             ]
           },
-          "__family__": "Dataset",
+          "__name": "Dataset",
           "__namespace__": "examples.ml_pipeline.class_api"
         },
         "filter": {
@@ -100,7 +100,7 @@ with the output (something like)
           "version": "0",
           "date": "2024-09-29",
           "snapshot_slug": "default",
-          "__family__": "Dump",
+          "__name": "Dump",
           "__namespace__": "examples.ml_pipeline.class_api"
         },
         "params": {
@@ -110,7 +110,7 @@ with the output (something like)
             1.0
           ]
         },
-        "__family__": "Dataset",
+        "__name": "Dataset",
         "__namespace__": "examples.ml_pipeline.class_api"
       },
       "filter": {

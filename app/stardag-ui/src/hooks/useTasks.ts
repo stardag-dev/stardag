@@ -18,8 +18,8 @@ interface UseTasksReturn {
   setPage: (page: number) => void;
   loading: boolean;
   error: string | null;
-  familyFilter: string;
-  setFamilyFilter: (filter: string) => void;
+  nameFilter: string;
+  setNameFilter: (filter: string) => void;
   statusFilter: TaskStatus | "";
   setStatusFilter: (status: TaskStatus | "") => void;
   pageSize: number;
@@ -41,7 +41,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [familyFilter, setFamilyFilter] = useState("");
+  const [nameFilter, setNameFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "">("");
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -119,9 +119,9 @@ export function useTasks(pageSize = 20): UseTasksReturn {
   const filteredTasks = useMemo(() => {
     let result = allTasks;
 
-    if (familyFilter) {
-      const lowerFilter = familyFilter.toLowerCase();
-      result = result.filter((t) => t.task_family.toLowerCase().includes(lowerFilter));
+    if (nameFilter) {
+      const lowerFilter = nameFilter.toLowerCase();
+      result = result.filter((t) => t.task_name.toLowerCase().includes(lowerFilter));
     }
 
     if (statusFilter) {
@@ -129,14 +129,14 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     }
 
     return result;
-  }, [allTasks, familyFilter, statusFilter]);
+  }, [allTasks, nameFilter, statusFilter]);
 
   // Tasks with context for DAG (shows all tasks, marks which match filter)
   const tasksWithContext = useMemo(() => {
     if (!graph || !currentBuild) return [];
 
     const matchingTaskIds = new Set(filteredTasks.map((t) => t.task_id));
-    const noFilter = !familyFilter && !statusFilter;
+    const noFilter = !nameFilter && !statusFilter;
 
     return graph.nodes.map((node) => {
       const fullTask = allTasks.find((t) => t.task_id === node.task_id);
@@ -145,7 +145,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
         task_id: node.task_id,
         workspace_id: currentBuild.workspace_id,
         task_namespace: node.task_namespace,
-        task_family: node.task_family,
+        task_name: node.task_name,
         task_data: fullTask?.task_data ?? {},
         version: fullTask?.version ?? null,
         created_at: fullTask?.created_at ?? currentBuild.created_at,
@@ -156,10 +156,10 @@ export function useTasks(pageSize = 20): UseTasksReturn {
         isFilterMatch: noFilter || matchingTaskIds.has(node.task_id),
       };
     });
-  }, [graph, currentBuild, allTasks, filteredTasks, familyFilter, statusFilter]);
+  }, [graph, currentBuild, allTasks, filteredTasks, nameFilter, statusFilter]);
 
-  const handleSetFamilyFilter = useCallback((filter: string) => {
-    setFamilyFilter(filter);
+  const handleSetNameFilter = useCallback((filter: string) => {
+    setNameFilter(filter);
     setPage(1);
   }, []);
 
@@ -198,8 +198,8 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     setPage,
     loading,
     error,
-    familyFilter,
-    setFamilyFilter: handleSetFamilyFilter,
+    nameFilter,
+    setNameFilter: handleSetNameFilter,
     statusFilter,
     setStatusFilter: handleSetStatusFilter,
     pageSize,

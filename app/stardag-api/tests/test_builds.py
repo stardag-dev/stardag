@@ -116,7 +116,7 @@ async def test_register_task_to_build(client: AsyncClient):
     task_data = {
         "task_id": "test-task-123",
         "task_namespace": "test",
-        "task_family": "TestTask",
+        "task_name": "TestTask",
         "task_data": {"param": "value"},
         "dependency_task_ids": [],
     }
@@ -124,7 +124,7 @@ async def test_register_task_to_build(client: AsyncClient):
     assert response.status_code == 201
     data = response.json()
     assert data["task_id"] == "test-task-123"
-    assert data["task_family"] == "TestTask"
+    assert data["task_name"] == "TestTask"
 
 
 @pytest.mark.asyncio
@@ -138,7 +138,7 @@ async def test_start_task_in_build(client: AsyncClient):
     task_data = {
         "task_id": "start-task-123",
         "task_namespace": "",
-        "task_family": "TestTask",
+        "task_name": "TestTask",
         "task_data": {},
     }
     await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
@@ -164,7 +164,7 @@ async def test_complete_task_in_build(client: AsyncClient):
     task_data = {
         "task_id": "complete-task-123",
         "task_namespace": "",
-        "task_family": "TestTask",
+        "task_name": "TestTask",
         "task_data": {},
     }
     await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
@@ -191,7 +191,7 @@ async def test_fail_task_in_build(client: AsyncClient):
     task_data = {
         "task_id": "fail-task-123",
         "task_namespace": "",
-        "task_family": "TestTask",
+        "task_name": "TestTask",
         "task_data": {},
     }
     await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
@@ -220,7 +220,7 @@ async def test_list_tasks_in_build(client: AsyncClient):
         task_data = {
             "task_id": f"list-task-{i}",
             "task_namespace": "",
-            "task_family": "TestTask",
+            "task_name": "TestTask",
             "task_data": {},
         }
         await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
@@ -243,7 +243,7 @@ async def test_list_events_in_build(client: AsyncClient):
     task_data = {
         "task_id": "event-task",
         "task_namespace": "",
-        "task_family": "TestTask",
+        "task_name": "TestTask",
         "task_data": {},
     }
     await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
@@ -270,7 +270,7 @@ async def test_get_build_graph(client: AsyncClient):
         json={
             "task_id": "upstream-task",
             "task_namespace": "",
-            "task_family": "UpstreamTask",
+            "task_name": "UpstreamTask",
             "task_data": {},
         },
     )
@@ -279,7 +279,7 @@ async def test_get_build_graph(client: AsyncClient):
         json={
             "task_id": "downstream-task",
             "task_namespace": "",
-            "task_family": "DownstreamTask",
+            "task_name": "DownstreamTask",
             "task_data": {},
             "dependency_task_ids": ["upstream-task"],
         },
@@ -303,7 +303,7 @@ async def test_task_reuse_across_runs(client: AsyncClient):
     task_data = {
         "task_id": "shared-task",
         "task_namespace": "",
-        "task_family": "SharedTask",
+        "task_name": "SharedTask",
         "task_data": {"value": 1},
     }
     response = await client.post(f"/api/v1/builds/{build1_id}/tasks", json=task_data)

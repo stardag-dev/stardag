@@ -56,7 +56,7 @@ print(task.model_dump_json(indent=2))
 #   "integers": {
 #     "version": null,
 #     "limit": 10,
-#     "__family__": "get_range",
+#     "__name": "get_range",
 #     "__namespace__": ""
 #   }
 # }
@@ -227,7 +227,7 @@ print(expression.model_dump_json(indent=2))
 #     "version": "0",
 #     "a": 1.0,
 #     "b": 2.0,
-#     "__family__": "add",
+#     "__name": "add",
 #     "__namespace__": ""
 #   },
 #   "b": {
@@ -236,11 +236,11 @@ print(expression.model_dump_json(indent=2))
 #       "version": "0",
 #       "a": 3.0,
 #       "b": 4.0,
-#       "__family__": "multiply",
+#       "__name": "multiply",
 #       "__namespace__": ""
 #     },
 #     "b": 5.0,
-#     "__family__": "subtract",
+#     "__name": "subtract",
 #     "__namespace__": ""
 #   }
 # }
@@ -248,13 +248,13 @@ print(expression.model_dump_json(indent=2))
 # Parameter hashing
 print(expression._id_hash_jsonable())
 # {'namespace': '',
-#  'family': 'add',
+#  'name': 'add',
 #  'parameters': {'version': '0',
 #   'a': '5133f0a7861a76ca3ea57e53036381006ca73153',
 #   'b': '251f1deeac5f21035fdaaffe95fd4e351ea8cd9b'}}
 print(expression.requires()["b"]._id_hash_jsonable())
 # {'namespace': '',
-#  'family': 'subtract',
+#  'name': 'subtract',
 #  'parameters': {'version': '0',
 #   'a': 'fd9ef94177202229500d7816c88fad4044e49b74',
 #   'b': 5.0}}

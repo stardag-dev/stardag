@@ -42,7 +42,7 @@ def main():
     final_task = add_and_format(a=step2, b=step4)  # = "The sum is: 20"
 
     print("Building DAG...")
-    print(f"Final task: {final_task.get_family()} ({final_task.task_id[:12]}...)")
+    print(f"Final task: {final_task.get_name()} ({final_task.id}...)")
 
     # Build the DAG
     sd.build(final_task)

@@ -13,7 +13,7 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
       <div className="mb-4 flex items-start justify-between">
         <div className="min-w-0 flex-1">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">
-            {task.task_family}
+            {task.task_name}
           </h2>
           <p className="font-mono text-sm text-gray-500 dark:text-gray-400 truncate">
             {task.task_id}

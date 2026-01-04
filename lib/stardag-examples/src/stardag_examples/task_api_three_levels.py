@@ -8,11 +8,11 @@ import stardag as sd
 
 
 def decorator_api(limit: int) -> sd.TaskLoads[int]:
-    @sd.task(family="Range")
+    @sd.task(name="Range")
     def get_range(limit: int) -> list[int]:
         return list(range(limit))
 
-    @sd.task(family="Sum")
+    @sd.task(name="Sum")
     def get_sum(integers: sd.Depends[list[int]]) -> int:
         return sum(integers)
 
@@ -43,12 +43,13 @@ def base_task_api(limit: int) -> sd.TaskLoads[int]:
     from stardag.target.serialize import JSONSerializer, Serializable
 
     def default_relpath(task: sd.Task) -> str:
+        task_id = str(task.id)
         return "/".join(
             [
-                task.get_family(),
-                task.task_id[:2],
-                task.task_id[2:4],
-                f"{task.task_id}.json",
+                task.get_name(),
+                task_id[:2],
+                task_id[2:4],
+                f"{task_id}.json",
             ]
         )
 

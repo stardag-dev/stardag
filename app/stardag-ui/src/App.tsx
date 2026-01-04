@@ -39,8 +39,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
     setPage,
     loading,
     error,
-    familyFilter,
-    setFamilyFilter,
+    nameFilter,
+    setNameFilter,
     statusFilter,
     setStatusFilter,
     pageSize,
@@ -137,8 +137,8 @@ function Dashboard({ onNavigate }: DashboardProps) {
             <div className="flex h-full flex-col">
               {/* Filters */}
               <TaskFilters
-                familyFilter={familyFilter}
-                onFamilyFilterChange={setFamilyFilter}
+                nameFilter={nameFilter}
+                onNameFilterChange={setNameFilter}
                 statusFilter={statusFilter}
                 onStatusFilterChange={setStatusFilter}
               />

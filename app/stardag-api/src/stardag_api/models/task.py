@@ -20,7 +20,7 @@ class Task(Base, TimestampMixin):
 
     task_id is a deterministic hash computed by the SDK based on:
     - namespace
-    - family
+    - name
     - parameters (hash)
 
     A Task can participate in multiple Runs. Status per-run is tracked via Events.
@@ -29,7 +29,7 @@ class Task(Base, TimestampMixin):
     __tablename__ = "tasks"
     __table_args__ = (
         UniqueConstraint("workspace_id", "task_id", name="uq_task_workspace_taskid"),
-        Index("ix_tasks_workspace_family", "workspace_id", "task_family"),
+        Index("ix_tasks_workspace_name", "workspace_id", "task_name"),
         Index("ix_tasks_workspace_namespace", "workspace_id", "task_namespace"),
     )
 
@@ -55,7 +55,7 @@ class Task(Base, TimestampMixin):
         nullable=False,
         default="",
     )
-    task_family: Mapped[str] = mapped_column(
+    task_name: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
         index=True,

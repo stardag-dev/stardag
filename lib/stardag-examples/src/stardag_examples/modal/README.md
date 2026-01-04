@@ -82,12 +82,12 @@ For a minimal example
 import stardag as sd
 
 
-@sd.task(family="Range")
+@sd.task(name="Range")
 def get_range(limit: int) -> list[int]:
     return list(range(limit))
 
 
-@sd.task(family="Sum")
+@sd.task(name="Sum")
 def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 ```
@@ -216,7 +216,7 @@ from stardag_examples.modal.prefect.app import stardag_app
 
 
 def worker_selector(task: sd.Task) -> str:
-    if task.get_family() == "TrainedModel":
+    if task.get_name() == "TrainedModel":
         return "large"  # Our big fancy GPU machine ;)
     return "default"
 

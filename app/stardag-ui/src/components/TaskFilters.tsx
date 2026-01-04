@@ -1,15 +1,15 @@
 import type { TaskStatus } from "../types/task";
 
 interface TaskFiltersProps {
-  familyFilter: string;
-  onFamilyFilterChange: (value: string) => void;
+  nameFilter: string;
+  onNameFilterChange: (value: string) => void;
   statusFilter: TaskStatus | "";
   onStatusFilterChange: (value: TaskStatus | "") => void;
 }
 
 export function TaskFilters({
-  familyFilter,
-  onFamilyFilterChange,
+  nameFilter,
+  onNameFilterChange,
   statusFilter,
   onStatusFilterChange,
 }: TaskFiltersProps) {
@@ -17,9 +17,9 @@ export function TaskFilters({
     <div className="flex gap-4 p-3 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
       <input
         type="text"
-        placeholder="Filter by task family..."
-        value={familyFilter}
-        onChange={(e) => onFamilyFilterChange(e.target.value)}
+        placeholder="Filter by task name..."
+        value={nameFilter}
+        onChange={(e) => onNameFilterChange(e.target.value)}
         className="flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
       />
       <select

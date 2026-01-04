@@ -32,7 +32,7 @@ if __name__ == "__main__":
     #     "version": "0",
     #     "a": 1.0,
     #     "b": 2.0,
-    #     "__family__": "add",
+    #     "__name": "add",
     #     "__namespace__": ""
     #   },
     #   "b": {
@@ -41,11 +41,11 @@ if __name__ == "__main__":
     #       "version": "0",
     #       "a": 3.0,
     #       "b": 4.0,
-    #       "__family__": "multiply",
+    #       "__name": "multiply",
     #       "__namespace__": ""
     #     },
     #     "b": 5.0,
-    #     "__family__": "subtract",
+    #     "__name": "subtract",
     #     "__namespace__": ""
     #   }
     # }

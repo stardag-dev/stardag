@@ -1,7 +1,8 @@
 from stardag.integration.modal._app import (
     FunctionSettings,
     StardagApp,
-    WorkerSelectorByFamily,
+    WorkerSelectorByFamily,  # backwards compatibility alias
+    WorkerSelectorByTypeName,
 )
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
@@ -17,5 +18,6 @@ __all__ = [
     "ModalMountedVolumeTarget",
     "get_volume_name_and_path",
     "get_modal_target",
-    "WorkerSelectorByFamily",
+    "WorkerSelectorByTypeName",
+    "WorkerSelectorByFamily",  # backwards compatibility alias
 ]

@@ -29,7 +29,7 @@ export interface Task {
   task_id: string;
   workspace_id: string;
   task_namespace: string;
-  task_family: string;
+  task_name: string;
   task_data: Record<string, unknown>;
   version: string | null;
   created_at: string;
@@ -50,7 +50,7 @@ export interface TaskListResponse {
 export interface TaskNode {
   id: number;
   task_id: string;
-  task_family: string;
+  task_name: string;
   task_namespace: string;
   status: TaskStatus;
 }

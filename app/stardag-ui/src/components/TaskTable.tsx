@@ -56,7 +56,7 @@ export function TaskTable({
             <thead className="bg-gray-50 dark:bg-gray-800 sticky top-0">
               <tr>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
-                  Task Family
+                  Task Name
                 </th>
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   Task ID
@@ -81,7 +81,7 @@ export function TaskTable({
                   }`}
                 >
                   <td className="px-4 py-3 text-sm font-medium text-gray-900 dark:text-gray-100">
-                    {task.task_family}
+                    {task.task_name}
                   </td>
                   <td className="px-4 py-3 font-mono text-sm text-gray-500 dark:text-gray-400">
                     {task.task_id.slice(0, 12)}...

@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 import stardag as sd
 from pydantic import Field
+from stardag._task import TaskRef
 from stardag.target import LoadedT
 
 from stardag_examples.ml_pipeline import base
@@ -21,7 +22,7 @@ sd.namespace("examples.ml_pipeline.class_api", scope=__name__)
 
 class ExamplesMLPipelineBase(sd.AutoTask[LoadedT], typing.Generic[LoadedT]):
     __version__ = "0"
-    version: str | None = __version__
+    version: str = __version__
 
 
 class Dump(ExamplesMLPipelineBase[pd.DataFrame]):
@@ -155,7 +156,7 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
         return [
             MarkdownArtifact(  # type: ignore
                 markdown=markdown,
-                key=format_key(f"{self.id_ref.slug}-result"),
+                key=format_key(f"{TaskRef.from_task(self).slug}-result"),
                 description="Metrics",
             )
         ]
@@ -199,7 +200,7 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
         return [
             TableArtifact(  # type: ignore
                 table=rows,
-                key=format_key(f"{self.id_ref.slug}-result"),
+                key=format_key(f"{TaskRef.from_task(self).slug}-result"),
                 description="Metrics by model parameters",
             )
         ]
