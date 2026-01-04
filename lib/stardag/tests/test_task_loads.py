@@ -3,6 +3,7 @@ from typing import Annotated
 import pytest
 from pydantic import ValidationError
 
+from stardag._auto_task import AutoTask
 from stardag._task import BaseTask, Task
 from stardag._task_loads import TaskLoads
 from stardag.base_model import StardagField
@@ -309,3 +310,87 @@ def test_on_type_mismatch_raise_is_default():
     # ContainerTaskLoadsStr uses TaskLoads which uses Polymorphic() with default
     with pytest.raises(ValidationError):
         ContainerTaskLoadsStr(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+
+
+# =============================================================================
+# Tests for AutoTask compatibility with TaskLoads
+# =============================================================================
+
+
+class AutoTaskStr(AutoTask[str]):
+    """AutoTask that produces str - should be compatible with TaskLoads[str]."""
+
+    data: str = "auto task string"
+
+    def run(self) -> None:
+        self.output().save(self.data)
+
+
+class AutoTaskInt(AutoTask[int]):
+    """AutoTask that produces int - not compatible with TaskLoads[str]."""
+
+    number: int = 42
+
+    def run(self) -> None:
+        self.output().save(self.number)
+
+
+class AutoTaskListStr(AutoTask[list[str]]):
+    """AutoTask that produces list[str] - not compatible with TaskLoads[str]."""
+
+    items: list[str] = ["a", "b", "c"]
+
+    def run(self) -> None:
+        self.output().save(self.items)
+
+
+def test_autotask_compatible_with_task_loads():
+    """AutoTask[str] should be compatible with TaskLoads[str].
+
+    This tests the __map_generic_args_to_ancestor__ hook that maps
+    AutoTask[str] -> Task[LoadableSaveableFileSystemTarget[str]]
+    which is compatible with TaskLoads[str] (= Task[LoadableTarget[str]])
+    because LoadableSaveableFileSystemTarget is a subtype of LoadableTarget.
+    """
+    container = ContainerTaskLoadsStr(task=AutoTaskStr())
+    assert_serialize_validate_roundtrip(ContainerTaskLoadsStr, container)
+
+
+def test_autotask_type_mismatch_detected():
+    """AutoTask[int] should NOT be compatible with TaskLoads[str].
+
+    The __map_generic_args_to_ancestor__ hook should enable proper type checking
+    even when origins differ (AutoTask vs Task).
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        ContainerTaskLoadsStr(task=AutoTaskInt())  # pyright: ignore[reportArgumentType]
+
+    error_str = str(exc_info.value)
+    assert "AutoTaskInt" in error_str
+
+
+def test_autotask_nested_generic_mismatch():
+    """AutoTask[list[str]] should NOT be compatible with TaskLoads[str]."""
+    with pytest.raises(ValidationError) as exc_info:
+        ContainerTaskLoadsStr(task=AutoTaskListStr())  # pyright: ignore[reportArgumentType]
+
+    error_str = str(exc_info.value)
+    assert "AutoTaskListStr" in error_str
+
+
+class ContainerTaskLoadsInt(BaseTask):
+    """Container expecting TaskLoads[int]."""
+
+    task: TaskLoads[int]
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+def test_autotask_int_compatible_with_task_loads_int():
+    """AutoTask[int] should be compatible with TaskLoads[int]."""
+    container = ContainerTaskLoadsInt(task=AutoTaskInt())
+    assert_serialize_validate_roundtrip(ContainerTaskLoadsInt, container)

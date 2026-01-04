@@ -120,12 +120,22 @@ def _check_generic_args_compatibility(
     if not actual_args:
         return True, ""
 
-    # Only compare args if origins match - different origins (e.g., Task vs AutoTask)
-    # have different parameterization semantics, so comparing their args is invalid
+    # Handle different origins (e.g., Task vs AutoTask) by checking if the actual
+    # class provides a mapping to translate its generic args to the expected origin
     if expected_origin is not None and actual_origin is not None:
         if expected_origin is not actual_origin:
-            # Different origins - can't reliably compare args
-            return True, ""
+            # Try to get mapped args from the actual origin
+            mapper = getattr(actual_origin, "__map_generic_args_to_ancestor__", None)
+            if mapper is not None:
+                mapped_args = mapper(expected_origin, actual_args)
+                if mapped_args is not None:
+                    actual_args = mapped_args
+                else:
+                    # Mapping not applicable - can't reliably compare args
+                    return True, ""
+            else:
+                # No mapper available - can't reliably compare args
+                return True, ""
 
     # Compare args
     if len(expected_args) != len(actual_args):
