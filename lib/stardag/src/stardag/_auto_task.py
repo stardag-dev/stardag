@@ -50,6 +50,29 @@ class AutoTask(
     """
 
     @classmethod
+    def __map_generic_args_to_ancestor__(
+        cls, ancestor_origin: type, args: tuple
+    ) -> tuple | None:
+        """Map generic args from AutoTask to how they appear on an ancestor class.
+
+        This enables type compatibility checking when using AutoTask with TaskLoads.
+        For example, AutoTask[str] maps to Task[LoadableSaveableFileSystemTarget[str]],
+        which is compatible with TaskLoads[str] (= Task[LoadableTarget[str]]) because
+        LoadableSaveableFileSystemTarget is a subtype of LoadableTarget.
+
+        Args:
+            ancestor_origin: The ancestor class to map args to (e.g., Task)
+            args: The generic args of this class (e.g., (str,) for AutoTask[str])
+
+        Returns:
+            The mapped args for the ancestor, or None if mapping is not applicable.
+        """
+        if ancestor_origin is Task and len(args) == 1:
+            # AutoTask[T] -> Task[LoadableSaveableFileSystemTarget[T]]
+            return (LoadableSaveableFileSystemTarget[args[0]],)
+        return None
+
+    @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: typing.Any) -> None:  # type: ignore
         super().__pydantic_init_subclass__(**kwargs)
         # get generic type of self
