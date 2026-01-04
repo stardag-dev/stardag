@@ -11,6 +11,44 @@ class AutoTask(
     Task[LoadableSaveableFileSystemTarget[LoadedT]],
     typing.Generic[LoadedT],
 ):
+    """A base class for automatically serializing task outputs.
+
+    The output of an `AutoTask` is a `LoadableSaveableFileSystemTarget` that uses a
+    serializer inferred from the generic type parameter `LoadedT`.
+
+    The output file path is automatically constructed based on the task's
+    namespace, name, version, and unique ID and has the following structure:
+
+    ```
+    [<relpath_base>/][<type_namespace>/]<type_name>/v<version>/[<relpath_extra>/]
+    <id>[:2]/<id>[2:4]/<id>[/<relpath_filename>].<relpath_extension>
+    ```
+
+    You can override the following properties to customize the output path:
+    `_relpath_base`, `_relpath_extra`, `_relpath_filename`, and `_relpath_extension`.
+
+    See stardag.target.serialize.get_serializer for details on how the serializer is
+    inferred from the generic type parameter, and how to customize it.
+
+    Example:
+
+    ```python
+    import stardag as sd
+
+    class MyAutoTask(sd.AutoTask[dict[str, int]]):
+        def run(self):
+            self.output().save({"a": 1, "b": 2})
+
+    my_task = MyAutoTask()
+
+    print(my_task.output())
+    # Serializable(../MyAutoTask/03/6f/036f6e71-1b3c-54b8-aec1-182359f1e09a.json)
+
+    print(my_task.output().serializer)
+    # <stardag.target.serialize.JSONSerializer at 0x1064e4710>
+    ```
+    """
+
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: typing.Any) -> None:  # type: ignore
         super().__pydantic_init_subclass__(**kwargs)
@@ -27,18 +65,22 @@ class AutoTask(
 
     @property
     def _relpath_base(self) -> str:
+        """Override to customize the base path of the task output."""
         return ""
 
     @property
     def _relpath_extra(self) -> str:
+        """Override to customize the extra path component of the task output."""
         return ""
 
     @property
     def _relpath_filename(self) -> str:
+        """Override to customize the filename of the task output."""
         return ""
 
     @property
     def _relpath_extension(self) -> str:
+        """Override to customize the file extension of the task output."""
         get_default_ext = getattr(
             self._serializer, "get_default_extension", lambda: None
         )
