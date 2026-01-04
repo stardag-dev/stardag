@@ -1,10 +1,13 @@
-"""NOTE: after any changes, the app must be redeployed for the changes to take effect.
+"""Modal integration tests.
 
-```sh
-modal deploy tests/test_integration/test_modal/test__target.py
-```
+These tests require a deployed Modal app. The app is automatically deployed
+before tests run if needed (via the `ensure_app_deployed` fixture).
+
+To manually deploy:
+    modal deploy tests/test_integration/test_modal/test__target.py
 """
 
+import subprocess
 import uuid
 
 import pytest
@@ -30,7 +33,7 @@ except ImportError:
 
 
 MOUNT_PATH = "/data"
-ROOT_DEAFULT = "stardag/root/default"
+ROOT_DEFAULT = "stardag/root/default"
 
 TEST_IMAGE = modal.Image.debian_slim(python_version="3.12").pip_install(
     "pydantic>=2.8.2",
@@ -42,6 +45,25 @@ TEST_IMAGE = modal.Image.debian_slim(python_version="3.12").pip_install(
 TEST_APP_NAME = "stardag-testing"
 
 app = modal.App(TEST_APP_NAME)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def ensure_app_deployed():
+    """Ensure the Modal app is deployed before tests run.
+
+    This deploys the app using the current local code, ensuring tests
+    always run against the latest version.
+    """
+    result = subprocess.run(
+        ["modal", "deploy", __file__],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"Failed to deploy Modal app:\n{result.stderr}")
+    yield
+    # Optionally stop the app after tests (commented out to allow inspection)
+    # subprocess.run(["modal", "app", "stop", TEST_APP_NAME])
 
 
 def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
@@ -67,7 +89,7 @@ def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
     volumes={MOUNT_PATH: VOLUME},
 )
 def write_read_full_uri(temp_test_dir: str):
-    VOLUME.reload()  # TODO: should not be necessary
+    VOLUME.reload()
     _write_read_full_uri(temp_test_dir, mount_expected=True)
 
 
@@ -93,14 +115,17 @@ def test_modal_mounted_volume_target_full_uri(use_mount: bool):
         res = read_file(f"{temp_test_dir}/test.txt")
         assert res == b"test"
     finally:
-        VOLUME.remove_file(temp_test_dir, recursive=True)
+        try:
+            VOLUME.remove_file(temp_test_dir, recursive=True)
+        except Exception:
+            pass  # File might not exist if test failed early
 
 
 def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
     target = get_target(f"{temp_test_dir}/test.txt")
     assert (
         target.path
-        == f"modalvol://{VOLUME_NAME}/{ROOT_DEAFULT}/{temp_test_dir}/test.txt"
+        == f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}/{temp_test_dir}/test.txt"
     )
     if mount_expected:
         assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
@@ -114,7 +139,7 @@ def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
         TEST_IMAGE.env(
             {
                 "STARDAG_TARGET_ROOTS__DEFAULT": (
-                    f"modalvol://stardag-testing/{ROOT_DEAFULT}"
+                    f"modalvol://stardag-testing/{ROOT_DEFAULT}"
                 ),
                 "STARDAG_MODAL_VOLUME_MOUNTS": '{"/data": "stardag-testing"}',
             }
@@ -123,7 +148,7 @@ def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
     volumes={MOUNT_PATH: VOLUME},
 )
 def write_read_default_root(temp_test_dir: str):
-    VOLUME.reload()  # TODO: should not be necessary
+    VOLUME.reload()
     _write_read_default_root(temp_test_dir, mount_expected=True)
 
 
@@ -132,7 +157,7 @@ def write_read_default_root(temp_test_dir: str):
         TEST_IMAGE.env(
             {
                 "STARDAG_TARGET_ROOTS__DEFAULT": (
-                    f"modalvol://stardag-testing/{ROOT_DEAFULT}"
+                    f"modalvol://stardag-testing/{ROOT_DEFAULT}"
                 ),
             }
         ).add_local_python_source("stardag")
@@ -156,10 +181,13 @@ def test_modal_mounted_volume_target_default_root(use_mount: bool):
     temp_test_dir = f"test-{uuid.uuid4()}"
     try:
         write_read_function.remote(temp_test_dir=temp_test_dir)
-        res = read_file(f"{ROOT_DEAFULT}/{temp_test_dir}/test.txt")
+        res = read_file(f"{ROOT_DEFAULT}/{temp_test_dir}/test.txt")
         assert res == b"test"
     finally:
-        VOLUME.remove_file(f"{ROOT_DEAFULT}/{temp_test_dir}", recursive=True)
+        try:
+            VOLUME.remove_file(f"{ROOT_DEFAULT}/{temp_test_dir}", recursive=True)
+        except Exception:
+            pass  # File might not exist if test failed early
 
 
 def _write_read_(target: FileSystemTarget):
