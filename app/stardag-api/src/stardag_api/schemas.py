@@ -127,7 +127,7 @@ class TaskCreate(BaseModel):
 
     task_id: str
     task_namespace: str = ""
-    task_family: str
+    task_name: str
     task_data: dict
     version: str | None = None
     dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
@@ -142,7 +142,7 @@ class TaskResponse(BaseModel):
     task_id: str
     workspace_id: str
     task_namespace: str
-    task_family: str
+    task_name: str
     task_data: dict
     version: str | None
     created_at: datetime
@@ -216,7 +216,7 @@ class TaskNode(BaseModel):
 
     id: int
     task_id: str
-    task_family: str
+    task_name: str
     task_namespace: str
     status: TaskStatus = TaskStatus.PENDING
 

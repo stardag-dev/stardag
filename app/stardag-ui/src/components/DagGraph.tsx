@@ -173,7 +173,7 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
         type: "taskNode",
         position: { x: 0, y: 0 },
         data: {
-          label: graphNode.task_family,
+          label: graphNode.task_name,
           taskId: graphNode.task_id,
           status: graphNode.status,
           isSelected: graphNode.task_id === selectedTaskId,

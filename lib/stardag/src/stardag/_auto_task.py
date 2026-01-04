@@ -20,7 +20,7 @@ class AutoTask(
     namespace, name, version, and unique ID and has the following structure:
 
     ```
-    [<relpath_base>/][<type_namespace>/]<type_name>/v<version>/[<relpath_extra>/]
+    [<relpath_base>/][<namespace>/]<name>/v<version>/[<relpath_extra>/]
     <id>[:2]/<id>[2:4]/<id>[/<relpath_filename>].<relpath_extension>
     ```
 
@@ -100,8 +100,8 @@ class AutoTask(
                 part
                 for part in [
                     self._relpath_base,
-                    self.get_type_namespace().replace(".", "/"),
-                    self.get_type_name(),
+                    self.get_namespace().replace(".", "/"),
+                    self.get_name(),
                     f"v{self.version}" if self.version else "",
                     self._relpath_extra,
                     task_id_str[:2],

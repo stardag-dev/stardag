@@ -3,8 +3,8 @@ from stardag_examples.ml_pipeline.class_api import get_benchmark_dag
 from stardag_examples.modal.prefect.app import stardag_app
 
 
-def worker_selector(task: sd.Task) -> str:
-    if task.get_family() == "TrainedModel":
+def worker_selector(task: sd.BaseTask) -> str:
+    if task.get_name() == "TrainedModel":
         return "large"
     return "default"
 

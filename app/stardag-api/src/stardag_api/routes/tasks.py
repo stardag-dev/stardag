@@ -20,7 +20,7 @@ async def list_tasks(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-    task_family: str | None = None,
+    task_name: str | None = None,
     task_namespace: str | None = None,
 ):
     """List tasks in a workspace.
@@ -34,9 +34,9 @@ async def list_tasks(
         select(func.count()).select_from(Task).where(Task.workspace_id == workspace_id)
     )
 
-    if task_family:
-        query = query.where(Task.task_family == task_family)
-        count_query = count_query.where(Task.task_family == task_family)
+    if task_name:
+        query = query.where(Task.task_name == task_name)
+        count_query = count_query.where(Task.task_name == task_name)
     if task_namespace:
         query = query.where(Task.task_namespace == task_namespace)
         count_query = count_query.where(Task.task_namespace == task_namespace)
@@ -57,7 +57,7 @@ async def list_tasks(
                 task_id=t.task_id,
                 workspace_id=t.workspace_id,
                 task_namespace=t.task_namespace,
-                task_family=t.task_family,
+                task_name=t.task_name,
                 task_data=t.task_data,
                 version=t.version,
                 created_at=t.created_at,
@@ -95,7 +95,7 @@ async def get_task(
         task_id=task.task_id,
         workspace_id=task.workspace_id,
         task_namespace=task.task_namespace,
-        task_family=task.task_family,
+        task_name=task.task_name,
         task_data=task.task_data,
         version=task.version,
         created_at=task.created_at,

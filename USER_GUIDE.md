@@ -20,11 +20,11 @@ The following three ways of specifying a `root_task`, its _dependencies_, _persi
 ```python
 import stardag as sd
 
-@sd.task(family="Range")
+@sd.task(name="Range")
 def get_range(limit: int) -> list[int]:
     return list(range(limit))
 
-@sd.task(family="Sum")
+@sd.task(name="Sum")
 def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
@@ -66,7 +66,7 @@ from stardag.target.serialize import JSONSerializer, Serializable
 def default_relpath(task: sd.Task) -> str:
     return "/".join(
         [
-            task.get_family(),
+            task.get_name(),
             task.task_id[:2],
             task.task_id[2:4],
             f"{task.task_id}.json",

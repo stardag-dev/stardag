@@ -87,7 +87,7 @@ class TestBuildWorkflow:
         # Register a task using API key
         task_data = {
             "task_id": "test-task-001",
-            "task_family": "TestTask",
+            "task_name": "TestTask",
             "task_namespace": "integration_tests",
             "task_data": {"param": "value"},
         }
@@ -185,7 +185,7 @@ class TestApiKeyWorkflow:
             headers={"X-API-Key": api_key},
             json={
                 "task_id": "api-key-task-001",
-                "task_family": "ApiKeyTask",
+                "task_name": "ApiKeyTask",
                 "task_namespace": "api_key_tests",
                 "task_data": {"key": "value"},
                 "version": "1.0.0",
@@ -467,7 +467,7 @@ class TestSDKBuildWorkflow:
                 assert len(tasks) == 3
 
                 # All tasks should be completed
-                task_statuses = {t["task_family"]: t["status"] for t in tasks}
+                task_statuses = {t["task_name"]: t["status"] for t in tasks}
                 assert task_statuses.get("add_numbers") == "completed"
                 assert task_statuses.get("multiply_by_two") == "completed"
                 assert task_statuses.get("format_result") == "completed"
@@ -593,7 +593,7 @@ class TestSDKBuildWorkflow:
                 # All tasks should be completed
                 for task in tasks:
                     assert task["status"] == "completed", (
-                        f"{task['task_family']} not completed"
+                        f"{task['task_name']} not completed"
                     )
 
                 # Verify the task graph structure

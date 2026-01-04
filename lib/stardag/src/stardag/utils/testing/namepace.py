@@ -14,22 +14,22 @@ class UnspecifiedNamespace(_DoNothing):
 
 
 class OverrideNamespaceByDUnder(_DoNothing):
-    __type_namespace__ = "override_namespace"
+    __namespace__ = "override_namespace"
 
 
 class ClearNamespaceByDunder(_DoNothing):
-    __type_namespace__ = ""
+    __namespace__ = ""
 
 
 class OverrideNamespaceByDUnderChild(OverrideNamespaceByDUnder):
     pass
 
 
-class OverrideNamespaceByArg(_DoNothing, type_namespace="override_namespace"):
+class OverrideNamespaceByArg(_DoNothing, namespace_override="override_namespace"):
     pass
 
 
-class ClearNamespaceByArg(_DoNothing, type_namespace=""):
+class ClearNamespaceByArg(_DoNothing, namespace_override=""):
     pass
 
 
@@ -37,14 +37,14 @@ class OverrideNamespaceByArgChild(OverrideNamespaceByArg):
     pass
 
 
-class CustomFamilyByArgFromIntermediate(_DoNothing, type_name="custom_family"):
-    """Uses family_override with intermediate task implementation inheritance."""
+class CustomNameByArgFromIntermediate(_DoNothing, name_override="custom_name"):
+    """Uses name override with intermediate task implementation inheritance."""
 
     pass
 
 
-class CustomFamilyByArgFromTask(BaseTask, type_name="custom_family_2"):
-    """Uses family_override with base task."""
+class CustomNameByArgFromTask(BaseTask, name_override="custom_name_2"):
+    """Uses name override with base task."""
 
     def complete(self) -> bool:
         return True
@@ -53,37 +53,13 @@ class CustomFamilyByArgFromTask(BaseTask, type_name="custom_family_2"):
         pass
 
 
-class CustomFamilyByDUnder(_DoNothing):
-    """Children would have to override either namespace or family (almost never makes
-    sense to use this)"""
-
-    __type_name__ = "custom_family_3"
-
-
-class CustomFamilyByArgFromIntermediateChild(CustomFamilyByArgFromIntermediate):
-    """Should not inherit type_name."""
+class CustomNameByArgFromIntermediateChild(CustomNameByArgFromIntermediate):
+    """Should not inherit name override."""
 
     pass
 
 
-class CustomFamilyByArgFromTaskChild(CustomFamilyByArgFromTask):
-    """Should not inherit type_name."""
+class CustomNameByArgFromTaskChild(CustomNameByArgFromTask):
+    """Should not inherit name override."""
 
     pass
-
-
-try:
-
-    class CustomFamilyByDUnderChild(CustomFamilyByDUnder):  # type: ignore
-        """Must override __type_name__."""
-
-        pass
-
-except ValueError:
-
-    class CustomFamilyByDUnderChild(
-        CustomFamilyByDUnder, type_name="custom_family_3_child"
-    ):
-        """Must override __type_name__."""
-
-        pass

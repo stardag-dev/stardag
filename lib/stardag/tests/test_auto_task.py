@@ -49,7 +49,7 @@ class TestOutputPath:
         task = IntAutoTask(value=42)
         assert __name__.replace(".", "/") in task._relpath
 
-    def test_relpath_contains_type_name(self):
+    def test_relpath_contains_name(self):
         task = IntAutoTask(value=42)
         assert "IntAutoTask" in task._relpath
 

@@ -12,18 +12,16 @@ from stardag._task import (
 )
 from stardag._task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
-from stardag.polymorphic import TYPE_NAME_KEY, TYPE_NAMESPACE_KEY, SubClass, TypeId
+from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, SubClass, TypeId
 from stardag.target._in_memory import InMemoryTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 from stardag.utils.testing.namepace import (
     ClearNamespaceByArg,
     ClearNamespaceByDunder,
-    CustomFamilyByArgFromIntermediate,
-    CustomFamilyByArgFromIntermediateChild,
-    CustomFamilyByArgFromTask,
-    CustomFamilyByArgFromTaskChild,
-    CustomFamilyByDUnder,
-    CustomFamilyByDUnderChild,
+    CustomNameByArgFromIntermediate,
+    CustomNameByArgFromIntermediateChild,
+    CustomNameByArgFromTask,
+    CustomNameByArgFromTaskChild,
     OverrideNamespaceByArg,
     OverrideNamespaceByArgChild,
     OverrideNamespaceByDUnder,
@@ -140,8 +138,8 @@ class ComplexNestedTask(MockBaseTask):
             "basic task should include all fields",
             BasicTask(a=5),
             {
-                TYPE_NAME_KEY: "BasicTask",
-                TYPE_NAMESPACE_KEY: "",
+                NAME_KEY: "BasicTask",
+                NAMESPACE_KEY: "",
                 "version": "",
                 "a": 5,
             },
@@ -150,8 +148,8 @@ class ComplexNestedTask(MockBaseTask):
             "hash exclude (a) should be excluded",
             HashExcludeTask(a=10),
             {
-                TYPE_NAME_KEY: "HashExcludeTask",
-                TYPE_NAMESPACE_KEY: "",
+                NAME_KEY: "HashExcludeTask",
+                NAMESPACE_KEY: "",
                 "version": "",
             },
         ),
@@ -159,8 +157,8 @@ class ComplexNestedTask(MockBaseTask):
             "compat default (a == compat_default) should be excluded",
             CompatDefaultTask(a=42),
             {
-                TYPE_NAME_KEY: "CompatDefaultTask",
-                TYPE_NAMESPACE_KEY: "",
+                NAME_KEY: "CompatDefaultTask",
+                NAMESPACE_KEY: "",
                 "version": "",
             },
         ),
@@ -168,8 +166,8 @@ class ComplexNestedTask(MockBaseTask):
             "compat default (a != compat_default) should be included",
             CompatDefaultTask(a=10),
             {
-                TYPE_NAME_KEY: "CompatDefaultTask",
-                TYPE_NAMESPACE_KEY: "",
+                NAME_KEY: "CompatDefaultTask",
+                NAMESPACE_KEY: "",
                 "version": "",
                 "a": 10,
             },
@@ -178,8 +176,8 @@ class ComplexNestedTask(MockBaseTask):
             'nested task should be hash serialized as {"id": task.id}',
             WithNestedTask(task=BasicTask(a=7)),
             {
-                TYPE_NAME_KEY: "WithNestedTask",
-                TYPE_NAMESPACE_KEY: "",
+                NAME_KEY: "WithNestedTask",
+                NAMESPACE_KEY: "",
                 "version": "",
                 "task": {"id": str(BasicTask(a=7).id)},
             },
@@ -197,8 +195,8 @@ class ComplexNestedTask(MockBaseTask):
                 )
             ),
             {
-                TYPE_NAME_KEY: "ComplexNestedTask",
-                TYPE_NAMESPACE_KEY: "",
+                NAME_KEY: "ComplexNestedTask",
+                NAMESPACE_KEY: "",
                 "version": "",
                 "model": {
                     "b": "non-default",
@@ -283,40 +281,33 @@ _testing_module = "stardag.utils.testing"
             OverrideNamespaceByArgChild,
             TypeId(namespace=_testing_module, name="OverrideNamespaceByArgChild"),
         ),
-        # family override
+        # name override
         (
-            CustomFamilyByArgFromIntermediate,
-            TypeId(namespace=_testing_module, name="custom_family"),
+            CustomNameByArgFromIntermediate,
+            TypeId(namespace=_testing_module, name="custom_name"),
         ),
         (
-            CustomFamilyByArgFromIntermediateChild,
+            CustomNameByArgFromIntermediateChild,
             TypeId(
-                namespace=_testing_module, name="CustomFamilyByArgFromIntermediateChild"
+                namespace=_testing_module,
+                name="CustomNameByArgFromIntermediateChild",
             ),
         ),
         (
-            CustomFamilyByArgFromTask,
-            TypeId(namespace=_testing_module, name="custom_family_2"),
+            CustomNameByArgFromTask,
+            TypeId(namespace=_testing_module, name="custom_name_2"),
         ),
         (
-            CustomFamilyByArgFromTaskChild,
-            TypeId(namespace=_testing_module, name="CustomFamilyByArgFromTaskChild"),
-        ),
-        (
-            CustomFamilyByDUnder,
-            TypeId(namespace=_testing_module, name="custom_family_3"),
-        ),
-        (
-            CustomFamilyByDUnderChild,
-            TypeId(namespace=_testing_module, name="custom_family_3_child"),
+            CustomNameByArgFromTaskChild,
+            TypeId(namespace=_testing_module, name="CustomNameByArgFromTaskChild"),
         ),
     ],
 )
 def test_auto_namespace(task_class: Type[Task], expected_type_id: TypeId):
     assert task_class.__type_id__ == expected_type_id
-    namespace = task_class.get_type_namespace()
-    type_name = task_class.get_type_name()
-    assert TypeId(namespace, type_name) == expected_type_id
+    namespace = task_class.get_namespace()
+    name = task_class.get_name()
+    assert TypeId(namespace, name) == expected_type_id
     assert BaseTask._registry().get_class(expected_type_id) == task_class
 
 

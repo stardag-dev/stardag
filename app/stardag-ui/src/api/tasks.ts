@@ -45,7 +45,7 @@ export async function fetchBuild(buildId: string): Promise<Build> {
 // Task API (build-scoped)
 
 export interface TaskFilters {
-  task_family?: string;
+  task_name?: string;
   status?: TaskStatus;
   workspace_id?: string;
 }
@@ -55,7 +55,7 @@ export async function fetchTasksInBuild(
   filters: TaskFilters = {},
 ): Promise<Task[]> {
   const params = new URLSearchParams();
-  if (filters.task_family) params.set("task_family", filters.task_family);
+  if (filters.task_name) params.set("task_name", filters.task_name);
   if (filters.status) params.set("status", filters.status);
   if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
 
@@ -87,7 +87,7 @@ export async function fetchBuildGraph(
 export interface GlobalTaskFilters {
   page?: number;
   page_size?: number;
-  task_family?: string;
+  task_name?: string;
   workspace_id?: string;
 }
 
@@ -97,7 +97,7 @@ export async function fetchTasks(
   const params = new URLSearchParams();
   if (filters.page) params.set("page", String(filters.page));
   if (filters.page_size) params.set("page_size", String(filters.page_size));
-  if (filters.task_family) params.set("task_family", filters.task_family);
+  if (filters.task_name) params.set("task_name", filters.task_name);
   if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
 
   const url = `${API_BASE}/tasks?${params.toString()}`;

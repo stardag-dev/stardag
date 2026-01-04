@@ -154,14 +154,14 @@ def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:
 
 @dataclass(frozen=True)
 class TaskRef:
-    type_name: str
+    name: str
     version: str | None
     id: UUID
 
     @classmethod
     def from_task(cls, task: BaseTask) -> "TaskRef":
         return cls(
-            type_name=task.get_type_name(),
+            name=task.get_name(),
             version=task.version,
             id=task.id,
         )
@@ -169,7 +169,7 @@ class TaskRef:
     @property
     def slug(self) -> str:
         version_slug = f"v{self.version}" if self.version else ""
-        return f"{self.type_name}-{version_slug}-{str(self.id)[:8]}"
+        return f"{self.name}-{version_slug}-{str(self.id)[:8]}"
 
     def __str__(self) -> str:
         return self.slug
