@@ -12,6 +12,7 @@ from stardag._task import (
     namespace,
 )
 from stardag._task_loads import TaskLoads
+from stardag.base_model import StardagBaseModel, StardagField
 from stardag.build.registry import registry_provider
 from stardag.build.sequential import build
 from stardag.exceptions import (
@@ -21,6 +22,7 @@ from stardag.exceptions import (
     StardagError,
     TokenExpiredError,
 )
+from stardag.polymorphic import Polymorphic, SubClass
 from stardag.target import (
     DirectoryTarget,
     FileSystemTarget,
@@ -51,15 +53,19 @@ __all__ = [
     "FileSystemTarget",
     "get_directory_target",
     "get_target",
+    "HashableSet",
+    "HashSafeSetSerializer",
     "LocalTarget",
     "namespace",
+    "Polymorphic",
     "registry_provider",
     "StardagError",
+    "StardagBaseModel",
+    "StardagField",
+    "SubClass",
     "Task",
     "TaskRef",
     "TaskLoads",
-    "HashableSet",
-    "HashSafeSetSerializer",
     "TaskStruct",
     "target_factory_provider",
     "task",
