@@ -2936,7 +2936,7 @@ requires-dist = [
     { name = "botocore", marker = "extra == 's3'", specifier = ">=1.36" },
     { name = "httpx", marker = "extra == 'api'", specifier = ">=0.27.0" },
     { name = "httpx", marker = "extra == 'cli'", specifier = ">=0.27.0" },
-    { name = "modal", marker = "extra == 'modal'", specifier = ">=0.73.59" },
+    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.0.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.1.0" },
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
