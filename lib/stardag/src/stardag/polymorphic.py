@@ -314,12 +314,26 @@ _TBaseModel = TypeVar("_TBaseModel", bound=StardagBaseModel)
 
 
 class PolymorphicRoot(StardagBaseModel):
-    """
-    Base class for a polymorphic family.
-    Each subclass family has its own registry stored on the base class.
-    """
+    """Base class for a polymorphic family.
 
-    __type_id__: ClassVar[TypeId]
+    Each subclass family has its own registry stored on the base class. Subclasses are
+    automatically registered unless they are generic models.
+
+    Subclasses can override the default type id resolution by either providing the
+    class constructor arguments `type_name` and `type_namespace` or setting the class
+    variables `__type_namespace__` and `__type_name__`. NOTE that if the (latter) class
+    variables are set directly, all subclasses will inherit the same values, so these
+    should typlically only be used for final leaf classes.
+
+    Namespace can also be registered per-module via the registry of the base class
+    extending PolymorphicRoot (TODO: make _registry a public API for this).
+
+    Args:
+        type_name: Optional explicit type name for this class. If None, the class name
+            is used.
+        type_namespace: Optional explicit type namespace for this class. If None, the
+            module name (or registered module namespace) is used.
+    """
 
     # IMPORTANT: per-family registry lives on the base class
     __registry__: ClassVar[_TypeRegistry] = _TypeRegistry()
@@ -327,6 +341,7 @@ class PolymorphicRoot(StardagBaseModel):
     if TYPE_CHECKING:
         # Optionally set on subclasses to override default type id resolution
         __type_namespace__: ClassVar[str]
+        __type_id__: ClassVar[TypeId]
 
     @classmethod
     def _registry(cls) -> _TypeRegistry:
