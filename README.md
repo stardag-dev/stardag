@@ -54,10 +54,10 @@ print(task.model_dump_json(indent=2))
 # {
 #   "version": null,
 #   "integers": {
+#     "__name": "get_range",
+#     "__namespace": ""
 #     "version": null,
 #     "limit": 10,
-#     "__name": "get_range",
-#     "__namespace__": ""
 #   }
 # }
 
@@ -224,24 +224,24 @@ print(expression.model_dump_json(indent=2))
 # {
 #   "version": "0",
 #   "a": {
+#     "__name": "add",
+#     "__namespace": ""
 #     "version": "0",
 #     "a": 1.0,
 #     "b": 2.0,
-#     "__name": "add",
-#     "__namespace__": ""
 #   },
 #   "b": {
+#     "__name": "subtract",
+#     "__namespace": ""
 #     "version": "0",
 #     "a": {
+#       "__name": "multiply",
+#       "__namespace": ""
 #       "version": "0",
 #       "a": 3.0,
 #       "b": 4.0,
-#       "__name": "multiply",
-#       "__namespace__": ""
 #     },
 #     "b": 5.0,
-#     "__name": "subtract",
-#     "__namespace__": ""
 #   }
 # }
 

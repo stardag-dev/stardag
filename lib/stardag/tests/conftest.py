@@ -15,6 +15,14 @@ from stardag.utils.testing.simple_dag import (
 )
 
 
+# Register custom markers
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "integration: mark test as integration test (may require external services)",
+    )
+
+
 @pytest.fixture(scope="session")
 def simple_dag():
     return get_simple_dag()
