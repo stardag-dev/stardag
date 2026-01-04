@@ -1,4 +1,4 @@
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 from stardag._auto_task import AutoTask
 from stardag._decorator import Depends, task
@@ -30,7 +30,11 @@ from stardag.target import (
     target_factory_provider,
 )
 
-__version__ = version("stardag")
+try:
+    __version__ = version("stardag")
+except PackageNotFoundError:
+    # Package not installed (e.g., running from source in Modal container)
+    __version__ = "0.0.0.dev"
 
 
 __all__ = [
