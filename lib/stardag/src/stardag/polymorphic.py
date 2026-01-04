@@ -227,12 +227,23 @@ class _TypeRegistry:
                 logger.info(f"Class already registered: {cls} (type_id: {type_id})")
                 return type_id
 
-            raise ValueError(
+            error_msg = (
                 "A class is already registered for the "
                 f'type_id "{type_id}".\n'
                 f"Existing: {existing.__module__}.{existing.__name__}\n"
                 f"New: {cls.__module__}.{cls.__name__}"
             )
+            # TODO consider remoing support for explicit __type_name__?
+            explicit_type_name = getattr(cls, "__type_name__", None)
+            if explicit_type_name is not None:
+                error_msg += (
+                    f"\n(Note: The new class has an explicit __type_name__ "
+                    f'set to "{explicit_type_name}". If this is set in a superclass, '
+                    "you must override it in all subclasses to avoid conflicts. "
+                    "please consider passing type_name via args to the class "
+                    "constructor in the superclass instead.)"
+                )
+            raise ValueError(error_msg)
         self._type_id_to_class[type_id] = cls
 
         return type_id
