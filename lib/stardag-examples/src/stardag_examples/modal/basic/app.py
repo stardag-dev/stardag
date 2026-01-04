@@ -10,7 +10,7 @@ image = (
     .pip_install("stardag[modal]>=0.0.3")
     .env(
         {
-            "STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
+            "STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
         }
     )
     .add_local_python_source(

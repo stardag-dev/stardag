@@ -35,7 +35,7 @@ class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     def requires(self) -> typing.Mapping[str, Task] | None:
         requires = {
             name: getattr(self, name)
-            for name in self.model_fields.keys()
+            for name in self.__class__.model_fields.keys()
             if isinstance(getattr(self, name), Task)
         }
         return requires or None
@@ -53,7 +53,7 @@ class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
 
         return {
             name: get_input(name)
-            for name in self.model_fields.keys()
+            for name in self.__class__.model_fields.keys()
             if name != "version"
         }
 

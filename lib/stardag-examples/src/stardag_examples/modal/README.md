@@ -48,7 +48,7 @@ volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("stardag[modal]>=0.0.3")
-    .env({"STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default"})
+    .env({"STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default"})
     .add_local_python_source("my_package")
 )
 
@@ -111,7 +111,7 @@ You should see the `build` and `worker_default` functions being invoked in the m
 To retrive the output locally, you need to configure the same "target root" as is used in the app (see the image `.env` statement in the [first step](#define-your-stardag-modal-app))
 
 ```sh
-export STARDAG_TARGET_ROOT__DEFAULT=modalvol://stardag-default/root/default
+export STARDAG_TARGET_ROOTS__DEFAULT=modalvol://stardag-default/root/default
 ```
 
 and run
@@ -168,7 +168,7 @@ image = (
                 "https://api.prefect.cloud/api/"
                 "accounts/<account id>/workspaces/<workspace id>"
             ),
-            "STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
+            "STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
         }
     )
     .add_local_python_source(
@@ -238,7 +238,7 @@ Now, if you provided prefect API URL and keys, navigate to your prefect Web UI t
 After completion we can load the results locally as before:
 
 ```sh
-export STARDAG_TARGET_ROOT__DEFAULT=modalvol://stardag-default/root/default
+export STARDAG_TARGET_ROOTS__DEFAULT=modalvol://stardag-default/root/default
 ```
 
 ```python
