@@ -394,9 +394,11 @@ class PolymorphicRoot(StardagBaseModel):
         """Always add discriminator keys. This runs for all subclasses too."""
         if isinstance(data, dict):
             tid = self.__class__.__type_id__
-            data = dict(data)
-            data[TYPE_NAMESPACE_KEY] = tid.namespace
-            data[TYPE_NAME_KEY] = tid.name
+            data = {
+                TYPE_NAMESPACE_KEY: tid.namespace,
+                TYPE_NAME_KEY: tid.name,
+                **data,
+            }
         return data
 
     @classmethod
