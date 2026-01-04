@@ -29,24 +29,24 @@ if __name__ == "__main__":
     # {
     #   "version": "0",
     #   "a": {
+    #     "__name": "add",
+    #     "__namespace": ""
     #     "version": "0",
     #     "a": 1.0,
     #     "b": 2.0,
-    #     "__name": "add",
-    #     "__namespace__": ""
     #   },
     #   "b": {
+    #     "__name": "subtract",
+    #     "__namespace": ""
     #     "version": "0",
     #     "a": {
+    #       "__name": "multiply",
+    #       "__namespace": ""
     #       "version": "0",
     #       "a": 3.0,
     #       "b": 4.0,
-    #       "__name": "multiply",
-    #       "__namespace__": ""
     #     },
     #     "b": 5.0,
-    #     "__name": "subtract",
-    #     "__namespace__": ""
     #   }
     # }
     sd.build(expression)

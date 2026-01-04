@@ -45,7 +45,7 @@ uv run python -m stardag_examples.ml_pipeline.class_api
 
 with the output (something like)
 
-```
+```json
 {
   "version": "0",
   "predictions": {
@@ -59,13 +59,15 @@ with the output (something like)
       "dataset": {
         "version": "0",
         "dataset": {
+          "__name": "Dataset",
+          "__namespace": "examples.ml_pipeline.class_api",
           "version": "0",
           "dump": {
+            "__name": "Dump",
+            "__namespace": "examples.ml_pipeline.class_api",
             "version": "0",
             "date": "2024-09-29",
-            "snapshot_slug": "default",
-            "__name": "Dump",
-            "__namespace__": "examples.ml_pipeline.class_api"
+            "snapshot_slug": "default"
           },
           "params": {
             "category_thresholds": [
@@ -73,9 +75,7 @@ with the output (something like)
               0.5,
               1.0
             ]
-          },
-          "__name": "Dataset",
-          "__namespace__": "examples.ml_pipeline.class_api"
+          }
         },
         "filter": {
           "categories": null,
@@ -95,13 +95,15 @@ with the output (something like)
     "dataset": {
       "version": "0",
       "dataset": {
+        "__name": "Dataset",
+        "__namespace": "examples.ml_pipeline.class_api",
         "version": "0",
         "dump": {
+          "__name": "Dump",
+          "__namespace": "examples.ml_pipeline.class_api",
           "version": "0",
           "date": "2024-09-29",
-          "snapshot_slug": "default",
-          "__name": "Dump",
-          "__namespace__": "examples.ml_pipeline.class_api"
+          "snapshot_slug": "default"
         },
         "params": {
           "category_thresholds": [
@@ -109,9 +111,7 @@ with the output (something like)
             0.5,
             1.0
           ]
-        },
-        "__name": "Dataset",
-        "__namespace__": "examples.ml_pipeline.class_api"
+        }
       },
       "filter": {
         "categories": null,
