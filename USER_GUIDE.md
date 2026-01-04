@@ -116,14 +116,14 @@ In typicall usage, most task will have their output saved to a filesystem; local
 Each task only specifies its output location _relative to_ a (or multiple) globaly configured _target root(s)_. To configure these, use the following environment variables:
 
 ```sh
-export STARDAG_TARGET_ROOT__DEFAULT=<abspath or URI>
-export STARDAG_TARGET_ROOT__OTHER=<abspath or URI>
+export STARDAG_TARGET_ROOTS__DEFAULT=<abspath or URI>
+export STARDAG_TARGET_ROOTS__OTHER=<abspath or URI>
 ```
 
 or equivalent with JSON notation:
 
 ```sh
-export STARDAG_TARGET_ROOT='{"default": <abspath or URI>, "other": <abspath or URI>}'
+export STARDAG_TARGET_ROOTS='{"default": <abspath or URI>, "other": <abspath or URI>}'
 ```
 
 Under the hood, target roots are managed by the global `stardag.target.TargetFactory` instance obtained by `stardag.target.target_factory_provider.get()`. For maximal flexibility you can instantiate a `TargetFactory` (or a custom subclass) explicitly and set it to `target_factory_provider.set(TargetFactory(target_roots={...}))`.
@@ -148,7 +148,7 @@ For special cases you can of course instantiate and return a `FileSystemTarget` 
 A common use case for the globaly configured target roots is to switch target filesystem depending on the environemt. In local development you'd typically use a directory of choice on your local filesystem (or you could even set it by active git feature branch etc.). In testing you can setup pytest fixtures to use a temporary directory (separate for each test) or an in-memory filesystem (TODO document both), and in production you would typically select remote storage such as AWS S3:
 
 ```sh
-export STARDAG_TARGET_ROOT__DEFAULT="s3://my-bucket/stardag/root-default/"
+export STARDAG_TARGET_ROOTS__DEFAULT="s3://my-bucket/stardag/root-default/"
 ```
 
 ### Serialization

@@ -21,7 +21,7 @@ image = (
                 "accounts/bbef4152-5db3-471d-81c9-fa01fb0e0eb8/"
                 "workspaces/04af8615-4247-4607-a052-291be49f958f"
             ),
-            "STARDAG_TARGET_ROOT__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
+            "STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
         }
     )
     .add_local_python_source(

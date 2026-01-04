@@ -113,7 +113,7 @@ def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
     image=(
         TEST_IMAGE.env(
             {
-                "STARDAG_TARGET_ROOT__DEFAULT": (
+                "STARDAG_TARGET_ROOTS__DEFAULT": (
                     f"modalvol://stardag-testing/{ROOT_DEAFULT}"
                 ),
                 "STARDAG_MODAL_VOLUME_MOUNTS": '{"/data": "stardag-testing"}',
@@ -131,7 +131,7 @@ def write_read_default_root(temp_test_dir: str):
     image=(
         TEST_IMAGE.env(
             {
-                "STARDAG_TARGET_ROOT__DEFAULT": (
+                "STARDAG_TARGET_ROOTS__DEFAULT": (
                     f"modalvol://stardag-testing/{ROOT_DEAFULT}"
                 ),
             }

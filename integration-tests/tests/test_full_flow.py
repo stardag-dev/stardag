@@ -401,8 +401,8 @@ class TestSDKBuildWorkflow:
         # Use a temporary directory for task outputs
         with tempfile.TemporaryDirectory() as tmpdir:
             # Set environment variable to configure target root
-            old_env = os.environ.get("STARDAG_TARGET_ROOT__DEFAULT")
-            os.environ["STARDAG_TARGET_ROOT__DEFAULT"] = tmpdir
+            old_env = os.environ.get("STARDAG_TARGET_ROOTS__DEFAULT")
+            os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = tmpdir
 
             # Reset config and target factory to pick up new env var
             config_provider.reset()
@@ -475,9 +475,9 @@ class TestSDKBuildWorkflow:
             finally:
                 # Restore environment
                 if old_env is not None:
-                    os.environ["STARDAG_TARGET_ROOT__DEFAULT"] = old_env
+                    os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = old_env
                 else:
-                    os.environ.pop("STARDAG_TARGET_ROOT__DEFAULT", None)
+                    os.environ.pop("STARDAG_TARGET_ROOTS__DEFAULT", None)
                 # Reset providers again
                 config_provider.reset()
                 target_factory_provider.set(None)  # type: ignore[arg-type]
@@ -519,8 +519,8 @@ class TestSDKBuildWorkflow:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Set environment variable to configure target root
-            old_env = os.environ.get("STARDAG_TARGET_ROOT__DEFAULT")
-            os.environ["STARDAG_TARGET_ROOT__DEFAULT"] = tmpdir
+            old_env = os.environ.get("STARDAG_TARGET_ROOTS__DEFAULT")
+            os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = tmpdir
 
             # Reset config and target factory to pick up new env var
             config_provider.reset()
@@ -613,9 +613,9 @@ class TestSDKBuildWorkflow:
             finally:
                 # Restore environment
                 if old_env is not None:
-                    os.environ["STARDAG_TARGET_ROOT__DEFAULT"] = old_env
+                    os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = old_env
                 else:
-                    os.environ.pop("STARDAG_TARGET_ROOT__DEFAULT", None)
+                    os.environ.pop("STARDAG_TARGET_ROOTS__DEFAULT", None)
                 # Reset providers again
                 config_provider.reset()
                 target_factory_provider.set(None)  # type: ignore[arg-type]

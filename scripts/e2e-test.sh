@@ -59,7 +59,7 @@ done
 # Run demo script
 echo "=== Running demo script ==="
 TARGET_ROOT=$(mktemp -d)
-export STARDAG_TARGET_ROOT__DEFAULT="$TARGET_ROOT"
+export STARDAG_TARGET_ROOTS__DEFAULT="$TARGET_ROOT"
 export STARDAG_API_REGISTRY_URL="http://localhost:8000"
 
 cd "$REPO_ROOT/lib/stardag-examples"

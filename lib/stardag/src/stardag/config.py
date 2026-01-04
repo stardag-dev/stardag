@@ -437,9 +437,7 @@ class TargetConfig(BaseModel):
             Example: {"default": "/path/to/root", "s3": "s3://bucket/prefix"}
     """
 
-    roots: dict[str, str] = Field(
-        default_factory=lambda: {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
-    )
+    roots: dict[str, str] = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
 
 
 class APIConfig(BaseModel):
