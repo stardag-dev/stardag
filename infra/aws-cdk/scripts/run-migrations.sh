@@ -32,7 +32,7 @@ echo ""
 # Get stack exports
 echo "=== Getting stack exports ==="
 ECR_URI=$($AWS_CMD cloudformation list-exports \
-    --query "Exports[?Name=='StardagApiRepositoryUri'].Value" \
+    --query "Exports[?Name=='StardagEcrRepositoryUri'].Value" \
     --output text \
     --region $AWS_REGION)
 
