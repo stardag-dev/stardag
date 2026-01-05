@@ -56,6 +56,17 @@ services:
       db:
         condition: service_healthy
 
+  seed:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: stardag_admin
+    volumes:
+      - ./docker/postgres/seed-dev.sql:/seed-dev.sql:ro
+    command: ["psql", "-h", "db", "-U", "stardag_admin", "-d", "stardag", "-f", "/seed-dev.sql"]
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+
   api:
     build:
       context: ./app/stardag-api
@@ -73,7 +84,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      migrations:
+      seed:
         condition: service_completed_successfully
       # Keycloak is optional - API starts without it, auth routes will fail
       keycloak:
