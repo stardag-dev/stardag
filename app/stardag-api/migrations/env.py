@@ -14,8 +14,9 @@ from stardag_api.models import Base
 # access to the values within the .ini file in use.
 config = context.config
 
-# Set the database URL from settings
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Set the database URL from settings (use effective_database_url which constructs
+# URL from individual params if database_url is not explicitly set)
+config.set_main_option("sqlalchemy.url", settings.effective_database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
