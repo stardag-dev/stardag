@@ -27,7 +27,7 @@ AWS_PROFILE=$AWS_PROFILE npx cdk synth --quiet
 # Deploy
 echo ""
 echo "=== Deploying stack ==="
-AWS_PROFILE=$AWS_PROFILE npx cdk deploy --require-approval never
+AWS_PROFILE=$AWS_PROFILE npx cdk deploy --all --require-approval never
 
 echo ""
 echo "=== Infrastructure deployment complete ==="
