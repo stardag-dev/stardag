@@ -12,22 +12,29 @@ if [ -f .env.deploy ]; then
     export $(grep -v '^#' .env.deploy | xargs)
 fi
 
-AWS_PROFILE="${AWS_PROFILE:-stardag}"
-
+# Only use AWS_PROFILE if credentials aren't already set (CI uses OIDC env vars)
 echo "=== Deploying Stardag Infrastructure ==="
-echo "AWS Profile: $AWS_PROFILE"
+if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+    AWS_PROFILE="${AWS_PROFILE:-stardag}"
+    export AWS_PROFILE
+    echo "AWS Profile: $AWS_PROFILE"
+else
+    # Unset AWS_PROFILE to ensure env credentials are used
+    unset AWS_PROFILE
+    echo "Using environment credentials (CI mode)"
+fi
 echo "Region: $AWS_REGION"
 echo "Account: $AWS_ACCOUNT_ID"
 echo ""
 
 # Synthesize first to catch errors
 echo "=== Synthesizing CloudFormation template ==="
-AWS_PROFILE=$AWS_PROFILE npx cdk synth --quiet
+npx cdk synth --quiet
 
 # Deploy
 echo ""
 echo "=== Deploying stack ==="
-AWS_PROFILE=$AWS_PROFILE npx cdk deploy --all --require-approval never
+npx cdk deploy --all --require-approval never
 
 echo ""
 echo "=== Infrastructure deployment complete ==="

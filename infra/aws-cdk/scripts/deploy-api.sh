@@ -13,17 +13,25 @@ if [ -f .env.deploy ]; then
     export $(grep -v '^#' .env.deploy | xargs)
 fi
 
-AWS_PROFILE="${AWS_PROFILE:-stardag}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 
-echo "=== Building and Deploying API ==="
-echo "AWS Profile: $AWS_PROFILE"
+# Only use AWS_PROFILE if credentials aren't already set (CI uses OIDC env vars)
+if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+    AWS_PROFILE="${AWS_PROFILE:-stardag}"
+    AWS_CMD="aws --profile $AWS_PROFILE"
+    echo "=== Building and Deploying API ==="
+    echo "AWS Profile: $AWS_PROFILE"
+else
+    AWS_CMD="aws"
+    echo "=== Building and Deploying API ==="
+    echo "Using environment credentials (CI mode)"
+fi
 echo "Region: $AWS_REGION"
 echo ""
 
 # Get ECR repository URI from CloudFormation exports
 echo "=== Getting ECR repository URI ==="
-ECR_URI=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+ECR_URI=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagEcrRepositoryUri'].Value" \
     --output text \
     --region $AWS_REGION)
@@ -36,12 +44,12 @@ fi
 echo "ECR Repository: $ECR_URI"
 
 # Get ECS cluster and service names
-CLUSTER_NAME=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+CLUSTER_NAME=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagApiClusterName'].Value" \
     --output text \
     --region $AWS_REGION)
 
-SERVICE_NAME=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+SERVICE_NAME=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagApiServiceName'].Value" \
     --output text \
     --region $AWS_REGION)
@@ -52,7 +60,7 @@ echo ""
 
 # Login to ECR
 echo "=== Logging in to ECR ==="
-AWS_PROFILE=$AWS_PROFILE aws ecr get-login-password --region $AWS_REGION | \
+$AWS_CMD ecr get-login-password --region $AWS_REGION | \
     docker login --username AWS --password-stdin "${ECR_URI%%/*}"
 
 # Build the API image
@@ -72,7 +80,7 @@ docker push $ECR_URI:$IMAGE_TAG
 # Update ECS service to use new image
 echo ""
 echo "=== Updating ECS service ==="
-AWS_PROFILE=$AWS_PROFILE aws ecs update-service \
+$AWS_CMD ecs update-service \
     --cluster $CLUSTER_NAME \
     --service $SERVICE_NAME \
     --force-new-deployment \
@@ -82,6 +90,6 @@ echo ""
 echo "=== API deployment initiated ==="
 echo ""
 echo "The ECS service is now updating. You can monitor progress with:"
-echo "  AWS_PROFILE=$AWS_PROFILE aws ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --region $AWS_REGION"
+echo "  $AWS_CMD ecs describe-services --cluster $CLUSTER_NAME --services $SERVICE_NAME --region $AWS_REGION"
 echo ""
 echo "Or check the AWS Console: https://$AWS_REGION.console.aws.amazon.com/ecs/v2/clusters/$CLUSTER_NAME/services/$SERVICE_NAME"

@@ -19,8 +19,15 @@ if [ ! -f .env.deploy ]; then
 fi
 export $(grep -v '^#' .env.deploy | xargs)
 
-AWS_PROFILE="${AWS_PROFILE:-stardag}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
+
+# Only use AWS_PROFILE if credentials aren't already set (CI uses OIDC env vars)
+if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+    AWS_PROFILE="${AWS_PROFILE:-stardag}"
+    AWS_CMD="aws --profile $AWS_PROFILE"
+else
+    AWS_CMD="aws"
+fi
 
 # Validate required variables
 if [ -z "$DOMAIN_NAME" ]; then
@@ -29,18 +36,22 @@ if [ -z "$DOMAIN_NAME" ]; then
 fi
 
 echo "=== Building and Deploying UI ==="
-echo "AWS Profile: $AWS_PROFILE"
+if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+    echo "AWS Profile: $AWS_PROFILE"
+else
+    echo "Using environment credentials (CI mode)"
+fi
 echo "Region: $AWS_REGION"
 echo ""
 
 # Get stack exports
 echo "=== Getting stack exports ==="
-BUCKET_NAME=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+BUCKET_NAME=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagFrontendBucketName'].Value" \
     --output text \
     --region $AWS_REGION)
 
-DISTRIBUTION_ID=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+DISTRIBUTION_ID=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagFrontendDistributionId'].Value" \
     --output text \
     --region $AWS_REGION)
@@ -55,17 +66,17 @@ echo "CloudFront Distribution: $DISTRIBUTION_ID"
 echo ""
 
 # Get Cognito config for UI build
-COGNITO_USER_POOL_ID=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+COGNITO_USER_POOL_ID=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagCognitoUserPoolId'].Value" \
     --output text \
     --region $AWS_REGION 2>/dev/null || echo "")
 
-COGNITO_CLIENT_ID=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+COGNITO_CLIENT_ID=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagCognitoClientId'].Value" \
     --output text \
     --region $AWS_REGION 2>/dev/null || echo "")
 
-COGNITO_DOMAIN=$(AWS_PROFILE=$AWS_PROFILE aws cloudformation list-exports \
+COGNITO_DOMAIN=$($AWS_CMD cloudformation list-exports \
     --query "Exports[?Name=='StardagCognitoDomain'].Value" \
     --output text \
     --region $AWS_REGION 2>/dev/null || echo "")
@@ -96,12 +107,12 @@ npm run build
 # Deploy to S3
 echo ""
 echo "=== Uploading to S3 ==="
-AWS_PROFILE=$AWS_PROFILE aws s3 sync ./dist s3://$BUCKET_NAME --delete --region $AWS_REGION
+$AWS_CMD s3 sync ./dist s3://$BUCKET_NAME --delete --region $AWS_REGION
 
 # Invalidate CloudFront cache
 echo ""
 echo "=== Invalidating CloudFront cache ==="
-INVALIDATION_ID=$(AWS_PROFILE=$AWS_PROFILE aws cloudfront create-invalidation \
+INVALIDATION_ID=$($AWS_CMD cloudfront create-invalidation \
     --distribution-id $DISTRIBUTION_ID \
     --paths "/*" \
     --query "Invalidation.Id" \
