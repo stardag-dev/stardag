@@ -46,22 +46,6 @@ See [DEV_README.md](/DEV_README.md) for setup and commands.
 - **Unit tests**: Prefer unit tests for testing specific components and logic
 - **E2E test**: `./scripts/e2e-test.sh` runs a full integration test (docker-compose, API, UI, demo script). Use sparingly - it's slow and should not replace unit tests. Good for verifying the full stack works together after significant changes.
 
-## Tasks
-
-Larger efforts are tracked in `.claude/tasks/`. See [tasks/README.md](tasks/README.md) for the template and structure.
-
-**Current tasks:**
-
-- [registry-service](./tasks/registry-service/) - Backend API & Frontend App for task tracking and monitoring
-  - [main_and_mvp](./tasks/registry-service/main_and_mvp.md) - MVP implementation (completed)
-  - [mvp_cleanup](./tasks/registry-service/mvp_cleanup.md) - Post-MVP cleanup (completed)
-  - [db-schemas](./tasks/registry-service/db-schemas.md) - Update schemas (~completed)
-  - [auth](./tasks/registry-service/auth.md) - Production grad auth and org/user/workspace management (~completed)
-  - [config-and-auth-cleanup](./tasks/registry-service/config-and-auth-cleanup.md) (paused)
-  - [config-and-auth-cleanup-take-two](./tasks/registry-service/config-and-auth-cleanup-take-two.md) (completed)
-  - [integration-tests](./tasks/registry-service/integration-tests.md) (completed)
-  - [aws-deployment](./tasks/registry-service/aws-deployment.md) (draft)
-
 ## Code Style
 
 - Use type annotations throughout
