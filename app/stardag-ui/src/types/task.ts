@@ -64,3 +64,22 @@ export interface TaskGraphResponse {
   nodes: TaskNode[];
   edges: TaskEdge[];
 }
+
+// Task assets
+export type TaskAssetType = "markdown" | "json";
+
+// Body is always a dict stored in body_json
+// - markdown: { content: "<markdown string>" }
+// - json: the actual JSON data dict
+export interface TaskAsset {
+  id: number;
+  task_id: string;
+  asset_type: TaskAssetType;
+  name: string;
+  body: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TaskAssetListResponse {
+  assets: TaskAsset[];
+}

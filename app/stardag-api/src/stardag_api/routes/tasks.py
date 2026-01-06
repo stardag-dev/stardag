@@ -8,8 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
-from stardag_api.models import Task
-from stardag_api.schemas import TaskListResponse, TaskResponse
+from stardag_api.models import Task, TaskRegistryAsset
+from stardag_api.schemas import (
+    TaskListResponse,
+    TaskRegistryAssetListResponse,
+    TaskRegistryAssetResponse,
+    TaskResponse,
+)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -99,4 +104,48 @@ async def get_task(
         task_data=task.task_data,
         version=task.version,
         created_at=task.created_at,
+    )
+
+
+@router.get("/{task_id}/assets", response_model=TaskRegistryAssetListResponse)
+async def get_task_assets(
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Get assets for a task by its task_id (hash).
+
+    Requires authentication via API key or JWT token with workspace_id.
+    The workspace is determined from the authentication context.
+    """
+    # Find task by task_id (hash) in workspace
+    result = await db.execute(
+        select(Task)
+        .where(Task.workspace_id == auth.workspace_id)
+        .where(Task.task_id == task_id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Get all assets for this task
+    assets_result = await db.execute(
+        select(TaskRegistryAsset)
+        .where(TaskRegistryAsset.task_pk == task.id)
+        .order_by(TaskRegistryAsset.created_at.asc())
+    )
+    assets = assets_result.scalars().all()
+
+    return TaskRegistryAssetListResponse(
+        assets=[
+            TaskRegistryAssetResponse(
+                id=asset.id,
+                task_id=task.task_id,
+                asset_type=asset.asset_type,
+                name=asset.name,
+                body=asset.body_json,
+                created_at=asset.created_at,
+            )
+            for asset in assets
+        ]
     )

@@ -11,6 +11,7 @@ from stardag_api.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from stardag_api.models.event import Event
+    from stardag_api.models.task_asset import TaskRegistryAsset
     from stardag_api.models.task_dependency import TaskDependency
     from stardag_api.models.workspace import Workspace
 
@@ -87,4 +88,11 @@ class Task(Base, TimestampMixin):
         foreign_keys="TaskDependency.upstream_task_id",
         back_populates="upstream_task",
         cascade="all, delete-orphan",
+    )
+
+    # Registry assets (rich outputs from completed tasks)
+    registry_assets: Mapped[list[TaskRegistryAsset]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="TaskRegistryAsset.created_at",
     )

@@ -268,3 +268,38 @@ class ApiKeyCreateResponse(ApiKeyResponse):
     """Schema for API key creation response (includes the full key once)."""
 
     key: str  # The full key, only returned on creation
+
+
+# --- Task Registry Asset Schemas ---
+
+
+class TaskRegistryAssetCreate(BaseModel):
+    """Schema for creating a task registry asset.
+
+    Body format:
+    - For markdown: {"content": "<markdown string>"}
+    - For json: the actual JSON data dict
+    """
+
+    type: str  # "markdown" or "json"
+    name: str
+    body: dict  # Always a dict - markdown uses {"content": "..."}, json uses the data
+
+
+class TaskRegistryAssetResponse(BaseModel):
+    """Schema for task registry asset response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: str  # The task_id hash (not the internal PK)
+    asset_type: str
+    name: str
+    body: dict  # Always a dict from body_json
+    created_at: datetime
+
+
+class TaskRegistryAssetListResponse(BaseModel):
+    """Schema for task registry assets list response."""
+
+    assets: list[TaskRegistryAssetResponse]

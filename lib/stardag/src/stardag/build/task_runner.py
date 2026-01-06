@@ -36,6 +36,11 @@ class TaskRunner:
             # Task completed successfully
             self.registry.complete_task(task)
 
+            # Upload registry assets if any
+            assets = task.registry_assets()
+            if assets:
+                self.registry.upload_task_assets(task, assets)
+
             if self.on_complete_callback is not None:
                 self.on_complete_callback(task)
 
@@ -85,6 +90,11 @@ class AsyncTaskRunner:
 
             # Task completed successfully
             self.registry.complete_task(task)
+
+            # Upload registry assets if any
+            assets = task.registry_assets()
+            if assets:
+                self.registry.upload_task_assets(task, assets)
 
             if self.on_complete_callback is not None:
                 await self.on_complete_callback(task)

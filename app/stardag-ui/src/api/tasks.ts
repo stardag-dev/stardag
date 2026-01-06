@@ -2,6 +2,7 @@ import type {
   Build,
   BuildListResponse,
   Task,
+  TaskAssetListResponse,
   TaskGraphResponse,
   TaskStatus,
 } from "../types/task";
@@ -112,6 +113,14 @@ export async function fetchTask(taskId: string): Promise<Task> {
   const response = await fetchWithAuth(`${API_BASE}/tasks/${taskId}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch task: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchTaskAssets(taskId: string): Promise<TaskAssetListResponse> {
+  const response = await fetchWithAuth(`${API_BASE}/tasks/${taskId}/assets`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch task assets: ${response.statusText}`);
   }
   return response.json();
 }
