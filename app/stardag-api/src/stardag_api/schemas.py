@@ -155,6 +155,7 @@ class TaskWithStatusResponse(TaskResponse):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
+    asset_count: int = 0
 
 
 class TaskListResponse(BaseModel):
@@ -219,6 +220,7 @@ class TaskNode(BaseModel):
     task_name: str
     task_namespace: str
     status: TaskStatus = TaskStatus.PENDING
+    asset_count: int = 0
 
 
 class TaskEdge(BaseModel):

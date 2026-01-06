@@ -37,6 +37,7 @@ export interface Task {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
+  asset_count: number;
 }
 
 export interface TaskListResponse {
@@ -53,6 +54,7 @@ export interface TaskNode {
   task_name: string;
   task_namespace: string;
   status: TaskStatus;
+  asset_count: number;
 }
 
 export interface TaskEdge {

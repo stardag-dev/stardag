@@ -669,9 +669,20 @@ async def list_tasks_in_build(
     # Get all tasks by those IDs
     result = await db.execute(select(Task).where(Task.id.in_(task_ids_subquery)))
     tasks = result.scalars().all()
+    task_ids = [t.id for t in tasks]
 
     # Get all statuses
     statuses = await get_all_task_statuses_in_build(db, build_id)
+
+    # Get asset counts per task
+    asset_counts: dict[int, int] = {}
+    if task_ids:
+        asset_count_result = await db.execute(
+            select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
+            .where(TaskRegistryAsset.task_pk.in_(task_ids))
+            .group_by(TaskRegistryAsset.task_pk)
+        )
+        asset_counts = {row[0]: row[1] for row in asset_count_result.all()}
 
     responses = []
     for task in tasks:
@@ -692,6 +703,7 @@ async def list_tasks_in_build(
                 started_at=started_at,
                 completed_at=completed_at,
                 error_message=error_message,
+                asset_count=asset_counts.get(task.id, 0),
             )
         )
 
@@ -774,6 +786,16 @@ async def get_build_graph(
     # Get statuses
     statuses = await get_all_task_statuses_in_build(db, build_id)
 
+    # Get asset counts per task
+    asset_counts: dict[int, int] = {}
+    if task_ids:
+        asset_count_result = await db.execute(
+            select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
+            .where(TaskRegistryAsset.task_pk.in_(task_ids))
+            .group_by(TaskRegistryAsset.task_pk)
+        )
+        asset_counts = {row[0]: row[1] for row in asset_count_result.all()}
+
     # Build nodes
     nodes = []
     for task in tasks:
@@ -785,6 +807,7 @@ async def get_build_graph(
                 task_name=task.task_name,
                 task_namespace=task.task_namespace,
                 status=status,
+                asset_count=asset_counts.get(task.id, 0),
             )
         )
 

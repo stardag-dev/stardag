@@ -179,6 +179,7 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
           isSelected: graphNode.task_id === selectedTaskId,
           isFilterMatch: task?.isFilterMatch ?? true,
           direction,
+          hasAssets: graphNode.asset_count > 0,
         },
       };
     });
