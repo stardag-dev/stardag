@@ -237,3 +237,26 @@ async def test_json_asset_with_nested_data(client: AsyncClient, build_with_task)
     body = data["assets"][0]["body"]
     assert body["metrics"]["train"]["accuracy"] == 0.95
     assert body["config"]["layers"] == [64, 128, 64]
+
+
+@pytest.mark.asyncio
+async def test_get_assets_with_workspace_id(client: AsyncClient, build_with_task):
+    """Test getting assets with explicit workspace_id parameter.
+
+    This verifies the endpoint works with workspace_id, which is required
+    for JWT authentication (UI calls).
+    """
+    build_id, task_id = build_with_task
+
+    # Upload an asset first
+    assets = [{"type": "json", "name": "test", "body": {"key": "value"}}]
+    await client.post(f"/api/v1/builds/{build_id}/tasks/{task_id}/assets", json=assets)
+
+    # Get assets with workspace_id parameter (simulates UI call)
+    response = await client.get(
+        f"/api/v1/tasks/{task_id}/assets", params={"workspace_id": "default"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["assets"]) == 1
+    assert data["assets"][0]["name"] == "test"
