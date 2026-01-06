@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchTaskAssets } from "../api/tasks";
 import type { Task, TaskAsset } from "../types/task";
-import { AssetList } from "./AssetViewer";
+import { AssetList, ExpandButton } from "./AssetViewer";
+import { FullscreenModal } from "./FullscreenModal";
 import { StatusBadge } from "./StatusBadge";
 
 interface TaskDetailProps {
@@ -12,6 +13,7 @@ interface TaskDetailProps {
 export function TaskDetail({ task, onClose }: TaskDetailProps) {
   const [assets, setAssets] = useState<TaskAsset[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(false);
+  const [showParamsModal, setShowParamsModal] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -19,7 +21,7 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
     async function loadAssets() {
       setAssetsLoading(true);
       try {
-        const response = await fetchTaskAssets(task.task_id);
+        const response = await fetchTaskAssets(task.task_id, task.workspace_id);
         if (!cancelled) {
           setAssets(response.assets);
         }
@@ -40,7 +42,7 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
     return () => {
       cancelled = true;
     };
-  }, [task.task_id]);
+  }, [task.task_id, task.workspace_id]);
 
   return (
     <div className="h-full overflow-auto bg-white dark:bg-gray-800 p-4">
@@ -136,13 +138,26 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
         )}
 
         {/* Task data */}
-        <div>
-          <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
-            Task Parameters
-          </label>
-          <pre className="mt-1 max-h-64 overflow-auto rounded-md bg-gray-50 dark:bg-gray-900 p-3 text-sm text-gray-800 dark:text-gray-200">
-            {JSON.stringify(task.task_data, null, 2)}
-          </pre>
+        <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
+          <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Task Parameters
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+                json
+              </span>
+              <ExpandButton
+                onClick={() => setShowParamsModal(true)}
+                title="View fullscreen"
+              />
+            </div>
+          </div>
+          <div className="p-3">
+            <pre className="max-h-64 overflow-auto rounded-md bg-gray-50 p-3 text-sm text-gray-800 dark:bg-gray-900 dark:text-gray-200">
+              {JSON.stringify(task.task_data, null, 2)}
+            </pre>
+          </div>
         </div>
 
         {/* Assets */}
@@ -154,6 +169,17 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
           <AssetList assets={assets} />
         )}
       </div>
+
+      {/* Task Parameters Fullscreen Modal */}
+      <FullscreenModal
+        isOpen={showParamsModal}
+        onClose={() => setShowParamsModal(false)}
+        title="Task Parameters"
+      >
+        <pre className="overflow-auto rounded-md bg-gray-50 p-3 text-sm text-gray-800 dark:bg-gray-900 dark:text-gray-200">
+          {JSON.stringify(task.task_data, null, 2)}
+        </pre>
+      </FullscreenModal>
     </div>
   );
 }

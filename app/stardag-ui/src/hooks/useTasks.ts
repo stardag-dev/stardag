@@ -92,7 +92,9 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     try {
       // Fetch all tasks and graph in parallel
       const [tasksData, graphData] = await Promise.all([
-        fetchTasksInBuild(currentBuild.id, { workspace_id: activeWorkspace.id }),
+        fetchTasksInBuild(currentBuild.id, {
+          workspace_id: activeWorkspace.id,
+        }),
         fetchBuildGraph(currentBuild.id, activeWorkspace.id),
       ]);
 
@@ -153,6 +155,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
         started_at: fullTask?.started_at ?? null,
         completed_at: fullTask?.completed_at ?? null,
         error_message: fullTask?.error_message ?? null,
+        asset_count: node.asset_count,
         isFilterMatch: noFilter || matchingTaskIds.has(node.task_id),
       };
     });

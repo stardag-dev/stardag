@@ -117,8 +117,15 @@ export async function fetchTask(taskId: string): Promise<Task> {
   return response.json();
 }
 
-export async function fetchTaskAssets(taskId: string): Promise<TaskAssetListResponse> {
-  const response = await fetchWithAuth(`${API_BASE}/tasks/${taskId}/assets`);
+export async function fetchTaskAssets(
+  taskId: string,
+  workspaceId?: string,
+): Promise<TaskAssetListResponse> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+
+  const url = `${API_BASE}/tasks/${taskId}/assets?${params.toString()}`;
+  const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch task assets: ${response.statusText}`);
   }
