@@ -1,11 +1,7 @@
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.config import settings
-from stardag_api.db import engine
-from stardag_api.models import Base
 from stardag_api.routes import (
     auth_router,
     builds_router,
@@ -16,19 +12,10 @@ from stardag_api.routes import (
 )
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Create tables on startup
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-
-
 app = FastAPI(
     title="Stardag API",
     description="API for tracking and monitoring Stardag task execution",
     version="0.0.1",
-    lifespan=lifespan,
 )
 
 # CORS for frontend

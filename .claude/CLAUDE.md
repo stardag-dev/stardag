@@ -60,13 +60,16 @@ See [DEV_README.md](/DEV_README.md) for setup and commands.
 1. **Update the SQLAlchemy models** in `app/stardag-api/src/stardag_api/models/`
 
 2. **Generate the migration** using Alembic autogenerate:
+
    ```bash
    cd app/stardag-api
    uv run alembic revision --autogenerate -m "description of changes"
    ```
+
    This creates a file like `abc123def456_description_of_changes.py` with a proper hash-based revision ID.
 
 3. **Review the generated migration** - Alembic's autogenerate is not perfect:
+
    - Check that all intended changes are captured
    - Verify `upgrade()` and `downgrade()` are correct inverses
    - Remove any unintended changes
@@ -88,6 +91,7 @@ See [DEV_README.md](/DEV_README.md) for setup and commands.
 ### Why This Matters
 
 Alembic tracks migrations by revision ID in the `alembic_version` table. Hand-crafted IDs can cause:
+
 - Chain breaks when IDs don't follow the proper DAG
 - "Relation already exists" errors on fresh deployments
 - Confusion about which migrations have been applied
@@ -105,6 +109,7 @@ This section captures project-specific corrections and preferences. When the use
 ### Learnings Log
 
 1. **Run pre-commit hooks after editing files**
+
    - **Do**: Run relevant pre-commit hooks after editing files (e.g., `prettier` for markdown, `ruff` and `pyright` for Python)
    - **Don't**: Leave files in a non-compliant state
    - **Context**: Project uses prettier for markdown formatting, ruff and pyright for Python linting/formatting and typechecks

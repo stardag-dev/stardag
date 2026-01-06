@@ -62,7 +62,18 @@ services:
       PGPASSWORD: stardag_admin
     volumes:
       - ./docker/postgres/seed-dev.sql:/seed-dev.sql:ro
-    command: ["psql", "-h", "db", "-U", "stardag_admin", "-d", "stardag", "-f", "/seed-dev.sql"]
+    command:
+      [
+        "psql",
+        "-h",
+        "db",
+        "-U",
+        "stardag_admin",
+        "-d",
+        "stardag",
+        "-f",
+        "/seed-dev.sql",
+      ]
     depends_on:
       migrations:
         condition: service_completed_successfully
