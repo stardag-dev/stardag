@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <!-- Dark circle background -->
   <circle cx="16" cy="16" r="16" fill="#1e293b"/>
-  <!-- White 6-pointed asterisk (IBM Plex Mono style) -->
+  <!-- White 5-pointed asterisk (IBM Plex Mono style) -->
   <g fill="#ffffff" transform="translate(16,16)">
-    <!-- Vertical bar -->
     <rect x="-2.5" y="-12" width="5" height="24" rx="1.5"/>
-    <!-- Diagonal bars (rotated) -->
-    <rect x="-2.5" y="-12" width="5" height="24" rx="1.5" transform="rotate(60)"/>
-    <rect x="-2.5" y="-12" width="5" height="24" rx="1.5" transform="rotate(120)"/>
+    <rect x="-2.5" y="-12" width="5" height="24" rx="1.5" transform="rotate(72)"/>
+    <rect x="-2.5" y="-12" width="5" height="24" rx="1.5" transform="rotate(144)"/>
+    <rect x="-2.5" y="-12" width="5" height="24" rx="1.5" transform="rotate(216)"/>
+    <rect x="-2.5" y="-12" width="5" height="24" rx="1.5" transform="rotate(288)"/>
   </g>
 </svg>
