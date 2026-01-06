@@ -4,6 +4,7 @@ import * as cdk from "aws-cdk-lib";
 import { FoundationStack } from "../lib/foundation-stack";
 import { ApiStack } from "../lib/api-stack";
 import { FrontendStack } from "../lib/frontend-stack";
+import { BastionStack } from "../lib/bastion-stack";
 import { config } from "../lib/config";
 
 const app = new cdk.App();
@@ -45,3 +46,15 @@ const frontend = new FrontendStack(app, "StardagFrontend", {
   description: "Stardag Frontend - S3 static hosting with CloudFront CDN",
 });
 frontend.addDependency(foundation);
+
+// =============================================================
+// Stack 4: Bastion (Optional - EC2 for database access)
+// Deploy separately: npx cdk deploy StardagBastion
+// Destroy when done: npx cdk destroy StardagBastion
+// =============================================================
+const bastion = new BastionStack(app, "StardagBastion", {
+  env,
+  foundation,
+  description: "Stardag Bastion - Optional EC2 host for database access via SSM",
+});
+bastion.addDependency(foundation);

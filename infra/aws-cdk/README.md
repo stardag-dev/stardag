@@ -7,8 +7,109 @@ AWS CDK infrastructure for deploying Stardag SAAS application.
 - **Frontend:** S3 + CloudFront (`app.stardag.com`)
 - **Backend:** ECS Fargate + ALB (`api.stardag.com`)
 - **Database:** Aurora Serverless v2 PostgreSQL
-- **Auth:** Cognito User Pool with GitHub IdP
+- **Auth:** Cognito User Pool with Google IdP
 - **DNS:** Route 53
+
+## Stacks
+
+| Stack             | Description                            | Deployed by default |
+| ----------------- | -------------------------------------- | ------------------- |
+| StardagFoundation | VPC, Database, Cognito, ECR, DNS/Certs | Yes                 |
+| StardagApi        | ECS Fargate service + ALB              | Yes                 |
+| StardagFrontend   | S3 + CloudFront for static UI          | Yes                 |
+| StardagBastion    | EC2 bastion host for database access   | No (opt-in)         |
+
+## Deployment
+
+### Full Deployment (Recommended)
+
+Use the deployment scripts in `scripts/`:
+
+```bash
+# Full deployment (handles correct order)
+./scripts/deploy-all.sh
+
+# Individual components
+./scripts/deploy-infra.sh          # Deploy all main stacks
+./scripts/deploy-infra.sh --foundation-only  # Foundation only (first-time setup)
+./scripts/deploy-api.sh            # Build, push, and deploy API
+./scripts/deploy-ui.sh             # Build and deploy UI
+./scripts/run-migrations.sh        # Run database migrations
+```
+
+### Deployment Order
+
+For first-time deployments, the correct order is:
+
+1. Foundation stack (creates ECR, VPC, Database)
+2. Push API image to ECR
+3. Api and Frontend stacks (now image exists)
+4. Run migrations
+5. Update API service
+
+The `deploy-all.sh` script handles this automatically.
+
+## Operations
+
+### View Logs
+
+```bash
+# API logs (last 30 minutes)
+AWS_PROFILE=stardag aws logs tail /stardag/api --since 30m --region us-east-1
+
+# Follow logs in real-time
+AWS_PROFILE=stardag aws logs tail /stardag/api --follow --region us-east-1
+```
+
+### Run Migrations
+
+```bash
+./scripts/run-migrations.sh
+```
+
+### Database Access (Bastion Host)
+
+For direct database access, deploy the optional bastion stack:
+
+```bash
+# Deploy bastion
+npx cdk deploy StardagBastion --profile stardag
+
+# Connect via SSM (no SSH keys needed)
+aws ssm start-session --target <instance-id> --profile stardag
+
+# Once connected, access the database:
+psql -h <db-endpoint> -U stardag_admin -d stardag
+
+# Destroy when done (saves costs)
+npx cdk destroy StardagBastion --profile stardag
+```
+
+The bastion host:
+
+- Uses SSM Session Manager (no inbound ports, no SSH keys)
+- Has PostgreSQL 16 client pre-installed
+- Runs t3.micro (minimal cost)
+- Should be destroyed when not in use
+
+### Run Ad-hoc Database Commands
+
+For one-off database operations without deploying bastion:
+
+```bash
+# Example: Drop all tables
+aws ecs run-task \
+    --cluster stardag \
+    --task-definition <task-def-arn> \
+    --launch-type FARGATE \
+    --network-configuration "..." \
+    --overrides '{
+        "containerOverrides": [{
+            "name": "Api",
+            "command": ["python", "-c", "..."]
+        }]
+    }'
+```
 
 ## Prerequisites
 
@@ -45,12 +146,12 @@ DOMAIN_NAME=stardag.com
 API_SUBDOMAIN=api
 UI_SUBDOMAIN=app
 
-# GitHub OAuth
-GITHUB_CLIENT_ID=your-client-id
-GITHUB_CLIENT_SECRET=your-client-secret
+# Google OAuth
+GOOGLE_CLIENT_ID=your-client-id
+GOOGLE_CLIENT_SECRET=your-client-secret
 ```
 
-## Commands
+## CDK Commands
 
 ```bash
 # Install dependencies
@@ -68,11 +169,14 @@ npx cdk synth --profile stardag
 # Compare deployed stack with current state
 npx cdk diff --profile stardag
 
-# Deploy stack
-npx cdk deploy --profile stardag
+# Deploy specific stack
+npx cdk deploy StardagFoundation --profile stardag
+
+# Deploy all main stacks
+npx cdk deploy StardagFoundation StardagApi StardagFrontend --profile stardag
 
 # Destroy stack (careful!)
-npx cdk destroy --profile stardag
+npx cdk destroy StardagBastion --profile stardag
 ```
 
 ## Project Structure
@@ -83,8 +187,17 @@ infra/aws-cdk/
 │   └── stardag.ts           # CDK app entry point
 ├── lib/
 │   ├── config.ts            # Configuration loader
-│   ├── stardag-stack.ts     # Main stack
+│   ├── foundation-stack.ts  # VPC, Database, Auth, ECR
+│   ├── api-stack.ts         # ECS Fargate + ALB
+│   ├── frontend-stack.ts    # S3 + CloudFront
+│   ├── bastion-stack.ts     # Optional EC2 bastion
 │   └── constructs/          # Reusable constructs
+├── scripts/
+│   ├── deploy-all.sh        # Full deployment
+│   ├── deploy-infra.sh      # CDK stacks
+│   ├── deploy-api.sh        # Build and push API
+│   ├── deploy-ui.sh         # Build and deploy UI
+│   └── run-migrations.sh    # Database migrations
 ├── test/
 │   └── stardag.test.ts      # Stack tests
 ├── .env.deploy              # Your config (gitignored)

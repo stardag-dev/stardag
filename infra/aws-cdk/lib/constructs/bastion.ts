@@ -29,7 +29,10 @@ export class StardagBastion extends Construct {
   constructor(scope: Construct, id: string, props: StardagBastionProps) {
     super(scope, id);
 
-    const { vpc, instanceType = ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO) } = props;
+    const {
+      vpc,
+      instanceType = ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.MICRO),
+    } = props;
 
     // Create bastion host in public subnet
     // Uses Amazon Linux 2023 by default (via cdk.json feature flag)
@@ -59,7 +62,8 @@ export class StardagBastion extends Construct {
     // Output instance ID for easy access
     new cdk.CfnOutput(this, "InstanceId", {
       value: this.instance.instanceId,
-      description: "Bastion instance ID - use with: aws ssm start-session --target <id>",
+      description:
+        "Bastion instance ID - use with: aws ssm start-session --target <id>",
       exportName: "StardagBastionInstanceId",
     });
   }

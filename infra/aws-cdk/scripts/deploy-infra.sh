@@ -1,11 +1,31 @@
 #!/bin/bash
 # Deploy CDK infrastructure to AWS
+# Usage: deploy-infra.sh [--foundation-only | --all]
+#   --foundation-only: Deploy only Foundation stack (for first-time setup)
+#   --all: Deploy all stacks (default for subsequent deployments)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$CDK_DIR"
+
+# Parse arguments
+# Default: deploy main stacks (Foundation, Api, Frontend) but NOT Bastion
+STACKS="StardagFoundation StardagApi StardagFrontend"
+for arg in "$@"; do
+    case $arg in
+        --foundation-only)
+            STACKS="StardagFoundation"
+            shift
+            ;;
+        --all)
+            # Main stacks only, Bastion is deployed separately
+            STACKS="StardagFoundation StardagApi StardagFrontend"
+            shift
+            ;;
+    esac
+done
 
 # Load config
 if [ -f .env.deploy ]; then
@@ -25,6 +45,7 @@ else
 fi
 echo "Region: $AWS_REGION"
 echo "Account: $AWS_ACCOUNT_ID"
+echo "Stacks: $STACKS"
 echo ""
 
 # Synthesize first to catch errors
@@ -34,12 +55,17 @@ npx cdk synth --quiet
 # Deploy
 echo ""
 echo "=== Deploying stack ==="
-npx cdk deploy --all --require-approval never
+npx cdk deploy $STACKS --require-approval never
 
 echo ""
 echo "=== Infrastructure deployment complete ==="
 echo ""
-echo "Next steps:"
-echo "1. Run ./scripts/deploy-api.sh to build and push the API image"
-echo "2. Run ./scripts/run-migrations.sh to initialize the database"
-echo "3. Run ./scripts/deploy-ui.sh to deploy the UI"
+if [ "$STACKS" = "StardagFoundation" ]; then
+    echo "Foundation stack deployed. Next steps:"
+    echo "1. Run ./scripts/deploy-api.sh --skip-update to build and push the API image"
+    echo "2. Run ./scripts/deploy-infra.sh --all to deploy remaining stacks"
+    echo "3. Run ./scripts/run-migrations.sh to initialize the database"
+    echo "4. Run ./scripts/update-api-service.sh to start the API"
+else
+    echo "All infrastructure deployed."
+fi
