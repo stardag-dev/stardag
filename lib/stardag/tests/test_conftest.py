@@ -15,7 +15,7 @@ def test_default_local_target_tmp_path(default_local_target_tmp_path: Path):
     assert target_factory.prefixt_to_target_prototype["/"] == LocalTarget
     assert target_factory.target_roots["default"] == str(tmp_path) + "/"
     key = "mock/target.txt"
-    target = get_target(key, task=None)
+    target = get_target(key)
     assert isinstance(target, LocalTarget)
     assert target.path == str(tmp_path / key)
 
@@ -39,7 +39,7 @@ def test_default_in_memory_target(
     )
     assert target_factory.target_roots["default"] == default_in_memory_fs_target_prefix
     key = "mock/target.txt"
-    target = get_target(key, task=None)
+    target = get_target(key)
     assert isinstance(target, InMemoryFileSystemTarget)
     assert target.path == default_in_memory_fs_target_prefix + key
 

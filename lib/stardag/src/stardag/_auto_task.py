@@ -143,6 +143,6 @@ class AutoTask(
 
     def output(self) -> LoadableSaveableFileSystemTarget[LoadedT]:
         return Serializable(
-            wrapped=get_target(self._relpath, task=self),
+            wrapped=get_target(self._relpath),
             serializer=self._serializer,
         )

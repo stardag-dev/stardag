@@ -58,7 +58,7 @@ def base_task_api(limit: int) -> sd.TaskLoads[int]:
 
         def output(self) -> LoadableSaveableFileSystemTarget[list[int]]:
             return Serializable(
-                wrapped=sd.get_target(default_relpath(self), task=self),
+                wrapped=sd.get_target(default_relpath(self)),
                 serializer=JSONSerializer(list[int]),
             )
 
@@ -73,7 +73,7 @@ def base_task_api(limit: int) -> sd.TaskLoads[int]:
 
         def output(self) -> LoadableSaveableFileSystemTarget[int]:
             return Serializable(
-                wrapped=sd.get_target(default_relpath(self), task=self),
+                wrapped=sd.get_target(default_relpath(self)),
                 serializer=JSONSerializer(int),
             )
 
