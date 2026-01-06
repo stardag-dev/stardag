@@ -1,4 +1,7 @@
-import type { Task } from "../types/task";
+import { useEffect, useState } from "react";
+import { fetchTaskAssets } from "../api/tasks";
+import type { Task, TaskAsset } from "../types/task";
+import { AssetList } from "./AssetViewer";
 import { StatusBadge } from "./StatusBadge";
 
 interface TaskDetailProps {
@@ -7,6 +10,38 @@ interface TaskDetailProps {
 }
 
 export function TaskDetail({ task, onClose }: TaskDetailProps) {
+  const [assets, setAssets] = useState<TaskAsset[]>([]);
+  const [assetsLoading, setAssetsLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAssets() {
+      setAssetsLoading(true);
+      try {
+        const response = await fetchTaskAssets(task.task_id);
+        if (!cancelled) {
+          setAssets(response.assets);
+        }
+      } catch (error) {
+        console.error("Failed to load task assets:", error);
+        if (!cancelled) {
+          setAssets([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setAssetsLoading(false);
+        }
+      }
+    }
+
+    loadAssets();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [task.task_id]);
+
   return (
     <div className="h-full overflow-auto bg-white dark:bg-gray-800 p-4">
       {/* Header */}
@@ -109,6 +144,15 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
             {JSON.stringify(task.task_data, null, 2)}
           </pre>
         </div>
+
+        {/* Assets */}
+        {assetsLoading ? (
+          <div className="text-sm text-gray-500 dark:text-gray-400">
+            Loading assets...
+          </div>
+        ) : (
+          <AssetList assets={assets} />
+        )}
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ from collections import abc as collections_abc
 from dataclasses import dataclass
 from functools import cached_property, total_ordering
 from typing import (
+    TYPE_CHECKING,
     Any,
     ClassVar,
     Generator,
@@ -13,6 +14,10 @@ from typing import (
     Mapping,
     Sequence,
 )
+
+if TYPE_CHECKING:
+    from stardag._registry_asset import RegistryAsset
+
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, SerializationInfo
@@ -67,6 +72,21 @@ class BaseTask(
 
     def requires(self) -> TaskStruct | None:
         return None
+
+    def registry_assets(self) -> list["RegistryAsset"]:
+        """Return assets to be stored in the registry after task completion.
+
+        Override this method to expose rich outputs (reports, summaries,
+        structured data) that will be viewable in the registry UI.
+
+        This method is called after the task completes successfully. It should
+        be stateless - loading any required data from the task's target rather
+        than relying on in-memory state.
+
+        Returns:
+            List of registry assets (MarkdownRegistryAsset, JSONRegistryAsset, etc.)
+        """
+        return []
 
     @classmethod
     def has_dynamic_deps(cls) -> bool:

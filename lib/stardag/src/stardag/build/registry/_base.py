@@ -15,6 +15,7 @@ from stardag.polymorphic import SubClass
 from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
+    from stardag._registry_asset import RegistryAsset
     from stardag._task import BaseTask
 
 
@@ -102,6 +103,19 @@ class RegistryABC(metaclass=abc.ABCMeta):
         Args:
             task: The task that failed
             error_message: Optional error message describing the failure
+        """
+        pass
+
+    def upload_task_assets(
+        self, task: "BaseTask", assets: list["RegistryAsset"]
+    ) -> None:
+        """Upload assets for a completed task.
+
+        Called after a task completes successfully if it has registry assets.
+
+        Args:
+            task: The completed task
+            assets: List of assets to upload
         """
         pass
 

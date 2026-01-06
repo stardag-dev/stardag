@@ -3,6 +3,11 @@ from importlib.metadata import PackageNotFoundError, version
 from stardag._auto_task import AutoTask
 from stardag._decorator import Depends, task
 from stardag._hashable_set import HashableSet, HashSafeSetSerializer
+from stardag._registry_asset import (
+    JSONRegistryAsset,
+    MarkdownRegistryAsset,
+    RegistryAsset,
+)
 from stardag._task import (
     BaseTask,
     Task,
@@ -55,10 +60,13 @@ __all__ = [
     "get_target",
     "HashableSet",
     "HashSafeSetSerializer",
+    "JSONRegistryAsset",
     "LocalTarget",
+    "MarkdownRegistryAsset",
     "namespace",
     "Polymorphic",
     "registry_provider",
+    "RegistryAsset",
     "StardagError",
     "StardagBaseModel",
     "StardagField",

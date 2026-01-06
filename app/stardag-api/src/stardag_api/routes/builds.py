@@ -17,6 +17,7 @@ from stardag_api.models import (
     EventType,
     Task,
     TaskDependency,
+    TaskRegistryAsset,
     TaskStatus,
 )
 from stardag_api.schemas import (
@@ -28,6 +29,9 @@ from stardag_api.schemas import (
     TaskEdge,
     TaskGraphResponse,
     TaskNode,
+    TaskRegistryAssetCreate,
+    TaskRegistryAssetListResponse,
+    TaskRegistryAssetResponse,
     TaskResponse,
     TaskWithStatusResponse,
 )
@@ -543,6 +547,94 @@ async def fail_task(
         completed_at=completed_at,
         error_message=err_msg,
     )
+
+
+@router.post(
+    "/{build_id}/tasks/{task_id}/assets",
+    response_model=TaskRegistryAssetListResponse,
+    status_code=201,
+)
+async def upload_task_registry_assets(
+    build_id: str,
+    task_id: str,
+    assets: list[TaskRegistryAssetCreate],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Upload registry assets for a completed task.
+
+    Assets are rich outputs like markdown reports or JSON data that
+    can be viewed in the UI.
+
+    Body format:
+    - For markdown: {"content": "<markdown string>"}
+    - For json: the actual JSON data dict
+    """
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
+
+    # Find task by task_id (hash) in workspace
+    result = await db.execute(
+        select(Task)
+        .where(Task.workspace_id == build.workspace_id)
+        .where(Task.task_id == task_id)
+    )
+    db_task = result.scalar_one_or_none()
+    if not db_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    created_assets = []
+    for asset in assets:
+        # Check if asset with same type and name already exists
+        existing_result = await db.execute(
+            select(TaskRegistryAsset)
+            .where(TaskRegistryAsset.task_pk == db_task.id)
+            .where(TaskRegistryAsset.asset_type == asset.type)
+            .where(TaskRegistryAsset.name == asset.name)
+        )
+        existing_asset = existing_result.scalar_one_or_none()
+
+        if existing_asset:
+            # Update existing asset
+            existing_asset.body_json = asset.body
+            db_asset = existing_asset
+        else:
+            # Create new asset
+            db_asset = TaskRegistryAsset(
+                task_pk=db_task.id,
+                workspace_id=build.workspace_id,
+                asset_type=asset.type,
+                name=asset.name,
+                body_json=asset.body,
+            )
+            db.add(db_asset)
+
+        await db.flush()
+        created_assets.append(db_asset)
+
+    await db.commit()
+
+    # Build response
+    asset_responses = [
+        TaskRegistryAssetResponse(
+            id=db_asset.id,
+            task_id=db_task.task_id,
+            asset_type=db_asset.asset_type,
+            name=db_asset.name,
+            body=db_asset.body_json,
+            created_at=db_asset.created_at,
+        )
+        for db_asset in created_assets
+    ]
+
+    return TaskRegistryAssetListResponse(assets=asset_responses)
 
 
 @router.get("/{build_id}/tasks", response_model=list[TaskWithStatusResponse])

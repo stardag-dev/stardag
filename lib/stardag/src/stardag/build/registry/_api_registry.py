@@ -2,6 +2,7 @@
 
 import logging
 
+from stardag._registry_asset import RegistryAsset
 from stardag._task import BaseTask, flatten_task_struct
 from stardag.build.registry._base import RegistryABC, get_git_commit_hash
 from stardag.config import config_provider
@@ -298,6 +299,35 @@ class APIRegistry(RegistryABC):
             params=params,
         )
         self._handle_response_error(response, f"Fail task {task.id}")
+
+    def upload_task_assets(self, task: BaseTask, assets: list[RegistryAsset]) -> None:
+        """Upload assets for a completed task."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot upload task assets")
+            return
+
+        if not assets:
+            return
+
+        # Serialize assets to API format
+        # For all asset types, body is stored as a dict in body_json
+        # - markdown: {"content": "<markdown string>"}
+        # - json: the actual JSON data dict
+        assets_data = []
+        for asset in assets:
+            data = asset.model_dump(mode="json")
+            if asset.type == "markdown":
+                # Wrap markdown body string in {"content": ...} dict
+                data["body"] = {"content": data["body"]}
+            assets_data.append(data)
+
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/assets",
+            json=assets_data,
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Upload assets for task {task.id}")
+        logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
 
     def close(self) -> None:
         """Close the HTTP client."""
