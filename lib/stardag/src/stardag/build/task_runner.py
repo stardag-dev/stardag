@@ -20,9 +20,7 @@ class TaskRunner:
         self.registry = registry or NoOpRegistry()
 
     def run(self, task: BaseTask) -> typing.Generator[TaskStruct, None, None] | None:
-        # Notify registry that task is starting
-        if hasattr(self.registry, "start"):
-            self.registry.start(task)  # type: ignore
+        self.registry.start_task(task)
 
         if self.before_run_callback is not None:
             self.before_run_callback(task)
@@ -36,10 +34,7 @@ class TaskRunner:
                 return res
 
             # Task completed successfully
-            if hasattr(self.registry, "complete"):
-                self.registry.complete(task)  # type: ignore
-            else:
-                self.registry.register(task)
+            self.registry.complete_task(task)
 
             if self.on_complete_callback is not None:
                 self.on_complete_callback(task)
@@ -48,8 +43,7 @@ class TaskRunner:
 
         except Exception as e:
             # Task failed
-            if hasattr(self.registry, "fail"):
-                self.registry.fail(task, str(e))  # type: ignore
+            self.registry.fail_task(task, str(e))
             raise
 
     def _run_task(
@@ -72,9 +66,7 @@ class AsyncTaskRunner:
     async def run(
         self, task: BaseTask
     ) -> typing.Generator[TaskStruct, None, None] | None:
-        # Notify registry that task is starting
-        if hasattr(self.registry, "start"):
-            self.registry.start(task)  # type: ignore
+        self.registry.start_task(task)
 
         if self.before_run_callback is not None:
             await self.before_run_callback(task)
@@ -92,10 +84,7 @@ class AsyncTaskRunner:
                 return res
 
             # Task completed successfully
-            if hasattr(self.registry, "complete"):
-                self.registry.complete(task)  # type: ignore
-            else:
-                self.registry.register(task)
+            self.registry.complete_task(task)
 
             if self.on_complete_callback is not None:
                 await self.on_complete_callback(task)
@@ -104,8 +93,7 @@ class AsyncTaskRunner:
 
         except Exception as e:
             # Task failed
-            if hasattr(self.registry, "fail"):
-                self.registry.fail(task, str(e))  # type: ignore
+            self.registry.fail_task(task, str(e))
             raise
 
     async def _run_task(

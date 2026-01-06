@@ -3,7 +3,7 @@
 import logging
 
 from stardag._task import BaseTask, flatten_task_struct
-from stardag.build.registry import RegistryABC, get_git_commit_hash
+from stardag.build.registry._base import RegistryABC, get_git_commit_hash
 from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
@@ -232,7 +232,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Fail build")
         logger.info(f"Marked build as failed: {self._build_id}")
 
-    def register(self, task: BaseTask) -> None:
+    def register_task(self, task: BaseTask) -> None:
         """Register a task with the API service within the current build."""
         if self._build_id is None:
             # Auto-start a build if none exists
@@ -257,14 +257,14 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Register task {task.id}")
 
-    def start(self, task: BaseTask) -> None:
+    def start_task(self, task: BaseTask) -> None:
         """Mark a task as started within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot start task")
             return
 
         # Ensure task is registered first
-        self.register(task)
+        self.register_task(task)
 
         response = self.client.post(
             f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/start",
@@ -272,7 +272,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Start task {task.id}")
 
-    def complete(self, task: BaseTask) -> None:
+    def complete_task(self, task: BaseTask) -> None:
         """Mark a task as completed within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot complete task")
@@ -284,7 +284,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Complete task {task.id}")
 
-    def fail(self, task: BaseTask, error_message: str | None = None) -> None:
+    def fail_task(self, task: BaseTask, error_message: str | None = None) -> None:
         """Mark a task as failed within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot fail task")
