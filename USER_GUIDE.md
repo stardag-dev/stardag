@@ -78,7 +78,7 @@ class Range(sd.Task[LoadableSaveableFileSystemTarget[list[int]]]):
 
     def output(self) -> LoadableSaveableFileSystemTarget[list[int]]:
         return Serializable(
-            wrapped=sd.get_target(default_relpath(self), task=self),
+            wrapped=sd.get_target(default_relpath(self)),
             serializer=JSONSerializer(list[int]),
         )
 
@@ -93,7 +93,7 @@ class Sum(sd.Task[LoadableSaveableFileSystemTarget[int]]):
 
     def output(self) -> LoadableSaveableFileSystemTarget[int]:
         return Serializable(
-            wrapped=sd.get_target(default_relpath(self), task=self),
+            wrapped=sd.get_target(default_relpath(self)),
             serializer=JSONSerializer(int),
         )
 
@@ -137,7 +137,7 @@ import stardag as sd
 class MyTask(sd.Task[sd.FileSystemTarget]):
     # ...
     def output(self):
-        return sd.get_target(relpath="...", task=self)
+        return sd.get_target(relpath="...")
 
 ```
 

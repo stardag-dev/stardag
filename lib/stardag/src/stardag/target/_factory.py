@@ -1,7 +1,6 @@
 import json
 import typing
 
-from stardag._task import BaseTask
 from stardag.config import DEFAULT_TARGET_ROOT_KEY, config_provider
 from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
 from stardag.target._base import RemoteFileSystemTarget
@@ -63,7 +62,6 @@ class TargetFactory:
     def get_target(
         self,
         relpath: str,
-        task: BaseTask | None = None,  # noqa
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
     ) -> FileSystemTarget:
         """Get a file system target.
@@ -71,10 +69,7 @@ class TargetFactory:
         Args:
             relpath: The path to the target, relative to the configured root path for
               `target_root_key`.
-            task: The task that will use the target. NOTE: this can be used to for
-              advanced configuration of targets, such as in-memory/local disk caching
-              etc.
-            target_root: The key to the target root to use.
+            target_root_key: The key to the target root to use.
 
         Returns:
             A file system target.
@@ -89,7 +84,6 @@ class TargetFactory:
     def get_directory_target(
         self,
         relpath: str,
-        task: BaseTask | None = None,  # noqa
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
     ) -> DirectoryTarget:
         """Get a directory target.
@@ -97,10 +91,7 @@ class TargetFactory:
         Args:
             relpath: The path to the target, relative to the configured root path for
               `target_root_key`.
-            task: The task that will use the target. NOTE: this can be used to for
-              advanced configuration of targets, such as in-memory/local disk caching
-              etc.
-            target_root: The key to the target root to use.
+            target_root_key: The key to the target root to use.
 
         Returns:
             A directory target.
@@ -153,23 +144,19 @@ target_factory_provider = resource_provider(
 
 def get_target(
     relpath: str,
-    task: BaseTask | None = None,
     target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
 ) -> FileSystemTarget:
     return target_factory_provider.get().get_target(
         relpath=relpath,
-        task=task,
         target_root_key=target_root_key,
     )
 
 
 def get_directory_target(
     relpath: str,
-    task: BaseTask | None = None,
     target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
 ) -> DirectoryTarget:
     return target_factory_provider.get().get_directory_target(
         relpath=relpath,
-        task=task,
         target_root_key=target_root_key,
     )
