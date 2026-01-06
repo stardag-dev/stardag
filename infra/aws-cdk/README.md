@@ -75,13 +75,21 @@ For direct database access, deploy the optional bastion stack:
 # Deploy bastion
 npx cdk deploy StardagBastion --profile stardag
 
-# Connect via SSM (no SSH keys needed)
+# The stack outputs commands - run them in order:
+# 1. Allow bastion to access DB (run the Step1_AllowDBAccess output)
+aws ec2 authorize-security-group-ingress --group-id <db-sg-id> --protocol tcp --port 5432 --source-group <bastion-sg-id> --profile stardag
+
+# 2. Connect via SSM (run the Step2_Connect output)
 aws ssm start-session --target <instance-id> --profile stardag
 
-# Once connected, access the database:
+# 3. Once connected, access the database (run the Step3_AccessDB output):
 psql -h <db-endpoint> -U stardag_admin -d stardag
 
-# Destroy when done (saves costs)
+# 4. When done, clean up and destroy:
+# First revoke DB access (run the Cleanup_RevokeDBAccess output)
+aws ec2 revoke-security-group-ingress --group-id <db-sg-id> --protocol tcp --port 5432 --source-group <bastion-sg-id> --profile stardag
+
+# Then destroy the stack
 npx cdk destroy StardagBastion --profile stardag
 ```
 
@@ -90,6 +98,7 @@ The bastion host:
 - Uses SSM Session Manager (no inbound ports, no SSH keys)
 - Has PostgreSQL 16 client pre-installed
 - Runs t3.micro (minimal cost)
+- Requires manual security group rule (outputs the commands)
 - Should be destroyed when not in use
 
 ### Run Ad-hoc Database Commands

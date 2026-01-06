@@ -54,7 +54,9 @@ frontend.addDependency(foundation);
 // =============================================================
 const bastion = new BastionStack(app, "StardagBastion", {
   env,
-  foundation,
+  vpc: foundation.vpc,
+  dbEndpoint: foundation.dbClusterEndpoint,
+  dbSecurityGroupId: foundation.dbSecurityGroup.securityGroupId,
   description: "Stardag Bastion - Optional EC2 host for database access via SSM",
 });
 bastion.addDependency(foundation);

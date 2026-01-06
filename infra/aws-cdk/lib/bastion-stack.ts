@@ -2,10 +2,22 @@ import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import { Construct } from "constructs";
 import { StardagBastion } from "./constructs/bastion";
-import { FoundationStack } from "./foundation-stack";
 
 export interface BastionStackProps extends cdk.StackProps {
-  foundation: FoundationStack;
+  /**
+   * VPC to deploy the bastion in
+   */
+  vpc: ec2.IVpc;
+
+  /**
+   * Database endpoint for connection string
+   */
+  dbEndpoint: string;
+
+  /**
+   * Database security group ID (for manual setup instructions)
+   */
+  dbSecurityGroupId: string;
 }
 
 /**
@@ -14,42 +26,39 @@ export interface BastionStackProps extends cdk.StackProps {
  * This stack is deployed separately and can be destroyed when not needed
  * to save costs. Uses SSM Session Manager for secure access (no SSH keys).
  *
- * Deploy: npx cdk deploy StardagBastion
- * Destroy: npx cdk destroy StardagBastion
- *
- * Usage:
- *   1. Deploy: npx cdk deploy StardagBastion
- *   2. Connect: aws ssm start-session --target <instance-id>
- *   3. Access DB: psql -h <db-endpoint> -U stardag_admin -d stardag
- *   4. Destroy when done: npx cdk destroy StardagBastion
+ * After deployment, you must add an ingress rule to the DB security group
+ * to allow the bastion to connect. This is output by the stack.
  */
 export class BastionStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: BastionStackProps) {
     super(scope, id, props);
 
-    const { foundation } = props;
+    const { vpc, dbEndpoint, dbSecurityGroupId } = props;
 
     // Create bastion host
     const bastion = new StardagBastion(this, "Bastion", {
-      vpc: foundation.vpc,
+      vpc,
     });
-
-    // Allow bastion to connect to database
-    foundation.dbSecurityGroup.addIngressRule(
-      bastion.securityGroup,
-      ec2.Port.tcp(5432),
-      "Allow bastion host to connect to database",
-    );
 
     // Output connection instructions
-    new cdk.CfnOutput(this, "ConnectionInstructions", {
-      value: `aws ssm start-session --target ${bastion.instance.instanceId}`,
-      description: "Command to connect to bastion host",
+    new cdk.CfnOutput(this, "Step1_AllowDBAccess", {
+      value: `aws ec2 authorize-security-group-ingress --group-id ${dbSecurityGroupId} --protocol tcp --port 5432 --source-group ${bastion.securityGroup.securityGroupId}`,
+      description: "Run this command to allow bastion to access database",
     });
 
-    new cdk.CfnOutput(this, "DatabaseConnection", {
-      value: `psql -h ${foundation.dbClusterEndpoint} -U stardag_admin -d stardag`,
-      description: "Command to connect to database from bastion",
+    new cdk.CfnOutput(this, "Step2_Connect", {
+      value: `aws ssm start-session --target ${bastion.instance.instanceId}`,
+      description: "Connect to bastion via SSM",
+    });
+
+    new cdk.CfnOutput(this, "Step3_AccessDB", {
+      value: `psql -h ${dbEndpoint} -U stardag_admin -d stardag`,
+      description: "Run this command on the bastion to access the database",
+    });
+
+    new cdk.CfnOutput(this, "Cleanup_RevokeDBAccess", {
+      value: `aws ec2 revoke-security-group-ingress --group-id ${dbSecurityGroupId} --protocol tcp --port 5432 --source-group ${bastion.securityGroup.securityGroupId}`,
+      description: "Run this before destroying the stack to clean up the SG rule",
     });
   }
 }
