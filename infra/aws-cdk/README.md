@@ -12,12 +12,12 @@ AWS CDK infrastructure for deploying Stardag SAAS application.
 
 ## Stacks
 
-| Stack             | Description                            | Deployed by default |
-| ----------------- | -------------------------------------- | ------------------- |
-| StardagFoundation | VPC, Database, Cognito, ECR, DNS/Certs | Yes                 |
-| StardagApi        | ECS Fargate service + ALB              | Yes                 |
-| StardagFrontend   | S3 + CloudFront for static UI          | Yes                 |
-| StardagBastion    | EC2 bastion host for database access   | No (opt-in)         |
+| Stack             | Description                            | Deployed by default   |
+| ----------------- | -------------------------------------- | --------------------- |
+| StardagFoundation | VPC, Database, Cognito, ECR, DNS/Certs | Yes                   |
+| StardagApi        | ECS Fargate service + ALB              | Yes                   |
+| StardagFrontend   | S3 + CloudFront for static UI          | Yes                   |
+| StardagBastion    | EC2 bastion for database access        | No (deploy on-demand) |
 
 ## Deployment
 
