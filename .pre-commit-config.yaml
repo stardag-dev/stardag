@@ -16,7 +16,7 @@ repos:
     hooks:
       - id: pyright-stardag
         name: pyright (lib/stardag)
-        entry: bash -c 'cd lib/stardag && uv run pyright src tests'
+        entry: bash -c 'cd lib/stardag && uv sync --all-extras && uv run pyright src tests'
         language: system
         files: ^lib/stardag/
         types: [python]
@@ -24,7 +24,7 @@ repos:
         verbose: true
       - id: pyright-stardag-examples
         name: pyright (lib/stardag-examples)
-        entry: bash -c 'cd lib/stardag-examples && uv run pyright src tests'
+        entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv run pyright src tests'
         language: system
         files: ^lib/stardag-examples/
         types: [python]
@@ -32,7 +32,7 @@ repos:
         verbose: true
       - id: pyright-stardag-api
         name: pyright (app/stardag-api)
-        entry: bash -c 'cd app/stardag-api && uv run pyright src tests'
+        entry: bash -c 'cd app/stardag-api && uv sync --all-extras && uv run pyright src tests'
         language: system
         files: ^app/stardag-api/
         types: [python]

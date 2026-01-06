@@ -124,7 +124,7 @@ Once authenticated, configure the SDK to use the API registry:
 
 ```python
 import stardag as sd
-from stardag.build.api_registry import APIRegistry
+from stardag.build.registry import APIRegistry
 
 # Create registry (uses credentials from env var or CLI login)
 registry = APIRegistry(api_url="http://localhost:8000")

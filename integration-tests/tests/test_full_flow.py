@@ -385,7 +385,7 @@ class TestSDKBuildWorkflow:
         import tempfile
 
         import stardag as sd
-        from stardag.build.api_registry import APIRegistry
+        from stardag.build.registry import APIRegistry
         from stardag.config import config_provider
         from stardag.target import target_factory_provider
 
@@ -504,7 +504,7 @@ class TestSDKBuildWorkflow:
         import tempfile
 
         import stardag as sd
-        from stardag.build.api_registry import APIRegistry
+        from stardag.build.registry import APIRegistry
         from stardag.config import config_provider
         from stardag.target import target_factory_provider
 
