@@ -860,12 +860,12 @@ def login(
     # Select organization
     if len(organizations) == 1:
         org = organizations[0]
-        typer.echo(f"Using organization: {org['name']} ({org['slug']})")
+        typer.echo(f'Using organization: "{org["name"]}" (/{org["slug"]})')
     else:
         typer.echo("")
         typer.echo("Select an organization:")
         for i, org in enumerate(organizations):
-            typer.echo(f"  {i + 1}. {org['name']} ({org['slug']})")
+            typer.echo(f'  {i + 1}. "{org["name"]}" (/{org["slug"]})')
 
         choice = typer.prompt("Enter number", type=int, default=1)
         if choice < 1 or choice > len(organizations):
@@ -909,13 +909,12 @@ def login(
     # Select workspace
     if len(workspaces) == 1:
         ws = workspaces[0]
-        typer.echo(f"Using workspace: {ws['name']} ({ws['slug']})")
+        typer.echo(f'Using workspace: "{ws["name"]}" (/{ws["slug"]})')
     else:
         typer.echo("")
         typer.echo("Select a workspace:")
         for i, ws in enumerate(workspaces):
-            personal = " (personal)" if ws.get("owner_id") else ""
-            typer.echo(f"  {i + 1}. {ws['name']} ({ws['slug']}){personal}")
+            typer.echo(f'  {i + 1}. "{ws["name"]}" (/{ws["slug"]})')
 
         choice = typer.prompt("Enter number", type=int, default=1)
         if choice < 1 or choice > len(workspaces):
