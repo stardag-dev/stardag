@@ -173,29 +173,30 @@ def profile_add(
         typer.echo("Add it with: stardag config registry add <name> --url <url>")
         raise typer.Exit(1)
 
-    # Try to resolve and cache organization slug -> ID
+    # Resolve and cache organization slug -> ID
     # This validates the slug exists and populates the cache
     org_id = resolve_org_slug_to_id(registry, organization, user)
     if org_id is None:
         typer.echo(
-            f"Warning: Could not verify organization '{organization}'. "
+            f"Error: Could not verify organization '{organization}'. "
             "Run 'stardag auth login' first or check the slug.",
             err=True,
         )
+        raise typer.Exit(1)
     elif org_id != organization:
         typer.echo(f"Verified organization '{organization}' (cached ID)")
 
-    # Try to resolve and cache workspace slug -> ID
-    if org_id:
-        workspace_id = resolve_workspace_slug_to_id(registry, org_id, workspace, user)
-        if workspace_id is None:
-            typer.echo(
-                f"Warning: Could not verify workspace '{workspace}'. "
-                "Run 'stardag auth login' first or check the slug.",
-                err=True,
-            )
-        elif workspace_id != workspace:
-            typer.echo(f"Verified workspace '{workspace}' (cached ID)")
+    # Resolve and cache workspace slug -> ID
+    workspace_id = resolve_workspace_slug_to_id(registry, org_id, workspace, user)
+    if workspace_id is None:
+        typer.echo(
+            f"Error: Could not verify workspace '{workspace}'. "
+            "Run 'stardag auth login' first or check the slug.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    elif workspace_id != workspace:
+        typer.echo(f"Verified workspace '{workspace}' (cached ID)")
 
     # Store slugs in profile (not IDs) for readability
     add_profile(name, registry, organization, workspace, user)
@@ -206,18 +207,17 @@ def profile_add(
         set_default_profile(name)
         typer.echo("Set as default profile.")
 
-        # Auto-refresh access token (needs resolved org_id)
-        if org_id:
-            typer.echo("Refreshing access token...")
-            token = ensure_access_token(registry, org_id, user)
-            if token:
-                typer.echo("Access token refreshed successfully.")
-            else:
-                typer.echo(
-                    "Warning: Could not refresh access token. "
-                    "Run 'stardag auth refresh' to authenticate.",
-                    err=True,
-                )
+        # Auto-refresh access token
+        typer.echo("Refreshing access token...")
+        token = ensure_access_token(registry, org_id, user)
+        if token:
+            typer.echo("Access token refreshed successfully.")
+        else:
+            typer.echo(
+                "Warning: Could not refresh access token. "
+                "Run 'stardag auth refresh' to authenticate.",
+                err=True,
+            )
 
     typer.echo("")
     typer.echo(f"Use with: STARDAG_PROFILE={name}")
