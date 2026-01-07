@@ -360,6 +360,241 @@ class TestCrossComponentFlow:
         assert jwt_build_id in build_ids
 
 
+class TestTaskAssetsWorkflow:
+    """Test task registry assets workflow.
+
+    These tests verify:
+    1. Uploading assets via API key (SDK flow)
+    2. Fetching assets via JWT (UI flow) - requires workspace_id
+    3. Asset visibility across auth methods
+    """
+
+    def test_upload_and_fetch_assets_via_api_key(
+        self,
+        internal_authenticated_client: httpx.Client,
+        docker_services: ServiceEndpoints,
+        test_organization_id: str,
+        test_workspace_id: str,
+    ) -> None:
+        """Test uploading and fetching assets using API key."""
+        # Create an API key
+        response = internal_authenticated_client.post(
+            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/workspaces/{test_workspace_id}/api-keys",
+            json={"name": "Asset Test Key"},
+        )
+        assert response.status_code == 201
+        api_key = response.json()["key"]
+
+        # Create a build
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds",
+            headers={"X-API-Key": api_key},
+            json={"description": "Build with assets"},
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+        build_id = response.json()["id"]
+
+        # Register a task
+        task_id = "asset-test-task-001"
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
+            headers={"X-API-Key": api_key},
+            json={
+                "task_id": task_id,
+                "task_name": "AssetTestTask",
+                "task_namespace": "asset_tests",
+                "task_data": {"param": "value"},
+            },
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+
+        # Upload assets
+        assets = [
+            {
+                "type": "markdown",
+                "name": "report",
+                "body": {"content": "# Test Report\n\nThis is a test report."},
+            },
+            {
+                "type": "json",
+                "name": "metrics",
+                "body": {"accuracy": 0.95, "loss": 0.05},
+            },
+        ]
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks/{task_id}/assets",
+            headers={"X-API-Key": api_key},
+            json=assets,
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+        uploaded = response.json()
+        assert len(uploaded["assets"]) == 2
+
+        # Fetch assets using API key
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/tasks/{task_id}/assets",
+            headers={"X-API-Key": api_key},
+            timeout=30.0,
+        )
+        assert response.status_code == 200
+        fetched = response.json()
+        assert len(fetched["assets"]) == 2
+
+        # Verify asset content
+        asset_by_name = {a["name"]: a for a in fetched["assets"]}
+        assert asset_by_name["report"]["asset_type"] == "markdown"
+        assert asset_by_name["report"]["body"]["content"].startswith("# Test Report")
+        assert asset_by_name["metrics"]["asset_type"] == "json"
+        assert asset_by_name["metrics"]["body"]["accuracy"] == 0.95
+
+    def test_fetch_assets_via_jwt_requires_workspace_id(
+        self,
+        internal_authenticated_client: httpx.Client,
+        docker_services: ServiceEndpoints,
+        test_organization_id: str,
+        test_workspace_id: str,
+        internal_token: str,
+    ) -> None:
+        """Test that fetching assets with JWT requires workspace_id.
+
+        This is the critical test for the UI flow - JWT auth requires
+        workspace_id to be passed as a query parameter.
+        """
+        # Create an API key for setup
+        response = internal_authenticated_client.post(
+            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/workspaces/{test_workspace_id}/api-keys",
+            json={"name": "JWT Asset Test Key"},
+        )
+        assert response.status_code == 201
+        api_key = response.json()["key"]
+
+        # Create build, task, and upload asset using API key
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds",
+            headers={"X-API-Key": api_key},
+            json={"description": "Build for JWT asset test"},
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+        build_id = response.json()["id"]
+
+        task_id = "jwt-asset-test-task"
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
+            headers={"X-API-Key": api_key},
+            json={
+                "task_id": task_id,
+                "task_name": "JwtAssetTestTask",
+                "task_namespace": "jwt_tests",
+                "task_data": {},
+            },
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+
+        # Upload an asset
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks/{task_id}/assets",
+            headers={"X-API-Key": api_key},
+            json=[{"type": "json", "name": "data", "body": {"key": "value"}}],
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+
+        # Try to fetch assets with JWT but WITHOUT workspace_id - should fail
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/tasks/{task_id}/assets",
+            headers={"Authorization": f"Bearer {internal_token}"},
+            timeout=30.0,
+        )
+        assert response.status_code == 400, (
+            f"Expected 400 when workspace_id is missing with JWT, got {response.status_code}"
+        )
+        assert "workspace_id" in response.text.lower()
+
+        # Fetch with workspace_id - should succeed
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/tasks/{task_id}/assets",
+            headers={"Authorization": f"Bearer {internal_token}"},
+            params={"workspace_id": test_workspace_id},
+            timeout=30.0,
+        )
+        assert response.status_code == 200, f"Failed with workspace_id: {response.text}"
+        fetched = response.json()
+        assert len(fetched["assets"]) == 1
+        assert fetched["assets"][0]["name"] == "data"
+
+    def test_assets_visible_across_auth_methods(
+        self,
+        internal_authenticated_client: httpx.Client,
+        docker_services: ServiceEndpoints,
+        test_organization_id: str,
+        test_workspace_id: str,
+        internal_token: str,
+    ) -> None:
+        """Test that assets uploaded via API key are visible via JWT and vice versa."""
+        # Create an API key
+        response = internal_authenticated_client.post(
+            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/workspaces/{test_workspace_id}/api-keys",
+            json={"name": "Cross-Auth Asset Key"},
+        )
+        assert response.status_code == 201
+        api_key = response.json()["key"]
+
+        # Create build and task
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds",
+            headers={"X-API-Key": api_key},
+            json={"description": "Cross-auth asset test"},
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+        build_id = response.json()["id"]
+
+        task_id = "cross-auth-asset-task"
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
+            headers={"X-API-Key": api_key},
+            json={
+                "task_id": task_id,
+                "task_name": "CrossAuthTask",
+                "task_namespace": "cross_auth_tests",
+                "task_data": {},
+            },
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+
+        # Upload asset with API key
+        response = httpx.post(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks/{task_id}/assets",
+            headers={"X-API-Key": api_key},
+            json=[
+                {"type": "json", "name": "api-key-asset", "body": {"source": "api_key"}}
+            ],
+            timeout=30.0,
+        )
+        assert response.status_code == 201
+
+        # Verify visible via JWT (with workspace_id)
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/tasks/{task_id}/assets",
+            headers={"Authorization": f"Bearer {internal_token}"},
+            params={"workspace_id": test_workspace_id},
+            timeout=30.0,
+        )
+        assert response.status_code == 200
+        assets = response.json()["assets"]
+        assert len(assets) == 1
+        assert assets[0]["body"]["source"] == "api_key"
+
+
 class TestSDKBuildWorkflow:
     """Test building DAGs using the stardag SDK with the API registry.
 
