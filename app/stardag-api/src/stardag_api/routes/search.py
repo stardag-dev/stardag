@@ -71,7 +71,11 @@ def parse_filter_string(filter_str: str) -> list[tuple[str, str, str]]:
 
 
 def build_jsonb_condition(
-    key: str, operator: str, value: str, task_alias: str = "tasks"
+    key: str,
+    operator: str,
+    value: str,
+    task_alias: str = "tasks",
+    param_suffix: str = "",
 ) -> str | None:
     """Build a SQL condition for JSONB filtering.
 
@@ -94,9 +98,10 @@ def build_jsonb_condition(
     }
 
     if key in core_fields:
+        param_name = f"filter_{key}{param_suffix}"
         if sql_op == "ILIKE":
-            return f"{task_alias}.{key} ILIKE '%' || :filter_{key} || '%'"
-        return f"{task_alias}.{key} {sql_op} :filter_{key}"
+            return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'"
+        return f"{task_alias}.{key} {sql_op} :{param_name}"
 
     # Parameter fields - JSONB access
     if key.startswith("param."):
@@ -119,15 +124,16 @@ def build_jsonb_condition(
                     jsonb_path = f"{jsonb_path}->'{part}'"
 
         safe_key = key.replace(".", "_").replace("[", "_").replace("]", "_")
+        param_name = f"filter_{safe_key}{param_suffix}"
 
         if sql_op == "ILIKE":
-            return f"({jsonb_path}) ILIKE '%' || :filter_{safe_key} || '%'"
+            return f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'"
         elif operator in (">", "<", ">=", "<="):
             # Numeric comparison - cast both sides to float
             # Use CAST() syntax to avoid SQLAlchemy misinterpreting ::float as part of param name
-            return f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} CAST(:filter_{safe_key} AS DOUBLE PRECISION)"
+            return f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} CAST(:{param_name} AS DOUBLE PRECISION)"
         else:
-            return f"({jsonb_path}) {sql_op} :filter_{safe_key}"
+            return f"({jsonb_path}) {sql_op} :{param_name}"
 
     return None
 
@@ -163,12 +169,15 @@ async def search_tasks(
 
     if filter:
         parsed_filters = parse_filter_string(filter)
-        for key, op, value in parsed_filters:
-            condition = build_jsonb_condition(key, op, value, "tasks")
+        for i, (key, op, value) in enumerate(parsed_filters):
+            # Use index suffix to ensure unique parameter names for range queries
+            # e.g., param.x:>:5 and param.x:<:100 need different param names
+            param_suffix = f"_{i}"
+            condition = build_jsonb_condition(key, op, value, "tasks", param_suffix)
             if condition:
                 conditions.append(condition)
                 safe_key = key.replace(".", "_").replace("[", "_").replace("]", "_")
-                filter_params[f"filter_{safe_key}"] = value
+                filter_params[f"filter_{safe_key}{param_suffix}"] = value
 
     # Text search across name and namespace
     if q:
