@@ -93,10 +93,21 @@ def get_local_target_roots_dir() -> Path:
 def _sanitize_user_for_path(user: str) -> str:
     """Sanitize user identifier (email) for use in file paths.
 
-    Replaces @ and other special characters with safe alternatives.
+    Replaces special characters that are problematic in file paths:
+    - @ → _at_ (email separator)
+    - / → _ (Unix path separator)
+    - \\ → _ (Windows path separator)
+    - : → _ (Windows drive separator, macOS resource fork)
+
+    Args:
+        user: User identifier (typically an email address).
+
+    Returns:
+        Sanitized string safe for use in file names across platforms.
     """
-    # Replace common special characters in emails
-    return user.replace("@", "_at_").replace("/", "_").replace("\\", "_")
+    return (
+        user.replace("@", "_at_").replace("/", "_").replace("\\", "_").replace(":", "_")
+    )
 
 
 def get_registry_credentials_path(registry_name: str, user: str | None = None) -> Path:

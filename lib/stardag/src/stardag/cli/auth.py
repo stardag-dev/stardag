@@ -18,6 +18,7 @@ Supported OIDC Providers:
 import base64
 import hashlib
 import http.server
+import logging
 import os
 import secrets
 import socketserver
@@ -58,6 +59,8 @@ from stardag.config import (
     cache_workspace_id,
     get_config,
 )
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(help="Authentication commands for Stardag API")
 
@@ -233,17 +236,25 @@ def _exchange_for_internal_token(
 
 
 def _extract_user_from_oidc_token(token: str) -> str | None:
-    """Extract user email from OIDC access token (JWT).
+    """Extract user email from OIDC access token (JWT) for local use only.
 
-    The token is a JWT with claims including 'email' or 'preferred_username'.
-    We decode only the payload (no signature verification since we just
-    received the token from a trusted source).
+    This function extracts the user identifier (email) from a JWT token that
+    was just received from a trusted OIDC provider. Signature verification is
+    intentionally skipped because:
+    1. The token was obtained directly from the OIDC token endpoint over HTTPS
+    2. This is only used locally to determine credential storage paths
+    3. The token will still be validated by the backend when used
+
+    WARNING: Do not use this function to validate tokens or make authorization
+    decisions. It only extracts claims for local convenience (e.g., determining
+    which credential file to use).
 
     Args:
-        token: OIDC access token (JWT).
+        token: OIDC access token (JWT format: header.payload.signature).
 
     Returns:
-        User email if found in token claims, None otherwise.
+        User email if found in token claims ('email' or 'preferred_username'),
+        None if extraction fails.
     """
     import base64
     import json
@@ -252,20 +263,21 @@ def _extract_user_from_oidc_token(token: str) -> str | None:
         # JWT format: header.payload.signature
         parts = token.split(".")
         if len(parts) != 3:
+            logger.debug("Invalid JWT format: expected 3 parts, got %d", len(parts))
             return None
 
-        # Decode payload (add padding if needed)
+        # Decode payload (add base64 padding if needed)
         payload = parts[1]
-        padding = 4 - len(payload) % 4
-        if padding != 4:
-            payload += "=" * padding
+        missing_padding = (4 - len(payload) % 4) % 4
+        payload += "=" * missing_padding
 
         decoded = base64.urlsafe_b64decode(payload)
         claims = json.loads(decoded)
 
         # Try common claim names for email
         return claims.get("email") or claims.get("preferred_username")
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed to extract user from OIDC token: %s", e)
         return None
 
 
@@ -896,10 +908,32 @@ def login(
         # Include user in profile name if set (for multi-user scenarios)
         if logged_in_user:
             # Use a short version of email for profile name
-            user_part = logged_in_user.split("@")[0]
-            profile_name = (
+            # Handle edge case where email might not contain "@"
+            email_parts = logged_in_user.split("@")
+            user_part = email_parts[0]
+            domain_part = email_parts[1] if len(email_parts) > 1 else None
+            base_profile_name = (
                 f"{effective_registry}-{user_part}-{org_slug}-{workspace_slug}"
             )
+            profile_name = base_profile_name
+
+            # Handle collision: if profile name exists with a different user,
+            # add domain part to disambiguate (e.g., john@work.com vs john@personal.com)
+            if profile_name in profiles:
+                existing_user = profiles[profile_name].get("user")
+                if existing_user != logged_in_user:
+                    if domain_part:
+                        # Use domain to disambiguate
+                        domain_slug = domain_part.split(".")[
+                            0
+                        ]  # e.g., "work" from "work.com"
+                        profile_name = f"{base_profile_name}-{domain_slug}"
+                    # If still collision, add numeric suffix
+                    if profile_name in profiles:
+                        suffix = 2
+                        while f"{profile_name}-{suffix}" in profiles:
+                            suffix += 1
+                        profile_name = f"{profile_name}-{suffix}"
         else:
             profile_name = f"{effective_registry}-{org_slug}-{workspace_slug}"
         add_profile(
