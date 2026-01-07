@@ -4,12 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from stardag._auto_task import AutoTask
-from stardag._task import BaseTask, Task
+from stardag._task import BaseTask, Task, auto_namespace
 from stardag._task_loads import TaskLoads
 from stardag.base_model import StardagField
 from stardag.polymorphic import Polymorphic, SubClass
 from stardag.target import InMemoryTarget, LoadableSaveableTarget, LoadableTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
+
+auto_namespace(__name__)  # Avoid collisions in task registry
 
 # =============================================================================
 # Task classes for testing various generic type scenarios
