@@ -374,11 +374,9 @@ class TestUITaskExplorer:
             page.wait_for_load_state("networkidle")
 
             # Should have a column configuration button
-            column_btn = page.locator("button[title='Configure columns']").or_(
-                page.locator("button:has(svg)")
-            )
-            # At least some buttons should exist
-            assert column_btn.count() >= 0  # Exists in DOM
+            column_btn = page.locator("button[title='Configure columns']")
+            # At least one column configuration button should be visible
+            expect(column_btn.first).to_be_visible()
 
 
 class TestUIResponsiveness:
