@@ -232,6 +232,43 @@ def _exchange_for_internal_token(
         return response.json()
 
 
+def _extract_user_from_oidc_token(token: str) -> str | None:
+    """Extract user email from OIDC access token (JWT).
+
+    The token is a JWT with claims including 'email' or 'preferred_username'.
+    We decode only the payload (no signature verification since we just
+    received the token from a trusted source).
+
+    Args:
+        token: OIDC access token (JWT).
+
+    Returns:
+        User email if found in token claims, None otherwise.
+    """
+    import base64
+    import json
+
+    try:
+        # JWT format: header.payload.signature
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+
+        # Decode payload (add padding if needed)
+        payload = parts[1]
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += "=" * padding
+
+        decoded = base64.urlsafe_b64decode(payload)
+        claims = json.loads(decoded)
+
+        # Try common claim names for email
+        return claims.get("email") or claims.get("preferred_username")
+    except Exception:
+        return None
+
+
 def _get_auth_config_from_registry(api_url: str) -> dict | None:
     """Fetch OIDC configuration from registry server.
 
@@ -610,32 +647,54 @@ def login(
         typer.echo(f"Error exchanging code for tokens: {e}", err=True)
         raise typer.Exit(1)
 
-    # Save credentials (refresh token only - per registry)
+    # Extract user email from OIDC token
+    oidc_token = tokens["access_token"]
+    logged_in_user = _extract_user_from_oidc_token(oidc_token)
+    if logged_in_user:
+        typer.echo(f"Logged in as: {logged_in_user}")
+
+    # Save credentials (refresh token - per registry/user)
     creds_to_save: dict[str, str] = {
         "token_endpoint": token_endpoint,
         "client_id": effective_client_id,
     }
     if tokens.get("refresh_token"):
         creds_to_save["refresh_token"] = tokens["refresh_token"]
-    save_credentials(creds_to_save, effective_registry)  # type: ignore[arg-type]
+    save_credentials(creds_to_save, effective_registry, logged_in_user)  # type: ignore[arg-type]
 
     typer.echo("")
     typer.echo("Login successful!")
-    typer.echo(f"Credentials saved to {get_credentials_path(effective_registry)}")
+    typer.echo(
+        f"Credentials saved to {get_credentials_path(effective_registry, logged_in_user)}"
+    )
 
     # If we have an active profile for this registry, refresh its token
     if has_active_profile_for_registry and active_profile:
         profile_details = profiles[active_profile]
+        profile_user = profile_details.get("user")
         org_slug = profile_details["organization"]
         workspace_slug = profile_details["workspace"]
 
         typer.echo("")
         typer.echo(f"Active profile: {active_profile}")
+        if profile_user:
+            typer.echo(f"  User: {profile_user}")
         typer.echo(f"  Organization: {org_slug}")
         typer.echo(f"  Workspace: {workspace_slug}")
 
+        # Warn if logged-in user doesn't match profile user
+        if profile_user and logged_in_user and profile_user != logged_in_user:
+            typer.echo("")
+            typer.echo(
+                f"Warning: Logged in as '{logged_in_user}' but profile expects "
+                f"'{profile_user}'"
+            )
+            typer.echo("You may want to update the profile or create a new one")
+
+        # Use logged-in user for caching (profile user if different will use its own cache)
+        cache_user = logged_in_user
+
         # Resolve org slug to ID and cache access token
-        oidc_token = tokens["access_token"]
         org_id = resolve_org_slug_to_id(effective_registry, org_slug)
 
         if not org_id:
@@ -664,7 +723,7 @@ def login(
                 access_token = internal_tokens["access_token"]
                 expires_in = internal_tokens.get("expires_in", 600)
                 save_access_token_cache(
-                    effective_registry, org_id, access_token, expires_in
+                    effective_registry, org_id, access_token, expires_in, cache_user
                 )
                 typer.echo("Access token cached")
 
@@ -730,7 +789,7 @@ def login(
 
     # First-time setup (no profiles exist)
     # Fetch organizations and prompt for selection
-    oidc_token = tokens["access_token"]
+    # Note: oidc_token and logged_in_user are already extracted above
     organizations = _get_user_organizations(effective_url, oidc_token)
 
     if not organizations:
@@ -770,8 +829,10 @@ def login(
         access_token = internal_tokens["access_token"]
         expires_in = internal_tokens.get("expires_in", 600)
 
-        # Cache the access token
-        save_access_token_cache(effective_registry, org_id, access_token, expires_in)
+        # Cache the access token (with user for multi-user support)
+        save_access_token_cache(
+            effective_registry, org_id, access_token, expires_in, logged_in_user
+        )
         typer.echo("Access token cached")
 
     except Exception as e:
@@ -812,9 +873,9 @@ def login(
     # Sync target roots
     _sync_target_roots(effective_url, access_token, org_id, workspace_id)
 
-    # Check if a matching profile already exists
+    # Check if a matching profile already exists (including user for multi-user)
     existing_profile = find_matching_profile(
-        effective_registry, org_slug, workspace_slug
+        effective_registry, org_slug, workspace_slug, logged_in_user
     )
 
     if existing_profile:
@@ -832,9 +893,21 @@ def login(
         typer.echo(f"Use this profile with: STARDAG_PROFILE={existing_profile}")
     else:
         # Create new profile with slugs (not IDs) for readability
-        profile_name = f"{effective_registry}-{org_slug}-{workspace_slug}"
-        add_profile(profile_name, effective_registry, org_slug, workspace_slug)
+        # Include user in profile name if set (for multi-user scenarios)
+        if logged_in_user:
+            # Use a short version of email for profile name
+            user_part = logged_in_user.split("@")[0]
+            profile_name = (
+                f"{effective_registry}-{user_part}-{org_slug}-{workspace_slug}"
+            )
+        else:
+            profile_name = f"{effective_registry}-{org_slug}-{workspace_slug}"
+        add_profile(
+            profile_name, effective_registry, org_slug, workspace_slug, logged_in_user
+        )
         typer.echo(f"Created profile: {profile_name}")
+        if logged_in_user:
+            typer.echo(f"  User: {logged_in_user}")
 
         # Set as default if no other profiles
         if len(profiles) == 0:
@@ -1075,6 +1148,7 @@ def refresh(
     config = get_config()
     registry_name = registry or config.context.registry_name
     organization_id = org_id or config.context.organization_id
+    user = config.context.user  # Get user from active profile
 
     if not registry_name:
         typer.echo("Error: No registry specified and no active profile", err=True)
@@ -1084,7 +1158,8 @@ def refresh(
         typer.echo("Error: No organization specified", err=True)
         raise typer.Exit(1)
 
-    creds = load_credentials(registry_name)
+    # Load credentials (using user if available)
+    creds = load_credentials(registry_name, user)
     if not creds or not creds.get("refresh_token"):
         typer.echo(
             "Error: No refresh token found. Run 'stardag auth login' first.", err=True
@@ -1097,7 +1172,10 @@ def refresh(
         typer.echo(f"Error: Registry '{registry_name}' not found", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Refreshing token for {registry_name}/{organization_id}...")
+    if user:
+        typer.echo(f"Refreshing token for {registry_name}/{user}/{organization_id}...")
+    else:
+        typer.echo(f"Refreshing token for {registry_name}/{organization_id}...")
 
     # Refresh OIDC token
     token_endpoint = creds.get("token_endpoint")
@@ -1121,7 +1199,7 @@ def refresh(
         # Update stored refresh token if a new one was provided
         if tokens.get("refresh_token"):
             creds["refresh_token"] = tokens["refresh_token"]
-            save_credentials(creds, registry_name)
+            save_credentials(creds, registry_name, user)
 
     except Exception as e:
         typer.echo(f"Error refreshing OIDC token: {e}", err=True)
@@ -1137,7 +1215,7 @@ def refresh(
         expires_in = internal_tokens.get("expires_in", 600)
 
         save_access_token_cache(
-            registry_name, organization_id, access_token, expires_in
+            registry_name, organization_id, access_token, expires_in, user
         )
         typer.echo("Access token refreshed and cached")
 

@@ -1,10 +1,19 @@
 """Credential and configuration storage for Stardag CLI.
 
-New storage model:
-- Credentials (refresh tokens) in ~/.stardag/credentials/{registry}.json
-- Access token cache in ~/.stardag/access-token-cache/{registry}__{org}.json
+Storage model:
+- Credentials (refresh tokens):
+  - Per-user: ~/.stardag/credentials/{registry}__{user}.json
+  - Legacy (no user): ~/.stardag/credentials/{registry}.json
+- Access token cache:
+  - Per-user: ~/.stardag/access-token-cache/{registry}__{user}__{org}.json
+  - Legacy (no user): ~/.stardag/access-token-cache/{registry}__{org}.json
 - Config in ~/.stardag/config.toml (TOML format)
 - Target root cache in ~/.stardag/target-root-cache.json
+
+Multi-user support:
+- Profiles can optionally specify a 'user' field (email)
+- Credentials are stored per (registry, user) to support multiple identities
+- This allows switching between personal and work accounts on the same machine
 """
 
 import json
@@ -27,7 +36,7 @@ from stardag.config import (
 )
 
 
-# --- Credentials (OAuth refresh tokens - per registry) ---
+# --- Credentials (OAuth refresh tokens - per registry/user) ---
 
 
 class Credentials(TypedDict, total=False):
@@ -38,24 +47,37 @@ class Credentials(TypedDict, total=False):
     client_id: str  # OIDC client ID
 
 
-def load_credentials(registry: str | None = None) -> Credentials | None:
+def load_credentials(
+    registry: str | None = None, user: str | None = None
+) -> Credentials | None:
     """Load credentials from disk.
 
     Args:
         registry: Registry name. If None, uses active registry from config.
+        user: User identifier (email). If None, uses user from active profile
+            or falls back to legacy per-registry credentials.
 
     Returns:
         Credentials dict if file exists and is valid, None otherwise.
     """
-    if registry is None:
+    if registry is None or user is None:
         config = get_config()
-        registry = config.context.registry_name
+        registry = registry or config.context.registry_name
+        user = user or config.context.user
         if not registry:
             return None
 
-    path = get_registry_credentials_path(registry)
+    path = get_registry_credentials_path(registry, user)
     if not path.exists():
-        return None
+        # Fall back to legacy per-registry credentials if user-specific not found
+        if user:
+            legacy_path = get_registry_credentials_path(registry, None)
+            if legacy_path.exists():
+                path = legacy_path
+            else:
+                return None
+        else:
+            return None
 
     try:
         with open(path) as f:
@@ -65,20 +87,24 @@ def load_credentials(registry: str | None = None) -> Credentials | None:
         return None
 
 
-def save_credentials(credentials: Credentials, registry: str | None = None) -> None:
+def save_credentials(
+    credentials: Credentials, registry: str | None = None, user: str | None = None
+) -> None:
     """Save credentials to disk.
 
     Args:
         credentials: Credentials dict to save.
         registry: Registry name. If None, uses active registry from config.
+        user: User identifier (email). If provided, saves user-specific credentials.
     """
     if registry is None:
         config = get_config()
         registry = config.context.registry_name
+        user = user or config.context.user
         if not registry:
             raise ValueError("No registry specified and no active profile")
 
-    path = get_registry_credentials_path(registry)
+    path = get_registry_credentials_path(registry, user)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w") as f:
@@ -88,11 +114,12 @@ def save_credentials(credentials: Credentials, registry: str | None = None) -> N
     path.chmod(0o600)
 
 
-def clear_credentials(registry: str | None = None) -> bool:
+def clear_credentials(registry: str | None = None, user: str | None = None) -> bool:
     """Clear stored credentials.
 
     Args:
         registry: Registry name. If None, uses active registry from config.
+        user: User identifier (email). If provided, clears user-specific credentials.
 
     Returns:
         True if credentials were cleared, False if no credentials existed.
@@ -100,10 +127,11 @@ def clear_credentials(registry: str | None = None) -> bool:
     if registry is None:
         config = get_config()
         registry = config.context.registry_name
+        user = user or config.context.user
         if not registry:
             return False
 
-    path = get_registry_credentials_path(registry)
+    path = get_registry_credentials_path(registry, user)
     if path.exists():
         path.unlink()
         return True
@@ -128,15 +156,17 @@ def list_registries_with_credentials() -> list[str]:
     return sorted(registries)
 
 
-def get_refresh_token(registry: str | None = None) -> str | None:
+def get_refresh_token(
+    registry: str | None = None, user: str | None = None
+) -> str | None:
     """Get the stored refresh token."""
-    creds = load_credentials(registry)
+    creds = load_credentials(registry, user)
     if creds is None:
         return None
     return creds.get("refresh_token")
 
 
-# --- Access Token Cache (short-lived, per registry+org) ---
+# --- Access Token Cache (short-lived, per registry+user+org) ---
 
 
 class AccessTokenCache(TypedDict, total=False):
@@ -146,19 +176,30 @@ class AccessTokenCache(TypedDict, total=False):
     expires_at: float  # Unix timestamp when token expires
 
 
-def load_access_token_cache(registry: str, org_id: str) -> AccessTokenCache | None:
+def load_access_token_cache(
+    registry: str, org_id: str, user: str | None = None
+) -> AccessTokenCache | None:
     """Load access token from cache.
 
     Args:
         registry: Registry name.
         org_id: Organization ID.
+        user: User identifier (email). If provided, loads user-specific token.
 
     Returns:
         AccessTokenCache dict if file exists and token is valid, None otherwise.
     """
-    path = get_access_token_cache_path(registry, org_id)
+    path = get_access_token_cache_path(registry, org_id, user)
     if not path.exists():
-        return None
+        # Fall back to legacy path if user-specific not found
+        if user:
+            legacy_path = get_access_token_cache_path(registry, org_id, None)
+            if legacy_path.exists():
+                path = legacy_path
+            else:
+                return None
+        else:
+            return None
 
     try:
         with open(path) as f:
@@ -176,7 +217,11 @@ def load_access_token_cache(registry: str, org_id: str) -> AccessTokenCache | No
 
 
 def save_access_token_cache(
-    registry: str, org_id: str, access_token: str, expires_in: int
+    registry: str,
+    org_id: str,
+    access_token: str,
+    expires_in: int,
+    user: str | None = None,
 ) -> None:
     """Save access token to cache.
 
@@ -185,8 +230,9 @@ def save_access_token_cache(
         org_id: Organization ID.
         access_token: JWT access token.
         expires_in: Token TTL in seconds.
+        user: User identifier (email). If provided, saves user-specific token.
     """
-    path = get_access_token_cache_path(registry, org_id)
+    path = get_access_token_cache_path(registry, org_id, user)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Calculate expiration time (subtract 30s buffer)
@@ -204,17 +250,20 @@ def save_access_token_cache(
     path.chmod(0o600)
 
 
-def clear_access_token_cache(registry: str, org_id: str) -> bool:
+def clear_access_token_cache(
+    registry: str, org_id: str, user: str | None = None
+) -> bool:
     """Clear cached access token.
 
     Args:
         registry: Registry name.
         org_id: Organization ID.
+        user: User identifier (email). If provided, clears user-specific token.
 
     Returns:
         True if cache was cleared, False if no cache existed.
     """
-    path = get_access_token_cache_path(registry, org_id)
+    path = get_access_token_cache_path(registry, org_id, user)
     if path.exists():
         path.unlink()
         return True
@@ -222,26 +271,30 @@ def clear_access_token_cache(registry: str, org_id: str) -> bool:
 
 
 def get_access_token(
-    registry: str | None = None, org_id: str | None = None
+    registry: str | None = None,
+    org_id: str | None = None,
+    user: str | None = None,
 ) -> str | None:
     """Get a valid access token, loading from cache.
 
     Args:
         registry: Registry name. If None, uses active registry.
         org_id: Organization ID. If None, uses active org.
+        user: User identifier (email). If None, uses user from active profile.
 
     Returns:
         Access token if available and valid, None otherwise.
     """
-    if registry is None or org_id is None:
+    if registry is None or org_id is None or user is None:
         config = get_config()
         registry = registry or config.context.registry_name
         org_id = org_id or config.context.organization_id
+        user = user or config.context.user
 
     if not registry or not org_id:
         return None
 
-    cache = load_access_token_cache(registry, org_id)
+    cache = load_access_token_cache(registry, org_id, user)
     if cache:
         return cache.get("access_token")
 
@@ -268,14 +321,18 @@ def save_toml_config(config: TomlConfig) -> None:
         }
 
     if config.profile:
-        data["profile"] = {
-            name: {
+        profiles_data: dict = {}
+        for name, prof in config.profile.items():
+            profile_dict: dict[str, str] = {
                 "registry": prof.registry,
                 "organization": prof.organization,
                 "workspace": prof.workspace,
             }
-            for name, prof in config.profile.items()
-        }
+            # Only include user if set (backward compatible)
+            if prof.user:
+                profile_dict["user"] = prof.user
+            profiles_data[name] = profile_dict
+        data["profile"] = profiles_data
 
     if config.default:
         data["default"] = config.default
@@ -338,7 +395,13 @@ def list_registries() -> dict[str, str]:
     return {name: reg.url for name, reg in config.registry.items()}
 
 
-def add_profile(name: str, registry: str, organization: str, workspace: str) -> None:
+def add_profile(
+    name: str,
+    registry: str,
+    organization: str,
+    workspace: str,
+    user: str | None = None,
+) -> None:
     """Add or update a profile in config.
 
     Args:
@@ -346,12 +409,14 @@ def add_profile(name: str, registry: str, organization: str, workspace: str) -> 
         registry: Registry name.
         organization: Organization ID or slug.
         workspace: Workspace ID or slug.
+        user: User identifier (email). Optional for multi-user support.
     """
     config = load_toml_config()
     from stardag.config import ProfileConfig
 
     config.profile[name] = ProfileConfig(
         registry=registry,
+        user=user,
         organization=organization,
         workspace=workspace,
     )
@@ -375,19 +440,29 @@ def remove_profile(name: str) -> bool:
     return False
 
 
-def list_profiles() -> dict[str, dict[str, str]]:
+class ProfileDetails(TypedDict):
+    """Profile details structure returned by list_profiles."""
+
+    registry: str
+    user: str | None
+    organization: str
+    workspace: str
+
+
+def list_profiles() -> dict[str, ProfileDetails]:
     """List all profiles from config.
 
     Returns:
-        Dict of profile name to profile details.
+        Dict of profile name to profile details (including optional user).
     """
     config = load_toml_config()
     return {
-        name: {
-            "registry": prof.registry,
-            "organization": prof.organization,
-            "workspace": prof.workspace,
-        }
+        name: ProfileDetails(
+            registry=prof.registry,
+            user=prof.user,
+            organization=prof.organization,
+            workspace=prof.workspace,
+        )
         for name, prof in config.profile.items()
     }
 
@@ -423,9 +498,19 @@ def get_active_profile() -> tuple[str | None, str | None]:
 
 
 def find_matching_profile(
-    registry: str, organization: str, workspace: str
+    registry: str,
+    organization: str,
+    workspace: str,
+    user: str | None = None,
 ) -> str | None:
     """Find a profile that matches the given settings.
+
+    Args:
+        registry: Registry name.
+        organization: Organization slug/ID.
+        workspace: Workspace slug/ID.
+        user: User identifier (email). If provided, matches profiles with same user.
+            If None, matches profiles with no user set.
 
     Returns:
         Profile name if a matching profile exists, None otherwise.
@@ -434,6 +519,7 @@ def find_matching_profile(
     for name, details in profiles.items():
         if (
             details["registry"] == registry
+            and details["user"] == user
             and details["organization"] == organization
             and details["workspace"] == workspace
         ):
@@ -578,12 +664,13 @@ def set_target_roots(
 # --- Path convenience functions (for CLI display) ---
 
 
-def get_credentials_path(registry: str | None = None) -> Path:
+def get_credentials_path(registry: str | None = None, user: str | None = None) -> Path:
     """Get the path to the credentials file for display purposes."""
-    if registry is None:
+    if registry is None or user is None:
         config = get_config()
-        registry = config.context.registry_name or "local"
-    return get_registry_credentials_path(registry)
+        registry = registry or config.context.registry_name or "local"
+        user = user or config.context.user
+    return get_registry_credentials_path(registry, user)
 
 
 def get_config_path() -> Path:
