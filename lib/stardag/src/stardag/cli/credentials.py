@@ -1,17 +1,13 @@
 """Credential and configuration storage for Stardag CLI.
 
 Storage model:
-- Credentials (refresh tokens):
-  - Per-user: ~/.stardag/credentials/{registry}__{user}.json
-  - Legacy (no user): ~/.stardag/credentials/{registry}.json
-- Access token cache:
-  - Per-user: ~/.stardag/access-token-cache/{registry}__{user}__{org}.json
-  - Legacy (no user): ~/.stardag/access-token-cache/{registry}__{org}.json
+- Credentials (refresh tokens): ~/.stardag/credentials/{registry}__{user}.json
+- Access token cache: ~/.stardag/access-token-cache/{registry}__{user}__{org}.json
 - Config in ~/.stardag/config.toml (TOML format)
 - Target root cache in ~/.stardag/target-root-cache.json
 
 Multi-user support:
-- Profiles can optionally specify a 'user' field (email)
+- Profiles include a 'user' field (email) identifying the logged-in user
 - Credentials are stored per (registry, user) to support multiple identities
 - This allows switching between personal and work accounts on the same machine
 """
@@ -54,8 +50,7 @@ def load_credentials(
 
     Args:
         registry: Registry name. If None, uses active registry from config.
-        user: User identifier (email). If None, uses user from active profile
-            or falls back to legacy per-registry credentials.
+        user: User identifier (email). If None, uses user from active profile.
 
     Returns:
         Credentials dict if file exists and is valid, None otherwise.
@@ -64,20 +59,12 @@ def load_credentials(
         config = get_config()
         registry = registry or config.context.registry_name
         user = user or config.context.user
-        if not registry:
+        if not registry or not user:
             return None
 
     path = get_registry_credentials_path(registry, user)
     if not path.exists():
-        # Fall back to legacy per-registry credentials if user-specific not found
-        if user:
-            legacy_path = get_registry_credentials_path(registry, None)
-            if legacy_path.exists():
-                path = legacy_path
-            else:
-                return None
-        else:
-            return None
+        return None
 
     try:
         with open(path) as f:
@@ -95,14 +82,14 @@ def save_credentials(
     Args:
         credentials: Credentials dict to save.
         registry: Registry name. If None, uses active registry from config.
-        user: User identifier (email). If provided, saves user-specific credentials.
+        user: User identifier (email). If None, uses user from active profile.
     """
-    if registry is None:
+    if registry is None or user is None:
         config = get_config()
-        registry = config.context.registry_name
+        registry = registry or config.context.registry_name
         user = user or config.context.user
-        if not registry:
-            raise ValueError("No registry specified and no active profile")
+        if not registry or not user:
+            raise ValueError("No registry/user specified and no active profile")
 
     path = get_registry_credentials_path(registry, user)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,16 +106,16 @@ def clear_credentials(registry: str | None = None, user: str | None = None) -> b
 
     Args:
         registry: Registry name. If None, uses active registry from config.
-        user: User identifier (email). If provided, clears user-specific credentials.
+        user: User identifier (email). If None, uses user from active profile.
 
     Returns:
         True if credentials were cleared, False if no credentials existed.
     """
-    if registry is None:
+    if registry is None or user is None:
         config = get_config()
-        registry = config.context.registry_name
+        registry = registry or config.context.registry_name
         user = user or config.context.user
-        if not registry:
+        if not registry or not user:
             return False
 
     path = get_registry_credentials_path(registry, user)
@@ -177,29 +164,21 @@ class AccessTokenCache(TypedDict, total=False):
 
 
 def load_access_token_cache(
-    registry: str, org_id: str, user: str | None = None
+    registry: str, org_id: str, user: str
 ) -> AccessTokenCache | None:
     """Load access token from cache.
 
     Args:
         registry: Registry name.
         org_id: Organization ID.
-        user: User identifier (email). If provided, loads user-specific token.
+        user: User identifier (email).
 
     Returns:
         AccessTokenCache dict if file exists and token is valid, None otherwise.
     """
     path = get_access_token_cache_path(registry, org_id, user)
     if not path.exists():
-        # Fall back to legacy path if user-specific not found
-        if user:
-            legacy_path = get_access_token_cache_path(registry, org_id, None)
-            if legacy_path.exists():
-                path = legacy_path
-            else:
-                return None
-        else:
-            return None
+        return None
 
     try:
         with open(path) as f:
@@ -221,7 +200,7 @@ def save_access_token_cache(
     org_id: str,
     access_token: str,
     expires_in: int,
-    user: str | None = None,
+    user: str,
 ) -> None:
     """Save access token to cache.
 
@@ -230,7 +209,7 @@ def save_access_token_cache(
         org_id: Organization ID.
         access_token: JWT access token.
         expires_in: Token TTL in seconds.
-        user: User identifier (email). If provided, saves user-specific token.
+        user: User identifier (email).
     """
     path = get_access_token_cache_path(registry, org_id, user)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,15 +229,13 @@ def save_access_token_cache(
     path.chmod(0o600)
 
 
-def clear_access_token_cache(
-    registry: str, org_id: str, user: str | None = None
-) -> bool:
+def clear_access_token_cache(registry: str, org_id: str, user: str) -> bool:
     """Clear cached access token.
 
     Args:
         registry: Registry name.
         org_id: Organization ID.
-        user: User identifier (email). If provided, clears user-specific token.
+        user: User identifier (email).
 
     Returns:
         True if cache was cleared, False if no cache existed.
@@ -291,7 +268,7 @@ def get_access_token(
         org_id = org_id or config.context.organization_id
         user = user or config.context.user
 
-    if not registry or not org_id:
+    if not registry or not org_id or not user:
         return None
 
     cache = load_access_token_cache(registry, org_id, user)
@@ -669,7 +646,7 @@ def get_credentials_path(registry: str | None = None, user: str | None = None) -
     if registry is None or user is None:
         config = get_config()
         registry = registry or config.context.registry_name or "local"
-        user = user or config.context.user
+        user = user or config.context.user or "unknown"
     return get_registry_credentials_path(registry, user)
 
 
@@ -777,6 +754,7 @@ def _get_workspaces(api_url: str, access_token: str, org_id: str) -> list[dict]:
 def ensure_access_token(
     registry: str,
     org_id: str,
+    user: str,
     quiet: bool = False,
 ) -> str | None:
     """Ensure we have a valid access token, refreshing if needed.
@@ -784,20 +762,21 @@ def ensure_access_token(
     Args:
         registry: Registry name.
         org_id: Organization ID.
+        user: User identifier (email).
         quiet: If True, suppress warning messages.
 
     Returns:
         Access token if available/refreshed successfully, None otherwise.
     """
     # Check for cached valid token first
-    cached = load_access_token_cache(registry, org_id)
+    cached = load_access_token_cache(registry, org_id, user)
     if cached:
         cached_token = cached.get("access_token")
         if cached_token:
             return cached_token
 
     # Need to refresh - get credentials
-    creds = load_credentials(registry)
+    creds = load_credentials(registry, user)
     if not creds:
         return None
 
@@ -821,7 +800,7 @@ def ensure_access_token(
             # Update stored refresh token if a new one was provided
             if tokens.get("refresh_token"):
                 creds["refresh_token"] = tokens["refresh_token"]
-                save_credentials(creds, registry)
+                save_credentials(creds, registry, user)
 
             oidc_token = tokens["access_token"]
         else:
@@ -834,7 +813,7 @@ def ensure_access_token(
         expires_in = internal_tokens.get("expires_in", 600)
 
         # Cache it
-        save_access_token_cache(registry, org_id, access_token, expires_in)
+        save_access_token_cache(registry, org_id, access_token, expires_in, user)
 
         return access_token
 
@@ -845,6 +824,7 @@ def ensure_access_token(
 def resolve_org_slug_to_id(
     registry: str,
     org_slug_or_id: str,
+    user: str | None = None,
     oidc_token: str | None = None,
 ) -> str | None:
     """Resolve an organization slug to its ID.
@@ -852,6 +832,7 @@ def resolve_org_slug_to_id(
     Args:
         registry: Registry name.
         org_slug_or_id: Organization slug or ID.
+        user: User identifier (email). Required if oidc_token not provided.
         oidc_token: Optional OIDC token. If not provided, will try to refresh.
 
     Returns:
@@ -867,7 +848,9 @@ def resolve_org_slug_to_id(
 
     # Need to resolve slug - get OIDC token if not provided
     if not oidc_token:
-        oidc_token = _get_fresh_oidc_token(registry)
+        if not user:
+            return None
+        oidc_token = _get_fresh_oidc_token(registry, user)
         if not oidc_token:
             return None
 
@@ -896,6 +879,7 @@ def resolve_workspace_slug_to_id(
     registry: str,
     org_id: str,
     workspace_slug_or_id: str,
+    user: str | None = None,
     access_token: str | None = None,
 ) -> str | None:
     """Resolve a workspace slug to its ID.
@@ -904,6 +888,7 @@ def resolve_workspace_slug_to_id(
         registry: Registry name.
         org_id: Organization ID (must be resolved already).
         workspace_slug_or_id: Workspace slug or ID.
+        user: User identifier (email). Required if access_token not provided.
         access_token: Optional internal access token. If not provided, will try to get one.
 
     Returns:
@@ -919,7 +904,9 @@ def resolve_workspace_slug_to_id(
 
     # Need to resolve slug - get access token if not provided
     if not access_token:
-        access_token = ensure_access_token(registry, org_id, quiet=True)
+        if not user:
+            return None
+        access_token = ensure_access_token(registry, org_id, user, quiet=True)
         if not access_token:
             return None
 
@@ -944,12 +931,16 @@ def resolve_workspace_slug_to_id(
     return result
 
 
-def _get_fresh_oidc_token(registry: str) -> str | None:
+def _get_fresh_oidc_token(registry: str, user: str) -> str | None:
     """Get a fresh OIDC access token by refreshing.
+
+    Args:
+        registry: Registry name.
+        user: User identifier (email).
 
     Returns the OIDC access token or None if refresh fails.
     """
-    creds = load_credentials(registry)
+    creds = load_credentials(registry, user)
     if not creds:
         return None
 
@@ -966,7 +957,7 @@ def _get_fresh_oidc_token(registry: str) -> str | None:
         # Update stored refresh token if a new one was provided
         if tokens.get("refresh_token"):
             creds["refresh_token"] = tokens["refresh_token"]
-            save_credentials(creds, registry)
+            save_credentials(creds, registry, user)
 
         return tokens.get("access_token")
     except Exception:

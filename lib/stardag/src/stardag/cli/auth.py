@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import typer
 
 from stardag.cli.credentials import (
+    Credentials,
     InvalidProfileError,
     add_profile,
     add_registry,
@@ -687,22 +688,30 @@ def login(
     # Try ID token first (per OIDC spec, user claims like email are in id_token)
     # Fall back to access token (some providers put claims there too)
     oidc_token = tokens["access_token"]
-    logged_in_user = None
+    logged_in_user: str | None = None
     if tokens.get("id_token"):
         logged_in_user = _extract_user_from_oidc_token(tokens["id_token"])
     if not logged_in_user:
         logged_in_user = _extract_user_from_oidc_token(oidc_token)
-    if logged_in_user:
-        typer.echo(f"Logged in as: {logged_in_user}")
+
+    if not logged_in_user:
+        typer.echo(
+            "Error: Could not extract user email from tokens. "
+            "The OIDC provider may not be returning the email claim.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(f"Logged in as: {logged_in_user}")
 
     # Save credentials (refresh token - per registry/user)
-    creds_to_save: dict[str, str] = {
+    creds_to_save: Credentials = {
         "token_endpoint": token_endpoint,
         "client_id": effective_client_id,
     }
     if tokens.get("refresh_token"):
         creds_to_save["refresh_token"] = tokens["refresh_token"]
-    save_credentials(creds_to_save, effective_registry, logged_in_user)  # type: ignore[arg-type]
+    save_credentials(creds_to_save, effective_registry, logged_in_user)
 
     typer.echo("")
     typer.echo("Login successful!")
@@ -737,7 +746,10 @@ def login(
         cache_user = logged_in_user
 
         # Resolve org slug to ID and cache access token
-        org_id = resolve_org_slug_to_id(effective_registry, org_slug)
+        # Pass oidc_token since we have it fresh
+        org_id = resolve_org_slug_to_id(
+            effective_registry, org_slug, oidc_token=oidc_token
+        )
 
         if not org_id:
             # Need to fetch org ID from API
@@ -770,8 +782,12 @@ def login(
                 typer.echo("Access token cached")
 
                 # Also resolve and cache workspace ID if needed
+                # Pass access_token since we have it fresh
                 workspace_id = resolve_workspace_slug_to_id(
-                    effective_registry, org_id, workspace_slug
+                    effective_registry,
+                    org_id,
+                    workspace_slug,
+                    access_token=access_token,
                 )
                 if not workspace_id or not _looks_like_uuid(workspace_id):
                     workspaces = _get_workspaces(effective_url, access_token, org_id)
@@ -831,7 +847,8 @@ def login(
 
     # First-time setup (no profiles exist)
     # Fetch organizations and prompt for selection
-    # Note: oidc_token and logged_in_user are already extracted above
+    # Note: oidc_token and logged_in_user are already extracted and validated above
+    assert logged_in_user is not None  # Validated earlier with exit
     organizations = _get_user_organizations(effective_url, oidc_token)
 
     if not organizations:
@@ -1111,36 +1128,47 @@ def status(
         profile_details = profiles[active_profile]
         registry_name = registry or profile_details["registry"]
         registry_url = get_registry_url(registry_name)
+        user = profile_details["user"]
 
         typer.echo("")
         typer.echo("Active Context:")
         typer.echo(f"  Registry: {registry_name}")
         if registry_url:
             typer.echo(f"  API URL: {registry_url}")
+        typer.echo(f"  User: {user}")
         typer.echo(f"  Organization: {profile_details['organization']}")
         typer.echo(f"  Workspace: {profile_details['workspace']}")
 
         typer.echo("")
         typer.echo("Authentication:")
 
-        creds = load_credentials(registry_name)
-        if creds:
-            typer.echo(f"  Status: Logged in to {registry_name}")
-            typer.echo(f"  Credentials: {get_credentials_path(registry_name)}")
-
-            # Check for cached access token
-            # Need to resolve org slug to ID to check token cache
-            org_slug = profile_details["organization"]
-            org_id = resolve_org_slug_to_id(registry_name, org_slug)
-            access_token = get_access_token(registry_name, org_id) if org_id else None
-            if access_token:
-                typer.echo(f"  Access token: {access_token[:20]}... (cached)")
-            else:
-                typer.echo("  Access token: (not cached or expired)")
-        else:
-            typer.echo(f"  Status: Not logged in to {registry_name}")
+        if not user:
+            typer.echo("  Status: Profile has no user set")
             typer.echo("")
             typer.echo("Run 'stardag auth login' to authenticate")
+        else:
+            creds = load_credentials(registry_name, user)
+            if creds:
+                typer.echo(f"  Status: Logged in as {user}")
+                typer.echo(
+                    f"  Credentials: {get_credentials_path(registry_name, user)}"
+                )
+
+                # Check for cached access token
+                # Need to resolve org slug to ID to check token cache
+                org_slug = profile_details["organization"]
+                org_id = resolve_org_slug_to_id(registry_name, org_slug, user)
+                access_token = (
+                    get_access_token(registry_name, org_id, user) if org_id else None
+                )
+                if access_token:
+                    typer.echo(f"  Access token: {access_token[:20]}... (cached)")
+                else:
+                    typer.echo("  Access token: (not cached or expired)")
+            else:
+                typer.echo(f"  Status: Not logged in as {user}")
+                typer.echo("")
+                typer.echo("Run 'stardag auth login' to authenticate")
 
         typer.echo("")
         typer.echo("To switch profiles: export STARDAG_PROFILE=<name>")
@@ -1222,7 +1250,15 @@ def refresh(
         typer.echo("Error: No organization specified", err=True)
         raise typer.Exit(1)
 
-    # Load credentials (using user if available)
+    if not user:
+        typer.echo(
+            "Error: No user in active profile. "
+            "Run 'stardag auth login' to authenticate.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Load credentials
     creds = load_credentials(registry_name, user)
     if not creds or not creds.get("refresh_token"):
         typer.echo(
@@ -1236,10 +1272,7 @@ def refresh(
         typer.echo(f"Error: Registry '{registry_name}' not found", err=True)
         raise typer.Exit(1)
 
-    if user:
-        typer.echo(f"Refreshing token for {registry_name}/{user}/{organization_id}...")
-    else:
-        typer.echo(f"Refreshing token for {registry_name}/{organization_id}...")
+    typer.echo(f"Refreshing token for {registry_name}/{user}/{organization_id}...")
 
     # Refresh OIDC token
     token_endpoint = creds.get("token_endpoint")

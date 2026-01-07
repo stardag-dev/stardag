@@ -143,6 +143,7 @@ app.add_typer(profile_app, name="profile")
 def profile_add(
     name: str = typer.Argument(..., help="Profile name"),
     registry: str = typer.Option(..., "--registry", "-r", help="Registry name"),
+    user: str = typer.Option(..., "--user", "-u", help="User email"),
     organization: str = typer.Option(
         ..., "--organization", "-o", help="Organization slug (or ID)"
     ),
@@ -155,15 +156,15 @@ def profile_add(
 ) -> None:
     """Add or update a profile.
 
-    A profile defines the (registry, organization, workspace) tuple
+    A profile defines the (registry, user, organization, workspace) tuple
     for easy switching between different contexts.
 
     Organization and workspace should be specified by slug for readability.
     The IDs are resolved and cached automatically when authenticated.
 
     Examples:
-        stardag config profile add local-dev -r local -o my-org -w development
-        stardag config profile add prod -r central -o my-company -w production --default
+        stardag config profile add local-dev -r local -u me@example.com -o my-org -w development
+        stardag config profile add prod -r cloud -u me@work.com -o my-company -w production --default
     """
     # Verify registry exists
     registries = list_registries()
@@ -174,7 +175,7 @@ def profile_add(
 
     # Try to resolve and cache organization slug -> ID
     # This validates the slug exists and populates the cache
-    org_id = resolve_org_slug_to_id(registry, organization)
+    org_id = resolve_org_slug_to_id(registry, organization, user)
     if org_id is None:
         typer.echo(
             f"Warning: Could not verify organization '{organization}'. "
@@ -186,7 +187,7 @@ def profile_add(
 
     # Try to resolve and cache workspace slug -> ID
     if org_id:
-        workspace_id = resolve_workspace_slug_to_id(registry, org_id, workspace)
+        workspace_id = resolve_workspace_slug_to_id(registry, org_id, workspace, user)
         if workspace_id is None:
             typer.echo(
                 f"Warning: Could not verify workspace '{workspace}'. "
@@ -197,8 +198,9 @@ def profile_add(
             typer.echo(f"Verified workspace '{workspace}' (cached ID)")
 
     # Store slugs in profile (not IDs) for readability
-    add_profile(name, registry, organization, workspace)
+    add_profile(name, registry, organization, workspace, user)
     typer.echo(f"Profile '{name}' added.")
+    typer.echo(f"  User: {user}")
 
     if set_default:
         set_default_profile(name)
@@ -207,7 +209,7 @@ def profile_add(
         # Auto-refresh access token (needs resolved org_id)
         if org_id:
             typer.echo("Refreshing access token...")
-            token = ensure_access_token(registry, org_id)
+            token = ensure_access_token(registry, org_id, user)
             if token:
                 typer.echo("Access token refreshed successfully.")
             else:
@@ -290,11 +292,20 @@ def profile_use(
     # Auto-refresh access token for the new profile
     profile = profiles[name]
     registry = profile["registry"]
+    user = profile["user"]
     org_slug = profile["organization"]
     workspace_slug = profile["workspace"]
 
+    if not user:
+        typer.echo(
+            "Warning: Profile has no user set. "
+            "Run 'stardag auth login' to authenticate and update the profile.",
+            err=True,
+        )
+        return
+
     # Resolve org slug to ID (needed for token operations)
-    org_id = resolve_org_slug_to_id(registry, org_slug)
+    org_id = resolve_org_slug_to_id(registry, org_slug, user)
     if org_id is None:
         typer.echo(
             f"Warning: Could not resolve organization '{org_slug}'. "
@@ -304,10 +315,10 @@ def profile_use(
         return
 
     # Also resolve workspace to populate cache
-    resolve_workspace_slug_to_id(registry, org_id, workspace_slug)
+    resolve_workspace_slug_to_id(registry, org_id, workspace_slug, user)
 
     typer.echo("Refreshing access token...")
-    token = ensure_access_token(registry, org_id)
+    token = ensure_access_token(registry, org_id, user)
     if token:
         typer.echo("Access token refreshed successfully.")
     else:

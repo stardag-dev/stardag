@@ -110,44 +110,33 @@ def _sanitize_user_for_path(user: str) -> str:
     )
 
 
-def get_registry_credentials_path(registry_name: str, user: str | None = None) -> Path:
-    """Get the credentials file path for a specific registry and optional user.
+def get_registry_credentials_path(registry_name: str, user: str) -> Path:
+    """Get the credentials file path for a specific registry and user.
 
     Args:
         registry_name: Name of the registry.
-        user: Optional user identifier (email). If provided, credentials are
-            stored per-user. If not, uses legacy per-registry storage.
+        user: User identifier (email).
 
     Returns:
         Path to the credentials file.
     """
-    if user:
-        safe_user = _sanitize_user_for_path(user)
-        return get_credentials_dir() / f"{registry_name}__{safe_user}.json"
-    return get_credentials_dir() / f"{registry_name}.json"
+    safe_user = _sanitize_user_for_path(user)
+    return get_credentials_dir() / f"{registry_name}__{safe_user}.json"
 
 
-def get_access_token_cache_path(
-    registry_name: str, org_id: str, user: str | None = None
-) -> Path:
+def get_access_token_cache_path(registry_name: str, org_id: str, user: str) -> Path:
     """Get the access token cache path for a registry/org/user combo.
 
     Args:
         registry_name: Name of the registry.
         org_id: Organization ID.
-        user: Optional user identifier (email). If provided, tokens are
-            cached per-user. If not, uses legacy per-registry/org storage.
+        user: User identifier (email).
 
     Returns:
         Path to the access token cache file.
     """
-    if user:
-        safe_user = _sanitize_user_for_path(user)
-        return (
-            get_access_token_cache_dir()
-            / f"{registry_name}__{safe_user}__{org_id}.json"
-        )
-    return get_access_token_cache_dir() / f"{registry_name}__{org_id}.json"
+    safe_user = _sanitize_user_for_path(user)
+    return get_access_token_cache_dir() / f"{registry_name}__{safe_user}__{org_id}.json"
 
 
 def find_project_config() -> Path | None:
@@ -729,7 +718,7 @@ def load_config(
 
     # 5. Load access token from cache (if we have profile info)
     access_token: str | None = None
-    if registry_name and organization_id:
+    if registry_name and organization_id and user:
         token_cache_path = get_access_token_cache_path(
             registry_name, organization_id, user
         )
