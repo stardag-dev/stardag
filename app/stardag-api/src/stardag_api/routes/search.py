@@ -1,8 +1,9 @@
 """Task search routes - advanced filtering and autocomplete."""
 
 import re
+import time
 from collections import Counter
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select, text
@@ -24,6 +25,26 @@ from stardag_api.schemas import (
 from stardag_api.services.status import get_all_task_statuses_in_build
 
 router = APIRouter(prefix="/tasks/search", tags=["search"])
+
+# Simple in-memory cache for suggestions with TTL (5 minutes)
+_suggestions_cache: dict[str, tuple[float, Any]] = {}
+_CACHE_TTL_SECONDS = 300
+
+
+def _get_cached(key: str) -> Any | None:
+    """Get a value from cache if not expired."""
+    if key in _suggestions_cache:
+        timestamp, value = _suggestions_cache[key]
+        if time.time() - timestamp < _CACHE_TTL_SECONDS:
+            return value
+        # Expired, remove from cache
+        del _suggestions_cache[key]
+    return None
+
+
+def _set_cached(key: str, value: Any) -> None:
+    """Set a value in cache with current timestamp."""
+    _suggestions_cache[key] = (time.time(), value)
 
 
 # Filter operators and their SQL equivalents
@@ -258,12 +279,20 @@ async def search_tasks(
             )
             builds_map = {b.id: b for b in builds_result.scalars().all()}
 
-            # Get status for each task in its latest build
+            # Batch fetch all statuses for unique builds to avoid N+1 queries
+            all_statuses_by_build: dict[
+                str, dict[int, tuple[TaskStatus, Any, Any, str | None]]
+            ] = {}
+            for build_id in build_ids:
+                all_statuses_by_build[build_id] = await get_all_task_statuses_in_build(
+                    db, build_id
+                )
+
+            # Map task statuses from batched results
             for event in latest_events_list:
                 build = builds_map.get(event.build_id)
                 if build and event.task_id:
-                    # Get full status for this task in this build
-                    statuses = await get_all_task_statuses_in_build(db, event.build_id)
+                    statuses = all_statuses_by_build.get(event.build_id, {})
                     status_info = statuses.get(
                         event.task_id, (TaskStatus.PENDING, None, None, None)
                     )
@@ -359,32 +388,44 @@ async def get_key_suggestions(
     if prefix and not prefix.startswith("param."):
         core_keys = [k for k in core_keys if k.key.startswith(prefix)]
 
-    # Get param keys from task_data
-    # Sample recent tasks to discover common keys
+    # Get param keys from task_data (cached)
     param_keys: list[KeySuggestion] = []
 
     if not prefix or prefix.startswith("param"):
-        # Get a sample of task_data to discover keys
-        sample_query = (
-            select(Task.task_data)
-            .where(Task.workspace_id == workspace_id)
-            .order_by(Task.created_at.desc())
-            .limit(100)
-        )
-        sample_result = await db.execute(sample_query)
-        sample_tasks = sample_result.scalars().all()
+        # Check cache for param keys (cache is per-workspace, not prefix)
+        cache_key = f"keys:{workspace_id}"
+        cached_param_keys = _get_cached(cache_key)
 
-        # Extract unique keys from task_data
-        key_counter: Counter[str] = Counter()
-        for task_data in sample_tasks:
-            if isinstance(task_data, dict):
-                _extract_keys(task_data, "param", key_counter)
+        if cached_param_keys is None:
+            # Get a sample of task_data to discover keys
+            sample_query = (
+                select(Task.task_data)
+                .where(Task.workspace_id == workspace_id)
+                .order_by(Task.created_at.desc())
+                .limit(100)
+            )
+            sample_result = await db.execute(sample_query)
+            sample_tasks = sample_result.scalars().all()
+
+            # Extract unique keys from task_data
+            key_counter: Counter[str] = Counter()
+            for task_data in sample_tasks:
+                if isinstance(task_data, dict):
+                    _extract_keys(task_data, "param", key_counter)
+
+            # Cache all discovered keys (up to 100)
+            cached_param_keys = [
+                (key, count) for key, count in key_counter.most_common(100)
+            ]
+            _set_cached(cache_key, cached_param_keys)
 
         # Filter by prefix and convert to suggestions
         prefix_filter = prefix[6:] if prefix.startswith("param.") else ""
-        for key, count in key_counter.most_common(limit):
+        for key, count in cached_param_keys:
             if not prefix_filter or key.startswith(f"param.{prefix_filter}"):
                 param_keys.append(KeySuggestion(key=key, type="string", count=count))
+            if len(param_keys) >= limit:
+                break
 
     all_keys = core_keys + param_keys
     return KeySuggestionsResponse(keys=all_keys[:limit])
@@ -420,7 +461,7 @@ async def get_value_suggestions(
     """
     workspace_id = auth.workspace_id
 
-    # Handle status specially
+    # Handle status specially (no caching needed - static values)
     if key == "status":
         values = [
             ValueSuggestion(value="pending"),
@@ -432,57 +473,70 @@ async def get_value_suggestions(
             values = [v for v in values if v.value.startswith(prefix)]
         return ValueSuggestionsResponse(values=values)
 
-    # For core string fields, get distinct values
+    # For core string fields, get distinct values (cached per workspace+key)
     core_fields = {"task_name": Task.task_name, "task_namespace": Task.task_namespace}
 
     if key in core_fields:
-        column = core_fields[key]
-        query = (
-            select(column, func.count(column))
-            .where(Task.workspace_id == workspace_id)
-            .group_by(column)
-            .order_by(func.count(column).desc())
-            .limit(limit)
-        )
-        if prefix:
-            query = query.where(column.ilike(f"{prefix}%"))
+        cache_key = f"values:{workspace_id}:{key}"
+        cached_values = _get_cached(cache_key)
 
-        result = await db.execute(query)
-        values = [
-            ValueSuggestion(value=str(row[0]), count=row[1])
-            for row in result.all()
-            if row[0]
-        ]
-        return ValueSuggestionsResponse(values=values)
+        if cached_values is None:
+            column = core_fields[key]
+            query = (
+                select(column, func.count(column))
+                .where(Task.workspace_id == workspace_id)
+                .group_by(column)
+                .order_by(func.count(column).desc())
+                .limit(100)  # Cache more values for filtering
+            )
+            result = await db.execute(query)
+            cached_values = [(str(row[0]), row[1]) for row in result.all() if row[0]]
+            _set_cached(cache_key, cached_values)
 
-    # For param.* fields, sample from task_data
-    if key.startswith("param."):
-        json_path = key[6:].split(".")
-
-        # Sample recent tasks
-        sample_query = (
-            select(Task.task_data)
-            .where(Task.workspace_id == workspace_id)
-            .order_by(Task.created_at.desc())
-            .limit(500)
-        )
-        sample_result = await db.execute(sample_query)
-        sample_tasks = sample_result.scalars().all()
-
-        # Extract values for the specified path
-        value_counter: Counter[str] = Counter()
-        for task_data in sample_tasks:
-            if isinstance(task_data, dict):
-                value = _get_nested_value(task_data, json_path)
-                if value is not None:
-                    str_value = str(value)
-                    if not prefix or str_value.startswith(prefix):
-                        value_counter[str_value] += 1
-
+        # Filter by prefix
         values = [
             ValueSuggestion(value=v, count=c)
-            for v, c in value_counter.most_common(limit)
-        ]
+            for v, c in cached_values
+            if not prefix or v.lower().startswith(prefix.lower())
+        ][:limit]
+        return ValueSuggestionsResponse(values=values)
+
+    # For param.* fields, sample from task_data (cached per workspace+key)
+    if key.startswith("param."):
+        cache_key = f"values:{workspace_id}:{key}"
+        cached_values = _get_cached(cache_key)
+
+        if cached_values is None:
+            json_path = key[6:].split(".")
+
+            # Sample recent tasks
+            sample_query = (
+                select(Task.task_data)
+                .where(Task.workspace_id == workspace_id)
+                .order_by(Task.created_at.desc())
+                .limit(500)
+            )
+            sample_result = await db.execute(sample_query)
+            sample_tasks = sample_result.scalars().all()
+
+            # Extract values for the specified path
+            value_counter: Counter[str] = Counter()
+            for task_data in sample_tasks:
+                if isinstance(task_data, dict):
+                    value = _get_nested_value(task_data, json_path)
+                    if value is not None:
+                        value_counter[str(value)] += 1
+
+            # Cache all discovered values (up to 100)
+            cached_values = list(value_counter.most_common(100))
+            _set_cached(cache_key, cached_values)
+
+        # Filter by prefix
+        values = [
+            ValueSuggestion(value=v, count=c)
+            for v, c in cached_values
+            if not prefix or v.startswith(prefix)
+        ][:limit]
         return ValueSuggestionsResponse(values=values)
 
     return ValueSuggestionsResponse(values=[])

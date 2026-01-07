@@ -259,8 +259,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
           return updated;
         }
 
-        // Add new filter
-        const id = `${Date.now()}`;
+        // Add new filter with unique ID
+        const id = crypto.randomUUID();
         return [...prev, { id, key, operator, value }];
       });
       setPage(1);
@@ -310,25 +310,71 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     setPage(1);
   }, []);
 
+  // Autocomplete mode: "key" for key suggestions, "value" for value suggestions
+  const [autocompleteMode, setAutocompleteMode] = useState<"key" | "value">("key");
+  const [autocompleteKey, setAutocompleteKey] = useState<string>("");
+
+  // Fetch value suggestions from backend
+  const fetchValueSuggestions = useCallback(
+    async (key: string, prefix: string) => {
+      if (!activeWorkspace?.id) return;
+      try {
+        const params = new URLSearchParams({
+          workspace_id: activeWorkspace.id,
+          key,
+          prefix,
+          limit: "10",
+        });
+        const response = await fetchWithAuth(`${API_V1}/tasks/search/values?${params}`);
+        if (response.ok) {
+          const data = await response.json();
+          const values = (data.values || []).map((v: { value: string }) => v.value);
+          setAutocompleteOptions(values);
+          setShowAutocomplete(values.length > 0);
+        }
+      } catch {
+        // Silently fail - autocomplete is optional
+      }
+    },
+    [activeWorkspace?.id],
+  );
+
   // Handle autocomplete input
   const handleSearchInput = useCallback(
     (value: string) => {
       setSearchText(value);
 
-      // Show autocomplete suggestions for keys
-      if (value.includes(":")) {
-        setShowAutocomplete(false);
-      } else if (value.length > 0) {
-        const suggestions = availableKeys.filter((k) =>
-          k.toLowerCase().includes(value.toLowerCase()),
-        );
-        setAutocompleteOptions(suggestions.slice(0, 10));
-        setShowAutocomplete(suggestions.length > 0);
+      // Parse the input to determine autocomplete mode
+      // Formats: "key", "key:", "key:op:", "key:op:value_prefix"
+      const colonCount = (value.match(/:/g) || []).length;
+
+      if (colonCount === 0) {
+        // No colon - suggest keys
+        setAutocompleteMode("key");
+        if (value.length > 0) {
+          const suggestions = availableKeys.filter((k) =>
+            k.toLowerCase().includes(value.toLowerCase()),
+          );
+          setAutocompleteOptions(suggestions.slice(0, 10));
+          setShowAutocomplete(suggestions.length > 0);
+        } else {
+          setShowAutocomplete(false);
+        }
       } else {
-        setShowAutocomplete(false);
+        // Has colon(s) - parse for value suggestions
+        // Match key:op:value or key:value patterns
+        const match = value.match(/^([^:]+):([=!<>~]+)?:?(.*)$/);
+        if (match) {
+          const [, key, , valuePrefix = ""] = match;
+          setAutocompleteMode("value");
+          setAutocompleteKey(key);
+          fetchValueSuggestions(key, valuePrefix);
+        } else {
+          setShowAutocomplete(false);
+        }
       }
     },
-    [availableKeys],
+    [availableKeys, fetchValueSuggestions],
   );
 
   // Parse and add filter from search text
@@ -337,15 +383,34 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       e.preventDefault();
       const text = searchText.trim();
 
-      // Try to parse as filter: key:op:value or key:value
-      const match = text.match(/^([^:]+):([=!<>~]+)?:?(.*)$/);
+      // Try to parse as filter: key:op:value (explicit operator) or key:value (implicit "=")
+      // Use two-step parsing to handle values with colons (e.g., URLs)
+      let key: string | undefined;
+      let op: FilterCondition["operator"] = "=";
+      let value: string | undefined;
+
+      // First, try explicit operator form: key:op:value
+      let match = text.match(/^([^:]+):([=!<>~]+):(.*)$/);
       if (match) {
-        const [, key, op = "=", value] = match;
-        if (key && value) {
-          addFilter(key, (op as FilterCondition["operator"]) || "=", value);
-          setSearchText("");
-          return;
+        [, key, op, value] = match as [
+          string,
+          string,
+          FilterCondition["operator"],
+          string,
+        ];
+      } else {
+        // Fallback: implicit operator form key:value (assume "=")
+        match = text.match(/^([^:]+):(.+)$/);
+        if (match) {
+          [, key, value] = match;
+          op = "=";
         }
+      }
+
+      if (key && value) {
+        addFilter(key, op, value);
+        setSearchText("");
+        return;
       }
 
       // Otherwise treat as text search - trigger search
@@ -414,12 +479,34 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                       {/* Autocomplete dropdown */}
                       {showAutocomplete && autocompleteOptions.length > 0 && (
                         <div className="absolute left-0 right-0 top-full z-10 mt-1 rounded-md border border-gray-200 bg-white shadow-lg dark:border-gray-600 dark:bg-gray-700">
+                          {autocompleteMode === "key" && (
+                            <div className="px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
+                              Keys
+                            </div>
+                          )}
+                          {autocompleteMode === "value" && (
+                            <div className="px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
+                              Values for {autocompleteKey}
+                            </div>
+                          )}
                           {autocompleteOptions.map((option) => (
                             <button
                               key={option}
                               type="button"
-                              onClick={() => {
-                                setSearchText(`${option}:`);
+                              // Use onMouseDown to prevent blur race condition
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                if (autocompleteMode === "key") {
+                                  setSearchText(`${option}:`);
+                                } else {
+                                  // Value mode - parse current text and replace value
+                                  const match =
+                                    searchText.match(/^([^:]+):([=!<>~]+)?:?/);
+                                  if (match) {
+                                    const [prefix] = match;
+                                    setSearchText(`${prefix}${option}`);
+                                  }
+                                }
                                 setShowAutocomplete(false);
                               }}
                               className="block w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
