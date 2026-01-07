@@ -1,3 +1,4 @@
+import os
 import typing
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from stardag.target import (
     target_factory_provider,
 )
 from stardag.target._factory import TargetFactory
+from stardag.utils.testing.env import temp_env_vars
 from stardag.utils.testing.simple_dag import (
     get_simple_dag,
     get_simple_dag_expected_root_output,
@@ -74,3 +76,11 @@ def default_in_memory_fs_target(
     _default_in_memory_fs_target_factory,
 ) -> typing.Type[InMemoryFileSystemTarget]:
     return InMemoryFileSystemTarget
+
+
+@pytest.fixture(scope="function", autouse=True)
+def cleared_stardag_env_vars() -> typing.Generator[None, None, None]:
+    """Clear STARDAG_* environment variables for the duration of the test."""
+    stardag_env_vars = [var for var in os.environ if var.startswith("STARDAG_")]
+    with temp_env_vars({var: None for var in stardag_env_vars}):
+        yield

@@ -1,8 +1,10 @@
 import pytest
 
 from stardag._decorator import Depends, task
-from stardag._task import Task
+from stardag._task import Task, auto_namespace
 from stardag.target import LoadableTarget
+
+auto_namespace(__name__)  # Avoid collisions in task registry
 
 
 def test_basic(default_in_memory_fs_target):

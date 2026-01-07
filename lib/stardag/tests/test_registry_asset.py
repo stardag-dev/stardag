@@ -7,7 +7,9 @@ from stardag._registry_asset import (
     MarkdownRegistryAsset,
     RegistryAsset,
 )
-from stardag._task import BaseTask
+from stardag._task import BaseTask, auto_namespace
+
+auto_namespace(__name__)  # Avoid collisions in task registry
 
 
 class MockTask(BaseTask):
