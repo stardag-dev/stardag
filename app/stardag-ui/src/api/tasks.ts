@@ -35,8 +35,13 @@ export async function fetchBuilds(
   return response.json();
 }
 
-export async function fetchBuild(buildId: string): Promise<Build> {
-  const response = await fetchWithAuth(`${API_BASE}/builds/${buildId}`);
+export async function fetchBuild(buildId: string, workspaceId: string): Promise<Build> {
+  const params = new URLSearchParams();
+  params.set("workspace_id", workspaceId);
+
+  const response = await fetchWithAuth(
+    `${API_BASE}/builds/${buildId}?${params.toString()}`,
+  );
   if (!response.ok) {
     throw new Error(`Failed to fetch build: ${response.statusText}`);
   }

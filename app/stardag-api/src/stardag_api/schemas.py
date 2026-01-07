@@ -305,3 +305,73 @@ class TaskRegistryAssetListResponse(BaseModel):
     """Schema for task registry assets list response."""
 
     assets: list[TaskRegistryAssetResponse]
+
+
+# --- Task Search Schemas ---
+
+
+class TaskSearchResult(BaseModel):
+    """Schema for a task in search results with build context."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    task_id: str
+    workspace_id: str
+    task_namespace: str
+    task_name: str
+    task_data: dict
+    version: str | None
+    created_at: datetime
+    # Build context (most recent build the task appeared in)
+    build_id: str | None = None
+    build_name: str | None = None
+    status: TaskStatus = TaskStatus.PENDING
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
+    asset_count: int = 0
+
+
+class TaskSearchResponse(BaseModel):
+    """Schema for task search results."""
+
+    tasks: list[TaskSearchResult]
+    total: int
+    page: int
+    page_size: int
+    available_columns: list[str] = []
+
+
+class KeySuggestion(BaseModel):
+    """Schema for an autocomplete key suggestion."""
+
+    key: str
+    type: str = "string"  # string, number, boolean, object
+    count: int = 0
+
+
+class KeySuggestionsResponse(BaseModel):
+    """Schema for key suggestions response."""
+
+    keys: list[KeySuggestion]
+
+
+class ValueSuggestion(BaseModel):
+    """Schema for an autocomplete value suggestion."""
+
+    value: str
+    count: int = 0
+
+
+class ValueSuggestionsResponse(BaseModel):
+    """Schema for value suggestions response."""
+
+    values: list[ValueSuggestion]
+
+
+class AvailableColumnsResponse(BaseModel):
+    """Schema for available columns response."""
+
+    core: list[str]
+    params: list[str]
+    assets: list[str]

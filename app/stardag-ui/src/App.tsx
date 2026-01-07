@@ -1,200 +1,126 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { setAccessTokenGetter } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
+import { BuildsList } from "./components/BuildsList";
+import { BuildView } from "./components/BuildView";
 import { CreateOrganization } from "./components/CreateOrganization";
-import { DagGraph } from "./components/DagGraph";
 import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { OrganizationSelector } from "./components/OrganizationSelector";
 import { OrganizationSettings } from "./components/OrganizationSettings";
 import { PendingInvites } from "./components/PendingInvites";
-import { TaskDetail } from "./components/TaskDetail";
-import { TaskFilters } from "./components/TaskFilters";
-import { TaskTable } from "./components/TaskTable";
+import type { NavItem } from "./components/Sidebar";
+import { Sidebar } from "./components/Sidebar";
+import { TaskExplorer } from "./components/TaskExplorer";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
 import { WorkspaceProvider, useWorkspace } from "./context/WorkspaceContext";
-import { useTasks } from "./hooks/useTasks";
-import type { Task } from "./types/task";
 
-interface DashboardProps {
-  onNavigate: (path: string) => void;
+// Main app layout with sidebar
+interface MainLayoutProps {
+  children: React.ReactNode;
+  activeNav: NavItem;
+  onNavigate: (item: NavItem) => void;
+  showHeader?: boolean;
 }
 
-function Dashboard({ onNavigate }: DashboardProps) {
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
-  const { getWorkspacePath, activeOrg, activeWorkspace } = useWorkspace();
-  const {
-    tasks,
-    tasksWithContext,
-    graph,
-    currentBuild,
-    builds,
-    total,
-    page,
-    setPage,
-    loading,
-    error,
-    nameFilter,
-    setNameFilter,
-    statusFilter,
-    setStatusFilter,
-    pageSize,
-    totalPages,
-    selectBuild,
-  } = useTasks();
-
-  // Sync URL with active org/workspace
-  const isInitialMount = useRef(true);
-  useEffect(() => {
-    // Skip on initial mount - let URL drive initial state
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-    // Update URL when org/workspace changes
-    const newPath = getWorkspacePath();
-    if (window.location.pathname !== newPath) {
-      window.history.replaceState({}, "", newPath);
-    }
-  }, [activeOrg, activeWorkspace, getWorkspacePath]);
-
-  const handleDagTaskClick = useCallback(
-    (taskId: string) => {
-      // Look in tasksWithContext first (includes related tasks)
-      const task = tasksWithContext.find((t) => t.task_id === taskId);
-      if (task) setSelectedTask(task);
-    },
-    [tasksWithContext],
-  );
+function MainLayout({
+  children,
+  activeNav,
+  onNavigate,
+  showHeader = true,
+}: MainLayoutProps) {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   return (
-    <div className="flex h-screen flex-col bg-gray-100 dark:bg-gray-900">
-      {/* Header */}
-      <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2">
-        <div className="flex items-center gap-4">
-          {/* Slack-like org selector (top-left) */}
-          <OrganizationSelector />
+    <div className="flex h-screen bg-gray-100 dark:bg-gray-900">
+      {/* Sidebar */}
+      <Sidebar
+        activeItem={activeNav}
+        onNavigate={onNavigate}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+      />
 
-          {/* Separator */}
-          <div className="h-8 w-px bg-gray-200 dark:bg-gray-700" />
-
-          {/* Build selector */}
-          {builds.length > 0 && (
-            <select
-              value={currentBuild?.id ?? ""}
-              onChange={(e) => selectBuild(e.target.value)}
-              className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            >
-              {builds.map((build) => (
-                <option key={build.id} value={build.id}>
-                  {build.name} ({build.status})
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => onNavigate("/settings")}
-            className="rounded-md p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-            title="Organization Settings"
-          >
-            <svg
-              className="h-5 w-5"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-              />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-              />
-            </svg>
-          </button>
-          <ThemeToggle />
-          <UserMenu />
-        </div>
-      </header>
-
-      {/* Main content */}
-      <div className="flex-1 overflow-hidden">
-        <PanelGroup direction="horizontal">
-          {/* Left column: Filters + DAG + List */}
-          <Panel defaultSize={selectedTask ? 70 : 100} minSize={40}>
-            <div className="flex h-full flex-col">
-              {/* Filters */}
-              <TaskFilters
-                nameFilter={nameFilter}
-                onNameFilterChange={setNameFilter}
-                statusFilter={statusFilter}
-                onStatusFilterChange={setStatusFilter}
-              />
-
-              {/* DAG + List with resizable split */}
-              <PanelGroup direction="vertical" className="flex-1">
-                {/* DAG Graph */}
-                <Panel defaultSize={50} minSize={20}>
-                  <div className="h-full border-b border-gray-200 dark:border-gray-700">
-                    <DagGraph
-                      tasks={tasksWithContext}
-                      graph={graph}
-                      selectedTaskId={selectedTask?.task_id ?? null}
-                      onTaskClick={handleDagTaskClick}
-                    />
-                  </div>
-                </Panel>
-
-                <PanelResizeHandle className="h-1 bg-gray-200 dark:bg-gray-700 hover:bg-blue-400 dark:hover:bg-blue-500 transition-colors cursor-row-resize" />
-
-                {/* Task List */}
-                <Panel defaultSize={50} minSize={20}>
-                  <TaskTable
-                    tasks={tasks}
-                    loading={loading}
-                    error={error}
-                    selectedTaskId={selectedTask?.task_id ?? null}
-                    onSelectTask={setSelectedTask}
-                    page={page}
-                    pageSize={pageSize}
-                    total={total}
-                    totalPages={totalPages}
-                    onPageChange={setPage}
-                  />
-                </Panel>
-              </PanelGroup>
+      {/* Main content area */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Header */}
+        {showHeader && (
+          <header className="flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 dark:border-gray-700 dark:bg-gray-800">
+            <div className="flex items-center gap-4">
+              <OrganizationSelector />
             </div>
-          </Panel>
+            <div className="flex items-center gap-3">
+              <ThemeToggle />
+              <UserMenu />
+            </div>
+          </header>
+        )}
 
-          {/* Right column: Task Detail (only when task selected) */}
-          {selectedTask && (
-            <>
-              <PanelResizeHandle className="w-1 bg-gray-200 dark:bg-gray-700 hover:bg-blue-400 dark:hover:bg-blue-500 transition-colors cursor-col-resize" />
-              <Panel defaultSize={30} minSize={20} maxSize={50}>
-                <div className="h-full border-l border-gray-200 dark:border-gray-700">
-                  <TaskDetail
-                    task={selectedTask}
-                    onClose={() => setSelectedTask(null)}
-                  />
-                </div>
-              </Panel>
-            </>
-          )}
-        </PanelGroup>
+        {/* Content */}
+        <main className="flex-1 overflow-hidden">{children}</main>
       </div>
     </div>
+  );
+}
+
+// Home page with builds list
+interface HomePageProps {
+  onNavigate: (item: NavItem) => void;
+  onSelectBuild: (buildId: string) => void;
+}
+
+function HomePage({ onNavigate, onSelectBuild }: HomePageProps) {
+  return (
+    <MainLayout activeNav="home" onNavigate={onNavigate}>
+      <BuildsList onSelectBuild={onSelectBuild} />
+    </MainLayout>
+  );
+}
+
+// Single build view
+interface BuildPageProps {
+  buildId: string;
+  onNavigate: (item: NavItem) => void;
+  onBack: () => void;
+}
+
+function BuildPage({ buildId, onNavigate, onBack }: BuildPageProps) {
+  return (
+    <MainLayout activeNav="home" onNavigate={onNavigate}>
+      <BuildView buildId={buildId} onBack={onBack} />
+    </MainLayout>
+  );
+}
+
+// Task explorer page
+interface TaskExplorerPageProps {
+  onNavigate: (item: NavItem) => void;
+  onNavigateToBuild: (buildId: string) => void;
+}
+
+function TaskExplorerPage({ onNavigate, onNavigateToBuild }: TaskExplorerPageProps) {
+  return (
+    <MainLayout activeNav="tasks" onNavigate={onNavigate}>
+      <TaskExplorer onNavigateToBuild={onNavigateToBuild} />
+    </MainLayout>
+  );
+}
+
+// Settings page (reusing existing component)
+interface SettingsPageProps {
+  onNavigate: (item: NavItem) => void;
+  onNavigatePath: (path: string) => void;
+}
+
+function SettingsPage({ onNavigate, onNavigatePath }: SettingsPageProps) {
+  return (
+    <MainLayout activeNav="settings" onNavigate={onNavigate} showHeader={false}>
+      <OrganizationSettings onNavigate={onNavigatePath} />
+    </MainLayout>
   );
 }
 
@@ -203,7 +129,6 @@ function AuthConnector({ children }: { children: React.ReactNode }) {
   const { getAccessToken } = useAuth();
 
   useEffect(() => {
-    // Pass the org-aware getAccessToken to the API client
     setAccessTokenGetter(getAccessToken);
   }, [getAccessToken]);
 
@@ -232,12 +157,11 @@ function InvitesPage({ onNavigate }: InvitesPageProps) {
 
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900">
-      {/* Header */}
-      <header className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3">
+      <header className="flex items-center justify-between border-b border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
         <div className="flex items-center gap-4">
           <button
             onClick={() => onNavigate("/")}
-            className="text-gray-900 dark:text-gray-100 hover:text-blue-600 dark:hover:text-blue-400"
+            className="text-gray-900 hover:text-blue-600 dark:text-gray-100 dark:hover:text-blue-400"
           >
             <Logo size="md" />
           </button>
@@ -248,14 +172,13 @@ function InvitesPage({ onNavigate }: InvitesPageProps) {
         </div>
       </header>
 
-      {/* Content */}
       <main className="mx-auto max-w-2xl px-4 py-8">
         <PendingInvites />
 
         <div className="mt-8 text-center">
           <button
             onClick={() => onNavigate("/")}
-            className="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+            className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
           >
             Back to Dashboard
           </button>
@@ -270,41 +193,39 @@ function LandingPage() {
   const { login } = useAuth();
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900 flex flex-col">
-      {/* Header */}
+    <div className="flex min-h-screen flex-col bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
       <header className="flex items-center justify-between px-6 py-4">
         <Logo size="lg" className="text-white" />
         <button
           onClick={login}
-          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
         >
           Sign In
         </button>
       </header>
 
-      {/* Hero */}
-      <main className="flex-1 flex items-center justify-center px-6">
+      <main className="flex flex-1 items-center justify-center px-6">
         <div className="max-w-2xl text-center">
           <div className="mb-6">
             <span
-              className="font-mono font-medium text-6xl text-white select-none"
+              className="select-none font-mono text-6xl font-medium text-white"
               style={{ fontFamily: "'IBM Plex Mono', monospace" }}
             >
               Stardag
             </span>
           </div>
-          <h2 className="text-3xl font-bold text-white mb-6">
+          <h2 className="mb-6 text-3xl font-bold text-white">
             Declarative DAG Framework
           </h2>
-          <p className="text-xl text-gray-300 mb-8">
+          <p className="mb-8 text-xl text-gray-300">
             Build composable data pipelines with type-safe tasks, deterministic outputs,
             and bottom-up execution. Track, monitor, and manage your workflows with
             ease.
           </p>
-          <div className="flex gap-4 justify-center">
+          <div className="flex justify-center gap-4">
             <button
               onClick={login}
-              className="rounded-md bg-blue-600 px-6 py-3 text-lg font-medium text-white hover:bg-blue-700 transition-colors"
+              className="rounded-md bg-blue-600 px-6 py-3 text-lg font-medium text-white transition-colors hover:bg-blue-700"
             >
               Get Started
             </button>
@@ -312,16 +233,15 @@ function LandingPage() {
               href="https://github.com/andhus/stardag"
               target="_blank"
               rel="noopener noreferrer"
-              className="rounded-md border border-gray-600 px-6 py-3 text-lg font-medium text-gray-300 hover:bg-gray-800 transition-colors"
+              className="rounded-md border border-gray-600 px-6 py-3 text-lg font-medium text-gray-300 transition-colors hover:bg-gray-800"
             >
               View on GitHub
             </a>
           </div>
 
-          {/* Feature highlights */}
-          <div className="mt-16 grid grid-cols-1 md:grid-cols-3 gap-8 text-left">
-            <div className="bg-gray-800/50 rounded-lg p-6">
-              <div className="text-blue-400 mb-3">
+          <div className="mt-16 grid grid-cols-1 gap-8 text-left md:grid-cols-3">
+            <div className="rounded-lg bg-gray-800/50 p-6">
+              <div className="mb-3 text-blue-400">
                 <svg
                   className="h-8 w-8"
                   fill="none"
@@ -336,16 +256,16 @@ function LandingPage() {
                   />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold text-white mb-2">
+              <h3 className="mb-2 text-lg font-semibold text-white">
                 Composable Tasks
               </h3>
-              <p className="text-gray-400 text-sm">
+              <p className="text-sm text-gray-400">
                 Build complex pipelines from simple, reusable task components with full
                 type safety.
               </p>
             </div>
-            <div className="bg-gray-800/50 rounded-lg p-6">
-              <div className="text-green-400 mb-3">
+            <div className="rounded-lg bg-gray-800/50 p-6">
+              <div className="mb-3 text-green-400">
                 <svg
                   className="h-8 w-8"
                   fill="none"
@@ -360,16 +280,16 @@ function LandingPage() {
                   />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold text-white mb-2">
+              <h3 className="mb-2 text-lg font-semibold text-white">
                 Deterministic Outputs
               </h3>
-              <p className="text-gray-400 text-sm">
+              <p className="text-sm text-gray-400">
                 Parameter-based hashing ensures reproducible builds and efficient
                 caching.
               </p>
             </div>
-            <div className="bg-gray-800/50 rounded-lg p-6">
-              <div className="text-purple-400 mb-3">
+            <div className="rounded-lg bg-gray-800/50 p-6">
+              <div className="mb-3 text-purple-400">
                 <svg
                   className="h-8 w-8"
                   fill="none"
@@ -384,8 +304,8 @@ function LandingPage() {
                   />
                 </svg>
               </div>
-              <h3 className="text-lg font-semibold text-white mb-2">Smart Execution</h3>
-              <p className="text-gray-400 text-sm">
+              <h3 className="mb-2 text-lg font-semibold text-white">Smart Execution</h3>
+              <p className="text-sm text-gray-400">
                 Bottom-up, Makefile-style execution builds only what's needed.
               </p>
             </div>
@@ -393,18 +313,24 @@ function LandingPage() {
         </div>
       </main>
 
-      {/* Footer */}
-      <footer className="px-6 py-4 text-center text-gray-500 text-sm">
+      <footer className="px-6 py-4 text-center text-sm text-gray-500">
         Built with Stardag
       </footer>
     </div>
   );
 }
 
-// Simple URL-based routing
+// URL-based routing with support for new views
 function Router() {
   const { isAuthenticated } = useAuth();
+  const { getWorkspacePath } = useWorkspace();
   const [path, setPath] = useState(window.location.pathname);
+
+  // Derive selectedBuildId from path instead of using effect
+  const selectedBuildId = useMemo(() => {
+    const buildMatch = path.match(/\/builds\/([^/]+)/);
+    return buildMatch ? buildMatch[1] : null;
+  }, [path]);
 
   useEffect(() => {
     const handlePopState = () => setPath(window.location.pathname);
@@ -416,6 +342,59 @@ function Router() {
     window.history.pushState({}, "", newPath);
     setPath(newPath);
   }, []);
+
+  // Parse path to determine view
+  const getViewFromPath = useCallback(() => {
+    if (path === "/callback") return "callback";
+    if (path === "/settings") return "settings";
+    if (path === "/invites") return "invites";
+    if (path === "/organizations/new") return "new-org";
+
+    // Check for tasks path: /tasks, /:org/tasks, or /:org/:workspace/tasks
+    if (path === "/tasks" || path.endsWith("/tasks")) return "tasks";
+
+    // Check for build ID in path: /builds/:id or /:org/:workspace/builds/:id
+    const buildMatch = path.match(/\/builds\/([^/]+)/);
+    if (buildMatch) {
+      return "build";
+    }
+
+    return "home";
+  }, [path]);
+
+  // Handle sidebar navigation
+  const handleNavigation = useCallback(
+    (item: NavItem) => {
+      const basePath = getWorkspacePath();
+      switch (item) {
+        case "home":
+          navigateTo(basePath || "/");
+          break;
+        case "tasks":
+          navigateTo(`${basePath}/tasks`);
+          break;
+        case "settings":
+          navigateTo("/settings");
+          break;
+      }
+    },
+    [navigateTo, getWorkspacePath],
+  );
+
+  // Handle build selection
+  const handleSelectBuild = useCallback(
+    (buildId: string) => {
+      const basePath = getWorkspacePath();
+      navigateTo(`${basePath}/builds/${buildId}`);
+    },
+    [navigateTo, getWorkspacePath],
+  );
+
+  // Handle back from build view
+  const handleBackFromBuild = useCallback(() => {
+    const basePath = getWorkspacePath();
+    navigateTo(basePath || "/");
+  }, [navigateTo, getWorkspacePath]);
 
   // Auth callback - always handle regardless of auth state
   if (path === "/callback") {
@@ -435,21 +414,49 @@ function Router() {
   }
 
   // Authenticated routes - wrap with onboarding modal
+  const view = getViewFromPath();
+
   const renderAuthenticatedContent = () => {
-    if (path === "/settings") {
-      return <OrganizationSettings onNavigate={navigateTo} />;
-    }
+    switch (view) {
+      case "settings":
+        return (
+          <SettingsPage onNavigate={handleNavigation} onNavigatePath={navigateTo} />
+        );
 
-    if (path === "/invites") {
-      return <InvitesPage onNavigate={navigateTo} />;
-    }
+      case "invites":
+        return <InvitesPage onNavigate={navigateTo} />;
 
-    if (path === "/organizations/new") {
-      return <CreateOrganization onNavigate={navigateTo} />;
-    }
+      case "new-org":
+        return <CreateOrganization onNavigate={navigateTo} />;
 
-    // Dashboard handles all other paths (including /:orgSlug and /:orgSlug/:workspaceSlug)
-    return <Dashboard onNavigate={navigateTo} />;
+      case "tasks":
+        return (
+          <TaskExplorerPage
+            onNavigate={handleNavigation}
+            onNavigateToBuild={handleSelectBuild}
+          />
+        );
+
+      case "build":
+        if (selectedBuildId) {
+          return (
+            <BuildPage
+              buildId={selectedBuildId}
+              onNavigate={handleNavigation}
+              onBack={handleBackFromBuild}
+            />
+          );
+        }
+        return (
+          <HomePage onNavigate={handleNavigation} onSelectBuild={handleSelectBuild} />
+        );
+
+      case "home":
+      default:
+        return (
+          <HomePage onNavigate={handleNavigation} onSelectBuild={handleSelectBuild} />
+        );
+    }
   };
 
   return (
