@@ -90,13 +90,52 @@ def get_local_target_roots_dir() -> Path:
     return get_stardag_dir() / "local-target-roots"
 
 
-def get_registry_credentials_path(registry_name: str) -> Path:
-    """Get the credentials file path for a specific registry."""
+def _sanitize_user_for_path(user: str) -> str:
+    """Sanitize user identifier (email) for use in file paths.
+
+    Replaces @ and other special characters with safe alternatives.
+    """
+    # Replace common special characters in emails
+    return user.replace("@", "_at_").replace("/", "_").replace("\\", "_")
+
+
+def get_registry_credentials_path(registry_name: str, user: str | None = None) -> Path:
+    """Get the credentials file path for a specific registry and optional user.
+
+    Args:
+        registry_name: Name of the registry.
+        user: Optional user identifier (email). If provided, credentials are
+            stored per-user. If not, uses legacy per-registry storage.
+
+    Returns:
+        Path to the credentials file.
+    """
+    if user:
+        safe_user = _sanitize_user_for_path(user)
+        return get_credentials_dir() / f"{registry_name}__{safe_user}.json"
     return get_credentials_dir() / f"{registry_name}.json"
 
 
-def get_access_token_cache_path(registry_name: str, org_id: str) -> Path:
-    """Get the access token cache path for a registry/org combo."""
+def get_access_token_cache_path(
+    registry_name: str, org_id: str, user: str | None = None
+) -> Path:
+    """Get the access token cache path for a registry/org/user combo.
+
+    Args:
+        registry_name: Name of the registry.
+        org_id: Organization ID.
+        user: Optional user identifier (email). If provided, tokens are
+            cached per-user. If not, uses legacy per-registry/org storage.
+
+    Returns:
+        Path to the access token cache file.
+    """
+    if user:
+        safe_user = _sanitize_user_for_path(user)
+        return (
+            get_access_token_cache_dir()
+            / f"{registry_name}__{safe_user}__{org_id}.json"
+        )
     return get_access_token_cache_dir() / f"{registry_name}__{org_id}.json"
 
 
@@ -377,15 +416,18 @@ class RegistryConfig(BaseModel):
 class ProfileConfig(BaseModel):
     """Profile configuration from TOML.
 
-    A profile defines the (registry, organization, workspace) tuple.
+    A profile defines the (registry, user, organization, workspace) tuple.
 
     Attributes:
         registry: Name of the registry to use.
+        user: User identifier (email) for credential lookup. Optional for
+            backward compatibility - if not set, uses registry-level credentials.
         organization: Organization ID or slug.
         workspace: Workspace ID or slug.
     """
 
     registry: str
+    user: str | None = None
     organization: str
     workspace: str
 
@@ -418,6 +460,7 @@ class TomlConfig(BaseModel):
                 if all(k in value for k in ("registry", "organization", "workspace")):
                     profiles[key] = ProfileConfig(
                         registry=value["registry"],
+                        user=value.get("user"),  # Optional user field
                         organization=value["organization"],
                         workspace=value["workspace"],
                     )
@@ -458,12 +501,14 @@ class ContextConfig(BaseModel):
     Attributes:
         profile: Active profile name (if using profile-based config).
         registry_name: Registry name from config (for credential lookup).
+        user: User identifier (email) for credential lookup.
         organization_id: Active organization ID.
         workspace_id: Active workspace ID.
     """
 
     profile: str | None = None
     registry_name: str | None = None
+    user: str | None = None
     organization_id: str | None = None
     workspace_id: str | None = None
 
@@ -574,10 +619,11 @@ def load_config(
     # Merge configs (project overrides user)
     toml_config = _merge_toml_configs(user_toml, project_toml)
 
-    # 3. Resolve profile → (registry, org, workspace)
+    # 3. Resolve profile → (registry, user, org, workspace)
     profile_name: str | None = None
     registry_name: str | None = None
     registry_url: str | None = None
+    user: str | None = None
     organization_id: str | None = None
     workspace_id: str | None = None
 
@@ -598,6 +644,7 @@ def load_config(
         profile = toml_config.profile.get(profile_name)
         if profile:
             registry_name = profile.registry
+            user = profile.user  # Optional user for multi-user support
             org_value = profile.organization  # Could be slug or ID
             workspace_value = profile.workspace  # Could be slug or ID
 
@@ -672,7 +719,9 @@ def load_config(
     # 5. Load access token from cache (if we have profile info)
     access_token: str | None = None
     if registry_name and organization_id:
-        token_cache_path = get_access_token_cache_path(registry_name, organization_id)
+        token_cache_path = get_access_token_cache_path(
+            registry_name, organization_id, user
+        )
         if token_cache_path.exists():
             token_data = load_json_file(token_cache_path)
             # Check if token is still valid
@@ -694,6 +743,7 @@ def load_config(
         context=ContextConfig(
             profile=profile_name,
             registry_name=registry_name,
+            user=user,
             organization_id=organization_id,
             workspace_id=workspace_id,
         ),
