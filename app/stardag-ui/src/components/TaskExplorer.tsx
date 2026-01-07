@@ -377,281 +377,342 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         </p>
       </div>
 
-      {/* Search bar */}
-      <div className="border-b border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
-        <form onSubmit={handleSearchSubmit} className="relative">
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1">
-              <input
-                type="text"
-                value={searchText}
-                onChange={(e) => handleSearchInput(e.target.value)}
-                onFocus={() => searchText && handleSearchInput(searchText)}
-                onBlur={() => setTimeout(() => setShowAutocomplete(false), 200)}
-                placeholder="Search tasks... (e.g., name:~training, param.lr:>0.01)"
-                className="w-full rounded-md border border-gray-300 bg-white px-4 py-2 pl-10 text-sm text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
-              />
-              <svg
-                className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                />
-              </svg>
-
-              {/* Autocomplete dropdown */}
-              {showAutocomplete && autocompleteOptions.length > 0 && (
-                <div className="absolute left-0 right-0 top-full z-10 mt-1 rounded-md border border-gray-200 bg-white shadow-lg dark:border-gray-600 dark:bg-gray-700">
-                  {autocompleteOptions.map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      onClick={() => {
-                        setSearchText(`${option}:`);
-                        setShowAutocomplete(false);
-                      }}
-                      className="block w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <button
-              type="submit"
-              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-            >
-              Search
-            </button>
-
-            {/* Column picker */}
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowColumnPicker(!showColumnPicker)}
-                className="rounded-md border border-gray-300 p-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
-                title="Configure columns"
-              >
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"
-                  />
-                </svg>
-              </button>
-
-              {showColumnPicker && (
-                <div className="absolute right-0 top-full z-10 mt-1 w-48 rounded-md border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-600 dark:bg-gray-700">
-                  {columns.map((col) => (
-                    <label
-                      key={col.key}
-                      className="flex items-center gap-2 rounded px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-600"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={col.visible}
-                        onChange={() =>
-                          setColumns((prev) =>
-                            prev.map((c) =>
-                              c.key === col.key ? { ...c, visible: !c.visible } : c,
-                            ),
-                          )
-                        }
-                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                      />
-                      <span className="text-sm text-gray-700 dark:text-gray-300">
-                        {col.label}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </form>
-
-        {/* Active filters */}
-        {filters.length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-2">
-            {filters.map((filter) => (
-              <span
-                key={filter.id}
-                className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-3 py-1 text-sm text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
-              >
-                <button
-                  onClick={() => editFilter(filter)}
-                  className="flex items-center gap-1 hover:underline"
-                  title="Click to edit this filter"
-                >
-                  <span className="font-medium">{filter.key}</span>
-                  <span className="text-blue-500 dark:text-blue-400">
-                    {filter.operator}
-                  </span>
-                  <span>{filter.value}</span>
-                </button>
-                <button
-                  onClick={() => removeFilter(filter.id)}
-                  className="ml-1 rounded-full p-0.5 hover:bg-blue-200 dark:hover:bg-blue-800"
-                  title="Remove filter"
-                >
-                  <svg
-                    className="h-3 w-3"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M6 18L18 6M6 6l12 12"
-                    />
-                  </svg>
-                </button>
-              </span>
-            ))}
-            <button
-              onClick={() => setFilters([])}
-              className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            >
-              Clear all
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Collapsible DAG section */}
-      {tasks.length > 0 && (
-        <div className="border-b border-gray-200 dark:border-gray-700">
-          <button
-            onClick={() => canShowDag && setShowDag(!showDag)}
-            disabled={!canShowDag}
-            className={`flex w-full items-center justify-between px-6 py-2 text-sm ${
-              canShowDag
-                ? "cursor-pointer text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
-                : "cursor-not-allowed text-gray-400 dark:text-gray-500"
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <svg
-                className={`h-4 w-4 transition-transform ${showDag ? "rotate-90" : ""}`}
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 5l7 7-7 7"
-                />
-              </svg>
-              <span className="font-medium">DAG View</span>
-              {!canShowDag && (
-                <span className="text-xs text-gray-400 dark:text-gray-500">
-                  {tasks.length > 100
-                    ? "(Limit: 100 tasks)"
-                    : uniqueBuildIds.length > 1
-                      ? `(${uniqueBuildIds.length} builds - select a single build)`
-                      : "(No build associated)"}
-                </span>
-              )}
-            </div>
-            {canShowDag && (
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                {showDag ? "Click to collapse" : "Click to expand"}
-              </span>
-            )}
-          </button>
-
-          {/* DAG content when expanded */}
-          {showDag && canShowDag && (
-            <div className="h-64 border-t border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
-              {dagLoading ? (
-                <div className="flex h-full items-center justify-center">
-                  <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-                </div>
-              ) : dagGraph ? (
-                <DagGraph
-                  tasks={tasksWithContext}
-                  graph={dagGraph}
-                  selectedTaskId={selectedTask?.task_id ?? null}
-                  onTaskClick={handleDagTaskClick}
-                />
-              ) : (
-                <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
-                  <p>Failed to load DAG</p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Results area with optional detail panel */}
+      {/* Main content area with horizontal panels */}
       <div className="flex-1 overflow-hidden">
         <PanelGroup direction="horizontal">
-          {/* Results table panel */}
+          {/* Left panel - search, filters, DAG, results */}
           <Panel defaultSize={selectedTask ? 70 : 100} minSize={40}>
-            <div className="h-full overflow-auto">
-              {loading ? (
-                <div className="flex h-full items-center justify-center">
-                  <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-                </div>
-              ) : error ? (
-                <div className="flex h-full items-center justify-center text-red-500">
-                  <p>{error}</p>
-                </div>
-              ) : tasks.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center text-gray-500 dark:text-gray-400">
-                  <svg
-                    className="mb-4 h-16 w-16"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={1.5}
-                      d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                    />
-                  </svg>
-                  <p className="text-lg font-medium">No tasks found</p>
-                  <p className="mt-1 text-sm">Try adjusting your filters</p>
-                </div>
-              ) : (
-                <table className="w-full">
-                  <thead className="sticky top-0 bg-gray-50 dark:bg-gray-800">
-                    <tr>
-                      {visibleColumns.map((col) => (
-                        <th
-                          key={col.key}
-                          onClick={() => handleSort(col.key)}
-                          className="cursor-pointer border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
+            <div className="flex h-full flex-col">
+              {/* Search bar */}
+              <div className="border-b border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
+                <form onSubmit={handleSearchSubmit} className="relative">
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        type="text"
+                        value={searchText}
+                        onChange={(e) => handleSearchInput(e.target.value)}
+                        onFocus={() => searchText && handleSearchInput(searchText)}
+                        onBlur={() => setTimeout(() => setShowAutocomplete(false), 200)}
+                        placeholder="Search tasks... (e.g., name:~training, param.lr:>0.01)"
+                        className="w-full rounded-md border border-gray-300 bg-white px-4 py-2 pl-10 text-sm text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
+                      />
+                      <svg
+                        className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                        />
+                      </svg>
+
+                      {/* Autocomplete dropdown */}
+                      {showAutocomplete && autocompleteOptions.length > 0 && (
+                        <div className="absolute left-0 right-0 top-full z-10 mt-1 rounded-md border border-gray-200 bg-white shadow-lg dark:border-gray-600 dark:bg-gray-700">
+                          {autocompleteOptions.map((option) => (
+                            <button
+                              key={option}
+                              type="button"
+                              onClick={() => {
+                                setSearchText(`${option}:`);
+                                setShowAutocomplete(false);
+                              }}
+                              className="block w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
+                            >
+                              {option}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      type="submit"
+                      className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                    >
+                      Search
+                    </button>
+
+                    {/* Column picker */}
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setShowColumnPicker(!showColumnPicker)}
+                        className="rounded-md border border-gray-300 p-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                        title="Configure columns"
+                      >
+                        <svg
+                          className="h-4 w-4"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
                         >
-                          <div className="flex items-center gap-1">
-                            {col.label}
-                            {sortBy === col.key && (
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"
+                          />
+                        </svg>
+                      </button>
+
+                      {showColumnPicker && (
+                        <div className="absolute right-0 top-full z-10 mt-1 w-48 rounded-md border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-600 dark:bg-gray-700">
+                          {columns.map((col) => (
+                            <label
+                              key={col.key}
+                              className="flex items-center gap-2 rounded px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-600"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={col.visible}
+                                onChange={() =>
+                                  setColumns((prev) =>
+                                    prev.map((c) =>
+                                      c.key === col.key
+                                        ? { ...c, visible: !c.visible }
+                                        : c,
+                                    ),
+                                  )
+                                }
+                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="text-sm text-gray-700 dark:text-gray-300">
+                                {col.label}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </form>
+
+                {/* Active filters */}
+                {filters.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {filters.map((filter) => (
+                      <span
+                        key={filter.id}
+                        className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-3 py-1 text-sm text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
+                      >
+                        <button
+                          onClick={() => editFilter(filter)}
+                          className="flex items-center gap-1 hover:underline"
+                          title="Click to edit this filter"
+                        >
+                          <span className="font-medium">{filter.key}</span>
+                          <span className="text-blue-500 dark:text-blue-400">
+                            {filter.operator}
+                          </span>
+                          <span>{filter.value}</span>
+                        </button>
+                        <button
+                          onClick={() => removeFilter(filter.id)}
+                          className="ml-1 rounded-full p-0.5 hover:bg-blue-200 dark:hover:bg-blue-800"
+                          title="Remove filter"
+                        >
+                          <svg
+                            className="h-3 w-3"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M6 18L18 6M6 6l12 12"
+                            />
+                          </svg>
+                        </button>
+                      </span>
+                    ))}
+                    <button
+                      onClick={() => setFilters([])}
+                      className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Collapsible DAG section */}
+              {tasks.length > 0 && (
+                <div className="border-b border-gray-200 dark:border-gray-700">
+                  <button
+                    onClick={() => canShowDag && setShowDag(!showDag)}
+                    disabled={!canShowDag}
+                    className={`flex w-full items-center justify-between px-6 py-2 text-sm ${
+                      canShowDag
+                        ? "cursor-pointer text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
+                        : "cursor-not-allowed text-gray-400 dark:text-gray-500"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <svg
+                        className={`h-4 w-4 transition-transform ${
+                          showDag ? "rotate-90" : ""
+                        }`}
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M9 5l7 7-7 7"
+                        />
+                      </svg>
+                      <span className="font-medium">DAG View</span>
+                      {!canShowDag && (
+                        <span className="text-xs text-gray-400 dark:text-gray-500">
+                          {tasks.length > 100
+                            ? "(Limit: 100 tasks)"
+                            : uniqueBuildIds.length > 1
+                              ? `(${uniqueBuildIds.length} builds - select a single build)`
+                              : "(No build associated)"}
+                        </span>
+                      )}
+                    </div>
+                    {canShowDag && (
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {showDag ? "Click to collapse" : "Click to expand"}
+                      </span>
+                    )}
+                  </button>
+
+                  {/* DAG content when expanded */}
+                  {showDag && canShowDag && (
+                    <div className="h-64 border-t border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
+                      {dagLoading ? (
+                        <div className="flex h-full items-center justify-center">
+                          <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                        </div>
+                      ) : dagGraph ? (
+                        <DagGraph
+                          tasks={tasksWithContext}
+                          graph={dagGraph}
+                          selectedTaskId={selectedTask?.task_id ?? null}
+                          onTaskClick={handleDagTaskClick}
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
+                          <p>Failed to load DAG</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Results table area */}
+              <div className="flex-1 overflow-auto">
+                {loading ? (
+                  <div className="flex h-full items-center justify-center">
+                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                  </div>
+                ) : error ? (
+                  <div className="flex h-full items-center justify-center text-red-500">
+                    <p>{error}</p>
+                  </div>
+                ) : tasks.length === 0 ? (
+                  <div className="flex h-full flex-col items-center justify-center text-gray-500 dark:text-gray-400">
+                    <svg
+                      className="mb-4 h-16 w-16"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={1.5}
+                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                      />
+                    </svg>
+                    <p className="text-lg font-medium">No tasks found</p>
+                    <p className="mt-1 text-sm">Try adjusting your filters</p>
+                  </div>
+                ) : (
+                  <table className="w-full">
+                    <thead className="sticky top-0 bg-gray-50 dark:bg-gray-800">
+                      <tr>
+                        {visibleColumns.map((col) => (
+                          <th
+                            key={col.key}
+                            onClick={() => handleSort(col.key)}
+                            className="cursor-pointer border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
+                          >
+                            <div className="flex items-center gap-1">
+                              {col.label}
+                              {sortBy === col.key && (
+                                <svg
+                                  className={`h-4 w-4 ${
+                                    sortDir === "desc" ? "rotate-180" : ""
+                                  }`}
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M5 15l7-7 7 7"
+                                  />
+                                </svg>
+                              )}
+                            </div>
+                          </th>
+                        ))}
+                        {/* Actions column header */}
+                        <th className="border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                          <span className="sr-only">Actions</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-800">
+                      {tasks.map((task) => (
+                        <tr
+                          key={`${task.task_id}-${task.build_id}`}
+                          className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
+                            selectedTask?.task_id === task.task_id
+                              ? "bg-blue-50 dark:bg-blue-900/20"
+                              : ""
+                          }`}
+                        >
+                          {visibleColumns.map((col) => (
+                            <td
+                              key={col.key}
+                              onClick={(e) => {
+                                const value = getCellValue(task, col.key);
+                                if (value) {
+                                  handleCellClick(col.key, String(value), e.shiftKey);
+                                }
+                              }}
+                              className="cursor-pointer whitespace-nowrap px-4 py-3 text-sm text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
+                              title="Click to filter, Shift+click to exclude"
+                            >
+                              {renderCell(task, col.key, onNavigateToBuild)}
+                            </td>
+                          ))}
+                          {/* Actions column */}
+                          <td className="whitespace-nowrap px-4 py-3 text-sm">
+                            <button
+                              onClick={() => setSelectedTask(task)}
+                              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+                              title="View task details"
+                            >
                               <svg
-                                className={`h-4 w-4 ${
-                                  sortDir === "desc" ? "rotate-180" : ""
-                                }`}
+                                className="h-5 w-5"
                                 fill="none"
                                 stroke="currentColor"
                                 viewBox="0 0 24 24"
@@ -660,76 +721,51 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                   strokeLinecap="round"
                                   strokeLinejoin="round"
                                   strokeWidth={2}
-                                  d="M5 15l7-7 7 7"
+                                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                                />
+                                <path
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  strokeWidth={2}
+                                  d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
                                 />
                               </svg>
-                            )}
-                          </div>
-                        </th>
-                      ))}
-                      {/* Actions column header */}
-                      <th className="border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
-                        <span className="sr-only">Actions</span>
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-800">
-                    {tasks.map((task) => (
-                      <tr
-                        key={`${task.task_id}-${task.build_id}`}
-                        className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
-                          selectedTask?.task_id === task.task_id
-                            ? "bg-blue-50 dark:bg-blue-900/20"
-                            : ""
-                        }`}
-                      >
-                        {visibleColumns.map((col) => (
-                          <td
-                            key={col.key}
-                            onClick={(e) => {
-                              const value = getCellValue(task, col.key);
-                              if (value) {
-                                handleCellClick(col.key, String(value), e.shiftKey);
-                              }
-                            }}
-                            className="cursor-pointer whitespace-nowrap px-4 py-3 text-sm text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
-                            title="Click to filter, Shift+click to exclude"
-                          >
-                            {renderCell(task, col.key, onNavigateToBuild)}
+                            </button>
                           </td>
-                        ))}
-                        {/* Actions column */}
-                        <td className="whitespace-nowrap px-4 py-3 text-sm">
-                          <button
-                            onClick={() => setSelectedTask(task)}
-                            className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
-                            title="View task details"
-                          >
-                            <svg
-                              className="h-5 w-5"
-                              fill="none"
-                              stroke="currentColor"
-                              viewBox="0 0 24 24"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                              />
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                              />
-                            </svg>
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+
+              {/* Pagination */}
+              {totalPages > 0 && (
+                <div className="flex items-center justify-between border-t border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
+                  <span className="text-sm text-gray-500 dark:text-gray-400">
+                    Showing {(page - 1) * pageSize + 1}-
+                    {Math.min(page * pageSize, total)} of {total}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={page === 1}
+                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-sm text-gray-500 dark:text-gray-400">
+                      Page {page} of {totalPages}
+                    </span>
+                    <button
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      disabled={page === totalPages}
+                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           </Panel>
@@ -750,35 +786,6 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
           )}
         </PanelGroup>
       </div>
-
-      {/* Pagination */}
-      {totalPages > 0 && (
-        <div className="flex items-center justify-between border-t border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
-          <span className="text-sm text-gray-500 dark:text-gray-400">
-            Showing {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, total)} of{" "}
-            {total}
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page === 1}
-              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
-            >
-              Previous
-            </button>
-            <span className="text-sm text-gray-500 dark:text-gray-400">
-              Page {page} of {totalPages}
-            </span>
-            <button
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={page === totalPages}
-              className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
-            >
-              Next
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
