@@ -123,8 +123,9 @@ def build_jsonb_condition(
         if sql_op == "ILIKE":
             return f"({jsonb_path}) ILIKE '%' || :filter_{safe_key} || '%'"
         elif operator in (">", "<", ">=", "<="):
-            # Numeric comparison - cast to float
-            return f"({jsonb_path})::float {sql_op} :filter_{safe_key}::float"
+            # Numeric comparison - cast both sides to float
+            # Use CAST() syntax to avoid SQLAlchemy misinterpreting ::float as part of param name
+            return f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} CAST(:filter_{safe_key} AS DOUBLE PRECISION)"
         else:
             return f"({jsonb_path}) {sql_op} :filter_{safe_key}"
 

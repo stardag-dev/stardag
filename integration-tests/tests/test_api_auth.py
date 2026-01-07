@@ -349,3 +349,93 @@ class TestEndpointAccess:
         )
         # Should be 403 (forbidden) or 404 (not found)
         assert response.status_code in (403, 404)
+
+
+class TestTaskSearchApi:
+    """Tests for the /tasks/search endpoint."""
+
+    def test_search_endpoint_exists(
+        self,
+        internal_authenticated_client: httpx.Client,
+        test_workspace_id: str,
+    ) -> None:
+        """Test that /tasks/search endpoint exists and returns 200."""
+        response = internal_authenticated_client.get(
+            "/api/v1/tasks/search",
+            params={"workspace_id": test_workspace_id},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "tasks" in data
+        assert "total" in data
+
+    def test_search_keys_endpoint(
+        self,
+        internal_authenticated_client: httpx.Client,
+        test_workspace_id: str,
+    ) -> None:
+        """Test that /tasks/search/keys endpoint returns available keys."""
+        response = internal_authenticated_client.get(
+            "/api/v1/tasks/search/keys",
+            params={"workspace_id": test_workspace_id},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "keys" in data
+        # Should include core keys
+        key_names = [k["key"] for k in data["keys"]]
+        assert "task_name" in key_names
+        assert "status" in key_names
+
+    def test_search_with_name_filter(
+        self,
+        internal_authenticated_client: httpx.Client,
+        test_workspace_id: str,
+    ) -> None:
+        """Test search with task_name filter."""
+        response = internal_authenticated_client.get(
+            "/api/v1/tasks/search",
+            params={
+                "workspace_id": test_workspace_id,
+                "filter": "task_name:~:test",
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "tasks" in data
+
+    def test_search_with_numeric_filter(
+        self,
+        internal_authenticated_client: httpx.Client,
+        test_workspace_id: str,
+    ) -> None:
+        """Test search with numeric param filter (param.x:>=:10)."""
+        response = internal_authenticated_client.get(
+            "/api/v1/tasks/search",
+            params={
+                "workspace_id": test_workspace_id,
+                "filter": "param.sample_size:>=:10",
+            },
+        )
+        # Should return 200 (even if no results)
+        assert response.status_code == 200
+        data = response.json()
+        assert "tasks" in data
+
+    def test_search_with_nested_param_filter(
+        self,
+        internal_authenticated_client: httpx.Client,
+        test_workspace_id: str,
+    ) -> None:
+        """Test search with nested param filter (param.data.value:>:5)."""
+        response = internal_authenticated_client.get(
+            "/api/v1/tasks/search",
+            params={
+                "workspace_id": test_workspace_id,
+                "filter": "param.data_source.sample_size:>=:10",
+            },
+        )
+        # Should return 200 (even if no results)
+        assert response.status_code == 200
+        data = response.json()
+        assert "tasks" in data
