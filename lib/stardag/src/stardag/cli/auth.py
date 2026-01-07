@@ -430,9 +430,33 @@ def _determine_registry(
     # 4. Check available registries
     registries = list_registries()
     if len(registries) == 0:
-        # No registries configured, use local default
-        add_registry("local", DEFAULT_API_URL)
-        return "local", DEFAULT_API_URL
+        # No registries configured, prompt user to select
+        typer.echo("No registry configured. Select one:")
+        typer.echo("")
+        typer.echo("  1. Stardag Cloud (https://api.stardag.com)")
+        typer.echo("  2. Local registry (http://localhost:8000)")
+        typer.echo("  3. Other (enter URL)")
+        typer.echo("")
+
+        choice = typer.prompt("Enter number", type=int, default=1)
+        if choice == 1:
+            add_registry("cloud", "https://api.stardag.com")
+            return "cloud", "https://api.stardag.com"
+        elif choice == 2:
+            add_registry("local", DEFAULT_API_URL)
+            return "local", DEFAULT_API_URL
+        elif choice == 3:
+            custom_url = typer.prompt("Enter registry URL")
+            custom_url = custom_url.rstrip("/")
+            registry_name = typer.prompt(
+                "Enter a name for this registry", default="custom"
+            )
+            add_registry(registry_name, custom_url)
+            return registry_name, custom_url
+        else:
+            typer.echo("Invalid selection, defaulting to Stardag Cloud")
+            add_registry("cloud", "https://api.stardag.com")
+            return "cloud", "https://api.stardag.com"
     elif len(registries) == 1:
         # Only one registry, use it
         registry_name = list(registries.keys())[0]
