@@ -683,9 +683,15 @@ def login(
         typer.echo(f"Error exchanging code for tokens: {e}", err=True)
         raise typer.Exit(1)
 
-    # Extract user email from OIDC token
+    # Extract user email from tokens
+    # Try ID token first (per OIDC spec, user claims like email are in id_token)
+    # Fall back to access token (some providers put claims there too)
     oidc_token = tokens["access_token"]
-    logged_in_user = _extract_user_from_oidc_token(oidc_token)
+    logged_in_user = None
+    if tokens.get("id_token"):
+        logged_in_user = _extract_user_from_oidc_token(tokens["id_token"])
+    if not logged_in_user:
+        logged_in_user = _extract_user_from_oidc_token(oidc_token)
     if logged_in_user:
         typer.echo(f"Logged in as: {logged_in_user}")
 
