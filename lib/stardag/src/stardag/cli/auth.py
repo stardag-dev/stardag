@@ -45,13 +45,19 @@ from stardag.cli.credentials import (
     list_registries_with_credentials,
     load_credentials,
     resolve_org_slug_to_id,
+    resolve_workspace_slug_to_id,
     save_access_token_cache,
     save_credentials,
     set_default_profile,
     set_target_roots,
     validate_active_profile,
 )
-from stardag.config import cache_org_id, cache_workspace_id, get_config
+from stardag.config import (
+    _looks_like_uuid,
+    cache_org_id,
+    cache_workspace_id,
+    get_config,
+)
 
 app = typer.Typer(help="Authentication commands for Stardag API")
 
@@ -617,7 +623,7 @@ def login(
     typer.echo("Login successful!")
     typer.echo(f"Credentials saved to {get_credentials_path(effective_registry)}")
 
-    # If we have an active profile for this registry, just confirm it
+    # If we have an active profile for this registry, refresh its token
     if has_active_profile_for_registry and active_profile:
         profile_details = profiles[active_profile]
         org_slug = profile_details["organization"]
@@ -627,6 +633,65 @@ def login(
         typer.echo(f"Active profile: {active_profile}")
         typer.echo(f"  Organization: {org_slug}")
         typer.echo(f"  Workspace: {workspace_slug}")
+
+        # Resolve org slug to ID and cache access token
+        oidc_token = tokens["access_token"]
+        org_id = resolve_org_slug_to_id(effective_registry, org_slug)
+
+        if not org_id:
+            # Need to fetch org ID from API
+            organizations = _get_user_organizations(effective_url, oidc_token)
+            matching_org = next(
+                (o for o in organizations if o["slug"] == org_slug), None
+            )
+            if matching_org:
+                org_id = matching_org["id"]
+                cache_org_id(effective_registry, org_slug, org_id)
+            else:
+                typer.echo("")
+                typer.echo(
+                    f"Warning: Could not find organization '{org_slug}' for this user"
+                )
+                typer.echo("You may need to update your profile or check org access")
+
+        if org_id:
+            # Exchange for internal org-scoped token
+            typer.echo(f"Caching access token for {org_slug}...")
+            try:
+                internal_tokens = _exchange_for_internal_token(
+                    effective_url, oidc_token, org_id
+                )
+                access_token = internal_tokens["access_token"]
+                expires_in = internal_tokens.get("expires_in", 600)
+                save_access_token_cache(
+                    effective_registry, org_id, access_token, expires_in
+                )
+                typer.echo("Access token cached")
+
+                # Also resolve and cache workspace ID if needed
+                workspace_id = resolve_workspace_slug_to_id(
+                    effective_registry, org_id, workspace_slug
+                )
+                if not workspace_id or not _looks_like_uuid(workspace_id):
+                    workspaces = _get_workspaces(effective_url, access_token, org_id)
+                    matching_ws = next(
+                        (w for w in workspaces if w["slug"] == workspace_slug), None
+                    )
+                    if matching_ws:
+                        workspace_id = matching_ws["id"]
+                        cache_workspace_id(
+                            effective_registry, org_id, workspace_slug, workspace_id
+                        )
+
+                # Sync target roots
+                if workspace_id:
+                    _sync_target_roots(
+                        effective_url, access_token, org_id, workspace_id
+                    )
+
+            except Exception as e:
+                typer.echo(f"Warning: Could not cache access token: {e}")
+                typer.echo("Run 'stardag auth refresh' to try again")
 
         if active_source == "env":
             typer.echo("")
