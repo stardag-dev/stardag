@@ -95,7 +95,11 @@ class TestUILogin:
             # Fill in credentials
             page.locator("input[name='username']").fill(TEST_USER_EMAIL)
             page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
-            page.locator("input[type='submit']").click()
+            # Keycloak submit button can be input or button depending on theme
+            submit_btn = page.locator(
+                "input[type='submit'], button[type='submit'], #kc-login"
+            )
+            submit_btn.first.click()
 
             # Wait for redirect back to app
             page.wait_for_url(
@@ -129,7 +133,10 @@ class TestUINavigation:
         if "keycloak" in page.url or "realms/stardag" in page.url:
             page.locator("input[name='username']").fill(TEST_USER_EMAIL)
             page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
-            page.locator("input[type='submit']").click()
+            submit_btn = page.locator(
+                "input[type='submit'], button[type='submit'], #kc-login"
+            )
+            submit_btn.first.click()
             page.wait_for_url(re.compile(r".*localhost:3000.*"), timeout=10000)
             page.wait_for_load_state("networkidle")
 
@@ -179,7 +186,9 @@ class TestUIBuildsPage:
         if "keycloak" in page.url or "realms/stardag" in page.url:
             page.locator("input[name='username']").fill(TEST_USER_EMAIL)
             page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
-            page.locator("input[type='submit']").click()
+            page.locator(
+                "input[type='submit'], button[type='submit'], #kc-login"
+            ).first.click()
             page.wait_for_url(re.compile(r".*localhost:3000.*"), timeout=10000)
             page.wait_for_load_state("networkidle")
 
@@ -247,23 +256,46 @@ class TestUISidebarNavigation:
     ) -> None:
         """Login before each test in this class."""
         page.goto(docker_services.ui)
-        page.wait_for_load_state("networkidle")
 
-        if "keycloak" in page.url or "realms/stardag" in page.url:
-            page.locator("input[name='username']").fill(TEST_USER_EMAIL)
+        # Wait for either Keycloak login form OR sidebar (already logged in)
+        # This handles async redirects to Keycloak
+        keycloak_form = page.locator("input[name='username']")
+        sidebar_btn = page.locator("button[title='Collapse sidebar']")
+
+        # Wait for one of them to appear
+        try:
+            page.wait_for_selector(
+                "input[name='username'], button[title='Collapse sidebar']",
+                timeout=15000,
+            )
+        except Exception:
+            # If neither appears, the page might show a login button
+            login_btn = page.get_by_text("Login").or_(page.get_by_text("Sign in"))
+            if login_btn.first.is_visible():
+                login_btn.first.click()
+                page.wait_for_selector("input[name='username']", timeout=10000)
+
+        # If we're on Keycloak, fill in credentials
+        if keycloak_form.is_visible():
+            keycloak_form.fill(TEST_USER_EMAIL)
             page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
-            page.locator("input[type='submit']").click()
+            page.locator(
+                "input[type='submit'], button[type='submit'], #kc-login"
+            ).first.click()
             page.wait_for_url(re.compile(r".*localhost:3000.*"), timeout=10000)
             page.wait_for_load_state("networkidle")
+
+        # Wait for sidebar to be fully rendered (indicates we're logged in)
+        sidebar_btn.wait_for(state="visible", timeout=10000)
 
     def test_sidebar_is_visible(
         self,
         page: Page,
     ) -> None:
         """Test that sidebar is visible after login."""
-        # Sidebar should be visible
-        sidebar = page.locator("nav").or_(page.locator("aside"))
-        expect(sidebar.first).to_be_visible()
+        # Sidebar has a collapse button in the header
+        collapse_btn = page.locator("button[title='Collapse sidebar']")
+        expect(collapse_btn).to_be_visible()
 
     def test_sidebar_has_navigation_items(
         self,
@@ -271,8 +303,9 @@ class TestUISidebarNavigation:
     ) -> None:
         """Test that sidebar has expected navigation items."""
         # Should have Home, Task Explorer, and Settings navigation items
-        nav_buttons = page.locator("nav button, aside button")
-        expect(nav_buttons.first).to_be_visible()
+        # These are visible as text when sidebar is expanded
+        home_btn = page.get_by_text("Home", exact=True)
+        expect(home_btn).to_be_visible()
 
     def test_task_explorer_navigation(
         self,
@@ -337,7 +370,9 @@ class TestUITaskExplorer:
         if "keycloak" in page.url or "realms/stardag" in page.url:
             page.locator("input[name='username']").fill(TEST_USER_EMAIL)
             page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
-            page.locator("input[type='submit']").click()
+            page.locator(
+                "input[type='submit'], button[type='submit'], #kc-login"
+            ).first.click()
             page.wait_for_url(re.compile(r".*localhost:3000.*"), timeout=10000)
             page.wait_for_load_state("networkidle")
 
