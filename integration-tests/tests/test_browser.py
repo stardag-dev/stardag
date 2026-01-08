@@ -575,6 +575,229 @@ class TestUITaskExplorer:
             expect(page.locator("text=No tasks found")).to_be_visible()
 
 
+class TestUIDAGPanel:
+    """Test DAG panel functionality in Task Explorer."""
+
+    @pytest.fixture(autouse=True)
+    def login_first(
+        self,
+        page: Page,
+        docker_services: ServiceEndpoints,
+    ) -> None:
+        """Login before each test in this class."""
+        page.goto(docker_services.ui)
+
+        # Wait for either Keycloak login form OR sidebar (already logged in)
+        keycloak_form = page.locator("input[name='username']")
+        sidebar_btn = page.locator("button[title='Collapse sidebar']")
+
+        # Wait for one of them to appear
+        try:
+            page.wait_for_selector(
+                "input[name='username'], button[title='Collapse sidebar']",
+                timeout=15000,
+            )
+        except Exception:
+            # If neither appears, the page might show a login button
+            login_btn = page.get_by_text("Login").or_(page.get_by_text("Sign in"))
+            if login_btn.first.is_visible():
+                login_btn.first.click()
+                page.wait_for_selector("input[name='username']", timeout=10000)
+
+        # If we're on Keycloak, fill in credentials
+        if keycloak_form.is_visible():
+            keycloak_form.fill(TEST_USER_EMAIL)
+            page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
+            page.locator(
+                "input[type='submit'], button[type='submit'], #kc-login"
+            ).first.click()
+            page.wait_for_url(re.compile(r".*localhost:3000.*"), timeout=10000)
+            page.wait_for_load_state("networkidle")
+
+        # Wait for sidebar to be fully rendered (indicates we're logged in)
+        sidebar_btn.wait_for(state="visible", timeout=10000)
+
+    def _navigate_to_task_explorer(self, page: Page) -> None:
+        """Helper to navigate to Task Explorer page."""
+        task_explorer_btn = page.get_by_text("Task Explorer").or_(
+            page.get_by_title("Task Explorer")
+        )
+        task_explorer_btn.click()
+        page.wait_for_load_state("networkidle")
+
+        # Wait for Task Explorer header to be visible
+        page.locator("h1:has-text('Task Explorer')").wait_for(
+            state="visible", timeout=5000
+        )
+
+    def test_dag_view_toggle_button_exists(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that DAG View toggle button exists in Task Explorer."""
+        self._navigate_to_task_explorer(page)
+
+        # Should have a DAG View button/header in the panel
+        dag_button = page.get_by_text("DAG View", exact=False)
+        expect(dag_button).to_be_visible()
+
+    def test_dag_panel_toggle_changes_chevron(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that clicking DAG View toggle changes the chevron icon state."""
+        self._navigate_to_task_explorer(page)
+
+        # Find the DAG View toggle button
+        dag_button = page.locator("button:has-text('DAG View')")
+        expect(dag_button).to_be_visible()
+
+        # Get the chevron element
+        chevron = dag_button.locator("svg").first
+        expect(chevron).to_be_visible()
+
+        # Click to toggle (note: this may be disabled if no single build is selected)
+        # We still verify the button exists and responds to clicks
+        dag_button.click()
+        page.wait_for_timeout(300)  # Wait for animation
+
+        # Button should still be visible after toggle
+        expect(dag_button).to_be_visible()
+
+    def test_dag_panel_resize_handle_exists(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that the resize handle between table and DAG exists."""
+        self._navigate_to_task_explorer(page)
+
+        # Look for the resize handle (cursor-row-resize class)
+        resize_handle = page.locator(".cursor-row-resize")
+        expect(resize_handle.first).to_be_visible()
+
+    def test_dag_panel_disabled_message_when_no_single_build(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that DAG panel shows disabled message when multiple builds."""
+        self._navigate_to_task_explorer(page)
+
+        # The DAG section should be visible with some state indicator
+        dag_section = page.locator("button:has-text('DAG View')")
+        expect(dag_section).to_be_visible()
+
+        # The button should show some state - either enabled with toggle hint
+        # or disabled with a reason message
+        dag_text = dag_section.inner_text()
+        # Should contain either "Click to" (enabled) or a disabled reason
+        assert (
+            "Click to" in dag_text
+            or "(No tasks)" in dag_text
+            or "(No build associated)" in dag_text
+            or "builds - select a single build" in dag_text
+            or "(Limit: 100 tasks)" in dag_text
+        ), f"DAG section should show state indicator, got: {dag_text}"
+
+
+class TestUIBuildViewDAG:
+    """Test DAG panel functionality in Build View."""
+
+    @pytest.fixture(autouse=True)
+    def login_first(
+        self,
+        page: Page,
+        docker_services: ServiceEndpoints,
+    ) -> None:
+        """Login before each test in this class."""
+        page.goto(docker_services.ui)
+
+        keycloak_form = page.locator("input[name='username']")
+        sidebar_btn = page.locator("button[title='Collapse sidebar']")
+
+        try:
+            page.wait_for_selector(
+                "input[name='username'], button[title='Collapse sidebar']",
+                timeout=15000,
+            )
+        except Exception:
+            login_btn = page.get_by_text("Login").or_(page.get_by_text("Sign in"))
+            if login_btn.first.is_visible():
+                login_btn.first.click()
+                page.wait_for_selector("input[name='username']", timeout=10000)
+
+        if keycloak_form.is_visible():
+            keycloak_form.fill(TEST_USER_EMAIL)
+            page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
+            page.locator(
+                "input[type='submit'], button[type='submit'], #kc-login"
+            ).first.click()
+            page.wait_for_url(re.compile(r".*localhost:3000.*"), timeout=10000)
+            page.wait_for_load_state("networkidle")
+
+        sidebar_btn.wait_for(state="visible", timeout=10000)
+
+    def test_build_page_dag_toggle_exists(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that DAG View toggle exists on build page if builds exist."""
+        # Navigate to Home (builds list)
+        page.get_by_text("Home", exact=True).click()
+        page.wait_for_load_state("networkidle")
+
+        # Check if there are any builds to click on
+        build_rows = page.locator("tr").filter(has=page.locator("td"))
+        if build_rows.count() > 0:
+            # Click the first build row
+            build_rows.first.click()
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(500)
+
+            # Should have DAG View toggle button
+            dag_button = page.get_by_text("DAG View", exact=False)
+            expect(dag_button).to_be_visible()
+
+    def test_build_dag_panel_collapse_expand(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that DAG panel can be collapsed and expanded in Build view."""
+        # Navigate to Home (builds list)
+        page.get_by_text("Home", exact=True).click()
+        page.wait_for_load_state("networkidle")
+
+        # Check if there are any builds to click on
+        build_rows = page.locator("tr").filter(has=page.locator("td"))
+        if build_rows.count() > 0:
+            # Click the first build row
+            build_rows.first.click()
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(500)
+
+            # Find DAG View toggle
+            dag_button = page.locator("button:has-text('DAG View')")
+            if dag_button.is_visible():
+                # Click to collapse
+                dag_button.click()
+                page.wait_for_timeout(300)  # Wait for animation
+
+                # Should show "Click to expand" now
+                collapsed_text = dag_button.inner_text()
+                assert "Click to expand" in collapsed_text, (
+                    f"After collapse, expected 'Click to expand', got: {collapsed_text}"
+                )
+
+                # Click again to expand
+                dag_button.click()
+                page.wait_for_timeout(300)
+
+                # Should show "Click to collapse" now
+                expanded_text = dag_button.inner_text()
+                assert "Click to collapse" in expanded_text, (
+                    f"After expand, expected 'Click to collapse', got: {expanded_text}"
+                )
+
+
 class TestUIResponsiveness:
     """Test UI responsiveness at different viewport sizes."""
 

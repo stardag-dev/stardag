@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ImperativePanelHandle,
+  Panel,
+  PanelGroup,
+  PanelResizeHandle,
+} from "react-resizable-panels";
 import { fetchBuild, fetchBuildGraph, fetchTasksInBuild } from "../api/tasks";
 import { useWorkspace } from "../context/WorkspaceContext";
 import type { Build, Task, TaskGraphResponse, TaskStatus } from "../types/task";
@@ -30,6 +35,20 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
 
   // DAG collapse state - expanded by default
   const [showDag, setShowDag] = useState(true);
+  const dagPanelRef = useRef<ImperativePanelHandle>(null);
+
+  // Handle DAG toggle with panel resize
+  const handleToggleDag = useCallback(() => {
+    const panel = dagPanelRef.current;
+    if (panel) {
+      if (showDag) {
+        panel.collapse();
+      } else {
+        panel.expand();
+      }
+    }
+    setShowDag(!showDag);
+  }, [showDag]);
 
   // Filter state
   const [nameFilter, setNameFilter] = useState("");
@@ -234,11 +253,18 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
               {/* DAG + List with resizable split */}
               <PanelGroup direction="vertical" className="flex-1">
                 {/* Collapsible DAG Section */}
-                <Panel defaultSize={showDag ? 50 : 0} minSize={0}>
+                <Panel
+                  ref={dagPanelRef}
+                  defaultSize={50}
+                  minSize={0}
+                  collapsible
+                  onCollapse={() => setShowDag(false)}
+                  onExpand={() => setShowDag(true)}
+                >
                   <div className="flex h-full flex-col">
                     {/* DAG collapse header */}
                     <button
-                      onClick={() => setShowDag(!showDag)}
+                      onClick={handleToggleDag}
                       className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
                     >
                       <div className="flex items-center gap-2">
@@ -278,12 +304,10 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                   </div>
                 </Panel>
 
-                {showDag && (
-                  <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
-                )}
+                <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
 
                 {/* Task List */}
-                <Panel defaultSize={showDag ? 50 : 100} minSize={20}>
+                <Panel defaultSize={50} minSize={20}>
                   <TaskTable
                     tasks={paginatedTasks}
                     loading={false}
