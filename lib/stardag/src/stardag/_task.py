@@ -59,16 +59,30 @@ class BaseTask(
         """Declare if the task is complete."""
         ...
 
+    async def complete_aio(self) -> bool:
+        """Asynchronously declare if the task is complete."""
+        return self.complete()
+
     @abstractmethod
     def run(self) -> None | Generator[TaskStruct, None, None]:
         """Execute the task logic."""
         ...
 
-    def run_version_checked(self):
+    async def run_aio(self) -> None | Generator[TaskStruct, None, None]:
+        """Asynchronously execute the task logic."""
+        return self.run()
+
+    def run_version_checked(self) -> None | Generator[TaskStruct, None, None]:
         if not self.version == self.__version__:
             raise ValueError("TODO")
 
-        self.run()
+        return self.run()
+
+    async def run_version_checked_aio(self) -> None | Generator[TaskStruct, None, None]:
+        if not self.version == self.__version__:
+            raise ValueError("TODO")
+
+        return await self.run_aio()
 
     def requires(self) -> TaskStruct | None:
         return None
@@ -88,9 +102,17 @@ class BaseTask(
         """
         return []
 
+    def registry_assets_aio(self) -> list["RegistryAsset"]:
+        """Asynchronously return assets to be stored in the registry after task
+        completion.
+        """
+        return self.registry_assets()
+
     @classmethod
     def has_dynamic_deps(cls) -> bool:
-        return inspect.isgeneratorfunction(cls.run)
+        return inspect.isgeneratorfunction(cls.run) or inspect.isasyncgenfunction(
+            cls.run_aio
+        )  # TODO is this correct?
 
     @cached_property
     def id(self) -> UUID:
@@ -135,6 +157,10 @@ class Task(BaseTask, Generic[TargetType]):
     def complete(self) -> bool:
         """Check if the task is complete."""
         return self.output().exists()
+
+    async def complete_aio(self) -> bool:
+        """Asynchronously check if the task is complete."""
+        return await self.output().exists_aio()
 
     @abstractmethod
     def output(self) -> TargetType:
