@@ -28,6 +28,9 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // DAG collapse state - expanded by default
+  const [showDag, setShowDag] = useState(true);
+
   // Filter state
   const [nameFilter, setNameFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "">("");
@@ -230,22 +233,57 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
 
               {/* DAG + List with resizable split */}
               <PanelGroup direction="vertical" className="flex-1">
-                {/* DAG Graph */}
-                <Panel defaultSize={50} minSize={20}>
-                  <div className="h-full border-b border-gray-200 dark:border-gray-700">
-                    <DagGraph
-                      tasks={tasksWithContext}
-                      graph={graph}
-                      selectedTaskId={selectedTask?.task_id ?? null}
-                      onTaskClick={handleDagTaskClick}
-                    />
+                {/* Collapsible DAG Section */}
+                <Panel defaultSize={showDag ? 50 : 0} minSize={0}>
+                  <div className="flex h-full flex-col">
+                    {/* DAG collapse header */}
+                    <button
+                      onClick={() => setShowDag(!showDag)}
+                      className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+                    >
+                      <div className="flex items-center gap-2">
+                        <svg
+                          className={`h-4 w-4 transition-transform ${
+                            showDag ? "rotate-90" : ""
+                          }`}
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M9 5l7 7-7 7"
+                          />
+                        </svg>
+                        <span className="font-medium">DAG View</span>
+                      </div>
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                        {showDag ? "Click to collapse" : "Click to expand"}
+                      </span>
+                    </button>
+
+                    {/* DAG Graph */}
+                    {showDag && (
+                      <div className="flex-1">
+                        <DagGraph
+                          tasks={tasksWithContext}
+                          graph={graph}
+                          selectedTaskId={selectedTask?.task_id ?? null}
+                          onTaskClick={handleDagTaskClick}
+                        />
+                      </div>
+                    )}
                   </div>
                 </Panel>
 
-                <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
+                {showDag && (
+                  <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
+                )}
 
                 {/* Task List */}
-                <Panel defaultSize={50} minSize={20}>
+                <Panel defaultSize={showDag ? 50 : 100} minSize={20}>
                   <TaskTable
                     tasks={paginatedTasks}
                     loading={false}
