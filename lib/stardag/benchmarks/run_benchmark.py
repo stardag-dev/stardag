@@ -187,6 +187,7 @@ def main():
     from benchmarks.dags import (
         cpu_bound_dynamic,
         cpu_bound_tree,
+        heavy_cpu_flat,
         io_bound_dynamic,
         io_bound_tree,
         light_dynamic,
@@ -214,6 +215,7 @@ def main():
                 ("io_bound_dynamic", io_bound_dynamic),
                 ("cpu_bound_static", cpu_bound_tree),
                 ("cpu_bound_dynamic", cpu_bound_dynamic),
+                ("heavy_cpu_static", heavy_cpu_flat),
                 ("light_static", light_tree),
                 ("light_dynamic", light_dynamic),
             ]
@@ -224,6 +226,7 @@ def main():
             print("\nWorkers: 4, Warmup: 1, Timed runs: 3")
             print("Static DAGs: 3-level tree (15 tasks)")
             print("Dynamic DAGs: flat (9 tasks - root + 8 leaves)")
+            print("Heavy CPU: flat (5 tasks - root + 4 leaves, ~1s each)")
             print()
 
             for scenario_name, dag_factory in scenarios:
