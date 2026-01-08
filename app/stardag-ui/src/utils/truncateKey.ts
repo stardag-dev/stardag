@@ -68,13 +68,37 @@ export function truncateNestedKey(key: string, maxChars: number): string {
 /**
  * Measure text width using canvas
  * Returns width in pixels
+ *
+ * @param text - The text to measure
+ * @param font - CSS font string (e.g., "500 12px Inter")
+ * @param letterSpacing - Letter spacing in pixels (0 by default)
+ * @param uppercase - Whether to measure as uppercase (for CSS text-transform)
  */
-function measureTextWidth(text: string, font: string): number {
+function measureTextWidth(
+  text: string,
+  font: string,
+  letterSpacing: number = 0,
+  uppercase: boolean = false,
+): number {
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
-  if (!context) return text.length * 8; // Fallback estimate
+  if (!context) return text.length * 10; // Fallback estimate
   context.font = font;
-  return context.measureText(text).width;
+  const measureText = uppercase ? text.toUpperCase() : text;
+  const baseWidth = context.measureText(measureText).width;
+  // Add letter-spacing: (n-1) gaps for n characters
+  const spacingWidth =
+    measureText.length > 1 ? letterSpacing * (measureText.length - 1) : 0;
+  return baseWidth + spacingWidth;
+}
+
+/**
+ * Options for pixel-based truncation
+ */
+export interface TruncateOptions {
+  font?: string;
+  letterSpacing?: number;
+  uppercase?: boolean;
 }
 
 /**
@@ -84,9 +108,15 @@ function measureTextWidth(text: string, font: string): number {
 export function truncateNestedKeyToWidth(
   key: string,
   maxWidth: number,
-  font: string = "14px Inter, system-ui, sans-serif",
+  options: TruncateOptions = {},
 ): string {
-  const fullWidth = measureTextWidth(key, font);
+  const {
+    font = "14px Inter, system-ui, sans-serif",
+    letterSpacing = 0,
+    uppercase = false,
+  } = options;
+
+  const fullWidth = measureTextWidth(key, font, letterSpacing, uppercase);
   if (fullWidth <= maxWidth) {
     return key;
   }
@@ -99,7 +129,7 @@ export function truncateNestedKeyToWidth(
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
     const truncated = truncateNestedKey(key, mid);
-    const width = measureTextWidth(truncated, font);
+    const width = measureTextWidth(truncated, font, letterSpacing, uppercase);
 
     if (width <= maxWidth) {
       result = truncated;

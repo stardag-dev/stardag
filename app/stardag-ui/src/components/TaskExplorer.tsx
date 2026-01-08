@@ -60,9 +60,12 @@ function TruncatedColumnHeader({
       return label;
     }
 
-    // Use the measured container width directly
-    const font = "11px Inter, system-ui, sans-serif";
-    return truncateNestedKeyToWidth(label, containerWidth, font);
+    // Match the header CSS: text-xs (12px), font-medium (500), uppercase, tracking-wider (0.05em = 0.6px)
+    return truncateNestedKeyToWidth(label, containerWidth, {
+      font: "500 12px Inter, system-ui, sans-serif",
+      letterSpacing: 0.6, // tracking-wider = 0.05em at 12px
+      uppercase: true, // CSS text-transform: uppercase
+    });
   }, [label, isNested, containerWidth]);
 
   return (
