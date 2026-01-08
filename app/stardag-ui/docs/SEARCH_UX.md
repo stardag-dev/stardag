@@ -8,6 +8,16 @@ The Task Explorer search bar provides a powerful yet intuitive way to filter tas
 
 Filters follow the format: `key operator value`
 
+### Input Format (typed in search bar)
+
+```
+task_name = MyTask              # Exact match (equals)
+param.lr > 0.01                 # Greater than
+status != failed                # Not equals
+task_name ~ train               # Contains (substring match)
+description = "value with spaces"  # Quoted values for spaces
+```
+
 ### Display Format (in filter chips)
 
 ```
@@ -16,31 +26,36 @@ param.lr > 0.01
 status != failed
 ```
 
-### Input Format (typed in search bar)
-
-```
-task_name:MyTask          # Shorthand for equals
-task_name:=:MyTask        # Explicit equals
-param.lr:>:0.01           # Greater than
-status:!=:failed          # Not equals
-task_name:~:train         # Contains (substring match)
-```
-
 ## Operators
 
-| Operator      | Description                 | Example                                    |
-| ------------- | --------------------------- | ------------------------------------------ |
-| `=` (default) | Exact match                 | `status:=:completed` or `status:completed` |
-| `!=`          | Not equal                   | `status:!=:failed`                         |
-| `>`           | Greater than                | `param.epochs:>:10`                        |
-| `<`           | Less than                   | `param.lr:<:0.1`                           |
-| `>=`          | Greater than or equal       | `param.batch_size:>=:32`                   |
-| `<=`          | Less than or equal          | `created_at:<=:2024-01-01`                 |
-| `~`           | Contains (case-insensitive) | `task_name:~:train`                        |
+| Operator      | Description                 | Example                    |
+| ------------- | --------------------------- | -------------------------- |
+| `=` (default) | Exact match                 | `status = completed`       |
+| `!=`          | Not equal                   | `status != failed`         |
+| `>`           | Greater than                | `param.epochs > 10`        |
+| `<`           | Less than                   | `param.lr < 0.1`           |
+| `>=`          | Greater than or equal       | `param.batch_size >= 32`   |
+| `<=`          | Less than or equal          | `created_at <= 2024-01-01` |
+| `~`           | Contains (case-insensitive) | `task_name ~ train`        |
+
+## Values with Spaces
+
+Values containing spaces must be quoted:
+
+```
+description = "my long description"
+label = "training run"
+```
+
+Quotes within values can be escaped:
+
+```
+message = "He said \"hello\""
+```
 
 ## Autocomplete Flow
 
-The search bar provides progressive autocomplete through three stages:
+The search bar provides progressive autocomplete through three stages with automatic transitions:
 
 ### Stage 1: Key Selection
 
@@ -62,18 +77,19 @@ Dropdown shows:
 - `Escape` - Close dropdown
 - Continue typing - Filter options
 
-**After selection:** The key is inserted followed by a colon, cursor stays in input.
+**After selection:** The key is inserted followed by a space, and operator suggestions appear automatically.
 
 ```
-Search bar: "param.lr:"
+Search bar: "param.lr "
+Dropdown: [=, !=, >, <, >=, <=, ~]
 ```
 
 ### Stage 2: Operator Selection
 
-After typing a key and colon, show available operators:
+After selecting a key, operators are shown automatically:
 
 ```
-User has: "param.lr:"
+User has: "param.lr "
 Dropdown shows:
   Operators
   ├─ =   (equals)
@@ -85,25 +101,19 @@ Dropdown shows:
   └─ ~   (contains)
 ```
 
-**After selection:** The operator is inserted followed by a colon, cursor stays in input.
+**After selection:** The operator is inserted followed by a space, and value suggestions appear automatically.
 
 ```
-Search bar: "param.lr:>:"
-```
-
-**Shortcut:** User can skip operator selection by typing the value directly.
-This defaults to `=` (equals).
-
-```
-User types: "param.lr:0.01" → Creates filter: param.lr = 0.01
+Search bar: "param.lr > "
+Dropdown: [0.001, 0.01, 0.1, ...]
 ```
 
 ### Stage 3: Value Selection
 
-After operator, show matching values:
+After operator, show matching values from the database:
 
 ```
-User has: "status:=:"
+User has: "status = "
 Dropdown shows:
   Values for status
   ├─ completed (45)
@@ -112,7 +122,7 @@ Dropdown shows:
   └─ failed (5)
 ```
 
-**After selection or Enter:** The filter is added to the active filters list.
+**After selection:** The filter is added to the active filters list and the search bar is cleared.
 
 ## Complete Examples
 
@@ -123,23 +133,22 @@ Dropdown shows:
    Dropdown: [status, started_at, ...]
 
 2. User presses ↓ to highlight "status", then Enter
-   Search bar: "status:"
+   Search bar: "status "
+   Dropdown automatically shows: [=, !=, >, ...]
 
-3. Dropdown shows operators: [=, !=, >, ...]
-   User presses Enter (selects =)
-   Search bar: "status:=:"
+3. User presses Enter (selects =)
+   Search bar: "status = "
+   Dropdown automatically shows: [completed, pending, ...]
 
-4. Dropdown shows values: [completed, pending, ...]
-   User presses ↓ twice to "running", then Enter
-
-5. Filter added: status = running
+4. User presses ↓ twice to "running", then Enter
+   Filter added: status = running
    Search bar cleared, ready for next filter
 ```
 
-### Example 2: Quick filter with implicit equals
+### Example 2: Typing a complete filter manually
 
 ```
-1. User types: "task_name:MyTask"
+1. User types: "task_name = MyTask"
 2. User presses Enter
 3. Filter added: task_name = MyTask
 ```
@@ -149,15 +158,17 @@ Dropdown shows:
 ```
 1. User types: "param.epochs"
 2. Autocomplete highlights, user presses Enter
-   Search bar: "param.epochs:"
+   Search bar: "param.epochs "
+   Dropdown shows operators
 
-3. User types: ">" (starts with operator character)
-   Search bar: "param.epochs:>"
+3. User types: ">"
+   Search bar: "param.epochs >"
 
-4. User types: ":100" or "100"
-   Search bar: "param.epochs:>:100" or "param.epochs:>100"
+4. User presses Enter to select ">"
+   Search bar: "param.epochs > "
+   Dropdown shows value suggestions
 
-5. User presses Enter
+5. User types: "100" and presses Enter
    Filter added: param.epochs > 100
 ```
 
@@ -165,7 +176,7 @@ Dropdown shows:
 
 ### Mouse Interaction
 
-- Click on dropdown option → Select and continue
+- Click on dropdown option → Select and auto-show next stage
 - Click outside dropdown → Close dropdown, keep text
 
 ### Keyboard Interaction
@@ -178,9 +189,19 @@ Dropdown shows:
 
 ### Focus Behavior
 
-- After selecting any autocomplete option, focus returns to input
+- After selecting any autocomplete option, focus stays in input
 - Input cursor positioned at end of text
 - User can immediately continue typing
+- Next autocomplete stage appears automatically
+
+## Filter Composition Behavior
+
+While the user is composing a filter (typing a structured query), existing search results are preserved. This prevents the results from disappearing or showing "No results" while the user is still typing the filter.
+
+The filter is only applied when:
+
+1. The user completes the filter by pressing Enter
+2. The user selects a value from autocomplete
 
 ## Filter Chip Interactions
 
@@ -197,7 +218,7 @@ Filters appear as chips below the search bar:
 Clicking a filter chip:
 
 1. Removes the filter from active filters
-2. Populates search bar with: `key:operator:value`
+2. Populates search bar with: `key operator value`
 3. Focuses the search bar for editing
 
 ### Remove Filter
@@ -208,10 +229,10 @@ Clicking the × button removes the filter.
 
 ### Values with Colons (URLs, timestamps)
 
-The parser handles values containing colons:
+The parser handles values containing colons correctly:
 
 ```
-Input: "url:=:http://example.com:8080/path"
+Input: "url = http://example.com:8080/path"
 Parsed: key="url", op="=", value="http://example.com:8080/path"
 ```
 
@@ -228,6 +249,7 @@ If the input doesn't match the filter pattern, it's treated as a text search acr
 - Shows count for values (when available)
 - Max 10 items shown
 - Positioned directly below input, same width
+- Shows keyboard hints at bottom
 
 ### Filter Chips
 
