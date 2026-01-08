@@ -86,6 +86,28 @@ class CPUBoundTask(BenchmarkTask):
 
 
 # =============================================================================
+# Heavy CPU-bound workload (multiprocess wins here)
+# =============================================================================
+
+
+class HeavyCPUBoundTask(BenchmarkTask):
+    """Heavy CPU-intensive work (~1s per task).
+
+    With tasks this heavy, multiprocessing's process spawn overhead
+    becomes negligible and true parallelism provides significant speedup.
+    ThreadPool/AsyncIO are limited by GIL to sequential execution.
+    """
+
+    iterations: int = 5_000_000  # ~1s per task
+
+    def _do_work(self) -> None:
+        # Heavy CPU-bound work: many hash iterations
+        data = b"benchmark"
+        for _ in range(self.iterations):
+            data = hashlib.sha256(data).digest()
+
+
+# =============================================================================
 # Light workload
 # =============================================================================
 

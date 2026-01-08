@@ -11,6 +11,7 @@ from benchmarks.tasks import (
     BenchmarkTask,
     CPUBoundDynamicTask,
     CPUBoundTask,
+    HeavyCPUBoundTask,
     IOBoundDynamicTask,
     IOBoundTask,
     LightDynamicTask,
@@ -136,3 +137,18 @@ def cpu_bound_dynamic(prefix: str = ""):
 def light_dynamic(prefix: str = ""):
     """Light flat DAG with dynamic deps (8 leaves discovered at runtime)."""
     return create_dynamic_flat_dag("light", prefix=prefix)
+
+
+def heavy_cpu_flat(prefix: str = "") -> BenchmarkTask:
+    """Heavy CPU-bound flat DAG (4 leaves, ~1s each).
+
+    Uses fewer tasks to keep benchmark time reasonable.
+    This scenario demonstrates multiprocessing's advantage for CPU-heavy work.
+    """
+    # Create flat structure: root depends on 4 heavy leaves
+    leaves = [HeavyCPUBoundTask(task_id=f"{prefix}leaf_{i}") for i in range(4)]
+    root = HeavyCPUBoundTask(
+        task_id=f"{prefix}root",
+        deps=tuple(leaves),
+    )
+    return root
