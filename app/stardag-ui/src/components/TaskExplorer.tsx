@@ -152,7 +152,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Search state
   const [filters, setFilters] = useState<FilterCondition[]>([]);
-  const [searchText, setSearchText] = useState("");
+  const [searchText, setSearchText] = useState(""); // What user is typing (live)
+  const [committedQuery, setCommittedQuery] = useState(""); // What's actually searched (on submit)
   const [sortBy, setSortBy] = useState<string>("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
@@ -201,9 +202,6 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const [autocompleteOptions, setAutocompleteOptions] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  // Track if user is composing a filter (don't apply partial query to search)
-  const [isComposingFilter, setIsComposingFilter] = useState(false);
-
   // Reference to input for focus management
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -230,7 +228,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     loadKeys();
   }, [activeWorkspace?.id]);
 
-  // Search tasks
+  // Search tasks - uses committedQuery (not live searchText) to avoid searching on every keystroke
   const searchTasks = useCallback(async () => {
     if (!activeWorkspace?.id) {
       setTasks([]);
@@ -256,10 +254,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         params.set("filter", filterStr);
       }
 
-      // Add text search - but NOT if user is composing a filter
-      // This prevents empty results while typing a structured query
-      if (searchText.trim() && !isComposingFilter) {
-        params.set("q", searchText.trim());
+      // Add text search - only the committed query, not live typing
+      if (committedQuery.trim()) {
+        params.set("q", committedQuery.trim());
       }
 
       const response = await fetchWithAuth(`${API_V1}/tasks/search?${params}`);
@@ -275,15 +272,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     } finally {
       setLoading(false);
     }
-  }, [
-    activeWorkspace?.id,
-    filters,
-    searchText,
-    isComposingFilter,
-    page,
-    sortBy,
-    sortDir,
-  ]);
+  }, [activeWorkspace?.id, filters, committedQuery, page, sortBy, sortDir]);
 
   useEffect(() => {
     searchTasks();
@@ -422,7 +411,6 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const editFilter = useCallback((filter: FilterCondition) => {
     setSearchText(formatFilterForInput(filter));
     setFilters((prev) => prev.filter((f) => f.id !== filter.id));
-    setIsComposingFilter(true);
   }, []);
 
   // Handle DAG task click
@@ -497,15 +485,6 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       // Parse the input to determine autocomplete mode
       const parsed = parseFilterInput(value);
 
-      // Determine if we're composing a structured filter
-      // (has a recognized key that looks like a filter key)
-      const looksLikeFilter =
-        !!parsed.key &&
-        (availableKeys.includes(parsed.key) ||
-          parsed.key.startsWith("param.") ||
-          value.includes(" "));
-      setIsComposingFilter(looksLikeFilter);
-
       // Stage 1: Just typing a key (no space yet)
       if (parsed.key && !value.includes(" ")) {
         setAutocompleteMode("key");
@@ -550,7 +529,6 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       }
 
       setShowAutocomplete(false);
-      setIsComposingFilter(false);
     },
     [availableKeys, fetchValueSuggestions],
   );
@@ -582,8 +560,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         const op = parsed.op ?? "=";
         addFilter(autocompleteKey, op, option);
         setSearchText("");
+        setCommittedQuery("");
         setShowAutocomplete(false);
-        setIsComposingFilter(false);
       }
       // Return focus to input
       inputRef.current?.focus();
@@ -645,15 +623,14 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         // Complete filter - add it
         addFilter(parsed.key, parsed.op, parsed.value);
         setSearchText("");
-        setIsComposingFilter(false);
+        setCommittedQuery("");
         return;
       }
 
-      // Otherwise treat as text search - trigger search
-      setIsComposingFilter(false);
-      searchTasks();
+      // Otherwise treat as text search - commit the query to trigger search
+      setCommittedQuery(text);
     },
-    [searchText, addFilter, searchTasks],
+    [searchText, addFilter],
   );
 
   const totalPages = Math.ceil(total / pageSize);
