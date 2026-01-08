@@ -1,0 +1,194 @@
+[
+  {
+    "scenario": "io_bound_static",
+    "implementation": "threadpool",
+    "workers": 4,
+    "duration": 0.533564041601494,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_static",
+    "implementation": "asyncio",
+    "workers": 4,
+    "duration": 0.5308976526915407,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_static",
+    "implementation": "asyncio_queue",
+    "workers": 4,
+    "duration": 0.5335577082975457,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_static",
+    "implementation": "multiprocess",
+    "workers": 4,
+    "duration": 1.5379364856441196,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_dynamic",
+    "implementation": "threadpool",
+    "workers": 4,
+    "duration": 0.3206375973143925,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_dynamic",
+    "implementation": "asyncio",
+    "workers": 4,
+    "duration": 0.9536237083375454,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_dynamic",
+    "implementation": "asyncio_queue",
+    "workers": 4,
+    "duration": 0.9481346529986089,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_dynamic",
+    "implementation": "multiprocess",
+    "workers": 4,
+    "duration": 1.8865494719939306,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_static",
+    "implementation": "threadpool",
+    "workers": 4,
+    "duration": 0.2903603886952624,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_static",
+    "implementation": "asyncio",
+    "workers": 4,
+    "duration": 0.2960441386482368,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_static",
+    "implementation": "asyncio_queue",
+    "workers": 4,
+    "duration": 0.2980127364086608,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_static",
+    "implementation": "multiprocess",
+    "workers": 4,
+    "duration": 1.1095228473034997,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_dynamic",
+    "implementation": "threadpool",
+    "workers": 4,
+    "duration": 0.17874240266003957,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_dynamic",
+    "implementation": "asyncio",
+    "workers": 4,
+    "duration": 0.17863108369056135,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_dynamic",
+    "implementation": "asyncio_queue",
+    "workers": 4,
+    "duration": 0.18289019439058998,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_dynamic",
+    "implementation": "multiprocess",
+    "workers": 4,
+    "duration": 1.0359302083185564,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_static",
+    "implementation": "threadpool",
+    "workers": 4,
+    "duration": 0.0038709723157808185,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_static",
+    "implementation": "asyncio",
+    "workers": 4,
+    "duration": 0.0037491943997641406,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_static",
+    "implementation": "asyncio_queue",
+    "workers": 4,
+    "duration": 0.003304874640889466,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_static",
+    "implementation": "multiprocess",
+    "workers": 4,
+    "duration": 1.0062719167132552,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_dynamic",
+    "implementation": "threadpool",
+    "workers": 4,
+    "duration": 0.0025434169995908937,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_dynamic",
+    "implementation": "asyncio",
+    "workers": 4,
+    "duration": 0.0034634999853248396,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_dynamic",
+    "implementation": "asyncio_queue",
+    "workers": 4,
+    "duration": 0.0029839579559241733,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_dynamic",
+    "implementation": "multiprocess",
+    "workers": 4,
+    "duration": 1.0389287779883791,
+    "success": true,
+    "error": null
+  }
+]
