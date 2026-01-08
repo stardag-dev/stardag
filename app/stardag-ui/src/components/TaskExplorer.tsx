@@ -167,23 +167,28 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   // Selected task for detail view
   const [selectedTask, setSelectedTask] = useState<TaskSearchResult | null>(null);
 
-  // DAG view state - expanded by default
+  // DAG view state
+  // userPrefersShowDag: what the user wants (persists across canShowDag changes)
+  // showDag: actual display state (may be overridden when canShowDag is false)
+  const [userPrefersShowDag, setUserPrefersShowDag] = useState(true);
   const [showDag, setShowDag] = useState(true);
   const [dagGraph, setDagGraph] = useState<TaskGraphResponse | null>(null);
   const [dagLoading, setDagLoading] = useState(false);
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
 
-  // Handle DAG toggle with panel resize
+  // Handle DAG toggle with panel resize - updates user preference
   const handleToggleDag = useCallback(() => {
     const panel = dagPanelRef.current;
+    const newState = !showDag;
     if (panel) {
-      if (showDag) {
-        panel.collapse();
-      } else {
+      if (newState) {
         panel.expand();
+      } else {
+        panel.collapse();
       }
     }
-    setShowDag(!showDag);
+    setShowDag(newState);
+    setUserPrefersShowDag(newState);
   }, [showDag]);
 
   // Column state
@@ -296,6 +301,31 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const canShowDag =
     uniqueBuildIds.length === 1 && tasks.length > 0 && tasks.length <= 100;
   const dagBuildId = canShowDag ? uniqueBuildIds[0] : null;
+
+  // Auto-collapse DAG when canShowDag becomes false, restore when true
+  useEffect(() => {
+    const panel = dagPanelRef.current;
+    if (!canShowDag) {
+      // Can't show DAG - collapse panel
+      if (showDag && panel) {
+        panel.collapse();
+      }
+      setShowDag(false);
+    } else {
+      // Can show DAG - restore to user preference
+      if (userPrefersShowDag && !showDag) {
+        if (panel) {
+          panel.expand();
+        }
+        setShowDag(true);
+      } else if (!userPrefersShowDag && showDag) {
+        if (panel) {
+          panel.collapse();
+        }
+        setShowDag(false);
+      }
+    }
+  }, [canShowDag, userPrefersShowDag]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load DAG graph when expanded and there's a single build
   useEffect(() => {
