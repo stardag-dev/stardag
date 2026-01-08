@@ -330,6 +330,8 @@ class TaskSearchResult(BaseModel):
     completed_at: datetime | None = None
     error_message: str | None = None
     asset_count: int = 0
+    # Asset data - mapping of asset_name -> body_json (populated when asset columns requested)
+    asset_data: dict[str, dict] = {}
 
 
 class TaskSearchResponse(BaseModel):

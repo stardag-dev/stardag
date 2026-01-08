@@ -38,6 +38,8 @@ export interface Task {
   completed_at: string | null;
   error_message: string | null;
   asset_count: number;
+  // Asset data - mapping of asset_name -> body_json (populated when asset columns requested)
+  asset_data?: Record<string, Record<string, unknown>>;
 }
 
 export interface TaskListResponse {
