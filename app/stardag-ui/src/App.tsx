@@ -25,6 +25,8 @@ interface MainLayoutProps {
   activeNav: NavItem;
   onNavigate: (item: NavItem) => void;
   showHeader?: boolean;
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
 }
 
 function MainLayout({
@@ -32,9 +34,9 @@ function MainLayout({
   activeNav,
   onNavigate,
   showHeader = true,
+  sidebarCollapsed,
+  onToggleSidebar,
 }: MainLayoutProps) {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-
   return (
     <div className="flex h-screen bg-gray-100 dark:bg-gray-900">
       {/* Sidebar */}
@@ -42,7 +44,7 @@ function MainLayout({
         activeItem={activeNav}
         onNavigate={onNavigate}
         collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onToggleCollapse={onToggleSidebar}
       />
 
       {/* Main content area */}
@@ -67,58 +69,106 @@ function MainLayout({
   );
 }
 
+// Shared sidebar props for all pages
+interface SidebarStateProps {
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+}
+
 // Home page with builds list
-interface HomePageProps {
+interface HomePageProps extends SidebarStateProps {
   onNavigate: (item: NavItem) => void;
   onSelectBuild: (buildId: string) => void;
 }
 
-function HomePage({ onNavigate, onSelectBuild }: HomePageProps) {
+function HomePage({
+  onNavigate,
+  onSelectBuild,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: HomePageProps) {
   return (
-    <MainLayout activeNav="home" onNavigate={onNavigate}>
+    <MainLayout
+      activeNav="home"
+      onNavigate={onNavigate}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
       <BuildsList onSelectBuild={onSelectBuild} />
     </MainLayout>
   );
 }
 
 // Single build view
-interface BuildPageProps {
+interface BuildPageProps extends SidebarStateProps {
   buildId: string;
   onNavigate: (item: NavItem) => void;
   onBack: () => void;
 }
 
-function BuildPage({ buildId, onNavigate, onBack }: BuildPageProps) {
+function BuildPage({
+  buildId,
+  onNavigate,
+  onBack,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: BuildPageProps) {
   return (
-    <MainLayout activeNav="home" onNavigate={onNavigate}>
+    <MainLayout
+      activeNav="home"
+      onNavigate={onNavigate}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
       <BuildView buildId={buildId} onBack={onBack} />
     </MainLayout>
   );
 }
 
 // Task explorer page
-interface TaskExplorerPageProps {
+interface TaskExplorerPageProps extends SidebarStateProps {
   onNavigate: (item: NavItem) => void;
   onNavigateToBuild: (buildId: string) => void;
 }
 
-function TaskExplorerPage({ onNavigate, onNavigateToBuild }: TaskExplorerPageProps) {
+function TaskExplorerPage({
+  onNavigate,
+  onNavigateToBuild,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: TaskExplorerPageProps) {
   return (
-    <MainLayout activeNav="tasks" onNavigate={onNavigate}>
+    <MainLayout
+      activeNav="tasks"
+      onNavigate={onNavigate}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
       <TaskExplorer onNavigateToBuild={onNavigateToBuild} />
     </MainLayout>
   );
 }
 
 // Settings page (reusing existing component)
-interface SettingsPageProps {
+interface SettingsPageProps extends SidebarStateProps {
   onNavigate: (item: NavItem) => void;
   onNavigatePath: (path: string) => void;
 }
 
-function SettingsPage({ onNavigate, onNavigatePath }: SettingsPageProps) {
+function SettingsPage({
+  onNavigate,
+  onNavigatePath,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: SettingsPageProps) {
   return (
-    <MainLayout activeNav="settings" onNavigate={onNavigate} showHeader={false}>
+    <MainLayout
+      activeNav="settings"
+      onNavigate={onNavigate}
+      showHeader={false}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
       <OrganizationSettings onNavigate={onNavigatePath} />
     </MainLayout>
   );
@@ -325,6 +375,11 @@ function Router() {
   const { isAuthenticated } = useAuth();
   const { getWorkspacePath } = useWorkspace();
   const [path, setPath] = useState(window.location.pathname);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => !prev);
+  }, []);
 
   // Derive selectedBuildId from path instead of using effect
   const selectedBuildId = useMemo(() => {
@@ -420,7 +475,12 @@ function Router() {
     switch (view) {
       case "settings":
         return (
-          <SettingsPage onNavigate={handleNavigation} onNavigatePath={navigateTo} />
+          <SettingsPage
+            onNavigate={handleNavigation}
+            onNavigatePath={navigateTo}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
+          />
         );
 
       case "invites":
@@ -434,6 +494,8 @@ function Router() {
           <TaskExplorerPage
             onNavigate={handleNavigation}
             onNavigateToBuild={handleSelectBuild}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
           />
         );
 
@@ -444,17 +506,29 @@ function Router() {
               buildId={selectedBuildId}
               onNavigate={handleNavigation}
               onBack={handleBackFromBuild}
+              sidebarCollapsed={sidebarCollapsed}
+              onToggleSidebar={handleToggleSidebar}
             />
           );
         }
         return (
-          <HomePage onNavigate={handleNavigation} onSelectBuild={handleSelectBuild} />
+          <HomePage
+            onNavigate={handleNavigation}
+            onSelectBuild={handleSelectBuild}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
+          />
         );
 
       case "home":
       default:
         return (
-          <HomePage onNavigate={handleNavigation} onSelectBuild={handleSelectBuild} />
+          <HomePage
+            onNavigate={handleNavigation}
+            onSelectBuild={handleSelectBuild}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
+          />
         );
     }
   };

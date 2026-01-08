@@ -162,8 +162,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   // Selected task for detail view
   const [selectedTask, setSelectedTask] = useState<TaskSearchResult | null>(null);
 
-  // DAG view state
-  const [showDag, setShowDag] = useState(false);
+  // DAG view state - expanded by default
+  const [showDag, setShowDag] = useState(true);
   const [dagGraph, setDagGraph] = useState<TaskGraphResponse | null>(null);
   const [dagLoading, setDagLoading] = useState(false);
 
@@ -845,230 +845,256 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                 )}
               </div>
 
-              {/* Collapsible DAG section */}
-              {tasks.length > 0 && (
-                <div className="border-b border-gray-200 dark:border-gray-700">
-                  <button
-                    onClick={() => canShowDag && setShowDag(!showDag)}
-                    disabled={!canShowDag}
-                    className={`flex w-full items-center justify-between px-6 py-2 text-sm ${
-                      canShowDag
-                        ? "cursor-pointer text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
-                        : "cursor-not-allowed text-gray-400 dark:text-gray-500"
-                    }`}
+              {/* DAG + Results with resizable split when DAG is visible */}
+              <PanelGroup direction="vertical" className="flex-1">
+                {/* Collapsible DAG section */}
+                {tasks.length > 0 && (
+                  <Panel
+                    defaultSize={showDag && canShowDag ? 40 : 0}
+                    minSize={0}
+                    collapsible
                   >
-                    <div className="flex items-center gap-2">
-                      <svg
-                        className={`h-4 w-4 transition-transform ${
-                          showDag ? "rotate-90" : ""
+                    <div className="flex h-full flex-col border-b border-gray-200 dark:border-gray-700">
+                      <button
+                        onClick={() => canShowDag && setShowDag(!showDag)}
+                        disabled={!canShowDag}
+                        className={`flex w-full items-center justify-between px-6 py-2 text-sm ${
+                          canShowDag
+                            ? "cursor-pointer text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
+                            : "cursor-not-allowed text-gray-400 dark:text-gray-500"
                         }`}
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
                       >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M9 5l7 7-7 7"
-                        />
-                      </svg>
-                      <span className="font-medium">DAG View</span>
-                      {!canShowDag && (
-                        <span className="text-xs text-gray-400 dark:text-gray-500">
-                          {tasks.length > 100
-                            ? "(Limit: 100 tasks)"
-                            : uniqueBuildIds.length > 1
-                              ? `(${uniqueBuildIds.length} builds - select a single build)`
-                              : "(No build associated)"}
-                        </span>
-                      )}
-                    </div>
-                    {canShowDag && (
-                      <span className="text-xs text-gray-500 dark:text-gray-400">
-                        {showDag ? "Click to collapse" : "Click to expand"}
-                      </span>
-                    )}
-                  </button>
-
-                  {/* DAG content when expanded */}
-                  {showDag && canShowDag && (
-                    <div className="h-64 border-t border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
-                      {dagLoading ? (
-                        <div className="flex h-full items-center justify-center">
-                          <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-                        </div>
-                      ) : dagGraph ? (
-                        <DagGraph
-                          tasks={tasksWithContext}
-                          graph={dagGraph}
-                          selectedTaskId={selectedTask?.task_id ?? null}
-                          onTaskClick={handleDagTaskClick}
-                        />
-                      ) : (
-                        <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
-                          <p>Failed to load DAG</p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Results table area */}
-              <div className="flex-1 overflow-auto">
-                {loading ? (
-                  <div className="flex h-full items-center justify-center">
-                    <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-                  </div>
-                ) : error ? (
-                  <div className="flex h-full items-center justify-center text-red-500">
-                    <p>{error}</p>
-                  </div>
-                ) : tasks.length === 0 ? (
-                  <div className="flex h-full flex-col items-center justify-center text-gray-500 dark:text-gray-400">
-                    <svg
-                      className="mb-4 h-16 w-16"
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={1.5}
-                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                      />
-                    </svg>
-                    <p className="text-lg font-medium">No tasks found</p>
-                    <p className="mt-1 text-sm">Try adjusting your filters</p>
-                  </div>
-                ) : (
-                  <table className="w-full">
-                    <thead className="sticky top-0 bg-gray-50 dark:bg-gray-800">
-                      <tr>
-                        {visibleColumns.map((col) => (
-                          <th
-                            key={col.key}
-                            onClick={() => handleSort(col.key)}
-                            className="cursor-pointer border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
+                        <div className="flex items-center gap-2">
+                          <svg
+                            className={`h-4 w-4 transition-transform ${
+                              showDag ? "rotate-90" : ""
+                            }`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
                           >
-                            <div className="flex items-center gap-1">
-                              {col.label}
-                              {sortBy === col.key && (
-                                <svg
-                                  className={`h-4 w-4 ${
-                                    sortDir === "desc" ? "rotate-180" : ""
-                                  }`}
-                                  fill="none"
-                                  stroke="currentColor"
-                                  viewBox="0 0 24 24"
-                                >
-                                  <path
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                    strokeWidth={2}
-                                    d="M5 15l7-7 7 7"
-                                  />
-                                </svg>
-                              )}
-                            </div>
-                          </th>
-                        ))}
-                        {/* Actions column header */}
-                        <th className="border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
-                          <span className="sr-only">Actions</span>
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-800">
-                      {tasks.map((task) => (
-                        <tr
-                          key={`${task.task_id}-${task.build_id}`}
-                          className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
-                            selectedTask?.task_id === task.task_id
-                              ? "bg-blue-50 dark:bg-blue-900/20"
-                              : ""
-                          }`}
-                        >
-                          {visibleColumns.map((col) => (
-                            <td
-                              key={col.key}
-                              onClick={(e) => {
-                                const value = getCellValue(task, col.key);
-                                if (value) {
-                                  handleCellClick(col.key, String(value), e.shiftKey);
-                                }
-                              }}
-                              className="cursor-pointer whitespace-nowrap px-4 py-3 text-sm text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
-                              title="Click to filter, Shift+click to exclude"
-                            >
-                              {renderCell(task, col.key, onNavigateToBuild)}
-                            </td>
-                          ))}
-                          {/* Actions column */}
-                          <td className="whitespace-nowrap px-4 py-3 text-sm">
-                            <button
-                              onClick={() => setSelectedTask(task)}
-                              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
-                              title="View task details"
-                            >
-                              <svg
-                                className="h-5 w-5"
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  strokeWidth={2}
-                                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-                                />
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  strokeWidth={2}
-                                  d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-                                />
-                              </svg>
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M9 5l7 7-7 7"
+                            />
+                          </svg>
+                          <span className="font-medium">DAG View</span>
+                          {!canShowDag && (
+                            <span className="text-xs text-gray-400 dark:text-gray-500">
+                              {tasks.length > 100
+                                ? "(Limit: 100 tasks)"
+                                : uniqueBuildIds.length > 1
+                                  ? `(${uniqueBuildIds.length} builds - select a single build)`
+                                  : "(No build associated)"}
+                            </span>
+                          )}
+                        </div>
+                        {canShowDag && (
+                          <span className="text-xs text-gray-500 dark:text-gray-400">
+                            {showDag ? "Click to collapse" : "Click to expand"}
+                          </span>
+                        )}
+                      </button>
 
-              {/* Pagination */}
-              {totalPages > 0 && (
-                <div className="flex items-center justify-between border-t border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
-                  <span className="text-sm text-gray-500 dark:text-gray-400">
-                    Showing {(page - 1) * pageSize + 1}-
-                    {Math.min(page * pageSize, total)} of {total}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={page === 1}
-                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
-                    >
-                      Previous
-                    </button>
-                    <span className="text-sm text-gray-500 dark:text-gray-400">
-                      Page {page} of {totalPages}
-                    </span>
-                    <button
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                      disabled={page === totalPages}
-                      className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
-                    >
-                      Next
-                    </button>
+                      {/* DAG content when expanded */}
+                      {showDag && canShowDag && (
+                        <div className="flex-1 border-t border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
+                          {dagLoading ? (
+                            <div className="flex h-full items-center justify-center">
+                              <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                            </div>
+                          ) : dagGraph ? (
+                            <DagGraph
+                              tasks={tasksWithContext}
+                              graph={dagGraph}
+                              selectedTaskId={selectedTask?.task_id ?? null}
+                              onTaskClick={handleDagTaskClick}
+                            />
+                          ) : (
+                            <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
+                              <p>Failed to load DAG</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </Panel>
+                )}
+
+                {tasks.length > 0 && showDag && canShowDag && (
+                  <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
+                )}
+
+                {/* Results table area */}
+                <Panel defaultSize={showDag && canShowDag ? 60 : 100} minSize={20}>
+                  <div className="flex h-full flex-col">
+                    <div className="flex-1 overflow-auto">
+                      {loading ? (
+                        <div className="flex h-full items-center justify-center">
+                          <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                        </div>
+                      ) : error ? (
+                        <div className="flex h-full items-center justify-center text-red-500">
+                          <p>{error}</p>
+                        </div>
+                      ) : tasks.length === 0 ? (
+                        <div className="flex h-full flex-col items-center justify-center text-gray-500 dark:text-gray-400">
+                          <svg
+                            className="mb-4 h-16 w-16"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={1.5}
+                              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                            />
+                          </svg>
+                          <p className="text-lg font-medium">No tasks found</p>
+                          <p className="mt-1 text-sm">Try adjusting your filters</p>
+                        </div>
+                      ) : (
+                        <table className="w-full">
+                          <thead className="sticky top-0 bg-gray-50 dark:bg-gray-800">
+                            <tr>
+                              {visibleColumns.map((col) => (
+                                <th
+                                  key={col.key}
+                                  onClick={() => handleSort(col.key)}
+                                  className="cursor-pointer border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
+                                >
+                                  <div className="flex items-center gap-1">
+                                    {col.label}
+                                    {sortBy === col.key && (
+                                      <svg
+                                        className={`h-4 w-4 ${
+                                          sortDir === "desc" ? "rotate-180" : ""
+                                        }`}
+                                        fill="none"
+                                        stroke="currentColor"
+                                        viewBox="0 0 24 24"
+                                      >
+                                        <path
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                          strokeWidth={2}
+                                          d="M5 15l7-7 7 7"
+                                        />
+                                      </svg>
+                                    )}
+                                  </div>
+                                </th>
+                              ))}
+                              {/* Actions column header */}
+                              <th className="border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                                <span className="sr-only">Actions</span>
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-800">
+                            {tasks.map((task) => (
+                              <tr
+                                key={`${task.task_id}-${task.build_id}`}
+                                className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
+                                  selectedTask?.task_id === task.task_id
+                                    ? "bg-blue-50 dark:bg-blue-900/20"
+                                    : ""
+                                }`}
+                              >
+                                {visibleColumns.map((col) => (
+                                  <td
+                                    key={col.key}
+                                    onClick={(e) => {
+                                      const value = getCellValue(task, col.key);
+                                      if (value) {
+                                        handleCellClick(
+                                          col.key,
+                                          String(value),
+                                          e.shiftKey,
+                                        );
+                                      }
+                                    }}
+                                    className="cursor-pointer whitespace-nowrap px-4 py-3 text-sm text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
+                                    title="Click to filter, Shift+click to exclude"
+                                  >
+                                    {renderCell(
+                                      task,
+                                      col.key,
+                                      onNavigateToBuild,
+                                      setSelectedTask,
+                                    )}
+                                  </td>
+                                ))}
+                                {/* Actions column */}
+                                <td className="whitespace-nowrap px-4 py-3 text-sm">
+                                  <button
+                                    onClick={() => setSelectedTask(task)}
+                                    className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+                                    title="View task details"
+                                  >
+                                    <svg
+                                      className="h-5 w-5"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      viewBox="0 0 24 24"
+                                    >
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                                      />
+                                      <path
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={2}
+                                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                                      />
+                                    </svg>
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+
+                    {/* Pagination */}
+                    {totalPages > 0 && (
+                      <div className="flex items-center justify-between border-t border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
+                        <span className="text-sm text-gray-500 dark:text-gray-400">
+                          Showing {(page - 1) * pageSize + 1}-
+                          {Math.min(page * pageSize, total)} of {total}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => setPage((p) => Math.max(1, p - 1))}
+                            disabled={page === 1}
+                            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                          >
+                            Previous
+                          </button>
+                          <span className="text-sm text-gray-500 dark:text-gray-400">
+                            Page {page} of {totalPages}
+                          </span>
+                          <button
+                            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                            disabled={page === totalPages}
+                            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
+                </Panel>
+              </PanelGroup>
             </div>
           </Panel>
 
@@ -1127,10 +1153,30 @@ function getCellValue(task: TaskSearchResult, key: string): unknown {
   }
 }
 
+// Small link icon component
+function LinkIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className ?? "h-3.5 w-3.5"}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+      />
+    </svg>
+  );
+}
+
 function renderCell(
   task: TaskSearchResult,
   key: string,
   onNavigateToBuild?: (buildId: string) => void,
+  onSelectTask?: (task: TaskSearchResult) => void,
 ): React.ReactNode {
   const value = getCellValue(task, key);
 
@@ -1146,17 +1192,41 @@ function renderCell(
     );
   }
 
+  // Task name with link icon to open details
+  if (key === "task_name" && onSelectTask) {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span>{value as string}</span>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectTask(task);
+          }}
+          className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+          title="View task details"
+        >
+          <LinkIcon />
+        </button>
+      </span>
+    );
+  }
+
+  // Build name with link icon to navigate to build
   if (key === "build_name" && task.build_id && onNavigateToBuild) {
     return (
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onNavigateToBuild(task.build_id!);
-        }}
-        className="text-blue-600 hover:underline dark:text-blue-400"
-      >
-        {value as string}
-      </button>
+      <span className="inline-flex items-center gap-1.5">
+        <span>{value as string}</span>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onNavigateToBuild(task.build_id!);
+          }}
+          className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+          title="Go to build"
+        >
+          <LinkIcon />
+        </button>
+      </span>
     );
   }
 

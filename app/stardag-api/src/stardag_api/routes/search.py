@@ -97,19 +97,23 @@ def build_jsonb_condition(
     value: str,
     task_alias: str = "tasks",
     param_suffix: str = "",
-) -> str | None:
+) -> tuple[str | None, bool]:
     """Build a SQL condition for JSONB filtering.
 
     Handles:
     - Core fields (task_name, task_namespace, etc.)
+    - Build fields (build_id, build_name) - requires join
     - param.* fields (task_data JSONB)
     - status (from latest event)
+
+    Returns:
+        Tuple of (condition_string, needs_build_join)
     """
     sql_op = OPERATORS.get(operator)
     if not sql_op:
-        return None
+        return None, False
 
-    # Core fields - direct column access
+    # Core fields - direct column access on tasks table
     core_fields = {
         "task_name",
         "task_namespace",
@@ -121,8 +125,21 @@ def build_jsonb_condition(
     if key in core_fields:
         param_name = f"filter_{key}{param_suffix}"
         if sql_op == "ILIKE":
-            return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'"
-        return f"{task_alias}.{key} {sql_op} :{param_name}"
+            return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'", False
+        return f"{task_alias}.{key} {sql_op} :{param_name}", False
+
+    # Build fields - require join to events and builds tables
+    if key == "build_id":
+        param_name = f"filter_build_id{param_suffix}"
+        if sql_op == "ILIKE":
+            return f"builds.id ILIKE '%' || :{param_name} || '%'", True
+        return f"builds.id {sql_op} :{param_name}", True
+
+    if key == "build_name":
+        param_name = f"filter_build_name{param_suffix}"
+        if sql_op == "ILIKE":
+            return f"builds.name ILIKE '%' || :{param_name} || '%'", True
+        return f"builds.name {sql_op} :{param_name}", True
 
     # Parameter fields - JSONB access
     if key.startswith("param."):
@@ -148,15 +165,18 @@ def build_jsonb_condition(
         param_name = f"filter_{safe_key}{param_suffix}"
 
         if sql_op == "ILIKE":
-            return f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'"
+            return f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'", False
         elif operator in (">", "<", ">=", "<="):
             # Numeric comparison - cast both sides to float
             # Use CAST() syntax to avoid SQLAlchemy misinterpreting ::float as part of param name
-            return f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} CAST(:{param_name} AS DOUBLE PRECISION)"
+            return (
+                f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} "
+                f"CAST(:{param_name} AS DOUBLE PRECISION)"
+            ), False
         else:
-            return f"({jsonb_path}) {sql_op} :{param_name}"
+            return f"({jsonb_path}) {sql_op} :{param_name}", False
 
-    return None
+    return None, False
 
 
 @router.get("", response_model=TaskSearchResponse)
@@ -187,6 +207,7 @@ async def search_tasks(
     # Parse and apply filters
     filter_params: dict[str, str] = {}
     conditions: list[str] = []
+    needs_build_join = False
 
     if filter:
         parsed_filters = parse_filter_string(filter)
@@ -194,11 +215,15 @@ async def search_tasks(
             # Use index suffix to ensure unique parameter names for range queries
             # e.g., param.x:>:5 and param.x:<:100 need different param names
             param_suffix = f"_{i}"
-            condition = build_jsonb_condition(key, op, value, "tasks", param_suffix)
+            condition, requires_build = build_jsonb_condition(
+                key, op, value, "tasks", param_suffix
+            )
             if condition:
                 conditions.append(condition)
                 safe_key = key.replace(".", "_").replace("[", "_").replace("]", "_")
                 filter_params[f"filter_{safe_key}{param_suffix}"] = value
+                if requires_build:
+                    needs_build_join = True
 
     # Text search across name and namespace
     if q:
@@ -207,6 +232,36 @@ async def search_tasks(
             "(LOWER(tasks.task_name) LIKE :q_param OR LOWER(tasks.task_namespace) LIKE :q_param)"
         )
         filter_params["q_param"] = q_lower
+
+    # Add build join if needed for build_id/build_name filtering
+    if needs_build_join:
+        # Join tasks -> events -> builds to filter by build
+        # Using a subquery to get the latest event per task
+        latest_event_subquery = (
+            select(
+                Event.task_id,
+                func.max(Event.created_at).label("latest_event_time"),
+            )
+            .where(Event.task_id == Task.id)
+            .group_by(Event.task_id)
+            .correlate(Task)
+            .scalar_subquery()
+        )
+        query = query.join(
+            Event,
+            (Event.task_id == Task.id) & (Event.created_at == latest_event_subquery),
+        ).join(Build, Build.id == Event.build_id)
+        count_query = (
+            select(func.count())
+            .select_from(Task)
+            .where(Task.workspace_id == workspace_id)
+            .join(
+                Event,
+                (Event.task_id == Task.id)
+                & (Event.created_at == latest_event_subquery),
+            )
+            .join(Build, Build.id == Event.build_id)
+        )
 
     # Apply conditions using raw SQL for JSONB
     if conditions:
@@ -381,6 +436,8 @@ async def get_key_suggestions(
         KeySuggestion(key="task_namespace", type="string"),
         KeySuggestion(key="task_id", type="string"),
         KeySuggestion(key="status", type="string"),
+        KeySuggestion(key="build_id", type="string"),
+        KeySuggestion(key="build_name", type="string"),
         KeySuggestion(key="created_at", type="datetime"),
     ]
 
@@ -471,6 +528,36 @@ async def get_value_suggestions(
         ]
         if prefix:
             values = [v for v in values if v.value.startswith(prefix)]
+        return ValueSuggestionsResponse(values=values)
+
+    # Handle build_id and build_name - query from builds table
+    if key in ("build_id", "build_name"):
+        cache_key = f"values:{workspace_id}:{key}"
+        cached_values = _get_cached(cache_key)
+
+        if cached_values is None:
+            column = Build.id if key == "build_id" else Build.name
+            # Get builds in workspace via events
+            query = (
+                select(column, func.count(column))
+                .select_from(Build)
+                .join(Event, Event.build_id == Build.id)
+                .join(Task, Task.id == Event.task_id)
+                .where(Task.workspace_id == workspace_id)
+                .group_by(column)
+                .order_by(func.count(column).desc())
+                .limit(100)
+            )
+            result = await db.execute(query)
+            cached_values = [(str(row[0]), row[1]) for row in result.all() if row[0]]
+            _set_cached(cache_key, cached_values)
+
+        # Filter by prefix
+        values = [
+            ValueSuggestion(value=v, count=c)
+            for v, c in cached_values
+            if not prefix or v.lower().startswith(prefix.lower())
+        ][:limit]
         return ValueSuggestionsResponse(values=values)
 
     # For core string fields, get distinct values (cached per workspace+key)

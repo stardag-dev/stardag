@@ -69,7 +69,7 @@ export function Sidebar({
   return (
     <div
       className={`flex h-full flex-col border-r border-gray-200 bg-white transition-all duration-200 dark:border-gray-700 dark:bg-gray-800 ${
-        collapsed ? "w-16" : "w-56"
+        collapsed ? "w-16" : "w-44"
       }`}
     >
       {/* Logo/Header */}
