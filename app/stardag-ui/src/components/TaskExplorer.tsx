@@ -73,6 +73,75 @@ const FILTER_OPERATORS: { op: FilterCondition["operator"]; label: string }[] = [
   { op: "~", label: "contains" },
 ];
 
+// Helper: Quote a value if it contains spaces or quotes
+function quoteValue(value: string): string {
+  if (value.includes(" ") || value.includes('"')) {
+    // Escape internal quotes and wrap in quotes
+    return `"${value.replace(/"/g, '\\"')}"`;
+  }
+  return value;
+}
+
+// Helper: Unquote a value (remove surrounding quotes and unescape)
+function unquoteValue(value: string): string {
+  if (value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\"/g, '"');
+  }
+  return value;
+}
+
+// Helper: Parse space-based filter syntax
+// Formats: "key op value", "key op", "key"
+// Value can be quoted: key = "value with spaces"
+function parseFilterInput(text: string): {
+  key?: string;
+  op?: FilterCondition["operator"];
+  value?: string;
+} {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+
+  // Regex to match: key (optional: op (optional: value))
+  // Key cannot contain spaces, op is one of the operators, value can be quoted
+  const opPattern = "=|!=|>=|<=|>|<|~";
+
+  // Try to match: key op value (value may be quoted)
+  const fullMatch = trimmed.match(new RegExp(`^(\\S+)\\s+(${opPattern})\\s+(.+)$`));
+  if (fullMatch) {
+    const [, key, op, rawValue] = fullMatch;
+    return {
+      key,
+      op: op as FilterCondition["operator"],
+      value: unquoteValue(rawValue),
+    };
+  }
+
+  // Try to match: key op (no value yet)
+  const keyOpMatch = trimmed.match(new RegExp(`^(\\S+)\\s+(${opPattern})\\s*$`));
+  if (keyOpMatch) {
+    const [, key, op] = keyOpMatch;
+    return { key, op: op as FilterCondition["operator"] };
+  }
+
+  // Try to match: key followed by space (ready for operator)
+  const keySpaceMatch = trimmed.match(/^(\S+)\s+$/);
+  if (keySpaceMatch) {
+    return { key: keySpaceMatch[1] };
+  }
+
+  // Just a key (no space yet)
+  if (!trimmed.includes(" ")) {
+    return { key: trimmed };
+  }
+
+  return {};
+}
+
+// Helper: Format filter for display in search bar
+function formatFilterForInput(filter: FilterCondition): string {
+  return `${filter.key} ${filter.operator} ${quoteValue(filter.value)}`;
+}
+
 export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const { activeWorkspace } = useWorkspace();
 
@@ -107,6 +176,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [autocompleteOptions, setAutocompleteOptions] = useState<string[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // Track if user is composing a filter (don't apply partial query to search)
+  const [isComposingFilter, setIsComposingFilter] = useState(false);
 
   // Reference to input for focus management
   const inputRef = useRef<HTMLInputElement>(null);
@@ -152,7 +224,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         sort: `${sortBy}:${sortDir}`,
       });
 
-      // Add filters
+      // Add filters (convert to backend format: key:op:value)
       if (filters.length > 0) {
         const filterStr = filters
           .map((f) => `${f.key}:${f.operator}:${f.value}`)
@@ -160,8 +232,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         params.set("filter", filterStr);
       }
 
-      // Add text search
-      if (searchText.trim()) {
+      // Add text search - but NOT if user is composing a filter
+      // This prevents empty results while typing a structured query
+      if (searchText.trim() && !isComposingFilter) {
         params.set("q", searchText.trim());
       }
 
@@ -178,7 +251,15 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     } finally {
       setLoading(false);
     }
-  }, [activeWorkspace?.id, filters, searchText, page, sortBy, sortDir]);
+  }, [
+    activeWorkspace?.id,
+    filters,
+    searchText,
+    isComposingFilter,
+    page,
+    sortBy,
+    sortDir,
+  ]);
 
   useEffect(() => {
     searchTasks();
@@ -290,8 +371,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Edit filter - populate search bar and remove filter
   const editFilter = useCallback((filter: FilterCondition) => {
-    setSearchText(`${filter.key}:${filter.operator}:${filter.value}`);
+    setSearchText(formatFilterForInput(filter));
     setFilters((prev) => prev.filter((f) => f.id !== filter.id));
+    setIsComposingFilter(true);
   }, []);
 
   // Handle DAG task click
@@ -357,20 +439,26 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   );
 
   // Handle autocomplete input - determines which stage we're in
+  // Uses space-based syntax: "key op value" or "key op" or "key"
   const handleSearchInput = useCallback(
     (value: string) => {
       setSearchText(value);
       setSelectedIndex(0); // Reset selection when input changes
 
       // Parse the input to determine autocomplete mode
-      // Stage 1: No colon yet → suggest keys
-      // Stage 2: key: (ends with colon, no operator yet) → suggest operators
-      // Stage 3: key:op: or key:op:prefix → suggest values
+      const parsed = parseFilterInput(value);
 
-      const colonCount = (value.match(/:/g) || []).length;
+      // Determine if we're composing a structured filter
+      // (has a recognized key that looks like a filter key)
+      const looksLikeFilter =
+        !!parsed.key &&
+        (availableKeys.includes(parsed.key) ||
+          parsed.key.startsWith("param.") ||
+          value.includes(" "));
+      setIsComposingFilter(looksLikeFilter);
 
-      if (colonCount === 0) {
-        // Stage 1: No colon - suggest keys
+      // Stage 1: Just typing a key (no space yet)
+      if (parsed.key && !value.includes(" ")) {
         setAutocompleteMode("key");
         if (value.length > 0) {
           const suggestions = availableKeys.filter((k) =>
@@ -381,51 +469,39 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         } else {
           setShowAutocomplete(false);
         }
-      } else if (colonCount === 1 && value.endsWith(":")) {
-        // Stage 2: "key:" - suggest operators
-        const key = value.slice(0, -1);
-        setAutocompleteMode("operator");
-        setAutocompleteKey(key);
-        setAutocompleteOptions(FILTER_OPERATORS.map((o) => o.op));
-        setShowAutocomplete(true);
-      } else {
-        // Stage 3 or implicit value: parse for value suggestions
-        // Try to match key:op:valuePrefix or key:valuePrefix
-
-        // First check for explicit operator: key:op:value
-        const explicitMatch = value.match(/^([^:]+):([=!<>~]+):(.*)$/);
-        if (explicitMatch) {
-          const [, key, , valuePrefix] = explicitMatch;
-          setAutocompleteMode("value");
-          setAutocompleteKey(key);
-          fetchValueSuggestions(key, valuePrefix);
-          return;
-        }
-
-        // Check for key:op (operator partially typed, no second colon yet)
-        const partialOpMatch = value.match(/^([^:]+):([=!<>~]+)$/);
-        if (partialOpMatch) {
-          const [, key, partialOp] = partialOpMatch;
-          setAutocompleteMode("operator");
-          setAutocompleteKey(key);
-          const filtered = FILTER_OPERATORS.filter((o) => o.op.startsWith(partialOp));
-          setAutocompleteOptions(filtered.map((o) => o.op));
-          setShowAutocomplete(filtered.length > 0);
-          return;
-        }
-
-        // Implicit equals: key:value (value doesn't start with operator char)
-        const implicitMatch = value.match(/^([^:]+):([^=!<>~].*)$/);
-        if (implicitMatch) {
-          const [, key, valuePrefix] = implicitMatch;
-          setAutocompleteMode("value");
-          setAutocompleteKey(key);
-          fetchValueSuggestions(key, valuePrefix);
-          return;
-        }
-
-        setShowAutocomplete(false);
+        return;
       }
+
+      // Stage 2: Key followed by space - suggest operators
+      // Pattern: "key " or "key =", "key !", etc (partial operator)
+      if (parsed.key && !parsed.value) {
+        const afterKey = value.slice(parsed.key.length).trimStart();
+
+        if (afterKey === "" || afterKey.match(/^[=!<>~]*$/)) {
+          // Show operators (filter by partial if any)
+          setAutocompleteMode("operator");
+          setAutocompleteKey(parsed.key);
+          if (afterKey === "") {
+            setAutocompleteOptions(FILTER_OPERATORS.map((o) => o.op));
+          } else {
+            const filtered = FILTER_OPERATORS.filter((o) => o.op.startsWith(afterKey));
+            setAutocompleteOptions(filtered.map((o) => o.op));
+          }
+          setShowAutocomplete(true);
+          return;
+        }
+      }
+
+      // Stage 3: Key and operator present - suggest values
+      if (parsed.key && parsed.op) {
+        setAutocompleteMode("value");
+        setAutocompleteKey(parsed.key);
+        fetchValueSuggestions(parsed.key, parsed.value ?? "");
+        return;
+      }
+
+      setShowAutocomplete(false);
+      setIsComposingFilter(false);
     },
     [availableKeys, fetchValueSuggestions],
   );
@@ -434,29 +510,36 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const handleAutocompleteSelect = useCallback(
     (option: string) => {
       if (autocompleteMode === "key") {
-        // After key selection, add colon to prompt for operator
-        setSearchText(`${option}:`);
+        // After key selection, add space and auto-show operator suggestions
+        const newText = `${option} `;
+        setSearchText(newText);
+        setAutocompleteKey(option);
+        // Auto-trigger operator suggestions
+        setAutocompleteMode("operator");
+        setAutocompleteOptions(FILTER_OPERATORS.map((o) => o.op));
+        setShowAutocomplete(true);
+        setSelectedIndex(0);
       } else if (autocompleteMode === "operator") {
-        // After operator selection, add colon to prompt for value
-        setSearchText(`${autocompleteKey}:${option}:`);
+        // After operator selection, add space and auto-show value suggestions
+        const newText = `${autocompleteKey} ${option} `;
+        setSearchText(newText);
+        // Auto-trigger value suggestions
+        setAutocompleteMode("value");
+        fetchValueSuggestions(autocompleteKey, "");
+        setSelectedIndex(0);
       } else {
-        // After value selection, construct full filter and try to submit
-        // Parse current text to get key and operator
-        const explicitMatch = searchText.match(/^([^:]+):([=!<>~]+):?/);
-        if (explicitMatch) {
-          const [, key, op] = explicitMatch;
-          setSearchText(`${key}:${op}:${option}`);
-        } else {
-          // Implicit equals
-          setSearchText(`${autocompleteKey}:${option}`);
-        }
+        // After value selection, add the filter directly
+        const parsed = parseFilterInput(searchText);
+        const op = parsed.op ?? "=";
+        addFilter(autocompleteKey, op, option);
+        setSearchText("");
+        setShowAutocomplete(false);
+        setIsComposingFilter(false);
       }
-      setShowAutocomplete(false);
-      setSelectedIndex(0);
       // Return focus to input
       inputRef.current?.focus();
     },
-    [autocompleteMode, autocompleteKey, searchText],
+    [autocompleteMode, autocompleteKey, searchText, fetchValueSuggestions, addFilter],
   );
 
   // Handle keyboard navigation in autocomplete
@@ -506,37 +589,19 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       e.preventDefault();
       const text = searchText.trim();
 
-      // Try to parse as filter: key:op:value (explicit operator) or key:value (implicit "=")
-      // Use two-step parsing to handle values with colons (e.g., URLs)
-      let key: string | undefined;
-      let op: FilterCondition["operator"] = "=";
-      let value: string | undefined;
+      // Try to parse as filter using space-based syntax: "key op value"
+      const parsed = parseFilterInput(text);
 
-      // First, try explicit operator form: key:op:value
-      let match = text.match(/^([^:]+):([=!<>~]+):(.*)$/);
-      if (match) {
-        [, key, op, value] = match as [
-          string,
-          string,
-          FilterCondition["operator"],
-          string,
-        ];
-      } else {
-        // Fallback: implicit operator form key:value (assume "=")
-        match = text.match(/^([^:]+):(.+)$/);
-        if (match) {
-          [, key, value] = match;
-          op = "=";
-        }
-      }
-
-      if (key && value) {
-        addFilter(key, op, value);
+      if (parsed.key && parsed.op && parsed.value !== undefined) {
+        // Complete filter - add it
+        addFilter(parsed.key, parsed.op, parsed.value);
         setSearchText("");
+        setIsComposingFilter(false);
         return;
       }
 
       // Otherwise treat as text search - trigger search
+      setIsComposingFilter(false);
       searchTasks();
     },
     [searchText, addFilter, searchTasks],
@@ -584,7 +649,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                         onKeyDown={handleKeyDown}
                         onFocus={() => searchText && handleSearchInput(searchText)}
                         onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
-                        placeholder="Search tasks... (e.g., task_name:MyTask, param.lr:>:0.01)"
+                        placeholder="Search tasks... (e.g., task_name = MyTask, param.lr > 0.01)"
                         className="w-full rounded-md border border-gray-300 bg-white px-4 py-2 pl-10 text-sm text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
                       />
                       <svg

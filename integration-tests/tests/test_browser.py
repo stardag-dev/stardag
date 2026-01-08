@@ -365,16 +365,36 @@ class TestUITaskExplorer:
     ) -> None:
         """Login before each test in this class."""
         page.goto(docker_services.ui)
-        page.wait_for_load_state("networkidle")
 
-        if "keycloak" in page.url or "realms/stardag" in page.url:
-            page.locator("input[name='username']").fill(TEST_USER_EMAIL)
+        # Wait for either Keycloak login form OR sidebar (already logged in)
+        keycloak_form = page.locator("input[name='username']")
+        sidebar_btn = page.locator("button[title='Collapse sidebar']")
+
+        # Wait for one of them to appear
+        try:
+            page.wait_for_selector(
+                "input[name='username'], button[title='Collapse sidebar']",
+                timeout=15000,
+            )
+        except Exception:
+            # If neither appears, the page might show a login button
+            login_btn = page.get_by_text("Login").or_(page.get_by_text("Sign in"))
+            if login_btn.first.is_visible():
+                login_btn.first.click()
+                page.wait_for_selector("input[name='username']", timeout=10000)
+
+        # If we're on Keycloak, fill in credentials
+        if keycloak_form.is_visible():
+            keycloak_form.fill(TEST_USER_EMAIL)
             page.locator("input[name='password']").fill(TEST_USER_PASSWORD)
             page.locator(
                 "input[type='submit'], button[type='submit'], #kc-login"
             ).first.click()
             page.wait_for_url(re.compile(r".*localhost:3000.*"), timeout=10000)
             page.wait_for_load_state("networkidle")
+
+        # Wait for sidebar to be fully rendered (indicates we're logged in)
+        sidebar_btn.wait_for(state="visible", timeout=10000)
 
     def test_task_explorer_has_search_bar(
         self,
@@ -412,6 +432,147 @@ class TestUITaskExplorer:
             column_btn = page.locator("button[title='Configure columns']")
             # At least one column configuration button should be visible
             expect(column_btn.first).to_be_visible()
+
+    def _navigate_to_task_explorer(self, page: Page) -> None:
+        """Helper to navigate to Task Explorer page."""
+        # Navigate to Task Explorer via sidebar
+        task_explorer_btn = page.get_by_text("Task Explorer").or_(
+            page.get_by_title("Task Explorer")
+        )
+        task_explorer_btn.click()
+        page.wait_for_load_state("networkidle")
+
+        # Wait for Task Explorer header to be visible
+        page.locator("h1:has-text('Task Explorer')").wait_for(
+            state="visible", timeout=5000
+        )
+
+    def test_search_shows_key_autocomplete(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that typing in search shows key autocomplete suggestions."""
+        self._navigate_to_task_explorer(page)
+
+        # Find and focus search input
+        search_input = page.locator("input[placeholder*='Search']")
+        search_input.click()
+
+        # Type to trigger autocomplete
+        search_input.fill("task")
+        page.wait_for_timeout(500)  # Wait for autocomplete to appear
+
+        # Should show autocomplete dropdown with "Keys" header
+        autocomplete = page.locator("text=Keys")
+        expect(autocomplete).to_be_visible()
+
+        # Should show task_name as an option (use exact match)
+        task_name_option = page.get_by_role("button", name="task_name", exact=True)
+        expect(task_name_option).to_be_visible()
+
+    def test_search_keyboard_navigation(
+        self,
+        page: Page,
+    ) -> None:
+        """Test keyboard navigation in autocomplete dropdown."""
+        self._navigate_to_task_explorer(page)
+
+        # Find and focus search input
+        search_input = page.locator("input[placeholder*='Search']")
+        search_input.click()
+        search_input.fill("stat")
+        page.wait_for_timeout(500)
+
+        # Should show autocomplete dropdown
+        expect(page.locator("text=Keys")).to_be_visible()
+
+        # Press down arrow to select an item
+        search_input.press("ArrowDown")
+        page.wait_for_timeout(100)
+
+        # Press Enter to select
+        search_input.press("Enter")
+        page.wait_for_timeout(300)
+
+        # The search bar should now contain the selected key followed by space
+        # and should show operators dropdown
+        expect(page.locator("text=Operators")).to_be_visible()
+
+    def test_search_operator_autocomplete(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that operator autocomplete appears after key selection."""
+        self._navigate_to_task_explorer(page)
+
+        # Find and focus search input
+        search_input = page.locator("input[placeholder*='Search']")
+        search_input.click()
+
+        # Type a key followed by space to trigger operator autocomplete
+        search_input.fill("status ")
+        page.wait_for_timeout(500)
+
+        # Should show operators dropdown
+        expect(page.locator("text=Operators")).to_be_visible()
+
+        # Should show operator options (use exact match for "= equals")
+        expect(page.get_by_role("button", name="= equals")).to_be_visible()
+        expect(page.get_by_role("button", name="!= not equals")).to_be_visible()
+
+    def test_search_add_filter_via_space_syntax(
+        self,
+        page: Page,
+    ) -> None:
+        """Test adding a filter using space-based syntax."""
+        self._navigate_to_task_explorer(page)
+
+        # Find and focus search input
+        search_input = page.locator("input[placeholder*='Search']")
+        search_input.click()
+
+        # Type a complete filter with space-based syntax
+        search_input.fill("status = completed")
+        search_input.press("Enter")
+        page.wait_for_timeout(500)
+
+        # Should show filter chip with "status" key
+        filter_chip = page.locator("button:has-text('status')").first
+        expect(filter_chip).to_be_visible()
+
+        # Search bar should be cleared
+        expect(search_input).to_have_value("")
+
+    def test_search_results_preserved_during_composition(
+        self,
+        page: Page,
+    ) -> None:
+        """Test that search results are preserved while composing a filter."""
+        self._navigate_to_task_explorer(page)
+
+        # Wait for initial results to load (if any)
+        page.wait_for_timeout(1000)
+
+        # Check if there's a result table or "No tasks found" message
+        has_results = page.locator("table").is_visible()
+
+        # Store the initial state
+        initial_state = "results" if has_results else "empty"
+
+        # Find and focus search input
+        search_input = page.locator("input[placeholder*='Search']")
+        search_input.click()
+
+        # Start typing a filter (partial - should not trigger empty results)
+        search_input.fill("status ")
+        page.wait_for_timeout(500)
+
+        # The results should not disappear while composing
+        if initial_state == "results":
+            expect(page.locator("table")).to_be_visible()
+        else:
+            # If there were no results initially, that's fine
+            expect(page.locator("text=No tasks found")).to_be_visible()
 
 
 class TestUIResponsiveness:
