@@ -236,20 +236,17 @@ async def search_tasks(
     # Add build join if needed for build_id/build_name filtering
     if needs_build_join:
         # Join tasks -> events -> builds to filter by build
-        # Using a subquery to get the latest event per task
-        latest_event_subquery = (
-            select(
-                Event.task_id,
-                func.max(Event.created_at).label("latest_event_time"),
-            )
+        # Using a correlated subquery to get the latest event time per task
+        latest_event_time_subquery = (
+            select(func.max(Event.created_at))
             .where(Event.task_id == Task.id)
-            .group_by(Event.task_id)
             .correlate(Task)
             .scalar_subquery()
         )
         query = query.join(
             Event,
-            (Event.task_id == Task.id) & (Event.created_at == latest_event_subquery),
+            (Event.task_id == Task.id)
+            & (Event.created_at == latest_event_time_subquery),
         ).join(Build, Build.id == Event.build_id)
         count_query = (
             select(func.count())
@@ -258,7 +255,7 @@ async def search_tasks(
             .join(
                 Event,
                 (Event.task_id == Task.id)
-                & (Event.created_at == latest_event_subquery),
+                & (Event.created_at == latest_event_time_subquery),
             )
             .join(Build, Build.id == Event.build_id)
         )
