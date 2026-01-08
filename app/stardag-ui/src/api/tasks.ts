@@ -136,3 +136,25 @@ export async function fetchTaskAssets(
   }
   return response.json();
 }
+
+// Column management API
+
+export interface AvailableColumnsResponse {
+  core: string[];
+  params: string[];
+  assets: string[];
+}
+
+export async function fetchAvailableColumns(
+  workspaceId: string,
+): Promise<AvailableColumnsResponse> {
+  const params = new URLSearchParams();
+  params.set("workspace_id", workspaceId);
+
+  const url = `${API_BASE}/tasks/search/columns?${params.toString()}`;
+  const response = await fetchWithAuth(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch available columns: ${response.statusText}`);
+  }
+  return response.json();
+}

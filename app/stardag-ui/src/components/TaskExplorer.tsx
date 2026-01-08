@@ -7,11 +7,74 @@ import {
 } from "react-resizable-panels";
 import { fetchWithAuth } from "../api/client";
 import { API_V1 } from "../api/config";
-import { fetchBuildGraph } from "../api/tasks";
+import {
+  fetchAvailableColumns,
+  fetchBuildGraph,
+  type AvailableColumnsResponse,
+} from "../api/tasks";
 import { useWorkspace } from "../context/WorkspaceContext";
 import type { Task, TaskGraphResponse, TaskStatus } from "../types/task";
+import { truncateNestedKeyToWidth } from "../utils/truncateKey";
+import {
+  ColumnManagerModal,
+  type AvailableColumn,
+  type ColumnConfig,
+} from "./ColumnManagerModal";
 import { DagGraph } from "./DagGraph";
 import { TaskDetail } from "./TaskDetail";
+
+// Component that applies smart truncation to column headers when needed
+// Uses a ref to measure the actual container width for accurate truncation
+function TruncatedColumnHeader({
+  label,
+  isNested,
+}: {
+  label: string;
+  isNested: boolean;
+}) {
+  const containerRef = useRef<HTMLSpanElement>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  // Measure container width using ResizeObserver
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerWidth(entry.contentRect.width);
+      }
+    });
+
+    observer.observe(container);
+    // Initial measurement
+    setContainerWidth(container.getBoundingClientRect().width);
+
+    return () => observer.disconnect();
+  }, []);
+
+  // For non-nested keys, just show the label
+  // For nested keys, apply smart truncation based on measured container width
+  const truncatedLabel = useMemo(() => {
+    if (!isNested || containerWidth <= 0) {
+      return label;
+    }
+
+    // Use the measured container width directly
+    const font = "11px Inter, system-ui, sans-serif";
+    return truncateNestedKeyToWidth(label, containerWidth, font);
+  }, [label, isNested, containerWidth]);
+
+  return (
+    <span
+      ref={containerRef}
+      className="block min-w-0 flex-1 whitespace-nowrap overflow-hidden"
+      title={label}
+    >
+      {truncatedLabel}
+    </span>
+  );
+}
 
 // Filter types
 export interface FilterCondition {
@@ -38,20 +101,12 @@ interface TaskExplorerProps {
   onNavigateToBuild?: (buildId: string) => void;
 }
 
-// Column configuration
-interface ColumnConfig {
-  key: string;
-  label: string;
-  visible: boolean;
-  width?: number;
-}
-
 const DEFAULT_COLUMNS: ColumnConfig[] = [
-  { key: "task_name", label: "Name", visible: true },
-  { key: "task_namespace", label: "Namespace", visible: true },
-  { key: "status", label: "Status", visible: true },
-  { key: "build_name", label: "Build", visible: true },
-  { key: "created_at", label: "Created", visible: true },
+  { key: "task_name", label: "Name", visible: true, width: 200 },
+  { key: "task_namespace", label: "Namespace", visible: true, width: 150 },
+  { key: "status", label: "Status", visible: true, width: 100 },
+  { key: "build_name", label: "Build", visible: true, width: 150 },
+  { key: "created_at", label: "Created", visible: true, width: 180 },
 ];
 
 function getStatusColor(status: TaskStatus): string {
@@ -65,6 +120,23 @@ function getStatusColor(status: TaskStatus): string {
     default:
       return "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400";
   }
+}
+
+// Convert a column key to a human-readable label
+function keyToLabel(key: string): string {
+  // For param.* keys, keep the full key as label
+  if (key.startsWith("param.")) {
+    return key;
+  }
+  // For asset.* keys, keep the full key as label
+  if (key.startsWith("asset.")) {
+    return key;
+  }
+  // For core keys, format nicely (task_name -> Task Name)
+  return key
+    .split("_")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 // Available operators for filter autocomplete
@@ -194,7 +266,13 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Column state
   const [columns, setColumns] = useState<ColumnConfig[]>(DEFAULT_COLUMNS);
-  const [showColumnPicker, setShowColumnPicker] = useState(false);
+  const [showColumnManager, setShowColumnManager] = useState(false);
+  const [availableColumns, setAvailableColumns] = useState<AvailableColumn[]>([]);
+
+  // Column resize state
+  const [resizingColumn, setResizingColumn] = useState<string | null>(null);
+  const resizeStartX = useRef(0);
+  const resizeStartWidth = useRef(0);
 
   // Autocomplete state
   const [availableKeys, setAvailableKeys] = useState<string[]>([]);
@@ -228,6 +306,113 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     loadKeys();
   }, [activeWorkspace?.id]);
 
+  // Load available columns for column manager
+  useEffect(() => {
+    if (!activeWorkspace?.id) return;
+
+    const loadColumns = async () => {
+      try {
+        const data: AvailableColumnsResponse = await fetchAvailableColumns(
+          activeWorkspace.id,
+        );
+
+        // Convert to AvailableColumn format
+        const cols: AvailableColumn[] = [
+          ...data.core.map((key) => ({
+            key,
+            label: keyToLabel(key),
+            type: "core" as const,
+          })),
+          ...data.params.map((key) => ({
+            key,
+            label: key,
+            type: "param" as const,
+          })),
+          ...data.assets.map((key) => ({
+            key,
+            label: key,
+            type: "asset" as const,
+          })),
+        ];
+        setAvailableColumns(cols);
+
+        // Also add asset keys to availableKeys for search autocomplete
+        // (the /keys endpoint may not return them, but /columns does)
+        if (data.assets.length > 0) {
+          setAvailableKeys((prev) => {
+            const existingSet = new Set(prev);
+            const newKeys = data.assets.filter((k) => !existingSet.has(k));
+            return newKeys.length > 0 ? [...prev, ...newKeys] : prev;
+          });
+        }
+      } catch {
+        // Silently fail - column manager will just show fewer columns
+      }
+    };
+    loadColumns();
+  }, [activeWorkspace?.id]);
+
+  // Column resize handlers
+  const handleResizeStart = useCallback(
+    (e: React.MouseEvent, columnKey: string) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const column = columns.find((c) => c.key === columnKey);
+      if (column) {
+        setResizingColumn(columnKey);
+        resizeStartX.current = e.clientX;
+        resizeStartWidth.current = column.width;
+      }
+    },
+    [columns],
+  );
+
+  const handleResizeMove = useCallback(
+    (e: MouseEvent) => {
+      if (!resizingColumn) return;
+
+      const diff = e.clientX - resizeStartX.current;
+      const newWidth = Math.max(80, Math.min(500, resizeStartWidth.current + diff));
+
+      setColumns((prev) =>
+        prev.map((col) =>
+          col.key === resizingColumn ? { ...col, width: newWidth } : col,
+        ),
+      );
+    },
+    [resizingColumn],
+  );
+
+  const handleResizeEnd = useCallback(() => {
+    setResizingColumn(null);
+  }, []);
+
+  // Add/remove mouse event listeners for column resizing
+  useEffect(() => {
+    if (resizingColumn) {
+      document.addEventListener("mousemove", handleResizeMove);
+      document.addEventListener("mouseup", handleResizeEnd);
+      return () => {
+        document.removeEventListener("mousemove", handleResizeMove);
+        document.removeEventListener("mouseup", handleResizeEnd);
+      };
+    }
+  }, [resizingColumn, handleResizeMove, handleResizeEnd]);
+
+  // Compute visible asset names for search dependency (only changes when asset column visibility changes)
+  const visibleAssetNames = useMemo(() => {
+    const assetNames = new Set<string>();
+    for (const col of columns) {
+      if (col.visible && col.key.startsWith("asset.")) {
+        const parts = col.key.slice(6).split("."); // Remove 'asset.' prefix
+        if (parts.length > 0) {
+          assetNames.add(parts[0]);
+        }
+      }
+    }
+    return Array.from(assetNames).sort().join(",");
+  }, [columns]);
+
   // Search tasks - uses committedQuery (not live searchText) to avoid searching on every keystroke
   const searchTasks = useCallback(async () => {
     if (!activeWorkspace?.id) {
@@ -259,6 +444,11 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         params.set("q", committedQuery.trim());
       }
 
+      // Add include_assets for visible asset columns
+      if (visibleAssetNames) {
+        params.set("include_assets", visibleAssetNames);
+      }
+
       const response = await fetchWithAuth(`${API_V1}/tasks/search?${params}`);
       if (!response.ok) {
         throw new Error(`Search failed: ${response.statusText}`);
@@ -272,7 +462,15 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     } finally {
       setLoading(false);
     }
-  }, [activeWorkspace?.id, filters, committedQuery, page, sortBy, sortDir]);
+  }, [
+    activeWorkspace?.id,
+    filters,
+    committedQuery,
+    page,
+    sortBy,
+    sortDir,
+    visibleAssetNames,
+  ]);
 
   useEffect(() => {
     searchTasks();
@@ -766,58 +964,27 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                       Search
                     </button>
 
-                    {/* Column picker */}
-                    <div className="relative">
-                      <button
-                        type="button"
-                        onClick={() => setShowColumnPicker(!showColumnPicker)}
-                        className="rounded-md border border-gray-300 p-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
-                        title="Configure columns"
+                    {/* Column manager button */}
+                    <button
+                      type="button"
+                      onClick={() => setShowColumnManager(true)}
+                      className="rounded-md border border-gray-300 p-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                      title="Manage columns"
+                    >
+                      <svg
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
                       >
-                        <svg
-                          className="h-4 w-4"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"
-                          />
-                        </svg>
-                      </button>
-
-                      {showColumnPicker && (
-                        <div className="absolute right-0 top-full z-10 mt-1 w-48 rounded-md border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-600 dark:bg-gray-700">
-                          {columns.map((col) => (
-                            <label
-                              key={col.key}
-                              className="flex items-center gap-2 rounded px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-600"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={col.visible}
-                                onChange={() =>
-                                  setColumns((prev) =>
-                                    prev.map((c) =>
-                                      c.key === col.key
-                                        ? { ...c, visible: !c.visible }
-                                        : c,
-                                    ),
-                                  )
-                                }
-                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              <span className="text-sm text-gray-700 dark:text-gray-300">
-                                {col.label}
-                              </span>
-                            </label>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"
+                        />
+                      </svg>
+                    </button>
                   </div>
                 </form>
 
@@ -984,20 +1151,29 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                           <p className="mt-1 text-sm">Try adjusting your filters</p>
                         </div>
                       ) : (
-                        <table className="w-full">
+                        <table className="w-full table-fixed">
                           <thead className="sticky top-0 bg-gray-50 dark:bg-gray-800">
                             <tr>
                               {visibleColumns.map((col) => (
                                 <th
                                   key={col.key}
-                                  onClick={() => handleSort(col.key)}
-                                  className="cursor-pointer border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
+                                  style={{ width: col.width }}
+                                  className="group relative cursor-pointer border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
                                 >
-                                  <div className="flex items-center gap-1">
-                                    {col.label}
+                                  <div
+                                    className="flex items-center gap-1 overflow-hidden"
+                                    onClick={() => handleSort(col.key)}
+                                  >
+                                    <TruncatedColumnHeader
+                                      label={col.label}
+                                      isNested={
+                                        col.key.startsWith("param.") ||
+                                        col.key.startsWith("asset.")
+                                      }
+                                    />
                                     {sortBy === col.key && (
                                       <svg
-                                        className={`h-4 w-4 ${
+                                        className={`h-4 w-4 flex-shrink-0 ${
                                           sortDir === "desc" ? "rotate-180" : ""
                                         }`}
                                         fill="none"
@@ -1013,10 +1189,15 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                       </svg>
                                     )}
                                   </div>
+                                  {/* Resize handle */}
+                                  <div
+                                    className="absolute right-0 top-0 h-full w-1 cursor-col-resize bg-transparent opacity-0 transition-opacity group-hover:opacity-100 hover:bg-blue-400"
+                                    onMouseDown={(e) => handleResizeStart(e, col.key)}
+                                  />
                                 </th>
                               ))}
                               {/* Actions column header */}
-                              <th className="border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                              <th className="w-16 border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
                                 <span className="sr-only">Actions</span>
                               </th>
                             </tr>
@@ -1034,6 +1215,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                 {visibleColumns.map((col) => (
                                   <td
                                     key={col.key}
+                                    style={{ width: col.width }}
                                     onClick={(e) => {
                                       const value = getCellValue(task, col.key);
                                       if (value) {
@@ -1044,7 +1226,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                         );
                                       }
                                     }}
-                                    className="cursor-pointer whitespace-nowrap px-4 py-3 text-sm text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
+                                    className="cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 text-sm text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
                                     title="Click to filter, Shift+click to exclude"
                                   >
                                     {renderCell(
@@ -1140,6 +1322,15 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
           )}
         </PanelGroup>
       </div>
+
+      {/* Column Manager Modal */}
+      <ColumnManagerModal
+        isOpen={showColumnManager}
+        onClose={() => setShowColumnManager(false)}
+        columns={columns}
+        availableColumns={availableColumns}
+        onColumnsChange={setColumns}
+      />
     </div>
   );
 }
@@ -1150,6 +1341,31 @@ function getCellValue(task: TaskSearchResult, key: string): unknown {
     const paramPath = key.slice(6).split(".");
     let value: unknown = task.task_data;
     for (const p of paramPath) {
+      if (value && typeof value === "object") {
+        value = (value as Record<string, unknown>)[p];
+      } else {
+        return undefined;
+      }
+    }
+    return value;
+  }
+
+  // Handle asset.{name}.{path} format
+  if (key.startsWith("asset.")) {
+    const parts = key.slice(6).split(".", 1); // Remove 'asset.' prefix, split at first dot
+    if (parts.length < 1) return undefined;
+
+    const assetName = parts[0];
+    const restOfKey = key.slice(6 + assetName.length + 1); // Get path after asset.{name}.
+    const assetPath = restOfKey ? restOfKey.split(".") : [];
+
+    // Get asset data from task
+    const assetData = task.asset_data?.[assetName];
+    if (!assetData) return undefined;
+
+    // Navigate the path
+    let value: unknown = assetData;
+    for (const p of assetPath) {
       if (value && typeof value === "object") {
         value = (value as Record<string, unknown>)[p];
       } else {
@@ -1221,18 +1437,18 @@ function renderCell(
   // Task name with link icon to open details
   if (key === "task_name" && onSelectTask) {
     return (
-      <span className="inline-flex items-center gap-1.5">
-        <span>{value as string}</span>
+      <span className="inline-flex items-center gap-1.5 overflow-hidden">
         <button
           onClick={(e) => {
             e.stopPropagation();
             onSelectTask(task);
           }}
-          className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+          className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
           title="View task details"
         >
           <LinkIcon />
         </button>
+        <span className="truncate">{value as string}</span>
       </span>
     );
   }
@@ -1240,18 +1456,18 @@ function renderCell(
   // Build name with link icon to navigate to build
   if (key === "build_name" && task.build_id && onNavigateToBuild) {
     return (
-      <span className="inline-flex items-center gap-1.5">
-        <span>{value as string}</span>
+      <span className="inline-flex items-center gap-1.5 overflow-hidden">
         <button
           onClick={(e) => {
             e.stopPropagation();
             onNavigateToBuild(task.build_id!);
           }}
-          className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+          className="flex-shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
           title="Go to build"
         >
           <LinkIcon />
         </button>
+        <span className="truncate">{value as string}</span>
       </span>
     );
   }

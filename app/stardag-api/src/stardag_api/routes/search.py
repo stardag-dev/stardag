@@ -97,21 +97,23 @@ def build_jsonb_condition(
     value: str,
     task_alias: str = "tasks",
     param_suffix: str = "",
-) -> tuple[str | None, bool]:
+) -> tuple[str | None, bool, str | None]:
     """Build a SQL condition for JSONB filtering.
 
     Handles:
     - Core fields (task_name, task_namespace, etc.)
     - Build fields (build_id, build_name) - requires join
     - param.* fields (task_data JSONB)
+    - asset.* fields (asset body_json JSONB) - uses EXISTS subquery
     - status (from latest event)
 
     Returns:
-        Tuple of (condition_string, needs_build_join)
+        Tuple of (condition_string, needs_build_join, asset_name_for_filter)
+        asset_name_for_filter is set when filtering on asset.* keys
     """
     sql_op = OPERATORS.get(operator)
     if not sql_op:
-        return None, False
+        return None, False, None
 
     # Core fields - direct column access on tasks table
     core_fields = {
@@ -125,21 +127,21 @@ def build_jsonb_condition(
     if key in core_fields:
         param_name = f"filter_{key}{param_suffix}"
         if sql_op == "ILIKE":
-            return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'", False
-        return f"{task_alias}.{key} {sql_op} :{param_name}", False
+            return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'", False, None
+        return f"{task_alias}.{key} {sql_op} :{param_name}", False, None
 
     # Build fields - require join to events and builds tables
     if key == "build_id":
         param_name = f"filter_build_id{param_suffix}"
         if sql_op == "ILIKE":
-            return f"builds.id ILIKE '%' || :{param_name} || '%'", True
-        return f"builds.id {sql_op} :{param_name}", True
+            return f"builds.id ILIKE '%' || :{param_name} || '%'", True, None
+        return f"builds.id {sql_op} :{param_name}", True, None
 
     if key == "build_name":
         param_name = f"filter_build_name{param_suffix}"
         if sql_op == "ILIKE":
-            return f"builds.name ILIKE '%' || :{param_name} || '%'", True
-        return f"builds.name {sql_op} :{param_name}", True
+            return f"builds.name ILIKE '%' || :{param_name} || '%'", True, None
+        return f"builds.name {sql_op} :{param_name}", True, None
 
     # Parameter fields - JSONB access
     if key.startswith("param."):
@@ -161,22 +163,79 @@ def build_jsonb_condition(
                 else:
                     jsonb_path = f"{jsonb_path}->'{part}'"
 
-        safe_key = key.replace(".", "_").replace("[", "_").replace("]", "_")
+        safe_key = (
+            key.replace(".", "_").replace("[", "_").replace("]", "_").replace("-", "_")
+        )
         param_name = f"filter_{safe_key}{param_suffix}"
 
         if sql_op == "ILIKE":
-            return f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'", False
+            return f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'", False, None
         elif operator in (">", "<", ">=", "<="):
             # Numeric comparison - cast both sides to float
             # Use CAST() syntax to avoid SQLAlchemy misinterpreting ::float as part of param name
             return (
+                (
+                    f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} "
+                    f"CAST(:{param_name} AS DOUBLE PRECISION)"
+                ),
+                False,
+                None,
+            )
+        else:
+            return f"({jsonb_path}) {sql_op} :{param_name}", False, None
+
+    # Asset fields - EXISTS subquery on task_registry_assets table
+    # Format: asset.{asset_name}.{json_path}
+    if key.startswith("asset."):
+        rest = key[6:]  # Remove 'asset.' prefix
+        parts = rest.split(".", 1)
+        if len(parts) < 2:
+            return None, False, None
+
+        asset_name = parts[0]
+        json_path = parts[1]
+        path_parts = json_path.split(".")
+
+        # Build JSONB path access for asset body_json
+        jsonb_path = "asset_filter.body_json"
+        for i, part in enumerate(path_parts):
+            array_match = re.match(r"(\w+)\[(\d+)\]", part)
+            if array_match:
+                field, index = array_match.groups()
+                jsonb_path = f"({jsonb_path}->'{field}')->{index}"
+            else:
+                if i == len(path_parts) - 1:
+                    jsonb_path = f"{jsonb_path}->>'{part}'"
+                else:
+                    jsonb_path = f"{jsonb_path}->'{part}'"
+
+        safe_key = (
+            key.replace(".", "_").replace("[", "_").replace("]", "_").replace("-", "_")
+        )
+        param_name = f"filter_{safe_key}{param_suffix}"
+        asset_name_param = f"filter_asset_name{param_suffix}"
+
+        # Build EXISTS subquery condition
+        if sql_op == "ILIKE":
+            value_condition = f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'"
+        elif operator in (">", "<", ">=", "<="):
+            value_condition = (
                 f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} "
                 f"CAST(:{param_name} AS DOUBLE PRECISION)"
-            ), False
+            )
         else:
-            return f"({jsonb_path}) {sql_op} :{param_name}", False
+            value_condition = f"({jsonb_path}) {sql_op} :{param_name}"
 
-    return None, False
+        # EXISTS subquery to check for matching asset
+        condition = (
+            f"EXISTS (SELECT 1 FROM task_registry_assets asset_filter "
+            f"WHERE asset_filter.task_pk = {task_alias}.id "
+            f"AND asset_filter.name = :{asset_name_param} "
+            f"AND {value_condition})"
+        )
+        return condition, False, asset_name
+
+    return None, False, None
 
 
 @router.get("", response_model=TaskSearchResponse)
@@ -188,6 +247,7 @@ async def search_tasks(
     filter: str | None = None,
     q: str | None = None,  # Text search
     sort: str = "created_at:desc",
+    include_assets: str | None = None,  # Comma-separated asset names to include
 ):
     """Search tasks with advanced filtering.
 
@@ -195,6 +255,7 @@ async def search_tasks(
     - filter: Comma-separated filters (e.g., "task_name:~:train,param.lr:>:0.01")
     - q: Text search across task name and namespace
     - sort: Sort field and direction (e.g., "created_at:desc")
+    - include_assets: Comma-separated asset names to include in results (e.g., "report,metrics")
     """
     workspace_id = auth.workspace_id
 
@@ -215,15 +276,23 @@ async def search_tasks(
             # Use index suffix to ensure unique parameter names for range queries
             # e.g., param.x:>:5 and param.x:<:100 need different param names
             param_suffix = f"_{i}"
-            condition, requires_build = build_jsonb_condition(
+            condition, requires_build, asset_name = build_jsonb_condition(
                 key, op, value, "tasks", param_suffix
             )
             if condition:
                 conditions.append(condition)
-                safe_key = key.replace(".", "_").replace("[", "_").replace("]", "_")
+                safe_key = (
+                    key.replace(".", "_")
+                    .replace("[", "_")
+                    .replace("]", "_")
+                    .replace("-", "_")
+                )
                 filter_params[f"filter_{safe_key}{param_suffix}"] = value
                 if requires_build:
                     needs_build_join = True
+                # Add asset name parameter for asset.* filters
+                if asset_name:
+                    filter_params[f"filter_asset_name{param_suffix}"] = asset_name
 
     # Text search across name and namespace
     if q:
@@ -371,6 +440,29 @@ async def search_tasks(
         )
         asset_counts = {row[0]: row[1] for row in asset_count_result.all()}
 
+    # Get asset data for requested assets
+    task_asset_data: dict[
+        int, dict[str, dict]
+    ] = {}  # task_pk -> asset_name -> body_json
+    if task_ids and include_assets:
+        asset_names = [
+            name.strip() for name in include_assets.split(",") if name.strip()
+        ]
+        if asset_names:
+            asset_query = select(
+                TaskRegistryAsset.task_pk,
+                TaskRegistryAsset.name,
+                TaskRegistryAsset.body_json,
+            ).where(
+                TaskRegistryAsset.task_pk.in_(task_ids),
+                TaskRegistryAsset.name.in_(asset_names),
+            )
+            asset_result = await db.execute(asset_query)
+            for task_pk, asset_name, body_json in asset_result.all():
+                if task_pk not in task_asset_data:
+                    task_asset_data[task_pk] = {}
+                task_asset_data[task_pk][asset_name] = body_json or {}
+
     # Build response
     task_results = []
     for task in tasks:
@@ -391,6 +483,7 @@ async def search_tasks(
                 completed_at=build_info[4] if build_info else None,  # type: ignore
                 error_message=build_info[5] if build_info else None,
                 asset_count=asset_counts.get(task.id, 0),
+                asset_data=task_asset_data.get(task.id, {}),
             )
         )
 
@@ -439,7 +532,7 @@ async def get_key_suggestions(
     ]
 
     # Filter by prefix
-    if prefix and not prefix.startswith("param."):
+    if prefix and not prefix.startswith("param.") and not prefix.startswith("asset."):
         core_keys = [k for k in core_keys if k.key.startswith(prefix)]
 
     # Get param keys from task_data (cached)
@@ -481,7 +574,46 @@ async def get_key_suggestions(
             if len(param_keys) >= limit:
                 break
 
-    all_keys = core_keys + param_keys
+    # Get asset keys from TaskRegistryAsset.body_json (cached)
+    asset_keys: list[KeySuggestion] = []
+
+    if not prefix or prefix.startswith("asset"):
+        # Check cache for asset keys (cache is per-workspace)
+        asset_cache_key = f"asset_keys:{workspace_id}"
+        cached_asset_keys = _get_cached(asset_cache_key)
+
+        if cached_asset_keys is None:
+            # Get a sample of assets to discover keys
+            asset_query = (
+                select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
+                .where(TaskRegistryAsset.workspace_id == workspace_id)
+                .order_by(TaskRegistryAsset.created_at.desc())
+                .limit(200)
+            )
+            asset_result = await db.execute(asset_query)
+            sample_assets = asset_result.all()
+
+            # Extract unique keys from body_json
+            asset_key_counter: Counter[str] = Counter()
+            for asset_name, body_json in sample_assets:
+                if isinstance(body_json, dict):
+                    _extract_keys(body_json, f"asset.{asset_name}", asset_key_counter)
+
+            # Cache all discovered keys (up to 100)
+            cached_asset_keys = [
+                (key, count) for key, count in asset_key_counter.most_common(100)
+            ]
+            _set_cached(asset_cache_key, cached_asset_keys)
+
+        # Filter by prefix and convert to suggestions
+        prefix_filter = prefix[6:] if prefix.startswith("asset.") else ""
+        for key, count in cached_asset_keys:
+            if not prefix_filter or key.startswith(f"asset.{prefix_filter}"):
+                asset_keys.append(KeySuggestion(key=key, type="string", count=count))
+            if len(asset_keys) >= limit:
+                break
+
+    all_keys = core_keys + param_keys + asset_keys
     return KeySuggestionsResponse(keys=all_keys[:limit])
 
 
@@ -623,6 +755,51 @@ async def get_value_suggestions(
         ][:limit]
         return ValueSuggestionsResponse(values=values)
 
+    # For asset.* fields, sample from TaskRegistryAsset.body_json
+    if key.startswith("asset."):
+        cache_key = f"values:{workspace_id}:{key}"
+        cached_values = _get_cached(cache_key)
+
+        if cached_values is None:
+            # Parse asset.{name}.{path} format
+            parts = key[6:].split(".", 1)  # Remove 'asset.' prefix, split at first dot
+            if len(parts) < 2:
+                return ValueSuggestionsResponse(values=[])
+
+            asset_name = parts[0]
+            json_path = parts[1].split(".")
+
+            # Sample assets with matching name
+            sample_query = (
+                select(TaskRegistryAsset.body_json)
+                .where(TaskRegistryAsset.workspace_id == workspace_id)
+                .where(TaskRegistryAsset.name == asset_name)
+                .order_by(TaskRegistryAsset.created_at.desc())
+                .limit(500)
+            )
+            sample_result = await db.execute(sample_query)
+            sample_assets = sample_result.scalars().all()
+
+            # Extract values for the specified path
+            value_counter: Counter[str] = Counter()
+            for body_json in sample_assets:
+                if isinstance(body_json, dict):
+                    value = _get_nested_value(body_json, json_path)
+                    if value is not None:
+                        value_counter[str(value)] += 1
+
+            # Cache all discovered values (up to 100)
+            cached_values = list(value_counter.most_common(100))
+            _set_cached(cache_key, cached_values)
+
+        # Filter by prefix
+        values = [
+            ValueSuggestion(value=v, count=c)
+            for v, c in cached_values
+            if not prefix or v.startswith(prefix)
+        ][:limit]
+        return ValueSuggestionsResponse(values=values)
+
     return ValueSuggestionsResponse(values=[])
 
 
@@ -695,7 +872,22 @@ async def get_available_columns(
 
     params = [k for k, _ in key_counter.most_common(50)]
 
-    # Discover asset keys (would need to sample body_json)
-    assets: list[str] = []  # Placeholder - would need similar logic for assets
+    # Discover asset keys from TaskRegistryAsset.body_json
+    asset_query = (
+        select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
+        .where(TaskRegistryAsset.workspace_id == workspace_id)
+        .order_by(TaskRegistryAsset.created_at.desc())
+        .limit(200)
+    )
+    asset_result = await db.execute(asset_query)
+    sample_assets = asset_result.all()
+
+    asset_key_counter: Counter[str] = Counter()
+    for asset_name, body_json in sample_assets:
+        if isinstance(body_json, dict):
+            # Use asset.{name} as prefix
+            _extract_keys(body_json, f"asset.{asset_name}", asset_key_counter)
+
+    assets = [k for k, _ in asset_key_counter.most_common(50)]
 
     return AvailableColumnsResponse(core=core, params=params, assets=assets)
