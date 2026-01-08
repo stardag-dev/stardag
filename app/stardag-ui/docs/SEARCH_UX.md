@@ -257,3 +257,84 @@ If the input doesn't match the filter pattern, it's treated as a text search acr
 - Shows: `key operator value` with operator in lighter color
 - × button on right side for removal
 - Clickable for editing
+
+## Asset Filtering
+
+Task assets can be filtered using the `asset.{name}.{path}` syntax:
+
+```
+asset.metrics.accuracy > 0.9        # Filter by asset JSON value
+asset.raw-data.sample_size >= 100   # Nested asset key
+asset.analysis-report.content ~ error  # Contains in asset
+```
+
+Asset keys appear in autocomplete after typing `asset.` and are discovered from the `/tasks/search/columns` endpoint.
+
+## Column Management
+
+### Column Manager Modal
+
+Access via the "Manage columns" button (grid icon) above the results table.
+
+**Two-pane layout:**
+
+```
+┌─────────────────────────────────────────────────────┐
+│ Manage Columns                                   [X]│
+├─────────────────────────────────────────────────────┤
+│ [Search columns...]                                 │
+├────────────────────────┬────────────────────────────┤
+│ Hidden (12)            │ Visible (5)                │
+├────────────────────────┼────────────────────────────┤
+│ 📋 task_id             │ ⋮ 📋 task_name            │
+│ 📋 task_namespace      │ ⋮ 📋 status               │
+│ ⚙️ param.lr            │ ⋮ 📋 build_name           │
+│ ⚙️ param.model.type    │ ⋮ 📋 created_at           │
+│ 📦 asset.metrics.acc   │ ⋮ ⚙️ param.epochs         │
+│ ...                    │                            │
+└────────────────────────┴────────────────────────────┘
+```
+
+**Column types:**
+
+- 📋 Core fields (task_name, status, created_at, etc.)
+- ⚙️ Task parameters (param.\*)
+- 📦 Asset fields (asset.\*)
+
+**Interactions:**
+
+- Click item to move between Hidden/Visible lists
+- Drag handle (⋮) to reorder visible columns
+- Search filters both lists
+- Changes apply immediately (no Apply button)
+
+### Column Resizing
+
+- Drag the right edge of column headers to resize
+- Minimum width: 80px
+- Widths persist to localStorage
+
+### Smart Truncation for Nested Keys
+
+Long nested keys (param._, asset._) are truncated intelligently:
+
+```
+Full: param.model.config.learning_rate
+Truncated: param...learning_rate
+```
+
+The truncation algorithm:
+
+1. Prioritizes showing the last segment (most meaningful)
+2. Keeps first segment for context
+3. Uses "..." to indicate omitted middle parts
+4. Adjusts based on available column width
+
+Hover over truncated headers to see the full key in a tooltip.
+
+### Click-to-Filter from Cells
+
+- **Click** on any cell value → adds filter `key = value`
+- **Shift+Click** → adds exclusion filter `key != value`
+- Works for all column types (core, param, asset)
+- Visual hover indicator shows clickable cells
