@@ -34,15 +34,6 @@ pytestmark = [
 ]
 
 
-@pytest.fixture(scope="session")
-def browser_context_args():
-    """Configure browser context for tests."""
-    return {
-        "viewport": {"width": 1280, "height": 720},
-        "ignore_https_errors": True,
-    }
-
-
 class TestUILogin:
     """Test the login flow in the UI."""
 
@@ -656,13 +647,28 @@ class TestUIDAGPanel:
         chevron = dag_button.locator("svg").first
         expect(chevron).to_be_visible()
 
-        # Click to toggle (note: this may be disabled if no single build is selected)
-        # We still verify the button exists and responds to clicks
-        dag_button.click()
-        page.wait_for_timeout(300)  # Wait for animation
+        # Check if button is enabled (has a single build selected)
+        is_enabled = dag_button.is_enabled()
 
-        # Button should still be visible after toggle
-        expect(dag_button).to_be_visible()
+        if is_enabled:
+            # Click to toggle
+            dag_button.click()
+            page.wait_for_timeout(300)  # Wait for animation
+
+            # Button should still be visible after toggle
+            expect(dag_button).to_be_visible()
+        else:
+            # Button is disabled - verify disabled state is shown
+            dag_text = dag_button.inner_text()
+            assert any(
+                msg in dag_text
+                for msg in [
+                    "(No tasks)",
+                    "(No build associated)",
+                    "builds - select a single build",
+                    "(Limit: 100 tasks)",
+                ]
+            ), f"Disabled DAG button should show reason, got: {dag_text}"
 
     def test_dag_panel_resize_handle_exists(
         self,
