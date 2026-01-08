@@ -39,15 +39,21 @@ def simple_dag_expected_root_output():
 def default_local_target_tmp_path(
     tmp_path: Path,
 ) -> typing.Generator[Path, None, None]:
+    import json
+
     default_root = tmp_path.absolute() / "default-root"
     default_root.mkdir(parents=True, exist_ok=False)
-    with target_factory_provider.override(
-        TargetFactory(
-            target_roots={"default": str(default_root)},
-            prefixt_to_target_prototype={"/": LocalTarget},
-        )
-    ):
-        yield default_root
+
+    # Set env var so subprocesses (multiprocessing) can pick it up
+    target_roots = {"default": str(default_root)}
+    with temp_env_vars({"STARDAG_TARGET_ROOTS": json.dumps(target_roots)}):
+        with target_factory_provider.override(
+            TargetFactory(
+                target_roots=target_roots,
+                prefixt_to_target_prototype={"/": LocalTarget},
+            )
+        ):
+            yield default_root
 
 
 @pytest.fixture(scope="session")
