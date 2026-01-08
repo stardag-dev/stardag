@@ -30,6 +30,13 @@
       "name": "app/stardag-ui"
     },
     {
+      "path": "integration-tests",
+      "name": "integration-tests",
+      "settings": {
+        "python.defaultInterpreterPath": "integration-tests/.venv/bin/python"
+      }
+    },
+    {
       "path": "infra",
       "name": "infra"
     }
