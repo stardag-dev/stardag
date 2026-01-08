@@ -864,9 +864,89 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                 )}
               </div>
 
+              {/* DAG header - always visible */}
+              <button
+                onClick={() => canShowDag && handleToggleDag()}
+                disabled={!canShowDag}
+                className={`flex w-full items-center justify-between border-b border-gray-200 px-6 py-2 text-sm ${
+                  canShowDag
+                    ? "cursor-pointer text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
+                    : "cursor-not-allowed text-gray-400 dark:text-gray-500"
+                } dark:border-gray-700`}
+              >
+                <div className="flex items-center gap-2">
+                  <svg
+                    className={`h-4 w-4 transition-transform ${
+                      showDag ? "rotate-90" : ""
+                    }`}
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 5l7 7-7 7"
+                    />
+                  </svg>
+                  <span className="font-medium">DAG View</span>
+                  {!canShowDag && (
+                    <span className="text-xs text-gray-400 dark:text-gray-500">
+                      {tasks.length === 0
+                        ? "(No tasks)"
+                        : tasks.length > 100
+                          ? "(Limit: 100 tasks)"
+                          : uniqueBuildIds.length > 1
+                            ? `(${uniqueBuildIds.length} builds - select a single build)`
+                            : "(No build associated)"}
+                    </span>
+                  )}
+                </div>
+                {canShowDag && (
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                    {showDag ? "Click to collapse" : "Click to expand"}
+                  </span>
+                )}
+              </button>
+
               {/* DAG + Results with resizable split */}
               <PanelGroup direction="vertical" className="flex-1">
-                {/* Results table area (top) */}
+                {/* Collapsible DAG section (top) */}
+                <Panel
+                  ref={dagPanelRef}
+                  defaultSize={50}
+                  minSize={0}
+                  collapsible
+                  onCollapse={() => setShowDag(false)}
+                  onExpand={() => setShowDag(true)}
+                >
+                  {showDag && canShowDag && (
+                    <div className="h-full bg-gray-50 dark:bg-gray-900">
+                      {dagLoading ? (
+                        <div className="flex h-full items-center justify-center">
+                          <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                        </div>
+                      ) : dagGraph ? (
+                        <DagGraph
+                          tasks={tasksWithContext}
+                          graph={dagGraph}
+                          selectedTaskId={selectedTask?.task_id ?? null}
+                          onTaskClick={handleDagTaskClick}
+                        />
+                      ) : (
+                        <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
+                          <p>Failed to load DAG</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </Panel>
+
+                {/* Resize handle between DAG and table */}
+                <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
+
+                {/* Results table area (bottom) */}
                 <Panel defaultSize={50} minSize={20}>
                   <div className="flex h-full flex-col">
                     <div className="flex-1 overflow-auto">
@@ -1029,89 +1109,6 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                             Next
                           </button>
                         </div>
-                      </div>
-                    )}
-                  </div>
-                </Panel>
-
-                {/* Resize handle between table and DAG */}
-                <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
-
-                {/* Collapsible DAG section (bottom) */}
-                <Panel
-                  ref={dagPanelRef}
-                  defaultSize={50}
-                  minSize={0}
-                  collapsible
-                  onCollapse={() => setShowDag(false)}
-                  onExpand={() => setShowDag(true)}
-                >
-                  <div className="flex h-full flex-col border-t border-gray-200 dark:border-gray-700">
-                    {/* DAG header/toggle */}
-                    <button
-                      onClick={() => canShowDag && handleToggleDag()}
-                      disabled={!canShowDag}
-                      className={`flex w-full items-center justify-between px-6 py-2 text-sm ${
-                        canShowDag
-                          ? "cursor-pointer text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
-                          : "cursor-not-allowed text-gray-400 dark:text-gray-500"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <svg
-                          className={`h-4 w-4 transition-transform ${
-                            showDag ? "rotate-90" : ""
-                          }`}
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M9 5l7 7-7 7"
-                          />
-                        </svg>
-                        <span className="font-medium">DAG View</span>
-                        {!canShowDag && (
-                          <span className="text-xs text-gray-400 dark:text-gray-500">
-                            {tasks.length === 0
-                              ? "(No tasks)"
-                              : tasks.length > 100
-                                ? "(Limit: 100 tasks)"
-                                : uniqueBuildIds.length > 1
-                                  ? `(${uniqueBuildIds.length} builds - select a single build)`
-                                  : "(No build associated)"}
-                          </span>
-                        )}
-                      </div>
-                      {canShowDag && (
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
-                          {showDag ? "Click to collapse" : "Click to expand"}
-                        </span>
-                      )}
-                    </button>
-
-                    {/* DAG content when expanded */}
-                    {showDag && canShowDag && (
-                      <div className="flex-1 border-t border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900">
-                        {dagLoading ? (
-                          <div className="flex h-full items-center justify-center">
-                            <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-                          </div>
-                        ) : dagGraph ? (
-                          <DagGraph
-                            tasks={tasksWithContext}
-                            graph={dagGraph}
-                            selectedTaskId={selectedTask?.task_id ?? null}
-                            onTaskClick={handleDagTaskClick}
-                          />
-                        ) : (
-                          <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
-                            <p>Failed to load DAG</p>
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>
