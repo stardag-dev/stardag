@@ -64,9 +64,7 @@ class TestProfileAdd:
         add_registry("test-registry", "http://localhost:8000")
 
         # Mock resolve_org_slug_to_id to return None (can't verify)
-        with mock.patch(
-            "stardag.cli.config.resolve_org_slug_to_id", return_value=None
-        ):
+        with mock.patch("stardag.cli.config.resolve_org_slug_to_id", return_value=None):
             result = runner.invoke(
                 app,
                 [
