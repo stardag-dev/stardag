@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 async def build_flow(task: BaseTask, **kwargs):
     """A flow that builds any stardag Task.
 
-    NOTE that since task is a Pydantic model, if is serialized correctly as JSON by
+    NOTE that since a Task is a Pydantic model, it is serialized correctly as JSON by
     prefect. This means that if this flow is deployed to Prefect Cloud, the json
     representation of any task can be submitted to the flow via the UI.
     """
