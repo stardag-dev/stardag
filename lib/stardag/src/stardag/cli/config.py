@@ -244,6 +244,7 @@ def profile_list() -> None:
         is_active = " *" if name == active_profile else ""
         typer.echo(f"  {name}{is_active}")
         typer.echo(f"    registry: {details['registry']}")
+        typer.echo(f"    user: {details.get('user', '(not set)')}")
         typer.echo(f"    organization: {details['organization']}")
         typer.echo(f"    workspace: {details['workspace']}")
         typer.echo("")
