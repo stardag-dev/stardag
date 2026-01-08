@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { fetchWithAuth } from "../api/client";
 import { API_V1 } from "../api/config";
@@ -62,6 +62,17 @@ function getStatusColor(status: TaskStatus): string {
   }
 }
 
+// Available operators for filter autocomplete
+const FILTER_OPERATORS: { op: FilterCondition["operator"]; label: string }[] = [
+  { op: "=", label: "equals" },
+  { op: "!=", label: "not equals" },
+  { op: ">", label: "greater than" },
+  { op: "<", label: "less than" },
+  { op: ">=", label: "greater or equal" },
+  { op: "<=", label: "less or equal" },
+  { op: "~", label: "contains" },
+];
+
 export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const { activeWorkspace } = useWorkspace();
 
@@ -95,6 +106,10 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const [availableKeys, setAvailableKeys] = useState<string[]>([]);
   const [showAutocomplete, setShowAutocomplete] = useState(false);
   const [autocompleteOptions, setAutocompleteOptions] = useState<string[]>([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // Reference to input for focus management
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // Load available keys for autocomplete
   useEffect(() => {
@@ -310,8 +325,10 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     setPage(1);
   }, []);
 
-  // Autocomplete mode: "key" for key suggestions, "value" for value suggestions
-  const [autocompleteMode, setAutocompleteMode] = useState<"key" | "value">("key");
+  // Autocomplete mode: "key" | "operator" | "value"
+  const [autocompleteMode, setAutocompleteMode] = useState<
+    "key" | "operator" | "value"
+  >("key");
   const [autocompleteKey, setAutocompleteKey] = useState<string>("");
 
   // Fetch value suggestions from backend
@@ -339,17 +356,21 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     [activeWorkspace?.id],
   );
 
-  // Handle autocomplete input
+  // Handle autocomplete input - determines which stage we're in
   const handleSearchInput = useCallback(
     (value: string) => {
       setSearchText(value);
+      setSelectedIndex(0); // Reset selection when input changes
 
       // Parse the input to determine autocomplete mode
-      // Formats: "key", "key:", "key:op:", "key:op:value_prefix"
+      // Stage 1: No colon yet → suggest keys
+      // Stage 2: key: (ends with colon, no operator yet) → suggest operators
+      // Stage 3: key:op: or key:op:prefix → suggest values
+
       const colonCount = (value.match(/:/g) || []).length;
 
       if (colonCount === 0) {
-        // No colon - suggest keys
+        // Stage 1: No colon - suggest keys
         setAutocompleteMode("key");
         if (value.length > 0) {
           const suggestions = availableKeys.filter((k) =>
@@ -360,21 +381,123 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         } else {
           setShowAutocomplete(false);
         }
+      } else if (colonCount === 1 && value.endsWith(":")) {
+        // Stage 2: "key:" - suggest operators
+        const key = value.slice(0, -1);
+        setAutocompleteMode("operator");
+        setAutocompleteKey(key);
+        setAutocompleteOptions(FILTER_OPERATORS.map((o) => o.op));
+        setShowAutocomplete(true);
       } else {
-        // Has colon(s) - parse for value suggestions
-        // Match key:op:value or key:value patterns
-        const match = value.match(/^([^:]+):([=!<>~]+)?:?(.*)$/);
-        if (match) {
-          const [, key, , valuePrefix = ""] = match;
+        // Stage 3 or implicit value: parse for value suggestions
+        // Try to match key:op:valuePrefix or key:valuePrefix
+
+        // First check for explicit operator: key:op:value
+        const explicitMatch = value.match(/^([^:]+):([=!<>~]+):(.*)$/);
+        if (explicitMatch) {
+          const [, key, , valuePrefix] = explicitMatch;
           setAutocompleteMode("value");
           setAutocompleteKey(key);
           fetchValueSuggestions(key, valuePrefix);
-        } else {
-          setShowAutocomplete(false);
+          return;
         }
+
+        // Check for key:op (operator partially typed, no second colon yet)
+        const partialOpMatch = value.match(/^([^:]+):([=!<>~]+)$/);
+        if (partialOpMatch) {
+          const [, key, partialOp] = partialOpMatch;
+          setAutocompleteMode("operator");
+          setAutocompleteKey(key);
+          const filtered = FILTER_OPERATORS.filter((o) => o.op.startsWith(partialOp));
+          setAutocompleteOptions(filtered.map((o) => o.op));
+          setShowAutocomplete(filtered.length > 0);
+          return;
+        }
+
+        // Implicit equals: key:value (value doesn't start with operator char)
+        const implicitMatch = value.match(/^([^:]+):([^=!<>~].*)$/);
+        if (implicitMatch) {
+          const [, key, valuePrefix] = implicitMatch;
+          setAutocompleteMode("value");
+          setAutocompleteKey(key);
+          fetchValueSuggestions(key, valuePrefix);
+          return;
+        }
+
+        setShowAutocomplete(false);
       }
     },
     [availableKeys, fetchValueSuggestions],
+  );
+
+  // Handle autocomplete option selection
+  const handleAutocompleteSelect = useCallback(
+    (option: string) => {
+      if (autocompleteMode === "key") {
+        // After key selection, add colon to prompt for operator
+        setSearchText(`${option}:`);
+      } else if (autocompleteMode === "operator") {
+        // After operator selection, add colon to prompt for value
+        setSearchText(`${autocompleteKey}:${option}:`);
+      } else {
+        // After value selection, construct full filter and try to submit
+        // Parse current text to get key and operator
+        const explicitMatch = searchText.match(/^([^:]+):([=!<>~]+):?/);
+        if (explicitMatch) {
+          const [, key, op] = explicitMatch;
+          setSearchText(`${key}:${op}:${option}`);
+        } else {
+          // Implicit equals
+          setSearchText(`${autocompleteKey}:${option}`);
+        }
+      }
+      setShowAutocomplete(false);
+      setSelectedIndex(0);
+      // Return focus to input
+      inputRef.current?.focus();
+    },
+    [autocompleteMode, autocompleteKey, searchText],
+  );
+
+  // Handle keyboard navigation in autocomplete
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (!showAutocomplete || autocompleteOptions.length === 0) {
+        return;
+      }
+
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          setSelectedIndex((prev) =>
+            prev < autocompleteOptions.length - 1 ? prev + 1 : 0,
+          );
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          setSelectedIndex((prev) =>
+            prev > 0 ? prev - 1 : autocompleteOptions.length - 1,
+          );
+          break;
+        case "Enter":
+          if (showAutocomplete && autocompleteOptions.length > 0) {
+            e.preventDefault();
+            handleAutocompleteSelect(autocompleteOptions[selectedIndex]);
+          }
+          break;
+        case "Escape":
+          e.preventDefault();
+          setShowAutocomplete(false);
+          break;
+        case "Tab":
+          if (showAutocomplete && autocompleteOptions.length > 0) {
+            e.preventDefault();
+            handleAutocompleteSelect(autocompleteOptions[selectedIndex]);
+          }
+          break;
+      }
+    },
+    [showAutocomplete, autocompleteOptions, selectedIndex, handleAutocompleteSelect],
   );
 
   // Parse and add filter from search text
@@ -454,12 +577,14 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                   <div className="flex items-center gap-2">
                     <div className="relative flex-1">
                       <input
+                        ref={inputRef}
                         type="text"
                         value={searchText}
                         onChange={(e) => handleSearchInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
                         onFocus={() => searchText && handleSearchInput(searchText)}
-                        onBlur={() => setTimeout(() => setShowAutocomplete(false), 200)}
-                        placeholder="Search tasks... (e.g., name:~training, param.lr:>0.01)"
+                        onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
+                        placeholder="Search tasks... (e.g., task_name:MyTask, param.lr:>:0.01)"
                         className="w-full rounded-md border border-gray-300 bg-white px-4 py-2 pl-10 text-sm text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
                       />
                       <svg
@@ -479,41 +604,66 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                       {/* Autocomplete dropdown */}
                       {showAutocomplete && autocompleteOptions.length > 0 && (
                         <div className="absolute left-0 right-0 top-full z-10 mt-1 rounded-md border border-gray-200 bg-white shadow-lg dark:border-gray-600 dark:bg-gray-700">
-                          {autocompleteMode === "key" && (
-                            <div className="px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
-                              Keys
-                            </div>
-                          )}
-                          {autocompleteMode === "value" && (
-                            <div className="px-3 py-1 text-xs font-medium text-gray-500 dark:text-gray-400">
-                              Values for {autocompleteKey}
-                            </div>
-                          )}
-                          {autocompleteOptions.map((option) => (
-                            <button
-                              key={option}
-                              type="button"
-                              // Use onMouseDown to prevent blur race condition
-                              onMouseDown={(e) => {
-                                e.preventDefault();
-                                if (autocompleteMode === "key") {
-                                  setSearchText(`${option}:`);
-                                } else {
-                                  // Value mode - parse current text and replace value
-                                  const match =
-                                    searchText.match(/^([^:]+):([=!<>~]+)?:?/);
-                                  if (match) {
-                                    const [prefix] = match;
-                                    setSearchText(`${prefix}${option}`);
-                                  }
-                                }
-                                setShowAutocomplete(false);
-                              }}
-                              className="block w-full px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-600"
-                            >
-                              {option}
-                            </button>
-                          ))}
+                          {/* Header based on mode */}
+                          <div className="border-b border-gray-100 px-3 py-1.5 text-xs font-medium text-gray-500 dark:border-gray-600 dark:text-gray-400">
+                            {autocompleteMode === "key" && "Keys"}
+                            {autocompleteMode === "operator" && "Operators"}
+                            {autocompleteMode === "value" &&
+                              `Values for ${autocompleteKey}`}
+                          </div>
+                          {autocompleteOptions.map((option, index) => {
+                            const isSelected = index === selectedIndex;
+                            // Get operator description if in operator mode
+                            const opInfo =
+                              autocompleteMode === "operator"
+                                ? FILTER_OPERATORS.find((o) => o.op === option)
+                                : null;
+
+                            return (
+                              <button
+                                key={option}
+                                type="button"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  handleAutocompleteSelect(option);
+                                }}
+                                onMouseEnter={() => setSelectedIndex(index)}
+                                className={`block w-full px-4 py-2 text-left text-sm ${
+                                  isSelected
+                                    ? "bg-blue-50 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
+                                    : "text-gray-700 dark:text-gray-300"
+                                }`}
+                              >
+                                {autocompleteMode === "operator" ? (
+                                  <span className="flex items-center justify-between">
+                                    <span className="font-mono">{option}</span>
+                                    {opInfo && (
+                                      <span className="text-xs text-gray-400 dark:text-gray-500">
+                                        {opInfo.label}
+                                      </span>
+                                    )}
+                                  </span>
+                                ) : (
+                                  option
+                                )}
+                              </button>
+                            );
+                          })}
+                          {/* Keyboard hint */}
+                          <div className="border-t border-gray-100 px-3 py-1.5 text-xs text-gray-400 dark:border-gray-600 dark:text-gray-500">
+                            <kbd className="rounded bg-gray-100 px-1 dark:bg-gray-600">
+                              ↑↓
+                            </kbd>{" "}
+                            navigate{" "}
+                            <kbd className="rounded bg-gray-100 px-1 dark:bg-gray-600">
+                              Enter
+                            </kbd>{" "}
+                            select{" "}
+                            <kbd className="rounded bg-gray-100 px-1 dark:bg-gray-600">
+                              Esc
+                            </kbd>{" "}
+                            close
+                          </div>
                         </div>
                       )}
                     </div>
