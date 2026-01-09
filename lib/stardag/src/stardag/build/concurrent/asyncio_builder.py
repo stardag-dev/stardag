@@ -7,6 +7,7 @@ Key features:
 - Uses asyncio.create_task for concurrent execution
 - Handles dynamic dependencies naturally with async/await
 - Cleaner control flow than thread-based approach
+- Full async support: tasks can implement run_aio() for native async execution
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from uuid import UUID
 
 from stardag._task import BaseTask, TaskStruct, flatten_task_struct
 from stardag.build.registry import RegistryABC, registry_provider
-from stardag.build.task_runner import RunCallback, TaskRunner
+from stardag.build.task_runner import AsyncRunCallback, AsyncTaskRunner
 
 logger = logging.getLogger(__name__)
 
@@ -39,33 +40,33 @@ async def build(
     *,
     max_concurrent: int | None = None,
     completion_cache: set[UUID] | None = None,
-    task_runner: TaskRunner | None = None,
-    before_run_callback: RunCallback | None = None,
-    on_complete_callback: RunCallback | None = None,
+    task_runner: AsyncTaskRunner | None = None,
+    before_run_callback: AsyncRunCallback | None = None,
+    on_complete_callback: AsyncRunCallback | None = None,
     registry: RegistryABC | None = None,
 ) -> None:
     """Build a task DAG using asyncio for concurrency.
 
-    Tasks are run in threads via asyncio.to_thread() to avoid blocking the event loop.
-    This provides true concurrent execution even for synchronous task code.
+    Tasks are executed using their async run_aio() method, enabling native async I/O.
+    This provides true concurrent execution without thread pool overhead.
 
     Args:
         task: Root task to build
         max_concurrent: Maximum number of concurrent tasks (None = unlimited)
         completion_cache: Set of already-completed task IDs
-        task_runner: Custom task runner (sync, will be run in thread)
-        before_run_callback: Called before each task runs
-        on_complete_callback: Called after each task completes
+        task_runner: Custom async task runner
+        before_run_callback: Async callback called before each task runs
+        on_complete_callback: Async callback called after each task completes
         registry: Registry for tracking builds
     """
     registry = registry or registry_provider.get()
-    task_runner = task_runner or TaskRunner(
+    task_runner = task_runner or AsyncTaskRunner(
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
         registry=registry,
     )
 
-    registry.start_build(root_tasks=[task])
+    await registry.start_build_aio(root_tasks=[task])
 
     try:
         await build_with_asyncio(
@@ -74,9 +75,9 @@ async def build(
             completion_cache=completion_cache or set(),
             task_runner=task_runner,
         )
-        registry.complete_build()
+        await registry.complete_build_aio()
     except Exception as e:
-        registry.fail_build(str(e))
+        await registry.fail_build_aio(str(e))
         raise
 
 
@@ -85,7 +86,7 @@ async def build_with_asyncio(
     *,
     max_concurrent: int | None = None,
     completion_cache: set[UUID],
-    task_runner: TaskRunner,
+    task_runner: AsyncTaskRunner,
 ) -> None:
     """Core async build logic.
 
@@ -94,6 +95,8 @@ async def build_with_asyncio(
     2. Create async task for each stardag task
     3. Each async task waits for its dependencies before running
     4. Dynamic deps are handled by pausing and waiting for new deps
+
+    Tasks are executed via task.run_aio() for native async support.
     """
     # All discovered tasks
     all_tasks: dict[UUID, BaseTask] = {}
@@ -115,11 +118,11 @@ async def build_with_asyncio(
         for dep in flatten_task_struct(task.requires()):
             discover_tasks(dep)
 
-    def is_complete(task: BaseTask) -> bool:
-        """Check if task is complete."""
+    async def is_complete(task: BaseTask) -> bool:
+        """Check if task is complete (async)."""
         if task.id in completion_cache:
             return True
-        if task.complete():
+        if await task.complete_aio():
             completion_cache.add(task.id)
             completion_events[task.id].set()
             return True
@@ -128,13 +131,13 @@ async def build_with_asyncio(
     async def wait_for_deps(deps: list[BaseTask]) -> None:
         """Wait for all dependencies to complete."""
         for dep in deps:
-            if not is_complete(dep):
+            if not await is_complete(dep):
                 await completion_events[dep.id].wait()
 
     async def run_task_with_deps(task: BaseTask) -> None:
         """Run a single task after waiting for its dependencies."""
         # Check if already complete
-        if is_complete(task):
+        if await is_complete(task):
             return
 
         # Get static dependencies
@@ -145,14 +148,14 @@ async def build_with_asyncio(
             for dep in static_deps:
                 if dep.id not in all_tasks:
                     discover_tasks(dep)
-                if dep.id not in active_tasks and not is_complete(dep):
+                if dep.id not in active_tasks and not await is_complete(dep):
                     active_tasks[dep.id] = asyncio.create_task(run_task_with_deps(dep))
 
         # Wait for static deps
         await wait_for_deps(static_deps)
 
         # Check again if complete (might have been completed by another path)
-        if is_complete(task):
+        if await is_complete(task):
             return
 
         # Acquire semaphore if limiting concurrency
@@ -160,9 +163,8 @@ async def build_with_asyncio(
             await semaphore.acquire()
 
         try:
-            # Execute the task in a thread to avoid blocking the event loop
-            # This is necessary because task.run() is synchronous
-            result = await asyncio.to_thread(task_runner.run, task)
+            # Execute the task using async runner - no thread needed!
+            result = await task_runner.run(task)
 
             if result is not None:
                 # Task has dynamic deps - result is a generator
@@ -173,7 +175,11 @@ async def build_with_asyncio(
                         dynamic_deps = flatten_task_struct(yielded)
 
                         # Check if all dynamic deps are already complete
-                        all_complete = all(is_complete(dep) for dep in dynamic_deps)
+                        all_complete = True
+                        for dep in dynamic_deps:
+                            if not await is_complete(dep):
+                                all_complete = False
+                                break
                         if all_complete:
                             continue
 
@@ -182,7 +188,9 @@ async def build_with_asyncio(
                             for dep in dynamic_deps:
                                 if dep.id not in all_tasks:
                                     discover_tasks(dep)
-                                if dep.id not in active_tasks and not is_complete(dep):
+                                if dep.id not in active_tasks and not await is_complete(
+                                    dep
+                                ):
                                     active_tasks[dep.id] = asyncio.create_task(
                                         run_task_with_deps(dep)
                                     )
@@ -219,29 +227,29 @@ async def build_queue_based(
     *,
     max_concurrent: int = 4,
     completion_cache: set[UUID] | None = None,
-    task_runner: TaskRunner | None = None,
-    before_run_callback: RunCallback | None = None,
-    on_complete_callback: RunCallback | None = None,
+    task_runner: AsyncTaskRunner | None = None,
+    before_run_callback: AsyncRunCallback | None = None,
+    on_complete_callback: AsyncRunCallback | None = None,
     registry: RegistryABC | None = None,
 ) -> None:
     """Alternative build using explicit task queue.
 
-    Tasks are run in threads via asyncio.to_thread() to avoid blocking.
+    Tasks are executed via async run_aio() method for native async support.
 
     This approach is closer to how Prefect works:
     1. Queue tasks that are ready to run
-    2. Workers pull from queue and execute in threads
+    2. Workers pull from queue and execute asynchronously
     3. When task completes, check if new tasks are ready
     """
     registry = registry or registry_provider.get()
-    task_runner = task_runner or TaskRunner(
+    task_runner = task_runner or AsyncTaskRunner(
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
         registry=registry,
     )
     completion_cache = completion_cache or set()
 
-    registry.start_build(root_tasks=[root_task])
+    await registry.start_build_aio(root_tasks=[root_task])
 
     # Task tracking
     all_tasks: dict[UUID, BaseTask] = {}
@@ -338,8 +346,8 @@ async def build_queue_based(
                         enqueue_ready_tasks()
                         continue
 
-                # First execution - run in thread to avoid blocking event loop
-                result = await asyncio.to_thread(task_runner.run, task)
+                # Execute the task using async runner
+                result = await task_runner.run(task)
 
                 if result is not None:
                     # Dynamic deps - store generator
@@ -413,8 +421,8 @@ async def build_queue_based(
         for p in pending:
             p.cancel()
 
-        registry.complete_build()
+        await registry.complete_build_aio()
 
     except Exception as e:
-        registry.fail_build(str(e))
+        await registry.fail_build_aio(str(e))
         raise

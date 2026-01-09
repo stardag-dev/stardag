@@ -42,6 +42,20 @@ class InMemoryTarget(LoadableSaveableTarget[LoadedT]):
     def load(self) -> LoadedT:
         return self.key_to_object[self.key]
 
+    # Async implementations (trivial since in-memory is fast)
+
+    async def exists_aio(self) -> bool:
+        """Async check - trivial for in-memory."""
+        return self.exists()
+
+    async def save_aio(self, obj: LoadedT) -> None:
+        """Async save - trivial for in-memory."""
+        self.save(obj)
+
+    async def load_aio(self) -> LoadedT:
+        """Async load - trivial for in-memory."""
+        return self.load()
+
 
 class InMemoryFileSystemTarget(FileSystemTarget):
     """Useful in testing"""
@@ -86,6 +100,12 @@ class InMemoryFileSystemTarget(FileSystemTarget):
             return _InMemoryBytesWritableFileSystemTargetHandle(self.path)
 
         raise ValueError(f"Invalid mode {mode}")
+
+    # Async implementations (trivial since in-memory is fast)
+
+    async def exists_aio(self) -> bool:
+        """Async check - trivial for in-memory."""
+        return self.exists()
 
 
 class _InMemoryBytesWritableFileSystemTargetHandle(

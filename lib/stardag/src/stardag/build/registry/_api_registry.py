@@ -61,6 +61,7 @@ class APIRegistry(RegistryABC):
         self.workspace_id = workspace_id or config.context.workspace_id
 
         self._client = None
+        self._async_client = None
         self._build_id: str | None = None
 
         if self.api_key:
@@ -335,9 +336,190 @@ class APIRegistry(RegistryABC):
             self._client.close()
             self._client = None
 
+    async def aclose(self) -> None:
+        """Close the async HTTP client."""
+        if self._async_client is not None:
+            await self._async_client.aclose()
+            self._async_client = None
+
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.aclose()
+        return False
+
+    # Async client and methods
+
+    @property
+    def async_client(self):
+        """Lazy-initialized async HTTP client."""
+        if self._async_client is None:
+            try:
+                import httpx
+            except ImportError:
+                raise ImportError(
+                    "httpx is required for APIRegistry. "
+                    "Install it with: pip install stardag[api]"
+                )
+            headers = {}
+            if self.api_key:
+                headers["X-API-Key"] = self.api_key
+            elif self.access_token:
+                headers["Authorization"] = f"Bearer {self.access_token}"
+            self._async_client = httpx.AsyncClient(
+                timeout=self.timeout, headers=headers
+            )
+        return self._async_client
+
+    async def start_build_aio(
+        self,
+        root_tasks: list[BaseTask] | None = None,
+        description: str | None = None,
+    ) -> str:
+        """Async version - start a new build and return its ID."""
+        build_data = {
+            "commit_hash": get_git_commit_hash(),
+            "root_task_ids": [str(task.id) for task in (root_tasks or [])],
+            "description": description,
+        }
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds",
+            json=build_data,
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, "Start build")
+        data = response.json()
+        build_id: str = data["id"]
+        self._build_id = build_id
+        logger.info(f"Started build: {data['name']} (ID: {build_id})")
+        return build_id
+
+    async def complete_build_aio(self) -> None:
+        """Async version - mark the current build as completed."""
+        if self._build_id is None:
+            logger.warning("No active build to complete")
+            return
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/complete",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, "Complete build")
+        logger.info(f"Completed build: {self._build_id}")
+
+    async def fail_build_aio(self, error_message: str | None = None) -> None:
+        """Async version - mark the current build as failed."""
+        if self._build_id is None:
+            logger.warning("No active build to fail")
+            return
+
+        params = self._get_params()
+        if error_message:
+            params["error_message"] = error_message
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/fail",
+            params=params,
+        )
+        self._handle_response_error(response, "Fail build")
+        logger.info(f"Marked build as failed: {self._build_id}")
+
+    async def register_task_aio(self, task: BaseTask) -> None:
+        """Async version - register a task within the current build."""
+        if self._build_id is None:
+            await self.start_build_aio(root_tasks=[task])
+
+        task_data = {
+            "task_id": str(task.id),
+            "task_namespace": task.get_namespace(),
+            "task_name": task.get_name(),
+            "task_data": task.model_dump(mode="json"),
+            "version": task.version,
+            "dependency_task_ids": [
+                str(dep.id) for dep in flatten_task_struct(task.requires())
+            ],
+        }
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks",
+            json=task_data,
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Register task {task.id}")
+
+    async def start_task_aio(self, task: BaseTask) -> None:
+        """Async version - mark a task as started."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot start task")
+            return
+
+        await self.register_task_aio(task)
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/start",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Start task {task.id}")
+
+    async def complete_task_aio(self, task: BaseTask) -> None:
+        """Async version - mark a task as completed."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot complete task")
+            return
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/complete",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Complete task {task.id}")
+
+    async def fail_task_aio(
+        self, task: BaseTask, error_message: str | None = None
+    ) -> None:
+        """Async version - mark a task as failed."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot fail task")
+            return
+
+        params = self._get_params()
+        if error_message:
+            params["error_message"] = error_message
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/fail",
+            params=params,
+        )
+        self._handle_response_error(response, f"Fail task {task.id}")
+
+    async def upload_task_assets_aio(
+        self, task: BaseTask, assets: list[RegistryAsset]
+    ) -> None:
+        """Async version - upload assets for a completed task."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot upload task assets")
+            return
+
+        if not assets:
+            return
+
+        assets_data = []
+        for asset in assets:
+            data = asset.model_dump(mode="json")
+            if asset.type == "markdown":
+                data["body"] = {"content": data["body"]}
+            assets_data.append(data)
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/assets",
+            json=assets_data,
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Upload assets for task {task.id}")
+        logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
