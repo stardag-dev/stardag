@@ -1,22 +1,11 @@
 import asyncio
 import typing
 
-from stardag._task import BaseTask, TaskStruct
+from stardag._task import BaseTask, TaskStruct, _has_custom_run_aio
 from stardag.build.registry import NoOpRegistry, RegistryABC
 
 RunCallback = typing.Callable[[BaseTask], None]
 AsyncRunCallback = typing.Callable[[BaseTask], typing.Awaitable[None]]
-
-
-def _has_custom_run_aio(task: BaseTask) -> bool:
-    """Check if task has overridden run_aio() (not using default delegation).
-
-    The default run_aio() in BaseTask just delegates to run(). If a task has
-    a custom async implementation, we can call it directly. Otherwise, we need
-    to run the sync run() in a thread to avoid blocking the event loop.
-    """
-    # Check if the task's run_aio method is different from BaseTask's
-    return type(task).run_aio is not BaseTask.run_aio
 
 
 class TaskRunner:
