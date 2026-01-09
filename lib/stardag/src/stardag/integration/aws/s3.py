@@ -52,13 +52,7 @@ class S3FileSystem(RemoteFileSystemABC):
         aioboto3_session: aioboto3.Session | None = None,
     ):
         self.s3_client: S3Client = s3_client or boto3.client("s3")
-        self._aioboto3_session = aioboto3_session
-
-    def _get_aioboto3_session(self) -> aioboto3.Session:
-        """Get the aioboto3 session, creating one if not provided."""
-        if self._aioboto3_session is not None:
-            return self._aioboto3_session
-        return aioboto3.Session()
+        self.aioboto3_session = aioboto3_session or aioboto3.Session()
 
     def exists(self, uri: str) -> bool:
         bucket, key = get_bucket_key(uri)
@@ -86,9 +80,8 @@ class S3FileSystem(RemoteFileSystemABC):
     async def exists_aio(self, uri: str) -> bool:
         """Asynchronously check if the S3 object exists."""
         bucket, key = get_bucket_key(uri)
-        session = self._get_aioboto3_session()
         s3: AsyncS3Client
-        async with session.client("s3") as s3:
+        async with self.aioboto3_session.client("s3") as s3:
             try:
                 await s3.head_object(Bucket=bucket, Key=key)
                 return True
@@ -101,17 +94,15 @@ class S3FileSystem(RemoteFileSystemABC):
     async def download_aio(self, uri: str, destination: Path) -> None:
         """Asynchronously download a file from S3."""
         bucket, key = get_bucket_key(uri)
-        session = self._get_aioboto3_session()
         s3: AsyncS3Client
-        async with session.client("s3") as s3:
+        async with self.aioboto3_session.client("s3") as s3:
             await s3.download_file(bucket, key, str(destination))
 
     async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
         """Asynchronously upload a file to S3."""
         bucket, key = get_bucket_key(uri)
-        session = self._get_aioboto3_session()
         s3: AsyncS3Client
-        async with session.client("s3") as s3:
+        async with self.aioboto3_session.client("s3") as s3:
             await s3.upload_file(str(source), bucket, key)
 
 
@@ -131,14 +122,7 @@ def get_uri(bucket: str, key: str) -> str:
 
 s3_client_provider = resource_provider(S3Client, lambda: boto3.client("s3"))
 
-
-def _get_default_aioboto3_session() -> aioboto3.Session:
-    return aioboto3.Session()
-
-
-aioboto3_session_provider = resource_provider(
-    aioboto3.Session, _get_default_aioboto3_session
-)
+aioboto3_session_provider = resource_provider(aioboto3.Session, aioboto3.Session)
 
 
 def _init_s3_file_system() -> RemoteFileSystemABC:
