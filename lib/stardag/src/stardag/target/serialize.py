@@ -2,7 +2,9 @@ import abc
 import contextlib
 import pickle
 import typing
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncGenerator
 
 try:
     from typing import Self
@@ -43,6 +45,21 @@ class Serializer(typing.Generic[LoadedT], typing.Protocol):
         self,
         target: FileSystemTarget,
     ) -> LoadedT: ...
+
+    async def dump_aio(
+        self,
+        obj: LoadedT,
+        target: FileSystemTarget,
+    ) -> None:
+        """Async dump - default delegates to sync method."""
+        self.dump(obj, target)
+
+    async def load_aio(
+        self,
+        target: FileSystemTarget,
+    ) -> LoadedT:
+        """Async load - default delegates to sync method."""
+        return self.load(target)
 
 
 class Serializable(
@@ -101,6 +118,32 @@ class Serializable(
     @contextlib.contextmanager
     def _writable_proxy_path(self) -> typing.Generator[Path, None, None]:
         with self.wrapped._writable_proxy_path() as path:
+            yield path
+
+    # Async implementations
+
+    async def exists_aio(self) -> bool:
+        """Async check - delegates to wrapped target."""
+        return await self.wrapped.exists_aio()
+
+    async def load_aio(self) -> LoadedT:
+        """Async load - delegates to serializer."""
+        return await self.serializer.load_aio(self.wrapped)
+
+    async def save_aio(self, obj: LoadedT) -> None:
+        """Async save - delegates to serializer."""
+        await self.serializer.dump_aio(obj, self.wrapped)
+
+    @asynccontextmanager
+    async def _readable_proxy_path_aio(self) -> AsyncGenerator[Path, None]:
+        """Async readable proxy path - delegates to wrapped target."""
+        async with self.wrapped._readable_proxy_path_aio() as path:
+            yield path
+
+    @asynccontextmanager
+    async def _writable_proxy_path_aio(self) -> AsyncGenerator[Path, None]:
+        """Async writable proxy path - delegates to wrapped target."""
+        async with self.wrapped._writable_proxy_path_aio() as path:
             yield path
 
 

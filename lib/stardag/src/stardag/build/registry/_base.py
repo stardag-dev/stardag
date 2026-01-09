@@ -119,6 +119,48 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    # Async versions - default implementations delegate to sync methods
+
+    async def register_task_aio(self, task: "BaseTask") -> None:
+        """Async version of register_task."""
+        self.register_task(task)
+
+    async def start_build_aio(
+        self,
+        root_tasks: list["BaseTask"] | None = None,
+        description: str | None = None,
+    ) -> str | None:
+        """Async version of start_build."""
+        return self.start_build(root_tasks, description)
+
+    async def complete_build_aio(self) -> None:
+        """Async version of complete_build."""
+        self.complete_build()
+
+    async def fail_build_aio(self, error_message: str | None = None) -> None:
+        """Async version of fail_build."""
+        self.fail_build(error_message)
+
+    async def start_task_aio(self, task: "BaseTask") -> None:
+        """Async version of start_task."""
+        self.start_task(task)
+
+    async def complete_task_aio(self, task: "BaseTask") -> None:
+        """Async version of complete_task."""
+        self.complete_task(task)
+
+    async def fail_task_aio(
+        self, task: "BaseTask", error_message: str | None = None
+    ) -> None:
+        """Async version of fail_task."""
+        self.fail_task(task, error_message)
+
+    async def upload_task_assets_aio(
+        self, task: "BaseTask", assets: list["RegistryAsset"]
+    ) -> None:
+        """Async version of upload_task_assets."""
+        self.upload_task_assets(task, assets)
+
 
 class NoOpRegistry(RegistryABC):
     """A registry that does nothing.
