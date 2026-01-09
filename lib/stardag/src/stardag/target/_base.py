@@ -917,6 +917,21 @@ class InMemoryRemoteFileSystem(RemoteFileSystemABC):
         with open(source, "rb") as f:
             self.uri_to_bytes[uri] = f.read()
 
+    async def exists_aio(self, uri: str) -> bool:
+        return uri in self.uri_to_bytes
+
+    async def download_aio(self, uri: str, destination: Path) -> None:
+        import aiofiles
+
+        async with aiofiles.open(destination, "wb") as f:  # type: ignore[arg-type]
+            await f.write(self.uri_to_bytes[uri])
+
+    async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
+        import aiofiles
+
+        async with aiofiles.open(source, "rb") as f:  # type: ignore[arg-type]
+            self.uri_to_bytes[uri] = await f.read()
+
 
 class CachedRemoteFileSystemConfig(BaseSettings):
     root: str
