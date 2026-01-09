@@ -59,6 +59,41 @@ class S3FileSystem(RemoteFileSystemABC):
         bucket, key = get_bucket_key(uri)
         self.s3_client.upload_file(str(source), bucket, key)
 
+    # Async implementations using aioboto3
+
+    async def exists_aio(self, uri: str) -> bool:
+        """Asynchronously check if the S3 object exists."""
+        import aioboto3  # type: ignore[import-not-found]
+
+        bucket, key = get_bucket_key(uri)
+        session = aioboto3.Session()
+        async with session.client("s3") as s3:  # type: ignore[union-attr]
+            try:
+                await s3.head_object(Bucket=bucket, Key=key)
+                return True
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] == "404":  # type: ignore
+                    return False
+                raise
+
+    async def download_aio(self, uri: str, destination: Path) -> None:
+        """Asynchronously download a file from S3."""
+        import aioboto3  # type: ignore[import-not-found]
+
+        bucket, key = get_bucket_key(uri)
+        session = aioboto3.Session()
+        async with session.client("s3") as s3:  # type: ignore[union-attr]
+            await s3.download_file(bucket, key, str(destination))
+
+    async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
+        """Asynchronously upload a file to S3."""
+        import aioboto3  # type: ignore[import-not-found]
+
+        bucket, key = get_bucket_key(uri)
+        session = aioboto3.Session()
+        async with session.client("s3") as s3:  # type: ignore[union-attr]
+            await s3.upload_file(str(source), bucket, key)
+
 
 def get_bucket_key(uri: str) -> tuple[str, str]:
     """Get the bucket and key from the given S3 URI."""
