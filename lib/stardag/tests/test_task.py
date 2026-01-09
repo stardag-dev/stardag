@@ -247,6 +247,9 @@ def test_task_with_target_serialization():
 class MockTask(AutoTask[str]):
     a: int
 
+    def run(self) -> None:
+        pass
+
 
 _testing_module = "stardag.utils.testing"
 
