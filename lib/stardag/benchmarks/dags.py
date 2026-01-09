@@ -152,3 +152,52 @@ def heavy_cpu_flat(prefix: str = "") -> BenchmarkTask:
         deps=tuple(leaves),
     )
     return root
+
+
+def io_bound_flat(prefix: str = "", leaf_count: int = 32) -> BenchmarkTask:
+    """Flat IO-bound DAG optimized for async execution.
+
+    This scenario demonstrates asyncio's advantage:
+    - Many independent IO tasks that can run truly concurrently
+    - No thread pool overhead with async sleep
+    - Single root depends on all leaves
+
+    With max_concurrent=4:
+    - Threadpool: 32 tasks / 4 threads = 8 batches * 0.1s = 0.8s minimum
+    - Asyncio: Can overlap all sleeps within semaphore limit, ~0.8s minimum
+
+    The advantage shows when we increase max_concurrent or have many quick I/O ops.
+    """
+    leaves = [
+        IOBoundTask(task_id=f"{prefix}leaf_{i}", sleep_duration=0.1)
+        for i in range(leaf_count)
+    ]
+    root = IOBoundTask(
+        task_id=f"{prefix}root",
+        deps=tuple(leaves),
+        sleep_duration=0.1,
+    )
+    return root
+
+
+def io_bound_flat_many(prefix: str = "") -> BenchmarkTask:
+    """Flat IO-bound DAG with many quick tasks.
+
+    This scenario shows asyncio's advantage with many short I/O operations:
+    - 100 leaf tasks with 10ms sleep each
+    - Single root depends on all leaves
+
+    With max_concurrent=None (unlimited):
+    - Asyncio: Can run all 100 tasks concurrently, ~0.01s + overhead
+    - Threadpool: Limited by thread creation/management overhead
+    """
+    leaves = [
+        IOBoundTask(task_id=f"{prefix}leaf_{i}", sleep_duration=0.01)
+        for i in range(100)
+    ]
+    root = IOBoundTask(
+        task_id=f"{prefix}root",
+        deps=tuple(leaves),
+        sleep_duration=0.01,
+    )
+    return root
