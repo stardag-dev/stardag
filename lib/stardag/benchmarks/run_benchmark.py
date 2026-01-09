@@ -189,6 +189,8 @@ def main():
         cpu_bound_tree,
         heavy_cpu_flat,
         io_bound_dynamic,
+        io_bound_flat,
+        io_bound_flat_many,
         io_bound_tree,
         light_dynamic,
         light_tree,
@@ -210,7 +212,7 @@ def main():
             all_results: list[BenchmarkResult] = []
 
             # Scenarios to benchmark
-            scenarios = [
+            scenarios_4workers = [
                 ("io_bound_static", io_bound_tree),
                 ("io_bound_dynamic", io_bound_dynamic),
                 ("cpu_bound_static", cpu_bound_tree),
@@ -223,13 +225,18 @@ def main():
             print("=" * 60)
             print("CONCURRENT BUILD BENCHMARK")
             print("=" * 60)
-            print("\nWorkers: 4, Warmup: 1, Timed runs: 3")
+            print("\nWarmup: 1, Timed runs: 3")
+            print()
+
+            print("=" * 60)
+            print("SECTION 1: Standard scenarios (4 workers)")
+            print("=" * 60)
             print("Static DAGs: 3-level tree (15 tasks)")
             print("Dynamic DAGs: flat (9 tasks - root + 8 leaves)")
             print("Heavy CPU: flat (5 tasks - root + 4 leaves, ~1s each)")
             print()
 
-            for scenario_name, dag_factory in scenarios:
+            for scenario_name, dag_factory in scenarios_4workers:
                 print(f"\n{scenario_name}:")
                 print("-" * 40)
                 results = run_benchmark(
@@ -240,6 +247,46 @@ def main():
                     timed_runs=3,
                 )
                 all_results.extend(results)
+
+            print()
+            print("=" * 60)
+            print("SECTION 2: High-concurrency IO scenarios")
+            print("=" * 60)
+            print("io_flat_32_w16: 33 tasks (32 leaves + root), 16 workers")
+            print("io_flat_many_w32: 101 tasks (100 leaves + root), 32 workers")
+            print()
+            print(
+                "Note: With synthetic sleep, asyncio and threadpool perform similarly"
+            )
+            print("because GIL is released during sleep. Async advantages are more")
+            print(
+                "visible with real network I/O (connection pooling, no thread overhead)."
+            )
+            print()
+
+            # High concurrency scenario 1: 32 leaves, 16 workers
+            print("\nio_flat_32_w16:")
+            print("-" * 40)
+            results = run_benchmark(
+                "io_flat_32_w16",
+                io_bound_flat,
+                workers=16,
+                warmup_runs=1,
+                timed_runs=3,
+            )
+            all_results.extend(results)
+
+            # High concurrency scenario 2: 100 leaves, 32 workers
+            print("\nio_flat_many_w32:")
+            print("-" * 40)
+            results = run_benchmark(
+                "io_flat_many_w32",
+                io_bound_flat_many,
+                workers=32,
+                warmup_runs=1,
+                timed_runs=3,
+            )
+            all_results.extend(results)
 
             # Print summary table
             print("\n" + "=" * 60)

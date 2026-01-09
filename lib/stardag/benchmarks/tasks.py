@@ -1,13 +1,24 @@
 """Benchmark task definitions for concurrent build comparison.
 
 Three workload types to expose different characteristics:
-- IO-bound: Simulated I/O wait (time.sleep) - parallelizes well in all approaches
+- IO-bound: Simulated I/O wait - uses asyncio.sleep in run_aio() for true async
 - CPU-bound: Actual computation - only multiprocessing bypasses GIL
 - Light: Minimal work - exposes overhead differences between approaches
+
+Key insight: IO-bound tasks implement both run() and run_aio():
+- run(): Uses time.sleep() - blocks thread, works with threadpool
+- run_aio(): Uses asyncio.sleep() - true async, called by asyncio builder
+
+With synthetic sleep, asyncio and threadpool perform similarly because threads
+release the GIL during sleep. The async advantage becomes significant with:
+- Real network I/O (aiohttp vs requests) - connection pooling, no thread overhead
+- Many short-lived I/O operations - thread creation overhead avoided
+- Memory-constrained environments - coroutines use less memory than threads
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 from typing import TYPE_CHECKING
@@ -54,14 +65,25 @@ class BenchmarkTask(AutoTask[dict]):
 class IOBoundTask(BenchmarkTask):
     """Simulates I/O-bound work with sleep.
 
-    This workload parallelizes well in all approaches since threads
-    release the GIL during sleep.
+    Implements both sync run() and async run_aio() to demonstrate the difference:
+    - run(): Uses time.sleep() - blocks thread, works with threadpool
+    - run_aio(): Uses asyncio.sleep() - true async, excels with asyncio builder
+
+    The asyncio builder will detect run_aio() and call it directly, achieving
+    true concurrent execution without thread overhead.
     """
 
     sleep_duration: float = 0.1
 
     def _do_work(self) -> None:
         time.sleep(self.sleep_duration)
+
+    async def run_aio(self) -> None:
+        """Async implementation using asyncio.sleep for true async I/O."""
+        start = time.perf_counter()
+        await asyncio.sleep(self.sleep_duration)
+        elapsed = time.perf_counter() - start
+        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
 
 
 # =============================================================================
@@ -130,7 +152,12 @@ class LightTask(BenchmarkTask):
 
 
 class IOBoundDynamicTask(AutoTask[dict]):
-    """IO-bound task with dynamic dependencies."""
+    """IO-bound task with dynamic dependencies.
+
+    Note: Dynamic tasks with yield cannot easily implement run_aio() because
+    async generators require different handling than sync generators.
+    These tasks fall back to asyncio.to_thread(run) in the async builder.
+    """
 
     task_id: str
     sleep_duration: float = 0.1
