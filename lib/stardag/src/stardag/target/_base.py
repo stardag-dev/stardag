@@ -109,6 +109,40 @@ class WritableFileSystemTargetHandle(
     def write(self, data: StreamT_contra) -> None: ...
 
 
+# Async file handle protocols
+
+
+@typing.runtime_checkable
+class AIOFileSystemTargetHandle(typing.Protocol):
+    async def close(self) -> None: ...
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(
+        self,
+        type: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None: ...
+
+
+@typing.runtime_checkable
+class ReadableAIOFileSystemTargetHandle(
+    AIOFileSystemTargetHandle,
+    typing.Generic[StreamT_co],
+    typing.Protocol,
+):
+    async def read(self, size: int = -1) -> StreamT_co: ...
+
+
+@typing.runtime_checkable
+class WritableAIOFileSystemTargetHandle(
+    AIOFileSystemTargetHandle,
+    typing.Generic[StreamT_contra],
+    typing.Protocol,
+):
+    async def write(self, data: StreamT_contra) -> None: ...
+
+
 BytesT = typing.TypeVar("BytesT", bound=bytes)
 
 
@@ -148,6 +182,36 @@ class _FileSystemTargetGeneric(
         """For convenience, subclasses of FileSystemTarget can implement the private
         method _open without type hints to not having to repeat the overload:s."""
         return self._open(mode=mode)  # type: ignore
+
+    # Async open overloads
+
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["r"]
+    ) -> ReadableAIOFileSystemTargetHandle[str]: ...
+
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["rb"]
+    ) -> ReadableAIOFileSystemTargetHandle[BytesT]: ...
+
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["w"]
+    ) -> WritableAIOFileSystemTargetHandle[str]: ...
+
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["wb"]
+    ) -> WritableAIOFileSystemTargetHandle[BytesT]: ...
+
+    def open_aio(self, mode: OpenMode) -> AIOFileSystemTargetHandle:
+        """Async version of open().
+
+        For convenience, subclasses of FileSystemTarget can implement the private
+        method _open_aio without type hints to not having to repeat the overloads.
+        """
+        return self._open_aio(mode=mode)  # type: ignore
 
     @contextlib.contextmanager
     def proxy_path(
@@ -293,6 +357,19 @@ class LocalTarget(FileSystemTarget):
         """Asynchronously check if the local file exists."""
         return await aiofiles.os.path.exists(self._path)
 
+    def _open_aio(self, mode: OpenMode) -> AIOFileSystemTargetHandle:  # type: ignore
+        if mode in ["r", "rb"]:
+            return _AIOReadFileHandle(  # type: ignore
+                self._path, typing.cast(typing.Literal["r", "rb"], mode)
+            )
+        if mode in ["w", "wb"]:
+            return _AIOAtomicWriteFileHandle(  # type: ignore
+                self._path,
+                typing.cast(typing.Literal["w", "wb"], mode),
+                self._post_write_hook,
+            )
+        raise ValueError(f"Invalid mode {mode}")
+
     @asynccontextmanager
     async def _readable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
         """For local files, the proxy path is the file itself."""
@@ -360,6 +437,112 @@ class _AtomicWriteFileHandle(
         finally:
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
+
+
+class _AIOReadFileHandle(
+    ReadableAIOFileSystemTargetHandle[StreamT_co],
+    typing.Generic[StreamT_co],
+):
+    """Async file handle for reading local files."""
+
+    def __init__(
+        self,
+        path: Path,
+        mode: typing.Literal["r", "rb"],
+    ) -> None:
+        self.path = path
+        self.mode = mode
+        self._handle: typing.Any = None
+
+    async def _ensure_open(self) -> None:
+        if self._handle is None:
+            self._handle = await aiofiles.open(self.path, self.mode)  # type: ignore
+
+    async def read(self, size: int = -1) -> StreamT_co:
+        await self._ensure_open()
+        return await self._handle.read(size)
+
+    async def close(self) -> None:
+        if self._handle is not None:
+            await self._handle.close()
+            self._handle = None
+
+    async def __aenter__(self) -> Self:
+        await self._ensure_open()
+        return self
+
+    async def __aexit__(
+        self,
+        type: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None:
+        await self.close()
+
+
+class _AIOAtomicWriteFileHandle(
+    WritableAIOFileSystemTargetHandle[StreamT_contra],
+    typing.Generic[StreamT_contra],
+):
+    """Async atomic write file handle for local files."""
+
+    def __init__(
+        self,
+        path: Path,
+        mode: typing.Literal["w", "wb"],
+        post_write_hook: typing.Callable[[], None],
+    ) -> None:
+        self.path = path
+        self.mode = mode
+        self._tmp_path = self.path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        self._post_write_hook = post_write_hook
+        self._handle: typing.Any = None
+        self._initialized = False
+
+    async def _ensure_initialized(self) -> None:
+        if not self._initialized:
+            await aiofiles.os.makedirs(self._tmp_path.parent, exist_ok=True)
+            self._handle = await aiofiles.open(self._tmp_path, self.mode)  # type: ignore
+            self._initialized = True
+
+    async def write(self, data: StreamT_contra) -> None:
+        await self._ensure_initialized()
+        await self._handle.write(data)
+
+    async def close(self) -> None:
+        if self._handle is not None:
+            await self._handle.close()
+            self._handle = None
+        try:
+            if await aiofiles.os.path.exists(self._tmp_path):
+                await aiofiles.os.rename(self._tmp_path, self.path)
+                self._post_write_hook()
+        finally:
+            if await aiofiles.os.path.exists(self._tmp_path):
+                await aiofiles.os.remove(self._tmp_path)
+
+    async def __aenter__(self) -> Self:
+        await self._ensure_initialized()
+        return self
+
+    async def __aexit__(
+        self,
+        type: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None:
+        if self._handle is not None:
+            await self._handle.close()
+            self._handle = None
+        try:
+            if type is None and await aiofiles.os.path.exists(self._tmp_path):
+                await aiofiles.os.rename(self._tmp_path, self.path)
+                self._post_write_hook()
+        finally:
+            if await aiofiles.os.path.exists(self._tmp_path):
+                await aiofiles.os.remove(self._tmp_path)
 
 
 class RemoteFileSystemABC(metaclass=abc.ABCMeta):
@@ -480,6 +663,13 @@ class RemoteFileSystemTarget(FileSystemTarget):
         """Asynchronously check if the remote file exists."""
         return await self.rfs.exists_aio(self.path)
 
+    def _open_aio(self, mode: OpenMode) -> AIOFileSystemTargetHandle:  # type: ignore
+        if mode in ["r", "rb"]:
+            return _RemoteAIOReadFileHandle(self.path, mode, self.rfs)  # type: ignore
+        if mode in ["w", "wb"]:
+            return _RemoteAIOWriteFileHandle(self.path, mode, self.rfs)  # type: ignore
+        raise ValueError(f"Invalid mode {mode}")
+
     @asynccontextmanager
     async def _readable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
         """Async version of _readable_proxy_path()."""
@@ -592,6 +782,120 @@ class _RemoteWriteFileHandle(
             if self._tmp_path.exists():
                 self._tmp_path.unlink()
                 self._tmp_path.parent.rmdir()
+
+
+class _RemoteAIOReadFileHandle(
+    ReadableAIOFileSystemTargetHandle[StreamT_co],
+    typing.Generic[StreamT_co],
+):
+    """Async file handle for reading remote files via proxy path."""
+
+    def __init__(
+        self,
+        path: str,
+        mode: typing.Literal["r", "rb"],
+        rfs: RemoteFileSystemABC,
+    ) -> None:
+        self.path = path
+        self.rfs = rfs
+        if mode not in ["r", "rb"]:
+            raise ValueError(f"Invalid mode {mode}")
+        self.mode = mode
+        self._proxy_path: Path | None = None
+        self._proxy_handle: typing.Any = None
+
+    async def _ensure_open(self) -> None:
+        if self._proxy_handle is None:
+            self._proxy_path = await self.rfs.enter_readable_proxy_path_aio(self.path)
+            self._proxy_handle = await aiofiles.open(self._proxy_path, self.mode)  # type: ignore
+
+    async def read(self, size: int = -1) -> StreamT_co:
+        await self._ensure_open()
+        return await self._proxy_handle.read(size)
+
+    async def close(self) -> None:
+        if self._proxy_handle is not None:
+            await self._proxy_handle.close()
+            self._proxy_handle = None
+        if self._proxy_path is not None:
+            await self.rfs.exit_readable_proxy_path_aio(self._proxy_path)
+            self._proxy_path = None
+
+    async def __aenter__(self) -> Self:
+        await self._ensure_open()
+        return self
+
+    async def __aexit__(
+        self,
+        type: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None:
+        await self.close()
+
+
+class _RemoteAIOWriteFileHandle(
+    WritableAIOFileSystemTargetHandle[StreamT_contra],
+    typing.Generic[StreamT_contra],
+):
+    """Async file handle for writing to remote files via proxy path."""
+
+    def __init__(
+        self,
+        path: str,
+        mode: typing.Literal["w", "wb"],
+        rfs: RemoteFileSystemABC,
+    ) -> None:
+        self.path = path
+        self.rfs = rfs
+        self.mode = mode
+        self._tmp_path = Path(tempfile.mkdtemp()) / Path(path).name
+        self._tmp_handle: typing.Any = None
+        self._initialized = False
+
+    async def _ensure_initialized(self) -> None:
+        if not self._initialized:
+            self._tmp_handle = await aiofiles.open(self._tmp_path, self.mode)  # type: ignore
+            self._initialized = True
+
+    async def write(self, data: StreamT_contra) -> None:
+        await self._ensure_initialized()
+        await self._tmp_handle.write(data)
+
+    async def close(self) -> None:
+        if self._tmp_handle is not None:
+            await self._tmp_handle.close()
+            self._tmp_handle = None
+        try:
+            if await aiofiles.os.path.exists(self._tmp_path):
+                await self.rfs.upload_aio(self._tmp_path, self.path, ok_remove=True)
+        finally:
+            if await aiofiles.os.path.exists(self._tmp_path):
+                await aiofiles.os.remove(self._tmp_path)
+                await aiofiles.os.rmdir(self._tmp_path.parent)
+
+    async def __aenter__(self) -> Self:
+        await self._ensure_initialized()
+        return self
+
+    async def __aexit__(
+        self,
+        type: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None:
+        if self._tmp_handle is not None:
+            await self._tmp_handle.close()
+            self._tmp_handle = None
+        try:
+            if type is None and await aiofiles.os.path.exists(self._tmp_path):
+                await self.rfs.upload_aio(self._tmp_path, self.path, ok_remove=True)
+        finally:
+            if await aiofiles.os.path.exists(self._tmp_path):
+                await aiofiles.os.remove(self._tmp_path)
+                await aiofiles.os.rmdir(self._tmp_path.parent)
 
 
 class InMemoryRemoteFileSystem(RemoteFileSystemABC):
