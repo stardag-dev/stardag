@@ -1,3 +1,4 @@
+import asyncio
 from typing import Annotated, Type
 
 import pytest
@@ -7,7 +8,10 @@ from stardag._decorator import task as task_decorator
 from stardag._task import (
     BaseTask,
     Task,
+    TaskImplementationError,
     TaskStruct,
+    _has_custom_run,
+    _has_custom_run_aio,
     flatten_task_struct,
 )
 from stardag._task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
@@ -57,17 +61,15 @@ def test_task_base_subclassing():
     ):
         TaskNoComplete()  # type: ignore
 
-    class TaskNoRun(BaseTask):
-        def complete(self) -> bool:
-            return False
-
+    # Task without run() or run_aio() raises at class definition time
     with pytest.raises(
-        TypeError,
-        # NOTE message varies between Python versions (full below ok for >=3.11)
-        # match="Can't instantiate abstract class TaskNoRun without an implementation for abstract method 'run'",
-        match="Can't instantiate abstract class TaskNoRun",
+        TaskImplementationError,
+        match="must implement either run\\(\\) or run_aio\\(\\)",
     ):
-        TaskNoRun()  # type: ignore
+
+        class TaskNoRun(BaseTask):
+            def complete(self) -> bool:
+                return False
 
 
 def test_run_version_checked():
@@ -343,3 +345,218 @@ def mock_task(key: str) -> str:
 )
 def test_flatten_task_struct(task_struct: TaskStruct, expected: list[Task]):
     assert flatten_task_struct(task_struct) == expected
+
+
+# =============================================================================
+# Tests for run/run_aio symmetry
+# =============================================================================
+
+
+class TestRunRunAioSymmetry:
+    """Tests for bidirectional run() / run_aio() default implementations."""
+
+    def test_sync_only_task(self):
+        """Task implementing only run() should have working run_aio()."""
+
+        class SyncOnlyTask(BaseTask):
+            result: list = []
+
+            def complete(self) -> bool:
+                return bool(self.result)
+
+            def run(self) -> None:
+                self.result.append("sync")
+
+        task = SyncOnlyTask()
+
+        # Verify detection
+        assert _has_custom_run(task) is True
+        assert _has_custom_run_aio(task) is False
+
+        # run() should work directly
+        task.run()
+        assert task.result == ["sync"]
+
+        # run_aio() should delegate to run()
+        task2 = SyncOnlyTask()
+        asyncio.run(task2.run_aio())
+        assert task2.result == ["sync"]
+
+    def test_async_only_task(self):
+        """Task implementing only run_aio() should have working run()."""
+
+        class AsyncOnlyTask(BaseTask):
+            result: list = []
+
+            def complete(self) -> bool:
+                return bool(self.result)
+
+            async def run_aio(self) -> None:
+                await asyncio.sleep(0)  # Simulate async work
+                self.result.append("async")
+
+        task = AsyncOnlyTask()
+
+        # Verify detection
+        assert _has_custom_run(task) is False
+        assert _has_custom_run_aio(task) is True
+
+        # run_aio() should work directly
+        asyncio.run(task.run_aio())
+        assert task.result == ["async"]
+
+        # run() should use asyncio.run() to call run_aio()
+        task2 = AsyncOnlyTask()
+        task2.run()
+        assert task2.result == ["async"]
+
+    def test_both_implemented(self):
+        """Task implementing both run() and run_aio() should use each directly."""
+
+        class BothTask(BaseTask):
+            result: list = []
+
+            def complete(self) -> bool:
+                return bool(self.result)
+
+            def run(self) -> None:
+                self.result.append("sync")
+
+            async def run_aio(self) -> None:
+                await asyncio.sleep(0)
+                self.result.append("async")
+
+        task = BothTask()
+
+        # Verify detection
+        assert _has_custom_run(task) is True
+        assert _has_custom_run_aio(task) is True
+
+        # Each method should use its own implementation
+        task.run()
+        assert task.result == ["sync"]
+
+        task2 = BothTask()
+        asyncio.run(task2.run_aio())
+        assert task2.result == ["async"]
+
+    def test_neither_implemented_raises_at_class_definition(self):
+        """Task implementing neither run() nor run_aio() should fail at class definition."""
+        with pytest.raises(
+            TaskImplementationError,
+            match="must implement either run\\(\\) or run_aio\\(\\)",
+        ):
+
+            class NeitherTask(BaseTask):
+                def complete(self) -> bool:
+                    return True
+
+    def test_sync_default_from_async_context_raises(self):
+        """Calling run() from async context when only run_aio() is implemented should raise."""
+
+        class AsyncOnlyTask(BaseTask):
+            def complete(self) -> bool:
+                return True
+
+            async def run_aio(self) -> None:
+                await asyncio.sleep(0)
+
+        task = AsyncOnlyTask()
+
+        async def call_run_from_async():
+            # This should raise because we're in an async context
+            # and the task only has run_aio()
+            task.run()
+
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot call AsyncOnlyTask.run\\(\\) from within an async context",
+        ):
+            asyncio.run(call_run_from_async())
+
+    def test_sync_default_from_async_context_error_message(self):
+        """Error message when calling run() from async context should be helpful."""
+
+        class MyAsyncTask(BaseTask):
+            def complete(self) -> bool:
+                return True
+
+            async def run_aio(self) -> None:
+                pass
+
+        task = MyAsyncTask()
+
+        async def call_run_from_async():
+            task.run()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            asyncio.run(call_run_from_async())
+
+        error_msg = str(exc_info.value)
+        # Check that the error message contains helpful suggestions
+        assert "await task.run_aio()" in error_msg
+        assert "Implement run()" in error_msg
+        assert "asyncio.to_thread" in error_msg
+
+    def test_abstract_class_skips_validation(self):
+        """Abstract subclasses should not be required to implement run/run_aio."""
+        import abc
+
+        # This should not raise - it's abstract
+        class AbstractTask(BaseTask, abc.ABC):
+            @abc.abstractmethod
+            def complete(self) -> bool: ...
+
+        # Concrete subclass must implement run or run_aio
+        with pytest.raises(TaskImplementationError):
+
+            class ConcreteWithoutRun(AbstractTask):
+                def complete(self) -> bool:
+                    return True
+
+    def test_async_generator_run_aio_raises_on_sync_call(self):
+        """Async generator run_aio() cannot be auto-converted to sync run()."""
+
+        class AsyncDynamicTask(BaseTask):
+            depth: int = 2
+
+            def complete(self) -> bool:
+                return self.depth == 0
+
+            async def run_aio(self):  # type: ignore[override]
+                if self.depth > 0:
+                    yield AsyncDynamicTask(depth=self.depth - 1)
+
+        task = AsyncDynamicTask(depth=1)
+        assert task.has_dynamic_deps() is True
+
+        # run() should raise NotImplementedError for async generators
+        with pytest.raises(
+            NotImplementedError,
+            match="async generator.*cannot be automatically converted",
+        ):
+            task.run()
+
+    @pytest.mark.asyncio
+    async def test_async_generator_run_aio_works_directly(self):
+        """Async generator run_aio() works when called directly."""
+
+        class AsyncDynamicTask(BaseTask):
+            depth: int = 2
+            result: list = []
+
+            def complete(self) -> bool:
+                return self.depth == 0
+
+            async def run_aio(self):  # type: ignore[override]
+                if self.depth > 0:
+                    yield AsyncDynamicTask(depth=self.depth - 1)
+                self.result.append(f"depth-{self.depth}")
+
+        task = AsyncDynamicTask(depth=1)
+
+        # run_aio() should work directly as an async generator
+        gen = task.run_aio()
+        yielded = await gen.asend(None)
+        assert isinstance(yielded, AsyncDynamicTask)
+        assert yielded.depth == 0
