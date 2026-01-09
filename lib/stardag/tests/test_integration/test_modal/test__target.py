@@ -11,6 +11,7 @@ import subprocess
 import uuid
 
 import pytest
+
 from stardag import FileSystemTarget, get_target
 from stardag.target import RemoteFileSystemTarget
 
@@ -19,6 +20,7 @@ VOLUME_NAME = "stardag-testing"
 try:
     import modal
     from modal.exception import AuthError
+
     from stardag.integration import modal as sd_modal
 
     # check if logged in and volume exists
@@ -36,10 +38,12 @@ MOUNT_PATH = "/data"
 ROOT_DEFAULT = "stardag/root/default"
 
 TEST_IMAGE = modal.Image.debian_slim(python_version="3.12").pip_install(
+    # TODO extract from pyproject.toml
     "pydantic>=2.8.2",
     "pydantic-settings>=2.7.1",
     "uuid6>=2024.7.10",
     "pytest>=8.2.2",
+    "aiofiles>=23.1.0",
 )
 
 TEST_APP_NAME = "stardag-testing"
