@@ -3,7 +3,7 @@
     "scenario": "io_bound_static",
     "implementation": "threadpool",
     "workers": 4,
-    "duration": 0.5342529166955501,
+    "duration": 0.5386560420738533,
     "success": true,
     "error": null
   },
@@ -11,7 +11,7 @@
     "scenario": "io_bound_static",
     "implementation": "asyncio",
     "workers": 4,
-    "duration": 0.5349909719855835,
+    "duration": 0.5389497780318683,
     "success": true,
     "error": null
   },
@@ -19,7 +19,7 @@
     "scenario": "io_bound_static",
     "implementation": "asyncio_queue",
     "workers": 4,
-    "duration": 0.5336293329795202,
+    "duration": 0.5234138613644367,
     "success": true,
     "error": null
   },
@@ -27,7 +27,7 @@
     "scenario": "io_bound_static",
     "implementation": "multiprocess",
     "workers": 4,
-    "duration": 1.541518555333217,
+    "duration": 1.6385440276547645,
     "success": true,
     "error": null
   },
@@ -35,7 +35,7 @@
     "scenario": "io_bound_dynamic",
     "implementation": "threadpool",
     "workers": 4,
-    "duration": 0.319794569319735,
+    "duration": 0.3227644443201522,
     "success": true,
     "error": null
   },
@@ -43,7 +43,7 @@
     "scenario": "io_bound_dynamic",
     "implementation": "asyncio",
     "workers": 4,
-    "duration": 0.9479790973709896,
+    "duration": 0.9645288466320684,
     "success": true,
     "error": null
   },
@@ -51,7 +51,7 @@
     "scenario": "io_bound_dynamic",
     "implementation": "asyncio_queue",
     "workers": 4,
-    "duration": 0.9484640696706871,
+    "duration": 0.9573972500317419,
     "success": true,
     "error": null
   },
@@ -59,7 +59,7 @@
     "scenario": "io_bound_dynamic",
     "implementation": "multiprocess",
     "workers": 4,
-    "duration": 1.877527847381619,
+    "duration": 2.0263759167088815,
     "success": true,
     "error": null
   },
@@ -67,7 +67,7 @@
     "scenario": "cpu_bound_static",
     "implementation": "threadpool",
     "workers": 4,
-    "duration": 0.28756680568524945,
+    "duration": 0.29769770859275013,
     "success": true,
     "error": null
   },
@@ -75,7 +75,7 @@
     "scenario": "cpu_bound_static",
     "implementation": "asyncio",
     "workers": 4,
-    "duration": 0.2920212916797027,
+    "duration": 0.30197834708572674,
     "success": true,
     "error": null
   },
@@ -83,7 +83,7 @@
     "scenario": "cpu_bound_static",
     "implementation": "asyncio_queue",
     "workers": 4,
-    "duration": 0.290521402998517,
+    "duration": 0.3000464583747089,
     "success": true,
     "error": null
   },
@@ -91,7 +91,7 @@
     "scenario": "cpu_bound_static",
     "implementation": "multiprocess",
     "workers": 4,
-    "duration": 1.108953027636744,
+    "duration": 1.2691353753519554,
     "success": true,
     "error": null
   },
@@ -99,7 +99,7 @@
     "scenario": "cpu_bound_dynamic",
     "implementation": "threadpool",
     "workers": 4,
-    "duration": 0.17757098601820567,
+    "duration": 0.18752133334055543,
     "success": true,
     "error": null
   },
@@ -107,7 +107,7 @@
     "scenario": "cpu_bound_dynamic",
     "implementation": "asyncio",
     "workers": 4,
-    "duration": 0.17425050004385412,
+    "duration": 0.18342138865652183,
     "success": true,
     "error": null
   },
@@ -115,7 +115,7 @@
     "scenario": "cpu_bound_dynamic",
     "implementation": "asyncio_queue",
     "workers": 4,
-    "duration": 0.1747034863801673,
+    "duration": 0.1860421666642651,
     "success": true,
     "error": null
   },
@@ -123,7 +123,7 @@
     "scenario": "cpu_bound_dynamic",
     "implementation": "multiprocess",
     "workers": 4,
-    "duration": 1.0216884583545227,
+    "duration": 1.111932542019834,
     "success": true,
     "error": null
   },
@@ -131,7 +131,7 @@
     "scenario": "heavy_cpu_static",
     "implementation": "threadpool",
     "workers": 4,
-    "duration": 4.7961589999807375,
+    "duration": 5.068652833656718,
     "success": true,
     "error": null
   },
@@ -139,7 +139,7 @@
     "scenario": "heavy_cpu_static",
     "implementation": "asyncio",
     "workers": 4,
-    "duration": 4.861262236062127,
+    "duration": 5.103449249989353,
     "success": true,
     "error": null
   },
@@ -147,7 +147,7 @@
     "scenario": "heavy_cpu_static",
     "implementation": "asyncio_queue",
     "workers": 4,
-    "duration": 4.943640443962067,
+    "duration": 5.112296611303464,
     "success": true,
     "error": null
   },
@@ -155,7 +155,7 @@
     "scenario": "heavy_cpu_static",
     "implementation": "multiprocess",
     "workers": 4,
-    "duration": 3.0980536662973464,
+    "duration": 3.1842697920122496,
     "success": true,
     "error": null
   },
@@ -163,7 +163,7 @@
     "scenario": "light_static",
     "implementation": "threadpool",
     "workers": 4,
-    "duration": 0.00412440299987793,
+    "duration": 0.003695833341528972,
     "success": true,
     "error": null
   },
@@ -171,7 +171,7 @@
     "scenario": "light_static",
     "implementation": "asyncio",
     "workers": 4,
-    "duration": 0.0035619583601752916,
+    "duration": 0.005485499976202846,
     "success": true,
     "error": null
   },
@@ -179,7 +179,7 @@
     "scenario": "light_static",
     "implementation": "asyncio_queue",
     "workers": 4,
-    "duration": 0.003367888663584987,
+    "duration": 0.0033488056312004724,
     "success": true,
     "error": null
   },
@@ -187,7 +187,7 @@
     "scenario": "light_static",
     "implementation": "multiprocess",
     "workers": 4,
-    "duration": 1.003662083336773,
+    "duration": 1.0730162359929334,
     "success": true,
     "error": null
   },
@@ -195,7 +195,7 @@
     "scenario": "light_dynamic",
     "implementation": "threadpool",
     "workers": 4,
-    "duration": 0.002449222025461495,
+    "duration": 0.0023225970023001232,
     "success": true,
     "error": null
   },
@@ -203,7 +203,7 @@
     "scenario": "light_dynamic",
     "implementation": "asyncio",
     "workers": 4,
-    "duration": 0.0032593749929219484,
+    "duration": 0.0044449022971093655,
     "success": true,
     "error": null
   },
@@ -211,7 +211,7 @@
     "scenario": "light_dynamic",
     "implementation": "asyncio_queue",
     "workers": 4,
-    "duration": 0.0030059443476299443,
+    "duration": 0.002930444354812304,
     "success": true,
     "error": null
   },
@@ -219,7 +219,71 @@
     "scenario": "light_dynamic",
     "implementation": "multiprocess",
     "workers": 4,
-    "duration": 1.046974138667186,
+    "duration": 1.1066844166101266,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_32_w16",
+    "implementation": "threadpool",
+    "workers": 16,
+    "duration": 0.3345708472964664,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_32_w16",
+    "implementation": "asyncio",
+    "workers": 16,
+    "duration": 0.34293190261814743,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_32_w16",
+    "implementation": "asyncio_queue",
+    "workers": 16,
+    "duration": 0.3302312776601563,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_32_w16",
+    "implementation": "multiprocess",
+    "workers": 16,
+    "duration": 1.8722071806744982,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_many_w32",
+    "implementation": "threadpool",
+    "workers": 32,
+    "duration": 0.07310080563183874,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_many_w32",
+    "implementation": "asyncio",
+    "workers": 32,
+    "duration": 0.07485919437992077,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_many_w32",
+    "implementation": "asyncio_queue",
+    "workers": 32,
+    "duration": 0.059361236014713846,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_flat_many_w32",
+    "implementation": "multiprocess",
+    "workers": 32,
+    "duration": 3.131813444701644,
     "success": true,
     "error": null
   }
