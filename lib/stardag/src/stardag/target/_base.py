@@ -3,7 +3,10 @@ import contextlib
 import shutil
 import tempfile
 import typing
+from contextlib import asynccontextmanager
 
+import aiofiles
+import aiofiles.os
 from pydantic_settings import BaseSettings
 
 try:
@@ -31,6 +34,13 @@ class LoadableTarget(
 ):
     def load(self) -> LoadedT_co: ...
 
+    async def load_aio(self) -> LoadedT_co:
+        """Asynchronously load the target content.
+
+        Default implementation delegates to sync load() method.
+        """
+        return self.load()
+
 
 @typing.runtime_checkable
 class SaveableTarget(
@@ -39,6 +49,13 @@ class SaveableTarget(
     typing.Protocol,
 ):
     def save(self, obj: LoadedT_contra) -> None: ...
+
+    async def save_aio(self, obj: LoadedT_contra) -> None:
+        """Asynchronously save content to the target.
+
+        Default implementation delegates to sync save() method.
+        """
+        self.save(obj)
 
 
 @typing.runtime_checkable
@@ -161,6 +178,52 @@ class _FileSystemTargetGeneric(
     @contextlib.contextmanager
     def _writable_proxy_path(self) -> typing.Generator[Path, None, None]: ...
 
+    # Async versions
+
+    async def exists_aio(self) -> bool:
+        """Asynchronously check if the target exists.
+
+        Default implementation delegates to sync exists() method.
+        Subclasses can override for true async I/O.
+        """
+        return self.exists()
+
+    @asynccontextmanager
+    async def proxy_path_aio(
+        self,
+        mode: typing.Literal["r", "w"],
+    ) -> typing.AsyncGenerator[Path, None]:
+        """Async version of proxy_path().
+
+        Returns a temporary path on the local file system.
+        """
+        if mode == "r":
+            async with self._readable_proxy_path_aio() as path:
+                yield path
+        elif mode == "w":
+            async with self._writable_proxy_path_aio() as path:
+                yield path
+        else:
+            raise ValueError(f"Invalid mode {mode}")
+
+    @asynccontextmanager
+    async def _readable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
+        """Async version of _readable_proxy_path().
+
+        Default implementation delegates to sync version.
+        """
+        with self._readable_proxy_path() as path:
+            yield path
+
+    @asynccontextmanager
+    async def _writable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
+        """Async version of _writable_proxy_path().
+
+        Default implementation delegates to sync version.
+        """
+        with self._writable_proxy_path() as path:
+            yield path
+
     def __repr__(self):
         return f"{self.__class__.__name__}({self.path})"
 
@@ -223,6 +286,30 @@ class LocalTarget(FileSystemTarget):
 
     def _post_write_hook(self) -> None:
         pass
+
+    # Async implementations
+
+    async def exists_aio(self) -> bool:
+        """Asynchronously check if the local file exists."""
+        return await aiofiles.os.path.exists(self._path)
+
+    @asynccontextmanager
+    async def _readable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
+        """For local files, the proxy path is the file itself."""
+        yield self._path
+
+    @asynccontextmanager
+    async def _writable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
+        """Async atomic write via temporary file."""
+        tmp_path = self._path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        await aiofiles.os.makedirs(tmp_path.parent, exist_ok=True)
+        try:
+            yield tmp_path
+            await aiofiles.os.rename(tmp_path, self._path)
+            self._post_write_hook()
+        finally:
+            if await aiofiles.os.path.exists(tmp_path):
+                await aiofiles.os.remove(tmp_path)
 
 
 class _AtomicWriteFileHandle(
@@ -307,6 +394,46 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
             local_path.unlink()
             local_path.parent.rmdir()
 
+    # Async versions - default implementations delegate to sync
+
+    async def exists_aio(self, uri: str) -> bool:
+        """Asynchronously check if the file exists.
+
+        Default implementation delegates to sync exists() method.
+        Subclasses can override for true async I/O (e.g., aiobotocore for S3).
+        """
+        return self.exists(uri)
+
+    async def download_aio(self, uri: str, destination: Path) -> None:
+        """Asynchronously download a file.
+
+        Default implementation delegates to sync download() method.
+        """
+        self.download(uri, destination)
+
+    async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
+        """Asynchronously upload a file.
+
+        Default implementation delegates to sync upload() method.
+        """
+        self.upload(source, uri, ok_remove=ok_remove)
+
+    async def enter_readable_proxy_path_aio(self, uri: str) -> Path:
+        """Async version of enter_readable_proxy_path().
+
+        Default implementation delegates to sync version.
+        """
+        tmp_dir_path = Path(tempfile.mkdtemp())
+        local_path = tmp_dir_path / Path(uri).name
+        await self.download_aio(uri, local_path)
+        return local_path
+
+    async def exit_readable_proxy_path_aio(self, local_path: Path) -> None:
+        """Async version of exit_readable_proxy_path()."""
+        if await aiofiles.os.path.exists(local_path):
+            await aiofiles.os.remove(local_path)
+            await aiofiles.os.rmdir(local_path.parent)
+
 
 class RemoteFileSystemTarget(FileSystemTarget):
     def __init__(self, path: str, rfs: RemoteFileSystemABC) -> None:
@@ -346,6 +473,33 @@ class RemoteFileSystemTarget(FileSystemTarget):
             if tmp_path.exists():
                 tmp_path.unlink()
                 tmp_path.parent.rmdir()
+
+    # Async implementations
+
+    async def exists_aio(self) -> bool:
+        """Asynchronously check if the remote file exists."""
+        return await self.rfs.exists_aio(self.path)
+
+    @asynccontextmanager
+    async def _readable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
+        """Async version of _readable_proxy_path()."""
+        proxy_path = await self.rfs.enter_readable_proxy_path_aio(self.path)
+        try:
+            yield proxy_path
+        finally:
+            await self.rfs.exit_readable_proxy_path_aio(proxy_path)
+
+    @asynccontextmanager
+    async def _writable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
+        """Async version of _writable_proxy_path()."""
+        tmp_path = Path(tempfile.mkdtemp()) / Path(self.path).name
+        try:
+            yield tmp_path
+            await self.rfs.upload_aio(tmp_path, self.path, ok_remove=True)
+        finally:
+            if await aiofiles.os.path.exists(tmp_path):
+                await aiofiles.os.remove(tmp_path)
+                await aiofiles.os.rmdir(tmp_path.parent)
 
 
 class _RemoteReadFileHandle(
@@ -551,6 +705,56 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
             if tmp_cache_path.exists():
                 tmp_cache_path.unlink()
 
+    # Async implementations
+
+    async def exists_aio(self, uri: str) -> bool:
+        """Async check with cache optimization."""
+        if self.allow_cache_check_exists:
+            local_path = self.get_cache_path(uri)
+            if await aiofiles.os.path.exists(local_path):
+                return True
+        return await self.wrapped.exists_aio(uri)
+
+    async def download_aio(self, uri: str, destination: Path) -> None:
+        """Async download with cache."""
+        cache_path = self.get_cache_path(uri)
+        if not await aiofiles.os.path.exists(cache_path):
+            await self._load_to_cache_atomically_aio(uri, cache_path)
+        await aiofiles.os.makedirs(destination.parent, exist_ok=True)
+        shutil.copy(cache_path, destination)  # Local copy is fast, keep sync
+
+    async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
+        """Async upload with cache update."""
+        await self.wrapped.upload_aio(source, uri, ok_remove=False)
+        cache_path = self.get_cache_path(uri)
+        await aiofiles.os.makedirs(cache_path.parent, exist_ok=True)
+        if ok_remove:
+            await aiofiles.os.rename(source, cache_path)
+        else:
+            shutil.copy(source, cache_path)
+
+    async def enter_readable_proxy_path_aio(self, uri: str) -> Path:
+        """Async version returns cached path."""
+        cache_path = self.get_cache_path(uri)
+        if not await aiofiles.os.path.exists(cache_path):
+            await self._load_to_cache_atomically_aio(uri, cache_path)
+        return cache_path
+
+    async def exit_readable_proxy_path_aio(self, local_path: Path) -> None:
+        """Cache persists, no cleanup needed."""
+        pass
+
+    async def _load_to_cache_atomically_aio(self, uri: str, cache_path: Path) -> None:
+        """Async atomic download to cache."""
+        tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        await aiofiles.os.makedirs(tmp_cache_path.parent, exist_ok=True)
+        try:
+            await self.wrapped.download_aio(uri, tmp_cache_path)
+            await aiofiles.os.rename(tmp_cache_path, cache_path)
+        finally:
+            if await aiofiles.os.path.exists(tmp_cache_path):
+                await aiofiles.os.remove(tmp_cache_path)
+
 
 _FSTargetType = typing.TypeVar("_FSTargetType", bound=FileSystemTarget)
 
@@ -593,3 +797,18 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.path})"
+
+    # Async implementations
+
+    async def exists_aio(self) -> bool:
+        """Async check if directory is marked as done."""
+        return await self._flag_target.exists_aio()
+
+    async def mark_done_aio(self) -> None:
+        """Async version of mark_done()."""
+        async with self.sub_keys_target().proxy_path_aio("w") as path:
+            async with aiofiles.open(path, "w") as f:
+                await f.write("\n".join(sorted(self._sub_keys)))
+        async with self._flag_target.proxy_path_aio("w") as path:
+            async with aiofiles.open(path, "w") as f:
+                await f.write("")  # empty file

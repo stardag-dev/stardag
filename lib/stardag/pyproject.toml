@@ -5,6 +5,7 @@ description = "Declarative and composable DAG framework for Python with persiste
 authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
 requires-python = ">=3.10,<3.14"  # TODO update modal deps
 dependencies = [
+    "aiofiles>=25.1.0",
     "pydantic>=2.8.2",
     "pydantic-settings>=2.7.1",
     "uuid6>=2024.7.10",

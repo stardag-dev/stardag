@@ -19,22 +19,25 @@ from uuid import UUID
 
 import pytest
 
-from stardag.build.concurrent.threadpool import build_simple as threadpool_build
+from stardag._task import auto_namespace
 from stardag.build.concurrent.asyncio_builder import build as asyncio_build
 from stardag.build.concurrent.asyncio_builder import (
     build_queue_based as asyncio_queue_build,
 )
 from stardag.build.concurrent.multiprocess import build as multiprocess_build
+from stardag.build.concurrent.threadpool import build_simple as threadpool_build
 from stardag.build.registry import NoOpRegistry
 from stardag.target import InMemoryFileSystemTarget
-from stardag.utils.testing.simple_dag import (
-    get_simple_dag,
-    get_simple_dag_expected_root_output,
-)
 from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
     get_dynamic_deps_dag,
 )
+from stardag.utils.testing.simple_dag import (
+    get_simple_dag,
+    get_simple_dag_expected_root_output,
+)
+
+auto_namespace(__name__)
 
 
 # Type alias for build functions
@@ -239,7 +242,6 @@ class TestConcurrencyBehavior:
     ):
         """Test that independent tasks execute concurrently."""
         from stardag._auto_task import AutoTask
-        from stardag._task import auto_namespace
 
         impl_name, build_func = build_func_any
 
@@ -247,8 +249,6 @@ class TestConcurrencyBehavior:
         # Multiprocessing concurrency is verified with importable classes in other tests
         if impl_name == "multiprocess":
             pytest.skip("Multiprocessing requires importable classes")
-
-        auto_namespace(__name__)
 
         # Thread-safe execution log (also works with multiprocessing via file)
         # For simplicity, we'll track via task output timestamps
@@ -325,15 +325,12 @@ class TestConcurrencyBehavior:
     ):
         """Test that max_workers parameter limits concurrent execution."""
         from stardag._auto_task import AutoTask
-        from stardag._task import auto_namespace
 
         impl_name, build_func = build_func_any
 
         # Skip multiprocessing - test-local classes can't be imported by subprocess
         if impl_name == "multiprocess":
             pytest.skip("Multiprocessing requires importable classes")
-
-        auto_namespace(__name__)
 
         class ConcurrencyTracker(AutoTask[dict]):
             task_id: str
@@ -402,15 +399,12 @@ class TestErrorHandling:
     ):
         """Test that task failures are properly propagated."""
         from stardag._auto_task import AutoTask
-        from stardag._task import auto_namespace
 
         impl_name, build_func = build_func_any
 
         # Skip multiprocessing - test-local classes can't be imported by subprocess
         if impl_name == "multiprocess":
             pytest.skip("Multiprocessing requires importable classes")
-
-        auto_namespace(__name__)
 
         class FailingTask(AutoTask[str]):
             def run(self):
