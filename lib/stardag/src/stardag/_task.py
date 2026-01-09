@@ -81,8 +81,17 @@ class BaseTask(
         """Validate that subclasses implement either run() or run_aio()."""
         super().__init_subclass__(**kwargs)
 
-        # Skip validation for abstract classes
-        if inspect.isabstract(cls):
+        # Skip validation for abstract classes:
+        # - inspect.isabstract() catches classes with unimplemented @abstractmethod
+        # - abc.ABC in __bases__ catches classes explicitly marked as abstract base classes
+        #   (for intermediate classes meant to be subclassed, not instantiated)
+        if inspect.isabstract(cls) or abc.ABC in cls.__bases__:
+            return
+
+        # Skip validation for Pydantic parametrized generics (e.g., AutoTask[str])
+        # These are internal types created by Pydantic, not user-defined task classes.
+        # The heuristic is: class names with '[' are generic specializations.
+        if "[" in cls.__name__:
             return
 
         # Check if any class in the MRO (excluding BaseTask) has run or run_aio
