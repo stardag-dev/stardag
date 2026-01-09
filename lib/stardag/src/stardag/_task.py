@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import inspect
 import logging
 from abc import abstractmethod
@@ -36,6 +37,28 @@ TaskStruct: TypeAlias = Union[
 ]
 
 
+class TaskImplementationError(Exception):
+    """Raised when a task class has invalid run/run_aio implementation."""
+
+    pass
+
+
+def _has_custom_run(task: "BaseTask") -> bool:
+    """Check if task has overridden run() (not using default delegation).
+
+    Used to detect whether a task has a custom sync implementation.
+    """
+    return type(task).run is not BaseTask.run
+
+
+def _has_custom_run_aio(task: "BaseTask") -> bool:
+    """Check if task has overridden run_aio() (not using default delegation).
+
+    Used to detect whether a task has a custom async implementation.
+    """
+    return type(task).run_aio is not BaseTask.run_aio
+
+
 @total_ordering
 class BaseTask(
     PolymorphicRoot,
@@ -54,6 +77,27 @@ class BaseTask(
         description="Version of the task run implementation.",
     )
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Validate that subclasses implement either run() or run_aio()."""
+        super().__init_subclass__(**kwargs)
+
+        # Skip validation for abstract classes
+        if inspect.isabstract(cls):
+            return
+
+        # Check if any class in the MRO (excluding BaseTask) has run or run_aio
+        # This handles inheritance chains and Pydantic's generic class creation
+        has_run = any("run" in c.__dict__ and c is not BaseTask for c in cls.__mro__)
+        has_run_aio = any(
+            "run_aio" in c.__dict__ and c is not BaseTask for c in cls.__mro__
+        )
+
+        if not has_run and not has_run_aio:
+            raise TaskImplementationError(
+                f"Task class '{cls.__name__}' must implement either run() or run_aio(). "
+                f"Implement run() for synchronous tasks, or run_aio() for async tasks."
+            )
+
     @abstractmethod
     def complete(self) -> bool:
         """Declare if the task is complete."""
@@ -63,14 +107,76 @@ class BaseTask(
         """Asynchronously declare if the task is complete."""
         return self.complete()
 
-    @abstractmethod
     def run(self) -> None | Generator[TaskStruct, None, None]:
-        """Execute the task logic."""
-        ...
+        """Execute the task logic (sync).
+
+        Override this method for synchronous tasks. If you only override
+        run_aio(), this method will automatically run it via asyncio.run().
+
+        Returns:
+            None for simple tasks, or a Generator yielding TaskStruct for
+            tasks with dynamic dependencies.
+
+        Raises:
+            RuntimeError: If called from within an existing event loop when
+                only run_aio() is implemented. In that case, call run_aio()
+                directly instead.
+            NotImplementedError: If run_aio() is an async generator (dynamic deps).
+                Async generators cannot be automatically converted to sync generators.
+        """
+        if _has_custom_run_aio(self) and not _has_custom_run(self):
+            # User only implemented run_aio - run it synchronously
+            # Check if it's an async generator (dynamic deps) - can't auto-convert
+            if inspect.isasyncgenfunction(type(self).run_aio):
+                raise NotImplementedError(
+                    f"{type(self).__name__}.run_aio() is an async generator (uses "
+                    f"'yield' for dynamic dependencies), which cannot be automatically "
+                    f"converted to a sync run() method. Either:\n"
+                    f"  1. Use an async executor that calls run_aio() directly\n"
+                    f"  2. Implement run() as a sync generator for sync execution"
+                )
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop - safe to use asyncio.run()
+                return asyncio.run(self.run_aio())
+            else:
+                # Already in an event loop - can't use asyncio.run()
+                raise RuntimeError(
+                    f"Cannot call {type(self).__name__}.run() from within an async "
+                    f"context. This task only implements run_aio(), which cannot be "
+                    f"run synchronously when an event loop is already running. "
+                    f"Either:\n"
+                    f"  1. Call 'await task.run_aio()' directly instead of 'task.run()'\n"
+                    f"  2. Implement run() in your task class for sync execution\n"
+                    f"  3. Use 'await asyncio.to_thread(task.run)' from outside this "
+                    f"task's async context"
+                )
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement either run() or run_aio()"
+        )
 
     async def run_aio(self) -> None | Generator[TaskStruct, None, None]:
-        """Asynchronously execute the task logic."""
-        return self.run()
+        """Execute the task logic (async).
+
+        Override this method for asynchronous tasks. If you only override
+        run(), this method will automatically delegate to it.
+
+        For dynamic dependencies, you can use 'yield' which makes this an
+        async generator. Note that async generator methods have different
+        type signatures that may require type: ignore comments.
+
+        Returns:
+            None for simple tasks, or a Generator/AsyncGenerator for
+            tasks with dynamic dependencies.
+        """
+        if _has_custom_run(self) and not _has_custom_run_aio(self):
+            # User only implemented run - delegate to it
+            return self.run()
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement either run() or run_aio()"
+        )
 
     def run_version_checked(self) -> None | Generator[TaskStruct, None, None]:
         if not self.version == self.__version__:
