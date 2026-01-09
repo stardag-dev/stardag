@@ -85,6 +85,50 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
         with volume.batch_upload() as batch:
             batch.put_file(source, in_volume_path)
 
+    # Async implementations using Modal's .aio interface
+
+    async def exists_aio(self, uri: str) -> bool:
+        """Asynchronously check if the file exists in the Modal volume."""
+        volume_name, in_volume_path = get_volume_name_and_path(uri)
+        volume = await modal.Volume.from_name.aio(volume_name)  # type: ignore[attr-defined]
+
+        try:
+            async for entry in volume.iterdir.aio(in_volume_path):  # type: ignore[attr-defined]
+                if entry.type == FileEntryType.FILE and entry.path == in_volume_path:
+                    return True
+                return False
+            return False
+
+        except GRPCError as exc:
+            if exc.status == Status.NOT_FOUND:
+                return False
+            raise
+
+        except FileNotFoundError:
+            return False
+
+    async def download_aio(self, uri: str, destination: Path) -> None:
+        """Asynchronously download a file from the Modal volume."""
+        import aiofiles
+
+        volume_name, in_volume_path = get_volume_name_and_path(uri)
+        volume = await modal.Volume.from_name.aio(volume_name)  # type: ignore[attr-defined]
+
+        # Modal's read_file returns an iterator of bytes chunks
+        # We need to write them to the destination file
+        async with aiofiles.open(destination, "wb") as dest_handle:
+            async for chunk in volume.read_file.aio(in_volume_path):  # type: ignore[attr-defined]
+                await dest_handle.write(chunk)
+
+    async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
+        """Asynchronously upload a file to the Modal volume."""
+        volume_name, in_volume_path = get_volume_name_and_path(uri)
+        volume = await modal.Volume.from_name.aio(volume_name)  # type: ignore[attr-defined]
+
+        # Modal's batch_upload is a context manager, use the async version
+        async with volume.batch_upload.aio() as batch:  # type: ignore[attr-defined]
+            batch.put_file(source, in_volume_path)
+
 
 modal_volume_rfs_provider = resource_provider(
     RemoteFileSystemABC, ModalVolumeRemoteFileSystem
