@@ -1,3 +1,4 @@
+import abc
 import typing
 
 from stardag._task import Task
@@ -9,6 +10,7 @@ LoadedT = typing.TypeVar("LoadedT")
 
 class AutoTask(
     Task[LoadableSaveableFileSystemTarget[LoadedT]],
+    abc.ABC,
     typing.Generic[LoadedT],
 ):
     """A base class for automatically serializing task outputs.
@@ -145,21 +147,4 @@ class AutoTask(
         return Serializable(
             wrapped=get_target(self._relpath),
             serializer=self._serializer,
-        )
-
-    def run(self) -> None:
-        """Execute the task logic.
-
-        Subclasses must implement this method (or run_aio for async tasks).
-
-        Example:
-            class MyTask(AutoTask[dict]):
-                def run(self):
-                    self.output().save({"result": "value"})
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement run() or run_aio(). "
-            f"Example:\n"
-            f"    def run(self):\n"
-            f"        self.output().save(your_result)"
         )
