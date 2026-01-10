@@ -21,15 +21,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import TYPE_CHECKING
 
-from stardag._auto_task import AutoTask
-from stardag._task import auto_namespace
+import stardag as sd
 
-if TYPE_CHECKING:
-    from stardag._task import TaskStruct
-
-auto_namespace(__name__)
+sd.auto_namespace(__name__)
 
 
 # =============================================================================
@@ -37,13 +32,13 @@ auto_namespace(__name__)
 # =============================================================================
 
 
-class BenchmarkTask(AutoTask[dict]):
+class BenchmarkTask(sd.AutoTask[dict]):
     """Base class for benchmark tasks with timing."""
 
     task_id: str
-    deps: tuple["BenchmarkTask", ...] = ()
+    deps: tuple[sd.SubClass[sd.Task], ...] = ()
 
-    def requires(self) -> TaskStruct:
+    def requires(self) -> sd.TaskStruct:
         return self.deps
 
     def run(self) -> None:
@@ -151,7 +146,7 @@ class LightTask(BenchmarkTask):
 # =============================================================================
 
 
-class IOBoundDynamicTask(AutoTask[dict]):
+class IOBoundDynamicTask(sd.AutoTask[dict]):
     """IO-bound task with dynamic dependencies.
 
     Note: Dynamic tasks with yield cannot easily implement run_aio() because
@@ -164,7 +159,7 @@ class IOBoundDynamicTask(AutoTask[dict]):
     static_deps: tuple["IOBoundDynamicTask", ...] = ()
     dynamic_dep_ids: tuple[str, ...] = ()
 
-    def requires(self) -> TaskStruct:
+    def requires(self) -> sd.TaskStruct:
         return self.static_deps
 
     def run(self):
@@ -183,7 +178,7 @@ class IOBoundDynamicTask(AutoTask[dict]):
         self.output().save({"task_id": self.task_id, "elapsed": elapsed})
 
 
-class CPUBoundDynamicTask(AutoTask[dict]):
+class CPUBoundDynamicTask(sd.AutoTask[dict]):
     """CPU-bound task with dynamic dependencies."""
 
     task_id: str
@@ -191,7 +186,7 @@ class CPUBoundDynamicTask(AutoTask[dict]):
     static_deps: tuple["CPUBoundDynamicTask", ...] = ()
     dynamic_dep_ids: tuple[str, ...] = ()
 
-    def requires(self) -> TaskStruct:
+    def requires(self) -> sd.TaskStruct:
         return self.static_deps
 
     def run(self):
@@ -212,14 +207,14 @@ class CPUBoundDynamicTask(AutoTask[dict]):
         self.output().save({"task_id": self.task_id, "elapsed": elapsed})
 
 
-class LightDynamicTask(AutoTask[dict]):
+class LightDynamicTask(sd.AutoTask[dict]):
     """Light task with dynamic dependencies."""
 
     task_id: str
     static_deps: tuple["LightDynamicTask", ...] = ()
     dynamic_dep_ids: tuple[str, ...] = ()
 
-    def requires(self) -> TaskStruct:
+    def requires(self) -> sd.TaskStruct:
         return self.static_deps
 
     def run(self):
@@ -233,5 +228,75 @@ class LightDynamicTask(AutoTask[dict]):
         # Do the actual work
         start = time.perf_counter()
         _ = sum(range(100))
+        elapsed = time.perf_counter() - start
+        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+
+
+# =============================================================================
+# File I/O workload (real async I/O)
+# =============================================================================
+
+
+class FileIOTask(BenchmarkTask):
+    """Real file I/O task using target's async interface.
+
+    This demonstrates the actual async file I/O capabilities:
+    - run(): Uses synchronous file operations
+    - run_aio(): Uses async file operations via target.open_aio()
+
+    Unlike sleep-based tests, this shows real async I/O benefits where
+    the OS can overlap multiple file operations efficiently.
+    """
+
+    data_size: int = 10000  # bytes to write/read
+
+    def _do_work(self) -> None:
+        # Write data synchronously
+        data = "x" * self.data_size
+        with self.output().open("w") as f:
+            f.write(data)
+
+    async def run_aio(self) -> None:
+        """Async implementation using target.open_aio() for real async file I/O."""
+        start = time.perf_counter()
+
+        # Write data asynchronously
+        data = "x" * self.data_size
+        async with self.output().open_aio("w") as f:
+            await f.write(data)
+
+        elapsed = time.perf_counter() - start
+        # Re-save with timing info (overwrites the x's)
+        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+
+
+class FileIOReadWriteTask(BenchmarkTask):
+    """File I/O task that does both write and read operations.
+
+    Demonstrates async advantages with multiple I/O operations per task.
+    """
+
+    data_size: int = 50000  # bytes to write/read
+    iterations: int = 3  # number of write/read cycles
+
+    def _do_work(self) -> None:
+        data = "y" * self.data_size
+        for _ in range(self.iterations):
+            with self.output().open("w") as f:
+                f.write(data)
+            with self.output().open("r") as f:
+                _ = f.read()
+
+    async def run_aio(self) -> None:
+        """Async implementation with multiple write/read cycles."""
+        start = time.perf_counter()
+
+        data = "y" * self.data_size
+        for _ in range(self.iterations):
+            async with self.output().open_aio("w") as f:
+                await f.write(data)
+            async with self.output().open_aio("r") as f:
+                _ = await f.read()
+
         elapsed = time.perf_counter() - start
         self.output().save({"task_id": self.task_id, "elapsed": elapsed})

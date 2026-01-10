@@ -11,6 +11,8 @@ from benchmarks.tasks import (
     BenchmarkTask,
     CPUBoundDynamicTask,
     CPUBoundTask,
+    FileIOReadWriteTask,
+    FileIOTask,
     HeavyCPUBoundTask,
     IOBoundDynamicTask,
     IOBoundTask,
@@ -199,5 +201,51 @@ def io_bound_flat_many(prefix: str = "") -> BenchmarkTask:
         task_id=f"{prefix}root",
         deps=tuple(leaves),
         sleep_duration=0.01,
+    )
+    return root
+
+
+# =============================================================================
+# Real File I/O DAGs
+# =============================================================================
+
+
+def file_io_flat(prefix: str = "", leaf_count: int = 32) -> BenchmarkTask:
+    """Flat DAG with real file I/O operations.
+
+    Uses FileIOTask which implements both sync and async file operations.
+    This demonstrates the async file I/O benefits with aiofiles.
+    """
+    leaves = [
+        FileIOTask(task_id=f"{prefix}leaf_{i}", data_size=10000)
+        for i in range(leaf_count)
+    ]
+    root = FileIOTask(
+        task_id=f"{prefix}root",
+        deps=tuple(leaves),
+        data_size=10000,
+    )
+    return root
+
+
+def file_io_heavy(prefix: str = "", leaf_count: int = 16) -> BenchmarkTask:
+    """Flat DAG with heavy file I/O (multiple read/write cycles).
+
+    Uses FileIOReadWriteTask which does multiple write/read cycles per task.
+    This shows async benefits when tasks have substantial I/O work.
+    """
+    leaves = [
+        FileIOReadWriteTask(
+            task_id=f"{prefix}leaf_{i}",
+            data_size=50000,
+            iterations=3,
+        )
+        for i in range(leaf_count)
+    ]
+    root = FileIOReadWriteTask(
+        task_id=f"{prefix}root",
+        deps=tuple(leaves),
+        data_size=50000,
+        iterations=3,
     )
     return root

@@ -185,14 +185,10 @@ def main():
     """Run all benchmarks."""
     # Import here to avoid circular imports
     from benchmarks.dags import (
-        cpu_bound_dynamic,
         cpu_bound_tree,
         heavy_cpu_flat,
-        io_bound_dynamic,
         io_bound_flat,
-        io_bound_flat_many,
         io_bound_tree,
-        light_dynamic,
         light_tree,
     )
 
@@ -211,29 +207,29 @@ def main():
         ):
             all_results: list[BenchmarkResult] = []
 
-            # Scenarios to benchmark
+            # In-process implementations (skip multiprocess for speed)
+            in_process_only = ["threadpool", "asyncio", "asyncio_queue"]
+
+            # Core scenarios (reduced set for faster benchmarks)
             scenarios_4workers = [
                 ("io_bound_static", io_bound_tree),
-                ("io_bound_dynamic", io_bound_dynamic),
                 ("cpu_bound_static", cpu_bound_tree),
-                ("cpu_bound_dynamic", cpu_bound_dynamic),
-                ("heavy_cpu_static", heavy_cpu_flat),
                 ("light_static", light_tree),
-                ("light_dynamic", light_dynamic),
             ]
 
             print("=" * 60)
             print("CONCURRENT BUILD BENCHMARK")
             print("=" * 60)
-            print("\nWarmup: 1, Timed runs: 3")
+            print("\nWarmup: 1, Timed runs: 2")
             print()
 
             print("=" * 60)
-            print("SECTION 1: Standard scenarios (4 workers)")
+            print("SECTION 1: Core scenarios (4 workers, in-process only)")
             print("=" * 60)
             print("Static DAGs: 3-level tree (15 tasks)")
-            print("Dynamic DAGs: flat (9 tasks - root + 8 leaves)")
-            print("Heavy CPU: flat (5 tasks - root + 4 leaves, ~1s each)")
+            print(
+                "Multiprocess skipped for speed (see heavy_cpu for multiprocess demo)"
+            )
             print()
 
             for scenario_name, dag_factory in scenarios_4workers:
@@ -242,11 +238,26 @@ def main():
                 results = run_benchmark(
                     scenario_name,
                     dag_factory,
+                    implementations=in_process_only,
                     workers=4,
                     warmup_runs=1,
-                    timed_runs=3,
+                    timed_runs=2,
                 )
                 all_results.extend(results)
+
+            # Heavy CPU - also in-process only for speed
+            # (multiprocess would win here due to true parallelism, but adds ~20s overhead)
+            print("\nheavy_cpu_static:")
+            print("-" * 40)
+            results = run_benchmark(
+                "heavy_cpu_static",
+                heavy_cpu_flat,
+                implementations=in_process_only,
+                workers=4,
+                warmup_runs=1,
+                timed_runs=2,
+            )
+            all_results.extend(results)
 
             print()
             print("=" * 60)
@@ -264,29 +275,21 @@ def main():
             )
             print()
 
-            # High concurrency scenario 1: 32 leaves, 16 workers
+            # High concurrency scenario: 32 leaves, 16 workers
             print("\nio_flat_32_w16:")
             print("-" * 40)
             results = run_benchmark(
                 "io_flat_32_w16",
                 io_bound_flat,
+                implementations=in_process_only,
                 workers=16,
                 warmup_runs=1,
-                timed_runs=3,
+                timed_runs=2,
             )
             all_results.extend(results)
 
-            # High concurrency scenario 2: 100 leaves, 32 workers
-            print("\nio_flat_many_w32:")
-            print("-" * 40)
-            results = run_benchmark(
-                "io_flat_many_w32",
-                io_bound_flat_many,
-                workers=32,
-                warmup_runs=1,
-                timed_runs=3,
-            )
-            all_results.extend(results)
+            # Note: File I/O scenarios (file_io_flat, file_io_heavy) available but
+            # skipped for speed. They use target.open_aio() for true async file I/O.
 
             # Print summary table
             print("\n" + "=" * 60)
@@ -299,8 +302,8 @@ def main():
                 if r.scenario not in scenarios_seen:
                     scenarios_seen.append(r.scenario)
 
-            # Header
-            impl_names = list(IMPLEMENTATIONS.keys())
+            # Header - only show in-process implementations
+            impl_names = in_process_only
             header = f"{'Scenario':<25}" + "".join(f"{name:>15}" for name in impl_names)
             print(header)
             print("-" * len(header))
