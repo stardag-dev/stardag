@@ -1,6 +1,6 @@
 # Concurrent Build Benchmarks
 
-This directory contains benchmarks comparing the four concurrent build implementations for stardag task DAGs.
+This directory contains benchmarks comparing the concurrent build implementations for stardag task DAGs.
 
 ## Build Implementations
 
@@ -11,16 +11,36 @@ This directory contains benchmarks comparing the four concurrent build implement
 | **asyncio_queue** | Uses `asyncio.Queue` with worker pool pattern                            |
 | **multiprocess**  | Uses `ProcessPoolExecutor` with idempotent re-execution for dynamic deps |
 
+## Async Task Support
+
+Tasks can implement an optional `run_aio()` method for true async execution:
+
+```python
+class IOBoundTask(BenchmarkTask):
+    sleep_duration: float = 0.1
+
+    def _do_work(self) -> None:
+        time.sleep(self.sleep_duration)  # Blocks thread
+
+    async def run_aio(self) -> None:
+        """True async I/O - no thread blocking."""
+        await asyncio.sleep(self.sleep_duration)
+        self.output().save({"task_id": self.task_id})
+```
+
+The asyncio builders automatically detect `run_aio()` and call it directly, enabling true concurrent execution without thread overhead.
+
 ## Test Scenarios
 
 ### Workload Types
 
-| Workload      | Description                  | Characteristics                                        |
-| ------------- | ---------------------------- | ------------------------------------------------------ |
-| **IO-bound**  | `time.sleep(0.1)` per task   | Simulates network/disk I/O. Releases GIL during sleep. |
-| **CPU-bound** | 100k SHA-256 hash iterations | Light computation (~20ms). GIL limits parallelism.     |
-| **Heavy CPU** | 5M SHA-256 hash iterations   | Heavy computation (~1s). Multiprocess wins here.       |
-| **Light**     | `sum(range(100))`            | Near-zero work. Exposes scheduling overhead.           |
+| Workload      | Description                  | Characteristics                                     |
+| ------------- | ---------------------------- | --------------------------------------------------- |
+| **IO-bound**  | `asyncio.sleep(0.1)`         | True async sleep. Releases GIL during sleep.        |
+| **CPU-bound** | 100k SHA-256 hash iterations | Light computation (~20ms). GIL limits parallelism.  |
+| **Heavy CPU** | 5M SHA-256 hash iterations   | Heavy computation (~1s). Multiprocess wins here.    |
+| **Light**     | `sum(range(100))`            | Near-zero work. Exposes scheduling overhead.        |
+| **File I/O**  | Real file writes/reads       | Uses `target.open_aio()` for async file operations. |
 
 ### DAG Structures
 
@@ -41,17 +61,17 @@ This directory contains benchmarks comparing the four concurrent build implement
 - 2 intermediate tasks (level 2, each depends on 2 middle)
 - 1 root task (level 3, depends on 2 intermediate)
 
-**Dynamic DAGs (9 tasks):**
+**Flat High-Concurrency DAG (33 tasks):**
 
 ```
-         root
-    (yields at runtime)
-  / / / | | | \ \ \
- L0 L1 L2 L3 L4 L5 L6 L7
+           root
+  / / / | | | | \ \ \ \
+ L0 L1 L2 ......... L30 L31
 ```
 
-- 1 root task that dynamically discovers 8 leaf tasks
-- Tests runtime dependency resolution
+- 32 leaf tasks that can all run in parallel
+- 1 root task that depends on all leaves
+- Tests high-concurrency scenarios (16 workers)
 
 **Heavy CPU DAG (5 tasks):**
 
@@ -73,113 +93,95 @@ cd lib/stardag
 uv run python -m benchmarks.run_benchmark
 ```
 
+The benchmark takes approximately 30-60 seconds and saves results to `results.json`.
+
 ## Results
 
-**Configuration:** 4 workers, 1 warmup run, 3 timed runs (averaged)
+**Configuration:** In-process implementations only (threadpool, asyncio, asyncio_queue). Warmup: 1 run, Timed: 2 runs averaged.
 
-| Scenario          | threadpool | asyncio | asyncio_queue | multiprocess |
-| ----------------- | ---------- | ------- | ------------- | ------------ |
-| io_bound_static   | 0.534s     | 0.535s  | 0.534s        | 1.542s       |
-| io_bound_dynamic  | 0.320s     | 0.948s  | 0.948s        | 1.878s       |
-| cpu_bound_static  | 0.288s     | 0.292s  | 0.291s        | 1.109s       |
-| cpu_bound_dynamic | 0.178s     | 0.174s  | 0.175s        | 1.022s       |
-| **heavy_cpu**     | 4.796s     | 4.861s  | 4.944s        | **3.098s**   |
-| light_static      | 0.004s     | 0.004s  | 0.003s        | 1.004s       |
-| light_dynamic     | 0.002s     | 0.003s  | 0.003s        | 1.047s       |
+| Scenario         | threadpool | asyncio | asyncio_queue |
+| ---------------- | ---------- | ------- | ------------- |
+| io_bound_static  | 0.536s     | 0.520s  | 0.511s        |
+| cpu_bound_static | 0.287s     | 0.290s  | 0.283s        |
+| light_static     | 0.004s     | 0.006s  | 0.003s        |
+| heavy_cpu_static | 4.779s     | 4.896s  | 4.969s        |
+| io_flat_32_w16   | 0.327s     | 0.335s  | 0.326s        |
+
+Note: Multiprocess is excluded from the quick benchmark due to ~1s process spawn overhead per task. It excels for heavy CPU workloads (>1s per task) where spawn overhead is negligible.
 
 ## Analysis
 
 ### IO-Bound Workloads
 
-For **static dependencies**, all in-process approaches perform similarly (~0.53s) because:
+All implementations perform similarly for IO-bound tasks:
 
-- Threads release the GIL during `time.sleep()`
-- True concurrent execution across 4 workers
-- Theoretical minimum: 0.1s \* 15 tasks / 4 workers = 0.375s (actual ~0.53s due to DAG structure)
+- **io_bound_static**: ~0.51-0.54s for 15 tasks with 0.1s sleep each
+- **io_flat_32_w16**: ~0.33s for 33 tasks with 16 workers
 
-For **dynamic dependencies**, **threadpool is fastest** (0.32s vs ~0.95s for asyncio):
+Why similar performance?
 
-- Threadpool handles generator suspension efficiently with minimal overhead
-- Asyncio variants have more overhead managing dynamic dep discovery
-- The flat DAG structure (9 tasks) is inherently faster than the tree (15 tasks)
+1. Both `time.sleep()` (threadpool) and `asyncio.sleep()` (asyncio) release the GIL
+2. True concurrent execution across workers
+3. No CPU contention
 
-**Multiprocessing** is slowest (~1.5-1.9s) due to process spawning overhead overwhelming the parallelism benefits for short-lived tasks.
+The `run_aio()` method provides true async sleep, but the performance difference is minimal with synthetic sleep because threads already release the GIL during `time.sleep()`.
 
-### CPU-Bound Workloads (Light)
+### When Async Excels
 
-All in-process approaches show **similar performance** (~0.29s) because:
+Async advantages become significant with:
+
+- **Real network I/O** (aiohttp vs requests) - connection pooling, no thread overhead
+- **Many short-lived I/O operations** - thread creation overhead avoided
+- **Memory-constrained environments** - coroutines use less memory than threads
+- **Real async file I/O** - using `target.open_aio()` with aiofiles
+
+### CPU-Bound Workloads
+
+For light CPU work (~20ms per task), all in-process approaches show similar performance:
 
 - Python's GIL prevents true parallel CPU execution in threads
-- Tasks execute essentially sequentially despite thread pool
-- The 100k iterations complete quickly (~20ms each)
+- Tasks execute essentially sequentially despite thread/task pool
+- asyncio_queue slightly faster due to lower coordination overhead
 
-**Multiprocessing** is slower (~1.1s) despite bypassing the GIL because:
+For heavy CPU work (~1s per task), all in-process approaches are GIL-limited:
 
-- Process spawn overhead (~0.25s per worker) dominates
-- Task JSON serialization/deserialization adds latency
-- Only wins with much longer-running tasks
-
-### CPU-Bound Workloads (Heavy)
-
-For heavy CPU tasks (~1s each), **multiprocessing wins** (3.1s vs 4.8s):
-
-- **Threadpool/Asyncio:** ~4.8s - GIL forces sequential execution of 5 tasks
-- **Multiprocess:** ~3.1s - true parallelism (4 leaves run simultaneously, then root)
-
-This demonstrates the crossover point: when individual task runtime exceeds process spawn overhead (~1s), multiprocessing becomes worthwhile.
+- ~4.8-5.0s for 5 tasks that should parallelize
+- Multiprocess would win here (not in quick benchmark)
 
 ### Light Workloads
 
-In-process approaches are **extremely fast** (~3-4ms for 15 tasks):
+In-process approaches are extremely fast (~3-6ms for 15 tasks):
 
+- asyncio_queue often fastest (0.003s) due to efficient queue-based scheduling
 - Minimal scheduling overhead
-- Thread pool reuse eliminates spawn costs
-- asyncio event loop is efficient for light work
-
-**Multiprocessing** shows its **worst case** (~1s):
-
-- Process spawning takes ~250ms per worker
-- 99.6% of time is overhead, 0.4% is actual work
-- Never appropriate for light tasks
+- Thread/task pool reuse eliminates spawn costs
 
 ## Recommendations
 
 | Use Case                                 | Recommended Implementation                   |
 | ---------------------------------------- | -------------------------------------------- |
-| **IO-bound tasks** (API calls, file I/O) | threadpool or asyncio                        |
-| **CPU-bound tasks < 1s**                 | threadpool (simpler, lower overhead)         |
+| **IO-bound tasks** (API calls, file I/O) | asyncio or threadpool                        |
+| **Async codebase with run_aio()**        | asyncio (native async execution)             |
+| **CPU-bound tasks < 1s**                 | threadpool or asyncio_queue                  |
 | **CPU-bound tasks > 1s**                 | multiprocess (GIL bypass worth the overhead) |
+| **Light/fast tasks**                     | asyncio_queue (lowest overhead)              |
 | **Dynamic dependencies**                 | threadpool (best dynamic dep handling)       |
-| **Light/fast tasks**                     | threadpool or asyncio (never multiprocess)   |
-| **Async codebase**                       | asyncio (natural integration)                |
 
 ### Key Takeaways
 
-1. **Threadpool is the best general-purpose choice** - good performance across all scenarios, efficient dynamic dep handling, simple mental model.
+1. **All in-process implementations are comparable** for most workloads - choose based on your codebase style.
 
-2. **Asyncio is comparable for static deps** - choose if your codebase is already async-heavy.
+2. **asyncio_queue often edges out others** due to efficient queue-based scheduling with minimal coordination overhead.
 
-3. **Multiprocess wins for heavy CPU work** - when tasks take >1s each, the process overhead becomes negligible and true parallelism provides ~1.5x speedup.
+3. **Implement `run_aio()` for true async benefits** - allows asyncio builders to call native async code directly without thread overhead.
 
-4. **Dynamic deps favor threadpool** - the generator suspension pattern is more efficient than asyncio's approach.
+4. **Multiprocess wins for heavy CPU work** - when tasks take >1s each, process overhead becomes negligible and true parallelism provides significant speedup.
 
-## Limitations
-
-### AsyncIO Implementation
-
-The asyncio implementations cannot fully leverage async/await because the `TaskBase` interface only provides synchronous `run()` and `complete()` methods. The current implementation works around this by using `asyncio.to_thread()` to run synchronous task code without blocking the event loop.
-
-If `TaskBase` supported async versions of these methods (e.g., `async def run_async()`, `async def complete_async()`), the asyncio implementation could:
-
-- Directly `await` native async operations (aiohttp, asyncpg, etc.)
-- Avoid thread pool overhead for async-native tasks
-- Potentially outperform threadpool for IO-bound async workloads
-
-This is a known limitation that may be addressed in a future version of the task interface.
+5. **Dynamic deps favor threadpool** - the generator suspension pattern is more efficient than asyncio's approach.
 
 ## Files
 
-- `tasks.py` - Benchmark task definitions (IO/CPU/Heavy CPU/Light workloads)
-- `dags.py` - DAG factory functions (static trees, dynamic flat, heavy CPU)
+- `tasks.py` - Benchmark task definitions (IO/CPU/Heavy CPU/Light/File I/O workloads)
+- `dags.py` - DAG factory functions (static trees, flat high-concurrency, heavy CPU, file I/O)
 - `run_benchmark.py` - Benchmark runner script
 - `results.json` - Raw benchmark results
