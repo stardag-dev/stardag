@@ -796,9 +796,13 @@ async def build(
 
     task_count.discovered = len(task_states)
 
-    # Check initial completion
-    for state in task_states.values():
-        if await state.task.complete_aio():
+    # Check initial completion (parallel for efficiency with remote targets)
+    states_list = list(task_states.values())
+    completion_results = await asyncio.gather(
+        *[state.task.complete_aio() for state in states_list]
+    )
+    for state, is_complete in zip(states_list, completion_results):
+        if is_complete:
             completion_cache.add(state.task.id)
             state.completed = True
             completion_events[state.task.id].set()

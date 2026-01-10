@@ -40,3 +40,17 @@ Use process pool (`sync_run_default="process"`) when:
 - Tasks do heavy CPU work (>100ms per task)
 - True parallelism benefit outweighs spawn overhead
 - Tasks are serializable (picklable)
+
+## Completion Check Benchmark
+
+Tests overhead of checking task completion with simulated S3 latency (50ms HEAD request).
+
+```bash
+uv run python -m stardag_examples.benchmarks.completion_check
+```
+
+| Scenario                           | Sequential | Concurrent |
+| ---------------------------------- | ---------- | ---------- |
+| 101 pre-completed tasks (50ms/chk) | 5.47s      | 0.06s      |
+
+**93x speedup** with parallel completion checking via `asyncio.gather()`.
