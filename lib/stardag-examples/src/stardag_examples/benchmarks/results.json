@@ -1,0 +1,107 @@
+[
+  {
+    "scenario": "io_bound_tree",
+    "config": "sequential",
+    "duration": 1.5587859999698896,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_tree",
+    "config": "concurrent_thread",
+    "duration": 0.4081029863251994,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_tree",
+    "config": "concurrent_blocking",
+    "duration": 0.40825980505906045,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_flat_64",
+    "config": "sequential",
+    "duration": 5.948655070038512,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_flat_64",
+    "config": "concurrent_thread",
+    "duration": 0.7126303747063503,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_flat_64",
+    "config": "concurrent_blocking",
+    "duration": 0.7122084026923403,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_tree",
+    "config": "sequential",
+    "duration": 0.2966170283810546,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_tree",
+    "config": "concurrent_thread",
+    "duration": 0.28674218031422544,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_tree",
+    "config": "concurrent_process",
+    "duration": 1.1143767773561801,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "heavy_cpu_flat",
+    "config": "sequential",
+    "duration": 9.25033283297671,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "heavy_cpu_flat",
+    "config": "concurrent_thread",
+    "duration": 8.95654454198666,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "heavy_cpu_flat",
+    "config": "concurrent_process",
+    "duration": 4.065767208463512,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_tree",
+    "config": "sequential",
+    "duration": 0.0006317223111788431,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_tree",
+    "config": "concurrent_thread",
+    "duration": 0.0017356113530695438,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_tree",
+    "config": "concurrent_blocking",
+    "duration": 0.0008419863103578488,
+    "success": true,
+    "error": null
+  }
+]
