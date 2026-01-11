@@ -7,7 +7,8 @@ The main classes are:
 - APIRegistry: Registry that communicates with the stardag-api service
 - NoOpRegistry: A do-nothing registry (default when unconfigured)
 - registry_provider: Resource provider for getting the configured registry
-- RegistryGlobalConcurrencyLock: GlobalConcurrencyLock implementation using Registry API
+- RegistryGlobalConcurrencyLockManager: GlobalConcurrencyLockManager using Registry API
+- RegistryLockManagerConfig: Configuration for RegistryGlobalConcurrencyLockManager
 """
 
 from stardag.registry._api_registry import APIRegistry
@@ -19,14 +20,18 @@ from stardag.registry._base import (
     init_registry,
     registry_provider,
 )
-from stardag.registry._lock import RegistryGlobalConcurrencyLock
+from stardag.registry._lock import (
+    RegistryGlobalConcurrencyLockManager,
+    RegistryLockManagerConfig,
+)
 
 __all__ = [
     "APIRegistry",
     "NoOpRegistry",
     "RegisterdTaskEnvelope",
     "RegistryABC",
-    "RegistryGlobalConcurrencyLock",
+    "RegistryGlobalConcurrencyLockManager",
+    "RegistryLockManagerConfig",
     "get_git_commit_hash",
     "init_registry",
     "registry_provider",
