@@ -90,10 +90,10 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
     async def exists_aio(self, uri: str) -> bool:
         """Asynchronously check if the file exists in the Modal volume."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = await modal.Volume.from_name.aio(volume_name)  # type: ignore[attr-defined]
+        volume = modal.Volume.from_name(volume_name)
 
         try:
-            async for entry in volume.iterdir.aio(in_volume_path):  # type: ignore[attr-defined]
+            async for entry in volume.iterdir.aio(in_volume_path):
                 if entry.type == FileEntryType.FILE and entry.path == in_volume_path:
                     return True
                 return False
@@ -112,21 +112,21 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
         import aiofiles
 
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = await modal.Volume.from_name.aio(volume_name)  # type: ignore[attr-defined]
+        volume = modal.Volume.from_name(volume_name)
 
         # Modal's read_file returns an iterator of bytes chunks
         # We need to write them to the destination file
         async with aiofiles.open(destination, "wb") as dest_handle:
-            async for chunk in volume.read_file.aio(in_volume_path):  # type: ignore[attr-defined]
+            async for chunk in volume.read_file.aio(in_volume_path):
                 await dest_handle.write(chunk)
 
     async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
         """Asynchronously upload a file to the Modal volume."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = await modal.Volume.from_name.aio(volume_name)  # type: ignore[attr-defined]
+        volume = modal.Volume.from_name(volume_name)
 
         # Modal's batch_upload is a context manager, use the async version
-        async with volume.batch_upload.aio() as batch:  # type: ignore[attr-defined]
+        async with volume.batch_upload.aio() as batch:
             batch.put_file(source, in_volume_path)
 
 

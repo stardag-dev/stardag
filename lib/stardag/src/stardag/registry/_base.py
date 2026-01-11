@@ -177,8 +177,8 @@ def init_registry() -> RegistryABC:
 
     Returns APIRegistry if authentication is configured, otherwise NoOpRegistry.
     """
-    from stardag.registry._api_registry import APIRegistry
     from stardag.config import config_provider
+    from stardag.registry._api_registry import APIRegistry
 
     config = config_provider.get()
 
