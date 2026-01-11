@@ -36,6 +36,7 @@ if USE_LOCAL_STARDAG:
             "scikit-learn",
             "numpy",
             "uuid6",
+            "aiofiles>=23.1.0",
         )
         .env(common_env)
         .add_local_python_source("stardag", "stardag_examples")
