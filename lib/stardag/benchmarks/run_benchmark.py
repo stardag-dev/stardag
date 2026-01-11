@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark runner for concurrent build implementations.
 
-Runs each DAG scenario with each build implementation and measures execution time.
+Runs each DAG scenario with different build configurations and measures execution time.
 
 Usage:
     cd lib/stardag
@@ -10,7 +10,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import gc
 import json
 import os
@@ -19,18 +18,18 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from stardag.build.concurrent.asyncio_builder import build as asyncio_build
-from stardag.build.concurrent.asyncio_builder import (
-    build_queue_based as asyncio_queue_build,
+from stardag.build import (
+    DefaultExecutionModeSelector,
+    HybridConcurrentTaskRunner,
+    build,
+    build_sequential,
 )
-from stardag.build.concurrent.multiprocess import build as multiprocess_build
-from stardag.build.concurrent.threadpool import build_simple as threadpool_build
-from stardag.build.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry
 from stardag.target import LocalTarget
 from stardag.target._factory import TargetFactory, target_factory_provider
 
@@ -47,59 +46,51 @@ class BenchmarkResult:
     error: str | None = None
 
 
-def run_sync_build(
-    build_func: Callable, dag_factory: Callable, workers: int, run_id: str
-) -> float:
-    """Run a sync build and return duration."""
-    dag = dag_factory(prefix=f"{run_id}_")
-    registry = NoOpRegistry()
-
-    gc.collect()
-    start = time.perf_counter()
-    build_func(dag, max_workers=workers, registry=registry)
-    duration = time.perf_counter() - start
-
-    return duration
-
-
-def run_async_build(
-    async_build_func: Callable,
+def run_build(
     dag_factory: Callable,
-    workers: int,
     run_id: str,
-    param_name: str = "max_concurrent",
+    mode: Literal["sequential", "thread", "process"] = "thread",
+    workers: int = 4,
 ) -> float:
-    """Run an async build and return duration."""
+    """Run a build and return duration."""
     dag = dag_factory(prefix=f"{run_id}_")
     registry = NoOpRegistry()
 
     gc.collect()
     start = time.perf_counter()
-    asyncio.run(async_build_func(dag, **{param_name: workers}, registry=registry))
-    duration = time.perf_counter() - start
 
+    if mode == "sequential":
+        build_sequential([dag], registry=registry)
+    else:
+        # Use HybridConcurrentTaskRunner with configured execution mode
+        sync_run_default: Literal["thread", "process"] = mode  # type: ignore
+        runner = HybridConcurrentTaskRunner(
+            registry=registry,
+            execution_mode_selector=DefaultExecutionModeSelector(
+                sync_run_default=sync_run_default
+            ),
+            max_thread_workers=workers,
+            max_process_workers=workers,
+        )
+        build([dag], task_runner=runner)
+
+    duration = time.perf_counter() - start
     return duration
 
 
-# Build implementations
+# Build configurations
 IMPLEMENTATIONS: dict[str, dict[str, Any]] = {
-    "threadpool": {
-        "func": threadpool_build,
-        "async": False,
+    "sequential": {
+        "mode": "sequential",
+        "workers": 1,
     },
-    "asyncio": {
-        "func": asyncio_build,
-        "async": True,
-        "param": "max_concurrent",
+    "thread_pool": {
+        "mode": "thread",
+        "workers": 4,
     },
-    "asyncio_queue": {
-        "func": asyncio_queue_build,
-        "async": True,
-        "param": "max_concurrent",
-    },
-    "multiprocess": {
-        "func": multiprocess_build,
-        "async": False,
+    "process_pool": {
+        "mode": "process",
+        "workers": 4,
     },
 }
 
@@ -118,21 +109,18 @@ def run_benchmark(
 
     for impl_name in implementations:
         impl = IMPLEMENTATIONS[impl_name]
+        impl_workers = impl.get("workers", workers)
 
         # Warmup runs
         for i in range(warmup_runs):
             try:
                 run_id = f"warmup_{impl_name}_{i}"
-                if impl["async"]:
-                    run_async_build(
-                        impl["func"],
-                        dag_factory,
-                        workers,
-                        run_id,
-                        impl.get("param", "max_concurrent"),
-                    )
-                else:
-                    run_sync_build(impl["func"], dag_factory, workers, run_id)
+                run_build(
+                    dag_factory,
+                    run_id,
+                    mode=impl["mode"],
+                    workers=impl_workers,
+                )
             except Exception as e:
                 print(f"  Warmup failed for {impl_name}: {e}")
 
@@ -144,18 +132,12 @@ def run_benchmark(
         for i in range(timed_runs):
             try:
                 run_id = f"timed_{impl_name}_{i}"
-                if impl["async"]:
-                    duration = run_async_build(
-                        impl["func"],
-                        dag_factory,
-                        workers,
-                        run_id,
-                        impl.get("param", "max_concurrent"),
-                    )
-                else:
-                    duration = run_sync_build(
-                        impl["func"], dag_factory, workers, run_id
-                    )
+                duration = run_build(
+                    dag_factory,
+                    run_id,
+                    mode=impl["mode"],
+                    workers=impl_workers,
+                )
                 durations.append(duration)
             except Exception as e:
                 success = False
@@ -168,7 +150,7 @@ def run_benchmark(
             BenchmarkResult(
                 scenario=scenario_name,
                 implementation=impl_name,
-                workers=workers,
+                workers=impl_workers,
                 duration=avg_duration,
                 success=success,
                 error=error,
@@ -207,53 +189,50 @@ def main():
         ):
             all_results: list[BenchmarkResult] = []
 
-            # In-process implementations (skip multiprocess for speed)
-            in_process_only = ["threadpool", "asyncio", "asyncio_queue"]
+            # In-process implementations (skip process_pool for speed)
+            in_process_only = ["sequential", "thread_pool"]
 
-            # Core scenarios (reduced set for faster benchmarks)
-            scenarios_4workers = [
-                ("io_bound_static", io_bound_tree),
-                ("cpu_bound_static", cpu_bound_tree),
-                ("light_static", light_tree),
+            # Core scenarios
+            scenarios = [
+                ("io_bound_tree", io_bound_tree),
+                ("cpu_bound_tree", cpu_bound_tree),
+                ("light_tree", light_tree),
             ]
 
             print("=" * 60)
-            print("CONCURRENT BUILD BENCHMARK")
+            print("STARDAG BUILD BENCHMARK")
             print("=" * 60)
             print("\nWarmup: 1, Timed runs: 2")
             print()
 
             print("=" * 60)
-            print("SECTION 1: Core scenarios (4 workers, in-process only)")
+            print("SECTION 1: Core scenarios (in-process only)")
             print("=" * 60)
             print("Static DAGs: 3-level tree (15 tasks)")
             print(
-                "Multiprocess skipped for speed (see heavy_cpu for multiprocess demo)"
+                "Process pool skipped for speed (see heavy_cpu for process pool demo)"
             )
             print()
 
-            for scenario_name, dag_factory in scenarios_4workers:
+            for scenario_name, dag_factory in scenarios:
                 print(f"\n{scenario_name}:")
                 print("-" * 40)
                 results = run_benchmark(
                     scenario_name,
                     dag_factory,
                     implementations=in_process_only,
-                    workers=4,
                     warmup_runs=1,
                     timed_runs=2,
                 )
                 all_results.extend(results)
 
-            # Heavy CPU - also in-process only for speed
-            # (multiprocess would win here due to true parallelism, but adds ~20s overhead)
-            print("\nheavy_cpu_static:")
+            # Heavy CPU - include process pool
+            print("\nheavy_cpu_flat:")
             print("-" * 40)
             results = run_benchmark(
-                "heavy_cpu_static",
+                "heavy_cpu_flat",
                 heavy_cpu_flat,
-                implementations=in_process_only,
-                workers=4,
+                implementations=["sequential", "thread_pool", "process_pool"],
                 warmup_runs=1,
                 timed_runs=2,
             )
@@ -263,33 +242,20 @@ def main():
             print("=" * 60)
             print("SECTION 2: High-concurrency IO scenarios")
             print("=" * 60)
-            print("io_flat_32_w16: 33 tasks (32 leaves + root), 16 workers")
-            print("io_flat_many_w32: 101 tasks (100 leaves + root), 32 workers")
-            print()
-            print(
-                "Note: With synthetic sleep, asyncio and threadpool perform similarly"
-            )
-            print("because GIL is released during sleep. Async advantages are more")
-            print(
-                "visible with real network I/O (connection pooling, no thread overhead)."
-            )
+            print("io_flat: 33 tasks (32 leaves + root)")
             print()
 
-            # High concurrency scenario: 32 leaves, 16 workers
-            print("\nio_flat_32_w16:")
+            # High concurrency scenario
+            print("\nio_flat:")
             print("-" * 40)
             results = run_benchmark(
-                "io_flat_32_w16",
+                "io_flat",
                 io_bound_flat,
                 implementations=in_process_only,
-                workers=16,
                 warmup_runs=1,
                 timed_runs=2,
             )
             all_results.extend(results)
-
-            # Note: File I/O scenarios (file_io_flat, file_io_heavy) available but
-            # skipped for speed. They use target.open_aio() for true async file I/O.
 
             # Print summary table
             print("\n" + "=" * 60)
@@ -302,14 +268,14 @@ def main():
                 if r.scenario not in scenarios_seen:
                     scenarios_seen.append(r.scenario)
 
-            # Header - only show in-process implementations
-            impl_names = in_process_only
-            header = f"{'Scenario':<25}" + "".join(f"{name:>15}" for name in impl_names)
+            # Header
+            impl_names = ["sequential", "thread_pool", "process_pool"]
+            header = f"{'Scenario':<20}" + "".join(f"{name:>15}" for name in impl_names)
             print(header)
             print("-" * len(header))
 
             for scenario in scenarios_seen:
-                row = f"{scenario:<25}"
+                row = f"{scenario:<20}"
                 for impl in impl_names:
                     result = next(
                         (
@@ -321,8 +287,10 @@ def main():
                     )
                     if result and result.success:
                         row += f"{result.duration:>15.3f}"
-                    else:
+                    elif result:
                         row += f"{'FAILED':>15}"
+                    else:
+                        row += f"{'-':>15}"
                 print(row)
 
             # Save raw results
