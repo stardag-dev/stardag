@@ -671,9 +671,10 @@ class TestSDKBuildWorkflow:
                     api_key=api_key,
                 )
 
-                # Build the DAG
+                # Build the DAG (use build_sequential to avoid event loop conflict
+                # with Playwright's async runtime)
                 try:
-                    sd.build([final_task], registry=registry)
+                    sd.build_sequential([final_task], registry=registry)
                 finally:
                     registry.close()
 
@@ -795,9 +796,10 @@ class TestSDKBuildWorkflow:
                     api_key=api_key,
                 )
 
-                # Build the DAG
+                # Build the DAG (use build_sequential to avoid event loop conflict
+                # with Playwright's async runtime)
                 try:
-                    sd.build([final_task], registry=registry)
+                    sd.build_sequential([final_task], registry=registry)
                 finally:
                     registry.close()
 
