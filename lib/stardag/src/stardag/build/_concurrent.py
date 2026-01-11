@@ -23,9 +23,14 @@ from stardag.build._base import (
     BuildExitStatus,
     BuildSummary,
     DefaultExecutionModeSelector,
+    DefaultGlobalLockSelector,
     ExecutionMode,
     ExecutionModeSelector,
     FailMode,
+    GlobalConcurrencyLockManager,
+    GlobalLockConfig,
+    GlobalLockSelector,
+    LockAcquisitionStatus,
     RunWrapper,
     TaskCount,
     TaskExecutionState,
@@ -115,6 +120,7 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
 
     Routes tasks to appropriate execution context based on ExecutionModeSelector.
     Handles generator suspension for dynamic dependencies.
+    Optionally uses global concurrency locks for distributed execution.
 
     Args:
         registry: Registry for tracking task execution.
@@ -127,6 +133,9 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         max_async_workers: Maximum concurrent async tasks (semaphore-based).
         max_thread_workers: Maximum concurrent thread pool workers.
         max_process_workers: Maximum concurrent process pool workers.
+        global_lock_manager: Optional lock manager for distributed locking.
+        global_lock_selector: Selector for which tasks should use global lock.
+        global_lock_config: Configuration for global locking behavior.
     """
 
     def __init__(
@@ -137,6 +146,9 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         max_async_workers: int = 10,
         max_thread_workers: int = 10,
         max_process_workers: int | None = None,
+        global_lock_manager: GlobalConcurrencyLockManager | None = None,
+        global_lock_selector: GlobalLockSelector | None = None,
+        global_lock_config: GlobalLockConfig | None = None,
     ) -> None:
         self.registry = registry or NoOpRegistry()
         self.run_wrapper = run_wrapper
@@ -146,6 +158,13 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         self.max_async_workers = max_async_workers
         self.max_thread_workers = max_thread_workers
         self.max_process_workers = max_process_workers
+
+        # Global lock configuration
+        self._global_lock_manager = global_lock_manager
+        self._global_lock_config = global_lock_config or GlobalLockConfig()
+        self._global_lock_selector = global_lock_selector or DefaultGlobalLockSelector(
+            self._global_lock_config
+        )
 
         # Pools - initialized in setup()
         self._async_semaphore: asyncio.Semaphore | None = None
@@ -193,9 +212,22 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         is_reexecution = task.id in self._pending_reexecution
         if is_reexecution:
             self._pending_reexecution.discard(task.id)
-            # Don't call start_task again - task was already started
+
+        # Check if global lock should be used for this task
+        use_lock = self._global_lock_manager is not None and self._global_lock_selector(
+            task
+        )
+
+        if use_lock:
+            return await self._submit_with_lock(task, is_reexecution)
         else:
-            # Notify registry of new task start
+            return await self._submit_without_lock(task, is_reexecution)
+
+    async def _submit_without_lock(
+        self, task: BaseTask, is_reexecution: bool
+    ) -> None | TaskStruct | Exception:
+        """Execute task without global lock."""
+        if not is_reexecution:
             await self.registry.start_task_aio(task)
 
         mode = self.execution_mode_selector(task)
@@ -206,6 +238,104 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         except Exception as e:
             await self.registry.fail_task_aio(task, str(e))
             return e
+
+    async def _submit_with_lock(
+        self, task: BaseTask, is_reexecution: bool
+    ) -> None | TaskStruct | Exception:
+        """Execute task with global concurrency lock.
+
+        Flow:
+        1. Acquire lock (includes check for task completion in registry)
+        2. If ALREADY_COMPLETED: retry task.complete_aio() until True or timeout
+        3. If ACQUIRED: execute task, mark completed on success
+        4. If not acquired: return error
+        """
+        assert self._global_lock_manager is not None
+        task_id = str(task.id)
+
+        async with self._global_lock_manager.lock(task_id) as handle:
+            result = handle.result
+
+            if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
+                # Task completed elsewhere - wait for eventual consistency
+                completed = await self._wait_for_completion(task)
+                if completed:
+                    logger.debug(
+                        f"Task {task_id} already completed (confirmed via retry)"
+                    )
+                    return None
+                else:
+                    # Timeout waiting - log warning but don't fail
+                    # The task may still become visible eventually
+                    logger.warning(
+                        f"Task {task_id} marked complete in registry but "
+                        f"target not visible after retry timeout"
+                    )
+                    return None
+
+            if result.status == LockAcquisitionStatus.HELD_BY_OTHER:
+                # Lock held by another process - this shouldn't happen in normal
+                # operation since build() waits for tasks to complete. Could indicate
+                # concurrent builds or a stuck lock (will expire via TTL).
+                msg = f"Lock for task {task_id} held by another process"
+                logger.warning(msg)
+                return Exception(msg)
+
+            if result.status == LockAcquisitionStatus.CONCURRENCY_LIMIT_REACHED:
+                msg = f"Workspace concurrency limit reached for task {task_id}"
+                logger.warning(msg)
+                return Exception(msg)
+
+            if result.status == LockAcquisitionStatus.ERROR:
+                msg = (
+                    f"Failed to acquire lock for task {task_id}: {result.error_message}"
+                )
+                logger.error(msg)
+                return Exception(msg)
+
+            # Lock acquired - execute task
+            if not is_reexecution:
+                await self.registry.start_task_aio(task)
+
+            mode = self.execution_mode_selector(task)
+
+            try:
+                exec_result = await self._execute_task(task, mode)
+                handled = await self._handle_result(task, exec_result)
+
+                # Mark completed if task finished successfully
+                if handled is None:
+                    handle.mark_completed()
+
+                return handled
+
+            except Exception as e:
+                await self.registry.fail_task_aio(task, str(e))
+                return e
+
+    async def _wait_for_completion(self, task: BaseTask) -> bool:
+        """Wait for task completion with retry for eventual consistency.
+
+        When the lock manager reports a task is already completed (in the registry),
+        but local target.exists() returns False, retry until visible or timeout.
+
+        This handles S3 eventual consistency where a newly written object may not
+        be immediately visible to all readers.
+        """
+        config = self._global_lock_config
+        timeout = config.completion_retry_timeout_seconds
+        interval = config.completion_retry_interval_seconds
+
+        start = asyncio.get_event_loop().time()
+        while True:
+            if await task.complete_aio():
+                return True
+
+            elapsed = asyncio.get_event_loop().time() - start
+            if elapsed >= timeout:
+                return False
+
+            await asyncio.sleep(interval)
 
     async def _execute_task(
         self, task: BaseTask, mode: ExecutionMode
@@ -342,6 +472,8 @@ async def build_aio(
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
     run_wrapper: RunWrapper | None = None,
+    global_lock_manager: GlobalConcurrencyLockManager | None = None,
+    global_lock_config: GlobalLockConfig | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -351,6 +483,7 @@ async def build_aio(
     - Handles dynamic dependencies via generator suspension
     - Supports multiple root tasks (built concurrently)
     - Routes tasks to async/thread/process based on ExecutionModeSelector
+    - Optionally uses global concurrency locks for distributed execution
 
     Args:
         tasks: List of root tasks to build (and their dependencies)
@@ -360,6 +493,10 @@ async def build_aio(
             task_runner not provided)
         run_wrapper: Optional RunWrapper for delegating task execution (e.g., Modal).
             Only used when task_runner is None.
+        global_lock_manager: Optional lock manager for distributed locking.
+            Only used when task_runner is None.
+        global_lock_config: Configuration for global locking (enabled, retry settings).
+            Only used when task_runner is None.
 
     Returns:
         BuildSummary with status and task counts
@@ -368,7 +505,10 @@ async def build_aio(
 
     if task_runner is None:
         task_runner = HybridConcurrentTaskRunner(
-            registry=registry, run_wrapper=run_wrapper
+            registry=registry,
+            run_wrapper=run_wrapper,
+            global_lock_manager=global_lock_manager,
+            global_lock_config=global_lock_config,
         )
 
     task_count = TaskCount()
@@ -551,13 +691,27 @@ def build(
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
     run_wrapper: RunWrapper | None = None,
+    global_lock_manager: GlobalConcurrencyLockManager | None = None,
+    global_lock_config: GlobalLockConfig | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
     This is the main entry point for building tasks in production.
     Wraps the async build_aio() function for use from synchronous code.
+
+    See build_aio() for full documentation of parameters.
     """
-    return asyncio.run(build_aio(tasks, task_runner, fail_mode, registry, run_wrapper))
+    return asyncio.run(
+        build_aio(
+            tasks,
+            task_runner,
+            fail_mode,
+            registry,
+            run_wrapper,
+            global_lock_manager,
+            global_lock_config,
+        )
+    )
 
 
 __all__ = [
