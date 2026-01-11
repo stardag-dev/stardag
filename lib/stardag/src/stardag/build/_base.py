@@ -5,6 +5,7 @@ This module contains:
 - Execution mode types: ExecutionMode, ExecutionModeSelector, DefaultExecutionModeSelector
 - Task state tracking: TaskExecutionState
 - Task runner protocol: TaskRunnerABC
+- Global concurrency lock: GlobalConcurrencyLock, LockConfig, LockAcquisitionResult
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Generator, Literal, Protocol
+from typing import TYPE_CHECKING, Callable, Generator, Literal, Protocol
 
 from stardag._task import (
     BaseTask,
@@ -228,6 +229,177 @@ class DefaultRunWrapper:
 
 
 # =============================================================================
+# Global Concurrency Lock
+# =============================================================================
+
+
+class LockAcquisitionStatus(StrEnum):
+    """Status of a lock acquisition attempt."""
+
+    ACQUIRED = "acquired"
+    ALREADY_COMPLETED = "already_completed"
+    HELD_BY_OTHER = "held_by_other"
+    CONCURRENCY_LIMIT_REACHED = "concurrency_limit_reached"
+    ERROR = "error"
+
+
+@dataclass
+class LockAcquisitionResult:
+    """Result of a lock acquisition attempt."""
+
+    status: LockAcquisitionStatus
+    acquired: bool
+    error_message: str | None = None
+
+
+class GlobalConcurrencyLock(Protocol):
+    """Protocol for global distributed locks.
+
+    Implementations provide distributed locking for task execution across
+    multiple build processes/instances. This enables "exactly once" execution
+    guarantees globally (not just within a single build).
+
+    The default implementation uses the Stardag Registry API with PostgreSQL
+    backend. Users can implement custom solutions using Redis, DynamoDB, etc.
+    """
+
+    async def acquire(
+        self,
+        task_id: str,
+        owner_id: str,
+        ttl_seconds: int = 60,
+        check_task_completion: bool = True,
+    ) -> LockAcquisitionResult:
+        """Acquire a lock for a task.
+
+        Args:
+            task_id: The task identifier (hash).
+            owner_id: UUID identifying the lock owner (stable across retries).
+            ttl_seconds: Time-to-live in seconds for the lock.
+            check_task_completion: If True, check if task is already completed
+                in the registry before acquiring.
+
+        Returns:
+            LockAcquisitionResult with status:
+            - ACQUIRED: Lock acquired successfully
+            - ALREADY_COMPLETED: Task has completion record in registry
+            - HELD_BY_OTHER: Lock held by another owner
+            - CONCURRENCY_LIMIT_REACHED: Workspace limit reached
+            - ERROR: Unexpected error
+        """
+        ...
+
+    async def renew(
+        self,
+        task_id: str,
+        owner_id: str,
+        ttl_seconds: int = 60,
+    ) -> bool:
+        """Renew a lock's TTL.
+
+        Args:
+            task_id: The task identifier.
+            owner_id: The expected owner.
+            ttl_seconds: New TTL in seconds.
+
+        Returns:
+            True if successfully renewed, False otherwise.
+        """
+        ...
+
+    async def release(
+        self,
+        task_id: str,
+        owner_id: str,
+        task_completed: bool = False,
+        build_id: str | None = None,
+    ) -> bool:
+        """Release a lock.
+
+        Args:
+            task_id: The task identifier.
+            owner_id: The expected owner.
+            task_completed: If True and build_id provided, record task completion
+                in the same transaction.
+            build_id: Build ID for completion recording.
+
+        Returns:
+            True if successfully released, False otherwise.
+        """
+        ...
+
+    async def check_task_completed(
+        self,
+        task_id: str,
+    ) -> bool:
+        """Check if a task is registered as completed in the registry.
+
+        Args:
+            task_id: The task identifier.
+
+        Returns:
+            True if task has a completion record.
+        """
+        ...
+
+
+@dataclass
+class GlobalLockConfig:
+    """Configuration for global concurrency locking.
+
+    Attributes:
+        enabled: Whether to use global locking. Can be:
+            - True: Lock all tasks
+            - False: Lock no tasks (default)
+            - Callable: Function that returns True/False for each task
+        ttl_seconds: Lock time-to-live in seconds. Choose conservatively;
+            locks auto-expire and can be taken over.
+        renewal_interval_seconds: How often to renew locks during execution.
+            Set to None to disable auto-renewal.
+        wait_timeout_seconds: Max time to wait for lock acquisition.
+            Set to None to fail immediately if lock is held.
+        block_on_workspace_limit: If True, wait when workspace concurrency
+            limit is reached. If False, fail immediately.
+        completion_retry_timeout_seconds: Max time to retry task.complete()
+            when registry shows completed but target doesn't exist yet
+            (handles S3 eventual consistency).
+        completion_retry_interval_seconds: Interval between completion retries.
+    """
+
+    enabled: bool | Callable[[BaseTask], bool] = False
+    ttl_seconds: int = 60
+    renewal_interval_seconds: int | None = 30
+    wait_timeout_seconds: float | None = 300
+    block_on_workspace_limit: bool = True
+    completion_retry_timeout_seconds: float = 30
+    completion_retry_interval_seconds: float = 1.0
+
+
+class GlobalLockSelector(Protocol):
+    """Protocol for selecting whether a task should use global locking."""
+
+    def __call__(self, task: BaseTask) -> bool:
+        """Return True if task should use global lock."""
+        ...
+
+
+class DefaultGlobalLockSelector:
+    """Default selector that uses GlobalLockConfig.enabled to determine locking.
+
+    If enabled is a callable, it's called for each task.
+    Otherwise, the boolean value is used for all tasks.
+    """
+
+    def __init__(self, config: GlobalLockConfig) -> None:
+        self.config = config
+
+    def __call__(self, task: BaseTask) -> bool:
+        if callable(self.config.enabled):
+            return self.config.enabled(task)
+        return self.config.enabled
+
+
+# =============================================================================
 # Task Runner Protocol
 # =============================================================================
 
@@ -275,10 +447,16 @@ __all__ = [
     "BuildExitStatus",
     "BuildSummary",
     "DefaultExecutionModeSelector",
+    "DefaultGlobalLockSelector",
     "DefaultRunWrapper",
     "ExecutionMode",
     "ExecutionModeSelector",
     "FailMode",
+    "GlobalConcurrencyLock",
+    "GlobalLockConfig",
+    "GlobalLockSelector",
+    "LockAcquisitionResult",
+    "LockAcquisitionStatus",
     "RunWrapper",
     "TaskCount",
     "TaskExecutionState",

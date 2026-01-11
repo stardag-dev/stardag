@@ -14,16 +14,26 @@ Task runner:
 Interfaces:
 - TaskRunnerABC: Abstract base class for custom task runners
 - ExecutionModeSelector: Protocol for custom execution mode selection
+
+Global concurrency locking:
+- GlobalConcurrencyLock: Protocol for distributed lock implementations
+- GlobalLockConfig: Configuration for global locking behavior
 """
 
 from stardag.build._base import (
     BuildExitStatus,
     BuildSummary,
     DefaultExecutionModeSelector,
+    DefaultGlobalLockSelector,
     DefaultRunWrapper,
     ExecutionMode,
     ExecutionModeSelector,
     FailMode,
+    GlobalConcurrencyLock,
+    GlobalLockConfig,
+    GlobalLockSelector,
+    LockAcquisitionResult,
+    LockAcquisitionStatus,
     RunWrapper,
     TaskCount,
     TaskExecutionState,
@@ -53,6 +63,13 @@ __all__ = [
     # Run wrapper
     "DefaultRunWrapper",
     "RunWrapper",
+    # Global concurrency lock
+    "DefaultGlobalLockSelector",
+    "GlobalConcurrencyLock",
+    "GlobalLockConfig",
+    "GlobalLockSelector",
+    "LockAcquisitionResult",
+    "LockAcquisitionStatus",
     # Task runners
     "HybridConcurrentTaskRunner",
     "TaskRunnerABC",

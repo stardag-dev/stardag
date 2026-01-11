@@ -50,6 +50,11 @@ class Workspace(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
+    # Maximum concurrent locks allowed for this workspace (null = unlimited)
+    max_concurrent_locks: Mapped[int | None] = mapped_column(
+        nullable=True,
+        default=None,
+    )
 
     # Relationships
     organization: Mapped[Organization] = relationship(back_populates="workspaces")

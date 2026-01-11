@@ -12,6 +12,7 @@ from stardag_api.models.enums import (
 )
 from stardag_api.models.event import Event
 from stardag_api.models.invite import Invite
+from stardag_api.models.lock import DistributedLock
 from stardag_api.models.organization import Organization
 from stardag_api.models.organization_member import OrganizationMember
 from stardag_api.models.target_root import TargetRoot
@@ -26,6 +27,7 @@ __all__ = [
     "Base",
     "Build",
     "BuildStatus",
+    "DistributedLock",
     "Event",
     "EventType",
     "Invite",
