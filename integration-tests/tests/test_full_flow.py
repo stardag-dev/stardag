@@ -620,7 +620,7 @@ class TestSDKBuildWorkflow:
         import tempfile
 
         import stardag as sd
-        from stardag.build.registry import APIRegistry
+        from stardag.registry import APIRegistry
         from stardag.config import config_provider
         from stardag.target import target_factory_provider
 
@@ -673,7 +673,7 @@ class TestSDKBuildWorkflow:
 
                 # Build the DAG
                 try:
-                    sd.build(final_task, registry=registry)
+                    sd.build([final_task], registry=registry)
                 finally:
                     registry.close()
 
@@ -739,7 +739,7 @@ class TestSDKBuildWorkflow:
         import tempfile
 
         import stardag as sd
-        from stardag.build.registry import APIRegistry
+        from stardag.registry import APIRegistry
         from stardag.config import config_provider
         from stardag.target import target_factory_provider
 
@@ -797,7 +797,7 @@ class TestSDKBuildWorkflow:
 
                 # Build the DAG
                 try:
-                    sd.build(final_task, registry=registry)
+                    sd.build([final_task], registry=registry)
                 finally:
                     registry.close()
 
