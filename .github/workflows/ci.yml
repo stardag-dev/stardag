@@ -32,7 +32,7 @@ jobs:
       # Skip pyright hooks in pre-commit (they're informational with || true anyway)
       # Pyright runs separately in tox when needed
       - name: Set environment variable to skip pyright
-        run: echo "SKIP=pyright-stardag,pyright-stardag-examples,pyright-stardag-api" >> $GITHUB_ENV
+        run: echo "SKIP=pyright-stardag,pyright-stardag-examples,pyright-stardag-api,pyright-integration-tests" >> $GITHUB_ENV
       - uses: pre-commit/action@v3.0.1
 
   test-python:
