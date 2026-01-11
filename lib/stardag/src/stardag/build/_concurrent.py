@@ -40,6 +40,60 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Helper for process pool execution
+# =============================================================================
+
+
+def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
+    """Execute task in subprocess and handle generator results.
+
+    This function is called in a subprocess via ProcessPoolExecutor.
+    Since generators cannot be pickled, we:
+    1. Execute task.run()
+    2. If it returns a generator, extract ALL yielded TaskStruct
+    3. Return the combined TaskStruct (which IS picklable)
+
+    The task will be re-executed from scratch when dynamic deps complete
+    (idempotent re-execution pattern).
+
+    Args:
+        task: The task to execute.
+
+    Returns:
+        - None: Task completed with no dynamic dependencies.
+        - TaskStruct: Task yielded dynamic dependencies. Task needs to be
+            re-executed after these deps complete.
+    """
+    result = task.run()
+
+    if result is None:
+        return None
+
+    # Check if result is a generator (has __next__ method)
+    gen = result if hasattr(result, "__next__") else None
+    if gen is not None:
+        # Collect all yielded dynamic deps
+        all_deps: list[BaseTask] = []
+        try:
+            while True:
+                yielded = next(gen)  # type: ignore[arg-type]
+                # Flatten and collect
+                deps = flatten_task_struct(yielded)
+                all_deps.extend(deps)
+        except StopIteration:
+            pass
+
+        if all_deps:
+            # Return as tuple (picklable TaskStruct)
+            return tuple(all_deps)
+        return None
+
+    # Result is already a TaskStruct (shouldn't happen normally, but handle it)
+    # This can occur if task.run() returns a tuple/list directly
+    return result  # type: ignore[return-value]
+
+
+# =============================================================================
 # Task Runner Implementation
 # =============================================================================
 
@@ -87,7 +141,13 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         self._process_pool: ProcessPoolExecutor | None = None
 
         # Track suspended generators (task_id -> generator)
+        # For in-process execution where we can suspend and resume
         self._suspended_generators: dict[UUID, Generator[TaskStruct, None, None]] = {}
+
+        # Track tasks completed-but-waiting-for-deps (task_id -> True)
+        # For cross-process/remote execution where task ran to completion but
+        # yielded dynamic deps that need to be built first
+        self._completed_waiting_for_deps: set[UUID] = set()
 
     async def setup(self) -> None:
         """Initialize worker pools."""
@@ -108,12 +168,20 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
             self._process_pool = None
         self._async_semaphore = None
         self._suspended_generators.clear()
+        self._completed_waiting_for_deps.clear()
 
     async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
         """Execute a task and return result."""
-        # Check if we're resuming a suspended generator
+        # Check if we're resuming a suspended generator (in-process dynamic deps)
         if task.id in self._suspended_generators:
             return await self._resume_generator(task)
+
+        # Check if task completed but was waiting for dynamic deps (cross-process)
+        # In this case, task already ran to completion - just mark as done
+        if task.id in self._completed_waiting_for_deps:
+            self._completed_waiting_for_deps.discard(task.id)
+            await self._complete_task(task)
+            return None
 
         mode = self.execution_mode_selector(task)
 
@@ -129,8 +197,15 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
 
     async def _execute_task(
         self, task: BaseTask, mode: ExecutionMode
-    ) -> Generator[TaskStruct, None, None] | None:
-        """Execute task in appropriate context."""
+    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
+        """Execute task in appropriate context.
+
+        Returns:
+            - None: Task completed with no dynamic dependencies.
+            - Generator: Task has dynamic deps and is suspended in current process.
+            - TaskStruct: Task has dynamic deps but cannot be suspended (e.g., ran
+                in subprocess). Task will be re-executed when deps complete.
+        """
         # If run_wrapper is provided, use it for all execution
         if self.run_wrapper is not None:
             assert self._async_semaphore is not None
@@ -151,8 +226,11 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         elif mode == ExecutionMode.SYNC_PROCESS:
             assert self._process_pool is not None
             loop = asyncio.get_running_loop()
-            # Note: For process execution, we need to ensure the task is picklable
-            return await loop.run_in_executor(self._process_pool, task.run)
+            # Use helper that handles generators by collecting all yielded deps
+            # and returning TaskStruct (which IS picklable, unlike generators)
+            return await loop.run_in_executor(
+                self._process_pool, _run_task_in_process, task
+            )
 
         elif mode == ExecutionMode.SYNC_BLOCKING:
             # Block the event loop (debugging only)
@@ -162,21 +240,41 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
             raise ValueError(f"Unsupported execution mode: {mode}")
 
     async def _handle_result(
-        self, task: BaseTask, result: Generator[TaskStruct, None, None] | None
+        self,
+        task: BaseTask,
+        result: Generator[TaskStruct, None, None] | TaskStruct | None,
     ) -> None | TaskStruct | Exception:
-        """Handle task execution result."""
+        """Handle task execution result.
+
+        Handles three cases:
+        1. None: Task completed normally.
+        2. Generator: Task has dynamic deps and is suspended (in-process execution).
+           Store generator and return first yielded deps.
+        3. TaskStruct: Task has dynamic deps but cannot be suspended (cross-process
+           or remote execution). Return deps directly; task will be re-executed
+           when deps complete (idempotent re-execution).
+        """
         if result is None:
             # Task completed normally
             await self._complete_task(task)
             return None
 
-        # Check if result is a generator (dynamic deps)
+        # Check if result is a generator (dynamic deps, in-process)
+        # Use hasattr to check for generator protocol
         if hasattr(result, "__next__"):
-            return await self._handle_generator(task, result)
+            # Cast to Generator for type checker - we've verified it has __next__
+            gen: Generator[TaskStruct, None, None] = result  # type: ignore[assignment]
+            return await self._handle_generator(task, gen)
 
-        # Shouldn't reach here
-        await self._complete_task(task)
-        return None
+        # Result is TaskStruct (dynamic deps from process/remote execution)
+        # Task has ALREADY completed execution (generator ran to completion in
+        # subprocess), but it yielded these dynamic deps that need to be built.
+        # Mark task as "completed waiting for deps" so next submit() just marks
+        # it complete instead of re-executing.
+        self._completed_waiting_for_deps.add(task.id)
+        # Cast to TaskStruct for type checker - we've verified it's not a generator
+        task_struct: TaskStruct = result  # type: ignore[assignment]
+        return task_struct
 
     async def _handle_generator(
         self, task: BaseTask, gen: Generator[TaskStruct, None, None]

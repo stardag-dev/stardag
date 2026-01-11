@@ -168,18 +168,34 @@ class RunWrapper(Protocol):
     The RunWrapper is NOT responsible for:
     - Registry calls (start_task, complete_task, etc.) - handled by TaskRunner
     - Dependency resolution - handled by build()
-    - Generator handling - handled by TaskRunner
+
+    Return types support two patterns for dynamic dependencies:
+
+    1. **Generator (in-process)**: When task executes in same process (thread/async),
+       the generator can be suspended and resumed. TaskRunner stores the generator
+       and resumes it after dynamic deps complete.
+
+    2. **TaskStruct (cross-process/remote)**: When task executes in subprocess or
+       remote system, generators cannot be pickled. Instead, return the yielded
+       TaskStruct directly. TaskRunner will re-execute the task from scratch after
+       dynamic deps complete (idempotent re-execution pattern).
     """
 
-    async def run(self, task: BaseTask) -> Generator[TaskStruct, None, None] | None:
+    async def run(
+        self, task: BaseTask
+    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
         """Execute the task's run method.
 
         Args:
             task: The task to execute.
 
         Returns:
-            - None: Task completed successfully.
-            - Generator: Task has dynamic dependencies (yielded TaskStruct).
+            - None: Task completed successfully with no dynamic dependencies.
+            - Generator: Task has dynamic dependencies (yielded TaskStruct) and is
+                suspended in the current process. Can be resumed after deps complete.
+            - TaskStruct: Task has dynamic dependencies but cannot be suspended
+                (e.g., executed in subprocess/remote). Task should be re-executed
+                after deps complete (idempotent re-execution).
 
         Raises:
             Any exception from task execution is propagated.
@@ -192,9 +208,14 @@ class DefaultRunWrapper:
 
     Uses task.run_aio() if available, otherwise falls back to
     asyncio.to_thread(task.run) for sync-only tasks.
+
+    Note: This wrapper returns generators for dynamic deps since it executes
+    in the same process where generators can be suspended and resumed.
     """
 
-    async def run(self, task: BaseTask) -> Generator[TaskStruct, None, None] | None:
+    async def run(
+        self, task: BaseTask
+    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
         """Execute task using async if available, else via thread."""
         if _has_custom_run_aio(task):
             return await task.run_aio()
