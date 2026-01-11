@@ -49,8 +49,16 @@ class _PrefectTaskExecutor:
         self.before_run_callback = before_run_callback
         self.on_complete_callback = on_complete_callback
 
-    async def run(self, task: BaseTask) -> Generator[TaskStruct, None, None] | None:
-        """Execute task with registry tracking and callbacks."""
+    async def run(
+        self, task: BaseTask
+    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
+        """Execute task with registry tracking and callbacks.
+
+        Returns:
+            - None: Task completed with no dynamic dependencies.
+            - Generator: Task has dynamic deps and is suspended (in-process).
+            - TaskStruct: Task has dynamic deps but completed (cross-process).
+        """
         await self.registry.start_task_aio(task)
 
         if self.before_run_callback is not None:
@@ -59,12 +67,21 @@ class _PrefectTaskExecutor:
         try:
             result = await self.run_wrapper.run(task)
 
-            # Check if result is a generator (dynamic deps)
+            # Check if result is a generator (dynamic deps, in-process)
             if result is not None and hasattr(result, "__next__"):
                 # For dynamic deps, we return the generator without completing
+                # Cast for type checker
+                gen: Generator[TaskStruct, None, None] = result  # type: ignore[assignment]
+                return gen
+
+            # Check if result is TaskStruct (dynamic deps from cross-process)
+            # In Prefect's case, this means RunWrapper returned deps directly
+            if result is not None:
+                # Return TaskStruct - caller should handle building these deps
+                # and completing the task
                 return result
 
-            # Task completed successfully
+            # Task completed successfully (result is None)
             await self.registry.complete_task_aio(task)
 
             # Upload registry assets if any
@@ -75,7 +92,7 @@ class _PrefectTaskExecutor:
             if self.on_complete_callback is not None:
                 await self.on_complete_callback(task)
 
-            return result
+            return None
 
         except Exception as e:
             await self.registry.fail_task_aio(task, str(e))
@@ -230,21 +247,35 @@ async def build_dag_recursive(
         async def stardag_dynamic_task():
             if not task.complete():
                 try:
-                    gen = await executor.run(task)
-                    assert gen is not None
+                    result = await executor.run(task)
+                    if result is None:
+                        # Task completed with no dynamic deps
+                        logger.debug("Task completed with no dynamic deps")
+                        return task.id, None
 
-                    requires = next(gen)
-                    deps = flatten_task_struct(requires)
-                    completed = [dep.complete() for dep in deps]
-                    logger.debug(f"Initial deps: {deps}, completed: {completed}")
-                    while all(completed):
-                        logger.debug("All deps complete")
+                    # Check if result is a generator (in-process, can suspend/resume)
+                    if hasattr(result, "__next__"):
+                        gen: Generator[TaskStruct, None, None] = result  # type: ignore[assignment]
                         requires = next(gen)
                         deps = flatten_task_struct(requires)
                         completed = [dep.complete() for dep in deps]
-                        logger.debug(f"Deps: {deps}, completed: {completed}")
+                        logger.debug(f"Initial deps: {deps}, completed: {completed}")
+                        while all(completed):
+                            logger.debug("All deps complete")
+                            requires = next(gen)
+                            deps = flatten_task_struct(requires)
+                            completed = [dep.complete() for dep in deps]
+                            logger.debug(f"Deps: {deps}, completed: {completed}")
 
-                    return task.id, deps
+                        return task.id, deps
+                    else:
+                        # Result is TaskStruct (cross-process, task already completed)
+                        # Return deps directly - task execution is already done
+                        # Cast for type checker - we've verified it's not a generator
+                        task_struct: TaskStruct = result  # type: ignore[assignment]
+                        deps = flatten_task_struct(task_struct)
+                        logger.debug(f"Cross-process deps: {deps}")
+                        return task.id, deps
 
                 except StopIteration:
                     logger.debug("Task completed")
