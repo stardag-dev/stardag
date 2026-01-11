@@ -681,7 +681,7 @@ requires-dist = [
 provides-extras = ["browser"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pyright", specifier = ">=1.1" }]
+dev = [{ name = "pyright", specifier = ">=1.1.359" }]
 
 [[package]]
 name = "text-unidecode"
