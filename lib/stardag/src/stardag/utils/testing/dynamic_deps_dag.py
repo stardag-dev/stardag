@@ -6,6 +6,12 @@ auto_namespace(__name__)
 
 
 class DynamicDepsTask(AutoTask[str]):
+    """Task with dynamic dependencies for testing.
+
+    This task enforces the dynamic deps contract: after yielding deps,
+    it asserts that ALL yielded deps are complete before continuing.
+    """
+
     value: str
     static_deps: tuple[TaskLoads[str], ...] = ()
     dynamic_deps: tuple[TaskLoads[str], ...] = ()
@@ -14,8 +20,20 @@ class DynamicDepsTask(AutoTask[str]):
         return self.static_deps
 
     def run(self):  # type: ignore
-        for dep in sorted(self.dynamic_deps):  # type: ignore
-            yield dep
+        if self.dynamic_deps:
+            # Yield all dynamic deps at once
+            yield self.dynamic_deps
+
+            # CONTRACT: After yield returns, ALL deps MUST be complete.
+            # This assertion enforces the build system contract.
+            for dep in self.dynamic_deps:
+                if not dep.complete():  # type: ignore
+                    raise AssertionError(
+                        f"Dynamic deps contract violated! Dep {dep} is not complete "
+                        f"after yield. The build system must ensure all yielded deps "
+                        f"are complete before resuming the generator."
+                    )
+
         self.output().save(self.value)
 
 
