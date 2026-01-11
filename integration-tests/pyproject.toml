@@ -52,7 +52,7 @@ typeCheckingMode = "basic"
 
 [dependency-groups]
 dev = [
-    "pyright>=1.1",
+    "pyright>=1.1.359",
 ]
 
 [tool.uv.sources]
