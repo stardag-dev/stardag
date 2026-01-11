@@ -24,13 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from stardag.build._v2 import (
+from stardag.build import (
     DefaultExecutionModeSelector,
-    DefaultTaskRunner,
-    build,
+    HybridConcurrentTaskRunner,
+    build_aio,
     build_sequential,
 )
-from stardag.build.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileSystemTarget
 from stardag.target._factory import TargetFactory, target_factory_provider
 
@@ -65,7 +65,7 @@ async def run_concurrent_build(
     """Run a concurrent build and return duration."""
     dag = dag_factory(prefix=f"{run_id}_")
 
-    task_runner = DefaultTaskRunner(
+    task_runner = HybridConcurrentTaskRunner(
         registry=NoOpRegistry(),
         execution_mode_selector=DefaultExecutionModeSelector(
             sync_run_default=sync_run_default
@@ -77,7 +77,7 @@ async def run_concurrent_build(
 
     gc.collect()
     start = time.perf_counter()
-    await build([dag], task_runner=task_runner)
+    await build_aio([dag], task_runner=task_runner)
     duration = time.perf_counter() - start
 
     return duration

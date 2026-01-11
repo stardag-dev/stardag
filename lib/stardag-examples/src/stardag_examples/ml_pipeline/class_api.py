@@ -292,5 +292,5 @@ def get_benchmark_dag(
 if __name__ == "__main__":
     metrics = get_metrics_dag()
     print(metrics.model_dump_json(indent=2))
-    sd.build(metrics)
+    sd.build([metrics])
     print(json.dumps(metrics.output().load(), indent=2))

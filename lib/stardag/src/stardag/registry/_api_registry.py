@@ -4,7 +4,7 @@ import logging
 
 from stardag._registry_asset import RegistryAsset
 from stardag._task import BaseTask, flatten_task_struct
-from stardag.build.registry._base import RegistryABC, get_git_commit_hash
+from stardag.registry._base import RegistryABC, get_git_commit_hash
 from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,

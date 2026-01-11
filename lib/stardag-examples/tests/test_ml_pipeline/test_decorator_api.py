@@ -1,7 +1,7 @@
 import pytest
 from stardag_examples.ml_pipeline.decorator_api import get_metrics_dag
 
-from stardag.build.sequential import build as build_sequential
+from stardag.build import build_sequential
 from stardag.target.serialize import JSONSerializer, PandasDataFrameCSVSerializer
 
 try:
@@ -20,7 +20,7 @@ def test_build_metrics_dag(default_in_memory_fs_target):
     )
     assert isinstance(metrics.predictions._serializer, PandasDataFrameCSVSerializer)  # type: ignore
     assert metrics.predictions.output().path.endswith(".csv")  # type: ignore
-    build_sequential(metrics)
+    build_sequential([metrics])
     assert metrics.complete()
     assert metrics.output().exists()
     metrics_dict = metrics.output().load()

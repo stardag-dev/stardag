@@ -1,10 +1,10 @@
-"""Tests for the v2 build system.
+"""Tests for the build system.
 
 Tests the unified build system with:
 - build_sequential(): Sync debugging build
 - build_sequential_aio(): Async debugging build
-- build(): Concurrent hybrid build
-- build_sync(): Sync wrapper for concurrent build
+- build(): Sync wrapper for concurrent build (default)
+- build_aio(): Async concurrent build
 """
 
 from __future__ import annotations
@@ -18,16 +18,16 @@ import pytest
 
 from stardag._auto_task import AutoTask
 from stardag._task import auto_namespace
-from stardag.build._v2 import (
+from stardag.build import (
     BuildExitStatus,
-    DefaultTaskRunner,
     FailMode,
+    HybridConcurrentTaskRunner,
     build,
+    build_aio,
     build_sequential,
     build_sequential_aio,
-    build_sync,
 )
-from stardag.build.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileSystemTarget
 from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
@@ -367,7 +367,7 @@ class TestBuildConcurrent:
         dag = get_simple_dag()
         expected_output = get_simple_dag_expected_root_output()
 
-        summary = await build([dag], registry=noop_registry)
+        summary = await build_aio([dag], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
@@ -383,7 +383,7 @@ class TestBuildConcurrent:
         dag = get_dynamic_deps_dag()
         assert_dynamic_deps_task_complete_recursive(dag, False)
 
-        summary = await build([dag], registry=noop_registry)
+        summary = await build_aio([dag], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert_dynamic_deps_task_complete_recursive(dag, True)
@@ -401,7 +401,7 @@ class TestBuildConcurrent:
         root = SlowTask(name="root", delay=0.01, deps=(task_a, task_b))
 
         start = time.time()
-        summary = await build([root], registry=noop_registry)
+        summary = await build_aio([root], registry=noop_registry)
         elapsed = time.time() - start
 
         assert summary.status == BuildExitStatus.SUCCESS
@@ -424,7 +424,7 @@ class TestBuildConcurrent:
         failing = FailingTask()
         dependent = SyncOnlyTask(name="dependent", deps=(failing,))
 
-        summary = await build(
+        summary = await build_aio(
             [dependent], registry=noop_registry, fail_mode=FailMode.FAIL_FAST
         )
 
@@ -442,7 +442,7 @@ class TestBuildConcurrent:
         failing = FailingTask()
         dependent = SyncOnlyTask(name="dependent", deps=(failing,))
 
-        summary = await build(
+        summary = await build_aio(
             [good_task, dependent],
             registry=noop_registry,
             fail_mode=FailMode.CONTINUE,
@@ -463,7 +463,7 @@ class TestBuildConcurrent:
         task2 = SyncOnlyTask(name="root2")
         task3 = SyncOnlyTask(name="root3")
 
-        summary = await build([task1, task2, task3], registry=noop_registry)
+        summary = await build_aio([task1, task2, task3], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert task1.complete()
@@ -479,30 +479,30 @@ class TestBuildConcurrent:
         """Test async-only tasks execute in main event loop."""
         task = AsyncOnlyTask(name="async_test")
 
-        summary = await build([task], registry=noop_registry)
+        summary = await build_aio([task], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert task.output().load()["mode"] == "async"
 
 
 # ============================================================================
-# Test: build_sync
+# Test: build (sync)
 # ============================================================================
 
 
-class TestBuildSync:
-    """Tests for build_sync() - sync wrapper for concurrent build."""
+class TestBuildSyncWrapper:
+    """Tests for build() - sync wrapper for concurrent build (default)."""
 
     def test_simple_dag(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
         noop_registry,
     ):
-        """Test build_sync with simple DAG."""
+        """Test build with simple DAG."""
         dag = get_simple_dag()
         expected_output = get_simple_dag_expected_root_output()
 
-        summary = build_sync([dag], registry=noop_registry)
+        summary = build([dag], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
@@ -513,23 +513,23 @@ class TestBuildSync:
         default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
         noop_registry,
     ):
-        """Test build_sync with dynamic dependencies."""
+        """Test build with dynamic dependencies."""
         dag = get_dynamic_deps_dag()
         assert_dynamic_deps_task_complete_recursive(dag, False)
 
-        summary = build_sync([dag], registry=noop_registry)
+        summary = build([dag], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert_dynamic_deps_task_complete_recursive(dag, True)
 
 
 # ============================================================================
-# Test: DefaultTaskRunner
+# Test: HybridConcurrentTaskRunner
 # ============================================================================
 
 
-class TestDefaultTaskRunner:
-    """Tests for DefaultTaskRunner."""
+class TestHybridConcurrentTaskRunner:
+    """Tests for HybridConcurrentTaskRunner."""
 
     @pytest.mark.asyncio
     async def test_sync_task_runs_in_thread(
@@ -538,7 +538,9 @@ class TestDefaultTaskRunner:
         noop_registry,
     ):
         """Test sync tasks run in thread pool."""
-        runner = DefaultTaskRunner(registry=noop_registry, max_thread_workers=2)
+        runner = HybridConcurrentTaskRunner(
+            registry=noop_registry, max_thread_workers=2
+        )
         task = SyncOnlyTask(name="test")
 
         await runner.setup()
@@ -556,7 +558,7 @@ class TestDefaultTaskRunner:
         noop_registry,
     ):
         """Test async tasks run in main event loop."""
-        runner = DefaultTaskRunner(registry=noop_registry, max_async_workers=2)
+        runner = HybridConcurrentTaskRunner(registry=noop_registry, max_async_workers=2)
         task = AsyncOnlyTask(name="test")
 
         await runner.setup()
@@ -574,7 +576,7 @@ class TestDefaultTaskRunner:
         noop_registry,
     ):
         """Test failing tasks return exception."""
-        runner = DefaultTaskRunner(registry=noop_registry)
+        runner = HybridConcurrentTaskRunner(registry=noop_registry)
         task = FailingTask(error_message="test error")
 
         await runner.setup()
@@ -735,7 +737,7 @@ class TestDiamondPatterns:
         mid2 = DiamondTask(name="mid2", test_id="conc1", deps=(leaf,))
         root = DiamondTask(name="root", test_id="conc1", deps=(mid1, mid2))
 
-        summary = await build([root], registry=noop_registry)
+        summary = await build_aio([root], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert summary.task_count.discovered == 4
@@ -811,7 +813,7 @@ class TestDiamondPatterns:
             static_task_deps=(dyn_task, shared),
         )
 
-        summary = await build([parent], registry=noop_registry)
+        summary = await build_aio([parent], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
 
@@ -902,7 +904,7 @@ class TestDiamondPatterns:
             static_task_deps=(dyn_and_static, shared_31),
         )
 
-        summary = await build([parent], registry=noop_registry)
+        summary = await build_aio([parent], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
 

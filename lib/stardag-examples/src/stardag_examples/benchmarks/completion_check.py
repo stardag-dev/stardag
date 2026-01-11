@@ -18,12 +18,12 @@ from dataclasses import dataclass
 
 import stardag as sd
 from stardag._task import BaseTask
-from stardag.build._v2 import (
-    DefaultTaskRunner,
-    build,
+from stardag.build import (
+    HybridConcurrentTaskRunner,
+    build_aio,
     build_sequential,
 )
-from stardag.build.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry
 
 sd.auto_namespace(__name__)
 
@@ -107,10 +107,10 @@ async def run_concurrent_benchmark(leaf_count: int) -> BenchmarkResult:
     root = create_flat_dag(leaf_count)
     pre_complete_tasks(root)
 
-    task_runner = DefaultTaskRunner(registry=NoOpRegistry())
+    task_runner = HybridConcurrentTaskRunner(registry=NoOpRegistry())
 
     start = time.perf_counter()
-    await build([root], task_runner=task_runner)
+    await build_aio([root], task_runner=task_runner)
     duration = time.perf_counter() - start
 
     return BenchmarkResult(

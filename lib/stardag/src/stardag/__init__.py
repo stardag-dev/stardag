@@ -18,8 +18,8 @@ from stardag._task import (
 )
 from stardag._task_loads import TaskLoads
 from stardag.base_model import StardagBaseModel, StardagField
-from stardag.build.registry import registry_provider
-from stardag.build.sequential import build
+from stardag.build import build, build_aio, build_sequential
+from stardag.registry import registry_provider
 from stardag.exceptions import (
     APIError,
     AuthenticationError,
@@ -53,6 +53,8 @@ __all__ = [
     "AutoTask",
     "BaseTask",
     "build",
+    "build_aio",
+    "build_sequential",
     "Depends",
     "DirectoryTarget",
     "FileSystemTarget",

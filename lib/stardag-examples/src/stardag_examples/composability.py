@@ -49,7 +49,7 @@ if __name__ == "__main__":
     #     "b": 5.0,
     #   }
     # }
-    sd.build(expression)
+    sd.build([expression])
     result = expression.output().load()
     print(result)
     # 10.0

@@ -45,7 +45,7 @@ def main():
     print(f"Final task: {final_task.get_name()} ({final_task.id}...)")
 
     # Build the DAG
-    sd.build(final_task)
+    sd.build([final_task])
 
     # Read the result
     result = final_task.result()

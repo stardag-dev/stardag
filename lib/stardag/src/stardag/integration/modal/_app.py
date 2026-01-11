@@ -1,12 +1,14 @@
 import logging
 import pathlib
 import typing
+from typing import Generator
 
 import modal
 from modal.gpu import GPU_T
 
 from stardag import BaseTask, build
-from stardag.build.task_runner import AsyncTaskRunner, TaskRunner
+from stardag._task import TaskStruct
+from stardag.build import RunWrapper
 from stardag.integration.modal._config import modal_config_provider
 
 try:
@@ -44,67 +46,25 @@ def _default_worker_selector(task: BaseTask) -> str:
     return "default"
 
 
-class ModalTaskRunner(TaskRunner):
+class ModalRunWrapper(RunWrapper):
+    """RunWrapper that transfers task execution to Modal.
+
+    This wrapper sends tasks to Modal worker functions for execution.
+    It implements the RunWrapper protocol, allowing it to be used with
+    both the main build() function and Prefect's build() function.
+    """
+
     def __init__(
         self,
         *,
         modal_app_name: str,
         worker_selector: WorkerSelector,
-        **kwargs,
     ):
-        super().__init__(**kwargs)
-        self.worker_selector = worker_selector
         self.modal_app_name = modal_app_name
-
-    def _run_task(self, task):
-        self._reload_volumes()
-        worker_name = self.worker_selector(task)
-        worker_function = modal.Function.from_name(
-            app_name=self.modal_app_name,
-            name=f"worker_{worker_name}",
-        )
-        if worker_function is None:
-            raise ValueError(f"Worker function '{worker_name}' not found")
-
-        res = worker_function.remote(task)
-
-        return res
-
-    def _reload_volumes(self):
-        modal_config = modal_config_provider.get()
-        for volume_name in modal_config.volume_name_to_mount_path.keys():
-            vol = modal.Volume.from_name(volume_name, create_if_missing=True)
-            vol.reload()
-
-
-def _build(
-    task: BaseTask,
-    worker_selector: WorkerSelector,
-    modal_app_name: str,
-):
-    _setup_logging()
-    task_runner = ModalTaskRunner(
-        modal_app_name=modal_app_name,
-        worker_selector=worker_selector,
-    )
-    logger.info(f"Building root task: {repr(task)}")
-    build(task, task_runner=task_runner)
-    logger.info(f"Completed building root task {repr(task)}")
-
-
-class ModalAsyncTaskRunner(AsyncTaskRunner):
-    def __init__(
-        self,
-        *,
-        modal_app_name: str,
-        worker_selector: WorkerSelector,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
         self.worker_selector = worker_selector
-        self.modal_app_name = modal_app_name
 
-    async def _run_task(self, task):
+    async def run(self, task: BaseTask) -> Generator[TaskStruct, None, None] | None:
+        """Execute task on Modal."""
         await self._reload_volumes()
         worker_name = self.worker_selector(task)
         worker_function = modal.Function.from_name(
@@ -115,7 +75,6 @@ class ModalAsyncTaskRunner(AsyncTaskRunner):
             raise ValueError(f"Worker function '{worker_name}' not found")
 
         res = await worker_function.remote.aio(task)
-
         return res
 
     async def _reload_volumes(self):
@@ -123,6 +82,21 @@ class ModalAsyncTaskRunner(AsyncTaskRunner):
         for volume_name in modal_config.volume_name_to_mount_path.keys():
             vol = modal.Volume.from_name(volume_name, create_if_missing=True)
             await vol.reload.aio()
+
+
+def _build(
+    task: BaseTask,
+    worker_selector: WorkerSelector,
+    modal_app_name: str,
+):
+    _setup_logging()
+    run_wrapper = ModalRunWrapper(
+        modal_app_name=modal_app_name,
+        worker_selector=worker_selector,
+    )
+    logger.info(f"Building root task: {repr(task)}")
+    build([task], run_wrapper=run_wrapper)
+    logger.info(f"Completed building root task {repr(task)}")
 
 
 async def _prefect_build(
@@ -142,9 +116,16 @@ async def _prefect_build(
         raise ImportError("Prefect is not installed")
 
     _setup_logging()
-    task_runner = ModalAsyncTaskRunner(
+    run_wrapper = ModalRunWrapper(
         modal_app_name=modal_app_name,
         worker_selector=worker_selector,
+    )
+    logger.info(f"Building root task: {repr(task)}")
+    await prefect_build_flow.with_options(
+        name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
+    )(
+        task,
+        run_wrapper=run_wrapper,
         before_run_callback=(
             before_run_callback or create_markdown
         ),  # TODO default to None
@@ -152,10 +133,6 @@ async def _prefect_build(
             on_complete_callback or upload_task_on_complete_artifacts
         ),
     )
-    logger.info(f"Building root task: {repr(task)}")
-    await prefect_build_flow.with_options(
-        name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
-    )(task, task_runner=task_runner)
     logger.info(f"Completed building root task {repr(task)}")
 
 
