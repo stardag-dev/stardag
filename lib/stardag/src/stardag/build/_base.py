@@ -364,11 +364,19 @@ class GlobalLockConfig:
             when lock manager indicates already_completed but target doesn't
             exist yet (handles eventual consistency like S3).
         completion_retry_interval_seconds: Interval between completion retries.
+        lock_wait_timeout_seconds: Max time to wait when lock is held by another
+            process or concurrency limit is reached. During this time, we poll
+            for task completion (another process may complete it) and retry
+            lock acquisition. Set to None to fail immediately without waiting.
+        lock_wait_poll_interval_seconds: Interval between checks when waiting
+            for lock availability.
     """
 
     enabled: bool | Callable[[BaseTask], bool] = False
     completion_retry_timeout_seconds: float = 30
     completion_retry_interval_seconds: float = 1.0
+    lock_wait_timeout_seconds: float | None = 300  # 5 minutes
+    lock_wait_poll_interval_seconds: float = 5.0
 
 
 class GlobalLockSelector(Protocol):

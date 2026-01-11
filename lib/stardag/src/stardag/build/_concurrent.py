@@ -248,70 +248,107 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         1. Acquire lock (includes check for task completion in registry)
         2. If ALREADY_COMPLETED: retry task.complete_aio() until True or timeout
         3. If ACQUIRED: execute task, mark completed on success
-        4. If not acquired: return error
+        4. If HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED: wait and retry
+        5. If ERROR: return exception
         """
         assert self._global_lock_manager is not None
         task_id = str(task.id)
+        config = self._global_lock_config
 
-        async with self._global_lock_manager.lock(task_id) as handle:
-            result = handle.result
+        # Track start time for timeout
+        start_time = asyncio.get_event_loop().time()
+        timeout = config.lock_wait_timeout_seconds
+        poll_interval = config.lock_wait_poll_interval_seconds
 
-            if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
-                # Task completed elsewhere - wait for eventual consistency
-                completed = await self._wait_for_completion(task)
-                if completed:
-                    logger.debug(
-                        f"Task {task_id} already completed (confirmed via retry)"
-                    )
-                    return None
-                else:
-                    # Timeout waiting - log warning but don't fail
-                    # The task may still become visible eventually
-                    logger.warning(
-                        f"Task {task_id} marked complete in registry but "
-                        f"target not visible after retry timeout"
-                    )
-                    return None
+        # Track last acquisition result for logging
+        last_status: LockAcquisitionStatus | None = None
 
-            if result.status == LockAcquisitionStatus.HELD_BY_OTHER:
-                # Lock held by another process - this shouldn't happen in normal
-                # operation since build() waits for tasks to complete. Could indicate
-                # concurrent builds or a stuck lock (will expire via TTL).
-                msg = f"Lock for task {task_id} held by another process"
-                logger.warning(msg)
-                return Exception(msg)
+        while True:
+            async with self._global_lock_manager.lock(task_id) as handle:
+                result = handle.result
+                last_status = result.status
 
-            if result.status == LockAcquisitionStatus.CONCURRENCY_LIMIT_REACHED:
-                msg = f"Workspace concurrency limit reached for task {task_id}"
-                logger.warning(msg)
-                return Exception(msg)
+                if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
+                    # Task completed elsewhere - wait for eventual consistency
+                    completed = await self._wait_for_completion(task)
+                    if completed:
+                        logger.debug(
+                            f"Task {task_id} already completed (confirmed via retry)"
+                        )
+                        return None
+                    else:
+                        # Timeout waiting - log warning but don't fail
+                        # The task may still become visible eventually
+                        logger.warning(
+                            f"Task {task_id} marked complete in registry but "
+                            f"target not visible after retry timeout"
+                        )
+                        return None
 
-            if result.status == LockAcquisitionStatus.ERROR:
+                if result.status == LockAcquisitionStatus.ACQUIRED:
+                    # Lock acquired - execute task
+                    if not is_reexecution:
+                        await self.registry.start_task_aio(task)
+
+                    mode = self.execution_mode_selector(task)
+
+                    try:
+                        exec_result = await self._execute_task(task, mode)
+                        handled = await self._handle_result(task, exec_result)
+
+                        # Mark completed if task finished successfully
+                        if handled is None:
+                            handle.mark_completed()
+
+                        return handled
+
+                    except Exception as e:
+                        await self.registry.fail_task_aio(task, str(e))
+                        return e
+
+                if result.status == LockAcquisitionStatus.ERROR:
+                    msg = f"Failed to acquire lock for task {task_id}: {result.error_message}"
+                    logger.error(msg)
+                    return Exception(msg)
+
+                # HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED
+                # Check if we should wait and retry
+                if timeout is None:
+                    # No waiting configured - fail immediately
+                    msg = f"Lock for task {task_id} unavailable: {result.status}"
+                    logger.warning(msg)
+                    return Exception(msg)
+
+            # Outside the context manager (lock released if we had it)
+            # We only get here for HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED
+            # (other statuses return from within the context manager)
+
+            # Check timeout before waiting (timeout is guaranteed not None here
+            # because we check `if timeout is None` above and return)
+            assert timeout is not None
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed >= timeout:
                 msg = (
-                    f"Failed to acquire lock for task {task_id}: {result.error_message}"
+                    f"Timeout waiting for lock on task {task_id} "
+                    f"(status: {last_status}, waited {elapsed:.1f}s)"
                 )
-                logger.error(msg)
+                logger.warning(msg)
                 return Exception(msg)
 
-            # Lock acquired - execute task
-            if not is_reexecution:
-                await self.registry.start_task_aio(task)
+            # Check if task completed while we were waiting
+            # (another process may have finished it)
+            if await task.complete_aio():
+                logger.debug(
+                    f"Task {task_id} completed by another process while waiting for lock"
+                )
+                return None
 
-            mode = self.execution_mode_selector(task)
-
-            try:
-                exec_result = await self._execute_task(task, mode)
-                handled = await self._handle_result(task, exec_result)
-
-                # Mark completed if task finished successfully
-                if handled is None:
-                    handle.mark_completed()
-
-                return handled
-
-            except Exception as e:
-                await self.registry.fail_task_aio(task, str(e))
-                return e
+            # Wait before retrying
+            logger.debug(
+                f"Lock for task {task_id} unavailable ({last_status}), "
+                f"retrying in {poll_interval}s..."
+            )
+            await asyncio.sleep(poll_interval)
 
     async def _wait_for_completion(self, task: BaseTask) -> bool:
         """Wait for task completion with retry for eventual consistency.
