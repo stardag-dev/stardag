@@ -126,6 +126,32 @@ class BaseTask(
             None for simple tasks, or a Generator yielding TaskStruct for
             tasks with dynamic dependencies.
 
+        Dynamic Dependencies Contract:
+            When a task yields dynamic dependencies via a generator, the BUILD
+            SYSTEM guarantees that ALL yielded tasks are COMPLETE before the
+            generator is resumed. The task can rely on this contract:
+
+            ```python
+            def run(self):
+                # Yield deps we need to be built first
+                deps = [TaskA(), TaskB()]
+                yield deps
+
+                # CONTRACT: When we reach here, ALL deps are complete.
+                # We can safely access their outputs.
+                result_a = deps[0].output().load()
+                result_b = deps[1].output().load()
+
+                # Yield more deps if needed
+                yield [TaskC(input=result_a)]
+
+                # Again, TaskC is complete when we reach here
+                self.output().save(final_result)
+            ```
+
+            This contract is essential for correctness - tasks can depend on
+            previously yielded tasks being complete before continuing execution.
+
         Raises:
             RuntimeError: If called from within an existing event loop when
                 only run_aio() is implemented. In that case, call run_aio()
@@ -179,6 +205,11 @@ class BaseTask(
         Returns:
             None for simple tasks, or a Generator/AsyncGenerator for
             tasks with dynamic dependencies.
+
+        Dynamic Dependencies Contract:
+            Same as run() - the build system guarantees that ALL yielded tasks
+            are COMPLETE before the generator is resumed. See run() docstring
+            for detailed documentation and examples.
         """
         if _has_custom_run(self) and not _has_custom_run_aio(self):
             # User only implemented run - delegate to it
