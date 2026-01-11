@@ -20,6 +20,7 @@ from stardag._auto_task import AutoTask
 from stardag._task import auto_namespace
 from stardag.build import (
     BuildExitStatus,
+    DefaultExecutionModeSelector,
     FailMode,
     HybridConcurrentTaskRunner,
     build,
@@ -915,3 +916,100 @@ class TestDiamondPatterns:
         assert _execution_counts.get("complex_conc:21") == 1
         assert _execution_counts.get("complex_conc:1") == 1
         assert _execution_counts.get("complex_conc:0") == 1
+
+
+# ============================================================================
+# Test: Process Pool Execution with Dynamic Dependencies
+# ============================================================================
+
+
+class TestProcessPoolDynamicDeps:
+    """Tests for dynamic dependencies with process pool execution.
+
+    These tests verify that tasks with dynamic dependencies (generators that yield)
+    work correctly when executed in a separate process via ProcessPoolExecutor.
+
+    The challenge: generators cannot be pickled, so when a task yields dynamic
+    dependencies in a subprocess, we cannot return the generator. Instead, we
+    return the yielded TaskStruct and re-execute the task when dependencies complete.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dynamic_deps_with_process_pool(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that dynamic dependencies work with process pool execution.
+
+        This tests the idempotent re-execution pattern:
+        1. Task runs in subprocess, yields dynamic deps
+        2. TaskStruct is returned (not generator - can't pickle generators)
+        3. Dynamic deps are built
+        4. Task is re-submitted to subprocess
+        5. Task re-runs from start (idempotent), now deps are complete
+        6. Task completes
+        """
+        # Use the standard dynamic deps DAG from testing utilities
+        dag = get_dynamic_deps_dag()
+        assert_dynamic_deps_task_complete_recursive(dag, False)
+
+        # Create runner with process pool
+        runner = HybridConcurrentTaskRunner(
+            registry=noop_registry,
+            execution_mode_selector=DefaultExecutionModeSelector(
+                sync_run_default="process"
+            ),
+            max_process_workers=2,
+        )
+
+        summary = await build_aio([dag], task_runner=runner)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert_dynamic_deps_task_complete_recursive(dag, True)
+
+    @pytest.mark.asyncio
+    async def test_dynamic_diamond_with_process_pool(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test diamond pattern with dynamic deps in process pool.
+
+        Tests the exact pattern from get_dynamic_deps_dag() where a task
+        appears in both static deps of parent AND dynamic deps of another task.
+        Each task should execute exactly once despite the diamond pattern.
+        """
+        global _execution_counts
+        _execution_counts = {}
+
+        shared = DynamicDiamondTask(name="shared", test_id="proc_dyn")
+        dyn_task = DynamicDiamondTask(
+            name="dyn_task",
+            test_id="proc_dyn",
+            dynamic_task_deps=(shared,),
+        )
+        parent = DynamicDiamondTask(
+            name="parent",
+            test_id="proc_dyn",
+            static_task_deps=(dyn_task, shared),
+        )
+
+        runner = HybridConcurrentTaskRunner(
+            registry=noop_registry,
+            execution_mode_selector=DefaultExecutionModeSelector(
+                sync_run_default="process"
+            ),
+            max_process_workers=2,
+        )
+
+        summary = await build_aio([parent], task_runner=runner)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        # Each task should execute exactly once (idempotent re-execution)
+        # Note: With process pool, tasks may be re-executed but should still
+        # only save output once (idempotent behavior)
+        assert _execution_counts.get("proc_dyn:shared") == 1
+        assert _execution_counts.get("proc_dyn:dyn_task") == 1
+        assert _execution_counts.get("proc_dyn:parent") == 1
