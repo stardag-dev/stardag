@@ -258,7 +258,11 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         # Track start time for timeout
         start_time = asyncio.get_event_loop().time()
         timeout = config.lock_wait_timeout_seconds
-        poll_interval = config.lock_wait_poll_interval_seconds
+
+        # Exponential backoff state
+        current_interval = config.lock_wait_initial_interval_seconds
+        max_interval = config.lock_wait_max_interval_seconds
+        backoff_factor = config.lock_wait_backoff_factor
 
         # Track last acquisition result for logging
         last_status: LockAcquisitionStatus | None = None
@@ -343,12 +347,15 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
                 )
                 return None
 
-            # Wait before retrying
+            # Wait before retrying (exponential backoff)
             logger.debug(
                 f"Lock for task {task_id} unavailable ({last_status}), "
-                f"retrying in {poll_interval}s..."
+                f"retrying in {current_interval:.1f}s..."
             )
-            await asyncio.sleep(poll_interval)
+            await asyncio.sleep(current_interval)
+
+            # Increase interval for next iteration (exponential backoff)
+            current_interval = min(current_interval * backoff_factor, max_interval)
 
     async def _wait_for_completion(self, task: BaseTask) -> bool:
         """Wait for task completion with retry for eventual consistency.

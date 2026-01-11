@@ -368,15 +368,21 @@ class GlobalLockConfig:
             process or concurrency limit is reached. During this time, we poll
             for task completion (another process may complete it) and retry
             lock acquisition. Set to None to fail immediately without waiting.
-        lock_wait_poll_interval_seconds: Interval between checks when waiting
-            for lock availability.
+        lock_wait_initial_interval_seconds: Initial interval between checks when
+            waiting for lock availability.
+        lock_wait_max_interval_seconds: Maximum interval between checks (caps
+            exponential backoff).
+        lock_wait_backoff_factor: Multiplier for exponential backoff (e.g., 2.0
+            means each interval doubles).
     """
 
     enabled: bool | Callable[[BaseTask], bool] = False
     completion_retry_timeout_seconds: float = 30
     completion_retry_interval_seconds: float = 1.0
     lock_wait_timeout_seconds: float | None = 300  # 5 minutes
-    lock_wait_poll_interval_seconds: float = 5.0
+    lock_wait_initial_interval_seconds: float = 1.0
+    lock_wait_max_interval_seconds: float = 30.0
+    lock_wait_backoff_factor: float = 2.0
 
 
 class GlobalLockSelector(Protocol):

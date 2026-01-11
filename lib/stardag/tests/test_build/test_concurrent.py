@@ -19,7 +19,11 @@ from stardag.build import (
     BuildExitStatus,
     DefaultExecutionModeSelector,
     FailMode,
+    GlobalLockConfig,
     HybridConcurrentTaskRunner,
+    LockAcquisitionResult,
+    LockAcquisitionStatus,
+    LockHandle,
     build,
     build_aio,
 )
@@ -750,3 +754,350 @@ class TestProcessPoolDynamicDeps:
         assert parent.complete()
         assert dyn_task.complete()
         assert shared.complete()
+
+
+# ============================================================================
+# Test: Global Concurrency Lock
+# ============================================================================
+
+
+class MockLockHandle:
+    """Mock lock handle for testing."""
+
+    def __init__(
+        self,
+        result: LockAcquisitionResult,
+        on_release: typing.Callable[["MockLockHandle"], typing.Awaitable[None]]
+        | None = None,
+    ):
+        self._result = result
+        self._completed = False
+        self._on_release = on_release
+
+    @property
+    def result(self) -> LockAcquisitionResult:
+        return self._result
+
+    def mark_completed(self) -> None:
+        self._completed = True
+
+    async def __aenter__(self) -> "MockLockHandle":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
+        if self._on_release:
+            await self._on_release(self)
+        return False
+
+
+class MockLockManager:
+    """Mock lock manager for testing global locking scenarios."""
+
+    def __init__(self):
+        self.results_by_task: dict[str, LockAcquisitionResult] = {}
+        self.call_counts: dict[str, int] = {}
+        # Callbacks indexed by (task_id, call_number)
+        self.result_sequence: dict[str, list[LockAcquisitionResult]] = {}
+        self.releases: list[tuple[str, bool]] = []
+
+    def set_result(self, task_id: str, result: LockAcquisitionResult) -> None:
+        """Set the result for a specific task."""
+        self.results_by_task[task_id] = result
+
+    def set_result_sequence(
+        self, task_id: str, results: list[LockAcquisitionResult]
+    ) -> None:
+        """Set a sequence of results for a task (one per call)."""
+        self.result_sequence[task_id] = results
+
+    def lock(self, task_id: str) -> LockHandle:
+        """Get a lock handle for a task."""
+        self.call_counts[task_id] = self.call_counts.get(task_id, 0) + 1
+        call_num = self.call_counts[task_id]
+
+        # Check for sequence first
+        if task_id in self.result_sequence:
+            seq = self.result_sequence[task_id]
+            idx = call_num - 1
+            if idx < len(seq):
+                result = seq[idx]
+            else:
+                # Use last result if we've exceeded sequence
+                result = seq[-1]
+        elif task_id in self.results_by_task:
+            result = self.results_by_task[task_id]
+        else:
+            # Default: acquired
+            result = LockAcquisitionResult(
+                status=LockAcquisitionStatus.ACQUIRED, acquired=True
+            )
+
+        async def on_release(handle: MockLockHandle) -> None:
+            self.releases.append((task_id, handle._completed))
+
+        return MockLockHandle(result, on_release)
+
+    async def acquire(self, task_id: str) -> LockAcquisitionResult:
+        handle = self.lock(task_id)
+        return handle.result
+
+    async def release(self, task_id: str, task_completed: bool = False) -> bool:
+        self.releases.append((task_id, task_completed))
+        return True
+
+
+class TestGlobalConcurrencyLock:
+    """Tests for global concurrency lock integration with build."""
+
+    @pytest.mark.asyncio
+    async def test_lock_acquired_executes_task(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that task executes normally when lock is acquired."""
+        task = SyncOnlyTask(name="test_locked")
+
+        lock_manager = MockLockManager()
+        lock_manager.set_result(
+            str(task.id),
+            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
+        )
+
+        summary = await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+        # Verify lock was released with completed=True
+        assert (str(task.id), True) in lock_manager.releases
+
+    @pytest.mark.asyncio
+    async def test_lock_already_completed_skips_task(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that task is skipped when lock reports already completed."""
+        task = SyncOnlyTask(name="test_already_completed")
+
+        # Pre-complete the task (simulate another process completed it)
+        task.output().save({"name": "test_already_completed", "mode": "external"})
+
+        lock_manager = MockLockManager()
+        lock_manager.set_result(
+            str(task.id),
+            LockAcquisitionResult(
+                status=LockAcquisitionStatus.ALREADY_COMPLETED, acquired=False
+            ),
+        )
+
+        config = GlobalLockConfig(
+            enabled=True,
+            completion_retry_timeout_seconds=1,
+            completion_retry_interval_seconds=0.1,
+        )
+
+        summary = await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=config,
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Task was pre-completed, so it's counted as previously_completed
+        assert summary.task_count.previously_completed == 1
+        # Lock was not released with completed (we didn't complete it)
+        assert all(not completed for _, completed in lock_manager.releases)
+
+    @pytest.mark.asyncio
+    async def test_lock_held_by_other_waits_and_succeeds(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test waiting when lock held by other, then succeeding when task completes."""
+        task = SyncOnlyTask(name="test_wait_for_lock")
+
+        # Simulate: first call returns HELD_BY_OTHER, then task completes externally
+        lock_manager = MockLockManager()
+        lock_manager.set_result_sequence(
+            str(task.id),
+            [
+                LockAcquisitionResult(
+                    status=LockAcquisitionStatus.HELD_BY_OTHER, acquired=False
+                ),
+                LockAcquisitionResult(
+                    status=LockAcquisitionStatus.HELD_BY_OTHER, acquired=False
+                ),
+            ],
+        )
+
+        config = GlobalLockConfig(
+            enabled=True,
+            lock_wait_timeout_seconds=2,
+            lock_wait_initial_interval_seconds=0.05,
+            lock_wait_max_interval_seconds=0.1,
+        )
+
+        # Start build in a task
+        async def run_build():
+            return await build_aio(
+                [task],
+                registry=noop_registry,
+                global_lock_manager=lock_manager,
+                global_lock_config=config,
+            )
+
+        # Complete the task after a short delay (simulating external completion)
+        async def complete_task_externally():
+            await asyncio.sleep(0.1)
+            task.output().save({"name": "test_wait_for_lock", "mode": "external"})
+
+        # Run both concurrently
+        summary, _ = await asyncio.gather(run_build(), complete_task_externally())
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+        # Lock was called multiple times
+        assert lock_manager.call_counts[str(task.id)] >= 2
+
+    @pytest.mark.asyncio
+    async def test_lock_held_by_other_timeout(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test timeout when lock remains held by other."""
+        task = SyncOnlyTask(name="test_lock_timeout")
+
+        lock_manager = MockLockManager()
+        lock_manager.set_result(
+            str(task.id),
+            LockAcquisitionResult(
+                status=LockAcquisitionStatus.HELD_BY_OTHER, acquired=False
+            ),
+        )
+
+        config = GlobalLockConfig(
+            enabled=True,
+            lock_wait_timeout_seconds=0.2,
+            lock_wait_initial_interval_seconds=0.05,
+            lock_wait_max_interval_seconds=0.1,
+        )
+
+        summary = await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=config,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed == 1
+        assert "Timeout" in str(summary.error) or "unavailable" in str(summary.error)
+
+    @pytest.mark.asyncio
+    async def test_lock_error_fails_task(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that lock error causes task failure."""
+        task = SyncOnlyTask(name="test_lock_error")
+
+        lock_manager = MockLockManager()
+        lock_manager.set_result(
+            str(task.id),
+            LockAcquisitionResult(
+                status=LockAcquisitionStatus.ERROR,
+                acquired=False,
+                error_message="Connection failed",
+            ),
+        )
+
+        summary = await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert "Connection failed" in str(summary.error)
+
+    @pytest.mark.asyncio
+    async def test_selective_locking(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test selective locking based on GlobalLockConfig.enabled callable."""
+        task1 = SyncOnlyTask(name="expensive_task")
+        task2 = SyncOnlyTask(name="cheap_task")
+
+        lock_manager = MockLockManager()
+
+        # Only lock tasks with "expensive" in name
+        def should_lock(task):
+            return "expensive" in task.name
+
+        config = GlobalLockConfig(enabled=should_lock)
+
+        summary = await build_aio(
+            [task1, task2],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=config,
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Only task1 should have been locked
+        assert str(task1.id) in lock_manager.call_counts
+        assert str(task2.id) not in lock_manager.call_counts
+
+    @pytest.mark.asyncio
+    async def test_exponential_backoff(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that exponential backoff is applied when waiting for lock."""
+        task = SyncOnlyTask(name="test_backoff")
+
+        # Always return HELD_BY_OTHER to force retries
+        lock_manager = MockLockManager()
+        lock_manager.set_result(
+            str(task.id),
+            LockAcquisitionResult(
+                status=LockAcquisitionStatus.HELD_BY_OTHER, acquired=False
+            ),
+        )
+
+        config = GlobalLockConfig(
+            enabled=True,
+            lock_wait_timeout_seconds=0.5,
+            lock_wait_initial_interval_seconds=0.05,
+            lock_wait_max_interval_seconds=0.15,
+            lock_wait_backoff_factor=2.0,
+        )
+
+        start = time.time()
+        await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=config,
+        )
+        elapsed = time.time() - start
+
+        # Should have retried multiple times with backoff
+        # Intervals: 0.05, 0.10, 0.15 (capped), 0.15, ... -> about 0.5s timeout
+        call_count = lock_manager.call_counts[str(task.id)]
+        assert call_count >= 3, f"Expected >= 3 retries, got {call_count}"
+        assert elapsed >= 0.4, f"Expected >= 0.4s elapsed, got {elapsed:.2f}s"
