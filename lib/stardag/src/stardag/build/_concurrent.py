@@ -45,24 +45,30 @@ logger = logging.getLogger(__name__)
 
 
 def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
-    """Execute task in subprocess and handle generator results.
+    """Execute task in subprocess, respecting dynamic deps contract.
 
     This function is called in a subprocess via ProcessPoolExecutor.
-    Since generators cannot be pickled, we:
-    1. Execute task.run()
-    2. If it returns a generator, extract ALL yielded TaskStruct
-    3. Return the combined TaskStruct (which IS picklable)
+    Since generators cannot be pickled, we implement idempotent re-execution:
 
-    The task will be re-executed from scratch when dynamic deps complete
-    (idempotent re-execution pattern).
+    1. Execute task.run() to get the generator
+    2. Drive generator forward ONLY when yielded deps are COMPLETE
+    3. If deps aren't complete, return them as TaskStruct (to be built)
+    4. Task will be re-executed from scratch after deps complete
+    5. On re-execution, previously incomplete deps should now be complete,
+       so generator continues past those yields
+    6. Repeat until generator completes
+
+    CONTRACT: The generator is only advanced past a yield when ALL tasks
+    yielded in that step are complete. This ensures the task can rely on
+    yielded deps being complete after yield returns.
 
     Args:
         task: The task to execute.
 
     Returns:
-        - None: Task completed with no dynamic dependencies.
-        - TaskStruct: Task yielded dynamic dependencies. Task needs to be
-            re-executed after these deps complete.
+        - None: Task completed (generator finished or no dynamic deps).
+        - TaskStruct: Task yielded deps that are NOT complete. These need
+            to be built, then the task will be re-executed.
     """
     result = task.run()
 
@@ -72,20 +78,26 @@ def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
     # Check if result is a generator (has __next__ method)
     gen = result if hasattr(result, "__next__") else None
     if gen is not None:
-        # Collect all yielded dynamic deps
-        all_deps: list[BaseTask] = []
         try:
             while True:
                 yielded = next(gen)  # type: ignore[arg-type]
-                # Flatten and collect
                 deps = flatten_task_struct(yielded)
-                all_deps.extend(deps)
+
+                # Check if ALL yielded deps are complete
+                incomplete_deps = [dep for dep in deps if not dep.complete()]
+
+                if incomplete_deps:
+                    # Deps not complete - return them to be built
+                    # Task will be re-executed after these are built
+                    return tuple(deps)
+
+                # All deps complete - continue to next yield
+                # (generator will continue past the yield point)
+
         except StopIteration:
+            # Generator completed - task is done
             pass
 
-        if all_deps:
-            # Return as tuple (picklable TaskStruct)
-            return tuple(all_deps)
         return None
 
     # Result is already a TaskStruct (shouldn't happen normally, but handle it)
@@ -144,10 +156,10 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         # For in-process execution where we can suspend and resume
         self._suspended_generators: dict[UUID, Generator[TaskStruct, None, None]] = {}
 
-        # Track tasks completed-but-waiting-for-deps (task_id -> True)
-        # For cross-process/remote execution where task ran to completion but
-        # yielded dynamic deps that need to be built first
-        self._completed_waiting_for_deps: set[UUID] = set()
+        # Track tasks pending re-execution (task_id -> True)
+        # For cross-process/remote execution: when task yields incomplete deps,
+        # it's re-executed from scratch after deps complete (idempotent re-execution)
+        self._pending_reexecution: set[UUID] = set()
 
     async def setup(self) -> None:
         """Initialize worker pools."""
@@ -168,7 +180,7 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
             self._process_pool = None
         self._async_semaphore = None
         self._suspended_generators.clear()
-        self._completed_waiting_for_deps.clear()
+        self._pending_reexecution.clear()
 
     async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
         """Execute a task and return result."""
@@ -176,17 +188,17 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
         if task.id in self._suspended_generators:
             return await self._resume_generator(task)
 
-        # Check if task completed but was waiting for dynamic deps (cross-process)
-        # In this case, task already ran to completion - just mark as done
-        if task.id in self._completed_waiting_for_deps:
-            self._completed_waiting_for_deps.discard(task.id)
-            await self._complete_task(task)
-            return None
+        # Check if task is pending re-execution (cross-process dynamic deps)
+        # Task yielded incomplete deps, deps are now built, re-execute task
+        is_reexecution = task.id in self._pending_reexecution
+        if is_reexecution:
+            self._pending_reexecution.discard(task.id)
+            # Don't call start_task again - task was already started
+        else:
+            # Notify registry of new task start
+            await self.registry.start_task_aio(task)
 
         mode = self.execution_mode_selector(task)
-
-        # Notify registry
-        await self.registry.start_task_aio(task)
 
         try:
             result = await self._execute_task(task, mode)
@@ -267,11 +279,12 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
             return await self._handle_generator(task, gen)
 
         # Result is TaskStruct (dynamic deps from process/remote execution)
-        # Task has ALREADY completed execution (generator ran to completion in
-        # subprocess), but it yielded these dynamic deps that need to be built.
-        # Mark task as "completed waiting for deps" so next submit() just marks
-        # it complete instead of re-executing.
-        self._completed_waiting_for_deps.add(task.id)
+        # Task yielded these deps but they weren't complete, so the task
+        # returned early (idempotent re-execution pattern). Mark task as pending
+        # re-execution - it will be re-executed from scratch after deps complete.
+        # On re-execution, the generator will drive forward past the yield
+        # because the deps are now complete.
+        self._pending_reexecution.add(task.id)
         # Cast to TaskStruct for type checker - we've verified it's not a generator
         task_struct: TaskStruct = result  # type: ignore[assignment]
         return task_struct
