@@ -9,6 +9,7 @@ The main classes are:
 - registry_provider: Resource provider for getting the configured registry
 - RegistryGlobalConcurrencyLockManager: GlobalConcurrencyLockManager using Registry API
 - RegistryLockManagerConfig: Configuration for RegistryGlobalConcurrencyLockManager
+- RegistryAPIClientConfig: HTTP client configuration for Registry API
 """
 
 from stardag.registry._api_registry import APIRegistry
@@ -20,6 +21,13 @@ from stardag.registry._base import (
     init_registry,
     registry_provider,
 )
+from stardag.registry._http_client import (
+    RegistryAPIAsyncHTTPClient,
+    RegistryAPIClientConfig,
+    RegistryAPISyncHTTPClient,
+    get_async_http_client,
+    get_sync_http_client,
+)
 from stardag.registry._lock import (
     RegistryGlobalConcurrencyLockManager,
     RegistryLockManagerConfig,
@@ -30,9 +38,14 @@ __all__ = [
     "NoOpRegistry",
     "RegisterdTaskEnvelope",
     "RegistryABC",
+    "RegistryAPIAsyncHTTPClient",
+    "RegistryAPIClientConfig",
+    "RegistryAPISyncHTTPClient",
     "RegistryGlobalConcurrencyLockManager",
     "RegistryLockManagerConfig",
+    "get_async_http_client",
     "get_git_commit_hash",
+    "get_sync_http_client",
     "init_registry",
     "registry_provider",
 ]

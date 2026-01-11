@@ -4,8 +4,6 @@ import logging
 
 from stardag._registry_asset import RegistryAsset
 from stardag._task import BaseTask, flatten_task_struct
-from stardag.registry._base import RegistryABC, get_git_commit_hash
-from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
     AuthorizationError,
@@ -15,6 +13,14 @@ from stardag.exceptions import (
     NotFoundError,
     TokenExpiredError,
     WorkspaceAccessError,
+)
+from stardag.registry._base import RegistryABC, get_git_commit_hash
+from stardag.registry._http_client import (
+    RegistryAPIAsyncHTTPClient,
+    RegistryAPIClientConfig,
+    RegistryAPISyncHTTPClient,
+    get_async_http_client,
+    get_sync_http_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,45 +48,30 @@ class APIRegistry(RegistryABC):
         workspace_id: str | None = None,
         api_key: str | None = None,
     ):
-        # Load central config
-        config = config_provider.get()
+        # HTTP client configuration (shared with RegistryGlobalConcurrencyLockManager)
+        self._client_config = RegistryAPIClientConfig.from_config(
+            api_url=api_url,
+            timeout=timeout,
+            workspace_id=workspace_id,
+            api_key=api_key,
+        )
 
-        # API key: explicit > config (which includes env var)
-        self.api_key = api_key or config.api_key
-
-        # Access token from config (browser login, only if no API key)
-        self.access_token = config.access_token if not self.api_key else None
-
-        # API URL: explicit > config
-        self.api_url = (api_url or config.api.url).rstrip("/")
-
-        # Timeout: explicit > config
-        self.timeout = timeout if timeout is not None else config.api.timeout
-
-        # Workspace ID: explicit > config
-        self.workspace_id = workspace_id or config.context.workspace_id
-
-        self._client = None
-        self._async_client = None
+        self._client: RegistryAPISyncHTTPClient | None = None
+        self._async_client: RegistryAPIAsyncHTTPClient | None = None
         self._build_id: str | None = None
 
-        if self.api_key:
-            logger.debug("APIRegistry initialized with API key authentication")
-        elif self.access_token:
-            if not self.workspace_id:
-                logger.warning(
-                    "APIRegistry: JWT auth requires workspace_id. "
-                    "Run 'stardag config set workspace <id>' to set it."
-                )
-            else:
-                logger.debug(
-                    "APIRegistry initialized with browser login (JWT) authentication"
-                )
-        else:
-            logger.warning(
-                "APIRegistry initialized without authentication. "
-                "Run 'stardag auth login' or set STARDAG_API_KEY env var."
-            )
+        # Log authentication status
+        self._client_config.log_auth_status("APIRegistry")
+
+    @property
+    def api_url(self) -> str:
+        """Base API URL."""
+        return self._client_config.api_url
+
+    @property
+    def workspace_id(self) -> str | None:
+        """Workspace ID for JWT auth."""
+        return self._client_config.workspace_id
 
     def _handle_response_error(self, response, operation: str = "API call") -> None:
         """Check response for errors and raise appropriate exceptions.
@@ -143,24 +134,10 @@ class APIRegistry(RegistryABC):
             )
 
     @property
-    def client(self):
+    def client(self) -> RegistryAPISyncHTTPClient:
+        """Lazy-initialized sync HTTP client."""
         if self._client is None:
-            try:
-                import httpx
-            except ImportError:
-                raise ImportError(
-                    "httpx is required for APIRegistry. "
-                    "Install it with: pip install stardag[api]"
-                )
-            # Create client with appropriate auth header
-            headers = {}
-            if self.api_key:
-                # API key auth (production/CI)
-                headers["X-API-Key"] = self.api_key
-            elif self.access_token:
-                # JWT auth from browser login (local dev)
-                headers["Authorization"] = f"Bearer {self.access_token}"
-            self._client = httpx.Client(timeout=self.timeout, headers=headers)
+            self._client = get_sync_http_client(self._client_config)
         return self._client
 
     @property
@@ -169,13 +146,8 @@ class APIRegistry(RegistryABC):
         return self._build_id
 
     def _get_params(self) -> dict[str, str]:
-        """Get query params for API requests.
-
-        When using JWT auth, workspace_id must be passed as a query param.
-        """
-        if self.access_token and not self.api_key and self.workspace_id:
-            return {"workspace_id": self.workspace_id}
-        return {}
+        """Get query params for API requests."""
+        return self._client_config.get_workspace_params()
 
     def start_build(
         self,
@@ -359,24 +331,10 @@ class APIRegistry(RegistryABC):
     # Async client and methods
 
     @property
-    def async_client(self):
+    def async_client(self) -> RegistryAPIAsyncHTTPClient:
         """Lazy-initialized async HTTP client."""
         if self._async_client is None:
-            try:
-                import httpx
-            except ImportError:
-                raise ImportError(
-                    "httpx is required for APIRegistry. "
-                    "Install it with: pip install stardag[api]"
-                )
-            headers = {}
-            if self.api_key:
-                headers["X-API-Key"] = self.api_key
-            elif self.access_token:
-                headers["Authorization"] = f"Bearer {self.access_token}"
-            self._async_client = httpx.AsyncClient(
-                timeout=self.timeout, headers=headers
-            )
+            self._async_client = get_async_http_client(self._client_config)
         return self._async_client
 
     async def start_build_aio(

@@ -14,11 +14,15 @@ from stardag.build._base import (
     LockAcquisitionStatus,
     LockHandle,
 )
-from stardag.config import config_provider
 from stardag.exceptions import APIError
+from stardag.registry._http_client import (
+    RegistryAPIAsyncHTTPClient,
+    RegistryAPIClientConfig,
+    get_async_http_client,
+)
 
 if TYPE_CHECKING:
-    import httpx
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -201,34 +205,27 @@ class RegistryGlobalConcurrencyLockManager:
         # Lock configuration
         self.config = config or RegistryLockManagerConfig()
 
-        # Load central config
-        central_config = config_provider.get()
+        # HTTP client configuration (shared with APIRegistry)
+        self._client_config = RegistryAPIClientConfig.from_config(
+            api_url=api_url,
+            timeout=timeout,
+            workspace_id=workspace_id,
+            api_key=api_key,
+        )
 
-        # API key: explicit > config (which includes env var)
-        self.api_key = api_key or central_config.api_key
+        self._async_client: RegistryAPIAsyncHTTPClient | None = None
 
-        # Access token from config (browser login, only if no API key)
-        self.access_token = central_config.access_token if not self.api_key else None
-
-        # API URL: explicit > config
-        self.api_url = (api_url or central_config.api.url).rstrip("/")
-
-        # Timeout: explicit > config
-        self.timeout = timeout if timeout is not None else central_config.api.timeout
-
-        # Workspace ID: explicit > config
-        self.workspace_id = workspace_id or central_config.context.workspace_id
-
-        self._async_client: httpx.AsyncClient | None = None
+    @property
+    def api_url(self) -> str:
+        """Base API URL."""
+        return self._client_config.api_url
 
     def _get_params(self) -> dict[str, str]:
         """Get query params for API requests."""
-        if self.access_token and not self.api_key and self.workspace_id:
-            return {"workspace_id": self.workspace_id}
-        return {}
+        return self._client_config.get_workspace_params()
 
     def _handle_response_error(
-        self, response: httpx.Response, operation: str = "Lock operation"
+        self, response, operation: str = "Lock operation"
     ) -> None:
         """Check response for errors and raise appropriate exceptions."""
         if response.status_code < 400:
@@ -250,24 +247,10 @@ class RegistryGlobalConcurrencyLockManager:
         raise APIError(f"{operation} failed", status_code=status_code, detail=detail)
 
     @property
-    def async_client(self) -> httpx.AsyncClient:
+    def async_client(self) -> RegistryAPIAsyncHTTPClient:
         """Lazy-initialized async HTTP client."""
         if self._async_client is None:
-            try:
-                import httpx
-            except ImportError:
-                raise ImportError(
-                    "httpx is required for RegistryGlobalConcurrencyLockManager. "
-                    "Install it with: pip install stardag[api]"
-                )
-            headers = {}
-            if self.api_key:
-                headers["X-API-Key"] = self.api_key
-            elif self.access_token:
-                headers["Authorization"] = f"Bearer {self.access_token}"
-            self._async_client = httpx.AsyncClient(
-                timeout=self.timeout, headers=headers
-            )
+            self._async_client = get_async_http_client(self._client_config)
         return self._async_client
 
     def lock(self, task_id: str) -> LockHandle:
