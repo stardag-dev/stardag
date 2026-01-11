@@ -38,6 +38,14 @@ repos:
         types: [python]
         pass_filenames: false
         verbose: true
+      - id: pyright-integration-tests
+        name: pyright (integration-tests)
+        entry: bash -c 'cd integration-tests && uv sync --all-extras && uv run pyright src tests'
+        language: system
+        files: ^integration-tests/
+        types: [python]
+        pass_filenames: false
+        verbose: true
       # TypeScript/React hooks for stardag-ui
       - id: eslint-stardag-ui
         name: eslint (app/stardag-ui)
