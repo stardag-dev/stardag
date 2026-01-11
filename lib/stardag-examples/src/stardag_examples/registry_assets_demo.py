@@ -176,7 +176,7 @@ def main() -> None:
     print("  - AnalysisReport: produces markdown asset (analysis-report)")
 
     # Build the DAG
-    sd.build(report)
+    sd.build([report])
 
     # Read the result
     result = report.output().load()
