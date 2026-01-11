@@ -9,8 +9,8 @@ The main classes are:
 - registry_provider: Resource provider for getting the configured registry
 """
 
-from stardag.build.registry._api_registry import APIRegistry
-from stardag.build.registry._base import (
+from stardag.registry._api_registry import APIRegistry
+from stardag.registry._base import (
     NoOpRegistry,
     RegisterdTaskEnvelope,
     RegistryABC,

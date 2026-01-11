@@ -1,5 +1,14 @@
+"""Prefect integration for building stardag task DAGs.
+
+This module provides functions to build stardag tasks using Prefect for
+orchestration. Prefect handles scheduling and dependency management via
+its task submission system.
+"""
+
 import asyncio
 import logging
+import typing
+from typing import Generator
 from uuid import UUID
 
 from prefect import flow
@@ -7,12 +16,70 @@ from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
-from stardag._task import BaseTask, TaskRef, flatten_task_struct
-from stardag.build.registry import RegistryABC, registry_provider
-from stardag.build.task_runner import AsyncRunCallback, AsyncTaskRunner
+from stardag._task import BaseTask, TaskRef, TaskStruct, flatten_task_struct
+from stardag.build import DefaultRunWrapper, RunWrapper
 from stardag.integration.prefect.utils import format_key
+from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
+
+# Callback types for prefect build
+AsyncRunCallback = typing.Callable[[BaseTask], typing.Awaitable[None]]
+
+
+class _PrefectTaskExecutor:
+    """Internal executor that wraps task execution with registry/callbacks.
+
+    This class handles:
+    - Registry calls (start_task, complete_task, etc.)
+    - Before/after callbacks
+    - Asset uploading
+    - Delegation to RunWrapper for actual task execution
+    """
+
+    def __init__(
+        self,
+        run_wrapper: RunWrapper | None = None,
+        registry: RegistryABC | None = None,
+        before_run_callback: AsyncRunCallback | None = None,
+        on_complete_callback: AsyncRunCallback | None = None,
+    ):
+        self.run_wrapper = run_wrapper or DefaultRunWrapper()
+        self.registry = registry or registry_provider.get()
+        self.before_run_callback = before_run_callback
+        self.on_complete_callback = on_complete_callback
+
+    async def run(self, task: BaseTask) -> Generator[TaskStruct, None, None] | None:
+        """Execute task with registry tracking and callbacks."""
+        await self.registry.start_task_aio(task)
+
+        if self.before_run_callback is not None:
+            await self.before_run_callback(task)
+
+        try:
+            result = await self.run_wrapper.run(task)
+
+            # Check if result is a generator (dynamic deps)
+            if result is not None and hasattr(result, "__next__"):
+                # For dynamic deps, we return the generator without completing
+                return result
+
+            # Task completed successfully
+            await self.registry.complete_task_aio(task)
+
+            # Upload registry assets if any
+            assets = task.registry_assets_aio()
+            if assets:
+                await self.registry.upload_task_assets_aio(task, assets)
+
+            if self.on_complete_callback is not None:
+                await self.on_complete_callback(task)
+
+            return result
+
+        except Exception as e:
+            await self.registry.fail_task_aio(task, str(e))
+            raise
 
 
 @flow
@@ -29,29 +96,47 @@ async def build_flow(task: BaseTask, **kwargs):
 async def build(
     task: BaseTask,
     *,
-    task_runner: AsyncTaskRunner | None = None,
-    # TODO clean up duplicate arg options
+    run_wrapper: RunWrapper | None = None,
     before_run_callback: AsyncRunCallback | None = None,
     on_complete_callback: AsyncRunCallback | None = None,
     wait_for_completion: bool = True,
     registry: RegistryABC | None = None,
 ) -> dict[str, PrefectConcurrentFuture]:
-    task_runner = task_runner or AsyncTaskRunner(
+    """Build a stardag task DAG using Prefect for orchestration.
+
+    Args:
+        task: The root task to build
+        run_wrapper: Optional RunWrapper for custom task execution (e.g., Modal)
+        before_run_callback: Called before each task runs
+        on_complete_callback: Called after each task completes
+        wait_for_completion: Whether to wait for all tasks to complete
+        registry: Registry for tracking task execution
+
+    Returns:
+        Dict mapping task IDs to Prefect futures
+    """
+    executor = _PrefectTaskExecutor(
+        run_wrapper=run_wrapper,
+        registry=registry,
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
-        registry=registry or registry_provider.get(),
     )
-    task_id_to_future = {}
-    task_id_to_dynamic_future = {}
-    task_id_to_dynamic_deps = {}
+
+    task_id_to_future: dict[UUID, PrefectConcurrentFuture | None] = {}
+    task_id_to_dynamic_future: dict[UUID, PrefectConcurrentFuture] = {}
+    task_id_to_dynamic_deps: dict[
+        UUID, tuple[list[BaseTask], PrefectConcurrentFuture]
+    ] = {}
+
     res = await build_dag_recursive(
         task,
-        task_runner=task_runner,
+        executor=executor,
         task_id_to_future=task_id_to_future,
         task_id_to_dynamic_future=task_id_to_dynamic_future,
         task_id_to_dynamic_deps=task_id_to_dynamic_deps,
-        visited=set([]),
+        visited=set(),
     )
+
     while res is None:
         # Get next completed dynamic task
         task_id, dynamic_future = await next(
@@ -64,9 +149,7 @@ async def build(
         )
         del task_id_to_dynamic_future[task_id]  # important to avoid infinite loop
         result = dynamic_future.result()
-        # TODO avoid duplicate task_id references
         task_id, dynamic_deps = result
-        # TODO check for exceptions
         if dynamic_deps is None:
             # task completed
             task_id_to_future[task_id] = dynamic_future
@@ -79,46 +162,39 @@ async def build(
 
         res = await build_dag_recursive(
             task,
-            task_runner=task_runner,
+            executor=executor,
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
-            visited=set([]),
+            visited=set(),
         )
+
     if wait_for_completion:
         for future in task_id_to_future.values():
-            future.wait()
+            if future is not None:
+                future.wait()
 
-    return task_id_to_future
+    return task_id_to_future  # type: ignore
 
 
 async def build_dag_recursive(
     task: BaseTask,
     *,
-    task_runner: AsyncTaskRunner,
+    executor: _PrefectTaskExecutor,
     task_id_to_future: dict[UUID, PrefectConcurrentFuture | None],
-    task_id_to_dynamic_future: dict[
-        UUID, PrefectConcurrentFuture
-    ],  # dynamic tasks tentative run
-    task_id_to_dynamic_deps: dict[
-        UUID, tuple[list[BaseTask], PrefectConcurrentFuture]
-    ],  # dynamic tasks' dependencies
-    visited: set[UUID],  # check for cyclic dependencies
-) -> (
-    PrefectConcurrentFuture | None
-):  # None means could not be scheduled yet, because has dynamic dep task as upstream
-    """Translates a stardag task-DAG into Prefect flow logic."""
-    # print(f"\nBuilding task {task.id}")
-    # pprint(task_id_to_future)
-    # pprint(task_id_to_dynamic_future)
-    # pprint(task_id_to_dynamic_deps)
-    # print()
+    task_id_to_dynamic_future: dict[UUID, PrefectConcurrentFuture],
+    task_id_to_dynamic_deps: dict[UUID, tuple[list[BaseTask], PrefectConcurrentFuture]],
+    visited: set[UUID],
+) -> PrefectConcurrentFuture | None:
+    """Recursively build a stardag task DAG into Prefect flow logic.
 
+    Returns None if the task cannot be scheduled yet due to upstream dynamic deps.
+    """
     # Cycle detection
     if task.id in visited:
         raise ValueError("Cyclic dependencies detected")
 
-    # Hitting a built "branch"
+    # Already built
     already_built_future = task_id_to_future.get(task.id, None)
     if already_built_future is not None:
         return already_built_future
@@ -135,7 +211,7 @@ async def build_dag_recursive(
     upstream_build_results = [
         await build_dag_recursive(
             dep,
-            task_runner=task_runner,
+            executor=executor,
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
@@ -144,7 +220,7 @@ async def build_dag_recursive(
         for dep in upstream_tasks
     ]
     logger.debug(f"Upstream build results: {upstream_build_results}")
-    if any([res is None for res in upstream_build_results]):
+    if any(res is None for res in upstream_build_results):
         # Task with dynamic deps upstream
         return None
 
@@ -152,10 +228,9 @@ async def build_dag_recursive(
 
         @prefect_task(name=f"{task_ref.slug}-dynamic")
         async def stardag_dynamic_task():
-            # TODO: concurrency lock
             if not task.complete():
                 try:
-                    gen = await task_runner.run(task)
+                    gen = await executor.run(task)
                     assert gen is not None
 
                     requires = next(gen)
@@ -174,47 +249,40 @@ async def build_dag_recursive(
                 except StopIteration:
                     logger.debug("Task completed")
                     return task.id, None
+            return task.id, None
 
         extra_deps = [prev_dynamic_future] if prev_dynamic_future is not None else []
         future = stardag_dynamic_task.submit(  # type: ignore
             wait_for=upstream_build_results + extra_deps
         )
         task_id_to_dynamic_future[task.id] = future
-
-        # signal that this task has dynamic deps, we can't build downstream tasks yet
         return None
 
-    @prefect_task(
-        name=task_ref.slug,
-        # TODO caching. Make sure to include environment (stardag root) in cache key
-        # cache_key_fn=lambda *args, **kwargs: task.id
-    )
+    @prefect_task(name=task_ref.slug)
     async def stardag_task():
-        # TODO: concurrency lock
         if not task.complete():
-            res = await task_runner.run(task)
-            # check if it's a generator
+            res = await executor.run(task)
             if res is not None:
                 raise AssertionError(
                     "Tasks with dynamic deps should be executed separately."
                 )
-
         return task.id
 
     future = stardag_task.submit(wait_for=upstream_build_results)  # type: ignore
     task_id_to_future[task.id] = future
-
     return future
 
 
 async def _completed_prefect_future(
-    key, future: PrefectConcurrentFuture, timeout: float | None = None
+    key: UUID, future: PrefectConcurrentFuture, timeout: float | None = None
 ):
+    """Wait for a prefect future and return the key with the future."""
     future.wait(timeout=timeout)
     return key, future
 
 
 async def create_markdown(task: BaseTask):
+    """Create a markdown artifact for a task."""
     output = getattr(task, "output", None)
     if output is None:
         output_path = "N/A"
@@ -238,8 +306,8 @@ async def create_markdown(task: BaseTask):
     )
 
 
-async def upload_task_on_complete_artifacts(task):
+async def upload_task_on_complete_artifacts(task: BaseTask):
     """Upload artifacts to Prefect Cloud for tasks that implement the special method."""
     if hasattr(task, "prefect_on_complete_artifacts"):
-        for artifact in task.prefect_on_complete_artifacts():
+        for artifact in task.prefect_on_complete_artifacts():  # type: ignore[attr-defined]
             await artifact.create()

@@ -1,8 +1,8 @@
 import json
 import typing
 
-from stardag.build import sequential
-from stardag.build.registry import NoOpRegistry
+from stardag.build import build_sequential
+from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileSystemTarget
 from stardag.utils.testing.simple_dag import RootTask, RootTaskLoadedT
 
@@ -12,7 +12,7 @@ def test_build_simple_dag(
     simple_dag: RootTask,
     simple_dag_expected_root_output: RootTaskLoadedT,
 ):
-    sequential.build(simple_dag, registry=NoOpRegistry())
+    build_sequential([simple_dag], registry=NoOpRegistry())
     assert simple_dag.output().load() == simple_dag_expected_root_output
     expected_root_path = f"in-memory://{simple_dag._relpath}"
     assert (

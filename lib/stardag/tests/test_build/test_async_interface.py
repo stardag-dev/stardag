@@ -11,10 +11,9 @@ import typing
 import pytest
 
 from stardag._auto_task import AutoTask
-from stardag._task import auto_namespace
-from stardag.build.concurrent import asyncio_builder
-from stardag.build.registry import NoOpRegistry
-from stardag.build.task_runner import _has_custom_run_aio
+from stardag._task import _has_custom_run_aio, auto_namespace
+from stardag.build import build_aio
+from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileSystemTarget
 
 auto_namespace(__name__)
@@ -80,7 +79,7 @@ class TestAsyncInterface:
         task_c = AsyncIOTask(name="C", delay=0.05, deps=(task_a, task_b))
 
         registry = NoOpRegistry()
-        await asyncio_builder.build(task_c, registry=registry)
+        await build_aio([task_c], registry=registry)
 
         # Verify async methods were used
         assert all(mode == "async" for _, mode in execution_log)
@@ -124,7 +123,7 @@ class TestAsyncInterface:
         task_c = ConcurrentAsyncTask(name="C", delay=0.05, deps=(task_a, task_b))
 
         registry = NoOpRegistry()
-        await asyncio_builder.build(task_c, max_concurrent=4, registry=registry)
+        await build_aio([task_c], registry=registry)
 
         # A and B should have overlapping execution windows (true concurrency)
         assert start_times["A"] < end_times["B"], "A should start before B ends"
