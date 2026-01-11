@@ -14,11 +14,11 @@ from stardag.build._base import (
     LockAcquisitionStatus,
     LockHandle,
 )
-from stardag.exceptions import APIError
 from stardag.registry._http_client import (
     RegistryAPIAsyncHTTPClient,
     RegistryAPIClientConfig,
     get_async_http_client,
+    handle_response_error,
 )
 
 if TYPE_CHECKING:
@@ -228,23 +228,14 @@ class RegistryGlobalConcurrencyLockManager:
         self, response, operation: str = "Lock operation"
     ) -> None:
         """Check response for errors and raise appropriate exceptions."""
-        if response.status_code < 400:
-            return
-
-        detail = None
-        try:
-            data = response.json()
-            detail = data.get("detail", str(data))
-        except Exception:
-            detail = response.text[:200] if response.text else None
-
-        status_code = response.status_code
-
-        # These are expected lock-specific responses, not errors
-        if status_code in (423, 429, 409):
-            return
-
-        raise APIError(f"{operation} failed", status_code=status_code, detail=detail)
+        # 423 (Locked), 429 (Too Many Requests), 409 (Conflict) are expected
+        # lock-specific responses, not errors
+        handle_response_error(
+            response,
+            operation=operation,
+            workspace_id=self._client_config.workspace_id,
+            ignore_status_codes=(423, 429, 409),
+        )
 
     @property
     def async_client(self) -> RegistryAPIAsyncHTTPClient:

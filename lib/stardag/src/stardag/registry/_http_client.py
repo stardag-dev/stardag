@@ -12,6 +12,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NewType
 
 from stardag.config import config_provider
+from stardag.exceptions import (
+    APIError,
+    AuthorizationError,
+    InvalidAPIKeyError,
+    InvalidTokenError,
+    NotAuthenticatedError,
+    NotFoundError,
+    TokenExpiredError,
+    WorkspaceAccessError,
+)
 
 if TYPE_CHECKING:
     import httpx
@@ -179,3 +189,76 @@ def get_sync_http_client(
         headers=config.get_auth_headers(),
     )
     return RegistryAPISyncHTTPClient(client)
+
+
+def handle_response_error(
+    response: httpx.Response,
+    operation: str = "API call",
+    workspace_id: str | None = None,
+    ignore_status_codes: tuple[int, ...] = (),
+) -> None:
+    """Check response for errors and raise appropriate exceptions.
+
+    This is the shared error handling logic for Registry API responses.
+    It parses the response, extracts error details, and raises the
+    appropriate exception type based on the status code.
+
+    Args:
+        response: httpx Response object to check.
+        operation: Description of the operation for error messages.
+        workspace_id: Workspace ID for WorkspaceAccessError context.
+        ignore_status_codes: Status codes to silently ignore (return without raising).
+            Useful for endpoints where certain 4xx codes are expected responses.
+
+    Raises:
+        TokenExpiredError: If token has expired (401 with "expired").
+        InvalidTokenError: If token is invalid (401).
+        InvalidAPIKeyError: If API key is invalid (401 with "api key").
+        NotAuthenticatedError: If no auth provided (401).
+        WorkspaceAccessError: If workspace access denied (403 with "workspace").
+        AuthorizationError: If other 403 error.
+        NotFoundError: If resource not found (404).
+        APIError: For other HTTP errors.
+    """
+    if response.status_code < 400:
+        return  # No error
+
+    status_code = response.status_code
+
+    # Check if this status code should be ignored
+    if status_code in ignore_status_codes:
+        return
+
+    # Try to extract detail from response JSON
+    detail = None
+    try:
+        data = response.json()
+        detail = data.get("detail", str(data))
+    except Exception:
+        detail = response.text[:200] if response.text else None
+
+    if status_code == 401:
+        # Authentication error - determine specific type
+        detail_lower = (detail or "").lower()
+        if "expired" in detail_lower:
+            raise TokenExpiredError(detail)
+        elif "api key" in detail_lower:
+            raise InvalidAPIKeyError(detail)
+        elif "not authenticated" in detail_lower or not detail:
+            raise NotAuthenticatedError(detail)
+        else:
+            raise InvalidTokenError(detail)
+
+    elif status_code == 403:
+        # Authorization error
+        detail_lower = (detail or "").lower()
+        if "workspace" in detail_lower:
+            raise WorkspaceAccessError(workspace_id=workspace_id, detail=detail)
+        else:
+            raise AuthorizationError(f"{operation} access denied", detail=detail)
+
+    elif status_code == 404:
+        raise NotFoundError(f"{operation}: resource not found", detail=detail)
+
+    else:
+        raise APIError(f"{operation} failed", status_code=status_code, detail=detail)

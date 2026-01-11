@@ -27,6 +27,7 @@ from stardag.registry._http_client import (
     RegistryAPISyncHTTPClient,
     get_async_http_client,
     get_sync_http_client,
+    handle_response_error,
 )
 from stardag.registry._lock import (
     RegistryGlobalConcurrencyLockManager,
@@ -46,6 +47,7 @@ __all__ = [
     "get_async_http_client",
     "get_git_commit_hash",
     "get_sync_http_client",
+    "handle_response_error",
     "init_registry",
     "registry_provider",
 ]

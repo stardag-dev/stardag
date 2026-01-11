@@ -4,16 +4,6 @@ import logging
 
 from stardag._registry_asset import RegistryAsset
 from stardag._task import BaseTask, flatten_task_struct
-from stardag.exceptions import (
-    APIError,
-    AuthorizationError,
-    InvalidAPIKeyError,
-    InvalidTokenError,
-    NotAuthenticatedError,
-    NotFoundError,
-    TokenExpiredError,
-    WorkspaceAccessError,
-)
 from stardag.registry._base import RegistryABC, get_git_commit_hash
 from stardag.registry._http_client import (
     RegistryAPIAsyncHTTPClient,
@@ -21,6 +11,7 @@ from stardag.registry._http_client import (
     RegistryAPISyncHTTPClient,
     get_async_http_client,
     get_sync_http_client,
+    handle_response_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,64 +65,10 @@ class APIRegistry(RegistryABC):
         return self._client_config.workspace_id
 
     def _handle_response_error(self, response, operation: str = "API call") -> None:
-        """Check response for errors and raise appropriate exceptions.
-
-        Args:
-            response: httpx Response object
-            operation: Description of the operation for error messages
-
-        Raises:
-            TokenExpiredError: If token has expired
-            InvalidTokenError: If token is invalid
-            InvalidAPIKeyError: If API key is invalid
-            NotAuthenticatedError: If no auth provided
-            WorkspaceAccessError: If workspace access denied
-            AuthorizationError: If other 403 error
-            NotFoundError: If resource not found
-            APIError: For other HTTP errors
-        """
-        if response.status_code < 400:
-            return  # No error
-
-        # Try to extract detail from response JSON
-        detail = None
-        try:
-            data = response.json()
-            detail = data.get("detail", str(data))
-        except Exception:
-            detail = response.text[:200] if response.text else None
-
-        status_code = response.status_code
-
-        if status_code == 401:
-            # Authentication error - determine specific type
-            detail_lower = (detail or "").lower()
-            if "expired" in detail_lower:
-                raise TokenExpiredError(detail)
-            elif "api key" in detail_lower:
-                raise InvalidAPIKeyError(detail)
-            elif "not authenticated" in detail_lower or not detail:
-                raise NotAuthenticatedError(detail)
-            else:
-                raise InvalidTokenError(detail)
-
-        elif status_code == 403:
-            # Authorization error
-            detail_lower = (detail or "").lower()
-            if "workspace" in detail_lower:
-                raise WorkspaceAccessError(
-                    workspace_id=self.workspace_id, detail=detail
-                )
-            else:
-                raise AuthorizationError(f"{operation} access denied", detail=detail)
-
-        elif status_code == 404:
-            raise NotFoundError(f"{operation}: resource not found", detail=detail)
-
-        else:
-            raise APIError(
-                f"{operation} failed", status_code=status_code, detail=detail
-            )
+        """Check response for errors and raise appropriate exceptions."""
+        handle_response_error(
+            response, operation=operation, workspace_id=self.workspace_id
+        )
 
     @property
     def client(self) -> RegistryAPISyncHTTPClient:
