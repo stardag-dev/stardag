@@ -29,12 +29,7 @@ from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
     get_dynamic_deps_dag,
 )
-from stardag.utils.testing.simple_dag import (
-    get_simple_dag,
-    get_simple_dag_expected_root_output,
-)
-
-from ._helpers import (
+from stardag.utils.testing.helper_tasks import (
     AsyncOnlyTask,
     DiamondTask,
     DynamicDiamondTask,
@@ -43,6 +38,10 @@ from ._helpers import (
     SyncOnlyTask,
     get_execution_count,
     reset_execution_counts,
+)
+from stardag.utils.testing.simple_dag import (
+    get_simple_dag,
+    get_simple_dag_expected_root_output,
 )
 
 auto_namespace(__name__)

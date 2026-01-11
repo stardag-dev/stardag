@@ -18,14 +18,7 @@ from stardag.build import (
 )
 from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileSystemTarget
-from stardag.utils.testing.simple_dag import (
-    RootTask,
-    RootTaskLoadedT,
-    get_simple_dag,
-    get_simple_dag_expected_root_output,
-)
-
-from ._helpers import (
+from stardag.utils.testing.helper_tasks import (
     AsyncOnlyTask,
     DiamondTask,
     DualTask,
@@ -36,7 +29,12 @@ from ._helpers import (
     get_execution_count,
     reset_execution_counts,
 )
-
+from stardag.utils.testing.simple_dag import (
+    RootTask,
+    RootTaskLoadedT,
+    get_simple_dag,
+    get_simple_dag_expected_root_output,
+)
 
 # ============================================================================
 # Test: build_sequential
