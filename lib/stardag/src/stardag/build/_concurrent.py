@@ -423,6 +423,9 @@ async def build_aio(
             # Dynamic deps returned (TaskStruct)
             dynamic_deps = flatten_task_struct(result)
 
+            # Notify registry of dynamic deps discovery
+            await registry.discover_dynamic_deps_aio(task, dynamic_deps)
+
             # Discover any new dynamic deps (discover handles counting)
             for dep in dynamic_deps:
                 if dep.id not in task_states:
