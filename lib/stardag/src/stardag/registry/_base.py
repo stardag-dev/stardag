@@ -132,6 +132,29 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def suspend_task(self, task: "BaseTask") -> None:
+        """Mark a task as suspended waiting for dynamic dependencies.
+
+        Called when a task yields dynamic deps that are not yet complete.
+        The task will remain suspended until its dynamic deps are built.
+
+        Args:
+            task: The task that is suspended
+        """
+        pass
+
+    def resume_task(self, task: "BaseTask") -> None:
+        """Mark a task as resumed after dynamic dependencies completed.
+
+        Called when a task's dynamic dependencies are complete and
+        the task is ready to continue execution (either by resuming
+        a suspended generator or by re-executing the task).
+
+        Args:
+            task: The task that is resuming
+        """
+        pass
+
     # Async versions - default implementations delegate to sync methods
 
     async def register_task_aio(self, task: "BaseTask") -> None:
@@ -179,6 +202,14 @@ class RegistryABC(metaclass=abc.ABCMeta):
     ) -> None:
         """Async version of discover_dynamic_deps."""
         self.discover_dynamic_deps(task, deps)
+
+    async def suspend_task_aio(self, task: "BaseTask") -> None:
+        """Async version of suspend_task."""
+        self.suspend_task(task)
+
+    async def resume_task_aio(self, task: "BaseTask") -> None:
+        """Async version of resume_task."""
+        self.resume_task(task)
 
 
 class NoOpRegistry(RegistryABC):

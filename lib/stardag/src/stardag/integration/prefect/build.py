@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 AsyncRunCallback = typing.Callable[[BaseTask], typing.Awaitable[None]]
 
 
-class _PrefectTaskExecutor:
+class _PrefectBuildOrchestrator:
     """Internal executor that wraps task execution with registry/callbacks.
 
     This class handles:
@@ -158,7 +158,7 @@ async def build(
     Returns:
         Dict mapping task IDs to Prefect futures
     """
-    executor = _PrefectTaskExecutor(
+    executor = _PrefectBuildOrchestrator(
         task_executor=task_executor,
         registry=registry,
         before_run_callback=before_run_callback,
@@ -223,7 +223,7 @@ async def build(
 async def build_dag_recursive(
     task: BaseTask,
     *,
-    executor: _PrefectTaskExecutor,
+    executor: _PrefectBuildOrchestrator,
     task_id_to_future: dict[UUID, PrefectConcurrentFuture | None],
     task_id_to_dynamic_future: dict[UUID, PrefectConcurrentFuture],
     task_id_to_dynamic_deps: dict[UUID, tuple[list[BaseTask], PrefectConcurrentFuture]],

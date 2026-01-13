@@ -118,6 +118,9 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
     For routing tasks to different executors (e.g., some to Modal, some local),
     use RoutedTaskExecutor to compose multiple executors.
 
+    Alternative: For fully async multiprocessing without thread pools, one could
+    implement an AIOMultiprocessingTaskExecutor using libraries like aiomultiprocess.
+
     Args:
         execution_mode_selector: Callable to select execution mode per task.
         max_async_workers: Maximum concurrent async tasks (semaphore-based).
@@ -352,8 +355,6 @@ async def build_aio(
     completion_events: dict[UUID, asyncio.Event] = {}
     # Currently executing tasks
     executing: set[UUID] = set()
-    # Lock for shared state
-    lock = asyncio.Lock()
 
     async def discover(task: BaseTask) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
@@ -420,11 +421,12 @@ async def build_aio(
             task_count.succeeded += 1
 
         else:
-            # Dynamic deps returned (TaskStruct)
+            # Dynamic deps returned (TaskStruct) - task is suspended
             dynamic_deps = flatten_task_struct(result)
 
-            # Notify registry of dynamic deps discovery
+            # Notify registry of dynamic deps discovery and suspension
             await registry.discover_dynamic_deps_aio(task, dynamic_deps)
+            await registry.suspend_task_aio(task)
 
             # Discover any new dynamic deps (discover handles counting)
             for dep in dynamic_deps:
@@ -464,8 +466,7 @@ async def build_aio(
                 break
 
             # Find and submit ready tasks
-            async with lock:
-                ready = find_ready_tasks()
+            ready = find_ready_tasks()
 
             # Start any ready tasks
             for task in ready:
@@ -473,6 +474,9 @@ async def build_aio(
                 if not state.started:
                     await registry.start_task_aio(task)
                     state.started = True
+                elif state.dynamic_deps:
+                    # Task was suspended waiting for dynamic deps, now resuming
+                    await registry.resume_task_aio(task)
                 # Create async task and track it
                 async_task = asyncio.create_task(task_executor.submit(task))
                 pending_futures[task.id] = async_task
@@ -509,27 +513,26 @@ async def build_aio(
             )
 
             # Process completed tasks
-            async with lock:
-                for async_task in done:
-                    # Find which task this was
-                    task_id = None
-                    for tid, fut in pending_futures.items():
-                        if fut is async_task:
-                            task_id = tid
-                            break
-                    assert task_id is not None
+            for async_task in done:
+                # Find which task this was
+                task_id = None
+                for tid, fut in pending_futures.items():
+                    if fut is async_task:
+                        task_id = tid
+                        break
+                assert task_id is not None
 
-                    # Remove from pending and executing
-                    del pending_futures[task_id]
-                    executing.discard(task_id)
+                # Remove from pending and executing
+                del pending_futures[task_id]
+                executing.discard(task_id)
 
-                    # Get result and process
-                    task = task_states[task_id].task
-                    try:
-                        result = async_task.result()
-                    except Exception as e:
-                        result = e
-                    await process_result(task, result)
+                # Get result and process
+                task = task_states[task_id].task
+                try:
+                    result = async_task.result()
+                except Exception as e:
+                    result = e
+                await process_result(task, result)
 
         await registry.complete_build_aio()
         return BuildSummary(
