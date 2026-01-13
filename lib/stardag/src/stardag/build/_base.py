@@ -12,7 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Generator, Literal, Protocol
+from typing import Callable, Generator, Generic, Literal, Protocol, TypeVar
 
 from stardag._task import (
     BaseTask,
@@ -182,82 +182,6 @@ class TaskExecutionState:
 
 
 # =============================================================================
-# Run Wrapper Protocol
-# =============================================================================
-
-
-class RunWrapper(Protocol):
-    """Protocol for wrapping task execution.
-
-    A RunWrapper is responsible for actually executing the task's run method.
-    This can be used to:
-    - Transfer execution to a remote system (e.g., Modal)
-    - Add logging/metrics around task execution
-    - Implement custom retry logic
-
-    The RunWrapper is NOT responsible for:
-    - Registry calls (start_task, complete_task, etc.) - handled by build()
-    - Dependency resolution - handled by build()
-
-    Return types support two patterns for dynamic dependencies:
-
-    1. **Generator (in-process)**: When task executes in same process (thread/async),
-       the generator can be suspended and resumed. TaskExecutor stores the generator
-       and resumes it after dynamic deps complete.
-
-    2. **TaskStruct (cross-process/remote)**: When task executes in subprocess or
-       remote system, generators cannot be pickled. Instead, return the yielded
-       TaskStruct directly. TaskExecutor will re-execute the task from scratch after
-       dynamic deps complete (idempotent re-execution pattern).
-    """
-
-    async def run(
-        self, task: BaseTask
-    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
-        """Execute the task's run method.
-
-        Args:
-            task: The task to execute.
-
-        Returns:
-            - None: Task completed successfully with no dynamic dependencies.
-            - Generator: Task has dynamic dependencies (yielded TaskStruct) and is
-                suspended in the current process. Can be resumed after deps complete.
-            - TaskStruct: Task has dynamic dependencies but cannot be suspended
-                (e.g., executed in subprocess/remote). Task should be re-executed
-                after deps complete (idempotent re-execution).
-
-        Raises:
-            Any exception from task execution is propagated.
-        """
-        ...
-
-
-class DefaultRunWrapper:
-    """Default run wrapper that executes tasks locally.
-
-    Uses task.run_aio() if available, otherwise falls back to
-    asyncio.to_thread(task.run) for sync-only tasks.
-
-    Note: This wrapper returns generators for dynamic deps since it executes
-    in the same process where generators can be suspended and resumed.
-    """
-
-    async def run(
-        self, task: BaseTask
-    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
-        """Execute task using async if available, else via thread."""
-        if _has_custom_run_aio(task):
-            return await task.run_aio()
-        elif _has_custom_run(task):
-            import asyncio
-
-            return await asyncio.to_thread(task.run)
-        else:
-            raise ValueError(f"Task {task} has no run method")
-
-
-# =============================================================================
 # Task Executor Protocol
 # =============================================================================
 
@@ -297,5 +221,62 @@ class TaskExecutorABC(ABC):
 
     @abstractmethod
     async def teardown(self) -> None:
-        """Teardown any resources used by the task runner."""
+        """Teardown any resources used by the task executor."""
         ...
+
+
+# Type variable for executor routing keys
+ExecutorKeyT = TypeVar("ExecutorKeyT")
+
+
+class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
+    """Task executor that routes tasks to different executors based on a router function.
+
+    This enables flexible execution strategies where different tasks can be
+    executed by different executors. For example:
+    - Route some tasks to Modal for GPU execution
+    - Route other tasks to local thread/process pools
+    - Route based on task type, resource requirements, etc.
+
+    Example:
+        local_executor = HybridConcurrentTaskExecutor()
+        modal_executor = ModalTaskExecutor(app_name="my-app")
+
+        routed = RoutedTaskExecutor(
+            executors={"local": local_executor, "modal": modal_executor},
+            router=lambda task: "modal" if needs_gpu(task) else "local",
+        )
+        await build_aio([task], task_executor=routed)
+    """
+
+    def __init__(
+        self,
+        executors: dict[ExecutorKeyT, TaskExecutorABC],
+        router: Callable[[BaseTask], ExecutorKeyT],
+    ) -> None:
+        """Initialize the routed executor.
+
+        Args:
+            executors: Mapping from routing keys to task executors.
+            router: Function that determines which executor to use for each task.
+        """
+        self.executors = executors
+        self.router = router
+
+    async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
+        """Route task to appropriate executor and submit."""
+        key = self.router(task)
+        executor = self.executors.get(key)
+        if executor is None:
+            return KeyError(f"No executor found for routing key: {key}")
+        return await executor.submit(task)
+
+    async def setup(self) -> None:
+        """Setup all child executors."""
+        for executor in self.executors.values():
+            await executor.setup()
+
+    async def teardown(self) -> None:
+        """Teardown all child executors."""
+        for executor in self.executors.values():
+            await executor.teardown()

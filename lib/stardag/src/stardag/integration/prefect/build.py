@@ -16,8 +16,15 @@ from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
-from stardag._task import BaseTask, TaskRef, TaskStruct, flatten_task_struct
-from stardag.build import DefaultRunWrapper, RunWrapper
+from stardag._task import (
+    BaseTask,
+    TaskRef,
+    TaskStruct,
+    _has_custom_run,
+    _has_custom_run_aio,
+    flatten_task_struct,
+)
+from stardag.build import TaskExecutorABC
 from stardag.integration.prefect.utils import format_key
 from stardag.registry import RegistryABC, registry_provider
 
@@ -34,20 +41,33 @@ class _PrefectTaskExecutor:
     - Registry calls (start_task, complete_task, etc.)
     - Before/after callbacks
     - Asset uploading
-    - Delegation to RunWrapper for actual task execution
+    - Local task execution (async or threaded)
+
+    Note: For remote execution (e.g., Modal), pass a custom TaskExecutorABC.
     """
 
     def __init__(
         self,
-        run_wrapper: RunWrapper | None = None,
+        task_executor: TaskExecutorABC | None = None,
         registry: RegistryABC | None = None,
         before_run_callback: AsyncRunCallback | None = None,
         on_complete_callback: AsyncRunCallback | None = None,
     ):
-        self.run_wrapper = run_wrapper or DefaultRunWrapper()
+        self.task_executor = task_executor
         self.registry = registry or registry_provider.get()
         self.before_run_callback = before_run_callback
         self.on_complete_callback = on_complete_callback
+
+    async def _execute_locally(
+        self, task: BaseTask
+    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
+        """Execute task locally using async or thread."""
+        if _has_custom_run_aio(task):
+            return await task.run_aio()
+        elif _has_custom_run(task):
+            return await asyncio.to_thread(task.run)
+        else:
+            raise ValueError(f"Task {task} has no run method")
 
     async def run(
         self, task: BaseTask
@@ -65,7 +85,14 @@ class _PrefectTaskExecutor:
             await self.before_run_callback(task)
 
         try:
-            result = await self.run_wrapper.run(task)
+            # Use custom executor if provided, otherwise execute locally
+            if self.task_executor is not None:
+                result = await self.task_executor.submit(task)
+                # If executor returned an exception, raise it
+                if isinstance(result, Exception):
+                    raise result
+            else:
+                result = await self._execute_locally(task)
 
             # Check if result is a generator (dynamic deps, in-process)
             if result is not None and hasattr(result, "__next__"):
@@ -75,7 +102,6 @@ class _PrefectTaskExecutor:
                 return gen
 
             # Check if result is TaskStruct (dynamic deps from cross-process)
-            # In Prefect's case, this means RunWrapper returned deps directly
             if result is not None:
                 # Return TaskStruct - caller should handle building these deps
                 # and completing the task
@@ -113,7 +139,7 @@ async def build_flow(task: BaseTask, **kwargs):
 async def build(
     task: BaseTask,
     *,
-    run_wrapper: RunWrapper | None = None,
+    task_executor: TaskExecutorABC | None = None,
     before_run_callback: AsyncRunCallback | None = None,
     on_complete_callback: AsyncRunCallback | None = None,
     wait_for_completion: bool = True,
@@ -123,7 +149,7 @@ async def build(
 
     Args:
         task: The root task to build
-        run_wrapper: Optional RunWrapper for custom task execution (e.g., Modal)
+        task_executor: Optional TaskExecutorABC for custom task execution (e.g., Modal)
         before_run_callback: Called before each task runs
         on_complete_callback: Called after each task completes
         wait_for_completion: Whether to wait for all tasks to complete
@@ -133,7 +159,7 @@ async def build(
         Dict mapping task IDs to Prefect futures
     """
     executor = _PrefectTaskExecutor(
-        run_wrapper=run_wrapper,
+        task_executor=task_executor,
         registry=registry,
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
