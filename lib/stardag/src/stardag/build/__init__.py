@@ -3,8 +3,9 @@
 This module provides functions and classes for building task DAGs.
 
 Primary build functions:
-- build(): Sync concurrent build (the default for production)
-- build_aio(): Async concurrent build
+- build(): Concurrent build, recommended for real workloads from a sync context
+- build_aio(): Async concurrent build, recommended for real workloads from an
+    async context or already running event loop
 - build_sequential(): Sync sequential build (for debugging)
 - build_sequential_aio(): Async sequential build (for debugging)
 
@@ -26,7 +27,6 @@ from stardag.build._base import (
     FailMode,
     RunWrapper,
     TaskCount,
-    TaskExecutionState,
     TaskRunnerABC,
 )
 from stardag.build._concurrent import (
@@ -45,7 +45,6 @@ __all__ = [
     "BuildSummary",
     "FailMode",
     "TaskCount",
-    "TaskExecutionState",
     # Execution mode
     "DefaultExecutionModeSelector",
     "ExecutionMode",
