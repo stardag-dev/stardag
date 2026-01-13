@@ -80,6 +80,8 @@ def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
                 deps = flatten_task_struct(yielded)
 
                 # Check if ALL yielded deps are complete
+                # TODO: For many deps with remote targets, check completion concurrently
+                # by starting an event loop and using asyncio.gather with complete_aio()
                 incomplete_deps = [dep for dep in deps if not dep.complete()]
 
                 if incomplete_deps:
