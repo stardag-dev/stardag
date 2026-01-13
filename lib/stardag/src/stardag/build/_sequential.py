@@ -22,7 +22,7 @@ from stardag.build._base import (
     FailMode,
     TaskCount,
 )
-from stardag.registry import NoOpRegistry, RegistryABC
+from stardag.registry import RegistryABC, init_registry
 
 
 def build_sequential(
@@ -51,7 +51,8 @@ def build_sequential(
     Returns:
         BuildSummary with status and task counts
     """
-    registry = registry or NoOpRegistry()
+    if registry is None:
+        registry = init_registry()
     task_count = TaskCount()
     completion_cache: set[UUID] = set()
     failed_cache: set[UUID] = set()
@@ -230,7 +231,8 @@ async def build_sequential_aio(
     Returns:
         BuildSummary with status and task counts
     """
-    registry = registry or NoOpRegistry()
+    if registry is None:
+        registry = init_registry()
     task_count = TaskCount()
     completion_cache: set[UUID] = set()
     failed_cache: set[UUID] = set()
