@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Generator
 from uuid import UUID
@@ -32,7 +31,7 @@ from stardag.build._base import (
     TaskExecutionState,
     TaskRunnerABC,
 )
-from stardag.registry import APIRegistry, NoOpRegistry, RegistryABC
+from stardag.registry import NoOpRegistry, RegistryABC, init_registry
 
 if TYPE_CHECKING:
     pass
@@ -365,14 +364,13 @@ async def build_aio(
     Returns:
         BuildSummary with status and task counts
     """
-    if registry is not None:
-        registry = registry
-    else:
-        registry = (
-            APIRegistry() if os.environ.get("STARDAG_REGISTRY_URL") else NoOpRegistry()
-        )
-
-    logger.info(f"Using registry: {type(registry).__name__}, {registry}")
+    # Determine registry: explicit > task_runner's > init_registry()
+    if registry is None:
+        if task_runner is not None:
+            registry = task_runner.registry
+        else:
+            registry = init_registry()
+    logger.info(f"Using registry: {type(registry).__name__}")
 
     if task_runner is None:
         task_runner = HybridConcurrentTaskRunner(
