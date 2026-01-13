@@ -51,15 +51,40 @@ class TaskCount:
 
 @dataclass
 class BuildSummary:
+    """Summary of a build execution."""
+
     status: BuildExitStatus
     task_count: TaskCount
     error: BaseException | None = None
 
+    def __repr__(self) -> str:
+        """Return a human-readable summary of the build."""
+        tc = self.task_count
+        status_icon = "✓" if self.status == BuildExitStatus.SUCCESS else "✗"
+        lines = [
+            f"Build {self.status.value.upper()} {status_icon}",
+            f"  Discovered: {tc.discovered}",
+            f"  Previously completed: {tc.previously_completed}",
+            f"  Succeeded: {tc.succeeded}",
+            f"  Failed: {tc.failed}",
+        ]
+        if tc.pending > 0:
+            lines.append(f"  Pending: {tc.pending}")
+        if self.error:
+            lines.append(f"  Error: {self.error}")
+        return "\n".join(lines)
+
 
 class FailMode(StrEnum):
-    # Exit at first failure
+    """How to handle task failures during build.
+
+    Attributes:
+        FAIL_FAST: Stop the build at the first task failure.
+        CONTINUE: Continue executing all tasks whose dependencies are met,
+            even if some tasks have failed.
+    """
+
     FAIL_FAST = "fail_fast"
-    # Continue executing all tasks whose dependencies are met
     CONTINUE = "continue"
 
 
@@ -69,12 +94,12 @@ class FailMode(StrEnum):
 
 
 class ExecutionMode(StrEnum):
+    """Execution mode for a task."""
+
     SYNC_BLOCKING = "sync_blocking"
     SYNC_THREAD = "sync_thread"
     SYNC_PROCESS = "sync_process"
     ASYNC_MAIN_LOOP = "async_main_loop"
-    # Future: ASYNC_AIOMULTIPROCESS for async-in-subprocess
-    # (to be implemented as separate TaskRunner)
 
 
 class ExecutionModeSelector(Protocol):
@@ -97,7 +122,13 @@ class DefaultExecutionModeSelector:
     Policy:
     - Async-only tasks: ASYNC_MAIN_LOOP
     - Dual tasks: ASYNC_MAIN_LOOP (prefer async)
-    - Sync-only tasks: configurable (thread/blocking/process)
+    - Sync-only tasks: configurable via `sync_run_default`
+
+    Args:
+        sync_run_default: Execution mode for sync-only tasks.
+            - "thread": Run in thread pool (default, good for I/O-bound)
+            - "blocking": Run blocking in current thread (debugging)
+            - "process": Run in process pool (good for CPU-bound)
     """
 
     def __init__(
@@ -272,18 +303,3 @@ class TaskRunnerABC(ABC):
     async def teardown(self) -> None:
         """Teardown any resources used by the task runner."""
         ...
-
-
-__all__ = [
-    "BuildExitStatus",
-    "BuildSummary",
-    "DefaultExecutionModeSelector",
-    "DefaultRunWrapper",
-    "ExecutionMode",
-    "ExecutionModeSelector",
-    "FailMode",
-    "RunWrapper",
-    "TaskCount",
-    "TaskExecutionState",
-    "TaskRunnerABC",
-]
