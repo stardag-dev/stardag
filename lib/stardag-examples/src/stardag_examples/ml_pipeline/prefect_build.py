@@ -1,4 +1,4 @@
-"""Builds the ML Pipeline using Prefect and a local (ThreadPool)TaskRunner.
+"""Builds the ML Pipeline using Prefect and a local (ThreadPool)TaskExecutor.
 
 Prerequisites:
 - Prefect installed: `uv sync --extra prefect`
