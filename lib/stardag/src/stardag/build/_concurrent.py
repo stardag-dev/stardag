@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Generator
+from typing import Generator
 from uuid import UUID
 
 from stardag._task import (
@@ -31,10 +31,7 @@ from stardag.build._base import (
     TaskExecutionState,
     TaskExecutorABC,
 )
-from stardag.registry import NoOpRegistry, RegistryABC, init_registry
-
-if TYPE_CHECKING:
-    pass
+from stardag.registry import RegistryABC, init_registry
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +113,10 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
     Routes tasks to appropriate execution context based on ExecutionModeSelector.
     Handles generator suspension for dynamic dependencies.
 
+    Note: This executor does not handle registry calls - those are managed by
+    the build() function. The executor only executes tasks and returns results.
+
     Args:
-        registry: Registry for tracking task execution.
         run_wrapper: Optional RunWrapper for delegating task execution (e.g., Modal).
             When provided, all tasks are executed via the wrapper (ignoring
             execution_mode_selector). When None, tasks run locally using
@@ -131,14 +130,12 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
 
     def __init__(
         self,
-        registry: RegistryABC | None = None,
         run_wrapper: RunWrapper | None = None,
         execution_mode_selector: ExecutionModeSelector | None = None,
         max_async_workers: int = 10,
         max_thread_workers: int = 10,
         max_process_workers: int | None = None,
     ) -> None:
-        self.registry = registry or NoOpRegistry()
         self.run_wrapper = run_wrapper
         self.execution_mode_selector = (
             execution_mode_selector or DefaultExecutionModeSelector()
@@ -183,28 +180,26 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         self._pending_reexecution.clear()
 
     async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
-        """Execute a task and return result."""
+        """Execute a task and return result.
+
+        Note: This method does not make any registry calls. The build function
+        is responsible for calling start_task, complete_task, and fail_task.
+        """
         # Check if we're resuming a suspended generator (in-process dynamic deps)
         if task.id in self._suspended_generators:
-            return await self._resume_generator(task)
+            return self._resume_generator(task)
 
         # Check if task is pending re-execution (cross-process dynamic deps)
         # Task yielded incomplete deps, deps are now built, re-execute task
-        is_reexecution = task.id in self._pending_reexecution
-        if is_reexecution:
+        if task.id in self._pending_reexecution:
             self._pending_reexecution.discard(task.id)
-            # Don't call start_task again - task was already started
-        else:
-            # Notify registry of new task start
-            await self.registry.start_task_aio(task)
 
         mode = self.execution_mode_selector(task)
 
         try:
             result = await self._execute_task(task, mode)
-            return await self._handle_result(task, result)
+            return self._handle_result(task, result)
         except Exception as e:
-            await self.registry.fail_task_aio(task, str(e))
             return e
 
     async def _execute_task(
@@ -251,11 +246,11 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         else:
             raise ValueError(f"Unsupported execution mode: {mode}")
 
-    async def _handle_result(
+    def _handle_result(
         self,
         task: BaseTask,
         result: Generator[TaskStruct, None, None] | TaskStruct | None,
-    ) -> None | TaskStruct | Exception:
+    ) -> None | TaskStruct:
         """Handle task execution result.
 
         Handles three cases:
@@ -265,10 +260,11 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         3. TaskStruct: Task has dynamic deps but cannot be suspended (cross-process
            or remote execution). Return deps directly; task will be re-executed
            when deps complete (idempotent re-execution).
+
+        Note: This method does not make any registry calls.
         """
         if result is None:
             # Task completed normally
-            await self._complete_task(task)
             return None
 
         # Check if result is a generator (dynamic deps, in-process)
@@ -276,7 +272,7 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         if hasattr(result, "__next__"):
             # Cast to Generator for type checker - we've verified it has __next__
             gen: Generator[TaskStruct, None, None] = result  # type: ignore[assignment]
-            return await self._handle_generator(task, gen)
+            return self._handle_generator(task, gen)
 
         # Result is TaskStruct (dynamic deps from process/remote execution)
         # Task yielded these deps but they weren't complete, so the task
@@ -289,7 +285,7 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         task_struct: TaskStruct = result  # type: ignore[assignment]
         return task_struct
 
-    async def _handle_generator(
+    def _handle_generator(
         self, task: BaseTask, gen: Generator[TaskStruct, None, None]
     ) -> None | TaskStruct:
         """Handle a generator from task execution."""
@@ -300,10 +296,9 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
             return yielded
         except StopIteration:
             # Generator completed without yielding
-            await self._complete_task(task)
             return None
 
-    async def _resume_generator(self, task: BaseTask) -> None | TaskStruct | Exception:
+    def _resume_generator(self, task: BaseTask) -> None | TaskStruct | Exception:
         """Resume a suspended generator."""
         gen = self._suspended_generators[task.id]
 
@@ -314,21 +309,10 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         except StopIteration:
             # Generator completed
             del self._suspended_generators[task.id]
-            await self._complete_task(task)
             return None
         except Exception as e:
             del self._suspended_generators[task.id]
-            await self.registry.fail_task_aio(task, str(e))
             return e
-
-    async def _complete_task(self, task: BaseTask) -> None:
-        """Mark task as completed in registry."""
-        await self.registry.complete_task_aio(task)
-
-        # Upload registry assets if any
-        assets = task.registry_assets_aio()
-        if assets:
-            await self.registry.upload_task_assets_aio(task, assets)
 
 
 # =============================================================================
@@ -351,31 +335,26 @@ async def build_aio(
     - Handles dynamic dependencies via generator suspension
     - Supports multiple root tasks (built concurrently)
     - Routes tasks to async/thread/process based on ExecutionModeSelector
+    - Manages all registry interactions (start/complete/fail task)
 
     Args:
         tasks: List of root tasks to build (and their dependencies)
         task_executor: TaskExecutor for executing tasks (default: HybridConcurrentTaskExecutor)
         fail_mode: How to handle task failures
-        registry: Registry for tracking builds (passed to HybridConcurrentTaskExecutor if
-            task_executor not provided)
+        registry: Registry for tracking builds (default: from init_registry())
         run_wrapper: Optional RunWrapper for delegating task execution (e.g., Modal).
             Only used when task_executor is None.
 
     Returns:
         BuildSummary with status and task counts
     """
-    # Determine registry: explicit > task_executor's > init_registry()
+    # Determine registry: explicit > init_registry()
     if registry is None:
-        if task_executor is not None:
-            registry = task_executor.registry
-        else:
-            registry = init_registry()
+        registry = init_registry()
     logger.info(f"Using registry: {type(registry).__name__}")
 
     if task_executor is None:
-        task_executor = HybridConcurrentTaskExecutor(
-            registry=registry, run_wrapper=run_wrapper
-        )
+        task_executor = HybridConcurrentTaskExecutor(run_wrapper=run_wrapper)
 
     task_count = TaskCount()
     completion_cache: set[UUID] = set()
@@ -476,6 +455,13 @@ async def build_aio(
 
             # Submit ready tasks concurrently
             if ready:
+                # Call start_task for tasks that haven't been started yet
+                for task in ready:
+                    state = task_states[task.id]
+                    if not state.started:
+                        await registry.start_task_aio(task)
+                        state.started = True
+
                 results = await asyncio.gather(
                     *[task_executor.submit(task) for task in ready],
                     return_exceptions=True,
@@ -487,7 +473,8 @@ async def build_aio(
                         state = task_states[task.id]
 
                         if isinstance(result, BaseException):
-                            # Task failed
+                            # Task failed - notify registry
+                            await registry.fail_task_aio(task, str(result))
                             state.exception = result
                             task_count.failed += 1
                             error = result
@@ -495,7 +482,11 @@ async def build_aio(
                                 raise result
 
                         elif result is None:
-                            # Task completed
+                            # Task completed - notify registry and upload assets
+                            await registry.complete_task_aio(task)
+                            assets = task.registry_assets_aio()
+                            if assets:
+                                await registry.upload_task_assets_aio(task, assets)
                             state.completed = True
                             completion_cache.add(task.id)
                             completion_events[task.id].set()

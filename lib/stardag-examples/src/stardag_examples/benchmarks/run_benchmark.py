@@ -66,7 +66,6 @@ async def run_concurrent_build(
     dag = dag_factory(prefix=f"{run_id}_")
 
     task_executor = HybridConcurrentTaskExecutor(
-        registry=NoOpRegistry(),
         execution_mode_selector=DefaultExecutionModeSelector(
             sync_run_default=sync_run_default
         ),
@@ -77,7 +76,7 @@ async def run_concurrent_build(
 
     gc.collect()
     start = time.perf_counter()
-    await build_aio([dag], task_executor=task_executor)
+    await build_aio([dag], task_executor=task_executor, registry=NoOpRegistry())
     duration = time.perf_counter() - start
 
     return duration
