@@ -22,7 +22,7 @@ from stardag._task import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from stardag.registry import RegistryABC
 
 
 # =============================================================================
@@ -244,6 +244,9 @@ class TaskRunnerABC(ABC):
     The runner is NOT responsible for dependency resolution - that's handled
     by the build() function.
     """
+
+    # The registry used by this task runner (must be set by subclasses)
+    registry: "RegistryABC"
 
     @abstractmethod
     async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
