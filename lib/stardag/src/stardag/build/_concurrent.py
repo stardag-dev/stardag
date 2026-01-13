@@ -560,10 +560,26 @@ def build(
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
-    This is the main entry point for building tasks in production.
-    Wraps the async build_aio() function for use from synchronous code.
+    This is the recommended entry point for building tasks from synchronous code.
+    Wraps the async build_aio() function.
+
+    Note:
+        This function cannot be called from within an already running event loop.
+        If you're in an async context (e.g., inside an async function, or using
+        frameworks like Playwright, FastAPI, etc.), use `await build_aio()` instead.
     """
-    return asyncio.run(build_aio(tasks, task_runner, fail_mode, registry, run_wrapper))
+    try:
+        return asyncio.run(
+            build_aio(tasks, task_runner, fail_mode, registry, run_wrapper)
+        )
+    except RuntimeError as e:
+        if "cannot be called from a running event loop" in str(e):
+            raise RuntimeError(
+                "build() cannot be used from within an already running event loop. "
+                "Use 'await build_aio()' instead, or 'build_sequential()' if you "
+                "need synchronous execution without an event loop."
+            ) from e
+        raise
 
 
 __all__ = [
