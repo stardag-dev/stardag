@@ -355,33 +355,38 @@ async def build_aio(
     # Lock for shared state
     lock = asyncio.Lock()
 
-    def discover(task: BaseTask) -> None:
-        """Recursively discover all tasks."""
+    async def discover(task: BaseTask) -> None:
+        """Recursively discover tasks, stopping at already-complete tasks.
+
+        This optimization avoids traversing into dependency subgraphs that
+        are already complete, which can significantly reduce discovery time
+        for large DAGs with cached results.
+        """
         if task.id in task_states:
             return
+
         static_deps = flatten_task_struct(task.requires())
         task_states[task.id] = TaskExecutionState(task=task, static_deps=static_deps)
         completion_events[task.id] = asyncio.Event()
+        task_count.discovered += 1
+
+        # Check if this task is already complete
+        is_complete = await task.complete_aio()
+        if is_complete:
+            completion_cache.add(task.id)
+            task_states[task.id].completed = True
+            completion_events[task.id].set()
+            task_count.previously_completed += 1
+            # Don't recurse into deps - they're already built
+            return
+
+        # Task not complete - recurse into dependencies
         for dep in static_deps:
-            discover(dep)
+            await discover(dep)
 
     # Discover all tasks from roots
     for root in tasks:
-        discover(root)
-
-    task_count.discovered = len(task_states)
-
-    # Check initial completion (parallel for efficiency with remote targets)
-    states_list = list(task_states.values())
-    completion_results = await asyncio.gather(
-        *[state.task.complete_aio() for state in states_list]
-    )
-    for state, is_complete in zip(states_list, completion_results):
-        if is_complete:
-            completion_cache.add(state.task.id)
-            state.completed = True
-            completion_events[state.task.id].set()
-            task_count.previously_completed += 1
+        await discover(root)
 
     await registry.start_build_aio(root_tasks=tasks)
     await task_executor.setup()
@@ -418,11 +423,10 @@ async def build_aio(
             # Dynamic deps returned (TaskStruct)
             dynamic_deps = flatten_task_struct(result)
 
-            # Discover any new dynamic deps
+            # Discover any new dynamic deps (discover handles counting)
             for dep in dynamic_deps:
                 if dep.id not in task_states:
-                    discover(dep)
-                    task_count.discovered += 1
+                    await discover(dep)
 
             # Accumulate dynamic deps (don't overwrite)
             existing_dyn_ids = {d.id for d in state.dynamic_deps}
