@@ -12,7 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Generator, Literal, Protocol
+from typing import Generator, Literal, Protocol
 
 from stardag._task import (
     BaseTask,
@@ -20,9 +20,6 @@ from stardag._task import (
     _has_custom_run,
     _has_custom_run_aio,
 )
-
-if TYPE_CHECKING:
-    from stardag.registry import RegistryABC
 
 
 # =============================================================================
@@ -172,6 +169,8 @@ class TaskExecutionState:
     dynamic_deps: list[BaseTask] = field(default_factory=list)
     # Generator if task has dynamic deps and is suspended
     generator: Generator[TaskStruct, None, None] | None = None
+    # True when registry.start_task has been called
+    started: bool = False
     # True when task execution has fully completed
     completed: bool = False
     # Exception if task failed
@@ -197,7 +196,7 @@ class RunWrapper(Protocol):
     - Implement custom retry logic
 
     The RunWrapper is NOT responsible for:
-    - Registry calls (start_task, complete_task, etc.) - handled by TaskExecutor
+    - Registry calls (start_task, complete_task, etc.) - handled by build()
     - Dependency resolution - handled by build()
 
     Return types support two patterns for dynamic dependencies:
@@ -269,15 +268,12 @@ class TaskExecutorABC(ABC):
     Receives tasks and executes them according to some policy. The executor is
     responsible for:
     - Executing tasks in the appropriate context (async/thread/process)
-    - Calling registry methods at appropriate times
     - Handling generator suspension for dynamic dependencies
 
-    The executor is NOT responsible for dependency resolution - that's handled
-    by the build() function.
+    The executor is NOT responsible for:
+    - Dependency resolution - handled by build()
+    - Registry calls (start_task, complete_task, etc.) - handled by build()
     """
-
-    # The registry used by this task executor (must be set by subclasses)
-    registry: "RegistryABC"
 
     @abstractmethod
     async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:

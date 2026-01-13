@@ -107,10 +107,10 @@ async def run_concurrent_benchmark(leaf_count: int) -> BenchmarkResult:
     root = create_flat_dag(leaf_count)
     pre_complete_tasks(root)
 
-    task_executor = HybridConcurrentTaskExecutor(registry=NoOpRegistry())
+    task_executor = HybridConcurrentTaskExecutor()
 
     start = time.perf_counter()
-    await build_aio([root], task_executor=task_executor)
+    await build_aio([root], task_executor=task_executor, registry=NoOpRegistry())
     duration = time.perf_counter() - start
 
     return BenchmarkResult(
