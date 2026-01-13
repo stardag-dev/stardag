@@ -9,11 +9,11 @@ Primary build functions:
 - build_sequential(): Sync sequential build (for debugging)
 - build_sequential_aio(): Async sequential build (for debugging)
 
-Task runner:
-- HybridConcurrentTaskRunner: Routes tasks to async/thread/process pools
+Task executor:
+- HybridConcurrentTaskExecutor: Routes tasks to async/thread/process pools
 
 Interfaces:
-- TaskRunnerABC: Abstract base class for custom task runners
+- TaskExecutorABC: Abstract base class for custom task executors
 - ExecutionModeSelector: Protocol for custom execution mode selection
 """
 
@@ -27,10 +27,10 @@ from stardag.build._base import (
     FailMode,
     RunWrapper,
     TaskCount,
-    TaskRunnerABC,
+    TaskExecutorABC,
 )
 from stardag.build._concurrent import (
-    HybridConcurrentTaskRunner,
+    HybridConcurrentTaskExecutor,
     build,
     build_aio,
 )
@@ -52,9 +52,9 @@ __all__ = [
     # Run wrapper
     "DefaultRunWrapper",
     "RunWrapper",
-    # Task runners
-    "HybridConcurrentTaskRunner",
-    "TaskRunnerABC",
+    # Task executors
+    "HybridConcurrentTaskExecutor",
+    "TaskExecutorABC",
     # Build functions
     "build",
     "build_aio",

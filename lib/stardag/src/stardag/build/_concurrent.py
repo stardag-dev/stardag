@@ -1,7 +1,7 @@
 """Concurrent build implementation.
 
 This module contains:
-- HybridConcurrentTaskRunner: Routes tasks to async/thread/process based on policy
+- HybridConcurrentTaskExecutor: Routes tasks to async/thread/process based on policy
 - build_aio(): Async concurrent build function
 - build(): Sync wrapper for build_aio() (the default for production)
 """
@@ -29,7 +29,7 @@ from stardag.build._base import (
     RunWrapper,
     TaskCount,
     TaskExecutionState,
-    TaskRunnerABC,
+    TaskExecutorABC,
 )
 from stardag.registry import NoOpRegistry, RegistryABC, init_registry
 
@@ -106,12 +106,12 @@ def _run_task_in_process(task: BaseTask) -> TaskStruct | None:
 
 
 # =============================================================================
-# Task Runner Implementation
+# Task Executor Implementation
 # =============================================================================
 
 
-class HybridConcurrentTaskRunner(TaskRunnerABC):
-    """Task runner with async, thread, and process pools.
+class HybridConcurrentTaskExecutor(TaskExecutorABC):
+    """Task executor with async, thread, and process pools.
 
     Routes tasks to appropriate execution context based on ExecutionModeSelector.
     Handles generator suspension for dynamic dependencies.
@@ -338,7 +338,7 @@ class HybridConcurrentTaskRunner(TaskRunnerABC):
 
 async def build_aio(
     tasks: list[BaseTask],
-    task_runner: TaskRunnerABC | None = None,
+    task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
     run_wrapper: RunWrapper | None = None,
@@ -354,26 +354,26 @@ async def build_aio(
 
     Args:
         tasks: List of root tasks to build (and their dependencies)
-        task_runner: TaskRunner for executing tasks (default: HybridConcurrentTaskRunner)
+        task_executor: TaskExecutor for executing tasks (default: HybridConcurrentTaskExecutor)
         fail_mode: How to handle task failures
-        registry: Registry for tracking builds (passed to HybridConcurrentTaskRunner if
-            task_runner not provided)
+        registry: Registry for tracking builds (passed to HybridConcurrentTaskExecutor if
+            task_executor not provided)
         run_wrapper: Optional RunWrapper for delegating task execution (e.g., Modal).
-            Only used when task_runner is None.
+            Only used when task_executor is None.
 
     Returns:
         BuildSummary with status and task counts
     """
-    # Determine registry: explicit > task_runner's > init_registry()
+    # Determine registry: explicit > task_executor's > init_registry()
     if registry is None:
-        if task_runner is not None:
-            registry = task_runner.registry
+        if task_executor is not None:
+            registry = task_executor.registry
         else:
             registry = init_registry()
     logger.info(f"Using registry: {type(registry).__name__}")
 
-    if task_runner is None:
-        task_runner = HybridConcurrentTaskRunner(
+    if task_executor is None:
+        task_executor = HybridConcurrentTaskExecutor(
             registry=registry, run_wrapper=run_wrapper
         )
 
@@ -419,7 +419,7 @@ async def build_aio(
             task_count.previously_completed += 1
 
     await registry.start_build_aio(root_tasks=tasks)
-    await task_runner.setup()
+    await task_executor.setup()
 
     try:
         # Main build loop
@@ -477,7 +477,7 @@ async def build_aio(
             # Submit ready tasks concurrently
             if ready:
                 results = await asyncio.gather(
-                    *[task_runner.submit(task) for task in ready],
+                    *[task_executor.submit(task) for task in ready],
                     return_exceptions=True,
                 )
 
@@ -543,7 +543,7 @@ async def build_aio(
         )
 
     finally:
-        await task_runner.teardown()
+        await task_executor.teardown()
 
 
 # =============================================================================
@@ -553,7 +553,7 @@ async def build_aio(
 
 def build(
     tasks: list[BaseTask],
-    task_runner: TaskRunnerABC | None = None,
+    task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
     run_wrapper: RunWrapper | None = None,
@@ -570,7 +570,7 @@ def build(
     """
     try:
         return asyncio.run(
-            build_aio(tasks, task_runner, fail_mode, registry, run_wrapper)
+            build_aio(tasks, task_executor, fail_mode, registry, run_wrapper)
         )
     except RuntimeError as e:
         if "cannot be called from a running event loop" in str(e):
@@ -583,7 +583,7 @@ def build(
 
 
 __all__ = [
-    "HybridConcurrentTaskRunner",
+    "HybridConcurrentTaskExecutor",
     "build",
     "build_aio",
 ]

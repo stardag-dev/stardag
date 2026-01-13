@@ -1,7 +1,7 @@
 """Tests for concurrent build implementation.
 
 Tests build() and build_aio() from stardag.build._concurrent,
-including HybridConcurrentTaskRunner.
+including HybridConcurrentTaskExecutor.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from stardag.build import (
     BuildExitStatus,
     DefaultExecutionModeSelector,
     FailMode,
-    HybridConcurrentTaskRunner,
+    HybridConcurrentTaskExecutor,
     build,
     build_aio,
 )
@@ -321,12 +321,12 @@ class TestBuildAio:
 
 
 # ============================================================================
-# Test: HybridConcurrentTaskRunner
+# Test: HybridConcurrentTaskExecutor
 # ============================================================================
 
 
-class TestHybridConcurrentTaskRunner:
-    """Tests for HybridConcurrentTaskRunner."""
+class TestHybridConcurrentTaskExecutor:
+    """Tests for HybridConcurrentTaskExecutor."""
 
     @pytest.mark.asyncio
     async def test_sync_task_runs_in_thread(
@@ -335,7 +335,7 @@ class TestHybridConcurrentTaskRunner:
         noop_registry,
     ):
         """Test sync tasks run in thread pool."""
-        runner = HybridConcurrentTaskRunner(
+        runner = HybridConcurrentTaskExecutor(
             registry=noop_registry, max_thread_workers=2
         )
         task = SyncOnlyTask(name="test")
@@ -355,7 +355,9 @@ class TestHybridConcurrentTaskRunner:
         noop_registry,
     ):
         """Test async tasks run in main event loop."""
-        runner = HybridConcurrentTaskRunner(registry=noop_registry, max_async_workers=2)
+        runner = HybridConcurrentTaskExecutor(
+            registry=noop_registry, max_async_workers=2
+        )
         task = AsyncOnlyTask(name="test")
 
         await runner.setup()
@@ -373,7 +375,7 @@ class TestHybridConcurrentTaskRunner:
         noop_registry,
     ):
         """Test failing tasks return exception."""
-        runner = HybridConcurrentTaskRunner(registry=noop_registry)
+        runner = HybridConcurrentTaskExecutor(registry=noop_registry)
         task = FailingTask(error_message="test error")
 
         await runner.setup()
@@ -696,8 +698,8 @@ class TestProcessPoolDynamicDeps:
         dag = get_dynamic_deps_dag()
         assert_dynamic_deps_task_complete_recursive(dag, False)
 
-        # Create runner with process pool
-        runner = HybridConcurrentTaskRunner(
+        # Create executor with process pool
+        executor = HybridConcurrentTaskExecutor(
             registry=noop_registry,
             execution_mode_selector=DefaultExecutionModeSelector(
                 sync_run_default="process"
@@ -705,7 +707,7 @@ class TestProcessPoolDynamicDeps:
             max_process_workers=2,
         )
 
-        summary = await build_aio([dag], task_runner=runner)
+        summary = await build_aio([dag], task_executor=executor)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert_dynamic_deps_task_complete_recursive(dag, True)
@@ -734,7 +736,7 @@ class TestProcessPoolDynamicDeps:
             static_task_deps=(dyn_task, shared),
         )
 
-        runner = HybridConcurrentTaskRunner(
+        executor = HybridConcurrentTaskExecutor(
             registry=noop_registry,
             execution_mode_selector=DefaultExecutionModeSelector(
                 sync_run_default="process"
@@ -742,7 +744,7 @@ class TestProcessPoolDynamicDeps:
             max_process_workers=2,
         )
 
-        summary = await build_aio([parent], task_runner=runner)
+        summary = await build_aio([parent], task_executor=executor)
 
         assert summary.status == BuildExitStatus.SUCCESS
 

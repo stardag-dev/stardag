@@ -4,7 +4,7 @@ This module contains:
 - Data structures: BuildExitStatus, TaskCount, BuildSummary, FailMode
 - Execution mode types: ExecutionMode, ExecutionModeSelector, DefaultExecutionModeSelector
 - Task state tracking: TaskExecutionState
-- Task runner protocol: TaskRunnerABC
+- Task executor protocol: TaskExecutorABC
 """
 
 from __future__ import annotations
@@ -197,18 +197,18 @@ class RunWrapper(Protocol):
     - Implement custom retry logic
 
     The RunWrapper is NOT responsible for:
-    - Registry calls (start_task, complete_task, etc.) - handled by TaskRunner
+    - Registry calls (start_task, complete_task, etc.) - handled by TaskExecutor
     - Dependency resolution - handled by build()
 
     Return types support two patterns for dynamic dependencies:
 
     1. **Generator (in-process)**: When task executes in same process (thread/async),
-       the generator can be suspended and resumed. TaskRunner stores the generator
+       the generator can be suspended and resumed. TaskExecutor stores the generator
        and resumes it after dynamic deps complete.
 
     2. **TaskStruct (cross-process/remote)**: When task executes in subprocess or
        remote system, generators cannot be pickled. Instead, return the yielded
-       TaskStruct directly. TaskRunner will re-execute the task from scratch after
+       TaskStruct directly. TaskExecutor will re-execute the task from scratch after
        dynamic deps complete (idempotent re-execution pattern).
     """
 
@@ -259,24 +259,24 @@ class DefaultRunWrapper:
 
 
 # =============================================================================
-# Task Runner Protocol
+# Task Executor Protocol
 # =============================================================================
 
 
-class TaskRunnerABC(ABC):
-    """Abstract base for task runners.
+class TaskExecutorABC(ABC):
+    """Abstract base for task executors.
 
-    Receives tasks and executes them according to some policy. The runner is
+    Receives tasks and executes them according to some policy. The executor is
     responsible for:
     - Executing tasks in the appropriate context (async/thread/process)
     - Calling registry methods at appropriate times
     - Handling generator suspension for dynamic dependencies
 
-    The runner is NOT responsible for dependency resolution - that's handled
+    The executor is NOT responsible for dependency resolution - that's handled
     by the build() function.
     """
 
-    # The registry used by this task runner (must be set by subclasses)
+    # The registry used by this task executor (must be set by subclasses)
     registry: "RegistryABC"
 
     @abstractmethod
