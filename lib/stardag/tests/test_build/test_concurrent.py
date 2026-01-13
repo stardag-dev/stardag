@@ -335,18 +335,16 @@ class TestHybridConcurrentTaskExecutor:
         noop_registry,
     ):
         """Test sync tasks run in thread pool."""
-        runner = HybridConcurrentTaskExecutor(
-            registry=noop_registry, max_thread_workers=2
-        )
+        executor = HybridConcurrentTaskExecutor(max_thread_workers=2)
         task = SyncOnlyTask(name="test")
 
-        await runner.setup()
+        await executor.setup()
         try:
-            result = await runner.submit(task)
+            result = await executor.submit(task)
             assert result is None  # Success
             assert task.complete()
         finally:
-            await runner.teardown()
+            await executor.teardown()
 
     @pytest.mark.asyncio
     async def test_async_task_runs_in_loop(
@@ -355,18 +353,16 @@ class TestHybridConcurrentTaskExecutor:
         noop_registry,
     ):
         """Test async tasks run in main event loop."""
-        runner = HybridConcurrentTaskExecutor(
-            registry=noop_registry, max_async_workers=2
-        )
+        executor = HybridConcurrentTaskExecutor(max_async_workers=2)
         task = AsyncOnlyTask(name="test")
 
-        await runner.setup()
+        await executor.setup()
         try:
-            result = await runner.submit(task)
+            result = await executor.submit(task)
             assert result is None  # Success
             assert task.complete()
         finally:
-            await runner.teardown()
+            await executor.teardown()
 
     @pytest.mark.asyncio
     async def test_failing_task_returns_exception(
@@ -375,16 +371,16 @@ class TestHybridConcurrentTaskExecutor:
         noop_registry,
     ):
         """Test failing tasks return exception."""
-        runner = HybridConcurrentTaskExecutor(registry=noop_registry)
+        executor = HybridConcurrentTaskExecutor()
         task = FailingTask(error_message="test error")
 
-        await runner.setup()
+        await executor.setup()
         try:
-            result = await runner.submit(task)
+            result = await executor.submit(task)
             assert isinstance(result, Exception)
             assert "test error" in str(result)
         finally:
-            await runner.teardown()
+            await executor.teardown()
 
 
 # ============================================================================
@@ -700,14 +696,13 @@ class TestProcessPoolDynamicDeps:
 
         # Create executor with process pool
         executor = HybridConcurrentTaskExecutor(
-            registry=noop_registry,
             execution_mode_selector=DefaultExecutionModeSelector(
                 sync_run_default="process"
             ),
             max_process_workers=2,
         )
 
-        summary = await build_aio([dag], task_executor=executor)
+        summary = await build_aio([dag], task_executor=executor, registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert_dynamic_deps_task_complete_recursive(dag, True)
@@ -737,14 +732,15 @@ class TestProcessPoolDynamicDeps:
         )
 
         executor = HybridConcurrentTaskExecutor(
-            registry=noop_registry,
             execution_mode_selector=DefaultExecutionModeSelector(
                 sync_run_default="process"
             ),
             max_process_workers=2,
         )
 
-        summary = await build_aio([parent], task_executor=executor)
+        summary = await build_aio(
+            [parent], task_executor=executor, registry=noop_registry
+        )
 
         assert summary.status == BuildExitStatus.SUCCESS
 
