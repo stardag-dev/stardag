@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal
 
 from stardag.build import (
     DefaultExecutionModeSelector,
-    HybridConcurrentTaskRunner,
+    HybridConcurrentTaskExecutor,
     build_aio,
     build_sequential,
 )
@@ -65,7 +65,7 @@ async def run_concurrent_build(
     """Run a concurrent build and return duration."""
     dag = dag_factory(prefix=f"{run_id}_")
 
-    task_runner = HybridConcurrentTaskRunner(
+    task_executor = HybridConcurrentTaskExecutor(
         registry=NoOpRegistry(),
         execution_mode_selector=DefaultExecutionModeSelector(
             sync_run_default=sync_run_default
@@ -77,7 +77,7 @@ async def run_concurrent_build(
 
     gc.collect()
     start = time.perf_counter()
-    await build_aio([dag], task_runner=task_runner)
+    await build_aio([dag], task_executor=task_executor)
     duration = time.perf_counter() - start
 
     return duration
