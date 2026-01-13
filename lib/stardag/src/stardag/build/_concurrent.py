@@ -386,35 +386,92 @@ async def build_aio(
     await registry.start_build_aio(root_tasks=tasks)
     await task_executor.setup()
 
+    # Map task_id -> asyncio.Task for in-flight executions
+    pending_futures: dict[UUID, asyncio.Task] = {}
+
+    async def process_result(task: BaseTask, result: BaseException | TaskStruct | None):
+        """Process a single task result."""
+        nonlocal error
+        state = task_states[task.id]
+
+        if isinstance(result, BaseException):
+            # Task failed - notify registry
+            await registry.fail_task_aio(task, str(result))
+            state.exception = result
+            task_count.failed += 1
+            error = result
+            if fail_mode == FailMode.FAIL_FAST:
+                raise result
+
+        elif result is None:
+            # Task completed - notify registry and upload assets
+            await registry.complete_task_aio(task)
+            assets = task.registry_assets_aio()
+            if assets:
+                await registry.upload_task_assets_aio(task, assets)
+            state.completed = True
+            completion_cache.add(task.id)
+            completion_events[task.id].set()
+            task_count.succeeded += 1
+
+        else:
+            # Dynamic deps returned (TaskStruct)
+            dynamic_deps = flatten_task_struct(result)
+
+            # Discover any new dynamic deps
+            for dep in dynamic_deps:
+                if dep.id not in task_states:
+                    discover(dep)
+                    task_count.discovered += 1
+
+            # Accumulate dynamic deps (don't overwrite)
+            existing_dyn_ids = {d.id for d in state.dynamic_deps}
+            for dep in dynamic_deps:
+                if dep.id not in existing_dyn_ids:
+                    state.dynamic_deps.append(dep)
+
+    def find_ready_tasks() -> list[BaseTask]:
+        """Find tasks that are ready to execute."""
+        ready: list[BaseTask] = []
+        for state in task_states.values():
+            if state.completed or state.task.id in executing:
+                continue
+            if state.exception is not None:
+                continue
+
+            # Check all deps (static + dynamic) complete
+            all_deps_complete = all(
+                task_states[dep.id].completed for dep in state.all_deps
+            )
+            if all_deps_complete:
+                ready.append(state.task)
+                executing.add(state.task.id)
+        return ready
+
     try:
-        # Main build loop
+        # Main build loop using as_completed pattern
         while True:
+            # Check if all roots complete
+            all_roots_complete = all(task_states[root.id].completed for root in tasks)
+            if all_roots_complete:
+                break
+
+            # Find and submit ready tasks
             async with lock:
-                # Check if all roots complete
-                all_roots_complete = all(
-                    task_states[root.id].completed for root in tasks
-                )
-                if all_roots_complete:
-                    break
+                ready = find_ready_tasks()
 
-                # Find tasks ready to execute
-                ready: list[BaseTask] = []
-                for state in task_states.values():
-                    if state.completed or state.task.id in executing:
-                        continue
-                    if state.exception is not None:
-                        continue
+            # Start any ready tasks
+            for task in ready:
+                state = task_states[task.id]
+                if not state.started:
+                    await registry.start_task_aio(task)
+                    state.started = True
+                # Create async task and track it
+                async_task = asyncio.create_task(task_executor.submit(task))
+                pending_futures[task.id] = async_task
 
-                    # Check all deps (static + dynamic) complete
-                    all_deps_complete = all(
-                        task_states[dep.id].completed for dep in state.all_deps
-                    )
-                    if all_deps_complete:
-                        ready.append(state.task)
-                        executing.add(state.task.id)
-
-            if not ready and not executing:
-                # Check if there are incomplete tasks
+            # If nothing is pending, check for deadlock or completion
+            if not pending_futures:
                 incomplete = [
                     s
                     for s in task_states.values()
@@ -439,68 +496,33 @@ async def build_aio(
                     # All remaining tasks are blocked by failed deps - exit gracefully
                 break
 
-            # Submit ready tasks concurrently
-            if ready:
-                # Call start_task for tasks that haven't been started yet
-                for task in ready:
-                    state = task_states[task.id]
-                    if not state.started:
-                        await registry.start_task_aio(task)
-                        state.started = True
+            # Wait for at least one task to complete
+            done, _ = await asyncio.wait(
+                pending_futures.values(), return_when=asyncio.FIRST_COMPLETED
+            )
 
-                results = await asyncio.gather(
-                    *[task_executor.submit(task) for task in ready],
-                    return_exceptions=True,
-                )
+            # Process completed tasks
+            async with lock:
+                for async_task in done:
+                    # Find which task this was
+                    task_id = None
+                    for tid, fut in pending_futures.items():
+                        if fut is async_task:
+                            task_id = tid
+                            break
+                    assert task_id is not None
 
-                async with lock:
-                    for task, result in zip(ready, results):
-                        executing.discard(task.id)
-                        state = task_states[task.id]
+                    # Remove from pending and executing
+                    del pending_futures[task_id]
+                    executing.discard(task_id)
 
-                        if isinstance(result, BaseException):
-                            # Task failed - notify registry
-                            await registry.fail_task_aio(task, str(result))
-                            state.exception = result
-                            task_count.failed += 1
-                            error = result
-                            if fail_mode == FailMode.FAIL_FAST:
-                                raise result
-
-                        elif result is None:
-                            # Task completed - notify registry and upload assets
-                            await registry.complete_task_aio(task)
-                            assets = task.registry_assets_aio()
-                            if assets:
-                                await registry.upload_task_assets_aio(task, assets)
-                            state.completed = True
-                            completion_cache.add(task.id)
-                            completion_events[task.id].set()
-                            task_count.succeeded += 1
-
-                        else:
-                            # Dynamic deps returned (TaskStruct)
-                            dynamic_deps = flatten_task_struct(result)
-
-                            # Discover any new dynamic deps
-                            for dep in dynamic_deps:
-                                if dep.id not in task_states:
-                                    discover(dep)
-                                    task_count.discovered += 1
-
-                            # Accumulate dynamic deps (don't overwrite)
-                            existing_dyn_ids = {d.id for d in state.dynamic_deps}
-                            for dep in dynamic_deps:
-                                if dep.id not in existing_dyn_ids:
-                                    state.dynamic_deps.append(dep)
-
-                            # Note: Don't add to ready/executing here - let the
-                            # next iteration find it via the normal ready check.
-                            # This avoids a bug where tasks get marked as executing
-                            # but never actually submitted.
-
-            # Small yield to allow other coroutines to run
-            await asyncio.sleep(0)
+                    # Get result and process
+                    task = task_states[task_id].task
+                    try:
+                        result = async_task.result()
+                    except Exception as e:
+                        result = e
+                    await process_result(task, result)
 
         await registry.complete_build_aio()
         return BuildSummary(
