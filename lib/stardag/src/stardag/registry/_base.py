@@ -119,6 +119,19 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def discover_dynamic_deps(self, task: "BaseTask", deps: list["BaseTask"]) -> None:
+        """Notify that dynamic dependencies were discovered for a task.
+
+        Called when a task yields dynamic dependencies during execution.
+        This enables monitoring/UI to track dynamic dependency discovery
+        in real-time.
+
+        Args:
+            task: The task that yielded dynamic deps
+            deps: The dynamic dependencies that were discovered
+        """
+        pass
+
     # Async versions - default implementations delegate to sync methods
 
     async def register_task_aio(self, task: "BaseTask") -> None:
@@ -160,6 +173,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
     ) -> None:
         """Async version of upload_task_assets."""
         self.upload_task_assets(task, assets)
+
+    async def discover_dynamic_deps_aio(
+        self, task: "BaseTask", deps: list["BaseTask"]
+    ) -> None:
+        """Async version of discover_dynamic_deps."""
+        self.discover_dynamic_deps(task, deps)
 
 
 class NoOpRegistry(RegistryABC):
