@@ -26,7 +26,6 @@ from stardag.build._base import (
     ExecutionMode,
     ExecutionModeSelector,
     FailMode,
-    RunWrapper,
     TaskCount,
     TaskExecutionState,
     TaskExecutorABC,
@@ -116,13 +115,11 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
     Note: This executor does not handle registry calls - those are managed by
     the build() function. The executor only executes tasks and returns results.
 
+    For routing tasks to different executors (e.g., some to Modal, some local),
+    use RoutedTaskExecutor to compose multiple executors.
+
     Args:
-        run_wrapper: Optional RunWrapper for delegating task execution (e.g., Modal).
-            When provided, all tasks are executed via the wrapper (ignoring
-            execution_mode_selector). When None, tasks run locally using
-            DefaultRunWrapper with execution mode selection.
         execution_mode_selector: Callable to select execution mode per task.
-            Only used when run_wrapper is None.
         max_async_workers: Maximum concurrent async tasks (semaphore-based).
         max_thread_workers: Maximum concurrent thread pool workers.
         max_process_workers: Maximum concurrent process pool workers.
@@ -130,13 +127,11 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
 
     def __init__(
         self,
-        run_wrapper: RunWrapper | None = None,
         execution_mode_selector: ExecutionModeSelector | None = None,
         max_async_workers: int = 10,
         max_thread_workers: int = 10,
         max_process_workers: int | None = None,
     ) -> None:
-        self.run_wrapper = run_wrapper
         self.execution_mode_selector = (
             execution_mode_selector or DefaultExecutionModeSelector()
         )
@@ -213,13 +208,6 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
             - TaskStruct: Task has dynamic deps but cannot be suspended (e.g., ran
                 in subprocess). Task will be re-executed when deps complete.
         """
-        # If run_wrapper is provided, use it for all execution
-        if self.run_wrapper is not None:
-            assert self._async_semaphore is not None
-            async with self._async_semaphore:
-                return await self.run_wrapper.run(task)
-
-        # Otherwise, use execution mode selector with local pools
         if mode == ExecutionMode.ASYNC_MAIN_LOOP:
             assert self._async_semaphore is not None
             async with self._async_semaphore:
@@ -325,7 +313,6 @@ async def build_aio(
     task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
-    run_wrapper: RunWrapper | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -339,11 +326,10 @@ async def build_aio(
 
     Args:
         tasks: List of root tasks to build (and their dependencies)
-        task_executor: TaskExecutor for executing tasks (default: HybridConcurrentTaskExecutor)
+        task_executor: TaskExecutor for executing tasks (default: HybridConcurrentTaskExecutor).
+            Use RoutedTaskExecutor to route tasks to different executors (e.g., Modal).
         fail_mode: How to handle task failures
         registry: Registry for tracking builds (default: from init_registry())
-        run_wrapper: Optional RunWrapper for delegating task execution (e.g., Modal).
-            Only used when task_executor is None.
 
     Returns:
         BuildSummary with status and task counts
@@ -354,7 +340,7 @@ async def build_aio(
     logger.info(f"Using registry: {type(registry).__name__}")
 
     if task_executor is None:
-        task_executor = HybridConcurrentTaskExecutor(run_wrapper=run_wrapper)
+        task_executor = HybridConcurrentTaskExecutor()
 
     task_count = TaskCount()
     completion_cache: set[UUID] = set()
@@ -547,7 +533,6 @@ def build(
     task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
-    run_wrapper: RunWrapper | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -560,9 +545,7 @@ def build(
         frameworks like Playwright, FastAPI, etc.), use `await build_aio()` instead.
     """
     try:
-        return asyncio.run(
-            build_aio(tasks, task_executor, fail_mode, registry, run_wrapper)
-        )
+        return asyncio.run(build_aio(tasks, task_executor, fail_mode, registry))
     except RuntimeError as e:
         if "cannot be called from a running event loop" in str(e):
             raise RuntimeError(

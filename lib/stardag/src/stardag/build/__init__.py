@@ -21,11 +21,10 @@ from stardag.build._base import (
     BuildExitStatus,
     BuildSummary,
     DefaultExecutionModeSelector,
-    DefaultRunWrapper,
     ExecutionMode,
     ExecutionModeSelector,
     FailMode,
-    RunWrapper,
+    RoutedTaskExecutor,
     TaskCount,
     TaskExecutorABC,
 )
@@ -49,11 +48,9 @@ __all__ = [
     "DefaultExecutionModeSelector",
     "ExecutionMode",
     "ExecutionModeSelector",
-    # Run wrapper
-    "DefaultRunWrapper",
-    "RunWrapper",
     # Task executors
     "HybridConcurrentTaskExecutor",
+    "RoutedTaskExecutor",
     "TaskExecutorABC",
     # Build functions
     "build",
