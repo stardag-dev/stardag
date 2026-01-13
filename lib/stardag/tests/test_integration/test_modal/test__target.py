@@ -215,3 +215,218 @@ def read_file(in_volume_path: str) -> bytes:
         data += chunk
 
     return data
+
+
+# =============================================================================
+# Unit tests for async methods (mocked, no Modal deployment required)
+# =============================================================================
+
+
+class TestModalVolumeRemoteFileSystemAsync:
+    """Unit tests for ModalVolumeRemoteFileSystem async methods.
+
+    These tests mock the Modal library to verify that:
+    1. modal.Volume.from_name() is called synchronously (not with .aio)
+    2. The async methods on Volume (.iterdir.aio, .read_file.aio, .batch_upload.aio)
+       are called correctly
+
+    This tests the fix for the bug where modal.Volume.from_name.aio() was incorrectly
+    used (from_name doesn't have an .aio variant - it's a sync factory).
+    """
+
+    @pytest.fixture
+    def mock_modal_volume(self):
+        """Create a mock Modal Volume with async methods."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        # Create the volume mock
+        volume = MagicMock()
+
+        # Mock iterdir.aio as an async generator
+        async def mock_iterdir_aio(path):
+            # Yield nothing (simulating empty directory / file not found)
+            return
+            yield  # Make it a generator
+
+        volume.iterdir.aio = mock_iterdir_aio
+
+        # Mock read_file.aio as an async generator that yields bytes
+        async def mock_read_file_aio(path):
+            yield b"test content"
+
+        volume.read_file.aio = mock_read_file_aio
+
+        # Mock batch_upload.aio as an async context manager
+        batch_mock = MagicMock()
+        batch_mock.put_file = MagicMock()
+
+        async_cm = AsyncMock()
+        async_cm.__aenter__.return_value = batch_mock
+        async_cm.__aexit__.return_value = None
+
+        volume.batch_upload.aio.return_value = async_cm
+
+        return volume
+
+    @pytest.mark.asyncio
+    async def test_exists_aio_uses_sync_from_name(self, mock_modal_volume):
+        """Test that exists_aio uses modal.Volume.from_name() synchronously.
+
+        The bug was calling `await modal.Volume.from_name.aio(volume_name)`
+        which doesn't exist - from_name is a synchronous factory method.
+        """
+        from unittest.mock import patch
+
+        with patch("modal.Volume") as MockVolume:
+            # from_name should be called synchronously and return the volume
+            MockVolume.from_name.return_value = mock_modal_volume
+
+            # Import after patching
+            from stardag.integration.modal._target import ModalVolumeRemoteFileSystem
+
+            rfs = ModalVolumeRemoteFileSystem()
+            uri = "modalvol://test-volume/path/to/file.txt"
+
+            # This should NOT raise "object MagicMock can't be used in 'await' expression"
+            result = await rfs.exists_aio(uri)
+
+            # Verify from_name was called synchronously (not awaited)
+            MockVolume.from_name.assert_called_once_with("test-volume")
+
+            # from_name should NOT have been called with .aio
+            assert (
+                not hasattr(MockVolume.from_name, "aio")
+                or not MockVolume.from_name.aio.called
+            )
+
+            # Result should be False since mock returns empty iterator
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_download_aio_uses_sync_from_name(self, mock_modal_volume, tmp_path):
+        """Test that download_aio uses modal.Volume.from_name() synchronously."""
+        from unittest.mock import patch
+
+        with patch("modal.Volume") as MockVolume:
+            MockVolume.from_name.return_value = mock_modal_volume
+
+            from stardag.integration.modal._target import ModalVolumeRemoteFileSystem
+
+            rfs = ModalVolumeRemoteFileSystem()
+            uri = "modalvol://test-volume/path/to/file.txt"
+            dest = tmp_path / "downloaded.txt"
+
+            await rfs.download_aio(uri, dest)
+
+            # Verify from_name was called synchronously
+            MockVolume.from_name.assert_called_once_with("test-volume")
+
+            # Verify file was written
+            assert dest.exists()
+            assert dest.read_bytes() == b"test content"
+
+    @pytest.mark.asyncio
+    async def test_upload_aio_uses_sync_from_name(self, mock_modal_volume, tmp_path):
+        """Test that upload_aio uses modal.Volume.from_name() synchronously."""
+        from unittest.mock import patch
+
+        # Create a source file
+        source = tmp_path / "source.txt"
+        source.write_text("upload content")
+
+        with patch("modal.Volume") as MockVolume:
+            MockVolume.from_name.return_value = mock_modal_volume
+
+            from stardag.integration.modal._target import ModalVolumeRemoteFileSystem
+
+            rfs = ModalVolumeRemoteFileSystem()
+            uri = "modalvol://test-volume/path/to/uploaded.txt"
+
+            await rfs.upload_aio(source, uri)
+
+            # Verify from_name was called synchronously
+            MockVolume.from_name.assert_called_once_with("test-volume")
+
+    @pytest.mark.asyncio
+    async def test_exists_aio_returns_true_for_existing_file(self):
+        """Test exists_aio returns True when file exists."""
+        from unittest.mock import MagicMock, patch
+
+        from modal.volume import FileEntryType
+
+        # Create a mock that simulates a file existing
+        volume = MagicMock()
+
+        async def mock_iterdir_aio(path):
+            entry = MagicMock()
+            entry.type = FileEntryType.FILE
+            entry.path = path
+            yield entry
+
+        volume.iterdir.aio = mock_iterdir_aio
+
+        with patch("modal.Volume") as MockVolume:
+            MockVolume.from_name.return_value = volume
+
+            from stardag.integration.modal._target import ModalVolumeRemoteFileSystem
+
+            rfs = ModalVolumeRemoteFileSystem()
+            uri = "modalvol://test-volume/path/to/file.txt"
+
+            result = await rfs.exists_aio(uri)
+
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_exists_aio_returns_false_for_directory(self):
+        """Test exists_aio returns False when path is a directory."""
+        from unittest.mock import MagicMock, patch
+
+        from modal.volume import FileEntryType
+
+        volume = MagicMock()
+
+        async def mock_iterdir_aio(path):
+            entry = MagicMock()
+            entry.type = FileEntryType.DIRECTORY
+            entry.path = path
+            yield entry
+
+        volume.iterdir.aio = mock_iterdir_aio
+
+        with patch("modal.Volume") as MockVolume:
+            MockVolume.from_name.return_value = volume
+
+            from stardag.integration.modal._target import ModalVolumeRemoteFileSystem
+
+            rfs = ModalVolumeRemoteFileSystem()
+            uri = "modalvol://test-volume/path/to/dir"
+
+            result = await rfs.exists_aio(uri)
+
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_exists_aio_handles_file_not_found(self):
+        """Test exists_aio returns False for FileNotFoundError."""
+        from unittest.mock import MagicMock, patch
+
+        volume = MagicMock()
+
+        async def mock_iterdir_aio(path):
+            raise FileNotFoundError("No such file")
+            yield  # Make it a generator
+
+        volume.iterdir.aio = mock_iterdir_aio
+
+        with patch("modal.Volume") as MockVolume:
+            MockVolume.from_name.return_value = volume
+
+            from stardag.integration.modal._target import ModalVolumeRemoteFileSystem
+
+            rfs = ModalVolumeRemoteFileSystem()
+            uri = "modalvol://test-volume/nonexistent.txt"
+
+            result = await rfs.exists_aio(uri)
+
+            assert result is False
