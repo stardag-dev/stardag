@@ -112,3 +112,31 @@ export interface TaskAsset {
 export interface TaskAssetListResponse {
   assets: TaskAsset[];
 }
+
+// Event types
+export type EventType =
+  | "build_started"
+  | "build_completed"
+  | "build_failed"
+  | "build_cancelled"
+  | "build_exit_early"
+  | "task_pending"
+  | "task_referenced"
+  | "task_started"
+  | "task_suspended"
+  | "task_resumed"
+  | "task_waiting_for_lock"
+  | "task_completed"
+  | "task_failed"
+  | "task_skipped"
+  | "task_cancelled";
+
+export interface TaskEvent {
+  id: string;
+  build_id: string;
+  task_id: number | null;
+  event_type: EventType;
+  created_at: string;
+  error_message: string | null;
+  event_metadata: Record<string, unknown> | null;
+}

@@ -3,6 +3,7 @@ import type {
   BuildListResponse,
   Task,
   TaskAssetListResponse,
+  TaskEvent,
   TaskGraphResponse,
   TaskStatus,
 } from "../types/task";
@@ -133,6 +134,21 @@ export async function fetchTaskAssets(
   const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch task assets: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchTaskEvents(
+  taskId: string,
+  workspaceId?: string,
+): Promise<TaskEvent[]> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+
+  const url = `${API_BASE}/tasks/${taskId}/events?${params.toString()}`;
+  const response = await fetchWithAuth(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch task events: ${response.statusText}`);
   }
   return response.json();
 }

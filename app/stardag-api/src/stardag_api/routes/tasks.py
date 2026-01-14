@@ -8,8 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
-from stardag_api.models import Task, TaskRegistryAsset
+from stardag_api.models import Event, Task, TaskRegistryAsset
 from stardag_api.schemas import (
+    EventResponse,
     TaskListResponse,
     TaskRegistryAssetListResponse,
     TaskRegistryAssetResponse,
@@ -149,3 +150,44 @@ async def get_task_assets(
             for asset in assets
         ]
     )
+
+
+@router.get("/{task_id}/events", response_model=list[EventResponse])
+async def get_task_events(
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Get all events for a task across all builds.
+
+    Returns events sorted by creation time (newest first).
+    Requires authentication via API key or JWT token with workspace_id.
+    """
+    # Find task by task_id (hash) in workspace
+    result = await db.execute(
+        select(Task)
+        .where(Task.workspace_id == auth.workspace_id)
+        .where(Task.task_id == task_id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Get all events for this task across all builds
+    events_result = await db.execute(
+        select(Event).where(Event.task_id == task.id).order_by(Event.created_at.desc())
+    )
+    events = events_result.scalars().all()
+
+    return [
+        EventResponse(
+            id=event.id,
+            build_id=event.build_id,
+            task_id=event.task_id,
+            event_type=event.event_type,
+            created_at=event.created_at,
+            error_message=event.error_message,
+            event_metadata=event.event_metadata,
+        )
+        for event in events
+    ]
