@@ -149,8 +149,8 @@ async def test_start_task_in_build(client: AsyncClient):
     )
     assert response.status_code == 200
     data = response.json()
+    assert data["task_id"] == "start-task-123"
     assert data["status"] == "running"
-    assert data["started_at"] is not None
 
 
 @pytest.mark.asyncio
@@ -176,8 +176,8 @@ async def test_complete_task_in_build(client: AsyncClient):
     )
     assert response.status_code == 200
     data = response.json()
+    assert data["task_id"] == "complete-task-123"
     assert data["status"] == "completed"
-    assert data["completed_at"] is not None
 
 
 @pytest.mark.asyncio
@@ -204,8 +204,8 @@ async def test_fail_task_in_build(client: AsyncClient):
     )
     assert response.status_code == 200
     data = response.json()
+    assert data["task_id"] == "fail-task-123"
     assert data["status"] == "failed"
-    assert data["error_message"] == "Task error"
 
 
 @pytest.mark.asyncio

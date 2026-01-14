@@ -158,6 +158,13 @@ class TaskWithStatusResponse(TaskResponse):
     asset_count: int = 0
 
 
+class TaskEventResponse(BaseModel):
+    """Slim response for task lifecycle events (start, complete, fail, etc.)."""
+
+    task_id: str
+    status: TaskStatus
+
+
 class TaskListResponse(BaseModel):
     """Schema for paginated task list."""
 
