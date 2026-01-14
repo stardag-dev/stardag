@@ -11,6 +11,9 @@ export interface TaskNodeData extends Record<string, unknown> {
   isFilterMatch: boolean;
   direction: LayoutDirection;
   hasAssets: boolean;
+  waitingForLock?: boolean;
+  statusBuildId?: string;
+  currentBuildId?: string;
 }
 
 const statusBorderColors: Record<TaskStatus, string> = {
@@ -102,7 +105,13 @@ export function TaskNode({ data }: TaskNodeProps) {
         >
           {data.taskId.slice(0, 8)}
         </span>
-        <StatusBadge status={data.status} muted={isMuted} />
+        <StatusBadge
+          status={data.status}
+          muted={isMuted}
+          waitingForLock={data.waitingForLock}
+          statusBuildId={data.statusBuildId}
+          currentBuildId={data.currentBuildId}
+        />
       </div>
       <Handle
         type="source"

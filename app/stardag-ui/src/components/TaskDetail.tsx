@@ -123,7 +123,8 @@ export function TaskDetail({
             <StatusBadge
               status={task.status}
               waitingForLock={task.waiting_for_lock}
-              lockHolderBuildId={task.lock_holder_build_id}
+              statusBuildId={task.status_build_id}
+              currentBuildId={buildId}
             />
             {canCancel && (
               <button

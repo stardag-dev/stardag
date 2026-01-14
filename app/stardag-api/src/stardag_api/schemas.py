@@ -158,7 +158,8 @@ class TaskWithStatusResponse(TaskResponse):
     asset_count: int = 0
     # Global status fields
     waiting_for_lock: bool = False
-    completed_in_build_id: str | None = None
+    # Build where the status-determining event occurred (for cross-build indicators)
+    status_build_id: str | None = None
 
 
 class TaskEventResponse(BaseModel):

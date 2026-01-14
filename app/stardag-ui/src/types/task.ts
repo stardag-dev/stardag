@@ -54,8 +54,8 @@ export interface Task {
   asset_data?: Record<string, Record<string, unknown>>;
   // Lock status - true if task is waiting for a global lock held by another build
   waiting_for_lock?: boolean;
-  // Build ID holding the lock (if waiting_for_lock is true)
-  lock_holder_build_id?: string;
+  // Build where the status-determining event occurred (for cross-build indicators)
+  status_build_id?: string;
 }
 
 export interface TaskListResponse {

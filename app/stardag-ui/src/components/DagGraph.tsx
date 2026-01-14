@@ -97,6 +97,7 @@ interface DagGraphProps {
   graph: TaskGraphResponse | null;
   selectedTaskId: string | null;
   onTaskClick: (taskId: string) => void;
+  buildId?: string;
 }
 
 const nodeTypes: NodeTypes = {
@@ -149,7 +150,13 @@ function getLayoutedElements(
   return { nodes: layoutedNodes, edges };
 }
 
-export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraphProps) {
+export function DagGraph({
+  tasks,
+  graph,
+  selectedTaskId,
+  onTaskClick,
+  buildId,
+}: DagGraphProps) {
   const { theme } = useTheme();
   const [direction, setDirection] = useState<LayoutDirection>("LR");
 
@@ -180,6 +187,9 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
           isFilterMatch: task?.isFilterMatch ?? true,
           direction,
           hasAssets: graphNode.asset_count > 0,
+          waitingForLock: task?.waiting_for_lock,
+          statusBuildId: task?.status_build_id,
+          currentBuildId: buildId,
         },
       };
     });
@@ -211,7 +221,15 @@ export function DagGraph({ tasks, graph, selectedTaskId, onTaskClick }: DagGraph
     });
 
     return getLayoutedElements(nodes, edges, direction);
-  }, [graph, selectedTaskId, taskByTaskId, taskByInternalId, theme, direction]);
+  }, [
+    graph,
+    selectedTaskId,
+    taskByTaskId,
+    taskByInternalId,
+    theme,
+    direction,
+    buildId,
+  ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
