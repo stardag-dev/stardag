@@ -352,7 +352,13 @@ export function TaskDetail({
                       className="hover:bg-gray-50 dark:hover:bg-gray-800"
                     >
                       <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-900 dark:text-gray-100">
-                        {new Date(event.created_at).toLocaleString()}
+                        {(() => {
+                          const d = new Date(event.created_at);
+                          const centiseconds = Math.floor(d.getMilliseconds() / 10)
+                            .toString()
+                            .padStart(2, "0");
+                          return `${d.toLocaleString()}.${centiseconds}`;
+                        })()}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3">
                         <span
