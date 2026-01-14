@@ -674,12 +674,12 @@ class TestSDKBuildWorkflow:
                 # Build the DAG (use build_sequential to avoid event loop conflict
                 # with Playwright's async runtime)
                 try:
-                    sd.build_sequential([final_task], registry=registry)
+                    build_summary = sd.build_sequential([final_task], registry=registry)
                 finally:
                     registry.close()
 
-                # Get the build ID
-                build_id = registry.build_id
+                # Get the build ID from the summary
+                build_id = build_summary.build_id
                 assert build_id is not None
 
                 # Verify build exists and is completed
@@ -799,12 +799,12 @@ class TestSDKBuildWorkflow:
                 # Build the DAG (use build_sequential to avoid event loop conflict
                 # with Playwright's async runtime)
                 try:
-                    sd.build_sequential([final_task], registry=registry)
+                    build_summary = sd.build_sequential([final_task], registry=registry)
                 finally:
                     registry.close()
 
-                # Get the build ID
-                build_id = registry.build_id
+                # Get the build ID from the summary
+                build_id = build_summary.build_id
                 assert build_id is not None
 
                 # Verify build is completed
