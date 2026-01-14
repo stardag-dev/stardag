@@ -4,7 +4,10 @@ interface StatusBadgeProps {
   status: TaskStatus;
   muted?: boolean;
   waitingForLock?: boolean;
-  lockHolderBuildId?: string;
+  // Build where the status-determining event occurred
+  statusBuildId?: string;
+  // Current build being viewed (to detect cross-build status)
+  currentBuildId?: string;
 }
 
 const statusStyles: Record<TaskStatus, string> = {
@@ -48,24 +51,52 @@ function LockIcon({ className }: { className?: string }) {
   );
 }
 
+function ExternalLinkIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+      />
+    </svg>
+  );
+}
+
 export function StatusBadge({
   status,
   muted = false,
   waitingForLock = false,
-  lockHolderBuildId,
+  statusBuildId,
+  currentBuildId,
 }: StatusBadgeProps) {
   const styles = muted ? statusStylesMuted : statusStyles;
 
-  const lockTooltip = lockHolderBuildId
-    ? `Waiting for lock held by build ${lockHolderBuildId.slice(0, 8)}...`
-    : "Waiting for global lock";
+  // Check if status is from a different build
+  const isFromOtherBuild =
+    statusBuildId && currentBuildId && statusBuildId !== currentBuildId;
+
+  let tooltip: string | undefined;
+  if (waitingForLock) {
+    tooltip = "Waiting for global lock";
+  } else if (isFromOtherBuild) {
+    tooltip = `${status} in build ${statusBuildId.slice(0, 8)}...`;
+  }
 
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${styles[status]}`}
-      title={waitingForLock ? lockTooltip : undefined}
+      title={tooltip}
     >
       {waitingForLock && <LockIcon className="h-3 w-3" />}
+      {isFromOtherBuild && !waitingForLock && <ExternalLinkIcon className="h-3 w-3" />}
       {status}
     </span>
   );

@@ -238,7 +238,10 @@ async def get_all_task_global_statuses(
 
     Returns:
         Dict mapping task_db_id to:
-        (status, started_at, completed_at, error_message, completed_in_build_id, waiting_for_lock)
+        (status, started_at, completed_at, error_message, status_build_id, waiting_for_lock)
+
+        status_build_id is the build where the status-determining event occurred.
+        This allows the UI to show when a task's status came from a different build.
     """
     if not task_db_ids:
         return {}
@@ -269,7 +272,7 @@ async def get_all_task_global_statuses(
             "started_at": None,
             "completed_at": None,
             "error_message": None,
-            "completed_in_build_id": None,
+            "status_build_id": None,
             "waiting_for_lock": False,
         }
         for task_id in task_db_ids
@@ -285,28 +288,32 @@ async def get_all_task_global_statuses(
             # Completed takes precedence over everything
             state["status"] = TaskStatus.COMPLETED
             state["completed_at"] = event.created_at
-            state["completed_in_build_id"] = event.build_id
+            state["status_build_id"] = event.build_id
             state["waiting_for_lock"] = False  # No longer waiting
         elif event.event_type == EventType.TASK_STARTED:
             # Running takes precedence over pending (but not completed)
             if state["status"] != TaskStatus.COMPLETED:
                 state["status"] = TaskStatus.RUNNING
+                state["status_build_id"] = event.build_id
                 if state["started_at"] is None:
                     state["started_at"] = event.created_at
                 state["waiting_for_lock"] = False
         elif event.event_type == EventType.TASK_RESUMED:
             if state["status"] != TaskStatus.COMPLETED:
                 state["status"] = TaskStatus.RUNNING
+                state["status_build_id"] = event.build_id
                 state["waiting_for_lock"] = False
         elif event.event_type == EventType.TASK_FAILED:
             # Only set failed if not completed elsewhere
             if state["status"] != TaskStatus.COMPLETED:
                 state["status"] = TaskStatus.FAILED
+                state["status_build_id"] = event.build_id
                 state["completed_at"] = event.created_at
                 state["error_message"] = event.error_message
         elif event.event_type == EventType.TASK_CANCELLED:
             if state["status"] != TaskStatus.COMPLETED:
                 state["status"] = TaskStatus.CANCELLED
+                state["status_build_id"] = event.build_id
                 state["completed_at"] = event.created_at
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Only mark as waiting if not yet completed/running
@@ -320,7 +327,7 @@ async def get_all_task_global_statuses(
             state["started_at"],
             state["completed_at"],
             state["error_message"],
-            state["completed_in_build_id"],
+            state["status_build_id"],
             state["waiting_for_lock"],
         )
 

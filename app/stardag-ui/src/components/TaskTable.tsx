@@ -12,6 +12,7 @@ interface TaskTableProps {
   total: number;
   totalPages: number;
   onPageChange: (page: number) => void;
+  buildId?: string;
 }
 
 export function TaskTable({
@@ -25,6 +26,7 @@ export function TaskTable({
   total,
   totalPages,
   onPageChange,
+  buildId,
 }: TaskTableProps) {
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -111,7 +113,12 @@ export function TaskTable({
                     {task.task_id.slice(0, 12)}...
                   </td>
                   <td className="px-4 py-3">
-                    <StatusBadge status={task.status} />
+                    <StatusBadge
+                      status={task.status}
+                      waitingForLock={task.waiting_for_lock}
+                      statusBuildId={task.status_build_id}
+                      currentBuildId={buildId}
+                    />
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
                     {new Date(task.created_at).toLocaleString()}

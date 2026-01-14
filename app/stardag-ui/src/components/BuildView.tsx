@@ -413,6 +413,7 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                         graph={graph}
                         selectedTaskId={selectedTask?.task_id ?? null}
                         onTaskClick={handleDagTaskClick}
+                        buildId={buildId}
                       />
                     </div>
                   )}
@@ -433,6 +434,7 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                     total={total}
                     totalPages={totalPages}
                     onPageChange={setPage}
+                    buildId={buildId}
                   />
                 </Panel>
               </PanelGroup>

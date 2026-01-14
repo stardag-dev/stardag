@@ -778,7 +778,7 @@ async def list_tasks_in_build(
             started_at,
             completed_at,
             error_message,
-            completed_in_build_id,
+            status_build_id,
             waiting_for_lock,
         ) = statuses.get(task.id, (TaskStatus.PENDING, None, None, None, None, False))
         responses.append(
@@ -797,7 +797,7 @@ async def list_tasks_in_build(
                 error_message=error_message,
                 asset_count=asset_counts.get(task.id, 0),
                 waiting_for_lock=waiting_for_lock,
-                completed_in_build_id=completed_in_build_id,
+                status_build_id=status_build_id,
             )
         )
 
