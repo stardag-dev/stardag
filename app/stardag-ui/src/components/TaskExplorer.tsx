@@ -309,6 +309,19 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     loadKeys();
   }, [activeWorkspace?.id]);
 
+  // Re-compute autocomplete when keys load and there's already search text
+  // This fixes a race condition where user types before keys are loaded
+  useEffect(() => {
+    if (availableKeys.length === 0 || !searchText || searchText.includes(" ")) return;
+
+    const suggestions = availableKeys.filter((k) =>
+      k.toLowerCase().includes(searchText.toLowerCase()),
+    );
+    setAutocompleteOptions(suggestions.slice(0, 10));
+    setShowAutocomplete(suggestions.length > 0);
+    setAutocompleteMode("key");
+  }, [availableKeys, searchText]);
+
   // Load available columns for column manager
   useEffect(() => {
     if (!activeWorkspace?.id) return;
