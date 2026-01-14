@@ -19,12 +19,14 @@ from stardag_api.models import (
     TaskDependency,
     TaskRegistryAsset,
     TaskStatus,
+    User,
 )
 from stardag_api.schemas import (
     BuildCreate,
     BuildListResponse,
     BuildResponse,
     EventResponse,
+    StatusTriggeredByUser,
     TaskCreate,
     TaskEdge,
     TaskEventResponse,
@@ -46,6 +48,25 @@ router = APIRouter(prefix="/builds", tags=["builds"])
 
 
 # --- Helpers ---
+
+
+async def _get_triggered_by_user(
+    db: AsyncSession, external_id: str | None
+) -> StatusTriggeredByUser | None:
+    """Look up user by external_id and return StatusTriggeredByUser or None."""
+    if not external_id:
+        return None
+
+    result = await db.execute(select(User).where(User.external_id == external_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        return None
+
+    return StatusTriggeredByUser(
+        id=user.external_id,
+        email=user.email or "",
+        display_name=user.display_name,
+    )
 
 
 async def _get_build_and_task(
@@ -143,7 +164,10 @@ async def create_build(
     await db.refresh(db_build)
 
     # Build response with derived status
-    status, started_at, completed_at = await get_build_status(db, db_build.id)
+    status, started_at, completed_at, triggered_by_id = await get_build_status(
+        db, db_build.id
+    )
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
         id=db_build.id,
@@ -157,6 +181,7 @@ async def create_build(
         status=status,
         started_at=started_at,
         completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
     )
 
 
@@ -193,7 +218,10 @@ async def list_builds(
     # Build responses with derived status
     build_responses = []
     for build in builds:
-        status, started_at, completed_at = await get_build_status(db, build.id)
+        status, started_at, completed_at, triggered_by_id = await get_build_status(
+            db, build.id
+        )
+        triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
         build_responses.append(
             BuildResponse(
                 id=build.id,
@@ -207,6 +235,7 @@ async def list_builds(
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,
+                status_triggered_by_user=triggered_by_user,
             )
         )
 
@@ -238,7 +267,10 @@ async def get_build(
             status_code=403, detail="Build does not belong to this workspace"
         )
 
-    status, started_at, completed_at = await get_build_status(db, build.id)
+    status, started_at, completed_at, triggered_by_id = await get_build_status(
+        db, build.id
+    )
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
         id=build.id,
@@ -252,6 +284,7 @@ async def get_build(
         status=status,
         started_at=started_at,
         completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
     )
 
 
@@ -260,8 +293,13 @@ async def complete_build(
     build_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    triggered_by_user_id: str | None = None,
 ):
-    """Mark a build as completed."""
+    """Mark a build as completed.
+
+    Args:
+        triggered_by_user_id: Optional user ID if this is a manual override from UI.
+    """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -272,15 +310,24 @@ async def complete_build(
             status_code=403, detail="Build does not belong to this workspace"
         )
 
+    # Store user ID in metadata if this was user-triggered
+    event_metadata = (
+        {"triggered_by_user_id": triggered_by_user_id} if triggered_by_user_id else None
+    )
+
     event = Event(
         build_id=build_id,
         task_id=None,
         event_type=EventType.BUILD_COMPLETED,
+        event_metadata=event_metadata,
     )
     db.add(event)
     await db.commit()
 
-    status, started_at, completed_at = await get_build_status(db, build.id)
+    status, started_at, completed_at, triggered_by_id = await get_build_status(
+        db, build.id
+    )
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
         id=build.id,
@@ -294,6 +341,7 @@ async def complete_build(
         status=status,
         started_at=started_at,
         completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
     )
 
 
@@ -303,8 +351,14 @@ async def fail_build(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     error_message: str | None = None,
+    triggered_by_user_id: str | None = None,
 ):
-    """Mark a build as failed."""
+    """Mark a build as failed.
+
+    Args:
+        error_message: Optional error message.
+        triggered_by_user_id: Optional user ID if this is a manual override from UI.
+    """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -315,16 +369,25 @@ async def fail_build(
             status_code=403, detail="Build does not belong to this workspace"
         )
 
+    # Store user ID in metadata if this was user-triggered
+    event_metadata = (
+        {"triggered_by_user_id": triggered_by_user_id} if triggered_by_user_id else None
+    )
+
     event = Event(
         build_id=build_id,
         task_id=None,
         event_type=EventType.BUILD_FAILED,
         error_message=error_message,
+        event_metadata=event_metadata,
     )
     db.add(event)
     await db.commit()
 
-    status, started_at, completed_at = await get_build_status(db, build.id)
+    status, started_at, completed_at, triggered_by_id = await get_build_status(
+        db, build.id
+    )
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
         id=build.id,
@@ -338,6 +401,7 @@ async def fail_build(
         status=status,
         started_at=started_at,
         completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
     )
 
 
@@ -346,8 +410,13 @@ async def cancel_build(
     build_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    triggered_by_user_id: str | None = None,
 ):
-    """Cancel a build."""
+    """Cancel a build.
+
+    Args:
+        triggered_by_user_id: Optional user ID if this is a manual override from UI.
+    """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -358,15 +427,24 @@ async def cancel_build(
             status_code=403, detail="Build does not belong to this workspace"
         )
 
+    # Store user ID in metadata if this was user-triggered
+    event_metadata = (
+        {"triggered_by_user_id": triggered_by_user_id} if triggered_by_user_id else None
+    )
+
     event = Event(
         build_id=build_id,
         task_id=None,
         event_type=EventType.BUILD_CANCELLED,
+        event_metadata=event_metadata,
     )
     db.add(event)
     await db.commit()
 
-    status, started_at, completed_at = await get_build_status(db, build.id)
+    status, started_at, completed_at, triggered_by_id = await get_build_status(
+        db, build.id
+    )
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
         id=build.id,
@@ -380,6 +458,7 @@ async def cancel_build(
         status=status,
         started_at=started_at,
         completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
     )
 
 
@@ -410,7 +489,10 @@ async def exit_early(
     db.add(event)
     await db.commit()
 
-    status, started_at, completed_at = await get_build_status(db, build.id)
+    status, started_at, completed_at, triggered_by_id = await get_build_status(
+        db, build.id
+    )
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
         id=build.id,
@@ -424,6 +506,7 @@ async def exit_early(
         status=status,
         started_at=started_at,
         completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
     )
 
 

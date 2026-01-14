@@ -91,6 +91,14 @@ class BuildCreate(BaseModel):
     description: str | None = None
 
 
+class StatusTriggeredByUser(BaseModel):
+    """User info for who triggered a manual status change."""
+
+    id: str
+    email: str
+    display_name: str | None
+
+
 class BuildResponse(BaseModel):
     """Schema for build response with derived status."""
 
@@ -108,6 +116,8 @@ class BuildResponse(BaseModel):
     status: BuildStatus = BuildStatus.PENDING
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    # User who triggered the status change (for manual overrides)
+    status_triggered_by_user: StatusTriggeredByUser | None = None
 
 
 class BuildListResponse(BaseModel):

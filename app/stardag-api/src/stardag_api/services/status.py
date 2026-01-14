@@ -10,11 +10,11 @@ from stardag_api.models import BuildStatus, Event, EventType, TaskStatus
 
 async def get_build_status(
     db: AsyncSession, build_id: str
-) -> tuple[BuildStatus, datetime | None, datetime | None]:
+) -> tuple[BuildStatus, datetime | None, datetime | None, str | None]:
     """Get derived build status from events.
 
     Returns:
-        Tuple of (status, started_at, completed_at)
+        Tuple of (status, started_at, completed_at, status_triggered_by_user_id)
     """
     # Get build-level events (task_id is NULL)
     result = await db.execute(
@@ -28,26 +28,45 @@ async def get_build_status(
     status = BuildStatus.PENDING
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    status_triggered_by_user_id: str | None = None
 
     # Process events from oldest to newest to build final state
     for event in reversed(events):
         if event.event_type == EventType.BUILD_STARTED:
             status = BuildStatus.RUNNING
             started_at = event.created_at
+            status_triggered_by_user_id = None  # Not user-triggered
         elif event.event_type == EventType.BUILD_COMPLETED:
             status = BuildStatus.COMPLETED
             completed_at = event.created_at
+            # Check if this was user-triggered (manual override)
+            status_triggered_by_user_id = (
+                event.event_metadata.get("triggered_by_user_id")
+                if event.event_metadata
+                else None
+            )
         elif event.event_type == EventType.BUILD_FAILED:
             status = BuildStatus.FAILED
             completed_at = event.created_at
+            status_triggered_by_user_id = (
+                event.event_metadata.get("triggered_by_user_id")
+                if event.event_metadata
+                else None
+            )
         elif event.event_type == EventType.BUILD_CANCELLED:
             status = BuildStatus.CANCELLED
             completed_at = event.created_at
+            status_triggered_by_user_id = (
+                event.event_metadata.get("triggered_by_user_id")
+                if event.event_metadata
+                else None
+            )
         elif event.event_type == EventType.BUILD_EXIT_EARLY:
             status = BuildStatus.EXIT_EARLY
             completed_at = event.created_at
+            status_triggered_by_user_id = None  # Not user-triggered
 
-    return status, started_at, completed_at
+    return status, started_at, completed_at, status_triggered_by_user_id
 
 
 async def get_task_status_in_build(
