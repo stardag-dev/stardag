@@ -450,6 +450,9 @@ async def build_aio(
     # Currently executing tasks
     executing: set[UUID] = set()
 
+    # Tasks found to be already complete during discovery (to register after build starts)
+    previously_completed_tasks: list[BaseTask] = []
+
     # Synchronization for concurrent discovery
     discover_lock = asyncio.Lock()
     discover_semaphore = asyncio.Semaphore(max_concurrent_discover)
@@ -486,6 +489,7 @@ async def build_aio(
                 task_states[task.id].completed = True
                 completion_events[task.id].set()
                 task_count.previously_completed += 1
+                previously_completed_tasks.append(task)
             # Don't recurse into deps - they're already built
             return
 
@@ -500,6 +504,15 @@ async def build_aio(
             tg.create_task(discover(root))
 
     await registry.build_start_aio(root_tasks=tasks)
+
+    # Register previously completed tasks so they appear in the build's task list
+    # These will get TASK_REFERENCED events since they already exist
+    for task in previously_completed_tasks:
+        try:
+            await registry.task_register_aio(task)
+        except Exception as reg_err:
+            logger.warning(f"Failed to register previously completed task: {reg_err}")
+
     await task_executor.setup()
 
     # Map task_id -> asyncio.Task for in-flight executions
