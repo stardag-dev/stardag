@@ -11,20 +11,20 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Generator
+from enum import StrEnum
+from typing import Generator, Literal, Protocol
 from uuid import UUID
 
 from stardag._task import (
     BaseTask,
     TaskStruct,
+    _has_custom_run,
+    _has_custom_run_aio,
     flatten_task_struct,
 )
 from stardag.build._base import (
     BuildExitStatus,
     BuildSummary,
-    DefaultExecutionModeSelector,
-    ExecutionMode,
-    ExecutionModeSelector,
     FailMode,
     TaskCount,
     TaskExecutionState,
@@ -33,6 +33,74 @@ from stardag.build._base import (
 from stardag.registry import RegistryABC, init_registry
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Execution Mode Selection
+# =============================================================================
+
+
+class ExecutionMode(StrEnum):
+    """Execution mode for a task."""
+
+    SYNC_BLOCKING = "sync_blocking"
+    SYNC_THREAD = "sync_thread"
+    SYNC_PROCESS = "sync_process"
+    ASYNC_MAIN_LOOP = "async_main_loop"
+
+
+class ExecutionModeSelector(Protocol):
+    """Protocol for selecting execution mode for a given task.
+
+    This can be used to customize how tasks are executed based on arbitrary criteria.
+
+    Note: Users can implement custom selectors to enable task-specified execution
+    preferences (e.g., via task class attributes) without framework changes. This
+    extensibility is intentional - the framework doesn't prescribe how tasks should
+    declare their preferred execution mode, but provides the mechanism to support it.
+    """
+
+    def __call__(self, task: BaseTask) -> ExecutionMode: ...
+
+
+class DefaultExecutionModeSelector:
+    """Selects execution mode based on the task's implemented run methods.
+
+    Policy:
+    - Async-only tasks: ASYNC_MAIN_LOOP
+    - Dual tasks: ASYNC_MAIN_LOOP (prefer async)
+    - Sync-only tasks: configurable via `sync_run_default`
+
+    Args:
+        sync_run_default: Execution mode for sync-only tasks.
+            - "thread": Run in thread pool (default, good for I/O-bound)
+            - "blocking": Run blocking in current thread (debugging)
+            - "process": Run in process pool (good for CPU-bound)
+    """
+
+    def __init__(
+        self,
+        sync_run_default: Literal["thread", "blocking", "process"] = "thread",
+    ) -> None:
+        self.sync_run_default = sync_run_default
+
+    def __call__(self, task: BaseTask) -> ExecutionMode:
+        has_run = _has_custom_run(task)
+        has_run_aio = _has_custom_run_aio(task)
+
+        if has_run_aio:
+            # Async-only or Dual task - use async
+            return ExecutionMode.ASYNC_MAIN_LOOP
+        elif has_run:
+            # Sync-only task
+            if self.sync_run_default == "thread":
+                return ExecutionMode.SYNC_THREAD
+            elif self.sync_run_default == "process":
+                return ExecutionMode.SYNC_PROCESS
+            else:
+                return ExecutionMode.SYNC_BLOCKING
+        else:
+            raise ValueError(f"Task {task} has no run method.")
 
 
 # =============================================================================
@@ -590,6 +658,9 @@ def build(
 
 
 __all__ = [
+    "DefaultExecutionModeSelector",
+    "ExecutionMode",
+    "ExecutionModeSelector",
     "HybridConcurrentTaskExecutor",
     "build",
     "build_aio",
