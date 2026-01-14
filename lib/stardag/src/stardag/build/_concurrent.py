@@ -13,7 +13,7 @@ import logging
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
 from typing import Generator, Literal, Protocol
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from stardag._task import (
     BaseTask,
@@ -27,9 +27,10 @@ from stardag.build._base import (
     BuildSummary,
     DefaultGlobalLockSelector,
     FailMode,
-    GlobalConcurrencyLock,
+    GlobalConcurrencyLockManager,
     GlobalLockConfig,
     GlobalLockSelector,
+    LockAcquisitionResult,
     LockAcquisitionStatus,
     TaskCount,
     TaskExecutionState,
@@ -392,7 +393,7 @@ async def build_aio(
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
     max_concurrent_discover: int = 50,
-    global_lock: GlobalConcurrencyLock | None = None,
+    global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
@@ -414,7 +415,7 @@ async def build_aio(
         registry: Registry for tracking builds (default: from init_registry())
         max_concurrent_discover: Maximum concurrent completion checks during DAG discovery.
             Higher values speed up discovery for large DAGs with remote targets.
-        global_lock: Global concurrency lock implementation for distributed builds.
+        global_lock_manager: Global concurrency lock manager for distributed builds.
             If provided with global_lock_config.enabled=True, tasks will acquire locks
             before execution to ensure exactly-once execution across processes.
         global_lock_config: Configuration for global locking behavior.
@@ -434,9 +435,8 @@ async def build_aio(
     if global_lock_config is None:
         global_lock_config = GlobalLockConfig()
     lock_selector: GlobalLockSelector = DefaultGlobalLockSelector(global_lock_config)
-    owner_id = str(uuid4())  # Stable owner ID for this build
 
-    # Track locks held by this build (task_id -> True)
+    # Track locks held by this build for manual release
     held_locks: set[str] = set()
 
     task_count = TaskCount()
@@ -534,7 +534,7 @@ async def build_aio(
 
         else:
             # Dynamic deps returned (TaskStruct) - task is suspended
-            # Note: We keep the lock held while suspended - release on final completion/failure
+            # Note: Lock is still held by context manager - release on final completion/failure
             dynamic_deps = flatten_task_struct(result)
 
             # Notify registry that task is suspended waiting for dynamic deps
@@ -594,93 +594,80 @@ async def build_aio(
                 return True
             await asyncio.sleep(interval)
 
-    async def acquire_lock_for_task(
-        task: BaseTask,
-    ) -> tuple[bool, BaseException | None]:
-        """Acquire lock for task, handling retries with exponential backoff.
-
-        Returns:
-            (should_execute, exception): If should_execute is True, proceed with
-            task execution. If False and exception is None, task was completed
-            externally. If exception is not None, lock acquisition failed.
-        """
-        assert global_lock is not None
-        assert global_lock_config is not None
-        task_id = str(task.id)
-
-        # Exponential backoff state
-        timeout = global_lock_config.wait_timeout_seconds
-        current_interval = 1.0  # Start with 1 second
-        max_interval = 30.0  # Cap at 30 seconds
-        backoff_factor = 2.0
-        start_time = asyncio.get_event_loop().time()
-
-        while True:
-            result = await global_lock.acquire(
-                task_id=task_id,
-                owner_id=owner_id,
-                ttl_seconds=global_lock_config.ttl_seconds,
-                check_task_completion=True,
-            )
-
-            if result.status == LockAcquisitionStatus.ACQUIRED:
-                held_locks.add(task_id)
-                return (True, None)
-
-            if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
-                # Task completed elsewhere - wait for completion to be visible
-                await wait_for_completion_with_retry(task)
-                return (False, None)
-
-            if result.status == LockAcquisitionStatus.ERROR:
-                return (False, Exception(f"Lock error: {result.error_message}"))
-
-            # HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED
-            if timeout is None:
-                return (
-                    False,
-                    Exception(f"Lock unavailable: {result.status.value}"),
-                )
-
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed >= timeout:
-                return (
-                    False,
-                    Exception(
-                        f"Timeout waiting for lock ({result.status.value}): "
-                        f"task {task_id} after {timeout}s"
-                    ),
-                )
-
-            # Check if task was completed while we waited
-            if await task.complete_aio():
-                return (False, None)
-
-            # Wait with exponential backoff
-            logger.debug(
-                f"Lock for task {task_id} unavailable ({result.status}), "
-                f"retrying in {current_interval:.1f}s..."
-            )
-            await asyncio.sleep(current_interval)
-            current_interval = min(current_interval * backoff_factor, max_interval)
-
     async def release_lock_for_task(task: BaseTask, completed: bool) -> None:
         """Release lock for task if held."""
-        if global_lock is None:
+        if global_lock_manager is None:
             return
         task_id = str(task.id)
         if task_id not in held_locks:
             return
         try:
-            await global_lock.release(
-                task_id=task_id,
-                owner_id=owner_id,
-                task_completed=completed,
-            )
+            await global_lock_manager.release(task_id, task_completed=completed)
         except Exception as e:
             logger.warning(f"Failed to release lock for task {task_id}: {e}")
         finally:
             held_locks.discard(task_id)
+
+    async def acquire_lock_with_completion_check(
+        task: BaseTask,
+        task_id: str,
+        lock_manager: GlobalConcurrencyLockManager,
+        config: GlobalLockConfig,
+    ) -> LockAcquisitionResult:
+        """Acquire lock with retry/backoff and external completion checking.
+
+        During the retry loop, we also check if the task was completed externally
+        (e.g., by another process). This handles the race condition where:
+        1. Lock is held by another process
+        2. That process completes the task and releases the lock
+        3. Before we can re-acquire, we should notice the task is complete
+        """
+        timeout = config.lock_wait_timeout_seconds
+        current_interval = config.lock_wait_initial_interval_seconds
+        max_interval = config.lock_wait_max_interval_seconds
+        backoff_factor = config.lock_wait_backoff_factor
+
+        loop = asyncio.get_event_loop()
+        start_time = loop.time()
+
+        while True:
+            # Try to acquire the lock
+            result = await lock_manager.acquire(task_id)
+
+            if result.status == LockAcquisitionStatus.ACQUIRED:
+                return result
+
+            if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
+                return result
+
+            if result.status == LockAcquisitionStatus.ERROR:
+                return result
+
+            # HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED - retry with backoff
+            if timeout is None:
+                return result
+
+            elapsed = loop.time() - start_time
+            if elapsed >= timeout:
+                return LockAcquisitionResult(
+                    status=result.status,
+                    acquired=False,
+                    error_message=f"Timeout after {timeout}s: {result.status.value}",
+                )
+
+            # Check if task was completed externally during the wait
+            if await task.complete_aio():
+                return LockAcquisitionResult(
+                    status=LockAcquisitionStatus.ALREADY_COMPLETED,
+                    acquired=False,
+                )
+
+            logger.debug(
+                f"Lock for {task_id} unavailable ({result.status}), "
+                f"retrying in {current_interval:.1f}s..."
+            )
+            await asyncio.sleep(current_interval)
+            current_interval = min(current_interval * backoff_factor, max_interval)
 
     try:
         # Main build loop using as_completed pattern
@@ -698,21 +685,47 @@ async def build_aio(
                 state = task_states[task.id]
 
                 # Acquire lock if enabled for this task
-                use_lock = global_lock is not None and lock_selector(task)
+                use_lock = global_lock_manager is not None and lock_selector(task)
                 if use_lock:
-                    should_execute, lock_error = await acquire_lock_for_task(task)
-                    if lock_error is not None:
-                        # Lock acquisition failed
-                        executing.discard(task.id)
-                        await process_result(task, lock_error)
-                        continue
-                    if not should_execute:
-                        # Task was completed externally (another process)
+                    assert global_lock_manager is not None  # For type checker
+                    task_id_str = str(task.id)
+                    # Acquire lock with retry/backoff and completion checking
+                    lock_result = await acquire_lock_with_completion_check(
+                        task, task_id_str, global_lock_manager, global_lock_config
+                    )
+
+                    if lock_result.status == LockAcquisitionStatus.ACQUIRED:
+                        held_locks.add(task_id_str)
+                        # Continue to task execution below
+                    elif lock_result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
+                        # Task completed externally - wait for visibility
+                        await wait_for_completion_with_retry(task)
                         executing.discard(task.id)
                         state.completed = True
                         completion_cache.add(task.id)
                         completion_events[task.id].set()
-                        task_count.succeeded += 1
+                        task_count.previously_completed += 1
+                        continue
+                    elif lock_result.status == LockAcquisitionStatus.ERROR:
+                        executing.discard(task.id)
+                        await process_result(
+                            task, Exception(f"Lock error: {lock_result.error_message}")
+                        )
+                        continue
+                    else:
+                        # HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED after timeout
+                        executing.discard(task.id)
+                        await process_result(
+                            task,
+                            Exception(
+                                f"Lock unavailable: {lock_result.status.value}"
+                                + (
+                                    f": {lock_result.error_message}"
+                                    if lock_result.error_message
+                                    else ""
+                                )
+                            ),
+                        )
                         continue
 
                 if not state.started:
@@ -810,7 +823,7 @@ def build(
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
     max_concurrent_discover: int = 50,
-    global_lock: GlobalConcurrencyLock | None = None,
+    global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
@@ -831,7 +844,7 @@ def build(
                 fail_mode,
                 registry,
                 max_concurrent_discover,
-                global_lock,
+                global_lock_manager,
                 global_lock_config,
             )
         )

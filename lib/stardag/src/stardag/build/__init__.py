@@ -17,7 +17,8 @@ Interfaces:
 - ExecutionModeSelector: Protocol for custom execution mode selection
 
 Global concurrency locking:
-- GlobalConcurrencyLock: Protocol for distributed lock implementations
+- GlobalConcurrencyLockManager: Protocol for distributed lock implementations
+- LockHandle: Protocol for lock handles (async context manager)
 - GlobalLockConfig: Configuration for global locking behavior
 """
 
@@ -26,11 +27,12 @@ from stardag.build._base import (
     BuildSummary,
     DefaultGlobalLockSelector,
     FailMode,
-    GlobalConcurrencyLock,
+    GlobalConcurrencyLockManager,
     GlobalLockConfig,
     GlobalLockSelector,
     LockAcquisitionResult,
     LockAcquisitionStatus,
+    LockHandle,
     RoutedTaskExecutor,
     TaskCount,
     TaskExecutorABC,
@@ -60,11 +62,12 @@ __all__ = [
     "ExecutionModeSelector",
     # Global concurrency lock
     "DefaultGlobalLockSelector",
-    "GlobalConcurrencyLock",
+    "GlobalConcurrencyLockManager",
     "GlobalLockConfig",
     "GlobalLockSelector",
     "LockAcquisitionResult",
     "LockAcquisitionStatus",
+    "LockHandle",
     # Task executors
     "HybridConcurrentTaskExecutor",
     "RoutedTaskExecutor",

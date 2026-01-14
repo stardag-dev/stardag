@@ -236,127 +236,137 @@ class LockAcquisitionResult:
     error_message: str | None = None
 
 
-class GlobalConcurrencyLock(Protocol):
-    """Protocol for global distributed locks.
+class LockHandle(Protocol):
+    """Async context manager for a held lock.
+
+    Returned by GlobalConcurrencyLockManager.lock(). Use as:
+
+        async with lock_manager.lock(task_id) as handle:
+            if handle.result.acquired:
+                # execute task
+                handle.mark_completed()  # record completion on release
+    """
+
+    @property
+    def result(self) -> LockAcquisitionResult:
+        """The result of the lock acquisition attempt."""
+        ...
+
+    def mark_completed(self) -> None:
+        """Mark that the task completed successfully.
+
+        When called before exiting the context, the lock release will
+        record task completion (implementation-dependent behavior).
+        """
+        ...
+
+    async def __aenter__(self) -> "LockHandle": ...
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool: ...
+
+
+class GlobalConcurrencyLockManager(Protocol):
+    """Protocol for managing distributed locks for task execution.
 
     Implementations provide distributed locking for task execution across
     multiple build processes/instances. This enables "exactly once" execution
     guarantees globally (not just within a single build).
 
-    The default implementation uses the Stardag Registry API with PostgreSQL
-    backend. Users can implement custom solutions using Redis, DynamoDB, etc.
+    The owner identity is set at instance creation time (not per-call),
+    as a single build process typically has one owner ID.
+
+    Usage:
+        lock_manager = SomeLockManager(owner_id="build-123")
+
+        async with lock_manager.lock("task-id") as handle:
+            if handle.result.acquired:
+                # execute task
+                handle.mark_completed()
+            elif handle.result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
+                # skip - task already completed elsewhere
+
+    Implementations:
+    - RegistryGlobalConcurrencyLockManager: Uses Stardag Registry API (default)
+    - Custom implementations can use Redis, DynamoDB, PostgreSQL advisory locks, etc.
     """
 
-    async def acquire(
-        self,
-        task_id: str,
-        owner_id: str,
-        ttl_seconds: int = 60,
-        check_task_completion: bool = True,
-    ) -> LockAcquisitionResult:
-        """Acquire a lock for a task.
+    def lock(self, task_id: str) -> LockHandle:
+        """Get an async context manager for locking a task.
 
         Args:
             task_id: The task identifier (hash).
-            owner_id: UUID identifying the lock owner (stable across retries).
-            ttl_seconds: Time-to-live in seconds for the lock.
-            check_task_completion: If True, check if task is already completed
-                in the registry before acquiring.
+
+        Returns:
+            A LockHandle that can be used as an async context manager.
+            The handle's result indicates whether the lock was acquired.
+        """
+        ...
+
+    async def acquire(self, task_id: str) -> LockAcquisitionResult:
+        """Acquire a lock for a task.
+
+        Lower-level method - prefer using lock() context manager.
+
+        Args:
+            task_id: The task identifier (hash).
 
         Returns:
             LockAcquisitionResult with status:
             - ACQUIRED: Lock acquired successfully
-            - ALREADY_COMPLETED: Task has completion record in registry
+            - ALREADY_COMPLETED: Task has completion record
             - HELD_BY_OTHER: Lock held by another owner
-            - CONCURRENCY_LIMIT_REACHED: Workspace limit reached
+            - CONCURRENCY_LIMIT_REACHED: Concurrency limit reached
             - ERROR: Unexpected error
         """
         ...
 
-    async def renew(
-        self,
-        task_id: str,
-        owner_id: str,
-        ttl_seconds: int = 60,
-    ) -> bool:
-        """Renew a lock's TTL.
-
-        Args:
-            task_id: The task identifier.
-            owner_id: The expected owner.
-            ttl_seconds: New TTL in seconds.
-
-        Returns:
-            True if successfully renewed, False otherwise.
-        """
-        ...
-
-    async def release(
-        self,
-        task_id: str,
-        owner_id: str,
-        task_completed: bool = False,
-        build_id: str | None = None,
-    ) -> bool:
+    async def release(self, task_id: str, task_completed: bool = False) -> bool:
         """Release a lock.
 
+        Lower-level method - prefer using lock() context manager.
+
         Args:
             task_id: The task identifier.
-            owner_id: The expected owner.
-            task_completed: If True and build_id provided, record task completion
-                in the same transaction.
-            build_id: Build ID for completion recording.
+            task_completed: If True, record that the task completed successfully.
 
         Returns:
             True if successfully released, False otherwise.
         """
         ...
 
-    async def check_task_completed(
-        self,
-        task_id: str,
-    ) -> bool:
-        """Check if a task is registered as completed in the registry.
-
-        Args:
-            task_id: The task identifier.
-
-        Returns:
-            True if task has a completion record.
-        """
-        ...
-
 
 @dataclass
 class GlobalLockConfig:
-    """Configuration for global concurrency locking.
+    """Configuration for global concurrency locking at the build level.
 
     Attributes:
         enabled: Whether to use global locking. Can be:
             - True: Lock all tasks
             - False: Lock no tasks (default)
             - Callable: Function that returns True/False for each task
-        ttl_seconds: Lock time-to-live in seconds. Choose conservatively;
-            locks auto-expire and can be taken over.
-        renewal_interval_seconds: How often to renew locks during execution.
-            Set to None to disable auto-renewal.
-        wait_timeout_seconds: Max time to wait for lock acquisition.
-            Set to None to fail immediately if lock is held.
-        block_on_workspace_limit: If True, wait when workspace concurrency
-            limit is reached. If False, fail immediately.
         completion_retry_timeout_seconds: Max time to retry task.complete()
-            when registry shows completed but target doesn't exist yet
-            (handles S3 eventual consistency).
+            when lock manager indicates already_completed but target doesn't
+            exist yet (handles eventual consistency like S3).
         completion_retry_interval_seconds: Interval between completion retries.
+        lock_wait_timeout_seconds: Max time to wait when lock is held by another
+            process or concurrency limit is reached. During this time, we poll
+            for task completion (another process may complete it) and retry
+            lock acquisition. Set to None to fail immediately without waiting.
+        lock_wait_initial_interval_seconds: Initial interval between checks when
+            waiting for lock availability.
+        lock_wait_max_interval_seconds: Maximum interval between checks (caps
+            exponential backoff).
+        lock_wait_backoff_factor: Multiplier for exponential backoff (e.g., 2.0
+            means each interval doubles).
     """
 
     enabled: bool | Callable[[BaseTask], bool] = False
-    ttl_seconds: int = 60
-    renewal_interval_seconds: int | None = 30
-    wait_timeout_seconds: float | None = 300
-    block_on_workspace_limit: bool = True
     completion_retry_timeout_seconds: float = 30
     completion_retry_interval_seconds: float = 1.0
+    lock_wait_timeout_seconds: float | None = 300  # 5 minutes
+    lock_wait_initial_interval_seconds: float = 1.0
+    lock_wait_max_interval_seconds: float = 30.0
+    lock_wait_backoff_factor: float = 2.0
 
 
 class GlobalLockSelector(Protocol):
