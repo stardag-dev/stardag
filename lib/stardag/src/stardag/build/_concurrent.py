@@ -386,6 +386,7 @@ async def build_aio(
     task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
+    max_concurrent_discover: int = 50,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -403,6 +404,8 @@ async def build_aio(
             Use RoutedTaskExecutor to route tasks to different executors (e.g., Modal).
         fail_mode: How to handle task failures
         registry: Registry for tracking builds (default: from init_registry())
+        max_concurrent_discover: Maximum concurrent completion checks during DAG discovery.
+            Higher values speed up discovery for large DAGs with remote targets.
 
     Returns:
         BuildSummary with status and task counts
@@ -426,38 +429,54 @@ async def build_aio(
     # Currently executing tasks
     executing: set[UUID] = set()
 
+    # Synchronization for concurrent discovery
+    discover_lock = asyncio.Lock()
+    discover_semaphore = asyncio.Semaphore(max_concurrent_discover)
+
     async def discover(task: BaseTask) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
 
         This optimization avoids traversing into dependency subgraphs that
         are already complete, which can significantly reduce discovery time
         for large DAGs with cached results.
+
+        Uses concurrent recursion with TaskGroup for parallel discovery,
+        with a lock protecting shared data structures and a semaphore
+        limiting concurrent completion checks.
         """
-        if task.id in task_states:
-            return
+        # Check if already discovered and reserve our spot (with lock)
+        async with discover_lock:
+            if task.id in task_states:
+                return
+            static_deps = flatten_task_struct(task.requires())
+            task_states[task.id] = TaskExecutionState(
+                task=task, static_deps=static_deps
+            )
+            completion_events[task.id] = asyncio.Event()
+            task_count.discovered += 1
 
-        static_deps = flatten_task_struct(task.requires())
-        task_states[task.id] = TaskExecutionState(task=task, static_deps=static_deps)
-        completion_events[task.id] = asyncio.Event()
-        task_count.discovered += 1
+        # Check completion outside lock (I/O bound, use semaphore to limit concurrency)
+        async with discover_semaphore:
+            is_complete = await task.complete_aio()
 
-        # Check if this task is already complete
-        is_complete = await task.complete_aio()
         if is_complete:
-            completion_cache.add(task.id)
-            task_states[task.id].completed = True
-            completion_events[task.id].set()
-            task_count.previously_completed += 1
+            async with discover_lock:
+                completion_cache.add(task.id)
+                task_states[task.id].completed = True
+                completion_events[task.id].set()
+                task_count.previously_completed += 1
             # Don't recurse into deps - they're already built
             return
 
-        # Task not complete - recurse into dependencies
-        for dep in static_deps:
-            await discover(dep)
+        # Task not complete - recurse into dependencies concurrently
+        async with asyncio.TaskGroup() as tg:
+            for dep in static_deps:
+                tg.create_task(discover(dep))
 
-    # Discover all tasks from roots
-    for root in tasks:
-        await discover(root)
+    # Discover all tasks from roots concurrently
+    async with asyncio.TaskGroup() as tg:
+        for root in tasks:
+            tg.create_task(discover(root))
 
     await registry.start_build_aio(root_tasks=tasks)
     await task_executor.setup()
@@ -634,6 +653,7 @@ def build(
     task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
+    max_concurrent_discover: int = 50,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -646,7 +666,11 @@ def build(
         frameworks like Playwright, FastAPI, etc.), use `await build_aio()` instead.
     """
     try:
-        return asyncio.run(build_aio(tasks, task_executor, fail_mode, registry))
+        return asyncio.run(
+            build_aio(
+                tasks, task_executor, fail_mode, registry, max_concurrent_discover
+            )
+        )
     except RuntimeError as e:
         if "cannot be called from a running event loop" in str(e):
             raise RuntimeError(
