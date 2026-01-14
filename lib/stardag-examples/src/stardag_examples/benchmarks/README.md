@@ -31,13 +31,28 @@ uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 
 ## Results Summary
 
-| Scenario                    | Sequential | Thread Pool | Process Pool |
-| --------------------------- | ---------- | ----------- | ------------ |
-| io_bound_tree (15 tasks)    | 1.56s      | 0.41s       | -            |
-| io_bound_flat_64 (65 tasks) | 5.95s      | 0.71s       | -            |
-| cpu_bound_tree (15 tasks)   | 0.30s      | 0.29s       | 1.11s        |
-| heavy_cpu_flat (9 tasks)    | 9.25s      | 8.96s       | 4.07s        |
-| light_tree (15 tasks)       | 0.001s     | 0.002s      | -            |
+### Baseline (NoOp Registry)
+
+| Scenario                  | Sequential | Thread Pool | Process Pool |
+| ------------------------- | ---------- | ----------- | ------------ |
+| io_bound_tree (15 tasks)  | 1.57s      | 0.41s       | -            |
+| cpu_bound_tree (15 tasks) | 0.31s      | 0.29s       | 1.08s        |
+| light_tree (15 tasks)     | 0.001s     | 0.002s      | -            |
+
+### Local Registry Comparison
+
+| Scenario       | Config     | No Locks | With Locks | Overhead |
+| -------------- | ---------- | -------- | ---------- | -------- |
+| io_bound_tree  | sequential | 2.16s    | 2.18s      | +1%      |
+| io_bound_tree  | concurrent | 0.72s    | 0.82s      | +14%     |
+| cpu_bound_tree | sequential | 0.60s    | 0.55s      | -8%      |
+| cpu_bound_tree | concurrent | 0.58s    | 0.66s      | +14%     |
+| light_tree     | sequential | 0.24s    | 0.24s      | 0%       |
+| light_tree     | concurrent | 0.28s    | 0.42s      | +50%     |
+
+**Registry overhead**: Local registry adds ~0.6s for io_bound scenarios (API calls for task registration/completion tracking). This is network latency to localhost:8000.
+
+**Lock overhead**: Global concurrency locks add ~10-15% overhead for concurrent execution due to lock acquisition/release API calls. Light tasks show higher percentage overhead because task work is minimal.
 
 ## Key Takeaways
 
