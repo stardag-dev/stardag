@@ -38,7 +38,7 @@ from stardag_api.schemas import (
 )
 from stardag_api.services import generate_build_slug, get_build_status
 from stardag_api.services.status import (
-    get_all_task_statuses_in_build,
+    get_all_task_global_statuses,
     get_task_status_in_build,
 )
 
@@ -758,8 +758,8 @@ async def list_tasks_in_build(
     tasks = result.scalars().all()
     task_ids = [t.id for t in tasks]
 
-    # Get all statuses
-    statuses = await get_all_task_statuses_in_build(db, build_id)
+    # Get global statuses (considering events from ALL builds)
+    statuses = await get_all_task_global_statuses(db, task_ids)
 
     # Get asset counts per task
     asset_counts: dict[int, int] = {}
@@ -773,9 +773,14 @@ async def list_tasks_in_build(
 
     responses = []
     for task in tasks:
-        status, started_at, completed_at, error_message = statuses.get(
-            task.id, (TaskStatus.PENDING, None, None, None)
-        )
+        (
+            status,
+            started_at,
+            completed_at,
+            error_message,
+            completed_in_build_id,
+            waiting_for_lock,
+        ) = statuses.get(task.id, (TaskStatus.PENDING, None, None, None, None, False))
         responses.append(
             TaskWithStatusResponse(
                 id=task.id,
@@ -791,6 +796,8 @@ async def list_tasks_in_build(
                 completed_at=completed_at,
                 error_message=error_message,
                 asset_count=asset_counts.get(task.id, 0),
+                waiting_for_lock=waiting_for_lock,
+                completed_in_build_id=completed_in_build_id,
             )
         )
 
@@ -868,10 +875,11 @@ async def get_build_graph(
     # Get all tasks by those IDs
     result = await db.execute(select(Task).where(Task.id.in_(task_ids_subquery)))
     tasks = result.scalars().all()
-    task_ids = {t.id for t in tasks}
+    task_ids_list = [t.id for t in tasks]
+    task_ids = set(task_ids_list)
 
-    # Get statuses
-    statuses = await get_all_task_statuses_in_build(db, build_id)
+    # Get global statuses (considering events from ALL builds)
+    statuses = await get_all_task_global_statuses(db, task_ids_list)
 
     # Get asset counts per task
     asset_counts: dict[int, int] = {}
@@ -886,7 +894,9 @@ async def get_build_graph(
     # Build nodes
     nodes = []
     for task in tasks:
-        status, _, _, _ = statuses.get(task.id, (TaskStatus.PENDING, None, None, None))
+        status, _, _, _, _, _ = statuses.get(
+            task.id, (TaskStatus.PENDING, None, None, None, None, False)
+        )
         nodes.append(
             TaskNode(
                 id=task.id,
