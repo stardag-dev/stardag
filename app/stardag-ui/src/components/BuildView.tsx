@@ -25,9 +25,10 @@ interface TaskWithContext extends Task {
 interface BuildViewProps {
   buildId: string;
   onBack: () => void;
+  onNavigateToBuild?: (buildId: string) => void;
 }
 
-export function BuildView({ buildId, onBack }: BuildViewProps) {
+export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps) {
   const { activeWorkspace } = useWorkspace();
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
@@ -181,6 +182,9 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
         error_message: fullTask?.error_message ?? null,
         asset_count: node.asset_count,
         isFilterMatch: noFilter || matchingTaskIds.has(node.task_id),
+        // Cross-build status fields
+        waiting_for_lock: fullTask?.waiting_for_lock,
+        status_build_id: fullTask?.status_build_id,
       };
     });
   }, [graph, allTasks, filteredTasks, nameFilter, statusFilter, build]);
@@ -414,6 +418,7 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                         selectedTaskId={selectedTask?.task_id ?? null}
                         onTaskClick={handleDagTaskClick}
                         buildId={buildId}
+                        onStatusBuildClick={onNavigateToBuild}
                       />
                     </div>
                   )}
@@ -435,6 +440,7 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                     totalPages={totalPages}
                     onPageChange={setPage}
                     buildId={buildId}
+                    onStatusBuildClick={onNavigateToBuild}
                   />
                 </Panel>
               </PanelGroup>
@@ -452,6 +458,7 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                     buildId={buildId}
                     onClose={() => setSelectedTask(null)}
                     onTaskCancelled={handleRefresh}
+                    onStatusBuildClick={onNavigateToBuild}
                   />
                 </div>
               </Panel>

@@ -10,6 +10,7 @@ interface TaskDetailProps {
   buildId?: string;
   onClose: () => void;
   onTaskCancelled?: () => void;
+  onStatusBuildClick?: (buildId: string) => void;
 }
 
 export function TaskDetail({
@@ -17,6 +18,7 @@ export function TaskDetail({
   buildId,
   onClose,
   onTaskCancelled,
+  onStatusBuildClick,
 }: TaskDetailProps) {
   const [assets, setAssets] = useState<TaskAsset[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(false);
@@ -125,6 +127,7 @@ export function TaskDetail({
               waitingForLock={task.waiting_for_lock}
               statusBuildId={task.status_build_id}
               currentBuildId={buildId}
+              onStatusBuildClick={onStatusBuildClick}
             />
             {canCancel && (
               <button
