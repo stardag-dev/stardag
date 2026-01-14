@@ -28,6 +28,7 @@ from stardag._task import (
 class BuildExitStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
+    EXIT_EARLY = "exit_early"  # All remaining tasks running in other builds
 
 
 @dataclass
@@ -105,6 +106,8 @@ class TaskExecutionState:
     completed: bool = False
     # Exception if task failed
     exception: BaseException | None = None
+    # True when task is waiting for a global lock held by another build
+    waiting_for_lock: bool = False
 
     @property
     def all_deps(self) -> list[BaseTask]:
@@ -358,6 +361,10 @@ class GlobalLockConfig:
             exponential backoff).
         lock_wait_backoff_factor: Multiplier for exponential backoff (e.g., 2.0
             means each interval doubles).
+        exit_early_when_all_locked: If True, the build will exit early when all
+            remaining tasks are waiting for locks held by other builds. This
+            avoids waiting indefinitely when another build will complete the
+            remaining work.
     """
 
     enabled: bool | Callable[[BaseTask], bool] = False
@@ -367,6 +374,7 @@ class GlobalLockConfig:
     lock_wait_initial_interval_seconds: float = 1.0
     lock_wait_max_interval_seconds: float = 30.0
     lock_wait_backoff_factor: float = 2.0
+    exit_early_when_all_locked: bool = False
 
 
 class GlobalLockSelector(Protocol):

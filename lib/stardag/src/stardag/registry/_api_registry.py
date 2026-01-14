@@ -571,3 +571,63 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
+
+    async def cancel_build_aio(self) -> None:
+        """Async version - cancel the current build."""
+        if self._build_id is None:
+            logger.warning("No active build to cancel")
+            return
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/cancel",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, "Cancel build")
+        logger.info(f"Cancelled build: {self._build_id}")
+
+    async def exit_early_aio(self, reason: str | None = None) -> None:
+        """Async version - mark build as exited early."""
+        if self._build_id is None:
+            logger.warning("No active build to exit early")
+            return
+
+        params = self._get_params()
+        if reason:
+            params["reason"] = reason
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/exit-early",
+            params=params,
+        )
+        self._handle_response_error(response, "Exit early")
+        logger.info(f"Build exited early: {self._build_id}")
+
+    async def cancel_task_aio(self, task: BaseTask) -> None:
+        """Async version - cancel a task."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot cancel task")
+            return
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/cancel",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Cancel task {task.id}")
+
+    async def task_waiting_for_lock_aio(
+        self, task: BaseTask, lock_owner: str | None = None
+    ) -> None:
+        """Async version - record that task is waiting for global lock."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot record task waiting for lock")
+            return
+
+        params = self._get_params()
+        if lock_owner:
+            params["lock_owner"] = lock_owner
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/waiting-for-lock",
+            params=params,
+        )
+        self._handle_response_error(response, f"Task {task.id} waiting for lock")
