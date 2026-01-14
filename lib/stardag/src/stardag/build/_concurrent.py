@@ -715,19 +715,22 @@ async def build_aio(
             assert global_lock_manager is not None  # For type checker
             task_id_str = str(task.id)
 
-            # Skip acquisition if we already hold this lock (task resuming after dynamic deps)
-            if task_id_str not in held_locks:
-                # Acquire lock (this can take time with retries - but we're async!)
-                lock_result = await acquire_lock_with_completion_check(
-                    task, task_id_str, global_lock_manager, global_lock_config
-                )
+            # Always acquire lock (even if we think we hold it from a previous
+            # dynamic deps yield). This handles:
+            # 1. Fresh task execution - normal acquire
+            # 2. Task resuming after dynamic deps - re-acquire is safe since
+            #    we're the same owner, and handles the case where lock expired
+            #    during the wait for deps
+            lock_result = await acquire_lock_with_completion_check(
+                task, task_id_str, global_lock_manager, global_lock_config
+            )
 
-                if lock_result.status != LockAcquisitionStatus.ACQUIRED:
-                    # Lock not acquired - return the lock result for handling
-                    return lock_result
+            if lock_result.status != LockAcquisitionStatus.ACQUIRED:
+                # Lock not acquired - return the lock result for handling
+                return lock_result
 
-                # Lock acquired - track it for release later
-                held_locks.add(task_id_str)
+            # Lock acquired - track it for release later
+            held_locks.add(task_id_str)
 
         # Now we have the lock (or locking wasn't needed)
         # Start the task in registry
