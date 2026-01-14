@@ -341,6 +341,92 @@ async def fail_build(
     )
 
 
+@router.post("/{build_id}/cancel", response_model=BuildResponse)
+async def cancel_build(
+    build_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Cancel a build."""
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
+
+    event = Event(
+        build_id=build_id,
+        task_id=None,
+        event_type=EventType.BUILD_CANCELLED,
+    )
+    db.add(event)
+    await db.commit()
+
+    status, started_at, completed_at = await get_build_status(db, build.id)
+
+    return BuildResponse(
+        id=build.id,
+        workspace_id=build.workspace_id,
+        user_id=build.user_id,
+        name=build.name,
+        description=build.description,
+        commit_hash=build.commit_hash,
+        root_task_ids=build.root_task_ids,
+        created_at=build.created_at,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+
+
+@router.post("/{build_id}/exit-early", response_model=BuildResponse)
+async def exit_early(
+    build_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    reason: str | None = None,
+):
+    """Mark a build as exited early (all remaining tasks running in other builds)."""
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
+
+    event = Event(
+        build_id=build_id,
+        task_id=None,
+        event_type=EventType.BUILD_EXIT_EARLY,
+        error_message=reason,  # Reuse error_message field for the reason
+    )
+    db.add(event)
+    await db.commit()
+
+    status, started_at, completed_at = await get_build_status(db, build.id)
+
+    return BuildResponse(
+        id=build.id,
+        workspace_id=build.workspace_id,
+        user_id=build.user_id,
+        name=build.name,
+        description=build.description,
+        commit_hash=build.commit_hash,
+        root_task_ids=build.root_task_ids,
+        created_at=build.created_at,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+
+
 # --- Tasks within Builds ---
 
 
@@ -373,6 +459,7 @@ async def register_task(
         .where(Task.task_id == task.task_id)
     )
     db_task = result.scalar_one_or_none()
+    task_already_existed = db_task is not None
 
     if not db_task:
         # Create new task
@@ -411,12 +498,23 @@ async def register_task(
                     db.add(dep_edge)
 
     # Create TASK_PENDING event for this build
-    event = Event(
+    pending_event = Event(
         build_id=build_id,
         task_id=db_task.id,
         event_type=EventType.TASK_PENDING,
     )
-    db.add(event)
+    db.add(pending_event)
+
+    # If task already existed, also create TASK_REFERENCED event
+    # This allows distinguishing between builds that first registered the task
+    # vs builds that are referencing an existing task
+    if task_already_existed:
+        referenced_event = Event(
+            build_id=build_id,
+            task_id=db_task.id,
+            event_type=EventType.TASK_REFERENCED,
+        )
+        db.add(referenced_event)
 
     await db.commit()
     await db.refresh(db_task)
@@ -493,6 +591,49 @@ async def resume_task(
 ):
     """Mark a task as resumed (dynamic dependencies completed)."""
     return await _create_task_event(build_id, task_id, EventType.TASK_RESUMED, db, auth)
+
+
+@router.post("/{build_id}/tasks/{task_id}/cancel", response_model=TaskEventResponse)
+async def cancel_task(
+    build_id: str,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Cancel a task within a build."""
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_CANCELLED, db, auth
+    )
+
+
+@router.post(
+    "/{build_id}/tasks/{task_id}/waiting-for-lock", response_model=TaskEventResponse
+)
+async def task_waiting_for_lock(
+    build_id: str,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    lock_owner: str | None = None,
+):
+    """Record that a task is waiting for a global lock held by another build."""
+    _, db_task = await _get_build_and_task(build_id, task_id, db, auth)
+
+    # Store lock owner info in event_metadata if provided
+    event_metadata = {"lock_owner": lock_owner} if lock_owner else None
+
+    event = Event(
+        build_id=build_id,
+        task_id=db_task.id,
+        event_type=EventType.TASK_WAITING_FOR_LOCK,
+        event_metadata=event_metadata,
+    )
+    db.add(event)
+    await db.commit()
+
+    status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
+
+    return TaskEventResponse(task_id=db_task.task_id, status=status)
 
 
 @router.post(

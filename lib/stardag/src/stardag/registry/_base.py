@@ -142,6 +142,48 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def cancel_build(self) -> None:
+        """Cancel the current build.
+
+        Called when a build is explicitly cancelled by the user.
+        """
+        pass
+
+    def exit_early(self, reason: str | None = None) -> None:
+        """Mark the build as exited early.
+
+        Called when all remaining tasks are running in other builds
+        and this build should stop waiting.
+
+        Args:
+            reason: Optional reason for exiting early
+        """
+        pass
+
+    def cancel_task(self, task: "BaseTask") -> None:
+        """Cancel a task.
+
+        Called when a task is explicitly cancelled by the user.
+
+        Args:
+            task: The task to cancel
+        """
+        pass
+
+    def task_waiting_for_lock(
+        self, task: "BaseTask", lock_owner: str | None = None
+    ) -> None:
+        """Record that a task is waiting for a global lock.
+
+        Called when a task cannot acquire its lock because another
+        build is holding it.
+
+        Args:
+            task: The task waiting for the lock
+            lock_owner: Optional identifier of who holds the lock
+        """
+        pass
+
     # Async versions - default implementations delegate to sync methods
 
     async def register_task_aio(self, task: "BaseTask") -> None:
@@ -191,6 +233,24 @@ class RegistryABC(metaclass=abc.ABCMeta):
     async def resume_task_aio(self, task: "BaseTask") -> None:
         """Async version of resume_task."""
         self.resume_task(task)
+
+    async def cancel_build_aio(self) -> None:
+        """Async version of cancel_build."""
+        self.cancel_build()
+
+    async def exit_early_aio(self, reason: str | None = None) -> None:
+        """Async version of exit_early."""
+        self.exit_early(reason)
+
+    async def cancel_task_aio(self, task: "BaseTask") -> None:
+        """Async version of cancel_task."""
+        self.cancel_task(task)
+
+    async def task_waiting_for_lock_aio(
+        self, task: "BaseTask", lock_owner: str | None = None
+    ) -> None:
+        """Async version of task_waiting_for_lock."""
+        self.task_waiting_for_lock(task, lock_owner)
 
 
 class NoOpRegistry(RegistryABC):

@@ -29,6 +29,7 @@ class TaskStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    CANCELLED = "cancelled"  # Explicitly cancelled by user
 
 
 class BuildStatus(str, enum.Enum):
@@ -39,6 +40,7 @@ class BuildStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    EXIT_EARLY = "exit_early"  # All remaining tasks running in other builds
 
 
 class EventType(str, enum.Enum):
@@ -49,12 +51,20 @@ class EventType(str, enum.Enum):
     BUILD_COMPLETED = "build_completed"
     BUILD_FAILED = "build_failed"
     BUILD_CANCELLED = "build_cancelled"
+    BUILD_EXIT_EARLY = "build_exit_early"  # All remaining tasks running in other builds
 
     # Task events (within a build)
     TASK_PENDING = "task_pending"
+    TASK_REFERENCED = (
+        "task_referenced"  # Task already existed, referenced by this build
+    )
     TASK_STARTED = "task_started"
     TASK_SUSPENDED = "task_suspended"  # Task waiting for dynamic dependencies
     TASK_RESUMED = "task_resumed"  # Task resuming after dynamic deps complete
+    TASK_WAITING_FOR_LOCK = (
+        "task_waiting_for_lock"  # Blocked by global lock in another build
+    )
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_SKIPPED = "task_skipped"
+    TASK_CANCELLED = "task_cancelled"  # Explicitly cancelled by user
