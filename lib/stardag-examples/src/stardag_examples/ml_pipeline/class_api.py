@@ -1,15 +1,17 @@
+import abc
 import datetime
 import json
 import logging
 import tempfile
 import typing
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import pandas as pd
 import stardag as sd
 from pydantic import Field
 from stardag._task import TaskRef
+from stardag.build import GlobalLockConfig
 from stardag.target import LoadedT
 
 from stardag_examples.ml_pipeline import base
@@ -20,9 +22,23 @@ logger = logging.getLogger(__name__)
 sd.namespace("examples.ml_pipeline.class_api", scope=__name__)
 
 
-class ExamplesMLPipelineBase(sd.AutoTask[LoadedT], typing.Generic[LoadedT]):
+class ExamplesMLPipelineBase(sd.AutoTask[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "0"
     version: str = __version__
+
+    sleep_seconds: Annotated[float, sd.StardagField(hash_exclude=True)] = 3.0
+
+    def run(self) -> None:
+        logger.info(f"Running task: {self.__class__.__name__}")
+        import time
+
+        time.sleep(self.sleep_seconds)  # Simulate some work being done
+        self._run()
+        logger.info(f"Completed task: {self.__class__.__name__}")
+
+    @abc.abstractmethod
+    def _run(self) -> None:
+        pass
 
 
 class Dump(ExamplesMLPipelineBase[pd.DataFrame]):
@@ -39,7 +55,7 @@ class Dump(ExamplesMLPipelineBase[pd.DataFrame]):
     def _relpath_extra(self) -> str:
         return f"{self.date.isoformat()}/{self.snapshot_slug}"
 
-    def run(self):
+    def _run(self):
         if not self.date == base.utc_today():
             raise ValueError("Date must be today")
 
@@ -54,7 +70,7 @@ class Dataset(ExamplesMLPipelineBase[pd.DataFrame]):
     def requires(self):
         return self.dump
 
-    def run(self):
+    def _run(self):
         print("Processing data...")
         data = self.dump.output().load()
         processed_data = base.process_data(data, params=self.params)
@@ -68,7 +84,7 @@ class Subset(ExamplesMLPipelineBase[pd.DataFrame]):
     def requires(self):  # type: ignore
         return self.dataset
 
-    def run(self):
+    def _run(self):
         print("Sub setting data...")
         data = self.dataset.output().load()  # type: ignore
         subset = self.filter(data)
@@ -85,7 +101,7 @@ class TrainedModel(ExamplesMLPipelineBase[base.SKLearnClassifierModel]):
 
     # TODO directory target!
 
-    def run(self):
+    def _run(self):
         print("Training model...")
         dataset = self.dataset.output().load()
 
@@ -114,7 +130,7 @@ class Predictions(ExamplesMLPipelineBase[pd.DataFrame]):
             "dataset": self.dataset,
         }
 
-    def run(self):
+    def _run(self):
         print("Predicting...")
         model = self.trained_model.output().load()
         dataset = self.dataset.output().load()
@@ -131,7 +147,7 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
             "dataset": self.predictions.dataset,
         }
 
-    def run(self):
+    def _run(self):
         print("Calculating metrics...")
         dataset = self.predictions.dataset.output().load()
         predictions = self.predictions.output().load()
@@ -183,7 +199,7 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
             for model in self.models
         ]
 
-    def run(self):
+    def _run(self):
         metrics_s = [task.output().load() for task in self.requires()]
         metrics_and_params_s = [
             {**metrics, **hyper_parameters.model_dump(mode="json")}
@@ -292,5 +308,5 @@ def get_benchmark_dag(
 if __name__ == "__main__":
     metrics = get_metrics_dag()
     print(metrics.model_dump_json(indent=2))
-    sd.build([metrics])
+    sd.build([metrics], global_lock_config=GlobalLockConfig(enabled=True))
     print(json.dumps(metrics.output().load(), indent=2))
