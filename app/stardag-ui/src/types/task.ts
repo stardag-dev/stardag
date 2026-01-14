@@ -1,5 +1,17 @@
-export type TaskStatus = "pending" | "running" | "suspended" | "completed" | "failed";
-export type BuildStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "suspended"
+  | "completed"
+  | "failed"
+  | "cancelled";
+export type BuildStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "exit_early";
 
 // Build entity
 export interface Build {
@@ -40,6 +52,10 @@ export interface Task {
   asset_count: number;
   // Asset data - mapping of asset_name -> body_json (populated when asset columns requested)
   asset_data?: Record<string, Record<string, unknown>>;
+  // Lock status - true if task is waiting for a global lock held by another build
+  waiting_for_lock?: boolean;
+  // Build ID holding the lock (if waiting_for_lock is true)
+  lock_holder_build_id?: string;
 }
 
 export interface TaskListResponse {
