@@ -51,6 +51,7 @@ class BuildSummary:
 
     status: BuildExitStatus
     task_count: TaskCount
+    build_id: str | None = None
     error: BaseException | None = None
 
     def __repr__(self) -> str:
@@ -59,11 +60,17 @@ class BuildSummary:
         status_icon = "✓" if self.status == BuildExitStatus.SUCCESS else "✗"
         lines = [
             f"Build {self.status.value.upper()} {status_icon}",
-            f"  Discovered: {tc.discovered}",
-            f"  Previously completed: {tc.previously_completed}",
-            f"  Succeeded: {tc.succeeded}",
-            f"  Failed: {tc.failed}",
         ]
+        if self.build_id:
+            lines.append(f"  Build ID: {self.build_id}")
+        lines.extend(
+            [
+                f"  Discovered: {tc.discovered}",
+                f"  Previously completed: {tc.previously_completed}",
+                f"  Succeeded: {tc.succeeded}",
+                f"  Failed: {tc.failed}",
+            ]
+        )
         if tc.pending > 0:
             lines.append(f"  Pending: {tc.pending}")
         if self.error:

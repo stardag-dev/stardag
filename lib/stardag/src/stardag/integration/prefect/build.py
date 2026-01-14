@@ -39,7 +39,7 @@ class _PrefectTaskRunWrapper:
 
     This class handles the "run" phase of task execution within a Prefect flow,
     providing:
-    - Registry lifecycle calls (start_task, complete_task, fail_task)
+    - Registry lifecycle calls (task_start, task_complete, task_fail)
     - Before/after execution callbacks for custom logging or artifacts
     - Asset uploading after task completion
     - Local task execution (async or threaded) when no executor is provided
@@ -49,6 +49,7 @@ class _PrefectTaskRunWrapper:
     still handling registry tracking and callbacks locally within the Prefect flow.
 
     Args:
+        build_id: The build ID for registry tracking.
         task_executor: Optional TaskExecutorABC for delegating task execution to
             remote infrastructure (e.g., ModalTaskExecutor). When provided, tasks
             are submitted to this executor instead of running locally. When None,
@@ -67,16 +68,18 @@ class _PrefectTaskRunWrapper:
             modal_app_name="my-app",
             worker_selector=lambda task: "gpu" if needs_gpu(task) else "default",
         )
-        run_wrapper = _PrefectTaskRunWrapper(task_executor=modal_executor)
+        run_wrapper = _PrefectTaskRunWrapper(build_id=build_id, task_executor=modal_executor)
     """
 
     def __init__(
         self,
+        build_id: str,
         task_executor: TaskExecutorABC | None = None,
         registry: RegistryABC | None = None,
         before_run_callback: AsyncRunCallback | None = None,
         on_complete_callback: AsyncRunCallback | None = None,
     ):
+        self.build_id = build_id
         self.task_executor = task_executor
         self.registry = registry or registry_provider.get()
         self.before_run_callback = before_run_callback
@@ -103,7 +106,7 @@ class _PrefectTaskRunWrapper:
             - Generator: Task has dynamic deps and is suspended (in-process).
             - TaskStruct: Task has dynamic deps but completed (cross-process).
         """
-        await self.registry.task_start_aio(task)
+        await self.registry.task_start_aio(self.build_id, task)
 
         if self.before_run_callback is not None:
             await self.before_run_callback(task)
@@ -132,12 +135,12 @@ class _PrefectTaskRunWrapper:
                 return result
 
             # Task completed successfully (result is None)
-            await self.registry.task_complete_aio(task)
+            await self.registry.task_complete_aio(self.build_id, task)
 
             # Upload registry assets if any
             assets = task.registry_assets_aio()
             if assets:
-                await self.registry.task_upload_assets_aio(task, assets)
+                await self.registry.task_upload_assets_aio(self.build_id, task, assets)
 
             if self.on_complete_callback is not None:
                 await self.on_complete_callback(task)
@@ -145,7 +148,7 @@ class _PrefectTaskRunWrapper:
             return None
 
         except Exception as e:
-            await self.registry.task_fail_aio(task, str(e))
+            await self.registry.task_fail_aio(self.build_id, task, str(e))
             raise
 
 
@@ -168,6 +171,7 @@ async def build(
     on_complete_callback: AsyncRunCallback | None = None,
     wait_for_completion: bool = True,
     registry: RegistryABC | None = None,
+    resume_build_id: str | None = None,
 ) -> dict[str, PrefectConcurrentFuture]:
     """Build a stardag task DAG using Prefect for orchestration.
 
@@ -178,11 +182,23 @@ async def build(
         on_complete_callback: Called after each task completes
         wait_for_completion: Whether to wait for all tasks to complete
         registry: Registry for tracking task execution
+        resume_build_id: Optional build ID to resume. If provided, continues tracking
+            events under this existing build instead of starting a new one.
 
     Returns:
         Dict mapping task IDs to Prefect futures
     """
+    if registry is None:
+        registry = registry_provider.get()
+
+    # Start or resume build
+    if resume_build_id is not None:
+        build_id = resume_build_id
+    else:
+        build_id = await registry.build_start_aio(root_tasks=[task])
+
     run_wrapper = _PrefectTaskRunWrapper(
+        build_id=build_id,
         task_executor=task_executor,
         registry=registry,
         before_run_callback=before_run_callback,
@@ -240,6 +256,9 @@ async def build(
         for future in task_id_to_future.values():
             if future is not None:
                 future.wait()
+
+    # Mark build as complete
+    await registry.build_complete_aio(build_id)
 
     return task_id_to_future  # type: ignore
 
