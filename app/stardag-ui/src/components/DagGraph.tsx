@@ -98,6 +98,7 @@ interface DagGraphProps {
   selectedTaskId: string | null;
   onTaskClick: (taskId: string) => void;
   buildId?: string;
+  onStatusBuildClick?: (buildId: string) => void;
 }
 
 const nodeTypes: NodeTypes = {
@@ -156,6 +157,7 @@ export function DagGraph({
   selectedTaskId,
   onTaskClick,
   buildId,
+  onStatusBuildClick,
 }: DagGraphProps) {
   const { theme } = useTheme();
   const [direction, setDirection] = useState<LayoutDirection>("LR");
@@ -190,6 +192,7 @@ export function DagGraph({
           waitingForLock: task?.waiting_for_lock,
           statusBuildId: task?.status_build_id,
           currentBuildId: buildId,
+          onStatusBuildClick,
         },
       };
     });
@@ -229,6 +232,7 @@ export function DagGraph({
     theme,
     direction,
     buildId,
+    onStatusBuildClick,
   ]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);

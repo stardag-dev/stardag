@@ -14,6 +14,7 @@ export interface TaskNodeData extends Record<string, unknown> {
   waitingForLock?: boolean;
   statusBuildId?: string;
   currentBuildId?: string;
+  onStatusBuildClick?: (buildId: string) => void;
 }
 
 const statusBorderColors: Record<TaskStatus, string> = {
@@ -41,6 +42,13 @@ interface TaskNodeProps {
 export function TaskNode({ data }: TaskNodeProps) {
   const isMuted = !data.isFilterMatch;
   const isHorizontal = data.direction === "LR";
+
+  // Wrap the click handler to stop propagation so node click doesn't fire
+  const handleStatusBuildClick = data.onStatusBuildClick
+    ? (buildId: string) => {
+        data.onStatusBuildClick?.(buildId);
+      }
+    : undefined;
 
   return (
     <div
@@ -111,6 +119,7 @@ export function TaskNode({ data }: TaskNodeProps) {
           waitingForLock={data.waitingForLock}
           statusBuildId={data.statusBuildId}
           currentBuildId={data.currentBuildId}
+          onStatusBuildClick={handleStatusBuildClick}
         />
       </div>
       <Handle

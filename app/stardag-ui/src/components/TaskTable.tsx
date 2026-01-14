@@ -13,6 +13,7 @@ interface TaskTableProps {
   totalPages: number;
   onPageChange: (page: number) => void;
   buildId?: string;
+  onStatusBuildClick?: (buildId: string) => void;
 }
 
 export function TaskTable({
@@ -27,6 +28,7 @@ export function TaskTable({
   totalPages,
   onPageChange,
   buildId,
+  onStatusBuildClick,
 }: TaskTableProps) {
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -118,6 +120,7 @@ export function TaskTable({
                       waitingForLock={task.waiting_for_lock}
                       statusBuildId={task.status_build_id}
                       currentBuildId={buildId}
+                      onStatusBuildClick={onStatusBuildClick}
                     />
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">

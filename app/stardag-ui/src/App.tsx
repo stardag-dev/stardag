@@ -104,12 +104,14 @@ interface BuildPageProps extends SidebarStateProps {
   buildId: string;
   onNavigate: (item: NavItem) => void;
   onBack: () => void;
+  onNavigateToBuild: (buildId: string) => void;
 }
 
 function BuildPage({
   buildId,
   onNavigate,
   onBack,
+  onNavigateToBuild,
   sidebarCollapsed,
   onToggleSidebar,
 }: BuildPageProps) {
@@ -120,7 +122,11 @@ function BuildPage({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <BuildView buildId={buildId} onBack={onBack} />
+      <BuildView
+        buildId={buildId}
+        onBack={onBack}
+        onNavigateToBuild={onNavigateToBuild}
+      />
     </MainLayout>
   );
 }
@@ -506,6 +512,7 @@ function Router() {
               buildId={selectedBuildId}
               onNavigate={handleNavigation}
               onBack={handleBackFromBuild}
+              onNavigateToBuild={handleSelectBuild}
               sidebarCollapsed={sidebarCollapsed}
               onToggleSidebar={handleToggleSidebar}
             />

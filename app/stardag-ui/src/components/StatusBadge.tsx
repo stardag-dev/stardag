@@ -8,6 +8,8 @@ interface StatusBadgeProps {
   statusBuildId?: string;
   // Current build being viewed (to detect cross-build status)
   currentBuildId?: string;
+  // Callback when clicking on a cross-build status badge
+  onStatusBuildClick?: (buildId: string) => void;
 }
 
 const statusStyles: Record<TaskStatus, string> = {
@@ -76,6 +78,7 @@ export function StatusBadge({
   waitingForLock = false,
   statusBuildId,
   currentBuildId,
+  onStatusBuildClick,
 }: StatusBadgeProps) {
   const styles = muted ? statusStylesMuted : statusStyles;
 
@@ -83,17 +86,49 @@ export function StatusBadge({
   const isFromOtherBuild =
     statusBuildId && currentBuildId && statusBuildId !== currentBuildId;
 
+  const isClickable = isFromOtherBuild && onStatusBuildClick;
+
   let tooltip: string | undefined;
   if (waitingForLock) {
     tooltip = "Waiting for global lock";
   } else if (isFromOtherBuild) {
-    tooltip = `${status} in build ${statusBuildId.slice(0, 8)}...`;
+    tooltip = `${status} in build ${statusBuildId.slice(0, 8)}...${
+      isClickable ? " (click to view)" : ""
+    }`;
   }
+
+  const handleClick = (e: React.MouseEvent) => {
+    // Stop propagation to prevent node click in DAG view
+    e.stopPropagation();
+    if (isClickable && statusBuildId) {
+      onStatusBuildClick(statusBuildId);
+    }
+  };
+
+  const baseClasses = `inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${styles[status]}`;
+  const clickableClasses = isClickable
+    ? "cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-blue-400 dark:hover:ring-offset-gray-800"
+    : "";
 
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${styles[status]}`}
+      className={`${baseClasses} ${clickableClasses}`}
       title={tooltip}
+      onClick={isClickable ? handleClick : undefined}
+      role={isClickable ? "button" : undefined}
+      tabIndex={isClickable ? 0 : undefined}
+      onKeyDown={
+        isClickable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.stopPropagation();
+                if (statusBuildId) {
+                  onStatusBuildClick(statusBuildId);
+                }
+              }
+            }
+          : undefined
+      }
     >
       {waitingForLock && <LockIcon className="h-3 w-3" />}
       {isFromOtherBuild && !waitingForLock && <ExternalLinkIcon className="h-3 w-3" />}
