@@ -499,7 +499,7 @@ async def build_aio(
         for root in tasks:
             tg.create_task(discover(root))
 
-    await registry.start_build_aio(root_tasks=tasks)
+    await registry.build_start_aio(root_tasks=tasks)
     await task_executor.setup()
 
     # Map task_id -> asyncio.Task for in-flight executions
@@ -539,7 +539,7 @@ async def build_aio(
             # Task failed - release lock (not completed) and notify registry
             await release_lock_for_task(task, completed=False)
             try:
-                await registry.fail_task_aio(task, str(result))
+                await registry.task_fail_aio(task, str(result))
             except Exception as reg_err:
                 logger.warning(f"Failed to notify registry of task failure: {reg_err}")
             state.exception = result
@@ -552,10 +552,10 @@ async def build_aio(
             # Task completed - release lock (completed) and notify registry
             await release_lock_for_task(task, completed=True)
             try:
-                await registry.complete_task_aio(task)
+                await registry.task_complete_aio(task)
                 assets = task.registry_assets_aio()
                 if assets:
-                    await registry.upload_task_assets_aio(task, assets)
+                    await registry.task_upload_assets_aio(task, assets)
             except Exception as reg_err:
                 logger.warning(
                     f"Failed to notify registry of task completion: {reg_err}"
@@ -572,7 +572,7 @@ async def build_aio(
 
             # Notify registry that task is suspended waiting for dynamic deps
             try:
-                await registry.suspend_task_aio(task)
+                await registry.task_suspend_aio(task)
             except Exception as reg_err:
                 logger.warning(
                     f"Failed to notify registry of task suspension: {reg_err}"
@@ -765,11 +765,11 @@ async def build_aio(
         # Now we have the lock (or locking wasn't needed)
         # Start the task in registry
         if not state.started:
-            await registry.start_task_aio(task)
+            await registry.task_start_aio(task)
             state.started = True
         elif state.dynamic_deps:
             # Task was suspended waiting for dynamic deps, now resuming
-            await registry.resume_task_aio(task)
+            await registry.task_resume_aio(task)
 
         # Execute the task via the executor
         return await task_executor.submit(task)
@@ -859,7 +859,7 @@ async def build_aio(
                         )
                         logger.info(f"Exiting early: {reason}")
                         try:
-                            await registry.exit_early_aio(reason)
+                            await registry.build_exit_early_aio(reason)
                         except Exception as reg_err:
                             logger.warning(
                                 f"Failed to notify registry of exit early: {reg_err}"
@@ -870,7 +870,7 @@ async def build_aio(
                             error=None,
                         )
 
-        await registry.complete_build_aio()
+        await registry.build_complete_aio()
         return BuildSummary(
             status=BuildExitStatus.SUCCESS
             if error is None
@@ -880,7 +880,7 @@ async def build_aio(
         )
 
     except Exception as e:
-        await registry.fail_build_aio(str(e))
+        await registry.build_fail_aio(str(e))
         return BuildSummary(
             status=BuildExitStatus.FAILURE,
             task_count=task_count,

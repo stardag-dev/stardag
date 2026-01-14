@@ -24,9 +24,9 @@ class APIRegistry(RegistryABC):
     """Registry that stores task information via the stardag-api REST service.
 
     This registry implements build-scoped task tracking:
-    1. Call start_build() at the beginning of a build to create a build record
+    1. Call build_start() at the beginning of a build to create a build record
     2. Tasks are registered within the build context
-    3. Call complete_build() or fail_build() when the build finishes
+    3. Call build_complete() or build_fail() when the build finishes
 
     Authentication:
     - API key can be provided directly or via STARDAG_API_KEY env var
@@ -177,7 +177,7 @@ class APIRegistry(RegistryABC):
             return {"workspace_id": self.workspace_id}
         return {}
 
-    def start_build(
+    def build_start(
         self,
         root_tasks: list[BaseTask] | None = None,
         description: str | None = None,
@@ -205,7 +205,7 @@ class APIRegistry(RegistryABC):
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
 
-    def complete_build(self) -> None:
+    def build_complete(self) -> None:
         """Mark the current build as completed."""
         if self._build_id is None:
             logger.warning("No active build to complete")
@@ -218,7 +218,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Complete build")
         logger.info(f"Completed build: {self._build_id}")
 
-    def fail_build(self, error_message: str | None = None) -> None:
+    def build_fail(self, error_message: str | None = None) -> None:
         """Mark the current build as failed."""
         if self._build_id is None:
             logger.warning("No active build to fail")
@@ -234,11 +234,11 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Fail build")
         logger.info(f"Marked build as failed: {self._build_id}")
 
-    def register_task(self, task: BaseTask) -> None:
+    def task_register(self, task: BaseTask) -> None:
         """Register a task with the API service within the current build."""
         if self._build_id is None:
             # Auto-start a build if none exists
-            self.start_build(root_tasks=[task])
+            self.build_start(root_tasks=[task])
 
         task_data = {
             # TODO: rename keys (drop "task_" prefix)
@@ -259,14 +259,14 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Register task {task.id}")
 
-    def start_task(self, task: BaseTask) -> None:
+    def task_start(self, task: BaseTask) -> None:
         """Mark a task as started within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot start task")
             return
 
         # Ensure task is registered first
-        self.register_task(task)
+        self.task_register(task)
 
         response = self.client.post(
             f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/start",
@@ -274,7 +274,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Start task {task.id}")
 
-    def complete_task(self, task: BaseTask) -> None:
+    def task_complete(self, task: BaseTask) -> None:
         """Mark a task as completed within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot complete task")
@@ -286,7 +286,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Complete task {task.id}")
 
-    def fail_task(self, task: BaseTask, error_message: str | None = None) -> None:
+    def task_fail(self, task: BaseTask, error_message: str | None = None) -> None:
         """Mark a task as failed within the current build."""
         if self._build_id is None:
             logger.warning("No active build - cannot fail task")
@@ -301,7 +301,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Fail task {task.id}")
 
-    def suspend_task(self, task: BaseTask) -> None:
+    def task_suspend(self, task: BaseTask) -> None:
         """Mark a task as suspended (waiting for dynamic dependencies)."""
         if self._build_id is None:
             logger.warning("No active build - cannot suspend task")
@@ -313,7 +313,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Suspend task {task.id}")
 
-    def resume_task(self, task: BaseTask) -> None:
+    def task_resume(self, task: BaseTask) -> None:
         """Mark a task as resumed (dynamic dependencies completed)."""
         if self._build_id is None:
             logger.warning("No active build - cannot resume task")
@@ -325,7 +325,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Resume task {task.id}")
 
-    def upload_task_assets(self, task: BaseTask, assets: list[RegistryAsset]) -> None:
+    def task_upload_assets(self, task: BaseTask, assets: list[RegistryAsset]) -> None:
         """Upload assets for a completed task."""
         if self._build_id is None:
             logger.warning("No active build - cannot upload task assets")
@@ -403,7 +403,7 @@ class APIRegistry(RegistryABC):
             )
         return self._async_client
 
-    async def start_build_aio(
+    async def build_start_aio(
         self,
         root_tasks: list[BaseTask] | None = None,
         description: str | None = None,
@@ -427,7 +427,7 @@ class APIRegistry(RegistryABC):
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
 
-    async def complete_build_aio(self) -> None:
+    async def build_complete_aio(self) -> None:
         """Async version - mark the current build as completed."""
         if self._build_id is None:
             logger.warning("No active build to complete")
@@ -440,7 +440,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Complete build")
         logger.info(f"Completed build: {self._build_id}")
 
-    async def fail_build_aio(self, error_message: str | None = None) -> None:
+    async def build_fail_aio(self, error_message: str | None = None) -> None:
         """Async version - mark the current build as failed."""
         if self._build_id is None:
             logger.warning("No active build to fail")
@@ -456,10 +456,10 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Fail build")
         logger.info(f"Marked build as failed: {self._build_id}")
 
-    async def register_task_aio(self, task: BaseTask) -> None:
+    async def task_register_aio(self, task: BaseTask) -> None:
         """Async version - register a task within the current build."""
         if self._build_id is None:
-            await self.start_build_aio(root_tasks=[task])
+            await self.build_start_aio(root_tasks=[task])
 
         task_data = {
             "task_id": str(task.id),
@@ -479,13 +479,13 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Register task {task.id}")
 
-    async def start_task_aio(self, task: BaseTask) -> None:
+    async def task_start_aio(self, task: BaseTask) -> None:
         """Async version - mark a task as started."""
         if self._build_id is None:
             logger.warning("No active build - cannot start task")
             return
 
-        await self.register_task_aio(task)
+        await self.task_register_aio(task)
 
         response = await self.async_client.post(
             f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/start",
@@ -493,7 +493,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Start task {task.id}")
 
-    async def complete_task_aio(self, task: BaseTask) -> None:
+    async def task_complete_aio(self, task: BaseTask) -> None:
         """Async version - mark a task as completed."""
         if self._build_id is None:
             logger.warning("No active build - cannot complete task")
@@ -505,7 +505,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Complete task {task.id}")
 
-    async def fail_task_aio(
+    async def task_fail_aio(
         self, task: BaseTask, error_message: str | None = None
     ) -> None:
         """Async version - mark a task as failed."""
@@ -522,7 +522,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Fail task {task.id}")
 
-    async def suspend_task_aio(self, task: BaseTask) -> None:
+    async def task_suspend_aio(self, task: BaseTask) -> None:
         """Async version - mark a task as suspended."""
         if self._build_id is None:
             logger.warning("No active build - cannot suspend task")
@@ -534,7 +534,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Suspend task {task.id}")
 
-    async def resume_task_aio(self, task: BaseTask) -> None:
+    async def task_resume_aio(self, task: BaseTask) -> None:
         """Async version - mark a task as resumed."""
         if self._build_id is None:
             logger.warning("No active build - cannot resume task")
@@ -546,7 +546,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Resume task {task.id}")
 
-    async def upload_task_assets_aio(
+    async def task_upload_assets_aio(
         self, task: BaseTask, assets: list[RegistryAsset]
     ) -> None:
         """Async version - upload assets for a completed task."""
@@ -572,7 +572,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
 
-    async def cancel_build_aio(self) -> None:
+    async def build_cancel_aio(self) -> None:
         """Async version - cancel the current build."""
         if self._build_id is None:
             logger.warning("No active build to cancel")
@@ -585,7 +585,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Cancel build")
         logger.info(f"Cancelled build: {self._build_id}")
 
-    async def exit_early_aio(self, reason: str | None = None) -> None:
+    async def build_exit_early_aio(self, reason: str | None = None) -> None:
         """Async version - mark build as exited early."""
         if self._build_id is None:
             logger.warning("No active build to exit early")
@@ -602,7 +602,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Exit early")
         logger.info(f"Build exited early: {self._build_id}")
 
-    async def cancel_task_aio(self, task: BaseTask) -> None:
+    async def task_cancel_aio(self, task: BaseTask) -> None:
         """Async version - cancel a task."""
         if self._build_id is None:
             logger.warning("No active build - cannot cancel task")
