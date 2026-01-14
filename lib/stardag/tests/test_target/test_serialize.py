@@ -44,6 +44,14 @@ class CustomMockSerializer(Serializer[str]):
         with target.open("r") as f:
             return f.read()
 
+    async def dump_aio(self, obj: str, target: FileSystemTarget) -> None:
+        async with target.open_aio("w") as f:
+            await f.write(obj)
+
+    async def load_aio(self, target: FileSystemTarget) -> str:
+        async with target.open_aio("r") as f:
+            return await f.read()
+
     def __eq__(self, value: object) -> bool:
         return isinstance(value, CustomMockSerializer)
 

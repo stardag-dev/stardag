@@ -14,12 +14,15 @@ except ImportError:
 from pydantic import PydanticSchemaGenerationError, TypeAdapter
 
 from stardag.target._base import (
+    AIOFileSystemTargetHandle,
     FileSystemTarget,
     FileSystemTargetHandle,
     LoadableSaveableFileSystemTarget,
     LoadedT,
     OpenMode,
+    ReadableAIOFileSystemTargetHandle,
     ReadableFileSystemTargetHandle,
+    WritableAIOFileSystemTargetHandle,
     WritableFileSystemTargetHandle,
 )
 from stardag.utils.resource_provider import resource_provider
@@ -36,11 +39,14 @@ except ImportError:
 
 @typing.runtime_checkable
 class Serializer(typing.Generic[LoadedT], typing.Protocol):
+    """Protocol for serializers that can dump/load objects to/from targets."""
+
     def dump(
         self,
         obj: LoadedT,
         target: FileSystemTarget,
     ) -> None: ...
+
     def load(
         self,
         target: FileSystemTarget,
@@ -50,16 +56,72 @@ class Serializer(typing.Generic[LoadedT], typing.Protocol):
         self,
         obj: LoadedT,
         target: FileSystemTarget,
-    ) -> None:
-        """Async dump - default delegates to sync method."""
-        self.dump(obj, target)
+    ) -> None: ...
 
     async def load_aio(
         self,
         target: FileSystemTarget,
-    ) -> LoadedT:
-        """Async load - default delegates to sync method."""
-        return self.load(target)
+    ) -> LoadedT: ...
+
+
+# Type variable for stream type (str or bytes)
+StreamT = typing.TypeVar("StreamT", str, bytes)
+
+
+class _DumpsLoadsSerializer(typing.Generic[LoadedT, StreamT], abc.ABC):
+    """Base class for serializers that use dumps/loads pattern.
+
+    Provides default implementations of dump/load and dump_aio/load_aio
+    using abstract dumps/loads methods.
+    """
+
+    stream_type: type[StreamT]
+
+    @abc.abstractmethod
+    def dumps(self, obj: LoadedT) -> StreamT:
+        """Serialize object to string or bytes."""
+        ...
+
+    @abc.abstractmethod
+    def loads(self, data: StreamT) -> LoadedT:
+        """Deserialize object from string or bytes."""
+        ...
+
+    @property
+    def read_mode(self) -> typing.Literal["r", "rb"]:
+        if self.stream_type is str:
+            return "r"
+        return "rb"
+
+    @property
+    def write_mode(self) -> typing.Literal["w", "wb"]:
+        if self.stream_type is str:
+            return "w"
+        return "wb"
+
+    def dump(
+        self,
+        obj: LoadedT,
+        target: FileSystemTarget,
+    ) -> None:
+        with target.open(self.write_mode) as handle:
+            handle.write(self.dumps(obj))  # type: ignore[arg-type]
+
+    def load(self, target: FileSystemTarget) -> LoadedT:
+        with target.open(self.read_mode) as handle:
+            return self.loads(handle.read())  # type: ignore[arg-type]
+
+    async def dump_aio(
+        self,
+        obj: LoadedT,
+        target: FileSystemTarget,
+    ) -> None:
+        async with target.open_aio(self.write_mode) as handle:
+            await handle.write(self.dumps(obj))  # type: ignore[arg-type]
+
+    async def load_aio(self, target: FileSystemTarget) -> LoadedT:
+        async with target.open_aio(self.read_mode) as handle:
+            return self.loads(await handle.read())  # type: ignore[arg-type]
 
 
 class Serializable(
@@ -110,6 +172,29 @@ class Serializable(
     def open(self, mode: OpenMode) -> FileSystemTargetHandle:
         return self.wrapped.open(mode)
 
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["r"]
+    ) -> ReadableAIOFileSystemTargetHandle[str]: ...
+
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["rb"]
+    ) -> ReadableAIOFileSystemTargetHandle[bytes]: ...
+
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["w"]
+    ) -> WritableAIOFileSystemTargetHandle[str]: ...
+
+    @typing.overload
+    def open_aio(
+        self, mode: typing.Literal["wb"]
+    ) -> WritableAIOFileSystemTargetHandle[bytes]: ...
+
+    def open_aio(self, mode: OpenMode) -> AIOFileSystemTargetHandle:
+        return self.wrapped.open_aio(mode)
+
     @contextlib.contextmanager
     def _readable_proxy_path(self) -> typing.Generator[Path, None, None]:
         with self.wrapped._readable_proxy_path() as path:
@@ -147,24 +232,20 @@ class Serializable(
             yield path
 
 
-class PlainTextSerializer(Serializer[str]):
+class PlainTextSerializer(_DumpsLoadsSerializer[str, str]):
+    stream_type = str
+
     @classmethod
     def type_checked_init(cls, annotation: typing.Type[str]) -> Self:
         if strip_annotation(annotation) != str:  # noqa: E721
             raise ValueError(f"{annotation} must be str.")
         return cls()
 
-    def dump(
-        self,
-        obj: str,
-        target: FileSystemTarget,
-    ) -> None:
-        with target.open("w") as handle:
-            handle.write(obj)
+    def dumps(self, obj: str) -> str:
+        return obj
 
-    def load(self, target: FileSystemTarget) -> str:
-        with target.open("r") as handle:
-            return handle.read()
+    def loads(self, data: str) -> str:
+        return data
 
     def get_default_extension(self) -> str:
         return "txt"
@@ -173,7 +254,9 @@ class PlainTextSerializer(Serializer[str]):
         return type(self) == type(value)  # noqa: E721
 
 
-class JSONSerializer(Serializer[LoadedT]):
+class JSONSerializer(_DumpsLoadsSerializer[LoadedT, bytes]):
+    stream_type = bytes
+
     @classmethod
     def type_checked_init(cls, annotation: typing.Type[LoadedT]) -> Self:
         return cls(annotation)
@@ -184,17 +267,11 @@ class JSONSerializer(Serializer[LoadedT]):
         except PydanticSchemaGenerationError as e:
             raise ValueError(f"Failed to generate schema for {annotation}") from e
 
-    def dump(
-        self,
-        obj: LoadedT,
-        target: FileSystemTarget,
-    ) -> None:
-        with target.open("wb") as handle:
-            handle.write(self.type_adapter.dump_json(obj))
+    def dumps(self, obj: LoadedT) -> bytes:
+        return self.type_adapter.dump_json(obj)
 
-    def load(self, target: FileSystemTarget) -> LoadedT:
-        with target.open("rb") as handle:
-            return self.type_adapter.validate_json(handle.read())
+    def loads(self, data: bytes) -> LoadedT:
+        return self.type_adapter.validate_json(data)
 
     def get_default_extension(self) -> str:
         return "json"
@@ -207,23 +284,19 @@ class JSONSerializer(Serializer[LoadedT]):
         )
 
 
-class PickleSerializer(Serializer[LoadedT]):
+class PickleSerializer(_DumpsLoadsSerializer[LoadedT, bytes]):
+    stream_type = bytes
+
     @classmethod
     def type_checked_init(cls, annotation: typing.Type[LoadedT]) -> Self:
         # always ok
         return cls()
 
-    def dump(
-        self,
-        obj: LoadedT,
-        target: FileSystemTarget,
-    ) -> None:
-        with target.open("wb") as handle:
-            pickle.dump(obj, handle)
+    def dumps(self, obj: LoadedT) -> bytes:
+        return pickle.dumps(obj)
 
-    def load(self, target: FileSystemTarget) -> LoadedT:
-        with target.open("rb") as handle:
-            return pickle.loads(handle.read())
+    def loads(self, data: bytes) -> LoadedT:
+        return pickle.loads(data)
 
     def get_default_extension(self) -> str:
         return "pkl"
@@ -232,7 +305,7 @@ class PickleSerializer(Serializer[LoadedT]):
         return type(self) == type(value)  # noqa: E721
 
 
-class PandasDataFrameCSVSerializer(Serializer[DataFrame]):
+class PandasDataFrameCSVSerializer(_DumpsLoadsSerializer[DataFrame, str]):
     """Serializer for pandas.DataFrame to CSV.
 
     NOTE this is mainly a proof of concept. Other formats are recommended for large
@@ -240,23 +313,21 @@ class PandasDataFrameCSVSerializer(Serializer[DataFrame]):
         https://matthewrocklin.com/blog/work/2015/03/16/Fast-Serialization
     """
 
+    stream_type = str
+
     @classmethod
     def type_checked_init(cls, annotation: typing.Type[DataFrame]) -> Self:
         if strip_annotation(annotation) != DataFrame:  # noqa: E721
             raise ValueError(f"{annotation} must be DataFrame.")
         return cls()
 
-    def dump(
-        self,
-        obj: DataFrame,
-        target: FileSystemTarget,
-    ) -> None:
-        with target.open("w") as handle:
-            obj.to_csv(handle, index=True)  # type: ignore
+    def dumps(self, obj: DataFrame) -> str:
+        return obj.to_csv(index=True)  # type: ignore
 
-    def load(self, target: FileSystemTarget) -> DataFrame:
-        with target.open("r") as handle:
-            return pd_read_csv(handle, index_col=0)  # type: ignore
+    def loads(self, data: str) -> DataFrame:
+        import io
+
+        return pd_read_csv(io.StringIO(data), index_col=0)  # type: ignore
 
     def get_default_extension(self) -> str:
         return "csv"
@@ -273,7 +344,7 @@ class SelfSerializing(typing.Protocol):
 
 
 class SelfSerializer(Serializer[SelfSerializing]):
-    """Serializer for objects that themselves implements the `Serializer` protocol."""
+    """Serializer for objects that themselves implement the SelfSerializing protocol."""
 
     @classmethod
     def type_checked_init(cls, annotation: typing.Type[SelfSerializing]) -> Self:
@@ -297,6 +368,18 @@ class SelfSerializer(Serializer[SelfSerializing]):
         obj.dump(target)
 
     def load(self, target: FileSystemTarget) -> SelfSerializing:
+        return self.class_.load(target)
+
+    async def dump_aio(
+        self,
+        obj: SelfSerializing,
+        target: FileSystemTarget,
+    ) -> None:
+        # Delegate to sync - SelfSerializing doesn't define async methods
+        obj.dump(target)
+
+    async def load_aio(self, target: FileSystemTarget) -> SelfSerializing:
+        # Delegate to sync - SelfSerializing doesn't define async methods
         return self.class_.load(target)
 
     def get_default_extension(self) -> str | None:

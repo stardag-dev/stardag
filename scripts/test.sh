@@ -26,4 +26,9 @@ cd "$ROOT_DIR/app/stardag-ui"
 npm test
 
 echo ""
+echo "=== Testing integration-tests ==="
+cd "$ROOT_DIR/integration-tests"
+uv run pytest tests
+
+echo ""
 echo "All tests completed!"
