@@ -354,10 +354,14 @@ export function TaskDetail({
                       <td className="whitespace-nowrap px-4 py-3 text-sm text-gray-900 dark:text-gray-100">
                         {(() => {
                           const d = new Date(event.created_at);
+                          const date = d.toLocaleDateString();
+                          const time = d.toLocaleTimeString(undefined, {
+                            hour12: false,
+                          });
                           const centiseconds = Math.floor(d.getMilliseconds() / 10)
                             .toString()
                             .padStart(2, "0");
-                          return `${d.toLocaleString()}.${centiseconds}`;
+                          return `${date} ${time}.${centiseconds}`;
                         })()}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3">
