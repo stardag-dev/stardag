@@ -5,6 +5,7 @@ from stardag_api.config import settings
 from stardag_api.routes import (
     auth_router,
     builds_router,
+    locks_router,
     organizations_router,
     search_router,
     target_roots_router,
@@ -40,6 +41,7 @@ app.include_router(organizations_router, prefix="/api/v1")
 
 # SDK routes (API key or internal JWT auth)
 app.include_router(builds_router, prefix="/api/v1")
+app.include_router(locks_router, prefix="/api/v1")
 # search_router must come before tasks_router because tasks_router has /{task_id}
 # which would match "search" as a task_id
 app.include_router(search_router, prefix="/api/v1")

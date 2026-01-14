@@ -15,12 +15,22 @@ Task executor:
 Interfaces:
 - TaskExecutorABC: Abstract base class for custom task executors
 - ExecutionModeSelector: Protocol for custom execution mode selection
+
+Global concurrency locking:
+- GlobalConcurrencyLock: Protocol for distributed lock implementations
+- GlobalLockConfig: Configuration for global locking behavior
 """
 
 from stardag.build._base import (
     BuildExitStatus,
     BuildSummary,
+    DefaultGlobalLockSelector,
     FailMode,
+    GlobalConcurrencyLock,
+    GlobalLockConfig,
+    GlobalLockSelector,
+    LockAcquisitionResult,
+    LockAcquisitionStatus,
     RoutedTaskExecutor,
     TaskCount,
     TaskExecutorABC,
@@ -48,6 +58,13 @@ __all__ = [
     "DefaultExecutionModeSelector",
     "ExecutionMode",
     "ExecutionModeSelector",
+    # Global concurrency lock
+    "DefaultGlobalLockSelector",
+    "GlobalConcurrencyLock",
+    "GlobalLockConfig",
+    "GlobalLockSelector",
+    "LockAcquisitionResult",
+    "LockAcquisitionStatus",
     # Task executors
     "HybridConcurrentTaskExecutor",
     "RoutedTaskExecutor",

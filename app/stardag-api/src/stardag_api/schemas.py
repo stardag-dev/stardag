@@ -384,3 +384,77 @@ class AvailableColumnsResponse(BaseModel):
     core: list[str]
     params: list[str]
     assets: list[str]
+
+
+# --- Lock Schemas ---
+
+
+class LockAcquireRequest(BaseModel):
+    """Schema for acquiring a distributed lock."""
+
+    owner_id: str  # UUID identifying the lock owner (stable across retries)
+    ttl_seconds: int = 60  # Time-to-live in seconds
+    check_task_completion: bool = True  # Check if task is already completed
+
+
+class LockRenewRequest(BaseModel):
+    """Schema for renewing a distributed lock."""
+
+    owner_id: str  # The expected owner
+    ttl_seconds: int = 60  # New TTL in seconds
+
+
+class LockReleaseRequest(BaseModel):
+    """Schema for releasing a distributed lock."""
+
+    owner_id: str  # The expected owner
+    task_completed: bool = False  # Whether the task completed successfully
+    build_id: str | None = None  # Build ID if recording completion
+
+
+class LockResponse(BaseModel):
+    """Schema for lock details."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+    workspace_id: str
+    owner_id: str
+    acquired_at: datetime
+    expires_at: datetime
+    version: int
+
+
+class LockAcquireResponse(BaseModel):
+    """Schema for lock acquisition response."""
+
+    status: str  # acquired, already_completed, held_by_other, concurrency_limit_reached
+    acquired: bool
+    lock: LockResponse | None = None
+    error_message: str | None = None
+
+
+class LockRenewResponse(BaseModel):
+    """Schema for lock renewal response."""
+
+    renewed: bool
+
+
+class LockReleaseResponse(BaseModel):
+    """Schema for lock release response."""
+
+    released: bool
+
+
+class LockListResponse(BaseModel):
+    """Schema for list of locks."""
+
+    locks: list[LockResponse]
+    count: int
+
+
+class TaskCompletionStatusResponse(BaseModel):
+    """Schema for task completion status check."""
+
+    task_id: str
+    is_completed: bool
