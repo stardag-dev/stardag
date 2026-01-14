@@ -18,8 +18,7 @@ from stardag._task import (
 )
 from stardag._task_loads import TaskLoads
 from stardag.base_model import StardagBaseModel, StardagField
-from stardag.build import build, build_aio, build_sequential
-from stardag.registry import registry_provider
+from stardag.build import build, build_aio, build_sequential, build_sequential_aio
 from stardag.exceptions import (
     APIError,
     AuthenticationError,
@@ -28,6 +27,7 @@ from stardag.exceptions import (
     TokenExpiredError,
 )
 from stardag.polymorphic import Polymorphic, SubClass
+from stardag.registry import registry_provider
 from stardag.target import (
     DirectoryTarget,
     FileSystemTarget,
@@ -55,6 +55,7 @@ __all__ = [
     "build",
     "build_aio",
     "build_sequential",
+    "build_sequential_aio",
     "Depends",
     "DirectoryTarget",
     "FileSystemTarget",
