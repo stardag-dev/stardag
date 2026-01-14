@@ -522,8 +522,9 @@ async def register_task(
 ):
     """Register a task to a build.
 
-    If the task already exists in the workspace, it will be reused.
-    Creates a TASK_PENDING event for this build.
+    If the task already exists in the workspace, it will be reused and a
+    TASK_REFERENCED event is created. Otherwise creates the task and a
+    TASK_PENDING event.
     """
     build = await db.get(Build, build_id)
     if not build:
@@ -580,24 +581,17 @@ async def register_task(
                     )
                     db.add(dep_edge)
 
-    # Create TASK_PENDING event for this build
-    pending_event = Event(
+    # Create appropriate event for this build:
+    # - TASK_PENDING if this build first registered the task
+    # - TASK_REFERENCED if the task already existed from another build
+    event = Event(
         build_id=build_id,
         task_id=db_task.id,
-        event_type=EventType.TASK_PENDING,
+        event_type=EventType.TASK_REFERENCED
+        if task_already_existed
+        else EventType.TASK_PENDING,
     )
-    db.add(pending_event)
-
-    # If task already existed, also create TASK_REFERENCED event
-    # This allows distinguishing between builds that first registered the task
-    # vs builds that are referencing an existing task
-    if task_already_existed:
-        referenced_event = Event(
-            build_id=build_id,
-            task_id=db_task.id,
-            event_type=EventType.TASK_REFERENCED,
-        )
-        db.add(referenced_event)
+    db.add(event)
 
     await db.commit()
     await db.refresh(db_task)
