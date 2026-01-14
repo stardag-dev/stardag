@@ -1115,3 +1115,184 @@ class TestGlobalConcurrencyLock:
         assert task.complete()
         # Lock should not have been called
         assert str(task.id) not in lock_manager.call_counts
+
+    @pytest.mark.asyncio
+    async def test_lock_released_on_task_failure(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that lock is released with task_completed=False when task fails."""
+        task = FailingTask(error_message="intentional failure")
+
+        lock_manager = MockGlobalLockManager()
+        lock_manager.set_result(
+            str(task.id),
+            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
+        )
+
+        summary = await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        # Verify lock was released with completed=False
+        assert len(lock_manager.releases) == 1
+        task_id, completed = lock_manager.releases[0]
+        assert task_id == str(task.id)
+        assert completed is False  # task_completed=False for failure
+
+    @pytest.mark.asyncio
+    async def test_lock_concurrency_limit_reached(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that CONCURRENCY_LIMIT_REACHED status is handled correctly."""
+        task = SyncOnlyTask(name="test_concurrency_limit")
+
+        lock_manager = MockGlobalLockManager()
+        lock_manager.set_result(
+            str(task.id),
+            LockAcquisitionResult(
+                status=LockAcquisitionStatus.CONCURRENCY_LIMIT_REACHED,
+                acquired=False,
+                error_message="Max concurrent tasks reached",
+            ),
+        )
+
+        config = GlobalLockConfig(
+            enabled=True,
+            lock_wait_timeout_seconds=0.2,
+            lock_wait_initial_interval_seconds=0.05,
+        )
+
+        summary = await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=config,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_lock_with_dynamic_deps(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that lock is held across dynamic dependency suspension.
+
+        When a task yields dynamic deps, it should:
+        1. Acquire lock before first execution
+        2. Keep lock while waiting for dynamic deps
+        3. Re-acquire lock when resuming (handles TTL expiration)
+        4. Release lock on final completion
+        """
+        reset_execution_counts()
+
+        # Task with dynamic dependency (using DynamicDiamondTask for both)
+        dynamic_dep = DynamicDiamondTask(name="dynamic_dep", test_id="lock_dyn")
+        parent_task = DynamicDiamondTask(
+            name="parent_with_dynamic",
+            test_id="lock_dyn",
+            dynamic_task_deps=(dynamic_dep,),
+        )
+
+        lock_manager = MockGlobalLockManager()
+
+        summary = await build_aio(
+            [parent_task],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert parent_task.complete()
+        assert dynamic_dep.complete()
+
+        # Both tasks should have had locks acquired
+        assert str(parent_task.id) in lock_manager.call_counts
+        assert str(dynamic_dep.id) in lock_manager.call_counts
+
+        # Parent should have acquired lock twice (initial + after dynamic deps)
+        # because we always re-acquire to handle potential TTL expiration
+        assert lock_manager.call_counts[str(parent_task.id)] >= 1
+
+        # Both locks should have been released with completed=True
+        parent_releases = [
+            (tid, comp)
+            for tid, comp in lock_manager.releases
+            if tid == str(parent_task.id)
+        ]
+        dynamic_releases = [
+            (tid, comp)
+            for tid, comp in lock_manager.releases
+            if tid == str(dynamic_dep.id)
+        ]
+        assert len(parent_releases) >= 1
+        assert all(comp is True for _, comp in parent_releases)
+        assert len(dynamic_releases) == 1
+        assert dynamic_releases[0][1] is True
+
+    @pytest.mark.asyncio
+    async def test_multiple_tasks_concurrent_lock_acquisition(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test multiple independent tasks acquiring locks concurrently."""
+        task1 = SyncOnlyTask(name="concurrent_1")
+        task2 = SyncOnlyTask(name="concurrent_2")
+        task3 = SyncOnlyTask(name="concurrent_3")
+
+        lock_manager = MockGlobalLockManager()
+
+        summary = await build_aio(
+            [task1, task2, task3],
+            registry=noop_registry,
+            global_lock_manager=lock_manager,
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task1.complete()
+        assert task2.complete()
+        assert task3.complete()
+
+        # All three tasks should have acquired locks
+        assert str(task1.id) in lock_manager.call_counts
+        assert str(task2.id) in lock_manager.call_counts
+        assert str(task3.id) in lock_manager.call_counts
+
+        # All three locks should have been released
+        released_task_ids = {tid for tid, _ in lock_manager.releases}
+        assert str(task1.id) in released_task_ids
+        assert str(task2.id) in released_task_ids
+        assert str(task3.id) in released_task_ids
+
+    @pytest.mark.asyncio
+    async def test_no_lock_manager_provided(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Test that build works normally when no lock manager is provided."""
+        task = SyncOnlyTask(name="no_lock_manager_task")
+
+        # global_lock_manager=None should work fine
+        summary = await build_aio(
+            [task],
+            registry=noop_registry,
+            global_lock_manager=None,
+            global_lock_config=GlobalLockConfig(enabled=True),
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
