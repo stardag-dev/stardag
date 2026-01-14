@@ -27,6 +27,7 @@ from stardag_api.schemas import (
     EventResponse,
     TaskCreate,
     TaskEdge,
+    TaskEventResponse,
     TaskGraphResponse,
     TaskNode,
     TaskRegistryAssetCreate,
@@ -36,9 +37,68 @@ from stardag_api.schemas import (
     TaskWithStatusResponse,
 )
 from stardag_api.services import generate_build_slug, get_build_status
-from stardag_api.services.status import get_all_task_statuses_in_build
+from stardag_api.services.status import (
+    get_all_task_statuses_in_build,
+    get_task_status_in_build,
+)
 
 router = APIRouter(prefix="/builds", tags=["builds"])
+
+
+# --- Helpers ---
+
+
+async def _get_build_and_task(
+    build_id: str,
+    task_id: str,
+    db: AsyncSession,
+    auth: SdkAuth,
+) -> tuple[Build, Task]:
+    """Get build and task, verifying ownership. Raises HTTPException on errors."""
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
+
+    result = await db.execute(
+        select(Task)
+        .where(Task.workspace_id == build.workspace_id)
+        .where(Task.task_id == task_id)
+    )
+    db_task = result.scalar_one_or_none()
+    if not db_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return build, db_task
+
+
+async def _create_task_event(
+    build_id: str,
+    task_id: str,
+    event_type: EventType,
+    db: AsyncSession,
+    auth: SdkAuth,
+    error_message: str | None = None,
+) -> TaskEventResponse:
+    """Create a task event and return slim response."""
+    _, db_task = await _get_build_and_task(build_id, task_id, db, auth)
+
+    event = Event(
+        build_id=build_id,
+        task_id=db_task.id,
+        event_type=event_type,
+        error_message=error_message,
+    )
+    db.add(event)
+    await db.commit()
+
+    status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
+
+    return TaskEventResponse(task_id=db_task.task_id, status=status)
 
 
 # --- Build CRUD ---
@@ -373,7 +433,7 @@ async def register_task(
     )
 
 
-@router.post("/{build_id}/tasks/{task_id}/start", response_model=TaskWithStatusResponse)
+@router.post("/{build_id}/tasks/{task_id}/start", response_model=TaskEventResponse)
 async def start_task(
     build_id: str,
     task_id: str,
@@ -381,59 +441,10 @@ async def start_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
     """Mark a task as started within a build."""
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
-        )
-
-    # Find task by task_id (hash) in workspace
-    result = await db.execute(
-        select(Task)
-        .where(Task.workspace_id == build.workspace_id)
-        .where(Task.task_id == task_id)
-    )
-    db_task = result.scalar_one_or_none()
-    if not db_task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    event = Event(
-        build_id=build_id,
-        task_id=db_task.id,
-        event_type=EventType.TASK_STARTED,
-    )
-    db.add(event)
-    await db.commit()
-
-    from stardag_api.services.status import get_task_status_in_build
-
-    status, started_at, completed_at, error_message = await get_task_status_in_build(
-        db, build_id, db_task.id
-    )
-
-    return TaskWithStatusResponse(
-        id=db_task.id,
-        task_id=db_task.task_id,
-        workspace_id=db_task.workspace_id,
-        task_namespace=db_task.task_namespace,
-        task_name=db_task.task_name,
-        task_data=db_task.task_data,
-        version=db_task.version,
-        created_at=db_task.created_at,
-        status=status,
-        started_at=started_at,
-        completed_at=completed_at,
-        error_message=error_message,
-    )
+    return await _create_task_event(build_id, task_id, EventType.TASK_STARTED, db, auth)
 
 
-@router.post(
-    "/{build_id}/tasks/{task_id}/complete", response_model=TaskWithStatusResponse
-)
+@router.post("/{build_id}/tasks/{task_id}/complete", response_model=TaskEventResponse)
 async def complete_task(
     build_id: str,
     task_id: str,
@@ -441,56 +452,12 @@ async def complete_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
     """Mark a task as completed within a build."""
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
-        )
-
-    result = await db.execute(
-        select(Task)
-        .where(Task.workspace_id == build.workspace_id)
-        .where(Task.task_id == task_id)
-    )
-    db_task = result.scalar_one_or_none()
-    if not db_task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    event = Event(
-        build_id=build_id,
-        task_id=db_task.id,
-        event_type=EventType.TASK_COMPLETED,
-    )
-    db.add(event)
-    await db.commit()
-
-    from stardag_api.services.status import get_task_status_in_build
-
-    status, started_at, completed_at, error_message = await get_task_status_in_build(
-        db, build_id, db_task.id
-    )
-
-    return TaskWithStatusResponse(
-        id=db_task.id,
-        task_id=db_task.task_id,
-        workspace_id=db_task.workspace_id,
-        task_namespace=db_task.task_namespace,
-        task_name=db_task.task_name,
-        task_data=db_task.task_data,
-        version=db_task.version,
-        created_at=db_task.created_at,
-        status=status,
-        started_at=started_at,
-        completed_at=completed_at,
-        error_message=error_message,
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_COMPLETED, db, auth
     )
 
 
-@router.post("/{build_id}/tasks/{task_id}/fail", response_model=TaskWithStatusResponse)
+@router.post("/{build_id}/tasks/{task_id}/fail", response_model=TaskEventResponse)
 async def fail_task(
     build_id: str,
     task_id: str,
@@ -499,59 +466,12 @@ async def fail_task(
     error_message: str | None = None,
 ):
     """Mark a task as failed within a build."""
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
-        )
-
-    result = await db.execute(
-        select(Task)
-        .where(Task.workspace_id == build.workspace_id)
-        .where(Task.task_id == task_id)
-    )
-    db_task = result.scalar_one_or_none()
-    if not db_task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    event = Event(
-        build_id=build_id,
-        task_id=db_task.id,
-        event_type=EventType.TASK_FAILED,
-        error_message=error_message,
-    )
-    db.add(event)
-    await db.commit()
-
-    from stardag_api.services.status import get_task_status_in_build
-
-    status, started_at, completed_at, err_msg = await get_task_status_in_build(
-        db, build_id, db_task.id
-    )
-
-    return TaskWithStatusResponse(
-        id=db_task.id,
-        task_id=db_task.task_id,
-        workspace_id=db_task.workspace_id,
-        task_namespace=db_task.task_namespace,
-        task_name=db_task.task_name,
-        task_data=db_task.task_data,
-        version=db_task.version,
-        created_at=db_task.created_at,
-        status=status,
-        started_at=started_at,
-        completed_at=completed_at,
-        error_message=err_msg,
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_FAILED, db, auth, error_message
     )
 
 
-@router.post(
-    "/{build_id}/tasks/{task_id}/suspend", response_model=TaskWithStatusResponse
-)
+@router.post("/{build_id}/tasks/{task_id}/suspend", response_model=TaskEventResponse)
 async def suspend_task(
     build_id: str,
     task_id: str,
@@ -559,58 +479,12 @@ async def suspend_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
     """Mark a task as suspended (waiting for dynamic dependencies)."""
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
-        )
-
-    result = await db.execute(
-        select(Task)
-        .where(Task.workspace_id == build.workspace_id)
-        .where(Task.task_id == task_id)
-    )
-    db_task = result.scalar_one_or_none()
-    if not db_task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    event = Event(
-        build_id=build_id,
-        task_id=db_task.id,
-        event_type=EventType.TASK_SUSPENDED,
-    )
-    db.add(event)
-    await db.commit()
-
-    from stardag_api.services.status import get_task_status_in_build
-
-    status, started_at, completed_at, error_message = await get_task_status_in_build(
-        db, build_id, db_task.id
-    )
-
-    return TaskWithStatusResponse(
-        id=db_task.id,
-        task_id=db_task.task_id,
-        workspace_id=db_task.workspace_id,
-        task_namespace=db_task.task_namespace,
-        task_name=db_task.task_name,
-        task_data=db_task.task_data,
-        version=db_task.version,
-        created_at=db_task.created_at,
-        status=status,
-        started_at=started_at,
-        completed_at=completed_at,
-        error_message=error_message,
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_SUSPENDED, db, auth
     )
 
 
-@router.post(
-    "/{build_id}/tasks/{task_id}/resume", response_model=TaskWithStatusResponse
-)
+@router.post("/{build_id}/tasks/{task_id}/resume", response_model=TaskEventResponse)
 async def resume_task(
     build_id: str,
     task_id: str,
@@ -618,53 +492,7 @@ async def resume_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
     """Mark a task as resumed (dynamic dependencies completed)."""
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
-        )
-
-    result = await db.execute(
-        select(Task)
-        .where(Task.workspace_id == build.workspace_id)
-        .where(Task.task_id == task_id)
-    )
-    db_task = result.scalar_one_or_none()
-    if not db_task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    event = Event(
-        build_id=build_id,
-        task_id=db_task.id,
-        event_type=EventType.TASK_RESUMED,
-    )
-    db.add(event)
-    await db.commit()
-
-    from stardag_api.services.status import get_task_status_in_build
-
-    status, started_at, completed_at, error_message = await get_task_status_in_build(
-        db, build_id, db_task.id
-    )
-
-    return TaskWithStatusResponse(
-        id=db_task.id,
-        task_id=db_task.task_id,
-        workspace_id=db_task.workspace_id,
-        task_namespace=db_task.task_namespace,
-        task_name=db_task.task_name,
-        task_data=db_task.task_data,
-        version=db_task.version,
-        created_at=db_task.created_at,
-        status=status,
-        started_at=started_at,
-        completed_at=completed_at,
-        error_message=error_message,
-    )
+    return await _create_task_event(build_id, task_id, EventType.TASK_RESUMED, db, auth)
 
 
 @router.post(
