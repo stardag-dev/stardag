@@ -58,26 +58,29 @@ def build_sequential(
     failed_cache: set[UUID] = set()
     error: Exception | None = None
 
-    # Discover all tasks
+    # Discover all tasks, stopping at already-complete tasks
     all_tasks: dict[UUID, BaseTask] = {}
 
     def discover(task: BaseTask) -> None:
+        """Recursively discover tasks, stopping at already-complete tasks."""
         if task.id in all_tasks:
             return
         all_tasks[task.id] = task
+        task_count.discovered += 1
+
+        # Check if this task is already complete
+        if task.complete():
+            completion_cache.add(task.id)
+            task_count.previously_completed += 1
+            # Don't recurse into deps - they're already built
+            return
+
+        # Task not complete - recurse into dependencies
         for dep in flatten_task_struct(task.requires()):
             discover(dep)
 
     for root in tasks:
         discover(root)
-
-    task_count.discovered = len(all_tasks)
-
-    # Check initial completion
-    for task in all_tasks.values():
-        if task.complete():
-            completion_cache.add(task.id)
-            task_count.previously_completed += 1
 
     registry.start_build(root_tasks=tasks)
 
@@ -238,26 +241,29 @@ async def build_sequential_aio(
     failed_cache: set[UUID] = set()
     error: Exception | None = None
 
-    # Discover all tasks
+    # Discover all tasks, stopping at already-complete tasks
     all_tasks: dict[UUID, BaseTask] = {}
 
-    def discover(task: BaseTask) -> None:
+    async def discover(task: BaseTask) -> None:
+        """Recursively discover tasks, stopping at already-complete tasks."""
         if task.id in all_tasks:
             return
         all_tasks[task.id] = task
-        for dep in flatten_task_struct(task.requires()):
-            discover(dep)
+        task_count.discovered += 1
 
-    for root in tasks:
-        discover(root)
-
-    task_count.discovered = len(all_tasks)
-
-    # Check initial completion
-    for task in all_tasks.values():
+        # Check if this task is already complete
         if await task.complete_aio():
             completion_cache.add(task.id)
             task_count.previously_completed += 1
+            # Don't recurse into deps - they're already built
+            return
+
+        # Task not complete - recurse into dependencies
+        for dep in flatten_task_struct(task.requires()):
+            await discover(dep)
+
+    for root in tasks:
+        await discover(root)
 
     await registry.start_build_aio(root_tasks=tasks)
 
