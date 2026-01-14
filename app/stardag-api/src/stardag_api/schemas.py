@@ -149,13 +149,16 @@ class TaskResponse(BaseModel):
 
 
 class TaskWithStatusResponse(TaskResponse):
-    """Task response with status derived from events for a specific build."""
+    """Task response with status derived from events (global across all builds)."""
 
     status: TaskStatus = TaskStatus.PENDING
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
     asset_count: int = 0
+    # Global status fields
+    waiting_for_lock: bool = False
+    completed_in_build_id: str | None = None
 
 
 class TaskEventResponse(BaseModel):
