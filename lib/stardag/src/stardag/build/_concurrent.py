@@ -426,8 +426,7 @@ async def build_aio(
             # Dynamic deps returned (TaskStruct) - task is suspended
             dynamic_deps = flatten_task_struct(result)
 
-            # Notify registry of dynamic deps discovery and suspension
-            await registry.discover_dynamic_deps_aio(task, dynamic_deps)
+            # Notify registry that task is suspended waiting for dynamic deps
             await registry.suspend_task_aio(task)
 
             # Discover any new dynamic deps (discover handles counting)

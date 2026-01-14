@@ -119,19 +119,6 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def discover_dynamic_deps(self, task: "BaseTask", deps: list["BaseTask"]) -> None:
-        """Notify that dynamic dependencies were discovered for a task.
-
-        Called when a task yields dynamic dependencies during execution.
-        This enables monitoring/UI to track dynamic dependency discovery
-        in real-time.
-
-        Args:
-            task: The task that yielded dynamic deps
-            deps: The dynamic dependencies that were discovered
-        """
-        pass
-
     def suspend_task(self, task: "BaseTask") -> None:
         """Mark a task as suspended waiting for dynamic dependencies.
 
@@ -196,12 +183,6 @@ class RegistryABC(metaclass=abc.ABCMeta):
     ) -> None:
         """Async version of upload_task_assets."""
         self.upload_task_assets(task, assets)
-
-    async def discover_dynamic_deps_aio(
-        self, task: "BaseTask", deps: list["BaseTask"]
-    ) -> None:
-        """Async version of discover_dynamic_deps."""
-        self.discover_dynamic_deps(task, deps)
 
     async def suspend_task_aio(self, task: "BaseTask") -> None:
         """Async version of suspend_task."""

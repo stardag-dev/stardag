@@ -16,6 +16,7 @@ export interface TaskNodeData extends Record<string, unknown> {
 const statusBorderColors: Record<TaskStatus, string> = {
   pending: "border-yellow-400",
   running: "border-blue-400",
+  suspended: "border-purple-400",
   completed: "border-green-400",
   failed: "border-red-400",
 };
@@ -23,6 +24,7 @@ const statusBorderColors: Record<TaskStatus, string> = {
 const statusBorderColorsMuted: Record<TaskStatus, string> = {
   pending: "border-yellow-400/40",
   running: "border-blue-400/40",
+  suspended: "border-purple-400/40",
   completed: "border-green-400/40",
   failed: "border-red-400/40",
 };
