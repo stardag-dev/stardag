@@ -35,7 +35,7 @@ sd.auto_namespace(__name__)
 class BenchmarkTask(sd.AutoTask[dict]):
     """Base class for benchmark tasks with timing."""
 
-    task_id: str
+    key: str  # User-provided label for this task instance (not the actual task.id)
     deps: tuple[sd.SubClass[sd.Task], ...] = ()
 
     def requires(self) -> sd.TaskStruct:
@@ -45,7 +45,7 @@ class BenchmarkTask(sd.AutoTask[dict]):
         start = time.perf_counter()
         self._do_work()
         elapsed = time.perf_counter() - start
-        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+        self.output().save({"key": self.key, "elapsed": elapsed})
 
     def _do_work(self) -> None:
         """Override in subclasses to do actual work."""
@@ -78,7 +78,7 @@ class IOBoundTask(BenchmarkTask):
         start = time.perf_counter()
         await asyncio.sleep(self.sleep_duration)
         elapsed = time.perf_counter() - start
-        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+        self.output().save({"key": self.key, "elapsed": elapsed})
 
 
 # =============================================================================
@@ -154,7 +154,7 @@ class IOBoundDynamicTask(sd.AutoTask[dict]):
     These tasks fall back to asyncio.to_thread(run) in the async builder.
     """
 
-    task_id: str
+    key: str  # User-provided label for this task instance (not the actual task.id)
     sleep_duration: float = 0.1
     static_deps: tuple["IOBoundDynamicTask", ...] = ()
     dynamic_dep_ids: tuple[str, ...] = ()
@@ -166,7 +166,7 @@ class IOBoundDynamicTask(sd.AutoTask[dict]):
         # Yield dynamic deps first (as dynamic tasks with no further deps)
         if self.dynamic_dep_ids:
             dynamic_deps = tuple(
-                IOBoundDynamicTask(task_id=dep_id, sleep_duration=self.sleep_duration)
+                IOBoundDynamicTask(key=dep_id, sleep_duration=self.sleep_duration)
                 for dep_id in self.dynamic_dep_ids
             )
             yield dynamic_deps
@@ -175,13 +175,13 @@ class IOBoundDynamicTask(sd.AutoTask[dict]):
         start = time.perf_counter()
         time.sleep(self.sleep_duration)
         elapsed = time.perf_counter() - start
-        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+        self.output().save({"key": self.key, "elapsed": elapsed})
 
 
 class CPUBoundDynamicTask(sd.AutoTask[dict]):
     """CPU-bound task with dynamic dependencies."""
 
-    task_id: str
+    key: str  # User-provided label for this task instance (not the actual task.id)
     iterations: int = 100_000
     static_deps: tuple["CPUBoundDynamicTask", ...] = ()
     dynamic_dep_ids: tuple[str, ...] = ()
@@ -193,7 +193,7 @@ class CPUBoundDynamicTask(sd.AutoTask[dict]):
         # Yield dynamic deps first (as dynamic tasks with no further deps)
         if self.dynamic_dep_ids:
             dynamic_deps = tuple(
-                CPUBoundDynamicTask(task_id=dep_id, iterations=self.iterations)
+                CPUBoundDynamicTask(key=dep_id, iterations=self.iterations)
                 for dep_id in self.dynamic_dep_ids
             )
             yield dynamic_deps
@@ -204,13 +204,13 @@ class CPUBoundDynamicTask(sd.AutoTask[dict]):
         for _ in range(self.iterations):
             data = hashlib.sha256(data).digest()
         elapsed = time.perf_counter() - start
-        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+        self.output().save({"key": self.key, "elapsed": elapsed})
 
 
 class LightDynamicTask(sd.AutoTask[dict]):
     """Light task with dynamic dependencies."""
 
-    task_id: str
+    key: str  # User-provided label for this task instance (not the actual task.id)
     static_deps: tuple["LightDynamicTask", ...] = ()
     dynamic_dep_ids: tuple[str, ...] = ()
 
@@ -221,7 +221,7 @@ class LightDynamicTask(sd.AutoTask[dict]):
         # Yield dynamic deps first (as dynamic tasks with no further deps)
         if self.dynamic_dep_ids:
             dynamic_deps = tuple(
-                LightDynamicTask(task_id=dep_id) for dep_id in self.dynamic_dep_ids
+                LightDynamicTask(key=dep_id) for dep_id in self.dynamic_dep_ids
             )
             yield dynamic_deps
 
@@ -229,7 +229,7 @@ class LightDynamicTask(sd.AutoTask[dict]):
         start = time.perf_counter()
         _ = sum(range(100))
         elapsed = time.perf_counter() - start
-        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+        self.output().save({"key": self.key, "elapsed": elapsed})
 
 
 # =============================================================================
@@ -267,7 +267,7 @@ class FileIOTask(BenchmarkTask):
 
         elapsed = time.perf_counter() - start
         # Re-save with timing info (overwrites the x's)
-        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+        self.output().save({"key": self.key, "elapsed": elapsed})
 
 
 class FileIOReadWriteTask(BenchmarkTask):
@@ -299,4 +299,4 @@ class FileIOReadWriteTask(BenchmarkTask):
                 _ = await f.read()
 
         elapsed = time.perf_counter() - start
-        self.output().save({"task_id": self.task_id, "elapsed": elapsed})
+        self.output().save({"key": self.key, "elapsed": elapsed})
