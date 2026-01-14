@@ -41,19 +41,20 @@ class RegistryABC(metaclass=abc.ABCMeta):
     """Abstract base class for task registries.
 
     A registry tracks task execution within builds. Implementations must
-    provide at least the `register_task` method. All other methods have default
+    provide at least the `task_register` method. All other methods have default
     no-op implementations for backwards compatibility.
+
+    Method naming convention:
+    - Build methods: build_<action> (e.g., build_start, build_complete)
+    - Task methods: task_<action> (e.g., task_register, task_start)
+    - Async versions: <method>_aio suffix (e.g., build_start_aio, task_register_aio)
     """
 
-    @abc.abstractmethod
-    def register_task(self, task: "BaseTask") -> None:
-        """Register a task as pending/scheduled.
+    # -------------------------------------------------------------------------
+    # Build lifecycle methods
+    # -------------------------------------------------------------------------
 
-        This is called when a task is about to be executed.
-        """
-        pass
-
-    def start_build(
+    def build_start(
         self,
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
@@ -69,11 +70,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         return None
 
-    def complete_build(self) -> None:
+    def build_complete(self) -> None:
         """Mark the current build as completed successfully."""
         pass
 
-    def fail_build(self, error_message: str | None = None) -> None:
+    def build_fail(self, error_message: str | None = None) -> None:
         """Mark the current build as failed.
 
         Args:
@@ -81,21 +82,51 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def start_task(self, task: "BaseTask") -> None:
+    def build_cancel(self) -> None:
+        """Cancel the current build.
+
+        Called when a build is explicitly cancelled by the user.
+        """
+        pass
+
+    def build_exit_early(self, reason: str | None = None) -> None:
+        """Mark the build as exited early.
+
+        Called when all remaining tasks are running in other builds
+        and this build should stop waiting.
+
+        Args:
+            reason: Optional reason for exiting early
+        """
+        pass
+
+    # -------------------------------------------------------------------------
+    # Task lifecycle methods
+    # -------------------------------------------------------------------------
+
+    @abc.abstractmethod
+    def task_register(self, task: "BaseTask") -> None:
+        """Register a task as pending/scheduled.
+
+        This is called when a task is about to be executed.
+        """
+        pass
+
+    def task_start(self, task: "BaseTask") -> None:
         """Mark a task as started/running.
 
         Called immediately before a task begins execution.
         """
         pass
 
-    def complete_task(self, task: "BaseTask") -> None:
+    def task_complete(self, task: "BaseTask") -> None:
         """Mark a task as completed successfully.
 
         Called after a task finishes execution without errors.
         """
         pass
 
-    def fail_task(self, task: "BaseTask", error_message: str | None = None) -> None:
+    def task_fail(self, task: "BaseTask", error_message: str | None = None) -> None:
         """Mark a task as failed.
 
         Called when a task raises an exception during execution.
@@ -106,20 +137,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def upload_task_assets(
-        self, task: "BaseTask", assets: list["RegistryAsset"]
-    ) -> None:
-        """Upload assets for a completed task.
-
-        Called after a task completes successfully if it has registry assets.
-
-        Args:
-            task: The completed task
-            assets: List of assets to upload
-        """
-        pass
-
-    def suspend_task(self, task: "BaseTask") -> None:
+    def task_suspend(self, task: "BaseTask") -> None:
         """Mark a task as suspended waiting for dynamic dependencies.
 
         Called when a task yields dynamic deps that are not yet complete.
@@ -130,7 +148,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def resume_task(self, task: "BaseTask") -> None:
+    def task_resume(self, task: "BaseTask") -> None:
         """Mark a task as resumed after dynamic dependencies completed.
 
         Called when a task's dynamic dependencies are complete and
@@ -142,25 +160,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def cancel_build(self) -> None:
-        """Cancel the current build.
-
-        Called when a build is explicitly cancelled by the user.
-        """
-        pass
-
-    def exit_early(self, reason: str | None = None) -> None:
-        """Mark the build as exited early.
-
-        Called when all remaining tasks are running in other builds
-        and this build should stop waiting.
-
-        Args:
-            reason: Optional reason for exiting early
-        """
-        pass
-
-    def cancel_task(self, task: "BaseTask") -> None:
+    def task_cancel(self, task: "BaseTask") -> None:
         """Cancel a task.
 
         Called when a task is explicitly cancelled by the user.
@@ -184,73 +184,88 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def task_upload_assets(
+        self, task: "BaseTask", assets: list["RegistryAsset"]
+    ) -> None:
+        """Upload assets for a completed task.
+
+        Called after a task completes successfully if it has registry assets.
+
+        Args:
+            task: The completed task
+            assets: List of assets to upload
+        """
+        pass
+
+    # -------------------------------------------------------------------------
     # Async versions - default implementations delegate to sync methods
+    # -------------------------------------------------------------------------
 
-    async def register_task_aio(self, task: "BaseTask") -> None:
-        """Async version of register_task."""
-        self.register_task(task)
-
-    async def start_build_aio(
+    async def build_start_aio(
         self,
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
     ) -> str | None:
-        """Async version of start_build."""
-        return self.start_build(root_tasks, description)
+        """Async version of build_start."""
+        return self.build_start(root_tasks, description)
 
-    async def complete_build_aio(self) -> None:
-        """Async version of complete_build."""
-        self.complete_build()
+    async def build_complete_aio(self) -> None:
+        """Async version of build_complete."""
+        self.build_complete()
 
-    async def fail_build_aio(self, error_message: str | None = None) -> None:
-        """Async version of fail_build."""
-        self.fail_build(error_message)
+    async def build_fail_aio(self, error_message: str | None = None) -> None:
+        """Async version of build_fail."""
+        self.build_fail(error_message)
 
-    async def start_task_aio(self, task: "BaseTask") -> None:
-        """Async version of start_task."""
-        self.start_task(task)
+    async def build_cancel_aio(self) -> None:
+        """Async version of build_cancel."""
+        self.build_cancel()
 
-    async def complete_task_aio(self, task: "BaseTask") -> None:
-        """Async version of complete_task."""
-        self.complete_task(task)
+    async def build_exit_early_aio(self, reason: str | None = None) -> None:
+        """Async version of build_exit_early."""
+        self.build_exit_early(reason)
 
-    async def fail_task_aio(
+    async def task_register_aio(self, task: "BaseTask") -> None:
+        """Async version of task_register."""
+        self.task_register(task)
+
+    async def task_start_aio(self, task: "BaseTask") -> None:
+        """Async version of task_start."""
+        self.task_start(task)
+
+    async def task_complete_aio(self, task: "BaseTask") -> None:
+        """Async version of task_complete."""
+        self.task_complete(task)
+
+    async def task_fail_aio(
         self, task: "BaseTask", error_message: str | None = None
     ) -> None:
-        """Async version of fail_task."""
-        self.fail_task(task, error_message)
+        """Async version of task_fail."""
+        self.task_fail(task, error_message)
 
-    async def upload_task_assets_aio(
-        self, task: "BaseTask", assets: list["RegistryAsset"]
-    ) -> None:
-        """Async version of upload_task_assets."""
-        self.upload_task_assets(task, assets)
+    async def task_suspend_aio(self, task: "BaseTask") -> None:
+        """Async version of task_suspend."""
+        self.task_suspend(task)
 
-    async def suspend_task_aio(self, task: "BaseTask") -> None:
-        """Async version of suspend_task."""
-        self.suspend_task(task)
+    async def task_resume_aio(self, task: "BaseTask") -> None:
+        """Async version of task_resume."""
+        self.task_resume(task)
 
-    async def resume_task_aio(self, task: "BaseTask") -> None:
-        """Async version of resume_task."""
-        self.resume_task(task)
-
-    async def cancel_build_aio(self) -> None:
-        """Async version of cancel_build."""
-        self.cancel_build()
-
-    async def exit_early_aio(self, reason: str | None = None) -> None:
-        """Async version of exit_early."""
-        self.exit_early(reason)
-
-    async def cancel_task_aio(self, task: "BaseTask") -> None:
-        """Async version of cancel_task."""
-        self.cancel_task(task)
+    async def task_cancel_aio(self, task: "BaseTask") -> None:
+        """Async version of task_cancel."""
+        self.task_cancel(task)
 
     async def task_waiting_for_lock_aio(
         self, task: "BaseTask", lock_owner: str | None = None
     ) -> None:
         """Async version of task_waiting_for_lock."""
         self.task_waiting_for_lock(task, lock_owner)
+
+    async def task_upload_assets_aio(
+        self, task: "BaseTask", assets: list["RegistryAsset"]
+    ) -> None:
+        """Async version of task_upload_assets."""
+        self.task_upload_assets(task, assets)
 
 
 class NoOpRegistry(RegistryABC):
@@ -259,7 +274,7 @@ class NoOpRegistry(RegistryABC):
     Used as a default when no registry is configured.
     """
 
-    def register_task(self, task: "BaseTask") -> None:
+    def task_register(self, task: "BaseTask") -> None:
         pass
 
 

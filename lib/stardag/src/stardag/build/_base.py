@@ -100,7 +100,7 @@ class TaskExecutionState:
     dynamic_deps: list[BaseTask] = field(default_factory=list)
     # Generator if task has dynamic deps and is suspended
     generator: Generator[TaskStruct, None, None] | None = None
-    # True when registry.start_task has been called
+    # True when registry.task_start has been called
     started: bool = False
     # True when task execution has fully completed
     completed: bool = False

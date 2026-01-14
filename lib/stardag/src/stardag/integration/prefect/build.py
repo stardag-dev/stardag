@@ -103,7 +103,7 @@ class _PrefectTaskRunWrapper:
             - Generator: Task has dynamic deps and is suspended (in-process).
             - TaskStruct: Task has dynamic deps but completed (cross-process).
         """
-        await self.registry.start_task_aio(task)
+        await self.registry.task_start_aio(task)
 
         if self.before_run_callback is not None:
             await self.before_run_callback(task)
@@ -132,12 +132,12 @@ class _PrefectTaskRunWrapper:
                 return result
 
             # Task completed successfully (result is None)
-            await self.registry.complete_task_aio(task)
+            await self.registry.task_complete_aio(task)
 
             # Upload registry assets if any
             assets = task.registry_assets_aio()
             if assets:
-                await self.registry.upload_task_assets_aio(task, assets)
+                await self.registry.task_upload_assets_aio(task, assets)
 
             if self.on_complete_callback is not None:
                 await self.on_complete_callback(task)
@@ -145,7 +145,7 @@ class _PrefectTaskRunWrapper:
             return None
 
         except Exception as e:
-            await self.registry.fail_task_aio(task, str(e))
+            await self.registry.task_fail_aio(task, str(e))
             raise
 
 

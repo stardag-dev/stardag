@@ -82,7 +82,7 @@ def build_sequential(
     for root in tasks:
         discover(root)
 
-    registry.start_build(root_tasks=tasks)
+    registry.build_start(root_tasks=tasks)
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""
@@ -123,11 +123,11 @@ def build_sequential(
                 task_count.failed += 1
                 failed_cache.add(ready_task.id)
                 error = e
-                registry.fail_task(ready_task, str(e))
+                registry.task_fail(ready_task, str(e))
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
 
-        registry.complete_build()
+        registry.build_complete()
         return BuildSummary(
             status=BuildExitStatus.SUCCESS
             if error is None
@@ -137,7 +137,7 @@ def build_sequential(
         )
 
     except Exception as e:
-        registry.fail_build(str(e))
+        registry.build_fail(str(e))
         return BuildSummary(
             status=BuildExitStatus.FAILURE,
             task_count=task_count,
@@ -153,7 +153,7 @@ def _run_task_sequential(
     dual_run_default: Literal["sync", "async"],
 ) -> None:
     """Run a single task in sequential mode, handling dynamic deps."""
-    registry.start_task(task)
+    registry.task_start(task)
 
     has_run = _has_custom_run(task)
     has_run_aio = _has_custom_run_aio(task)
@@ -200,12 +200,12 @@ def _run_task_sequential(
                 break
 
     completion_cache.add(task.id)
-    registry.complete_task(task)
+    registry.task_complete(task)
 
     # Upload registry assets if any
     assets = task.registry_assets()
     if assets:
-        registry.upload_task_assets(task, assets)
+        registry.task_upload_assets(task, assets)
 
 
 async def build_sequential_aio(
@@ -265,7 +265,7 @@ async def build_sequential_aio(
     for root in tasks:
         await discover(root)
 
-    await registry.start_build_aio(root_tasks=tasks)
+    await registry.build_start_aio(root_tasks=tasks)
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""
@@ -306,11 +306,11 @@ async def build_sequential_aio(
                 task_count.failed += 1
                 failed_cache.add(ready_task.id)
                 error = e
-                await registry.fail_task_aio(ready_task, str(e))
+                await registry.task_fail_aio(ready_task, str(e))
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
 
-        await registry.complete_build_aio()
+        await registry.build_complete_aio()
         return BuildSummary(
             status=BuildExitStatus.SUCCESS
             if error is None
@@ -320,7 +320,7 @@ async def build_sequential_aio(
         )
 
     except Exception as e:
-        await registry.fail_build_aio(str(e))
+        await registry.build_fail_aio(str(e))
         return BuildSummary(
             status=BuildExitStatus.FAILURE,
             task_count=task_count,
@@ -336,7 +336,7 @@ async def _run_task_sequential_aio(
     sync_run_default: Literal["thread", "blocking"],
 ) -> None:
     """Run a single task in async sequential mode, handling dynamic deps."""
-    await registry.start_task_aio(task)
+    await registry.task_start_aio(task)
 
     has_run = _has_custom_run(task)
     has_run_aio = _has_custom_run_aio(task)
@@ -381,12 +381,12 @@ async def _run_task_sequential_aio(
                 break
 
     completion_cache.add(task.id)
-    await registry.complete_task_aio(task)
+    await registry.task_complete_aio(task)
 
     # Upload registry assets if any
     assets = task.registry_assets_aio()
     if assets:
-        await registry.upload_task_assets_aio(task, assets)
+        await registry.task_upload_assets_aio(task, assets)
 
 
 __all__ = [
