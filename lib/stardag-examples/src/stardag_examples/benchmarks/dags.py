@@ -39,15 +39,14 @@ def create_tree_dag(
     """
     # Level 0: Leaf tasks
     leaves = [
-        task_class(task_id=f"{prefix}leaf_{i}", **task_kwargs)
-        for i in range(leaf_count)
+        task_class(key=f"{prefix}leaf_{i}", **task_kwargs) for i in range(leaf_count)
     ]
 
     # Level 1: Middle tasks (each depends on 2 leaves)
     middle_count = leaf_count // 2
     middle = [
         task_class(
-            task_id=f"{prefix}middle_{i}",
+            key=f"{prefix}middle_{i}",
             deps=(leaves[i * 2], leaves[i * 2 + 1]),
             **task_kwargs,
         )
@@ -58,7 +57,7 @@ def create_tree_dag(
     inter_count = middle_count // 2
     intermediate = [
         task_class(
-            task_id=f"{prefix}inter_{i}",
+            key=f"{prefix}inter_{i}",
             deps=(middle[i * 2], middle[i * 2 + 1]),
             **task_kwargs,
         )
@@ -67,7 +66,7 @@ def create_tree_dag(
 
     # Level 3: Root task
     root = task_class(
-        task_id=f"{prefix}root",
+        key=f"{prefix}root",
         deps=tuple(intermediate),
         **task_kwargs,
     )
@@ -102,7 +101,7 @@ def create_dynamic_flat_dag(
 
     # Root task with dynamic deps to all leaves
     root = dynamic_class(
-        task_id=f"{prefix}root",
+        key=f"{prefix}root",
         dynamic_dep_ids=leaf_ids,
         **task_kwargs,
     )
@@ -148,9 +147,9 @@ def heavy_cpu_flat(prefix: str = "", leaf_count: int = 8) -> BenchmarkTask:
     With heavy tasks, process spawn overhead becomes negligible.
     """
     # Create flat structure: root depends on N heavy leaves
-    leaves = [HeavyCPUBoundTask(task_id=f"{prefix}leaf_{i}") for i in range(leaf_count)]
+    leaves = [HeavyCPUBoundTask(key=f"{prefix}leaf_{i}") for i in range(leaf_count)]
     root = HeavyCPUBoundTask(
-        task_id=f"{prefix}root",
+        key=f"{prefix}root",
         deps=tuple(leaves),
     )
     return root
@@ -171,11 +170,11 @@ def io_bound_flat(prefix: str = "", leaf_count: int = 32) -> BenchmarkTask:
     The advantage shows when we increase max_concurrent or have many quick I/O ops.
     """
     leaves = [
-        IOBoundTask(task_id=f"{prefix}leaf_{i}", sleep_duration=0.1)
+        IOBoundTask(key=f"{prefix}leaf_{i}", sleep_duration=0.1)
         for i in range(leaf_count)
     ]
     root = IOBoundTask(
-        task_id=f"{prefix}root",
+        key=f"{prefix}root",
         deps=tuple(leaves),
         sleep_duration=0.1,
     )
@@ -194,11 +193,10 @@ def io_bound_flat_many(prefix: str = "") -> BenchmarkTask:
     - Threadpool: Limited by thread creation/management overhead
     """
     leaves = [
-        IOBoundTask(task_id=f"{prefix}leaf_{i}", sleep_duration=0.01)
-        for i in range(100)
+        IOBoundTask(key=f"{prefix}leaf_{i}", sleep_duration=0.01) for i in range(100)
     ]
     root = IOBoundTask(
-        task_id=f"{prefix}root",
+        key=f"{prefix}root",
         deps=tuple(leaves),
         sleep_duration=0.01,
     )
@@ -217,11 +215,10 @@ def file_io_flat(prefix: str = "", leaf_count: int = 32) -> BenchmarkTask:
     This demonstrates the async file I/O benefits with aiofiles.
     """
     leaves = [
-        FileIOTask(task_id=f"{prefix}leaf_{i}", data_size=10000)
-        for i in range(leaf_count)
+        FileIOTask(key=f"{prefix}leaf_{i}", data_size=10000) for i in range(leaf_count)
     ]
     root = FileIOTask(
-        task_id=f"{prefix}root",
+        key=f"{prefix}root",
         deps=tuple(leaves),
         data_size=10000,
     )
@@ -236,14 +233,14 @@ def file_io_heavy(prefix: str = "", leaf_count: int = 16) -> BenchmarkTask:
     """
     leaves = [
         FileIOReadWriteTask(
-            task_id=f"{prefix}leaf_{i}",
+            key=f"{prefix}leaf_{i}",
             data_size=50000,
             iterations=3,
         )
         for i in range(leaf_count)
     ]
     root = FileIOReadWriteTask(
-        task_id=f"{prefix}root",
+        key=f"{prefix}root",
         deps=tuple(leaves),
         data_size=50000,
         iterations=3,

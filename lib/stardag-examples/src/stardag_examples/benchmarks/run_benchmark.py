@@ -29,6 +29,7 @@ import gc
 import json
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -88,6 +89,8 @@ def create_registry(mode: RegistryMode, api_key: str | None = None) -> RegistryA
         return NoOpRegistry()
     elif mode == "local":
         # Local docker-compose registry at localhost:8000
+        # Use APIRegistry with local URL, but allow it to pick up auth from config
+        # (api_key from env, or access_token from browser login)
         return APIRegistry(api_url="http://localhost:8000", api_key=api_key)
     elif mode == "remote":
         # Remote registry - uses configured API URL from env/config
@@ -228,7 +231,10 @@ def run_benchmark(
                 # Create fresh registry for each run
                 registry = create_registry(registry_mode, api_key=api_key)
 
-                run_id = f"{config_name}_{i}"
+                # Generate unique run_id to avoid registry conflicts
+                # (registry may have completion records from previous runs)
+                unique_id = uuid.uuid4().hex[:8]
+                run_id = f"{config_name}_{i}_{unique_id}"
 
                 if config["type"] == "sequential":
                     duration = run_sequential_build(dag_factory, run_id, registry)
