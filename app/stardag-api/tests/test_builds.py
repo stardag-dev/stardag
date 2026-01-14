@@ -295,7 +295,11 @@ async def test_get_build_graph(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_task_reuse_across_runs(client: AsyncClient):
-    """Test that tasks are reused across builds (same task_id in same workspace)."""
+    """Test that tasks are reused across builds (same task_id in same workspace).
+
+    Tasks use global status - when completed in any build, they show as completed
+    everywhere. The status_build_id field indicates which build completed the task.
+    """
     # Create first run and register task
     response = await client.post("/api/v1/builds", json={})
     build1_id = response.json()["id"]
@@ -319,7 +323,6 @@ async def test_task_reuse_across_runs(client: AsyncClient):
     # Task should be reused (same database ID)
     assert task_db_id_1 == task_db_id_2
 
-    # But each build should track its own status via events
     # Complete in build1
     await client.post(f"/api/v1/builds/{build1_id}/tasks/shared-task/start")
     await client.post(f"/api/v1/builds/{build1_id}/tasks/shared-task/complete")
@@ -327,14 +330,16 @@ async def test_task_reuse_across_runs(client: AsyncClient):
     # Task status in build1 should be completed
     response = await client.get(f"/api/v1/builds/{build1_id}/tasks")
     build1_tasks = response.json()
-    assert any(
-        t["task_id"] == "shared-task" and t["status"] == "completed"
-        for t in build1_tasks
-    )
+    build1_task = next(t for t in build1_tasks if t["task_id"] == "shared-task")
+    assert build1_task["status"] == "completed"
+    assert build1_task["status_build_id"] == build1_id
 
-    # Task status in build2 should still be pending
+    # Task status in build2 should also show completed (global status)
+    # but status_build_id indicates it was completed in build1
     response = await client.get(f"/api/v1/builds/{build2_id}/tasks")
     build2_tasks = response.json()
-    assert any(
-        t["task_id"] == "shared-task" and t["status"] == "pending" for t in build2_tasks
-    )
+    build2_task = next(t for t in build2_tasks if t["task_id"] == "shared-task")
+    assert build2_task["status"] == "completed"
+    assert (
+        build2_task["status_build_id"] == build1_id
+    )  # Completed by build1, not build2
