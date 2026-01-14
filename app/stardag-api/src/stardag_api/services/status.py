@@ -75,6 +75,10 @@ async def get_task_status_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
+        elif event.event_type == EventType.TASK_SUSPENDED:
+            status = TaskStatus.SUSPENDED
+        elif event.event_type == EventType.TASK_RESUMED:
+            status = TaskStatus.RUNNING
         elif event.event_type == EventType.TASK_COMPLETED:
             status = TaskStatus.COMPLETED
             completed_at = event.created_at
@@ -123,6 +127,10 @@ async def get_all_task_statuses_in_build(
         elif event.event_type == EventType.TASK_STARTED:
             status = TaskStatus.RUNNING
             started_at = event.created_at
+        elif event.event_type == EventType.TASK_SUSPENDED:
+            status = TaskStatus.SUSPENDED
+        elif event.event_type == EventType.TASK_RESUMED:
+            status = TaskStatus.RUNNING
         elif event.event_type == EventType.TASK_COMPLETED:
             status = TaskStatus.COMPLETED
             completed_at = event.created_at

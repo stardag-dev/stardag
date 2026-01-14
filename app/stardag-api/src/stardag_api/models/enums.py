@@ -25,6 +25,7 @@ class TaskStatus(str, enum.Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    SUSPENDED = "suspended"  # Waiting for dynamic dependencies
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -52,6 +53,8 @@ class EventType(str, enum.Enum):
     # Task events (within a build)
     TASK_PENDING = "task_pending"
     TASK_STARTED = "task_started"
+    TASK_SUSPENDED = "task_suspended"  # Task waiting for dynamic dependencies
+    TASK_RESUMED = "task_resumed"  # Task resuming after dynamic deps complete
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_SKIPPED = "task_skipped"
