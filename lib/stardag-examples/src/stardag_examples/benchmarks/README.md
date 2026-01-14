@@ -37,6 +37,7 @@ uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 | ------------------------- | ---------- | ----------- | ------------ |
 | io_bound_tree (15 tasks)  | 1.57s      | 0.41s       | -            |
 | cpu_bound_tree (15 tasks) | 0.31s      | 0.29s       | 1.08s        |
+| heavy_cpu_flat (9 tasks)  | 9.25s      | 8.96s       | 4.07s        |
 | light_tree (15 tasks)     | 0.001s     | 0.002s      | -            |
 
 ### Local Registry Comparison
