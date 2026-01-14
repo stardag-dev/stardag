@@ -34,16 +34,40 @@ logger = logging.getLogger(__name__)
 AsyncRunCallback = typing.Callable[[BaseTask], typing.Awaitable[None]]
 
 
-class _PrefectBuildOrchestrator:
-    """Internal executor that wraps task execution with registry/callbacks.
+class _PrefectTaskRunWrapper:
+    """Wraps task execution with registry tracking and lifecycle callbacks.
 
-    This class handles:
-    - Registry calls (start_task, complete_task, etc.)
-    - Before/after callbacks
-    - Asset uploading
-    - Local task execution (async or threaded)
+    This class handles the "run" phase of task execution within a Prefect flow,
+    providing:
+    - Registry lifecycle calls (start_task, complete_task, fail_task)
+    - Before/after execution callbacks for custom logging or artifacts
+    - Asset uploading after task completion
+    - Local task execution (async or threaded) when no executor is provided
 
-    Note: For remote execution (e.g., Modal), pass a custom TaskExecutorABC.
+    The wrapper can optionally delegate actual task execution to a TaskExecutorABC
+    implementation, enabling remote execution on infrastructure like Modal while
+    still handling registry tracking and callbacks locally within the Prefect flow.
+
+    Args:
+        task_executor: Optional TaskExecutorABC for delegating task execution to
+            remote infrastructure (e.g., ModalTaskExecutor). When provided, tasks
+            are submitted to this executor instead of running locally. When None,
+            tasks execute locally using async (run_aio) or threaded (run) methods.
+        registry: Registry for tracking task lifecycle events (start, complete,
+            fail). Defaults to the registry from registry_provider.
+        before_run_callback: Async callback invoked before each task executes.
+            Useful for creating Prefect artifacts or custom logging.
+        on_complete_callback: Async callback invoked after each task completes
+            successfully. Useful for uploading artifacts to Prefect Cloud.
+
+    Example with Modal remote execution:
+        from stardag.integration.modal import ModalTaskExecutor
+
+        modal_executor = ModalTaskExecutor(
+            modal_app_name="my-app",
+            worker_selector=lambda task: "gpu" if needs_gpu(task) else "default",
+        )
+        run_wrapper = _PrefectTaskRunWrapper(task_executor=modal_executor)
     """
 
     def __init__(
@@ -158,7 +182,7 @@ async def build(
     Returns:
         Dict mapping task IDs to Prefect futures
     """
-    executor = _PrefectBuildOrchestrator(
+    run_wrapper = _PrefectTaskRunWrapper(
         task_executor=task_executor,
         registry=registry,
         before_run_callback=before_run_callback,
@@ -173,7 +197,7 @@ async def build(
 
     res = await build_dag_recursive(
         task,
-        executor=executor,
+        run_wrapper=run_wrapper,
         task_id_to_future=task_id_to_future,
         task_id_to_dynamic_future=task_id_to_dynamic_future,
         task_id_to_dynamic_deps=task_id_to_dynamic_deps,
@@ -205,7 +229,7 @@ async def build(
 
         res = await build_dag_recursive(
             task,
-            executor=executor,
+            run_wrapper=run_wrapper,
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
@@ -223,7 +247,7 @@ async def build(
 async def build_dag_recursive(
     task: BaseTask,
     *,
-    executor: _PrefectBuildOrchestrator,
+    run_wrapper: _PrefectTaskRunWrapper,
     task_id_to_future: dict[UUID, PrefectConcurrentFuture | None],
     task_id_to_dynamic_future: dict[UUID, PrefectConcurrentFuture],
     task_id_to_dynamic_deps: dict[UUID, tuple[list[BaseTask], PrefectConcurrentFuture]],
@@ -254,7 +278,7 @@ async def build_dag_recursive(
     upstream_build_results = [
         await build_dag_recursive(
             dep,
-            executor=executor,
+            run_wrapper=run_wrapper,
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
@@ -273,7 +297,7 @@ async def build_dag_recursive(
         async def stardag_dynamic_task():
             if not task.complete():
                 try:
-                    result = await executor.run(task)
+                    result = await run_wrapper.run(task)
                     if result is None:
                         # Task completed with no dynamic deps
                         logger.debug("Task completed with no dynamic deps")
@@ -318,7 +342,7 @@ async def build_dag_recursive(
     @prefect_task(name=task_ref.slug)
     async def stardag_task():
         if not task.complete():
-            res = await executor.run(task)
+            res = await run_wrapper.run(task)
             if res is not None:
                 raise AssertionError(
                     "Tasks with dynamic deps should be executed separately."
