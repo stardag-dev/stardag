@@ -6,8 +6,28 @@ Compares execution time across different build configurations for various worklo
 
 ```bash
 cd lib/stardag-examples
+
+# Default: NoOp registry (fastest, no network overhead)
 uv run python -m stardag_examples.benchmarks.run_benchmark
+
+# Quick mode (fewer scenarios, 1 run each)
+uv run python -m stardag_examples.benchmarks.run_benchmark --quick
+
+# With local registry (docker-compose at localhost:8000)
+STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local
+
+# With local registry and global concurrency locks enabled
+STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local --lock
+
+# With remote registry (uses STARDAG_REGISTRY_URL from env/config)
+uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 ```
+
+### Command-line Options
+
+- `--registry {noop,local,remote}`: Registry mode (default: noop)
+- `--lock`: Enable global concurrency locks (requires real registry)
+- `--quick`: Run quick benchmark (fewer scenarios, fewer runs)
 
 ## Results Summary
 
