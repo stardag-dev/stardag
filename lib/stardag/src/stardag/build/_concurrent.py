@@ -505,11 +505,36 @@ async def build_aio(
     # Map task_id -> asyncio.Task for in-flight executions
     pending_futures: dict[UUID, asyncio.Task] = {}
 
-    async def process_result(task: BaseTask, result: BaseException | TaskStruct | None):
-        """Process a single task result."""
+    async def process_result(
+        task: BaseTask,
+        result: LockAcquisitionResult | BaseException | TaskStruct | None,
+    ):
+        """Process a single task result (including lock acquisition results)."""
         nonlocal error
         state = task_states[task.id]
 
+        # Handle lock acquisition results (lock was not acquired)
+        if isinstance(result, LockAcquisitionResult):
+            if result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
+                # Task completed externally - wait for visibility then mark complete
+                await wait_for_completion_with_retry(task)
+                state.completed = True
+                completion_cache.add(task.id)
+                completion_events[task.id].set()
+                task_count.previously_completed += 1
+            else:
+                # ERROR, HELD_BY_OTHER, or CONCURRENCY_LIMIT_REACHED after timeout
+                msg = f"Lock {result.status.value}"
+                if result.error_message:
+                    msg += f": {result.error_message}"
+                state.exception = Exception(msg)
+                task_count.failed += 1
+                error = state.exception
+                if fail_mode == FailMode.FAIL_FAST:
+                    raise state.exception
+            return
+
+        # Handle normal task execution results
         if isinstance(result, BaseException):
             # Task failed - release lock (not completed) and notify registry
             await release_lock_for_task(task, completed=False)
@@ -534,7 +559,7 @@ async def build_aio(
 
         else:
             # Dynamic deps returned (TaskStruct) - task is suspended
-            # Note: Lock is still held by context manager - release on final completion/failure
+            # Note: Lock is still held - release on final completion/failure
             dynamic_deps = flatten_task_struct(result)
 
             # Notify registry that task is suspended waiting for dynamic deps
@@ -669,6 +694,51 @@ async def build_aio(
             await asyncio.sleep(current_interval)
             current_interval = min(current_interval * backoff_factor, max_interval)
 
+    async def submit_with_lock(
+        task: BaseTask,
+    ) -> LockAcquisitionResult | BaseException | TaskStruct | None:
+        """Submit task for execution, acquiring lock first if enabled.
+
+        This wraps lock acquisition + task execution as a single async unit,
+        allowing the main loop to remain non-blocking while waiting for locks.
+
+        Returns:
+            - LockAcquisitionResult: If lock was not acquired (ALREADY_COMPLETED,
+                ERROR, or timeout). The task was NOT executed.
+            - BaseException | TaskStruct | None: Normal task result if lock was
+                acquired (or locking wasn't needed) and task was executed.
+        """
+        state = task_states[task.id]
+        use_lock = global_lock_manager is not None and lock_selector(task)
+
+        if use_lock:
+            assert global_lock_manager is not None  # For type checker
+            task_id_str = str(task.id)
+
+            # Acquire lock (this can take time with retries - but we're async!)
+            lock_result = await acquire_lock_with_completion_check(
+                task, task_id_str, global_lock_manager, global_lock_config
+            )
+
+            if lock_result.status != LockAcquisitionStatus.ACQUIRED:
+                # Lock not acquired - return the lock result for handling
+                return lock_result
+
+            # Lock acquired - track it for release later
+            held_locks.add(task_id_str)
+
+        # Now we have the lock (or locking wasn't needed)
+        # Start the task in registry
+        if not state.started:
+            await registry.start_task_aio(task)
+            state.started = True
+        elif state.dynamic_deps:
+            # Task was suspended waiting for dynamic deps, now resuming
+            await registry.resume_task_aio(task)
+
+        # Execute the task via the executor
+        return await task_executor.submit(task)
+
     try:
         # Main build loop using as_completed pattern
         while True:
@@ -680,62 +750,9 @@ async def build_aio(
             # Find and submit ready tasks
             ready = find_ready_tasks()
 
-            # Start any ready tasks
+            # Submit ready tasks (lock acquisition + execution as single async unit)
             for task in ready:
-                state = task_states[task.id]
-
-                # Acquire lock if enabled for this task
-                use_lock = global_lock_manager is not None and lock_selector(task)
-                if use_lock:
-                    assert global_lock_manager is not None  # For type checker
-                    task_id_str = str(task.id)
-                    # Acquire lock with retry/backoff and completion checking
-                    lock_result = await acquire_lock_with_completion_check(
-                        task, task_id_str, global_lock_manager, global_lock_config
-                    )
-
-                    if lock_result.status == LockAcquisitionStatus.ACQUIRED:
-                        held_locks.add(task_id_str)
-                        # Continue to task execution below
-                    elif lock_result.status == LockAcquisitionStatus.ALREADY_COMPLETED:
-                        # Task completed externally - wait for visibility
-                        await wait_for_completion_with_retry(task)
-                        executing.discard(task.id)
-                        state.completed = True
-                        completion_cache.add(task.id)
-                        completion_events[task.id].set()
-                        task_count.previously_completed += 1
-                        continue
-                    elif lock_result.status == LockAcquisitionStatus.ERROR:
-                        executing.discard(task.id)
-                        await process_result(
-                            task, Exception(f"Lock error: {lock_result.error_message}")
-                        )
-                        continue
-                    else:
-                        # HELD_BY_OTHER or CONCURRENCY_LIMIT_REACHED after timeout
-                        executing.discard(task.id)
-                        await process_result(
-                            task,
-                            Exception(
-                                f"Lock unavailable: {lock_result.status.value}"
-                                + (
-                                    f": {lock_result.error_message}"
-                                    if lock_result.error_message
-                                    else ""
-                                )
-                            ),
-                        )
-                        continue
-
-                if not state.started:
-                    await registry.start_task_aio(task)
-                    state.started = True
-                elif state.dynamic_deps:
-                    # Task was suspended waiting for dynamic deps, now resuming
-                    await registry.resume_task_aio(task)
-                # Create async task and track it
-                async_task = asyncio.create_task(task_executor.submit(task))
+                async_task = asyncio.create_task(submit_with_lock(task))
                 pending_futures[task.id] = async_task
 
             # If nothing is pending, check for deadlock or completion
