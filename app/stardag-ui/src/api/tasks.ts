@@ -137,6 +137,40 @@ export async function fetchTaskAssets(
   return response.json();
 }
 
+// Build actions
+
+export async function cancelBuild(
+  buildId: string,
+  workspaceId?: string,
+): Promise<Build> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+
+  const url = `${API_BASE}/builds/${buildId}/cancel?${params.toString()}`;
+  const response = await fetchWithAuth(url, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`Failed to cancel build: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+// Task actions (build-scoped)
+
+export async function cancelTask(
+  buildId: string,
+  taskId: string,
+  workspaceId?: string,
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+
+  const url = `${API_BASE}/builds/${buildId}/tasks/${taskId}/cancel?${params.toString()}`;
+  const response = await fetchWithAuth(url, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`Failed to cancel task: ${response.statusText}`);
+  }
+}
+
 // Column management API
 
 export interface AvailableColumnsResponse {

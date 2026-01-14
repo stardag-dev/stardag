@@ -5,7 +5,12 @@ import {
   PanelGroup,
   PanelResizeHandle,
 } from "react-resizable-panels";
-import { fetchBuild, fetchBuildGraph, fetchTasksInBuild } from "../api/tasks";
+import {
+  cancelBuild,
+  fetchBuild,
+  fetchBuildGraph,
+  fetchTasksInBuild,
+} from "../api/tasks";
 import { useWorkspace } from "../context/WorkspaceContext";
 import type { Build, Task, TaskGraphResponse, TaskStatus } from "../types/task";
 import { DagGraph } from "./DagGraph";
@@ -36,6 +41,13 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
   // DAG collapse state - expanded by default
   const [showDag, setShowDag] = useState(true);
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
+
+  // Cancel and refresh state
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Handle DAG toggle with panel resize
   const handleToggleDag = useCallback(() => {
@@ -84,6 +96,51 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
   useEffect(() => {
     loadBuild();
   }, [loadBuild]);
+
+  // Refresh handler
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadBuild();
+    setRefreshing(false);
+  }, [loadBuild]);
+
+  // Auto-refresh effect
+  useEffect(() => {
+    if (autoRefresh && build?.status === "running") {
+      autoRefreshRef.current = setInterval(handleRefresh, 5000);
+    } else if (autoRefreshRef.current) {
+      clearInterval(autoRefreshRef.current);
+      autoRefreshRef.current = null;
+    }
+
+    return () => {
+      if (autoRefreshRef.current) {
+        clearInterval(autoRefreshRef.current);
+        autoRefreshRef.current = null;
+      }
+    };
+  }, [autoRefresh, build?.status, handleRefresh]);
+
+  // Cancel handler
+  const handleCancelBuild = useCallback(async () => {
+    if (!activeWorkspace?.id || !buildId) return;
+
+    const confirmed = window.confirm(`Are you sure you want to cancel this build?`);
+    if (!confirmed) return;
+
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      const updatedBuild = await cancelBuild(buildId, activeWorkspace.id);
+      setBuild(updatedBuild);
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : "Failed to cancel build");
+    } finally {
+      setCancelling(false);
+    }
+  }, [activeWorkspace?.id, buildId]);
+
+  const canCancelBuild = build?.status === "running" || build?.status === "pending";
 
   // Client-side filtering
   const filteredTasks = allTasks.filter((task) => {
@@ -223,16 +280,76 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                     ? "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-400"
                     : build.status === "running"
                       ? "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-400"
-                      : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400"
+                      : build.status === "cancelled"
+                        ? "bg-gray-100 text-gray-700 dark:bg-gray-900/50 dark:text-gray-400"
+                        : build.status === "exit_early"
+                          ? "bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-400"
+                          : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400"
               }`}
             >
-              {build.status}
+              {build.status === "exit_early" ? "exited early" : build.status}
             </span>
           </div>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            {allTasks.length} tasks &middot; Created{" "}
-            {new Date(build.created_at).toLocaleString()}
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              {allTasks.length} tasks &middot; Created{" "}
+              {new Date(build.created_at).toLocaleString()}
+            </p>
+            {cancelError && (
+              <span className="text-xs text-red-600 dark:text-red-400">
+                {cancelError}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex items-center gap-2">
+          {/* Auto-refresh toggle */}
+          {build.status === "running" && (
+            <label className="flex cursor-pointer items-center gap-1.5 text-sm text-gray-600 dark:text-gray-400">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(e) => setAutoRefresh(e.target.checked)}
+                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
+              />
+              Auto
+            </label>
+          )}
+
+          {/* Refresh button */}
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+            title="Refresh"
+          >
+            <svg
+              className={`h-5 w-5 ${refreshing ? "animate-spin" : ""}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+          </button>
+
+          {/* Cancel button */}
+          {canCancelBuild && (
+            <button
+              onClick={handleCancelBuild}
+              disabled={cancelling}
+              className="rounded-md bg-red-100 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50"
+            >
+              {cancelling ? "Cancelling..." : "Cancel Build"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -330,7 +447,9 @@ export function BuildView({ buildId, onBack }: BuildViewProps) {
                 <div className="h-full border-l border-gray-200 dark:border-gray-700">
                   <TaskDetail
                     task={selectedTask}
+                    buildId={buildId}
                     onClose={() => setSelectedTask(null)}
+                    onTaskCancelled={handleRefresh}
                   />
                 </div>
               </Panel>

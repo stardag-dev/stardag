@@ -19,6 +19,7 @@ const statusBorderColors: Record<TaskStatus, string> = {
   suspended: "border-purple-400",
   completed: "border-green-400",
   failed: "border-red-400",
+  cancelled: "border-gray-400",
 };
 
 const statusBorderColorsMuted: Record<TaskStatus, string> = {
@@ -27,6 +28,7 @@ const statusBorderColorsMuted: Record<TaskStatus, string> = {
   suspended: "border-purple-400/40",
   completed: "border-green-400/40",
   failed: "border-red-400/40",
+  cancelled: "border-gray-400/40",
 };
 
 interface TaskNodeProps {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchTaskAssets } from "../api/tasks";
+import { cancelTask, fetchTaskAssets } from "../api/tasks";
 import type { Task, TaskAsset } from "../types/task";
 import { AssetList, ExpandButton } from "./AssetViewer";
 import { FullscreenModal } from "./FullscreenModal";
@@ -7,13 +7,44 @@ import { StatusBadge } from "./StatusBadge";
 
 interface TaskDetailProps {
   task: Task;
+  buildId?: string;
   onClose: () => void;
+  onTaskCancelled?: () => void;
 }
 
-export function TaskDetail({ task, onClose }: TaskDetailProps) {
+export function TaskDetail({
+  task,
+  buildId,
+  onClose,
+  onTaskCancelled,
+}: TaskDetailProps) {
   const [assets, setAssets] = useState<TaskAsset[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(false);
   const [showParamsModal, setShowParamsModal] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
+  const canCancel = buildId && (task.status === "pending" || task.status === "running");
+
+  const handleCancel = async () => {
+    if (!buildId || !canCancel) return;
+
+    const confirmed = window.confirm(
+      `Are you sure you want to cancel task "${task.task_name}"?`,
+    );
+    if (!confirmed) return;
+
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      await cancelTask(buildId, task.task_id, task.workspace_id);
+      onTaskCancelled?.();
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : "Failed to cancel task");
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -88,9 +119,25 @@ export function TaskDetail({ task, onClose }: TaskDetailProps) {
           <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
             Status
           </label>
-          <div className="mt-1">
-            <StatusBadge status={task.status} />
+          <div className="mt-1 flex items-center gap-2">
+            <StatusBadge
+              status={task.status}
+              waitingForLock={task.waiting_for_lock}
+              lockHolderBuildId={task.lock_holder_build_id}
+            />
+            {canCancel && (
+              <button
+                onClick={handleCancel}
+                disabled={cancelling}
+                className="rounded-md bg-red-100 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50"
+              >
+                {cancelling ? "Cancelling..." : "Cancel"}
+              </button>
+            )}
           </div>
+          {cancelError && (
+            <p className="mt-1 text-xs text-red-600 dark:text-red-400">{cancelError}</p>
+          )}
         </div>
 
         {/* Timestamps */}
