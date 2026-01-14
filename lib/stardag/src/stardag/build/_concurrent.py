@@ -395,6 +395,7 @@ async def build_aio(
     max_concurrent_discover: int = 50,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
+    resume_build_id: str | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -419,9 +420,11 @@ async def build_aio(
             If provided with global_lock_config.enabled=True, tasks will acquire locks
             before execution to ensure exactly-once execution across processes.
         global_lock_config: Configuration for global locking behavior.
+        resume_build_id: Optional build ID to resume. If provided, continues tracking
+            events under this existing build instead of starting a new one.
 
     Returns:
-        BuildSummary with status and task counts
+        BuildSummary with status, task counts, and build_id
     """
     # Determine registry: explicit > init_registry()
     if registry is None:
@@ -503,13 +506,19 @@ async def build_aio(
         for root in tasks:
             tg.create_task(discover(root))
 
-    await registry.build_start_aio(root_tasks=tasks)
+    # Start or resume build
+    if resume_build_id is not None:
+        build_id = resume_build_id
+        logger.info(f"Resuming build: {build_id}")
+    else:
+        build_id = await registry.build_start_aio(root_tasks=tasks)
+        logger.info(f"Started build: {build_id}")
 
     # Register previously completed tasks so they appear in the build's task list
     # These will get TASK_REFERENCED events since they already exist
     for task in previously_completed_tasks:
         try:
-            await registry.task_register_aio(task)
+            await registry.task_register_aio(build_id, task)
         except Exception as reg_err:
             logger.warning(f"Failed to register previously completed task: {reg_err}")
 
@@ -552,7 +561,7 @@ async def build_aio(
             # Task failed - release lock (not completed) and notify registry
             await release_lock_for_task(task, completed=False)
             try:
-                await registry.task_fail_aio(task, str(result))
+                await registry.task_fail_aio(build_id, task, str(result))
             except Exception as reg_err:
                 logger.warning(f"Failed to notify registry of task failure: {reg_err}")
             state.exception = result
@@ -565,10 +574,10 @@ async def build_aio(
             # Task completed - release lock (completed) and notify registry
             await release_lock_for_task(task, completed=True)
             try:
-                await registry.task_complete_aio(task)
+                await registry.task_complete_aio(build_id, task)
                 assets = task.registry_assets_aio()
                 if assets:
-                    await registry.task_upload_assets_aio(task, assets)
+                    await registry.task_upload_assets_aio(build_id, task, assets)
             except Exception as reg_err:
                 logger.warning(
                     f"Failed to notify registry of task completion: {reg_err}"
@@ -585,7 +594,7 @@ async def build_aio(
 
             # Notify registry that task is suspended waiting for dynamic deps
             try:
-                await registry.task_suspend_aio(task)
+                await registry.task_suspend_aio(build_id, task)
             except Exception as reg_err:
                 logger.warning(
                     f"Failed to notify registry of task suspension: {reg_err}"
@@ -707,7 +716,7 @@ async def build_aio(
                 notified_waiting = True
                 lock_owner = result.error_message  # May contain owner info
                 try:
-                    await registry.task_waiting_for_lock_aio(task, lock_owner)
+                    await registry.task_waiting_for_lock_aio(build_id, task, lock_owner)
                 except Exception as e:
                     logger.warning(f"Failed to notify registry of lock wait: {e}")
 
@@ -778,11 +787,11 @@ async def build_aio(
         # Now we have the lock (or locking wasn't needed)
         # Start the task in registry
         if not state.started:
-            await registry.task_start_aio(task)
+            await registry.task_start_aio(build_id, task)
             state.started = True
         elif state.dynamic_deps:
             # Task was suspended waiting for dynamic deps, now resuming
-            await registry.task_resume_aio(task)
+            await registry.task_resume_aio(build_id, task)
 
         # Execute the task via the executor
         return await task_executor.submit(task)
@@ -872,7 +881,7 @@ async def build_aio(
                         )
                         logger.info(f"Exiting early: {reason}")
                         try:
-                            await registry.build_exit_early_aio(reason)
+                            await registry.build_exit_early_aio(build_id, reason)
                         except Exception as reg_err:
                             logger.warning(
                                 f"Failed to notify registry of exit early: {reg_err}"
@@ -880,23 +889,26 @@ async def build_aio(
                         return BuildSummary(
                             status=BuildExitStatus.EXIT_EARLY,
                             task_count=task_count,
+                            build_id=build_id,
                             error=None,
                         )
 
-        await registry.build_complete_aio()
+        await registry.build_complete_aio(build_id)
         return BuildSummary(
             status=BuildExitStatus.SUCCESS
             if error is None
             else BuildExitStatus.FAILURE,
             task_count=task_count,
+            build_id=build_id,
             error=error,
         )
 
     except Exception as e:
-        await registry.build_fail_aio(str(e))
+        await registry.build_fail_aio(build_id, str(e))
         return BuildSummary(
             status=BuildExitStatus.FAILURE,
             task_count=task_count,
+            build_id=build_id,
             error=e,
         )
 
@@ -917,6 +929,7 @@ def build(
     max_concurrent_discover: int = 50,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
+    resume_build_id: str | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -938,6 +951,7 @@ def build(
                 max_concurrent_discover,
                 global_lock_manager,
                 global_lock_config,
+                resume_build_id,
             )
         )
     except RuntimeError as e:
