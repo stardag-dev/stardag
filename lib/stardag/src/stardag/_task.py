@@ -1,5 +1,6 @@
 import abc
 import asyncio
+import functools
 import inspect
 import logging
 from abc import abstractmethod
@@ -59,6 +60,54 @@ def _has_custom_run_aio(task: "BaseTask") -> bool:
     return type(task).run_aio is not BaseTask.run_aio
 
 
+def _is_precheck_wrapped(func) -> bool:
+    """Check if a function has been wrapped with precheck."""
+    return getattr(func, "__precheck_wrapped__", False)
+
+
+def _wrap_run_with_precheck(func):
+    """Wrap run() method with precheck call."""
+    if _is_precheck_wrapped(func):
+        return func
+
+    @functools.wraps(func)
+    def wrapped(self, *args, **kwargs):
+        self._check_before_run()
+        return func(self, *args, **kwargs)
+
+    wrapped.__precheck_wrapped__ = True  # type: ignore[attr-defined]
+    return wrapped
+
+
+def _wrap_run_aio_with_precheck(func):
+    """Wrap run_aio() method with precheck call.
+
+    Handles both regular async functions and async generators.
+    """
+    if _is_precheck_wrapped(func):
+        return func
+
+    if inspect.isasyncgenfunction(func):
+        # For async generators, we need an async generator wrapper
+        @functools.wraps(func)
+        async def wrapped_gen(self, *args, **kwargs):
+            self._check_before_run()
+            async for item in func(self, *args, **kwargs):
+                yield item
+
+        wrapped_gen.__precheck_wrapped__ = True  # type: ignore[attr-defined]
+        return wrapped_gen
+    else:
+        # For regular async functions
+        @functools.wraps(func)
+        async def wrapped(self, *args, **kwargs):
+            self._check_before_run()
+            return await func(self, *args, **kwargs)
+
+        wrapped.__precheck_wrapped__ = True  # type: ignore[attr-defined]
+        return wrapped
+
+
 @total_ordering
 class BaseTask(
     PolymorphicRoot,
@@ -78,7 +127,10 @@ class BaseTask(
     )
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        """Validate that subclasses implement either run() or run_aio()."""
+        """Validate that subclasses implement either run() or run_aio().
+
+        Also wraps run() and run_aio() methods with precheck validation.
+        """
         super().__init_subclass__(**kwargs)
 
         # Skip validation for abstract classes:
@@ -106,6 +158,19 @@ class BaseTask(
                 f"Task class '{cls.__name__}' must implement either run() or run_aio(). "
                 f"Implement run() for synchronous tasks, or run_aio() for async tasks."
             )
+
+        # Wrap run() and run_aio() with precheck if this class defines them
+        if "run" in cls.__dict__:
+            attr = cls.__dict__["run"]
+            if isinstance(attr, (classmethod, staticmethod)):
+                raise TypeError("run() must be an instance method")
+            setattr(cls, "run", _wrap_run_with_precheck(attr))
+
+        if "run_aio" in cls.__dict__:
+            attr = cls.__dict__["run_aio"]
+            if isinstance(attr, (classmethod, staticmethod)):
+                raise TypeError("run_aio() must be an instance method")
+            setattr(cls, "run_aio", _wrap_run_aio_with_precheck(attr))
 
     @abstractmethod
     def complete(self) -> bool:
@@ -162,7 +227,11 @@ class BaseTask(
         if _has_custom_run_aio(self) and not _has_custom_run(self):
             # User only implemented run_aio - run it synchronously
             # Check if it's an async generator (dynamic deps) - can't auto-convert
-            if inspect.isasyncgenfunction(type(self).run_aio):
+            # Use unwrapped function since run_aio may be wrapped with precheck
+            run_aio_func = getattr(
+                type(self).run_aio, "__wrapped__", type(self).run_aio
+            )
+            if inspect.isasyncgenfunction(run_aio_func):
                 raise NotImplementedError(
                     f"{type(self).__name__}.run_aio() is an async generator (uses "
                     f"'yield' for dynamic dependencies), which cannot be automatically "
@@ -218,17 +287,17 @@ class BaseTask(
             f"{type(self).__name__} must implement either run() or run_aio()"
         )
 
-    def run_version_checked(self) -> None | Generator[TaskStruct, None, None]:
-        if not self.version == self.__version__:
-            raise ValueError("TODO")
+    def _check_before_run(self) -> None:
+        """Called before run() or run_aio() to validate task state.
 
-        return self.run()
-
-    async def run_version_checked_aio(self) -> None | Generator[TaskStruct, None, None]:
-        if not self.version == self.__version__:
-            raise ValueError("TODO")
-
-        return await self.run_aio()
+        Override this method to add custom pre-run validation.
+        By default, validates that the task's version matches the class version.
+        """
+        if self.version != self.__version__:
+            raise ValueError(
+                f"Task version mismatch: task instance has version='{self.version}' "
+                f"but class {type(self).__name__} has __version__='{self.__version__}'"
+            )
 
     def requires(self) -> TaskStruct | None:
         return None
@@ -256,9 +325,12 @@ class BaseTask(
 
     @classmethod
     def has_dynamic_deps(cls) -> bool:
-        return inspect.isgeneratorfunction(cls.run) or inspect.isasyncgenfunction(
-            cls.run_aio
-        )  # TODO is this correct?
+        # Check unwrapped functions since run/run_aio may be wrapped with precheck
+        run_func = getattr(cls.run, "__wrapped__", cls.run)
+        run_aio_func = getattr(cls.run_aio, "__wrapped__", cls.run_aio)
+        return inspect.isgeneratorfunction(run_func) or inspect.isasyncgenfunction(
+            run_aio_func
+        )
 
     @cached_property
     def id(self) -> UUID:
