@@ -22,7 +22,7 @@ from stardag_api.schemas import (
     ValueSuggestion,
     ValueSuggestionsResponse,
 )
-from stardag_api.services.status import get_all_task_statuses_in_build
+from stardag_api.services.status import get_all_task_global_statuses
 
 router = APIRouter(prefix="/tasks/search", tags=["search"])
 
@@ -269,10 +269,17 @@ async def search_tasks(
     filter_params: dict[str, str] = {}
     conditions: list[str] = []
     needs_build_join = False
+    # Status filters are applied post-query since status is derived from events
+    status_filters: list[tuple[str, str]] = []  # (operator, value) pairs
 
     if filter:
         parsed_filters = parse_filter_string(filter)
         for i, (key, op, value) in enumerate(parsed_filters):
+            # Handle status filter separately (post-query)
+            if key == "status":
+                status_filters.append((op, value.lower()))
+                continue
+
             # Use index suffix to ensure unique parameter names for range queries
             # e.g., param.x:>:5 and param.x:<:100 need different param names
             param_suffix = f"_{i}"
@@ -337,10 +344,6 @@ async def search_tasks(
             text(combined_condition).bindparams(**filter_params)
         )
 
-    # Get total count
-    total_result = await db.execute(count_query)
-    total = total_result.scalar() or 0
-
     # Apply sorting
     sort_parts = sort.split(":")
     sort_field = sort_parts[0] if sort_parts else "created_at"
@@ -358,21 +361,75 @@ async def search_tasks(
     else:
         query = query.order_by(sort_column.desc())
 
-    # Apply pagination
-    query = query.offset((page - 1) * page_size).limit(page_size)
+    # If status filter is present, we need to:
+    # 1. Fetch all tasks (no SQL pagination) since status is computed post-query
+    # 2. Get global statuses for all tasks
+    # 3. Filter by status in Python
+    # 4. Paginate in Python
+    if status_filters:
+        # Fetch all matching tasks (limit to 10000 to prevent OOM)
+        query = query.limit(10000)
+        result = await db.execute(query)
+        all_tasks = list(result.scalars().all())
 
-    # Execute query
-    result = await db.execute(query)
-    tasks = result.scalars().all()
+        if all_tasks:
+            # Get global statuses for all tasks
+            all_task_ids = [t.id for t in all_tasks]
+            all_statuses = await get_all_task_global_statuses(db, all_task_ids)
 
-    # Get latest build context for each task
+            # Filter by status
+            def matches_status_filters(task_id: int) -> bool:
+                status_info = all_statuses.get(task_id)
+                if not status_info:
+                    return False
+                status_str = status_info[0].value.lower()  # e.g., "completed"
+                for op, value in status_filters:
+                    if op == "=":
+                        if status_str != value:
+                            return False
+                    elif op == "!=":
+                        if status_str == value:
+                            return False
+                    elif op == "~":  # contains
+                        if value not in status_str:
+                            return False
+                return True
+
+            filtered_tasks = [t for t in all_tasks if matches_status_filters(t.id)]
+            total = len(filtered_tasks)
+
+            # Apply pagination in Python
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            tasks = filtered_tasks[start_idx:end_idx]
+        else:
+            tasks = []
+            total = 0
+    else:
+        # No status filter - use normal SQL pagination
+        total_result = await db.execute(count_query)
+        total = total_result.scalar() or 0
+
+        # Apply pagination
+        query = query.offset((page - 1) * page_size).limit(page_size)
+
+        # Execute query
+        result = await db.execute(query)
+        tasks = result.scalars().all()
+
+    # Get global status for each task (considers events across ALL builds)
     task_ids = [t.id for t in tasks]
-    task_build_map: dict[
-        int, tuple[str, str, TaskStatus, str | None, str | None, str | None]
+    task_status_map: dict[
+        int,
+        tuple[str | None, str | None, TaskStatus, str | None, str | None, str | None],
     ] = {}
 
     if task_ids:
-        # Get most recent build for each task via events
+        # Get global statuses - this looks at events across all builds
+        # to determine the true status (e.g., COMPLETED takes precedence)
+        global_statuses = await get_all_task_global_statuses(db, task_ids)
+
+        # Get the most recent build context for display (for build_id/build_name)
         # Using a subquery to find the latest event per task
         latest_event_subquery = (
             select(
@@ -392,43 +449,41 @@ async def search_tasks(
         events_result = await db.execute(latest_events)
         latest_events_list = events_result.scalars().all()
 
-        # Get build info for these events
+        # Get build info for display
         build_ids = {e.build_id for e in latest_events_list}
+        builds_map: dict[str, Build] = {}
         if build_ids:
             builds_result = await db.execute(
                 select(Build).where(Build.id.in_(build_ids))
             )
             builds_map = {b.id: b for b in builds_result.scalars().all()}
 
-            # Batch fetch all statuses for unique builds to avoid N+1 queries
-            all_statuses_by_build: dict[
-                str, dict[int, tuple[TaskStatus, Any, Any, str | None]]
-            ] = {}
-            for build_id in build_ids:
-                all_statuses_by_build[build_id] = await get_all_task_statuses_in_build(
-                    db, build_id
-                )
+        # Map tasks to their latest build context and global status
+        task_to_latest_build: dict[int, Build] = {}
+        for event in latest_events_list:
+            if event.task_id and event.build_id in builds_map:
+                task_to_latest_build[event.task_id] = builds_map[event.build_id]
 
-            # Map task statuses from batched results
-            for event in latest_events_list:
-                build = builds_map.get(event.build_id)
-                if build and event.task_id:
-                    statuses = all_statuses_by_build.get(event.build_id, {})
-                    status_info = statuses.get(
-                        event.task_id, (TaskStatus.PENDING, None, None, None)
-                    )
-                    task_build_map[event.task_id] = (
-                        build.id,
-                        build.name,
-                        status_info[0],  # status
-                        status_info[1].isoformat()
-                        if status_info[1]
-                        else None,  # started_at
-                        status_info[2].isoformat()
-                        if status_info[2]
-                        else None,  # completed_at
-                        status_info[3],  # error_message
-                    )
+        # Build final status map using global status but latest build for context
+        for task_id in task_ids:
+            # Global status: (status, started_at, completed_at, error_message, status_build_id, waiting_for_lock)
+            global_status = global_statuses.get(
+                task_id, (TaskStatus.PENDING, None, None, None, None, False)
+            )
+            latest_build = task_to_latest_build.get(task_id)
+
+            task_status_map[task_id] = (
+                latest_build.id if latest_build else None,  # build_id for display
+                latest_build.name if latest_build else None,  # build_name for display
+                global_status[0],  # status (global)
+                global_status[1].isoformat()
+                if global_status[1]
+                else None,  # started_at
+                global_status[2].isoformat()
+                if global_status[2]
+                else None,  # completed_at
+                global_status[3],  # error_message
+            )
 
     # Get asset counts
     asset_counts: dict[int, int] = {}
@@ -466,7 +521,7 @@ async def search_tasks(
     # Build response
     task_results = []
     for task in tasks:
-        build_info = task_build_map.get(task.id)
+        status_info = task_status_map.get(task.id)
         task_results.append(
             TaskSearchResult(
                 task_id=task.task_id,
@@ -476,12 +531,12 @@ async def search_tasks(
                 task_data=task.task_data,
                 version=task.version,
                 created_at=task.created_at,
-                build_id=build_info[0] if build_info else None,
-                build_name=build_info[1] if build_info else None,
-                status=build_info[2] if build_info else TaskStatus.PENDING,
-                started_at=build_info[3] if build_info else None,  # type: ignore
-                completed_at=build_info[4] if build_info else None,  # type: ignore
-                error_message=build_info[5] if build_info else None,
+                build_id=status_info[0] if status_info else None,
+                build_name=status_info[1] if status_info else None,
+                status=status_info[2] if status_info else TaskStatus.PENDING,
+                started_at=status_info[3] if status_info else None,  # type: ignore
+                completed_at=status_info[4] if status_info else None,  # type: ignore
+                error_message=status_info[5] if status_info else None,
                 asset_count=asset_counts.get(task.id, 0),
                 asset_data=task_asset_data.get(task.id, {}),
             )
