@@ -550,6 +550,124 @@ async def fail_task(
 
 
 @router.post(
+    "/{build_id}/tasks/{task_id}/suspend", response_model=TaskWithStatusResponse
+)
+async def suspend_task(
+    build_id: str,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Mark a task as suspended (waiting for dynamic dependencies)."""
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
+
+    result = await db.execute(
+        select(Task)
+        .where(Task.workspace_id == build.workspace_id)
+        .where(Task.task_id == task_id)
+    )
+    db_task = result.scalar_one_or_none()
+    if not db_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    event = Event(
+        build_id=build_id,
+        task_id=db_task.id,
+        event_type=EventType.TASK_SUSPENDED,
+    )
+    db.add(event)
+    await db.commit()
+
+    from stardag_api.services.status import get_task_status_in_build
+
+    status, started_at, completed_at, error_message = await get_task_status_in_build(
+        db, build_id, db_task.id
+    )
+
+    return TaskWithStatusResponse(
+        id=db_task.id,
+        task_id=db_task.task_id,
+        workspace_id=db_task.workspace_id,
+        task_namespace=db_task.task_namespace,
+        task_name=db_task.task_name,
+        task_data=db_task.task_data,
+        version=db_task.version,
+        created_at=db_task.created_at,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        error_message=error_message,
+    )
+
+
+@router.post(
+    "/{build_id}/tasks/{task_id}/resume", response_model=TaskWithStatusResponse
+)
+async def resume_task(
+    build_id: str,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Mark a task as resumed (dynamic dependencies completed)."""
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated workspace
+    if build.workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this workspace"
+        )
+
+    result = await db.execute(
+        select(Task)
+        .where(Task.workspace_id == build.workspace_id)
+        .where(Task.task_id == task_id)
+    )
+    db_task = result.scalar_one_or_none()
+    if not db_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    event = Event(
+        build_id=build_id,
+        task_id=db_task.id,
+        event_type=EventType.TASK_RESUMED,
+    )
+    db.add(event)
+    await db.commit()
+
+    from stardag_api.services.status import get_task_status_in_build
+
+    status, started_at, completed_at, error_message = await get_task_status_in_build(
+        db, build_id, db_task.id
+    )
+
+    return TaskWithStatusResponse(
+        id=db_task.id,
+        task_id=db_task.task_id,
+        workspace_id=db_task.workspace_id,
+        task_namespace=db_task.task_namespace,
+        task_name=db_task.task_name,
+        task_data=db_task.task_data,
+        version=db_task.version,
+        created_at=db_task.created_at,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        error_message=error_message,
+    )
+
+
+@router.post(
     "/{build_id}/tasks/{task_id}/assets",
     response_model=TaskRegistryAssetListResponse,
     status_code=201,

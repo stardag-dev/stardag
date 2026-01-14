@@ -301,6 +301,30 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Fail task {task.id}")
 
+    def suspend_task(self, task: BaseTask) -> None:
+        """Mark a task as suspended (waiting for dynamic dependencies)."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot suspend task")
+            return
+
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/suspend",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Suspend task {task.id}")
+
+    def resume_task(self, task: BaseTask) -> None:
+        """Mark a task as resumed (dynamic dependencies completed)."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot resume task")
+            return
+
+        response = self.client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/resume",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Resume task {task.id}")
+
     def upload_task_assets(self, task: BaseTask, assets: list[RegistryAsset]) -> None:
         """Upload assets for a completed task."""
         if self._build_id is None:
@@ -497,6 +521,30 @@ class APIRegistry(RegistryABC):
             params=params,
         )
         self._handle_response_error(response, f"Fail task {task.id}")
+
+    async def suspend_task_aio(self, task: BaseTask) -> None:
+        """Async version - mark a task as suspended."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot suspend task")
+            return
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/suspend",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Suspend task {task.id}")
+
+    async def resume_task_aio(self, task: BaseTask) -> None:
+        """Async version - mark a task as resumed."""
+        if self._build_id is None:
+            logger.warning("No active build - cannot resume task")
+            return
+
+        response = await self.async_client.post(
+            f"{self.api_url}/api/v1/builds/{self._build_id}/tasks/{task.id}/resume",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Resume task {task.id}")
 
     async def upload_task_assets_aio(
         self, task: BaseTask, assets: list[RegistryAsset]

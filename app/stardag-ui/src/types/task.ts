@@ -1,4 +1,4 @@
-export type TaskStatus = "pending" | "running" | "completed" | "failed";
+export type TaskStatus = "pending" | "running" | "suspended" | "completed" | "failed";
 export type BuildStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 // Build entity
