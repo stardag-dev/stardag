@@ -7,10 +7,13 @@ import {
 } from "react-resizable-panels";
 import {
   cancelBuild,
+  completeBuild,
+  failBuild,
   fetchBuild,
   fetchBuildGraph,
   fetchTasksInBuild,
 } from "../api/tasks";
+import { useAuth } from "../context/AuthContext";
 import { useWorkspace } from "../context/WorkspaceContext";
 import type { Build, Task, TaskGraphResponse, TaskStatus } from "../types/task";
 import { DagGraph } from "./DagGraph";
@@ -30,6 +33,7 @@ interface BuildViewProps {
 
 export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps) {
   const { activeWorkspace } = useWorkspace();
+  const { user } = useAuth();
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   // Data state
@@ -43,12 +47,17 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const [showDag, setShowDag] = useState(true);
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
 
-  // Cancel and refresh state
-  const [cancelling, setCancelling] = useState(false);
-  const [cancelError, setCancelError] = useState<string | null>(null);
+  // Override state dropdown
+  const [showOverrideMenu, setShowOverrideMenu] = useState(false);
+  const [overriding, setOverriding] = useState(false);
+  const [overrideError, setOverrideError] = useState<string | null>(null);
+  const overrideMenuRef = useRef<HTMLDivElement>(null);
+
+  // Refresh state
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastClickRef = useRef<number>(0);
 
   // Handle DAG toggle with panel resize
   const handleToggleDag = useCallback(() => {
@@ -122,26 +131,90 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     };
   }, [autoRefresh, build?.status, handleRefresh]);
 
-  // Cancel handler
-  const handleCancelBuild = useCallback(async () => {
-    if (!activeWorkspace?.id || !buildId) return;
+  // Override state handlers
+  const handleOverride = useCallback(
+    async (action: "cancel" | "complete" | "fail") => {
+      if (!activeWorkspace?.id || !buildId) return;
 
-    const confirmed = window.confirm(`Are you sure you want to cancel this build?`);
-    if (!confirmed) return;
+      const actionLabels = {
+        cancel: "cancel",
+        complete: "mark as completed",
+        fail: "mark as failed",
+      };
 
-    setCancelling(true);
-    setCancelError(null);
-    try {
-      const updatedBuild = await cancelBuild(buildId, activeWorkspace.id);
-      setBuild(updatedBuild);
-    } catch (err) {
-      setCancelError(err instanceof Error ? err.message : "Failed to cancel build");
-    } finally {
-      setCancelling(false);
+      const confirmed = window.confirm(
+        `Are you sure you want to ${actionLabels[action]} this build?`,
+      );
+      if (!confirmed) return;
+
+      setShowOverrideMenu(false);
+      setOverriding(true);
+      setOverrideError(null);
+
+      const userId = user?.profile?.sub;
+
+      try {
+        let updatedBuild: Build;
+        if (action === "cancel") {
+          updatedBuild = await cancelBuild(buildId, activeWorkspace.id, userId);
+        } else if (action === "complete") {
+          updatedBuild = await completeBuild(buildId, activeWorkspace.id, userId);
+        } else {
+          updatedBuild = await failBuild(buildId, activeWorkspace.id, userId);
+        }
+        setBuild(updatedBuild);
+      } catch (err) {
+        setOverrideError(
+          err instanceof Error
+            ? err.message
+            : `Failed to ${actionLabels[action]} build`,
+        );
+      } finally {
+        setOverriding(false);
+      }
+    },
+    [activeWorkspace?.id, buildId, user?.profile?.sub],
+  );
+
+  // Close override menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        overrideMenuRef.current &&
+        !overrideMenuRef.current.contains(event.target as Node)
+      ) {
+        setShowOverrideMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Double-click refresh to toggle auto-refresh
+  const handleRefreshClick = useCallback(() => {
+    const now = Date.now();
+    const timeSinceLastClick = now - lastClickRef.current;
+    lastClickRef.current = now;
+
+    if (timeSinceLastClick < 300) {
+      // Double-click: toggle auto-refresh
+      setAutoRefresh((prev) => !prev);
+    } else {
+      // Single click: manual refresh (only if not in auto-refresh mode)
+      if (!autoRefresh) {
+        handleRefresh();
+      } else {
+        // Click while auto-refreshing: stop auto-refresh
+        setAutoRefresh(false);
+      }
     }
-  }, [activeWorkspace?.id, buildId]);
+  }, [autoRefresh, handleRefresh]);
 
-  const canCancelBuild = build?.status === "running" || build?.status === "pending";
+  // Can override if build is in an active or stuck state
+  const canOverride =
+    build?.status === "running" ||
+    build?.status === "pending" ||
+    build?.status === "exit_early";
 
   // Client-side filtering
   const filteredTasks = allTasks.filter((task) => {
@@ -277,7 +350,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               {build.name}
             </h1>
             <span
-              className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
                 build.status === "completed"
                   ? "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400"
                   : build.status === "failed"
@@ -290,7 +363,30 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                           ? "bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-400"
                           : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400"
               }`}
+              title={
+                build.status_triggered_by_user
+                  ? `Manually set by ${
+                      build.status_triggered_by_user.display_name ||
+                      build.status_triggered_by_user.email
+                    }`
+                  : undefined
+              }
             >
+              {build.status_triggered_by_user && (
+                <svg
+                  className="h-3 w-3"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
+                  />
+                </svg>
+              )}
               {build.status === "exit_early" ? "exited early" : build.status}
             </span>
           </div>
@@ -299,9 +395,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               {allTasks.length} tasks &middot; Created{" "}
               {new Date(build.created_at).toLocaleString()}
             </p>
-            {cancelError && (
+            {overrideError && (
               <span className="text-xs text-red-600 dark:text-red-400">
-                {cancelError}
+                {overrideError}
               </span>
             )}
           </div>
@@ -309,28 +405,23 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
 
         {/* Action buttons */}
         <div className="flex items-center gap-2">
-          {/* Auto-refresh toggle */}
-          {build.status === "running" && (
-            <label className="flex cursor-pointer items-center gap-1.5 text-sm text-gray-600 dark:text-gray-400">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(e) => setAutoRefresh(e.target.checked)}
-                className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700"
-              />
-              Auto
-            </label>
-          )}
-
-          {/* Refresh button */}
+          {/* Refresh button with double-click for auto-refresh */}
           <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-            title="Refresh"
+            onClick={handleRefreshClick}
+            disabled={refreshing && !autoRefresh}
+            className={`rounded-md p-1.5 transition-colors ${
+              autoRefresh
+                ? "bg-blue-100 text-blue-700 ring-2 ring-blue-400 dark:bg-blue-900/30 dark:text-blue-400"
+                : "text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+            } disabled:opacity-50`}
+            title={
+              autoRefresh
+                ? "Auto-refreshing (click to stop)"
+                : "Click to refresh, double-click for auto-refresh"
+            }
           >
             <svg
-              className={`h-5 w-5 ${refreshing ? "animate-spin" : ""}`}
+              className={`h-5 w-5 ${refreshing || autoRefresh ? "animate-spin" : ""}`}
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -344,15 +435,60 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
             </svg>
           </button>
 
-          {/* Cancel button */}
-          {canCancelBuild && (
-            <button
-              onClick={handleCancelBuild}
-              disabled={cancelling}
-              className="rounded-md bg-red-100 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50"
-            >
-              {cancelling ? "Cancelling..." : "Cancel Build"}
-            </button>
+          {/* Override state dropdown */}
+          {canOverride && (
+            <div className="relative" ref={overrideMenuRef}>
+              <button
+                onClick={() => setShowOverrideMenu(!showOverrideMenu)}
+                disabled={overriding}
+                className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+              >
+                {overriding ? "Updating..." : "Override State"}
+                <svg
+                  className={`h-4 w-4 transition-transform ${
+                    showOverrideMenu ? "rotate-180" : ""
+                  }`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M19 9l-7 7-7-7"
+                  />
+                </svg>
+              </button>
+
+              {showOverrideMenu && (
+                <div className="absolute right-0 z-10 mt-1 w-40 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 dark:bg-gray-800 dark:ring-gray-700">
+                  <div className="py-1">
+                    <button
+                      onClick={() => handleOverride("complete")}
+                      className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                    >
+                      <span className="h-2 w-2 rounded-full bg-green-500" />
+                      Mark Completed
+                    </button>
+                    <button
+                      onClick={() => handleOverride("fail")}
+                      className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                    >
+                      <span className="h-2 w-2 rounded-full bg-red-500" />
+                      Mark Failed
+                    </button>
+                    <button
+                      onClick={() => handleOverride("cancel")}
+                      className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                    >
+                      <span className="h-2 w-2 rounded-full bg-gray-500" />
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </div>
       </div>

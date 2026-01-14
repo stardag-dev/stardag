@@ -142,14 +142,50 @@ export async function fetchTaskAssets(
 export async function cancelBuild(
   buildId: string,
   workspaceId?: string,
+  triggeredByUserId?: string,
 ): Promise<Build> {
   const params = new URLSearchParams();
   if (workspaceId) params.set("workspace_id", workspaceId);
+  if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
 
   const url = `${API_BASE}/builds/${buildId}/cancel?${params.toString()}`;
   const response = await fetchWithAuth(url, { method: "POST" });
   if (!response.ok) {
     throw new Error(`Failed to cancel build: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function completeBuild(
+  buildId: string,
+  workspaceId?: string,
+  triggeredByUserId?: string,
+): Promise<Build> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
+
+  const url = `${API_BASE}/builds/${buildId}/complete?${params.toString()}`;
+  const response = await fetchWithAuth(url, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`Failed to complete build: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function failBuild(
+  buildId: string,
+  workspaceId?: string,
+  triggeredByUserId?: string,
+): Promise<Build> {
+  const params = new URLSearchParams();
+  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
+
+  const url = `${API_BASE}/builds/${buildId}/fail?${params.toString()}`;
+  const response = await fetchWithAuth(url, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(`Failed to fail build: ${response.statusText}`);
   }
   return response.json();
 }

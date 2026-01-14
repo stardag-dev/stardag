@@ -13,6 +13,13 @@ export type BuildStatus =
   | "cancelled"
   | "exit_early";
 
+// User info for manual status triggers
+export interface StatusTriggeredByUser {
+  id: string;
+  email: string;
+  display_name: string | null;
+}
+
 // Build entity
 export interface Build {
   id: string;
@@ -26,6 +33,8 @@ export interface Build {
   status: BuildStatus;
   started_at: string | null;
   completed_at: string | null;
+  // User who triggered the status change (for manual overrides)
+  status_triggered_by_user: StatusTriggeredByUser | null;
 }
 
 export interface BuildListResponse {
