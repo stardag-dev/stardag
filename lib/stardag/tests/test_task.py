@@ -79,12 +79,12 @@ def test_run_version_checked():
         version: str = "1.0"
 
     task = VersionedTask(version="1.0")
-    # Should not raise
-    task.run_version_checked()
+    # Should not raise - version matches
+    task.run()
 
     task_invalid = VersionedTask(version="2.0")
-    with pytest.raises(ValueError, match="TODO"):
-        task_invalid.run_version_checked()
+    with pytest.raises(ValueError, match="Task version mismatch"):
+        task_invalid.run()
 
 
 def test_dynamic_deps():
