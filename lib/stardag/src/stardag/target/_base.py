@@ -19,7 +19,7 @@ from types import TracebackType
 
 import uuid6
 
-from stardag._target_base import Target
+from stardag._core.target_base import Target
 
 LoadedT = typing.TypeVar("LoadedT")
 LoadedT_co = typing.TypeVar("LoadedT_co", covariant=True)

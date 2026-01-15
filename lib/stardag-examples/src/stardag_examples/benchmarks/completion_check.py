@@ -17,7 +17,6 @@ import time
 from dataclasses import dataclass
 
 import stardag as sd
-from stardag._task import BaseTask
 from stardag.build import (
     HybridConcurrentTaskExecutor,
     build_aio,
@@ -34,7 +33,7 @@ S3_HEAD_LATENCY_MS = 50
 _completed_tasks: set[str] = set()
 
 
-class SlowCompleteTask(BaseTask):
+class SlowCompleteTask(sd.BaseTask):
     """Task with slow completion check (simulates S3 HEAD latency)."""
 
     task_id: str

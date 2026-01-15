@@ -3,8 +3,8 @@ from typing import Annotated, Any
 import pytest
 from pydantic import TypeAdapter
 
-from stardag._hashable_set import HashableSet, HashSafeSetSerializer
-from stardag._task import BaseTask, auto_namespace
+from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
+from stardag._core.task import BaseTask, auto_namespace
 from stardag.base_model import CONTEXT_MODE_KEY, StardagField
 
 auto_namespace(__name__)  # Avoid collisions in task registry

@@ -12,11 +12,13 @@ import time
 from typing import Literal
 from uuid import UUID
 
-from stardag._task import (
+from stardag import (
     BaseTask,
+    flatten_task_struct,
+)
+from stardag._core.task import (
     _has_custom_run,
     _has_custom_run_aio,
-    flatten_task_struct,
 )
 from stardag.build._base import (
     BuildExitStatus,

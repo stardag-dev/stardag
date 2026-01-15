@@ -6,8 +6,7 @@ import asyncio
 import time
 from typing import Any
 
-from stardag._auto_task import AutoTask
-from stardag._task import auto_namespace
+from stardag import AutoTask, auto_namespace
 
 auto_namespace(__name__)
 

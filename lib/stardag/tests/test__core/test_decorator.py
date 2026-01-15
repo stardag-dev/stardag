@@ -1,7 +1,7 @@
 import pytest
 
-from stardag._decorator import Depends, task
-from stardag._task import Task, auto_namespace
+from stardag import Task, auto_namespace
+from stardag._core.decorator import Depends, task
 from stardag.target import LoadableTarget
 
 auto_namespace(__name__)  # Avoid collisions in task registry

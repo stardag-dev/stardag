@@ -16,10 +16,12 @@ from prefect import task as prefect_task
 from prefect.artifacts import create_markdown_artifact
 from prefect.futures import PrefectConcurrentFuture
 
-from stardag._task import (
+from stardag import (
     BaseTask,
     TaskRef,
     TaskStruct,
+)
+from stardag._core.task import (
     _has_custom_run,
     _has_custom_run_aio,
     flatten_task_struct,

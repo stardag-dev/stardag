@@ -3,8 +3,11 @@ from typing import TYPE_CHECKING
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from stardag.target import CachedRemoteFileSystem, RemoteFileSystemABC
-from stardag.target._base import CachedRemoteFileSystemConfig
+from stardag.target import (
+    CachedRemoteFileSystem,
+    CachedRemoteFileSystemConfig,
+    RemoteFileSystemABC,
+)
 from stardag.utils.resource_provider import resource_provider
 
 try:

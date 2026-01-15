@@ -14,11 +14,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Callable, Generator, Generic, Protocol, TypeVar
 
-from stardag._task import (
-    BaseTask,
-    TaskStruct,
-)
-
+from stardag import BaseTask, TaskStruct
 
 # =============================================================================
 # Data Structures

@@ -1,4 +1,4 @@
-from stardag._task import BaseTask
+from stardag import BaseTask
 
 
 class _DoNothing(BaseTask):

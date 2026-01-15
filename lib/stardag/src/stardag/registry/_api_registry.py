@@ -2,20 +2,19 @@
 
 import logging
 
-from stardag._registry_asset import RegistryAsset
-from stardag._task import BaseTask, flatten_task_struct
-from stardag.registry._base import RegistryABC, get_git_commit_hash
+from stardag import BaseTask, RegistryAsset, flatten_task_struct
 from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
     AuthorizationError,
+    EnvironmentAccessError,
     InvalidAPIKeyError,
     InvalidTokenError,
     NotAuthenticatedError,
     NotFoundError,
     TokenExpiredError,
-    EnvironmentAccessError,
 )
+from stardag.registry._base import RegistryABC, get_git_commit_hash
 
 logger = logging.getLogger(__name__)
 

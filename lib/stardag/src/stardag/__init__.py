@@ -34,23 +34,24 @@ TODO: Expand docstrings for all public API components.
 
 from importlib.metadata import PackageNotFoundError, version
 
-from stardag._auto_task import AutoTask
-from stardag._decorator import Depends, task
-from stardag._hashable_set import HashableSet, HashSafeSetSerializer
-from stardag._registry_asset import (
+from stardag._core.auto_task import AutoTask
+from stardag._core.decorator import Depends, task
+from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
+from stardag._core.registry_asset import (
     JSONRegistryAsset,
     MarkdownRegistryAsset,
     RegistryAsset,
 )
-from stardag._task import (
+from stardag._core.task import (
     BaseTask,
     Task,
     TaskRef,
     TaskStruct,
     auto_namespace,
+    flatten_task_struct,
     namespace,
 )
-from stardag._task_loads import TaskLoads
+from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.build import build, build_aio, build_sequential, build_sequential_aio
 from stardag.exceptions import (
@@ -115,4 +116,5 @@ __all__ = [
     "target_factory_provider",
     "task",
     "TokenExpiredError",
+    "flatten_task_struct",
 ]

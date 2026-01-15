@@ -2,12 +2,12 @@
 
 import pytest
 
-from stardag._registry_asset import (
+from stardag._core.registry_asset import (
     JSONRegistryAsset,
     MarkdownRegistryAsset,
     RegistryAsset,
 )
-from stardag._task import BaseTask, auto_namespace
+from stardag._core.task import BaseTask, auto_namespace
 
 auto_namespace(__name__)  # Avoid collisions in task registry
 

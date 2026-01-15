@@ -1,5 +1,4 @@
-from stardag._auto_task import AutoTask
-from stardag._task import Task, auto_namespace
+from stardag import AutoTask, Task, auto_namespace
 from stardag.polymorphic import SubClass
 from stardag.target import LoadableTarget
 

@@ -1,7 +1,7 @@
 import abc
 import typing
 
-from stardag._task import Task
+from stardag._core.task import Task
 from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
 from stardag.target.serialize import get_serializer
 
