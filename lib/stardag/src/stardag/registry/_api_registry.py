@@ -2,7 +2,7 @@
 
 import logging
 
-from stardag import BaseTask, RegistryAsset, flatten_task_struct
+from stardag import BaseTask, flatten_task_struct
 from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
@@ -15,6 +15,7 @@ from stardag.exceptions import (
     TokenExpiredError,
 )
 from stardag.registry._base import RegistryABC, get_git_commit_hash
+from stardag.registry_asset import RegistryAsset
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,8 @@ from stardag.polymorphic import SubClass
 from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
-    from stardag import BaseTask, RegistryAsset
+    from stardag import BaseTask
+    from stardag.registry_asset import RegistryAsset
 
 
 class RegisterdTaskEnvelope(BaseModel):

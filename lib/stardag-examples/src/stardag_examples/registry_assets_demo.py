@@ -15,6 +15,11 @@ from typing import TypedDict
 
 import stardag as sd
 from stardag.config import load_config
+from stardag.registry_asset import (
+    JSONRegistryAsset,
+    MarkdownRegistryAsset,
+    RegistryAsset,
+)
 
 
 class DataResult(TypedDict):
@@ -41,7 +46,7 @@ class DataCollector(sd.AutoTask[DataResult]):
         }
         self.output().save(result)
 
-    def registry_assets(self) -> list[sd.RegistryAsset]:
+    def registry_assets(self) -> list[RegistryAsset]:
         """Produce a JSON asset with data statistics."""
         result = self.output().load()
         samples = result["samples"]
@@ -54,7 +59,7 @@ class DataCollector(sd.AutoTask[DataResult]):
         max_val = max(samples)
 
         return [
-            sd.JSONRegistryAsset(
+            JSONRegistryAsset(
                 name="raw-data",
                 body={
                     "sample_size": result["count"],
@@ -62,7 +67,7 @@ class DataCollector(sd.AutoTask[DataResult]):
                     "first_10_samples": samples[:10],
                 },
             ),
-            sd.JSONRegistryAsset(
+            JSONRegistryAsset(
                 name="statistics",
                 body={
                     "mean": round(mean, 4),
@@ -97,7 +102,7 @@ class AnalysisReport(sd.AutoTask[str]):
         result = f"Analysis complete. Mean: {mean:.4f}, StdDev: {std_dev:.4f}"
         self.output().save(result)
 
-    def registry_assets(self) -> list[sd.RegistryAsset]:
+    def registry_assets(self) -> list[RegistryAsset]:
         """Produce a markdown report asset."""
         data = self.data_source.output().load()
         samples = data["samples"]
@@ -148,7 +153,7 @@ distribution (μ ≈ 0, σ ≈ 1).
 *Report generated automatically by stardag*
 """
         return [
-            sd.MarkdownRegistryAsset(
+            MarkdownRegistryAsset(
                 name="analysis-report",
                 body=report,
             ),
