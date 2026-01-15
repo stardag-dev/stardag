@@ -82,8 +82,8 @@ class TestAuthFixtures:
         assert response.status_code == 401
 
 
-class TestOrgAndWorkspaceFixtures:
-    """Tests for organization and workspace fixtures."""
+class TestOrgAndEnvironmentFixtures:
+    """Tests for organization and environment fixtures."""
 
     def test_organization_fixture(self, test_organization_id: str) -> None:
         """Test that organization fixture returns a valid ID."""
@@ -98,18 +98,18 @@ class TestOrgAndWorkspaceFixtures:
     def test_internal_client_can_access_builds(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that internal auth client can access builds endpoint."""
         response = internal_authenticated_client.get(
             "/api/v1/builds",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         data = response.json()
         assert "items" in data or "total" in data
 
-    def test_workspace_fixture(self, test_workspace_id: str) -> None:
-        """Test that workspace fixture returns a valid ID."""
-        assert test_workspace_id is not None
-        assert len(test_workspace_id) > 0
+    def test_environment_fixture(self, test_environment_id: str) -> None:
+        """Test that environment fixture returns a valid ID."""
+        assert test_environment_id is not None
+        assert len(test_environment_id) > 0

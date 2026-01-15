@@ -94,7 +94,7 @@ class TestUILogin:
             page.wait_for_load_state("networkidle")
 
             expect(page.locator("body")).to_contain_text(
-                re.compile("(Dashboard|Builds|Workspaces|testuser)", re.IGNORECASE)
+                re.compile("(Dashboard|Builds|Environments|testuser)", re.IGNORECASE)
             )
 
 

@@ -28,8 +28,8 @@ def get_alembic_config(connection_url: str | None = None) -> Config:
 
 
 async def seed_defaults(session: AsyncSession):
-    """Seed default organization, workspace, user, and membership."""
-    from stardag_api.models import Organization, OrganizationMember, User, Workspace
+    """Seed default organization, environment, user, and membership."""
+    from stardag_api.models import Environment, Organization, OrganizationMember, User
     from stardag_api.models.enums import OrganizationRole
 
     # Create default organization
@@ -58,14 +58,14 @@ async def seed_defaults(session: AsyncSession):
     )
     session.add(membership)
 
-    # Create default workspace
-    workspace = Workspace(
+    # Create default environment
+    environment = Environment(
         id="default",
         organization_id="default",
-        name="Default Workspace",
+        name="Default Environment",
         slug="default",
     )
-    session.add(workspace)
+    session.add(environment)
 
     await session.commit()
 
@@ -109,7 +109,7 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
         get_org_id_from_token,
         require_sdk_auth,
     )
-    from stardag_api.models import User, Workspace
+    from stardag_api.models import Environment, User
 
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
@@ -118,10 +118,10 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
             yield session
 
     # Create mock auth objects
-    mock_workspace = Workspace(
+    mock_environment = Environment(
         id="default",
         organization_id="default",
-        name="Default Workspace",
+        name="Default Environment",
         slug="default",
     )
     mock_user = User(
@@ -131,7 +131,7 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
         display_name="Default User",
     )
     mock_sdk_auth = SdkAuth(
-        workspace=mock_workspace,
+        environment=mock_environment,
         org_id="default",
         user=mock_user,
     )

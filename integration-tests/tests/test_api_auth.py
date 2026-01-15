@@ -84,12 +84,12 @@ class TestTokenTypeValidation:
         self,
         docker_services: ServiceEndpoints,
         oidc_token: TokenSet,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that /builds rejects OIDC tokens (requires internal token)."""
         response = httpx.get(
             f"{docker_services.api}/api/v1/builds",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
             headers={"Authorization": f"Bearer {oidc_token.access_token}"},
             timeout=30.0,
         )
@@ -99,12 +99,12 @@ class TestTokenTypeValidation:
     def test_builds_accepts_internal_token(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that /builds accepts internal tokens."""
         response = internal_authenticated_client.get(
             "/api/v1/builds",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
 
@@ -112,12 +112,12 @@ class TestTokenTypeValidation:
         self,
         docker_services: ServiceEndpoints,
         oidc_token: TokenSet,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test /tasks endpoint rejects OIDC tokens (requires internal token or API key)."""
         response = httpx.get(
             f"{docker_services.api}/api/v1/tasks",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
             headers={"Authorization": f"Bearer {oidc_token.access_token}"},
             timeout=30.0,
         )
@@ -127,12 +127,12 @@ class TestTokenTypeValidation:
     def test_tasks_accepts_internal_token(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
-        """Test that /tasks accepts internal tokens with workspace_id."""
+        """Test that /tasks accepts internal tokens with environment_id."""
         response = internal_authenticated_client.get(
             "/api/v1/tasks",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
 
@@ -161,7 +161,7 @@ class TestTokenTypeValidation:
 class TestApiKeyAuth:
     """Tests for API key authentication.
 
-    API keys provide workspace-scoped authentication for SDK operations.
+    API keys provide environment-scoped authentication for SDK operations.
     Both read and write endpoints support API key auth.
     """
 
@@ -169,12 +169,12 @@ class TestApiKeyAuth:
         self,
         internal_authenticated_client: httpx.Client,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test creating an API key."""
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Test API Key"},
         )
         assert response.status_code == 201
@@ -188,47 +188,47 @@ class TestApiKeyAuth:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that API keys can be used to create builds.
 
-        API keys are workspace-scoped, so no workspace_id parameter is needed.
+        API keys are environment-scoped, so no environment_id parameter is needed.
         NOTE: Only POST endpoints support API key auth; GET /builds requires JWT.
         """
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "SDK Test Key"},
         )
         assert response.status_code == 201
         api_key = response.json()["key"]
 
-        # Use the API key to create a build (API key implies workspace)
+        # Use the API key to create a build (API key implies environment)
         response = httpx.post(
             f"{docker_services.api}/api/v1/builds",
             headers={"X-API-Key": api_key},
             json={"description": "Test build via API key"},
             timeout=30.0,
         )
-        # API key auth should work - the key is scoped to a workspace
+        # API key auth should work - the key is scoped to an environment
         assert response.status_code == 201, f"API key auth failed: {response.text}"
         data = response.json()
         assert "id" in data
-        assert "workspace_id" in data
+        assert "environment_id" in data
 
     def test_api_key_auth_get_builds_works(
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that GET /builds supports API key auth."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Read Test Key"},
         )
         assert response.status_code == 201
@@ -240,7 +240,7 @@ class TestApiKeyAuth:
             headers={"X-API-Key": api_key},
             timeout=30.0,
         )
-        # API key auth works for GET /builds (workspace comes from key)
+        # API key auth works for GET /builds (environment comes from key)
         assert response.status_code == 200
         data = response.json()
         assert "builds" in data
@@ -250,13 +250,13 @@ class TestApiKeyAuth:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that GET /tasks supports API key auth."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Tasks Test Key"},
         )
         assert response.status_code == 201
@@ -268,7 +268,7 @@ class TestApiKeyAuth:
             headers={"X-API-Key": api_key},
             timeout=30.0,
         )
-        # API key auth works for GET /tasks (workspace comes from key)
+        # API key auth works for GET /tasks (environment comes from key)
         assert response.status_code == 200
         data = response.json()
         assert "tasks" in data
@@ -339,11 +339,11 @@ class TestEndpointAccess:
     ) -> None:
         """Test that accessing resources from wrong org returns 403."""
         # The internal token is scoped to a specific org
-        # Try to access a workspace that doesn't exist in that org
-        fake_workspace_id = "00000000-0000-0000-0000-000000000000"
+        # Try to access an environment that doesn't exist in that org
+        fake_environment_id = "00000000-0000-0000-0000-000000000000"
         response = httpx.get(
             f"{docker_services.api}/api/v1/builds",
-            params={"workspace_id": fake_workspace_id},
+            params={"environment_id": fake_environment_id},
             headers={"Authorization": f"Bearer {internal_token}"},
             timeout=30.0,
         )
@@ -357,12 +357,12 @@ class TestTaskSearchApi:
     def test_search_endpoint_exists(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that /tasks/search endpoint exists and returns 200."""
         response = internal_authenticated_client.get(
             "/api/v1/tasks/search",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         data = response.json()
@@ -372,12 +372,12 @@ class TestTaskSearchApi:
     def test_search_keys_endpoint(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that /tasks/search/keys endpoint returns available keys."""
         response = internal_authenticated_client.get(
             "/api/v1/tasks/search/keys",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         data = response.json()
@@ -390,13 +390,13 @@ class TestTaskSearchApi:
     def test_search_with_name_filter(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test search with task_name filter."""
         response = internal_authenticated_client.get(
             "/api/v1/tasks/search",
             params={
-                "workspace_id": test_workspace_id,
+                "environment_id": test_environment_id,
                 "filter": "task_name:~:test",
             },
         )
@@ -407,13 +407,13 @@ class TestTaskSearchApi:
     def test_search_with_numeric_filter(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test search with numeric param filter (param.x:>=:10)."""
         response = internal_authenticated_client.get(
             "/api/v1/tasks/search",
             params={
-                "workspace_id": test_workspace_id,
+                "environment_id": test_environment_id,
                 "filter": "param.sample_size:>=:10",
             },
         )
@@ -425,13 +425,13 @@ class TestTaskSearchApi:
     def test_search_with_nested_param_filter(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test search with nested param filter (param.data.value:>:5)."""
         response = internal_authenticated_client.get(
             "/api/v1/tasks/search",
             params={
-                "workspace_id": test_workspace_id,
+                "environment_id": test_environment_id,
                 "filter": "param.data_source.sample_size:>=:10",
             },
         )

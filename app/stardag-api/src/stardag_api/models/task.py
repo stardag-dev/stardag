@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from stardag_api.models.event import Event
     from stardag_api.models.task_asset import TaskRegistryAsset
     from stardag_api.models.task_dependency import TaskDependency
-    from stardag_api.models.workspace import Workspace
+    from stardag_api.models.environment import Environment
 
 
 class Task(Base, TimestampMixin):
@@ -29,9 +29,11 @@ class Task(Base, TimestampMixin):
 
     __tablename__ = "tasks"
     __table_args__ = (
-        UniqueConstraint("workspace_id", "task_id", name="uq_task_workspace_taskid"),
-        Index("ix_tasks_workspace_name", "workspace_id", "task_name"),
-        Index("ix_tasks_workspace_namespace", "workspace_id", "task_namespace"),
+        UniqueConstraint(
+            "environment_id", "task_id", name="uq_task_environment_taskid"
+        ),
+        Index("ix_tasks_environment_name", "environment_id", "task_name"),
+        Index("ix_tasks_environment_namespace", "environment_id", "task_namespace"),
     )
 
     # Auto-increment primary key for efficient joins
@@ -43,9 +45,9 @@ class Task(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    workspace_id: Mapped[str] = mapped_column(
+    environment_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -69,7 +71,7 @@ class Task(Base, TimestampMixin):
     version: Mapped[str | None] = mapped_column(String(64))
 
     # Relationships
-    workspace: Mapped[Workspace] = relationship(back_populates="tasks")
+    environment: Mapped[Environment] = relationship(back_populates="tasks")
     events: Mapped[list[Event]] = relationship(
         back_populates="task",
         cascade="all, delete-orphan",

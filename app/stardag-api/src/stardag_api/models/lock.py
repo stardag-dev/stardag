@@ -13,29 +13,31 @@ from stardag_api.models.base import Base, utc_now
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from stardag_api.models.workspace import Workspace
+    from stardag_api.models.environment import Environment
 
 
 class DistributedLock(Base):
     """Lease-based distributed lock for global task concurrency control.
 
-    Locks are scoped to workspace and identified by name (typically task_id).
+    Locks are scoped to environment and identified by name (typically task_id).
     Uses TTL-based expiration for automatic cleanup on client failure.
     """
 
     __tablename__ = "distributed_locks"
     __table_args__ = (
-        Index("ix_distributed_locks_workspace_expires", "workspace_id", "expires_at"),
+        Index(
+            "ix_distributed_locks_environment_expires", "environment_id", "expires_at"
+        ),
         Index("ix_distributed_locks_expires", "expires_at"),
     )
 
     # Lock name is the primary key (typically: task_id)
     name: Mapped[str] = mapped_column(Text, primary_key=True)
 
-    # Workspace scope
-    workspace_id: Mapped[str] = mapped_column(
+    # Environment scope
+    environment_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -64,4 +66,4 @@ class DistributedLock(Base):
     )
 
     # Relationships
-    workspace: Mapped[Workspace] = relationship()
+    environment: Mapped[Environment] = relationship()

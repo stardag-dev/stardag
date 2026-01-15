@@ -21,7 +21,7 @@ from stardag.config import (
     TomlConfig,
     _looks_like_uuid,
     cache_org_id,
-    cache_workspace_id,
+    cache_environment_id,
     get_access_token_cache_path,
     get_config,
     get_registry_credentials_path,
@@ -303,7 +303,7 @@ def save_toml_config(config: TomlConfig) -> None:
             profile_dict: dict[str, str] = {
                 "registry": prof.registry,
                 "organization": prof.organization,
-                "workspace": prof.workspace,
+                "environment": prof.environment,
             }
             # Only include user if set (backward compatible)
             if prof.user:
@@ -376,7 +376,7 @@ def add_profile(
     name: str,
     registry: str,
     organization: str,
-    workspace: str,
+    environment: str,
     user: str | None = None,
 ) -> None:
     """Add or update a profile in config.
@@ -385,7 +385,7 @@ def add_profile(
         name: Profile name.
         registry: Registry name.
         organization: Organization ID or slug.
-        workspace: Workspace ID or slug.
+        environment: Workspace ID or slug.
         user: User identifier (email). Optional for multi-user support.
     """
     config = load_toml_config()
@@ -395,7 +395,7 @@ def add_profile(
         registry=registry,
         user=user,
         organization=organization,
-        workspace=workspace,
+        environment=environment,
     )
     save_toml_config(config)
 
@@ -423,7 +423,7 @@ class ProfileDetails(TypedDict):
     registry: str
     user: str | None
     organization: str
-    workspace: str
+    environment: str
 
 
 def list_profiles() -> dict[str, ProfileDetails]:
@@ -438,7 +438,7 @@ def list_profiles() -> dict[str, ProfileDetails]:
             registry=prof.registry,
             user=prof.user,
             organization=prof.organization,
-            workspace=prof.workspace,
+            environment=prof.environment,
         )
         for name, prof in config.profile.items()
     }
@@ -477,7 +477,7 @@ def get_active_profile() -> tuple[str | None, str | None]:
 def find_matching_profile(
     registry: str,
     organization: str,
-    workspace: str,
+    environment: str,
     user: str | None = None,
 ) -> str | None:
     """Find a profile that matches the given settings.
@@ -485,7 +485,7 @@ def find_matching_profile(
     Args:
         registry: Registry name.
         organization: Organization slug/ID.
-        workspace: Workspace slug/ID.
+        environment: Workspace slug/ID.
         user: User identifier (email). If provided, matches profiles with same user.
             If None, matches profiles with no user set.
 
@@ -498,7 +498,7 @@ def find_matching_profile(
             details["registry"] == registry
             and details["user"] == user
             and details["organization"] == organization
-            and details["workspace"] == workspace
+            and details["environment"] == environment
         ):
             return name
     return None
@@ -583,14 +583,14 @@ def set_default_profile(profile: str) -> None:
 def get_target_roots(
     registry_url: str | None = None,
     organization_id: str | None = None,
-    workspace_id: str | None = None,
+    environment_id: str | None = None,
 ) -> dict[str, str]:
     """Get target roots from cache.
 
     Args:
         registry_url: Registry URL. If None, uses active config.
         organization_id: Organization ID. If None, uses active config.
-        workspace_id: Workspace ID. If None, uses active config.
+        environment_id: Workspace ID. If None, uses active config.
 
     Returns:
         Dict of target root name to URI prefix.
@@ -598,21 +598,21 @@ def get_target_roots(
     config = get_config()
     registry_url = registry_url or config.api.url
     organization_id = organization_id or config.context.organization_id
-    workspace_id = workspace_id or config.context.workspace_id
+    environment_id = environment_id or config.context.environment_id
 
-    if not registry_url or not organization_id or not workspace_id:
+    if not registry_url or not organization_id or not environment_id:
         return {}
 
     from stardag.config import get_cached_target_roots
 
-    return get_cached_target_roots(registry_url, organization_id, workspace_id) or {}
+    return get_cached_target_roots(registry_url, organization_id, environment_id) or {}
 
 
 def set_target_roots(
     target_roots: dict[str, str],
     registry_url: str | None = None,
     organization_id: str | None = None,
-    workspace_id: str | None = None,
+    environment_id: str | None = None,
 ) -> None:
     """Update target roots in cache.
 
@@ -620,20 +620,22 @@ def set_target_roots(
         target_roots: Dict of target root name to URI prefix.
         registry_url: Registry URL. If None, uses active config.
         organization_id: Organization ID. If None, uses active config.
-        workspace_id: Workspace ID. If None, uses active config.
+        environment_id: Workspace ID. If None, uses active config.
     """
     config = get_config()
     registry_url = registry_url or config.api.url
     organization_id = organization_id or config.context.organization_id
-    workspace_id = workspace_id or config.context.workspace_id
+    environment_id = environment_id or config.context.environment_id
 
-    if not registry_url or not organization_id or not workspace_id:
-        raise ValueError("Registry URL, organization ID, and workspace ID are required")
+    if not registry_url or not organization_id or not environment_id:
+        raise ValueError(
+            "Registry URL, organization ID, and environment ID are required"
+        )
 
     update_cached_target_roots(
         registry_url,
         organization_id,
-        workspace_id,
+        environment_id,
         target_roots,
     )
 
@@ -731,8 +733,8 @@ def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
     return []
 
 
-def _get_workspaces(api_url: str, access_token: str, org_id: str) -> list[dict]:
-    """Fetch workspaces for an organization using internal token."""
+def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict]:
+    """Fetch environments for an organization using internal token."""
     try:
         import httpx
     except ImportError:
@@ -741,7 +743,7 @@ def _get_workspaces(api_url: str, access_token: str, org_id: str) -> list[dict]:
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces",
+                f"{api_url}/api/v1/ui/organizations/{org_id}/environments",
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if response.status_code == 200:
@@ -875,19 +877,19 @@ def resolve_org_slug_to_id(
     return result
 
 
-def resolve_workspace_slug_to_id(
+def resolve_environment_slug_to_id(
     registry: str,
     org_id: str,
-    workspace_slug_or_id: str,
+    environment_slug_or_id: str,
     user: str | None = None,
     access_token: str | None = None,
 ) -> str | None:
-    """Resolve a workspace slug to its ID.
+    """Resolve an environment slug to its ID.
 
     Args:
         registry: Registry name.
         org_id: Organization ID (must be resolved already).
-        workspace_slug_or_id: Workspace slug or ID.
+        environment_slug_or_id: Workspace slug or ID.
         user: User identifier (email). Required if access_token not provided.
         access_token: Optional internal access token. If not provided, will try to get one.
 
@@ -896,11 +898,11 @@ def resolve_workspace_slug_to_id(
         If input looks like a UUID, returns it unchanged.
 
     Side effects:
-        Populates the ID cache with all discovered workspace mappings.
+        Populates the ID cache with all discovered environment mappings.
     """
     # If it looks like a UUID, assume it's already an ID
-    if _looks_like_uuid(workspace_slug_or_id):
-        return workspace_slug_or_id
+    if _looks_like_uuid(environment_slug_or_id):
+        return environment_slug_or_id
 
     # Need to resolve slug - get access token if not provided
     if not access_token:
@@ -915,17 +917,17 @@ def resolve_workspace_slug_to_id(
     if not registry_url:
         return None
 
-    # Fetch workspaces and find matching slug
-    workspaces = _get_workspaces(registry_url, access_token, org_id)
+    # Fetch environments and find matching slug
+    environments = _get_environments(registry_url, access_token, org_id)
     result = None
-    for ws in workspaces:
+    for ws in environments:
         ws_id = ws.get("id")
         ws_slug = ws.get("slug")
-        # Cache all discovered workspaces
+        # Cache all discovered environments
         if ws_id and ws_slug:
-            cache_workspace_id(registry, org_id, ws_slug, ws_id)
+            cache_environment_id(registry, org_id, ws_slug, ws_id)
         # Check if this is the one we're looking for
-        if ws_slug == workspace_slug_or_id or ws_id == workspace_slug_or_id:
+        if ws_slug == environment_slug_or_id or ws_id == environment_slug_or_id:
             result = ws_id
 
     return result

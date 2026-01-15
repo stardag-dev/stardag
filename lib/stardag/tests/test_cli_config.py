@@ -49,8 +49,8 @@ class TestProfileAdd:
                 "test@example.com",
                 "-o",
                 "test-org",
-                "-w",
-                "test-workspace",
+                "-e",
+                "test-environment",
             ],
         )
         assert result.exit_code != 0
@@ -77,28 +77,30 @@ class TestProfileAdd:
                     "test@example.com",
                     "-o",
                     "unverifiable-org",
-                    "-w",
-                    "test-workspace",
+                    "-e",
+                    "test-environment",
                 ],
             )
             assert result.exit_code != 0
             assert "could not verify organization" in result.output.lower()
 
-    def test_profile_add_fails_when_workspace_cannot_be_verified(self, temp_config_dir):
-        """Test that profile add fails when workspace cannot be verified."""
+    def test_profile_add_fails_when_environment_cannot_be_verified(
+        self, temp_config_dir
+    ):
+        """Test that profile add fails when environment cannot be verified."""
         _ = temp_config_dir  # Fixture needed for side effects (config path patching)
 
         # Add a registry first
         add_registry("test-registry", "http://localhost:8000")
 
         # Mock resolve_org_slug_to_id to return org_id
-        # Mock resolve_workspace_slug_to_id to return None (can't verify)
+        # Mock resolve_environment_slug_to_id to return None (can't verify)
         with mock.patch(
             "stardag.cli.config.resolve_org_slug_to_id",
             return_value="org-123",
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_workspace_slug_to_id",
+                "stardag.cli.config.resolve_environment_slug_to_id",
                 return_value=None,
             ):
                 result = runner.invoke(
@@ -113,17 +115,17 @@ class TestProfileAdd:
                         "test@example.com",
                         "-o",
                         "test-org",
-                        "-w",
-                        "unverifiable-workspace",
+                        "-e",
+                        "unverifiable-environment",
                     ],
                 )
                 assert result.exit_code != 0
-                assert "could not verify workspace" in result.output.lower()
+                assert "could not verify environment" in result.output.lower()
 
-    def test_profile_add_succeeds_when_org_and_workspace_verified(
+    def test_profile_add_succeeds_when_org_and_environment_verified(
         self, temp_config_dir
     ):
-        """Test that profile add succeeds when both org and workspace are verified."""
+        """Test that profile add succeeds when both org and environment are verified."""
         _ = temp_config_dir  # Fixture needed for side effects (config path patching)
 
         # Add a registry first
@@ -135,7 +137,7 @@ class TestProfileAdd:
             return_value="org-123",
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_workspace_slug_to_id",
+                "stardag.cli.config.resolve_environment_slug_to_id",
                 return_value="ws-456",
             ):
                 result = runner.invoke(
@@ -150,8 +152,8 @@ class TestProfileAdd:
                         "test@example.com",
                         "-o",
                         "my-org",
-                        "-w",
-                        "my-workspace",
+                        "-e",
+                        "my-environment",
                     ],
                 )
                 assert result.exit_code == 0
@@ -162,7 +164,7 @@ class TestProfileAdd:
                 assert "test-profile" in profiles
                 assert profiles["test-profile"]["registry"] == "test-registry"
                 assert profiles["test-profile"]["organization"] == "my-org"
-                assert profiles["test-profile"]["workspace"] == "my-workspace"
+                assert profiles["test-profile"]["environment"] == "my-environment"
 
     def test_profile_add_with_default_flag_refreshes_token(self, temp_config_dir):
         """Test that profile add with --default flag attempts token refresh."""
@@ -175,7 +177,7 @@ class TestProfileAdd:
             return_value="org-123",
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_workspace_slug_to_id",
+                "stardag.cli.config.resolve_environment_slug_to_id",
                 return_value="ws-456",
             ):
                 with mock.patch(
@@ -194,8 +196,8 @@ class TestProfileAdd:
                             "test@example.com",
                             "-o",
                             "my-org",
-                            "-w",
-                            "my-workspace",
+                            "-e",
+                            "my-environment",
                             "--default",
                         ],
                     )
@@ -207,8 +209,8 @@ class TestProfileAdd:
                         "test-registry", "org-123", "test@example.com"
                     )
 
-    def test_profile_add_with_uuid_org_and_workspace(self, temp_config_dir):
-        """Test that profile add works when org/workspace are already UUIDs."""
+    def test_profile_add_with_uuid_org_and_environment(self, temp_config_dir):
+        """Test that profile add works when org/environment are already UUIDs."""
         _ = temp_config_dir  # Fixture needed for side effects (config path patching)
 
         add_registry("test-registry", "http://localhost:8000")
@@ -222,7 +224,7 @@ class TestProfileAdd:
             return_value=org_uuid,
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_workspace_slug_to_id",
+                "stardag.cli.config.resolve_environment_slug_to_id",
                 return_value=ws_uuid,
             ):
                 result = runner.invoke(
@@ -237,7 +239,7 @@ class TestProfileAdd:
                         "test@example.com",
                         "-o",
                         org_uuid,
-                        "-w",
+                        "-e",
                         ws_uuid,
                     ],
                 )
@@ -245,4 +247,4 @@ class TestProfileAdd:
                 assert "added" in result.output.lower()
                 # Should NOT show "Verified" messages when IDs match input
                 assert "verified organization" not in result.output.lower()
-                assert "verified workspace" not in result.output.lower()
+                assert "verified environment" not in result.output.lower()

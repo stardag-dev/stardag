@@ -8,7 +8,7 @@ from httpx import AsyncClient
 async def test_create_build(client: AsyncClient):
     """Test creating a new run."""
     build_data = {
-        "workspace_id": "default",
+        "environment_id": "default",
         "user": "default",
         "commit_hash": "abc123",
         "root_task_ids": [],
@@ -17,7 +17,7 @@ async def test_create_build(client: AsyncClient):
     response = await client.post("/api/v1/builds", json=build_data)
     assert response.status_code == 201
     data = response.json()
-    assert data["workspace_id"] == "default"
+    assert data["environment_id"] == "default"
     assert data["status"] == "running"  # Build starts in buildning state
     assert data["name"] is not None  # Has memorable slug
     assert "-" in data["name"]  # Format: adjective-noun-number
@@ -29,7 +29,7 @@ async def test_create_build_minimal(client: AsyncClient):
     response = await client.post("/api/v1/builds", json={})
     assert response.status_code == 201
     data = response.json()
-    assert data["workspace_id"] == "default"
+    assert data["environment_id"] == "default"
     assert data["status"] == "running"
 
 
@@ -63,7 +63,7 @@ async def test_list_builds(client: AsyncClient):
         await client.post("/api/v1/builds", json={})
 
     response = await client.get(
-        "/api/v1/builds", params={"workspace_id": "default", "page_size": 2}
+        "/api/v1/builds", params={"environment_id": "default", "page_size": 2}
     )
     assert response.status_code == 200
     data = response.json()
@@ -295,7 +295,7 @@ async def test_get_build_graph(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_task_reuse_across_runs(client: AsyncClient):
-    """Test that tasks are reused across builds (same task_id in same workspace).
+    """Test that tasks are reused across builds (same task_id in same environment).
 
     Tasks use global status - when completed in any build, they show as completed
     everywhere. The status_build_id field indicates which build completed the task.

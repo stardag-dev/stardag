@@ -54,19 +54,19 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
-# --- Workspace Schemas ---
+# --- Environment Schemas ---
 
 
-class WorkspaceCreate(BaseModel):
-    """Schema for creating a workspace."""
+class EnvironmentCreate(BaseModel):
+    """Schema for creating an environment."""
 
     name: str
     slug: str
     description: str | None = None
 
 
-class WorkspaceResponse(BaseModel):
-    """Schema for workspace response."""
+class EnvironmentResponse(BaseModel):
+    """Schema for environment response."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -84,7 +84,7 @@ class WorkspaceResponse(BaseModel):
 class BuildCreate(BaseModel):
     """Schema for creating a build."""
 
-    workspace_id: str = "default"
+    environment_id: str = "default"
     user_id: str | None = None  # Optional until auth is implemented
     commit_hash: str | None = None
     root_task_ids: list[str] = []
@@ -105,7 +105,7 @@ class BuildResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    workspace_id: str
+    environment_id: str
     user_id: str | None
     name: str
     description: str | None
@@ -150,7 +150,7 @@ class TaskResponse(BaseModel):
 
     id: int
     task_id: str
-    workspace_id: str
+    environment_id: str
     task_namespace: str
     task_name: str
     task_data: dict
@@ -273,7 +273,7 @@ class ApiKeyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    workspace_id: str
+    environment_id: str
     name: str
     key_prefix: str
     created_by_id: str | None
@@ -337,7 +337,7 @@ class TaskSearchResult(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     task_id: str
-    workspace_id: str
+    environment_id: str
     task_namespace: str
     task_name: str
     task_data: dict
@@ -432,7 +432,7 @@ class LockResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     name: str
-    workspace_id: str
+    environment_id: str
     owner_id: str
     acquired_at: datetime
     expires_at: datetime

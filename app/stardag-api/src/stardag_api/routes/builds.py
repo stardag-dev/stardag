@@ -80,14 +80,14 @@ async def _get_build_and_task(
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    if build.workspace_id != auth.workspace_id:
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     result = await db.execute(
         select(Task)
-        .where(Task.workspace_id == build.workspace_id)
+        .where(Task.environment_id == build.environment_id)
         .where(Task.task_id == task_id)
     )
     db_task = result.scalar_one_or_none()
@@ -134,15 +134,15 @@ async def create_build(
     """Create a new build.
 
     This is the entry point for SDK - creates a new build and returns its ID.
-    Requires API key authentication (recommended) or JWT token with workspace_id.
-    The workspace is determined from the authentication context.
+    Requires API key authentication (recommended) or JWT token with environment_id.
+    The environment is determined from the authentication context.
     """
     # Generate memorable slug
     name = generate_build_slug()
 
-    # Use workspace from auth context (API key determines workspace)
+    # Use environment from auth context (API key determines environment)
     db_build = Build(
-        workspace_id=auth.workspace_id,
+        environment_id=auth.environment_id,
         user_id=auth.user.id if auth.user else None,
         name=name,
         description=build.description,
@@ -171,7 +171,7 @@ async def create_build(
 
     return BuildResponse(
         id=db_build.id,
-        workspace_id=db_build.workspace_id,
+        environment_id=db_build.environment_id,
         user_id=db_build.user_id,
         name=db_build.name,
         description=db_build.description,
@@ -192,17 +192,17 @@ async def list_builds(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ):
-    """List builds in a workspace.
+    """List builds in an environment.
 
-    Requires authentication via API key or JWT token with workspace_id.
-    The workspace is determined from the authentication context.
+    Requires authentication via API key or JWT token with environment_id.
+    The environment is determined from the authentication context.
     """
-    workspace_id = auth.workspace_id
-    query = select(Build).where(Build.workspace_id == workspace_id)
+    environment_id = auth.environment_id
+    query = select(Build).where(Build.environment_id == environment_id)
     count_query = (
         select(func.count())
         .select_from(Build)
-        .where(Build.workspace_id == workspace_id)
+        .where(Build.environment_id == environment_id)
     )
 
     total_result = await db.execute(count_query)
@@ -225,7 +225,7 @@ async def list_builds(
         build_responses.append(
             BuildResponse(
                 id=build.id,
-                workspace_id=build.workspace_id,
+                environment_id=build.environment_id,
                 user_id=build.user_id,
                 name=build.name,
                 description=build.description,
@@ -255,16 +255,16 @@ async def get_build(
 ):
     """Get a build by ID with derived status.
 
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
@@ -274,7 +274,7 @@ async def get_build(
 
     return BuildResponse(
         id=build.id,
-        workspace_id=build.workspace_id,
+        environment_id=build.environment_id,
         user_id=build.user_id,
         name=build.name,
         description=build.description,
@@ -304,10 +304,10 @@ async def complete_build(
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     # Store user ID in metadata if this was user-triggered
@@ -331,7 +331,7 @@ async def complete_build(
 
     return BuildResponse(
         id=build.id,
-        workspace_id=build.workspace_id,
+        environment_id=build.environment_id,
         user_id=build.user_id,
         name=build.name,
         description=build.description,
@@ -363,10 +363,10 @@ async def fail_build(
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     # Store user ID in metadata if this was user-triggered
@@ -391,7 +391,7 @@ async def fail_build(
 
     return BuildResponse(
         id=build.id,
-        workspace_id=build.workspace_id,
+        environment_id=build.environment_id,
         user_id=build.user_id,
         name=build.name,
         description=build.description,
@@ -421,10 +421,10 @@ async def cancel_build(
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     # Store user ID in metadata if this was user-triggered
@@ -448,7 +448,7 @@ async def cancel_build(
 
     return BuildResponse(
         id=build.id,
-        workspace_id=build.workspace_id,
+        environment_id=build.environment_id,
         user_id=build.user_id,
         name=build.name,
         description=build.description,
@@ -474,10 +474,10 @@ async def exit_early(
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     event = Event(
@@ -496,7 +496,7 @@ async def exit_early(
 
     return BuildResponse(
         id=build.id,
-        workspace_id=build.workspace_id,
+        environment_id=build.environment_id,
         user_id=build.user_id,
         name=build.name,
         description=build.description,
@@ -522,7 +522,7 @@ async def register_task(
 ):
     """Register a task to a build.
 
-    If the task already exists in the workspace, it will be reused and a
+    If the task already exists in the environment, it will be reused and a
     TASK_REFERENCED event is created. Otherwise creates the task and a
     TASK_PENDING event.
     """
@@ -530,16 +530,16 @@ async def register_task(
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Check if task already exists in workspace
+    # Check if task already exists in environment
     result = await db.execute(
         select(Task)
-        .where(Task.workspace_id == build.workspace_id)
+        .where(Task.environment_id == build.environment_id)
         .where(Task.task_id == task.task_id)
     )
     db_task = result.scalar_one_or_none()
@@ -549,7 +549,7 @@ async def register_task(
         # Create new task
         db_task = Task(
             task_id=task.task_id,
-            workspace_id=build.workspace_id,
+            environment_id=build.environment_id,
             task_namespace=task.task_namespace,
             task_name=task.task_name,
             task_data=task.task_data,
@@ -563,7 +563,7 @@ async def register_task(
             # Find the upstream task
             dep_result = await db.execute(
                 select(Task)
-                .where(Task.workspace_id == build.workspace_id)
+                .where(Task.environment_id == build.environment_id)
                 .where(Task.task_id == dep_task_id)
             )
             dep_task = dep_result.scalar_one_or_none()
@@ -599,7 +599,7 @@ async def register_task(
     return TaskResponse(
         id=db_task.id,
         task_id=db_task.task_id,
-        workspace_id=db_task.workspace_id,
+        environment_id=db_task.environment_id,
         task_namespace=db_task.task_namespace,
         task_name=db_task.task_name,
         task_data=db_task.task_data,
@@ -738,16 +738,16 @@ async def upload_task_registry_assets(
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Find task by task_id (hash) in workspace
+    # Find task by task_id (hash) in environment
     result = await db.execute(
         select(Task)
-        .where(Task.workspace_id == build.workspace_id)
+        .where(Task.environment_id == build.environment_id)
         .where(Task.task_id == task_id)
     )
     db_task = result.scalar_one_or_none()
@@ -773,7 +773,7 @@ async def upload_task_registry_assets(
             # Create new asset
             db_asset = TaskRegistryAsset(
                 task_pk=db_task.id,
-                workspace_id=build.workspace_id,
+                environment_id=build.environment_id,
                 asset_type=asset.type,
                 name=asset.name,
                 body_json=asset.body,
@@ -809,16 +809,16 @@ async def list_tasks_in_build(
 ):
     """List all tasks in a build with their status.
 
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     # Get distinct task IDs that have events in this build
@@ -862,7 +862,7 @@ async def list_tasks_in_build(
             TaskWithStatusResponse(
                 id=task.id,
                 task_id=task.task_id,
-                workspace_id=task.workspace_id,
+                environment_id=task.environment_id,
                 task_namespace=task.task_namespace,
                 task_name=task.task_name,
                 task_data=task.task_data,
@@ -889,16 +889,16 @@ async def list_build_events(
 ):
     """List all events for a build.
 
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     result = await db.execute(
@@ -928,16 +928,16 @@ async def get_build_graph(
 ):
     """Get the task graph for a build.
 
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
 
-    # Verify build belongs to authenticated workspace
-    if build.workspace_id != auth.workspace_id:
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
         raise HTTPException(
-            status_code=403, detail="Build does not belong to this workspace"
+            status_code=403, detail="Build does not belong to this environment"
         )
 
     # Get distinct task IDs that have events in this build

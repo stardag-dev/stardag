@@ -17,7 +17,7 @@ const API_BASE = API_V1;
 export interface BuildFilters {
   page?: number;
   page_size?: number;
-  workspace_id?: string;
+  environment_id?: string;
 }
 
 export async function fetchBuilds(
@@ -26,7 +26,7 @@ export async function fetchBuilds(
   const params = new URLSearchParams();
   if (filters.page) params.set("page", String(filters.page));
   if (filters.page_size) params.set("page_size", String(filters.page_size));
-  if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
+  if (filters.environment_id) params.set("environment_id", filters.environment_id);
 
   const url = `${API_BASE}/builds?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -36,9 +36,12 @@ export async function fetchBuilds(
   return response.json();
 }
 
-export async function fetchBuild(buildId: string, workspaceId: string): Promise<Build> {
+export async function fetchBuild(
+  buildId: string,
+  environmentId: string,
+): Promise<Build> {
   const params = new URLSearchParams();
-  params.set("workspace_id", workspaceId);
+  params.set("environment_id", environmentId);
 
   const response = await fetchWithAuth(
     `${API_BASE}/builds/${buildId}?${params.toString()}`,
@@ -54,7 +57,7 @@ export async function fetchBuild(buildId: string, workspaceId: string): Promise<
 export interface TaskFilters {
   task_name?: string;
   status?: TaskStatus;
-  workspace_id?: string;
+  environment_id?: string;
 }
 
 export async function fetchTasksInBuild(
@@ -64,7 +67,7 @@ export async function fetchTasksInBuild(
   const params = new URLSearchParams();
   if (filters.task_name) params.set("task_name", filters.task_name);
   if (filters.status) params.set("status", filters.status);
-  if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
+  if (filters.environment_id) params.set("environment_id", filters.environment_id);
 
   const url = `${API_BASE}/builds/${buildId}/tasks?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -76,10 +79,10 @@ export async function fetchTasksInBuild(
 
 export async function fetchBuildGraph(
   buildId: string,
-  workspaceId?: string,
+  environmentId?: string,
 ): Promise<TaskGraphResponse> {
   const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (environmentId) params.set("environment_id", environmentId);
 
   const url = `${API_BASE}/builds/${buildId}/graph?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -89,13 +92,13 @@ export async function fetchBuildGraph(
   return response.json();
 }
 
-// Global task API (workspace-scoped, no status)
+// Global task API (environment-scoped, no status)
 
 export interface GlobalTaskFilters {
   page?: number;
   page_size?: number;
   task_name?: string;
-  workspace_id?: string;
+  environment_id?: string;
 }
 
 export async function fetchTasks(
@@ -105,7 +108,7 @@ export async function fetchTasks(
   if (filters.page) params.set("page", String(filters.page));
   if (filters.page_size) params.set("page_size", String(filters.page_size));
   if (filters.task_name) params.set("task_name", filters.task_name);
-  if (filters.workspace_id) params.set("workspace_id", filters.workspace_id);
+  if (filters.environment_id) params.set("environment_id", filters.environment_id);
 
   const url = `${API_BASE}/tasks?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -125,10 +128,10 @@ export async function fetchTask(taskId: string): Promise<Task> {
 
 export async function fetchTaskAssets(
   taskId: string,
-  workspaceId?: string,
+  environmentId?: string,
 ): Promise<TaskAssetListResponse> {
   const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (environmentId) params.set("environment_id", environmentId);
 
   const url = `${API_BASE}/tasks/${taskId}/assets?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -140,10 +143,10 @@ export async function fetchTaskAssets(
 
 export async function fetchTaskEvents(
   taskId: string,
-  workspaceId?: string,
+  environmentId?: string,
 ): Promise<TaskEvent[]> {
   const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (environmentId) params.set("environment_id", environmentId);
 
   const url = `${API_BASE}/tasks/${taskId}/events?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -157,11 +160,11 @@ export async function fetchTaskEvents(
 
 export async function cancelBuild(
   buildId: string,
-  workspaceId?: string,
+  environmentId?: string,
   triggeredByUserId?: string,
 ): Promise<Build> {
   const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (environmentId) params.set("environment_id", environmentId);
   if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
 
   const url = `${API_BASE}/builds/${buildId}/cancel?${params.toString()}`;
@@ -174,11 +177,11 @@ export async function cancelBuild(
 
 export async function completeBuild(
   buildId: string,
-  workspaceId?: string,
+  environmentId?: string,
   triggeredByUserId?: string,
 ): Promise<Build> {
   const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (environmentId) params.set("environment_id", environmentId);
   if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
 
   const url = `${API_BASE}/builds/${buildId}/complete?${params.toString()}`;
@@ -191,11 +194,11 @@ export async function completeBuild(
 
 export async function failBuild(
   buildId: string,
-  workspaceId?: string,
+  environmentId?: string,
   triggeredByUserId?: string,
 ): Promise<Build> {
   const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (environmentId) params.set("environment_id", environmentId);
   if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
 
   const url = `${API_BASE}/builds/${buildId}/fail?${params.toString()}`;
@@ -211,10 +214,10 @@ export async function failBuild(
 export async function cancelTask(
   buildId: string,
   taskId: string,
-  workspaceId?: string,
+  environmentId?: string,
 ): Promise<void> {
   const params = new URLSearchParams();
-  if (workspaceId) params.set("workspace_id", workspaceId);
+  if (environmentId) params.set("environment_id", environmentId);
 
   const url = `${API_BASE}/builds/${buildId}/tasks/${taskId}/cancel?${params.toString()}`;
   const response = await fetchWithAuth(url, { method: "POST" });
@@ -232,10 +235,10 @@ export interface AvailableColumnsResponse {
 }
 
 export async function fetchAvailableColumns(
-  workspaceId: string,
+  environmentId: string,
 ): Promise<AvailableColumnsResponse> {
   const params = new URLSearchParams();
-  params.set("workspace_id", workspaceId);
+  params.set("environment_id", environmentId);
 
   const url = `${API_BASE}/tasks/search/columns?${params.toString()}`;
   const response = await fetchWithAuth(url);

@@ -14,7 +14,7 @@ import {
   fetchTasksInBuild,
 } from "../api/tasks";
 import { useAuth } from "../context/AuthContext";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 import type { Build, Task, TaskGraphResponse, TaskStatus } from "../types/task";
 import { DagGraph } from "./DagGraph";
 import { TaskDetail } from "./TaskDetail";
@@ -32,7 +32,7 @@ interface BuildViewProps {
 }
 
 export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps) {
-  const { activeWorkspace } = useWorkspace();
+  const { activeEnvironment } = useEnvironment();
   const { user } = useAuth();
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
@@ -80,7 +80,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
 
   // Load build data
   const loadBuild = useCallback(async () => {
-    if (!activeWorkspace?.id || !buildId) {
+    if (!activeEnvironment?.id || !buildId) {
       setLoading(false);
       return;
     }
@@ -89,9 +89,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     setError(null);
     try {
       const [buildData, tasksData, graphData] = await Promise.all([
-        fetchBuild(buildId, activeWorkspace.id),
-        fetchTasksInBuild(buildId, { workspace_id: activeWorkspace.id }),
-        fetchBuildGraph(buildId, activeWorkspace.id),
+        fetchBuild(buildId, activeEnvironment.id),
+        fetchTasksInBuild(buildId, { environment_id: activeEnvironment.id }),
+        fetchBuildGraph(buildId, activeEnvironment.id),
       ]);
       setBuild(buildData);
       setAllTasks(tasksData);
@@ -101,7 +101,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     } finally {
       setLoading(false);
     }
-  }, [activeWorkspace?.id, buildId]);
+  }, [activeEnvironment?.id, buildId]);
 
   useEffect(() => {
     loadBuild();
@@ -134,7 +134,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // Override state handlers
   const handleOverride = useCallback(
     async (action: "cancel" | "complete" | "fail") => {
-      if (!activeWorkspace?.id || !buildId) return;
+      if (!activeEnvironment?.id || !buildId) return;
 
       const actionLabels = {
         cancel: "cancel",
@@ -156,11 +156,11 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       try {
         let updatedBuild: Build;
         if (action === "cancel") {
-          updatedBuild = await cancelBuild(buildId, activeWorkspace.id, userId);
+          updatedBuild = await cancelBuild(buildId, activeEnvironment.id, userId);
         } else if (action === "complete") {
-          updatedBuild = await completeBuild(buildId, activeWorkspace.id, userId);
+          updatedBuild = await completeBuild(buildId, activeEnvironment.id, userId);
         } else {
-          updatedBuild = await failBuild(buildId, activeWorkspace.id, userId);
+          updatedBuild = await failBuild(buildId, activeEnvironment.id, userId);
         }
         setBuild(updatedBuild);
       } catch (err) {
@@ -173,7 +173,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         setOverriding(false);
       }
     },
-    [activeWorkspace?.id, buildId, user?.profile?.sub],
+    [activeEnvironment?.id, buildId, user?.profile?.sub],
   );
 
   // Close override menu when clicking outside
@@ -243,7 +243,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       return {
         id: node.id,
         task_id: node.task_id,
-        workspace_id: build?.workspace_id ?? "",
+        environment_id: build?.environment_id ?? "",
         task_namespace: node.task_namespace,
         task_name: node.task_name,
         task_data: fullTask?.task_data ?? {},

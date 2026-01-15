@@ -28,13 +28,13 @@ async def list_target_roots(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """List target roots for the authenticated workspace.
+    """List target roots for the authenticated environment.
 
     This endpoint is used by the SDK/CLI to sync target root configuration.
-    Authentication via API key or JWT token determines the workspace.
+    Authentication via API key or JWT token determines the environment.
     """
     result = await db.execute(
-        select(TargetRoot).where(TargetRoot.workspace_id == auth.workspace_id)
+        select(TargetRoot).where(TargetRoot.environment_id == auth.environment_id)
     )
     roots = result.scalars().all()
 

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 import { useAuth } from "../context/AuthContext";
 import { fetchPendingInvites, type PendingInvite } from "../api/organizations";
 
@@ -16,12 +16,12 @@ export function OrganizationSelector() {
     organizations,
     activeOrg,
     setActiveOrg,
-    workspaces,
-    activeWorkspace,
-    setActiveWorkspace,
+    environments,
+    activeEnvironment,
+    setActiveEnvironment,
     isLoading,
     isExchangingToken,
-  } = useWorkspace();
+  } = useEnvironment();
 
   const [isOpen, setIsOpen] = useState(false);
   const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
@@ -137,7 +137,7 @@ export function OrganizationSelector() {
           )}
         </div>
 
-        {/* Org and workspace name */}
+        {/* Org and environment name */}
         <div className="flex flex-col items-start min-w-0">
           <div className="flex items-center gap-1.5">
             <span className="font-semibold text-gray-900 dark:text-gray-100 truncate max-w-[150px]">
@@ -159,9 +159,9 @@ export function OrganizationSelector() {
               />
             </svg>
           </div>
-          {activeWorkspace && (
+          {activeEnvironment && (
             <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[150px]">
-              {activeWorkspace.name}
+              {activeEnvironment.name}
             </span>
           )}
         </div>
@@ -189,21 +189,21 @@ export function OrganizationSelector() {
             </div>
           )}
 
-          {/* Workspaces section */}
-          {activeOrg && workspaces.length > 0 && (
+          {/* Environments section */}
+          {activeOrg && environments.length > 0 && (
             <div className="border-b border-gray-200 dark:border-gray-700 py-2">
               <div className="px-4 py-1.5 text-xs font-semibold uppercase text-gray-500 dark:text-gray-400">
-                Workspaces
+                Environments
               </div>
-              {workspaces.map((ws) => (
+              {environments.map((env) => (
                 <button
-                  key={ws.id}
+                  key={env.id}
                   onClick={() => {
-                    setActiveWorkspace(ws);
+                    setActiveEnvironment(env);
                     setIsOpen(false);
                   }}
                   className={`flex w-full items-center gap-3 px-4 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 ${
-                    activeWorkspace?.id === ws.id
+                    activeEnvironment?.id === env.id
                       ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
                       : "text-gray-900 dark:text-gray-100"
                   }`}
@@ -221,8 +221,8 @@ export function OrganizationSelector() {
                       d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
                     />
                   </svg>
-                  {ws.name}
-                  {activeWorkspace?.id === ws.id && (
+                  {env.name}
+                  {activeEnvironment?.id === env.id && (
                     <svg
                       className="ml-auto h-4 w-4"
                       fill="currentColor"

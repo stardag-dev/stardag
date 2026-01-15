@@ -63,7 +63,7 @@ export function TaskDetail({
   const loadEvents = useCallback(async () => {
     setEventsLoading(true);
     try {
-      const fetchedEvents = await fetchTaskEvents(task.task_id, task.workspace_id);
+      const fetchedEvents = await fetchTaskEvents(task.task_id, task.environment_id);
       setEvents(fetchedEvents);
     } catch (error) {
       console.error("Failed to load task events:", error);
@@ -71,7 +71,7 @@ export function TaskDetail({
     } finally {
       setEventsLoading(false);
     }
-  }, [task.task_id, task.workspace_id]);
+  }, [task.task_id, task.environment_id]);
 
   const handleShowEvents = useCallback(() => {
     setShowEventsModal(true);
@@ -89,7 +89,7 @@ export function TaskDetail({
     setCancelling(true);
     setCancelError(null);
     try {
-      await cancelTask(buildId, task.task_id, task.workspace_id);
+      await cancelTask(buildId, task.task_id, task.environment_id);
       onTaskCancelled?.();
     } catch (err) {
       setCancelError(err instanceof Error ? err.message : "Failed to cancel task");
@@ -104,7 +104,7 @@ export function TaskDetail({
     async function loadAssets() {
       setAssetsLoading(true);
       try {
-        const response = await fetchTaskAssets(task.task_id, task.workspace_id);
+        const response = await fetchTaskAssets(task.task_id, task.environment_id);
         if (!cancelled) {
           setAssets(response.assets);
         }
@@ -125,7 +125,7 @@ export function TaskDetail({
     return () => {
       cancelled = true;
     };
-  }, [task.task_id, task.workspace_id]);
+  }, [task.task_id, task.environment_id]);
 
   return (
     <div className="h-full overflow-auto bg-white dark:bg-gray-800 p-4">

@@ -127,13 +127,13 @@ class AuthorizationError(APIError):
         super().__init__(message, status_code=403, detail=detail)
 
 
-class WorkspaceAccessError(AuthorizationError):
-    """Not authorized to access the specified workspace."""
+class EnvironmentAccessError(AuthorizationError):
+    """Not authorized to access the specified environment."""
 
-    def __init__(self, workspace_id: str | None = None, detail: str | None = None):
-        msg = "Not authorized to access this workspace"
-        if workspace_id:
-            msg = f"Not authorized to access workspace '{workspace_id}'"
+    def __init__(self, environment_id: str | None = None, detail: str | None = None):
+        msg = "Not authorized to access this environment"
+        if environment_id:
+            msg = f"Not authorized to access environment '{environment_id}'"
         super().__init__(msg, detail=detail)
 
 

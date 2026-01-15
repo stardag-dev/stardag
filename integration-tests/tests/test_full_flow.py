@@ -18,14 +18,14 @@ class TestBuildWorkflow:
     def test_create_build_workflow(
         self,
         internal_authenticated_client: httpx.Client,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test creating a build and verifying it in the list."""
         # Create a build
         response = internal_authenticated_client.post(
             "/api/v1/builds",
             json={"description": "Integration test build"},
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 201
         build = response.json()
@@ -35,7 +35,7 @@ class TestBuildWorkflow:
         # Verify build appears in list
         response = internal_authenticated_client.get(
             "/api/v1/builds",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         builds = response.json()
@@ -47,7 +47,7 @@ class TestBuildWorkflow:
         # Get build details
         response = internal_authenticated_client.get(
             f"/api/v1/builds/{build_id}",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         build_detail = response.json()
@@ -59,7 +59,7 @@ class TestBuildWorkflow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test creating a build with tasks using API key (SDK auth).
 
@@ -68,7 +68,7 @@ class TestBuildWorkflow:
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Task Registration Key"},
         )
         assert response.status_code == 201
@@ -106,13 +106,13 @@ class TestBuildWorkflow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test completing a build using API key auth."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Complete Build Key"},
         )
         assert response.status_code == 201
@@ -140,7 +140,7 @@ class TestBuildWorkflow:
         # Verify build is completed
         response = internal_authenticated_client.get(
             f"/api/v1/builds/{build_id}",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         build = response.json()
@@ -155,13 +155,13 @@ class TestApiKeyWorkflow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test creating builds using API key auth."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Workflow Test Key"},
         )
         assert response.status_code == 201
@@ -177,7 +177,7 @@ class TestApiKeyWorkflow:
         assert response.status_code == 201
         build = response.json()
         build_id = build["id"]
-        assert build["workspace_id"] == test_workspace_id
+        assert build["environment_id"] == test_environment_id
 
         # Register a task using API key
         response = httpx.post(
@@ -205,7 +205,7 @@ class TestApiKeyWorkflow:
 
 
 class TestOrganizationWorkflow:
-    """Test organization and workspace management workflows."""
+    """Test organization and environment management workflows."""
 
     def test_organization_info(
         self,
@@ -222,22 +222,22 @@ class TestOrganizationWorkflow:
         org_ids = [org["id"] for org in data["organizations"]]
         assert test_organization_id in org_ids
 
-    def test_workspace_listing(
+    def test_environment_listing(
         self,
         internal_authenticated_client: httpx.Client,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
-        """Test listing workspaces in an organization."""
+        """Test listing environments in an organization."""
         response = internal_authenticated_client.get(
-            f"/api/v1/ui/organizations/{test_organization_id}/workspaces"
+            f"/api/v1/ui/organizations/{test_organization_id}/environments"
         )
         assert response.status_code == 200
-        workspaces = response.json()
+        environments = response.json()
 
-        # Test workspace should exist
-        workspace_ids = [ws["id"] for ws in workspaces]
-        assert test_workspace_id in workspace_ids
+        # Test environment should exist
+        environment_ids = [ws["id"] for ws in environments]
+        assert test_environment_id in environment_ids
 
 
 class TestTokenRefreshFlow:
@@ -262,12 +262,12 @@ class TestTokenRefreshFlow:
         response = httpx.get(
             f"{docker_services.api}/api/v1/builds",
             params={
-                "workspace_id": "any"
-            },  # Will fail workspace check but auth should pass
+                "environment_id": "any"
+            },  # Will fail environment check but auth should pass
             headers={"Authorization": f"Bearer {internal_token}"},
             timeout=30.0,
         )
-        # Should get 404 (workspace not found) not 401 (auth failed)
+        # Should get 404 (environment not found) not 401 (auth failed)
         assert response.status_code in (200, 404)
 
 
@@ -279,13 +279,13 @@ class TestCrossComponentFlow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that API key created via UI endpoint works for SDK operations."""
         # Create API key via UI endpoint (simulating UI creating key)
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "SDK Integration Key"},
         )
         assert response.status_code == 201
@@ -295,7 +295,7 @@ class TestCrossComponentFlow:
         # Verify key appears in list
         response = internal_authenticated_client.get(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys"
+            f"/environments/{test_environment_id}/api-keys"
         )
         assert response.status_code == 200
         keys = response.json()
@@ -316,13 +316,13 @@ class TestCrossComponentFlow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that builds are visible regardless of auth method used to create them."""
         # Create API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Visibility Test Key"},
         )
         api_key = response.json()["key"]
@@ -341,7 +341,7 @@ class TestCrossComponentFlow:
         response = internal_authenticated_client.post(
             "/api/v1/builds",
             json={"description": "Created with JWT"},
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 201
         jwt_build_id = response.json()["id"]
@@ -349,7 +349,7 @@ class TestCrossComponentFlow:
         # Both should be visible when listing with JWT
         response = internal_authenticated_client.get(
             "/api/v1/builds",
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
         )
         assert response.status_code == 200
         builds = response.json()
@@ -365,7 +365,7 @@ class TestTaskAssetsWorkflow:
 
     These tests verify:
     1. Uploading assets via API key (SDK flow)
-    2. Fetching assets via JWT (UI flow) - requires workspace_id
+    2. Fetching assets via JWT (UI flow) - requires environment_id
     3. Asset visibility across auth methods
     """
 
@@ -374,13 +374,13 @@ class TestTaskAssetsWorkflow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test uploading and fetching assets using API key."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Asset Test Key"},
         )
         assert response.status_code == 201
@@ -451,23 +451,23 @@ class TestTaskAssetsWorkflow:
         assert asset_by_name["metrics"]["asset_type"] == "json"
         assert asset_by_name["metrics"]["body"]["accuracy"] == 0.95
 
-    def test_fetch_assets_via_jwt_requires_workspace_id(
+    def test_fetch_assets_via_jwt_requires_environment_id(
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
         internal_token: str,
     ) -> None:
-        """Test that fetching assets with JWT requires workspace_id.
+        """Test that fetching assets with JWT requires environment_id.
 
         This is the critical test for the UI flow - JWT auth requires
-        workspace_id to be passed as a query parameter.
+        environment_id to be passed as a query parameter.
         """
         # Create an API key for setup
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "JWT Asset Test Key"},
         )
         assert response.status_code == 201
@@ -506,25 +506,27 @@ class TestTaskAssetsWorkflow:
         )
         assert response.status_code == 201
 
-        # Try to fetch assets with JWT but WITHOUT workspace_id - should fail
+        # Try to fetch assets with JWT but WITHOUT environment_id - should fail
         response = httpx.get(
             f"{docker_services.api}/api/v1/tasks/{task_id}/assets",
             headers={"Authorization": f"Bearer {internal_token}"},
             timeout=30.0,
         )
         assert response.status_code == 400, (
-            f"Expected 400 when workspace_id is missing with JWT, got {response.status_code}"
+            f"Expected 400 when environment_id is missing with JWT, got {response.status_code}"
         )
-        assert "workspace_id" in response.text.lower()
+        assert "environment_id" in response.text.lower()
 
-        # Fetch with workspace_id - should succeed
+        # Fetch with environment_id - should succeed
         response = httpx.get(
             f"{docker_services.api}/api/v1/tasks/{task_id}/assets",
             headers={"Authorization": f"Bearer {internal_token}"},
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
             timeout=30.0,
         )
-        assert response.status_code == 200, f"Failed with workspace_id: {response.text}"
+        assert response.status_code == 200, (
+            f"Failed with environment_id: {response.text}"
+        )
         fetched = response.json()
         assert len(fetched["assets"]) == 1
         assert fetched["assets"][0]["name"] == "data"
@@ -534,14 +536,14 @@ class TestTaskAssetsWorkflow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
         internal_token: str,
     ) -> None:
         """Test that assets uploaded via API key are visible via JWT and vice versa."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Cross-Auth Asset Key"},
         )
         assert response.status_code == 201
@@ -582,11 +584,11 @@ class TestTaskAssetsWorkflow:
         )
         assert response.status_code == 201
 
-        # Verify visible via JWT (with workspace_id)
+        # Verify visible via JWT (with environment_id)
         response = httpx.get(
             f"{docker_services.api}/api/v1/tasks/{task_id}/assets",
             headers={"Authorization": f"Bearer {internal_token}"},
-            params={"workspace_id": test_workspace_id},
+            params={"environment_id": test_environment_id},
             timeout=30.0,
         )
         assert response.status_code == 200
@@ -609,7 +611,7 @@ class TestSDKBuildWorkflow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test building a simple DAG using the SDK.
 
@@ -627,7 +629,7 @@ class TestSDKBuildWorkflow:
         # Create an API key for this test
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "SDK Build Test Key"},
         )
         assert response.status_code == 201
@@ -723,7 +725,7 @@ class TestSDKBuildWorkflow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         r"""Test building a diamond-shaped DAG using the SDK.
 
@@ -747,7 +749,7 @@ class TestSDKBuildWorkflow:
         # Create an API key for this test
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "SDK Diamond DAG Test Key"},
         )
         assert response.status_code == 201

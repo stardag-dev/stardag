@@ -124,13 +124,13 @@ class TestCliApiKeyAuth:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test config show when API key is set."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "CLI Test Key"},
         )
         assert response.status_code == 201
@@ -147,13 +147,13 @@ class TestCliApiKeyAuth:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test auth status shows API key is in use."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Status Test Key"},
         )
         assert response.status_code == 201
@@ -190,7 +190,7 @@ class TestCliEnvConfig:
         self,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test config with multiple env vars set."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -198,7 +198,7 @@ class TestCliEnvConfig:
                 "HOME": tmpdir,
                 "STARDAG_REGISTRY_URL": docker_services.api,
                 "STARDAG_ORGANIZATION_ID": test_organization_id,
-                "STARDAG_WORKSPACE_ID": test_workspace_id,
+                "STARDAG_ENVIRONMENT_ID": test_environment_id,
             }
             result = run_stardag_cli("config", "show", env=env)
             assert result.returncode == 0
@@ -302,7 +302,7 @@ class TestCliProfileCommands:
                 "-o",
                 "test-org",
                 "-w",
-                "test-workspace",
+                "test-environment",
                 env=env,
                 check=False,
             )
@@ -321,13 +321,13 @@ class TestCliLoginFlow:
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
         test_organization_id: str,
-        test_workspace_id: str,
+        test_environment_id: str,
     ) -> None:
         """Test that login command shows message when API key is already set."""
         # Create an API key
         response = internal_authenticated_client.post(
             f"/api/v1/ui/organizations/{test_organization_id}"
-            f"/workspaces/{test_workspace_id}/api-keys",
+            f"/environments/{test_environment_id}/api-keys",
             json={"name": "Login Test Key"},
         )
         assert response.status_code == 201

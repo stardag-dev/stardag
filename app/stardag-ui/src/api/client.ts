@@ -10,7 +10,7 @@ export function setAccessTokenGetter(fn: GetAccessToken): void {
   getAccessTokenFn = fn;
 }
 
-// Set the current org ID (called by WorkspaceContext when org changes)
+// Set the current org ID (called by EnvironmentContext when org changes)
 export function setCurrentOrgId(orgId: string | null): void {
   currentOrgId = orgId;
 }

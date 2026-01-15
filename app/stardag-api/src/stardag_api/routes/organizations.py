@@ -25,7 +25,7 @@ from stardag_api.models import (
     OrganizationRole,
     TargetRoot,
     User,
-    Workspace,
+    Environment,
 )
 from stardag_api.services import api_keys as api_key_service
 
@@ -77,7 +77,7 @@ class OrganizationDetailResponse(OrganizationResponse):
     """Organization with member count."""
 
     member_count: int
-    workspace_count: int
+    environment_count: int
 
 
 class MemberResponse(BaseModel):
@@ -117,8 +117,8 @@ class InviteResponse(BaseModel):
     invited_by_email: str | None
 
 
-class WorkspaceCreate(BaseModel):
-    """Create a workspace."""
+class EnvironmentCreate(BaseModel):
+    """Create an environment."""
 
     name: str
     slug: str
@@ -137,15 +137,15 @@ class WorkspaceCreate(BaseModel):
         return v
 
 
-class WorkspaceUpdate(BaseModel):
-    """Update a workspace."""
+class EnvironmentUpdate(BaseModel):
+    """Update an environment."""
 
     name: str | None = None
     description: str | None = None
 
 
-class WorkspaceResponse(BaseModel):
-    """Workspace response."""
+class EnvironmentResponse(BaseModel):
+    """Environment response."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -154,14 +154,14 @@ class WorkspaceResponse(BaseModel):
     name: str
     slug: str
     description: str | None
-    owner_id: str | None = None  # Non-null for personal workspaces
+    owner_id: str | None = None  # Non-null for personal environments
 
 
 # --- Helper functions ---
 
 
-def generate_personal_workspace_slug(email: str, suffix: int = 0) -> str:
-    """Generate a personal workspace slug from email.
+def generate_personal_environment_slug(email: str, suffix: int = 0) -> str:
+    """Generate a personal environment slug from email.
 
     Format: personal-{email_prefix} or personal-{email_prefix}-{suffix}
     """
@@ -173,39 +173,39 @@ def generate_personal_workspace_slug(email: str, suffix: int = 0) -> str:
     return f"personal-{clean_prefix}"
 
 
-async def create_personal_workspace(
+async def create_personal_environment(
     db: AsyncSession, org_id: str, user: User
-) -> Workspace:
-    """Create a personal workspace for a user in an organization.
+) -> Environment:
+    """Create a personal environment for a user in an organization.
 
     Ensures unique slug by appending numeric suffix if needed.
     """
-    base_slug = generate_personal_workspace_slug(user.email)
+    base_slug = generate_personal_environment_slug(user.email)
 
     # Check for existing slugs and find unique one
     suffix = 0
     slug = base_slug
     while True:
         existing = await db.execute(
-            select(Workspace).where(
-                Workspace.organization_id == org_id,
-                Workspace.slug == slug,
+            select(Environment).where(
+                Environment.organization_id == org_id,
+                Environment.slug == slug,
             )
         )
         if not existing.scalar_one_or_none():
             break
         suffix += 1
-        slug = generate_personal_workspace_slug(user.email, suffix)
+        slug = generate_personal_environment_slug(user.email, suffix)
 
-    workspace = Workspace(
+    environment = Environment(
         organization_id=org_id,
         name=f"Personal ({user.email.split('@')[0]})",
         slug=slug,
-        description=f"Personal workspace for {user.email}",
+        description=f"Personal environment for {user.email}",
         owner_id=user.id,
     )
-    db.add(workspace)
-    return workspace
+    db.add(environment)
+    return environment
 
 
 async def get_user_membership(
@@ -307,17 +307,17 @@ async def create_organization(
     )
     db.add(membership)
 
-    # Create default workspace
-    workspace = Workspace(
+    # Create default environment
+    environment = Environment(
         organization_id=org.id,
         name="Default",
         slug="default",
-        description="Default workspace",
+        description="Default environment",
     )
-    db.add(workspace)
+    db.add(environment)
 
-    # Create personal workspace for the creator
-    await create_personal_workspace(db, org.id, current_user)
+    # Create personal environment for the creator
+    await create_personal_environment(db, org.id, current_user)
 
     await db.commit()
     await db.refresh(org)
@@ -337,7 +337,7 @@ async def get_organization(
     result = await db.execute(
         select(Organization)
         .options(
-            selectinload(Organization.members), selectinload(Organization.workspaces)
+            selectinload(Organization.members), selectinload(Organization.environments)
         )
         .where(Organization.id == org_id)
     )
@@ -351,7 +351,7 @@ async def get_organization(
         slug=org.slug,
         description=org.description,
         member_count=len(org.members),
-        workspace_count=len(org.workspaces),
+        environment_count=len(org.environments),
     )
 
 
@@ -690,8 +690,8 @@ async def accept_invite(
     )
     db.add(membership)
 
-    # Create personal workspace for the new member
-    await create_personal_workspace(db, invite.organization_id, current_user)
+    # Create personal environment for the new member
+    await create_personal_environment(db, invite.organization_id, current_user)
 
     invite.status = InviteStatus.ACCEPTED
     await db.commit()
@@ -724,169 +724,173 @@ async def decline_invite(
     await db.commit()
 
 
-# --- Workspace endpoints ---
+# --- Environment endpoints ---
 
 
-@router.get("/{org_id}/workspaces", response_model=list[WorkspaceResponse])
-async def list_workspaces(
+@router.get("/{org_id}/environments", response_model=list[EnvironmentResponse])
+async def list_environments(
     org_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """List workspaces in organization."""
+    """List environments in organization."""
     await require_org_access(db, current_user.id, org_id)
 
     result = await db.execute(
-        select(Workspace).where(Workspace.organization_id == org_id)
+        select(Environment).where(Environment.organization_id == org_id)
     )
     return result.scalars().all()
 
 
 @router.post(
-    "/{org_id}/workspaces",
-    response_model=WorkspaceResponse,
+    "/{org_id}/environments",
+    response_model=EnvironmentResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_workspace(
+async def create_environment(
     org_id: str,
-    data: WorkspaceCreate,
+    data: EnvironmentCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Create a workspace (admin+ only)."""
+    """Create an environment (admin+ only)."""
     await require_org_access(
         db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
     )
 
-    # Check workspace limit
-    workspace_count_result = await db.execute(
-        select(func.count(Workspace.id)).where(Workspace.organization_id == org_id)
+    # Check environment limit
+    environment_count_result = await db.execute(
+        select(func.count(Environment.id)).where(Environment.organization_id == org_id)
     )
-    workspace_count = workspace_count_result.scalar() or 0
-    if workspace_count >= Organization.MAX_WORKSPACES_PER_ORG:
+    environment_count = environment_count_result.scalar() or 0
+    if environment_count >= Organization.MAX_ENVIRONMENTS_PER_ORG:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Organization can have at most {Organization.MAX_WORKSPACES_PER_ORG} workspaces",
+            detail=f"Organization can have at most {Organization.MAX_ENVIRONMENTS_PER_ORG} environments",
         )
 
     # Check if slug exists in this org
     existing = await db.execute(
-        select(Workspace).where(
-            Workspace.organization_id == org_id,
-            Workspace.slug == data.slug,
+        select(Environment).where(
+            Environment.organization_id == org_id,
+            Environment.slug == data.slug,
         )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Workspace slug already exists in this organization",
+            detail="Environment slug already exists in this organization",
         )
 
-    workspace = Workspace(
+    environment = Environment(
         organization_id=org_id,
         name=data.name,
         slug=data.slug,
         description=data.description,
     )
-    db.add(workspace)
+    db.add(environment)
     await db.commit()
-    await db.refresh(workspace)
+    await db.refresh(environment)
 
-    return workspace
+    return environment
 
 
-@router.get("/{org_id}/workspaces/{workspace_id}", response_model=WorkspaceResponse)
-async def get_workspace(
+@router.get(
+    "/{org_id}/environments/{environment_id}", response_model=EnvironmentResponse
+)
+async def get_environment(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Get workspace details."""
+    """Get environment details."""
     await require_org_access(db, current_user.id, org_id)
 
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
-    workspace = result.scalar_one_or_none()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    environment = result.scalar_one_or_none()
+    if not environment:
+        raise HTTPException(status_code=404, detail="Environment not found")
 
-    return workspace
+    return environment
 
 
-@router.patch("/{org_id}/workspaces/{workspace_id}", response_model=WorkspaceResponse)
-async def update_workspace(
+@router.patch(
+    "/{org_id}/environments/{environment_id}", response_model=EnvironmentResponse
+)
+async def update_environment(
     org_id: str,
-    workspace_id: str,
-    data: WorkspaceUpdate,
+    environment_id: str,
+    data: EnvironmentUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Update workspace (admin+ only)."""
+    """Update environment (admin+ only)."""
     await require_org_access(
         db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
     )
 
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
-    workspace = result.scalar_one_or_none()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    environment = result.scalar_one_or_none()
+    if not environment:
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     if data.name is not None:
-        workspace.name = data.name
+        environment.name = data.name
     if data.description is not None:
-        workspace.description = data.description
+        environment.description = data.description
 
     await db.commit()
-    await db.refresh(workspace)
+    await db.refresh(environment)
 
-    return workspace
+    return environment
 
 
 @router.delete(
-    "/{org_id}/workspaces/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT
+    "/{org_id}/environments/{environment_id}", status_code=status.HTTP_204_NO_CONTENT
 )
-async def delete_workspace(
+async def delete_environment(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Delete workspace (admin+ only)."""
+    """Delete environment (admin+ only)."""
     await require_org_access(
         db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
     )
 
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
-    workspace = result.scalar_one_or_none()
-    if not workspace:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    environment = result.scalar_one_or_none()
+    if not environment:
+        raise HTTPException(status_code=404, detail="Environment not found")
 
-    # Check if it's the last workspace
-    workspace_count = await db.execute(
-        select(Workspace).where(Workspace.organization_id == org_id)
+    # Check if it's the last environment
+    environment_count = await db.execute(
+        select(Environment).where(Environment.organization_id == org_id)
     )
-    if len(workspace_count.scalars().all()) <= 1:
+    if len(environment_count.scalars().all()) <= 1:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot delete the last workspace",
+            detail="Cannot delete the last environment",
         )
 
-    await db.delete(workspace)
+    await db.delete(environment)
     await db.commit()
 
 
@@ -905,7 +909,7 @@ class ApiKeyResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    workspace_id: str
+    environment_id: str
     name: str
     key_prefix: str
     created_by_id: str | None
@@ -948,7 +952,7 @@ class TargetRootResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    workspace_id: str
+    environment_id: str
     name: str
     uri_prefix: str
     created_at: str  # ISO format datetime
@@ -958,36 +962,37 @@ class TargetRootResponse(BaseModel):
 
 
 @router.get(
-    "/{org_id}/workspaces/{workspace_id}/api-keys", response_model=list[ApiKeyResponse]
+    "/{org_id}/environments/{environment_id}/api-keys",
+    response_model=list[ApiKeyResponse],
 )
 async def list_api_keys(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     include_revoked: bool = False,
 ):
-    """List API keys for a workspace."""
+    """List API keys for an environment."""
     await require_org_access(db, current_user.id, org_id)
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     keys = await api_key_service.list_api_keys(
-        db, workspace_id, include_revoked=include_revoked
+        db, environment_id, include_revoked=include_revoked
     )
 
     return [
         ApiKeyResponse(
             id=key.id,
-            workspace_id=key.workspace_id,
+            environment_id=key.environment_id,
             name=key.name,
             key_prefix=key.key_prefix,
             created_by_id=key.created_by_id,
@@ -1000,35 +1005,35 @@ async def list_api_keys(
 
 
 @router.post(
-    "/{org_id}/workspaces/{workspace_id}/api-keys",
+    "/{org_id}/environments/{environment_id}/api-keys",
     response_model=ApiKeyCreateResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_api_key(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     data: ApiKeyCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Create a new API key for a workspace (admin+ only)."""
+    """Create a new API key for an environment (admin+ only)."""
     await require_org_access(
         db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
     )
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     api_key, full_key = await api_key_service.create_api_key(
         db,
-        workspace_id=workspace_id,
+        environment_id=environment_id,
         name=data.name,
         created_by_id=current_user.id,
     )
@@ -1036,7 +1041,7 @@ async def create_api_key(
 
     return ApiKeyCreateResponse(
         id=api_key.id,
-        workspace_id=api_key.workspace_id,
+        environment_id=api_key.environment_id,
         name=api_key.name,
         key_prefix=api_key.key_prefix,
         created_by_id=api_key.created_by_id,
@@ -1048,12 +1053,12 @@ async def create_api_key(
 
 
 @router.delete(
-    "/{org_id}/workspaces/{workspace_id}/api-keys/{key_id}",
+    "/{org_id}/environments/{environment_id}/api-keys/{key_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def revoke_api_key(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     key_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1063,20 +1068,20 @@ async def revoke_api_key(
         db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
     )
 
-    # Verify the key exists and belongs to this workspace
+    # Verify the key exists and belongs to this environment
     key = await api_key_service.get_api_key_by_id(db, key_id)
-    if not key or key.workspace_id != workspace_id:
+    if not key or key.environment_id != environment_id:
         raise HTTPException(status_code=404, detail="API key not found")
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     await api_key_service.revoke_api_key(db, key_id)
     await db.commit()
@@ -1086,37 +1091,37 @@ async def revoke_api_key(
 
 
 @router.get(
-    "/{org_id}/workspaces/{workspace_id}/target-roots",
+    "/{org_id}/environments/{environment_id}/target-roots",
     response_model=list[TargetRootResponse],
 )
 async def list_target_roots(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """List target roots for a workspace."""
+    """List target roots for an environment."""
     await require_org_access(db, current_user.id, org_id)
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     result = await db.execute(
-        select(TargetRoot).where(TargetRoot.workspace_id == workspace_id)
+        select(TargetRoot).where(TargetRoot.environment_id == environment_id)
     )
     roots = result.scalars().all()
 
     return [
         TargetRootResponse(
             id=root.id,
-            workspace_id=root.workspace_id,
+            environment_id=root.environment_id,
             name=root.name,
             uri_prefix=root.uri_prefix,
             created_at=root.created_at.isoformat(),
@@ -1126,36 +1131,36 @@ async def list_target_roots(
 
 
 @router.post(
-    "/{org_id}/workspaces/{workspace_id}/target-roots",
+    "/{org_id}/environments/{environment_id}/target-roots",
     response_model=TargetRootResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def create_target_root(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     data: TargetRootCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Create a new target root for a workspace (admin+ only)."""
+    """Create a new target root for an environment (admin+ only)."""
     await require_org_access(
         db, current_user.id, org_id, min_role=OrganizationRole.ADMIN
     )
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     # Check for duplicate name
     result = await db.execute(
         select(TargetRoot).where(
-            TargetRoot.workspace_id == workspace_id,
+            TargetRoot.environment_id == environment_id,
             TargetRoot.name == data.name,
         )
     )
@@ -1166,7 +1171,7 @@ async def create_target_root(
         )
 
     target_root = TargetRoot(
-        workspace_id=workspace_id,
+        environment_id=environment_id,
         name=data.name,
         uri_prefix=data.uri_prefix,
     )
@@ -1176,7 +1181,7 @@ async def create_target_root(
 
     return TargetRootResponse(
         id=target_root.id,
-        workspace_id=target_root.workspace_id,
+        environment_id=target_root.environment_id,
         name=target_root.name,
         uri_prefix=target_root.uri_prefix,
         created_at=target_root.created_at.isoformat(),
@@ -1184,12 +1189,12 @@ async def create_target_root(
 
 
 @router.get(
-    "/{org_id}/workspaces/{workspace_id}/target-roots/{root_id}",
+    "/{org_id}/environments/{environment_id}/target-roots/{root_id}",
     response_model=TargetRootResponse,
 )
 async def get_target_root(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     root_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1200,26 +1205,26 @@ async def get_target_root(
     result = await db.execute(
         select(TargetRoot).where(
             TargetRoot.id == root_id,
-            TargetRoot.workspace_id == workspace_id,
+            TargetRoot.environment_id == environment_id,
         )
     )
     target_root = result.scalar_one_or_none()
     if not target_root:
         raise HTTPException(status_code=404, detail="Target root not found")
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     return TargetRootResponse(
         id=target_root.id,
-        workspace_id=target_root.workspace_id,
+        environment_id=target_root.environment_id,
         name=target_root.name,
         uri_prefix=target_root.uri_prefix,
         created_at=target_root.created_at.isoformat(),
@@ -1227,12 +1232,12 @@ async def get_target_root(
 
 
 @router.patch(
-    "/{org_id}/workspaces/{workspace_id}/target-roots/{root_id}",
+    "/{org_id}/environments/{environment_id}/target-roots/{root_id}",
     response_model=TargetRootResponse,
 )
 async def update_target_root(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     root_id: str,
     data: TargetRootUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -1246,28 +1251,28 @@ async def update_target_root(
     result = await db.execute(
         select(TargetRoot).where(
             TargetRoot.id == root_id,
-            TargetRoot.workspace_id == workspace_id,
+            TargetRoot.environment_id == environment_id,
         )
     )
     target_root = result.scalar_one_or_none()
     if not target_root:
         raise HTTPException(status_code=404, detail="Target root not found")
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     # Check for duplicate name if name is being changed
     if data.name is not None and data.name != target_root.name:
         result = await db.execute(
             select(TargetRoot).where(
-                TargetRoot.workspace_id == workspace_id,
+                TargetRoot.environment_id == environment_id,
                 TargetRoot.name == data.name,
             )
         )
@@ -1286,7 +1291,7 @@ async def update_target_root(
 
     return TargetRootResponse(
         id=target_root.id,
-        workspace_id=target_root.workspace_id,
+        environment_id=target_root.environment_id,
         name=target_root.name,
         uri_prefix=target_root.uri_prefix,
         created_at=target_root.created_at.isoformat(),
@@ -1294,12 +1299,12 @@ async def update_target_root(
 
 
 @router.delete(
-    "/{org_id}/workspaces/{workspace_id}/target-roots/{root_id}",
+    "/{org_id}/environments/{environment_id}/target-roots/{root_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_target_root(
     org_id: str,
-    workspace_id: str,
+    environment_id: str,
     root_id: str,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1312,22 +1317,22 @@ async def delete_target_root(
     result = await db.execute(
         select(TargetRoot).where(
             TargetRoot.id == root_id,
-            TargetRoot.workspace_id == workspace_id,
+            TargetRoot.environment_id == environment_id,
         )
     )
     target_root = result.scalar_one_or_none()
     if not target_root:
         raise HTTPException(status_code=404, detail="Target root not found")
 
-    # Verify workspace belongs to org
+    # Verify environment belongs to org
     result = await db.execute(
-        select(Workspace).where(
-            Workspace.id == workspace_id,
-            Workspace.organization_id == org_id,
+        select(Environment).where(
+            Environment.id == environment_id,
+            Environment.organization_id == org_id,
         )
     )
     if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Environment not found")
 
     await db.delete(target_root)
     await db.commit()

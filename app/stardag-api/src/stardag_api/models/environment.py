@@ -1,4 +1,4 @@
-"""Workspace model for isolated environments."""
+"""Environment model for isolated environments."""
 
 from __future__ import annotations
 
@@ -18,15 +18,15 @@ if TYPE_CHECKING:
     from stardag_api.models.user import User
 
 
-class Workspace(Base, TimestampMixin):
+class Environment(Base, TimestampMixin):
     """Isolated environment within an organization.
 
     Similar to a 'project' - contains builds, tasks, and their relationships.
     """
 
-    __tablename__ = "workspaces"
+    __tablename__ = "environments"
     __table_args__ = (
-        UniqueConstraint("organization_id", "slug", name="uq_workspace_org_slug"),
+        UniqueConstraint("organization_id", "slug", name="uq_environment_org_slug"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -43,35 +43,35 @@ class Workspace(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text)
-    # Personal workspace owner (null for shared workspaces)
+    # Personal environment owner (null for shared environments)
     owner_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
-    # Maximum concurrent locks allowed for this workspace (null = unlimited)
+    # Maximum concurrent locks allowed for this environment (null = unlimited)
     max_concurrent_locks: Mapped[int | None] = mapped_column(
         nullable=True,
         default=None,
     )
 
     # Relationships
-    organization: Mapped[Organization] = relationship(back_populates="workspaces")
+    organization: Mapped[Organization] = relationship(back_populates="environments")
     owner: Mapped[User | None] = relationship()
     builds: Mapped[list[Build]] = relationship(
-        back_populates="workspace",
+        back_populates="environment",
         cascade="all, delete-orphan",
     )
     tasks: Mapped[list[Task]] = relationship(
-        back_populates="workspace",
+        back_populates="environment",
         cascade="all, delete-orphan",
     )
     api_keys: Mapped[list[ApiKey]] = relationship(
-        back_populates="workspace",
+        back_populates="environment",
         cascade="all, delete-orphan",
     )
     target_roots: Mapped[list[TargetRoot]] = relationship(
-        back_populates="workspace",
+        back_populates="environment",
         cascade="all, delete-orphan",
     )

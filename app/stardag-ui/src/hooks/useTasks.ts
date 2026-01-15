@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { fetchBuilds, fetchTasksInBuild, fetchBuildGraph } from "../api/tasks";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 import type { Build, Task, TaskStatus, TaskGraphResponse } from "../types/task";
 
 export interface TaskWithContext extends Task {
@@ -29,7 +29,7 @@ interface UseTasksReturn {
 }
 
 export function useTasks(pageSize = 20): UseTasksReturn {
-  const { activeWorkspace } = useWorkspace();
+  const { activeEnvironment } = useEnvironment();
 
   // Raw data from API
   const [allTasks, setAllTasks] = useState<Task[]>([]);
@@ -45,10 +45,10 @@ export function useTasks(pageSize = 20): UseTasksReturn {
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "">("");
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Load builds for current workspace
+  // Load builds for current environment
   const loadBuilds = useCallback(async () => {
-    // Don't fetch builds if no workspace is active (user hasn't selected/created org yet)
-    if (!activeWorkspace?.id) {
+    // Don't fetch builds if no environment is active (user hasn't selected/created org yet)
+    if (!activeEnvironment?.id) {
       setBuilds([]);
       setCurrentBuild(null);
       setAllTasks([]);
@@ -61,15 +61,15 @@ export function useTasks(pageSize = 20): UseTasksReturn {
       const response = await fetchBuilds({
         page: 1,
         page_size: 50,
-        workspace_id: activeWorkspace.id,
+        environment_id: activeEnvironment.id,
       });
       setBuilds(response.builds);
-      // Select most recent build if no current build or workspace changed
+      // Select most recent build if no current build or environment changed
       if (response.builds.length > 0) {
         setCurrentBuild(response.builds[0]);
       } else {
         setCurrentBuild(null);
-        // Clear stale data when no builds for this workspace
+        // Clear stale data when no builds for this environment
         setAllTasks([]);
         setGraph(null);
       }
@@ -78,11 +78,11 @@ export function useTasks(pageSize = 20): UseTasksReturn {
       console.error("Failed to load builds:", err);
       return [];
     }
-  }, [activeWorkspace?.id]);
+  }, [activeEnvironment?.id]);
 
   // Load tasks for current build (no filtering - get all)
   const loadTasks = useCallback(async () => {
-    if (!currentBuild || !activeWorkspace?.id) {
+    if (!currentBuild || !activeEnvironment?.id) {
       setLoading(false);
       return;
     }
@@ -93,9 +93,9 @@ export function useTasks(pageSize = 20): UseTasksReturn {
       // Fetch all tasks and graph in parallel
       const [tasksData, graphData] = await Promise.all([
         fetchTasksInBuild(currentBuild.id, {
-          workspace_id: activeWorkspace.id,
+          environment_id: activeEnvironment.id,
         }),
-        fetchBuildGraph(currentBuild.id, activeWorkspace.id),
+        fetchBuildGraph(currentBuild.id, activeEnvironment.id),
       ]);
 
       setAllTasks(tasksData);
@@ -105,9 +105,9 @@ export function useTasks(pageSize = 20): UseTasksReturn {
     } finally {
       setLoading(false);
     }
-  }, [currentBuild, activeWorkspace?.id]);
+  }, [currentBuild, activeEnvironment?.id]);
 
-  // Load builds when workspace changes
+  // Load builds when environment changes
   useEffect(() => {
     loadBuilds();
   }, [loadBuilds, refreshKey]);
@@ -145,7 +145,7 @@ export function useTasks(pageSize = 20): UseTasksReturn {
       return {
         id: node.id,
         task_id: node.task_id,
-        workspace_id: currentBuild.workspace_id,
+        environment_id: currentBuild.environment_id,
         task_namespace: node.task_namespace,
         task_name: node.task_name,
         task_data: fullTask?.task_data ?? {},

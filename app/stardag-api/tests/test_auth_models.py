@@ -140,7 +140,7 @@ class TestApiKey:
     async def test_create_api_key(self, async_session: AsyncSession):
         """Test creating an API key."""
         api_key = ApiKey(
-            workspace_id="default",
+            environment_id="default",
             name="Test Key",
             key_prefix="sk_test_",
             key_hash="$2b$12$fakehash",
@@ -162,7 +162,7 @@ class TestApiKey:
         from datetime import datetime, timezone
 
         api_key = ApiKey(
-            workspace_id="default",
+            environment_id="default",
             name="Revocable Key",
             key_prefix="sk_rev_",
             key_hash="$2b$12$fakehash2",

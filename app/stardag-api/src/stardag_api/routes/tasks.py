@@ -29,15 +29,17 @@ async def list_tasks(
     task_name: str | None = None,
     task_namespace: str | None = None,
 ):
-    """List tasks in a workspace.
+    """List tasks in an environment.
 
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     The workspace is determined from the authentication context.
     """
-    workspace_id = auth.workspace_id
-    query = select(Task).where(Task.workspace_id == workspace_id)
+    environment_id = auth.environment_id
+    query = select(Task).where(Task.environment_id == environment_id)
     count_query = (
-        select(func.count()).select_from(Task).where(Task.workspace_id == workspace_id)
+        select(func.count())
+        .select_from(Task)
+        .where(Task.environment_id == environment_id)
     )
 
     if task_name:
@@ -61,7 +63,7 @@ async def list_tasks(
             TaskResponse(
                 id=t.id,
                 task_id=t.task_id,
-                workspace_id=t.workspace_id,
+                environment_id=t.environment_id,
                 task_namespace=t.task_namespace,
                 task_name=t.task_name,
                 task_data=t.task_data,
@@ -82,14 +84,14 @@ async def get_task(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Get a task by its task_id (hash) in a workspace.
+    """Get a task by its task_id (hash) in an environment.
 
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     The workspace is determined from the authentication context.
     """
     result = await db.execute(
         select(Task)
-        .where(Task.workspace_id == auth.workspace_id)
+        .where(Task.environment_id == auth.environment_id)
         .where(Task.task_id == task_id)
     )
     task = result.scalar_one_or_none()
@@ -99,7 +101,7 @@ async def get_task(
     return TaskResponse(
         id=task.id,
         task_id=task.task_id,
-        workspace_id=task.workspace_id,
+        environment_id=task.environment_id,
         task_namespace=task.task_namespace,
         task_name=task.task_name,
         task_data=task.task_data,
@@ -116,13 +118,13 @@ async def get_task_assets(
 ):
     """Get assets for a task by its task_id (hash).
 
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     The workspace is determined from the authentication context.
     """
     # Find task by task_id (hash) in workspace
     result = await db.execute(
         select(Task)
-        .where(Task.workspace_id == auth.workspace_id)
+        .where(Task.environment_id == auth.environment_id)
         .where(Task.task_id == task_id)
     )
     task = result.scalar_one_or_none()
@@ -161,12 +163,12 @@ async def get_task_events(
     """Get all events for a task across all builds.
 
     Returns events sorted by creation time (newest first).
-    Requires authentication via API key or JWT token with workspace_id.
+    Requires authentication via API key or JWT token with environment_id.
     """
     # Find task by task_id (hash) in workspace
     result = await db.execute(
         select(Task)
-        .where(Task.workspace_id == auth.workspace_id)
+        .where(Task.environment_id == auth.environment_id)
         .where(Task.task_id == task_id)
     )
     task = result.scalar_one_or_none()

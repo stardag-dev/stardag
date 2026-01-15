@@ -17,7 +17,7 @@ from stardag_api.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from stardag_api.models.task import Task
-    from stardag_api.models.workspace import Workspace
+    from stardag_api.models.environment import Environment
 
 
 class TaskRegistryAsset(Base, TimestampMixin):
@@ -40,7 +40,7 @@ class TaskRegistryAsset(Base, TimestampMixin):
             name="uq_task_registry_asset_task_type_name",
         ),
         Index("ix_task_registry_assets_task_pk", "task_pk"),
-        Index("ix_task_registry_assets_workspace", "workspace_id"),
+        Index("ix_task_registry_assets_environment", "environment_id"),
     )
 
     # Auto-increment primary key
@@ -52,10 +52,10 @@ class TaskRegistryAsset(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Workspace for access control
-    workspace_id: Mapped[str] = mapped_column(
+    # Environment for access control
+    environment_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -78,4 +78,4 @@ class TaskRegistryAsset(Base, TimestampMixin):
 
     # Relationships
     task: Mapped[Task] = relationship(back_populates="registry_assets")
-    workspace: Mapped[Workspace] = relationship()
+    environment: Mapped[Environment] = relationship()

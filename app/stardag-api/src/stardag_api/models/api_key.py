@@ -12,13 +12,13 @@ from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
     from stardag_api.models.user import User
-    from stardag_api.models.workspace import Workspace
+    from stardag_api.models.environment import Environment
 
 
 class ApiKey(Base, TimestampMixin):
     """API key for SDK authentication.
 
-    Keys are scoped to a workspace. The actual key is hashed;
+    Keys are scoped to an environment. The actual key is hashed;
     only the prefix (first 8 chars) is stored for identification.
     The full key is shown once on creation and cannot be retrieved.
     """
@@ -30,9 +30,9 @@ class ApiKey(Base, TimestampMixin):
         primary_key=True,
         default=generate_uuid,
     )
-    workspace_id: Mapped[str] = mapped_column(
+    environment_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -63,7 +63,7 @@ class ApiKey(Base, TimestampMixin):
     )
 
     # Relationships
-    workspace: Mapped[Workspace] = relationship(back_populates="api_keys")
+    environment: Mapped[Environment] = relationship(back_populates="api_keys")
     created_by: Mapped[User | None] = relationship()
 
     @property

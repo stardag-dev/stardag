@@ -190,7 +190,7 @@ def authenticated_client(
         yield client
 
 
-# --- Organization/Workspace Fixtures ---
+# --- Organization/Environment Fixtures ---
 
 
 @pytest.fixture
@@ -264,38 +264,38 @@ def internal_authenticated_client(
 
 
 @pytest.fixture
-def test_workspace_id(
+def test_environment_id(
     internal_authenticated_client: httpx.Client,
     test_organization_id: str,
 ) -> str:
-    """Get or create a test workspace and return its ID."""
-    # List workspaces in the organization
+    """Get or create a test environment and return its ID."""
+    # List environments in the organization
     response = internal_authenticated_client.get(
-        f"/api/v1/ui/organizations/{test_organization_id}/workspaces"
+        f"/api/v1/ui/organizations/{test_organization_id}/environments"
     )
     if response.status_code != 200:
-        raise RuntimeError(f"Failed to list workspaces: {response.text}")
+        raise RuntimeError(f"Failed to list environments: {response.text}")
 
-    workspaces = response.json()
-    if workspaces:
-        workspace_id = workspaces[0]["id"]
-        logger.info("Using existing workspace: %s", workspace_id)
-        return workspace_id
+    environments = response.json()
+    if environments:
+        environment_id = environments[0]["id"]
+        logger.info("Using existing environment: %s", environment_id)
+        return environment_id
 
-    # Create a new workspace
+    # Create a new environment
     response = internal_authenticated_client.post(
-        f"/api/v1/ui/organizations/{test_organization_id}/workspaces",
+        f"/api/v1/ui/organizations/{test_organization_id}/environments",
         json={
-            "name": "Test Workspace",
-            "slug": "test-workspace",
+            "name": "Test Environment",
+            "slug": "test-environment",
         },
     )
     if response.status_code not in (200, 201):
-        raise RuntimeError(f"Failed to create workspace: {response.text}")
+        raise RuntimeError(f"Failed to create environment: {response.text}")
 
-    workspace_id = response.json()["id"]
-    logger.info("Created test workspace: %s", workspace_id)
-    return workspace_id
+    environment_id = response.json()["id"]
+    logger.info("Created test environment: %s", environment_id)
+    return environment_id
 
 
 # --- Unauthenticated Client ---

@@ -13,7 +13,7 @@ class RegistryAPIClientConfig:
     api_url: str
     api_key: str | None
     access_token: str | None
-    workspace_id: str | None
+    environment_id: str | None
     timeout: float
 
     @classmethod
@@ -21,7 +21,7 @@ class RegistryAPIClientConfig:
         cls,
         api_url: str | None = None,
         api_key: str | None = None,
-        workspace_id: str | None = None,
+        environment_id: str | None = None,
         timeout: float | None = None,
     ) -> "RegistryAPIClientConfig":
         """Create config from central config with optional overrides."""
@@ -37,7 +37,7 @@ class RegistryAPIClientConfig:
             api_url=(api_url or config.api.url).rstrip("/"),
             api_key=resolved_api_key,
             access_token=resolved_access_token,
-            workspace_id=workspace_id or config.context.workspace_id,
+            environment_id=environment_id or config.context.environment_id,
             timeout=timeout if timeout is not None else config.api.timeout,
         )
 

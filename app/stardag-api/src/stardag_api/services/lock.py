@@ -1,7 +1,7 @@
 """Distributed lock service for global task concurrency control.
 
 Implements lease-based distributed locks using PostgreSQL.
-Locks are scoped to workspace and identified by lock name (typically task_id).
+Locks are scoped to environment and identified by lock name (typically task_id).
 """
 
 from dataclasses import dataclass
@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import DistributedLock, Event, EventType, Task, Workspace
+from stardag_api.models import DistributedLock, Environment, Event, EventType, Task
 
 
 class LockAcquisitionStatus(StrEnum):
@@ -41,31 +41,31 @@ def _utc_now() -> datetime:
 
 async def check_task_completed_in_registry(
     db: AsyncSession,
-    workspace_id: str,
+    environment_id: str,
     task_id: str,
 ) -> bool:
     """Check if a task has a TASK_COMPLETED event in the registry.
 
-    Searches across all builds in the workspace for any completion event.
+    Searches across all builds in the environment for any completion event.
 
     Args:
         db: Database session
-        workspace_id: The workspace to search in
+        environment_id: The environment to search in
         task_id: The task_id (hash) to check
 
     Returns:
         True if the task has at least one TASK_COMPLETED event
     """
-    # First find the task by task_id in the workspace
+    # First find the task by task_id in the environment
     task_result = await db.execute(
         select(Task.id)
-        .where(Task.workspace_id == workspace_id)
+        .where(Task.environment_id == environment_id)
         .where(Task.task_id == task_id)
     )
     task_db_id = task_result.scalar_one_or_none()
 
     if task_db_id is None:
-        # Task not registered in workspace, so not completed
+        # Task not registered in environment, so not completed
         return False
 
     # Check for any TASK_COMPLETED event for this task
@@ -79,15 +79,15 @@ async def check_task_completed_in_registry(
     return count > 0
 
 
-async def get_workspace_lock_count(
+async def get_environment_lock_count(
     db: AsyncSession,
-    workspace_id: str,
+    environment_id: str,
 ) -> int:
-    """Get the count of active (non-expired) locks for a workspace.
+    """Get the count of active (non-expired) locks for an environment.
 
     Args:
         db: Database session
-        workspace_id: The workspace to count locks for
+        environment_id: The environment to count locks for
 
     Returns:
         Number of active locks
@@ -96,27 +96,27 @@ async def get_workspace_lock_count(
     result = await db.execute(
         select(func.count())
         .select_from(DistributedLock)
-        .where(DistributedLock.workspace_id == workspace_id)
+        .where(DistributedLock.environment_id == environment_id)
         .where(DistributedLock.expires_at > now)
     )
     return result.scalar() or 0
 
 
-async def get_workspace_max_concurrent_locks(
+async def get_environment_max_concurrent_locks(
     db: AsyncSession,
-    workspace_id: str,
+    environment_id: str,
 ) -> int | None:
-    """Get the max concurrent locks limit for a workspace.
+    """Get the max concurrent locks limit for an environment.
 
     Args:
         db: Database session
-        workspace_id: The workspace to check
+        environment_id: The environment to check
 
     Returns:
         Max concurrent locks limit, or None if unlimited
     """
     result = await db.execute(
-        select(Workspace.max_concurrent_locks).where(Workspace.id == workspace_id)
+        select(Environment.max_concurrent_locks).where(Environment.id == environment_id)
     )
     return result.scalar_one_or_none()
 
@@ -125,7 +125,7 @@ async def acquire_lock(
     db: AsyncSession,
     lock_name: str,
     owner_id: str,
-    workspace_id: str,
+    environment_id: str,
     ttl_seconds: int,
     check_task_completion: bool = True,
 ) -> LockAcquisitionResult:
@@ -141,7 +141,7 @@ async def acquire_lock(
         db: Database session
         lock_name: Unique lock identifier (typically task_id)
         owner_id: UUID identifying the lock owner (stable across retries)
-        workspace_id: The workspace scope for the lock
+        environment_id: The environment scope for the lock
         ttl_seconds: Time-to-live in seconds
         check_task_completion: Whether to check if task is already completed
 
@@ -154,7 +154,7 @@ async def acquire_lock(
     # First, check if task is already completed in registry
     if check_task_completion:
         is_completed = await check_task_completed_in_registry(
-            db, workspace_id, lock_name
+            db, environment_id, lock_name
         )
         if is_completed:
             return LockAcquisitionResult(
@@ -162,10 +162,10 @@ async def acquire_lock(
                 acquired=False,
             )
 
-    # Check workspace concurrency limit
-    max_locks = await get_workspace_max_concurrent_locks(db, workspace_id)
+    # Check environment concurrency limit
+    max_locks = await get_environment_max_concurrent_locks(db, environment_id)
     if max_locks is not None:
-        current_count = await get_workspace_lock_count(db, workspace_id)
+        current_count = await get_environment_lock_count(db, environment_id)
         # Only check limit if we don't already hold a lock for this name
         existing_lock_result = await db.execute(
             select(DistributedLock).where(DistributedLock.name == lock_name)
@@ -178,14 +178,14 @@ async def acquire_lock(
                 return LockAcquisitionResult(
                     status=LockAcquisitionStatus.CONCURRENCY_LIMIT_REACHED,
                     acquired=False,
-                    error_message=f"Workspace concurrency limit reached ({max_locks})",
+                    error_message=f"Environment concurrency limit reached ({max_locks})",
                 )
 
     # Attempt atomic upsert
     # PostgreSQL INSERT ... ON CONFLICT with conditional UPDATE
     stmt = pg_insert(DistributedLock).values(
         name=lock_name,
-        workspace_id=workspace_id,
+        environment_id=environment_id,
         owner_id=owner_id,
         acquired_at=now,
         expires_at=expires_at,
@@ -293,7 +293,7 @@ async def release_lock_with_completion(
     db: AsyncSession,
     lock_name: str,
     owner_id: str,
-    workspace_id: str,
+    environment_id: str,
     build_id: str,
 ) -> bool:
     """Release a lock and record task completion in the same transaction.
@@ -306,7 +306,7 @@ async def release_lock_with_completion(
         db: Database session
         lock_name: The lock to release (should be task_id)
         owner_id: The expected owner
-        workspace_id: The workspace scope
+        environment_id: The environment scope
         build_id: The build to record completion for
 
     Returns:
@@ -315,7 +315,7 @@ async def release_lock_with_completion(
     # Find the task by task_id
     task_result = await db.execute(
         select(Task.id)
-        .where(Task.workspace_id == workspace_id)
+        .where(Task.environment_id == environment_id)
         .where(Task.task_id == lock_name)
     )
     task_db_id = task_result.scalar_one_or_none()
@@ -362,20 +362,22 @@ async def get_lock(
 
 async def list_locks(
     db: AsyncSession,
-    workspace_id: str,
+    environment_id: str,
     include_expired: bool = False,
 ) -> list[DistributedLock]:
-    """List locks for a workspace.
+    """List locks for an environment.
 
     Args:
         db: Database session
-        workspace_id: The workspace to list locks for
+        environment_id: The environment to list locks for
         include_expired: Whether to include expired locks
 
     Returns:
         List of locks
     """
-    query = select(DistributedLock).where(DistributedLock.workspace_id == workspace_id)
+    query = select(DistributedLock).where(
+        DistributedLock.environment_id == environment_id
+    )
 
     if not include_expired:
         now = _utc_now()
@@ -389,7 +391,7 @@ async def list_locks(
 
 async def cleanup_expired_locks(
     db: AsyncSession,
-    workspace_id: str | None = None,
+    environment_id: str | None = None,
 ) -> int:
     """Clean up expired locks.
 
@@ -398,7 +400,7 @@ async def cleanup_expired_locks(
 
     Args:
         db: Database session
-        workspace_id: Optional workspace to limit cleanup to
+        environment_id: Optional environment to limit cleanup to
 
     Returns:
         Number of locks deleted
@@ -406,8 +408,8 @@ async def cleanup_expired_locks(
     now = _utc_now()
     stmt = delete(DistributedLock).where(DistributedLock.expires_at <= now)
 
-    if workspace_id is not None:
-        stmt = stmt.where(DistributedLock.workspace_id == workspace_id)
+    if environment_id is not None:
+        stmt = stmt.where(DistributedLock.environment_id == environment_id)
 
     stmt = stmt.returning(DistributedLock.name)
 

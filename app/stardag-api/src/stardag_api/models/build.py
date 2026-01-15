@@ -12,7 +12,7 @@ from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 if TYPE_CHECKING:
     from stardag_api.models.event import Event
     from stardag_api.models.user import User
-    from stardag_api.models.workspace import Workspace
+    from stardag_api.models.environment import Environment
 
 
 class Build(Base, TimestampMixin):
@@ -24,7 +24,7 @@ class Build(Base, TimestampMixin):
 
     __tablename__ = "builds"
     __table_args__ = (
-        Index("ix_builds_workspace_created", "workspace_id", "created_at"),
+        Index("ix_builds_environment_created", "environment_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -32,9 +32,9 @@ class Build(Base, TimestampMixin):
         primary_key=True,
         default=generate_uuid,
     )
-    workspace_id: Mapped[str] = mapped_column(
+    environment_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -62,7 +62,7 @@ class Build(Base, TimestampMixin):
     )
 
     # Relationships
-    workspace: Mapped[Workspace] = relationship(back_populates="builds")
+    environment: Mapped[Environment] = relationship(back_populates="builds")
     user: Mapped[User | None] = relationship(back_populates="builds")
     events: Mapped[list[Event]] = relationship(
         back_populates="build",

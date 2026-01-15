@@ -9,13 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import ApiKey
 
-# Key format: sk_<workspace_prefix>_<random_bytes>
+# Key format: sk_<environment_prefix>_<random_bytes>
 # Total length: ~40 characters
 KEY_PREFIX = "sk_"
 KEY_RANDOM_BYTES = 24  # 32 chars in base64
 
 
-def generate_api_key(workspace_id: str) -> tuple[str, str, str]:
+def generate_api_key(environment_id: str) -> tuple[str, str, str]:
     """Generate a new API key.
 
     Returns:
@@ -28,9 +28,9 @@ def generate_api_key(workspace_id: str) -> tuple[str, str, str]:
     random_part = secrets.token_urlsafe(KEY_RANDOM_BYTES)
 
     # Create the full key with prefix
-    # Use first 6 chars of workspace_id for namespacing
-    workspace_prefix = workspace_id[:6]
-    full_key = f"{KEY_PREFIX}{workspace_prefix}_{random_part}"
+    # Use first 6 chars of environment_id for namespacing
+    environment_prefix = environment_id[:6]
+    full_key = f"{KEY_PREFIX}{environment_prefix}_{random_part}"
 
     # Extract prefix for display (first 8 chars after sk_)
     key_prefix = full_key[3:11]  # Skip "sk_", take next 8 chars
@@ -59,15 +59,15 @@ def verify_api_key(full_key: str, key_hash: str) -> bool:
 
 async def create_api_key(
     db: AsyncSession,
-    workspace_id: str,
+    environment_id: str,
     name: str,
     created_by_id: str | None = None,
 ) -> tuple[ApiKey, str]:
-    """Create a new API key for a workspace.
+    """Create a new API key for an environment.
 
     Args:
         db: Database session
-        workspace_id: The workspace to create the key for
+        environment_id: The environment to create the key for
         name: Human-readable name for the key
         created_by_id: User ID of the creator (optional)
 
@@ -75,10 +75,10 @@ async def create_api_key(
         Tuple of (ApiKey model, full_key)
         The full_key is only returned once and should be shown to the user.
     """
-    full_key, key_prefix, key_hash = generate_api_key(workspace_id)
+    full_key, key_prefix, key_hash = generate_api_key(environment_id)
 
     api_key = ApiKey(
-        workspace_id=workspace_id,
+        environment_id=environment_id,
         name=name,
         key_prefix=key_prefix,
         key_hash=key_hash,
@@ -93,20 +93,20 @@ async def create_api_key(
 
 async def list_api_keys(
     db: AsyncSession,
-    workspace_id: str,
+    environment_id: str,
     include_revoked: bool = False,
 ) -> list[ApiKey]:
-    """List API keys for a workspace.
+    """List API keys for an environment.
 
     Args:
         db: Database session
-        workspace_id: The workspace to list keys for
+        environment_id: The environment to list keys for
         include_revoked: Whether to include revoked keys
 
     Returns:
         List of ApiKey models (without the actual key values)
     """
-    query = select(ApiKey).where(ApiKey.workspace_id == workspace_id)
+    query = select(ApiKey).where(ApiKey.environment_id == environment_id)
 
     if not include_revoked:
         query = query.where(ApiKey.revoked_at.is_(None))

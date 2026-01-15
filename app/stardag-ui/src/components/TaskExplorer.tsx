@@ -12,7 +12,7 @@ import {
   fetchBuildGraph,
   type AvailableColumnsResponse,
 } from "../api/tasks";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 import type { Task, TaskGraphResponse, TaskStatus } from "../types/task";
 import { truncateNestedKeyToWidth } from "../utils/truncateKey";
 import {
@@ -223,7 +223,7 @@ function formatFilterForInput(filter: FilterCondition): string {
 }
 
 export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
-  const { activeWorkspace } = useWorkspace();
+  const { activeEnvironment } = useEnvironment();
 
   // Search state
   const [filters, setFilters] = useState<FilterCondition[]>([]);
@@ -288,12 +288,12 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Load available keys for autocomplete
   useEffect(() => {
-    if (!activeWorkspace?.id) return;
+    if (!activeEnvironment?.id) return;
 
     const loadKeys = async () => {
       try {
         const params = new URLSearchParams({
-          workspace_id: activeWorkspace.id,
+          environment_id: activeEnvironment.id,
         });
         const response = await fetchWithAuth(`${API_V1}/tasks/search/keys?${params}`);
         if (response.ok) {
@@ -307,7 +307,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       }
     };
     loadKeys();
-  }, [activeWorkspace?.id]);
+  }, [activeEnvironment?.id]);
 
   // Re-compute autocomplete when keys load and there's already search text
   // This fixes a race condition where user types before keys are loaded
@@ -324,12 +324,12 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Load available columns for column manager
   useEffect(() => {
-    if (!activeWorkspace?.id) return;
+    if (!activeEnvironment?.id) return;
 
     const loadColumns = async () => {
       try {
         const data: AvailableColumnsResponse = await fetchAvailableColumns(
-          activeWorkspace.id,
+          activeEnvironment.id,
         );
 
         // Convert to AvailableColumn format
@@ -366,7 +366,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       }
     };
     loadColumns();
-  }, [activeWorkspace?.id]);
+  }, [activeEnvironment?.id]);
 
   // Column resize handlers
   const handleResizeStart = useCallback(
@@ -431,7 +431,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Search tasks - uses committedQuery (not live searchText) to avoid searching on every keystroke
   const searchTasks = useCallback(async () => {
-    if (!activeWorkspace?.id) {
+    if (!activeEnvironment?.id) {
       setTasks([]);
       return;
     }
@@ -441,7 +441,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
     try {
       const params = new URLSearchParams({
-        workspace_id: activeWorkspace.id,
+        environment_id: activeEnvironment.id,
         page: String(page),
         page_size: String(pageSize),
         sort: `${sortBy}:${sortDir}`,
@@ -479,7 +479,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       setLoading(false);
     }
   }, [
-    activeWorkspace?.id,
+    activeEnvironment?.id,
     filters,
     committedQuery,
     page,
@@ -532,7 +532,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Load DAG graph when expanded and there's a single build
   useEffect(() => {
-    if (!showDag || !dagBuildId || !activeWorkspace?.id) {
+    if (!showDag || !dagBuildId || !activeEnvironment?.id) {
       setDagGraph(null);
       return;
     }
@@ -540,7 +540,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     let cancelled = false;
     setDagLoading(true);
 
-    fetchBuildGraph(dagBuildId, activeWorkspace.id)
+    fetchBuildGraph(dagBuildId, activeEnvironment.id)
       .then((graph) => {
         if (!cancelled) {
           setDagGraph(graph);
@@ -561,7 +561,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     return () => {
       cancelled = true;
     };
-  }, [showDag, dagBuildId, activeWorkspace?.id]);
+  }, [showDag, dagBuildId, activeEnvironment?.id]);
 
   // Tasks with filter context for DAG view
   const tasksWithContext = useMemo(() => {
@@ -572,7 +572,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       return {
         id: node.id,
         task_id: node.task_id,
-        workspace_id: activeWorkspace?.id ?? "",
+        environment_id: activeEnvironment?.id ?? "",
         task_namespace: node.task_namespace,
         task_name: node.task_name,
         task_data: searchTask?.task_data ?? {},
@@ -586,7 +586,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         isFilterMatch: searchTaskIds.has(node.task_id),
       };
     });
-  }, [dagGraph, tasks, activeWorkspace?.id]);
+  }, [dagGraph, tasks, activeEnvironment?.id]);
 
   // Handle filter operations
   const addFilter = useCallback(
@@ -667,10 +667,10 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   // Fetch value suggestions from backend
   const fetchValueSuggestions = useCallback(
     async (key: string, prefix: string) => {
-      if (!activeWorkspace?.id) return;
+      if (!activeEnvironment?.id) return;
       try {
         const params = new URLSearchParams({
-          workspace_id: activeWorkspace.id,
+          environment_id: activeEnvironment.id,
           key,
           prefix,
           limit: "10",
@@ -686,7 +686,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         // Silently fail - autocomplete is optional
       }
     },
-    [activeWorkspace?.id],
+    [activeEnvironment?.id],
   );
 
   // Handle autocomplete input - determines which stage we're in
@@ -850,10 +850,10 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const totalPages = Math.ceil(total / pageSize);
   const visibleColumns = columns.filter((c) => c.visible);
 
-  if (!activeWorkspace) {
+  if (!activeEnvironment) {
     return (
       <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
-        <p>Select a workspace to explore tasks</p>
+        <p>Select an environment to explore tasks</p>
       </div>
     );
   }

@@ -1,4 +1,4 @@
-"""Tests for task endpoints (workspace-scoped queries)."""
+"""Tests for task endpoints (environment-scoped queries)."""
 
 import pytest
 from httpx import AsyncClient
