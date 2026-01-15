@@ -1,4 +1,4 @@
-"""Invite model for organization invitations."""
+"""Invite model for workspace invitations."""
 
 from __future__ import annotations
 
@@ -9,15 +9,15 @@ from sqlalchemy import DateTime, Enum, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid
-from stardag_api.models.enums import InviteStatus, OrganizationRole
+from stardag_api.models.enums import InviteStatus, WorkspaceRole
 
 if TYPE_CHECKING:
-    from stardag_api.models.organization import Organization
+    from stardag_api.models.workspace import Workspace
     from stardag_api.models.user import User
 
 
 class Invite(Base, TimestampMixin):
-    """Invitation to join an organization.
+    """Invitation to join a workspace.
 
     Invites are sent by email. The invited user doesn't need to exist yet.
     When a user signs up with the invited email, they can accept pending invites.
@@ -25,10 +25,10 @@ class Invite(Base, TimestampMixin):
 
     __tablename__ = "invites"
     __table_args__ = (
-        # Partial unique index: only one pending invite per org+email
+        # Partial unique index: only one pending invite per workspace+email
         Index(
-            "ix_invite_org_email_pending",
-            "organization_id",
+            "ix_invite_workspace_email_pending",
+            "workspace_id",
             "email",
             unique=True,
             postgresql_where="status = 'pending'",
@@ -40,9 +40,9 @@ class Invite(Base, TimestampMixin):
         primary_key=True,
         default=generate_uuid,
     )
-    organization_id: Mapped[str] = mapped_column(
+    workspace_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("organizations.id", ondelete="CASCADE"),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -51,10 +51,10 @@ class Invite(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    role: Mapped[OrganizationRole] = mapped_column(
-        Enum(OrganizationRole, values_callable=lambda e: [x.value for x in e]),
+    role: Mapped[WorkspaceRole] = mapped_column(
+        Enum(WorkspaceRole, values_callable=lambda e: [x.value for x in e]),
         nullable=False,
-        default=OrganizationRole.MEMBER,
+        default=WorkspaceRole.MEMBER,
     )
     status: Mapped[InviteStatus] = mapped_column(
         Enum(InviteStatus, values_callable=lambda e: [x.value for x in e]),
@@ -71,5 +71,5 @@ class Invite(Base, TimestampMixin):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Relationships
-    organization: Mapped[Organization] = relationship(back_populates="invites")
+    workspace: Mapped[Workspace] = relationship(back_populates="invites")
     invited_by: Mapped[User | None] = relationship()

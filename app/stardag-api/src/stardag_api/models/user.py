@@ -11,14 +11,14 @@ from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
     from stardag_api.models.build import Build
-    from stardag_api.models.organization_member import OrganizationMember
+    from stardag_api.models.workspace_member import WorkspaceMember
 
 
 class User(Base, TimestampMixin):
     """User entity.
 
     Users are created automatically on first OIDC login.
-    A user can belong to multiple organizations via OrganizationMember.
+    A user can belong to multiple workspaces via WorkspaceMember.
     """
 
     __tablename__ = "users"
@@ -44,7 +44,7 @@ class User(Base, TimestampMixin):
     display_name: Mapped[str | None] = mapped_column(String(255))
 
     # Relationships
-    memberships: Mapped[list[OrganizationMember]] = relationship(
+    memberships: Mapped[list[WorkspaceMember]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )

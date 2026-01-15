@@ -4,24 +4,24 @@ Usage:
     stardag auth login [-r registry] [--api-url url]
     stardag auth logout [-r registry]
     stardag auth status [-r registry]
-    stardag auth refresh [-r registry] [-o org]
+    stardag auth refresh [-r registry] [-w workspace]
 
     stardag config show
     stardag config registry add <name> --url <url>
     stardag config registry list
     stardag config registry remove <name>
-    stardag config profile add <name> -r <registry> -o <org> -w <workspace>
+    stardag config profile add <name> -r <registry> -w <workspace> -e <environment>
     stardag config profile list
     stardag config profile use <name>
     stardag config profile remove <name>
     stardag config target-roots list
     stardag config target-roots sync
-    stardag config list organizations
     stardag config list workspaces
+    stardag config list environments
 
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.
-    Set STARDAG_REGISTRY_URL, STARDAG_ORGANIZATION_ID, STARDAG_WORKSPACE_ID
+    Set STARDAG_REGISTRY_URL, STARDAG_WORKSPACE_ID, STARDAG_ENVIRONMENT_ID
     for direct configuration (bypasses profiles).
     Set STARDAG_API_KEY for API key authentication.
 """

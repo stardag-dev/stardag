@@ -3,16 +3,16 @@
 import enum
 
 
-class OrganizationRole(str, enum.Enum):
-    """Role of a user within an organization."""
+class WorkspaceRole(str, enum.Enum):
+    """Role of a user within a workspace."""
 
     OWNER = "owner"  # Full control, cannot be removed, can transfer ownership
-    ADMIN = "admin"  # Can manage members and workspaces
-    MEMBER = "member"  # Read/write access to workspaces
+    ADMIN = "admin"  # Can manage members and environments
+    MEMBER = "member"  # Read/write access to environments
 
 
 class InviteStatus(str, enum.Enum):
-    """Status of an organization invite."""
+    """Status of a workspace invite."""
 
     PENDING = "pending"
     ACCEPTED = "accepted"

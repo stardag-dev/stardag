@@ -17,7 +17,7 @@ from stardag.cli.credentials import (
     list_profiles,
     list_registries,
     remove_profile,
-    resolve_org_slug_to_id,
+    resolve_workspace_slug_to_id,
     resolve_environment_slug_to_id,
     set_default_profile,
     set_target_roots,
@@ -43,7 +43,9 @@ def _validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:
         raise typer.Exit(1)
 
 
-def _get_authenticated_client(registry: str | None = None, org_id: str | None = None):
+def _get_authenticated_client(
+    registry: str | None = None, workspace_id: str | None = None
+):
     """Get an authenticated HTTP client.
 
     Returns tuple of (client, api_url, access_token) or raises Exit if not authenticated.
@@ -57,12 +59,12 @@ def _get_authenticated_client(registry: str | None = None, org_id: str | None = 
         raise typer.Exit(1)
 
     # Validate active profile if we're going to use it
-    if not registry or not org_id:
+    if not registry or not workspace_id:
         _validate_active_profile_cli()
 
     config = get_config()
     registry_name = registry or config.context.registry_name
-    organization_id = org_id or config.context.organization_id
+    ws_id = workspace_id or config.context.workspace_id
 
     if not registry_name:
         typer.echo(
@@ -77,7 +79,7 @@ def _get_authenticated_client(registry: str | None = None, org_id: str | None = 
         raise typer.Exit(1)
 
     # Get access token from cache
-    access_token = get_access_token(registry_name, organization_id)
+    access_token = get_access_token(registry_name, ws_id)
     if not access_token:
         typer.echo(
             "Error: No access token. Run 'stardag auth refresh' or 'stardag auth login'.",
@@ -111,8 +113,8 @@ def show_config() -> None:
         typer.echo("  Profile: (none - using env vars or defaults)")
     typer.echo(f"  Registry: {config.context.registry_name or '(not set)'}")
     typer.echo(f"  API URL: {config.api.url}")
-    typer.echo(f"  Organization: {config.context.organization_id or '(not set)'}")
-    typer.echo(f"  Workspace: {config.context.environment_id or '(not set)'}")
+    typer.echo(f"  Workspace: {config.context.workspace_id or '(not set)'}")
+    typer.echo(f"  Environment: {config.context.environment_id or '(not set)'}")
 
     typer.echo("")
     typer.echo("Target Roots:")
@@ -144,8 +146,8 @@ def profile_add(
     name: str = typer.Argument(..., help="Profile name"),
     registry: str = typer.Option(..., "--registry", "-r", help="Registry name"),
     user: str = typer.Option(..., "--user", "-u", help="User email"),
-    organization: str = typer.Option(
-        ..., "--organization", "-o", help="Organization slug (or ID)"
+    workspace: str = typer.Option(
+        ..., "--workspace", "-w", help="Workspace slug (or ID)"
     ),
     environment: str = typer.Option(
         ..., "--environment", "-e", help="Environment slug (or ID)"
@@ -156,15 +158,15 @@ def profile_add(
 ) -> None:
     """Add or update a profile.
 
-    A profile defines the (registry, user, organization, environment) tuple
+    A profile defines the (registry, user, workspace, environment) tuple
     for easy switching between different contexts.
 
-    Organization and environment should be specified by slug for readability.
+    Workspace and environment should be specified by slug for readability.
     The IDs are resolved and cached automatically when authenticated.
 
     Examples:
-        stardag config profile add local-dev -r local -u me@example.com -o my-org -e development
-        stardag config profile add prod -r cloud -u me@work.com -o my-company -e production --default
+        stardag config profile add local-dev -r local -u me@example.com -w my-workspace -e development
+        stardag config profile add prod -r cloud -u me@work.com -w my-company -e production --default
     """
     # Verify registry exists
     registries = list_registries()
@@ -173,21 +175,23 @@ def profile_add(
         typer.echo("Add it with: stardag config registry add <name> --url <url>")
         raise typer.Exit(1)
 
-    # Resolve and cache organization slug -> ID
+    # Resolve and cache workspace slug -> ID
     # This validates the slug exists and populates the cache
-    org_id = resolve_org_slug_to_id(registry, organization, user)
-    if org_id is None:
+    workspace_id = resolve_workspace_slug_to_id(registry, workspace, user)
+    if workspace_id is None:
         typer.echo(
-            f"Error: Could not verify organization '{organization}'. "
+            f"Error: Could not verify workspace '{workspace}'. "
             "Run 'stardag auth login' first or check the slug.",
             err=True,
         )
         raise typer.Exit(1)
-    elif org_id != organization:
-        typer.echo(f"Verified organization '{organization}' (cached ID)")
+    elif workspace_id != workspace:
+        typer.echo(f"Verified workspace '{workspace}' (cached ID)")
 
     # Resolve and cache environment slug -> ID
-    environment_id = resolve_environment_slug_to_id(registry, org_id, environment, user)
+    environment_id = resolve_environment_slug_to_id(
+        registry, workspace_id, environment, user
+    )
     if environment_id is None:
         typer.echo(
             f"Error: Could not verify environment '{environment}'. "
@@ -199,7 +203,7 @@ def profile_add(
         typer.echo(f"Verified environment '{environment}' (cached ID)")
 
     # Store slugs in profile (not IDs) for readability
-    add_profile(name, registry, organization, environment, user)
+    add_profile(name, registry, workspace, environment, user)
     typer.echo(f"Profile '{name}' added.")
     typer.echo(f"  User: {user}")
 
@@ -209,7 +213,7 @@ def profile_add(
 
         # Auto-refresh access token
         typer.echo("Refreshing access token...")
-        token = ensure_access_token(registry, org_id, user)
+        token = ensure_access_token(registry, workspace_id, user)
         if token:
             typer.echo("Access token refreshed successfully.")
         else:
@@ -233,7 +237,7 @@ def profile_list() -> None:
         typer.echo("No profiles configured.")
         typer.echo("")
         typer.echo(
-            "Create one with: stardag config profile add <name> -r <registry> -o <org> -e <environment>"
+            "Create one with: stardag config profile add <name> -r <registry> -w <workspace> -e <environment>"
         )
         typer.echo("Or run: stardag auth login")
         return
@@ -245,7 +249,7 @@ def profile_list() -> None:
         typer.echo(f"  {name}{is_active}")
         typer.echo(f"    registry: {details['registry']}")
         typer.echo(f"    user: {details.get('user', '(not set)')}")
-        typer.echo(f"    organization: {details['organization']}")
+        typer.echo(f"    workspace: {details['workspace']}")
         typer.echo(f"    environment: {details['environment']}")
         typer.echo("")
 
@@ -294,7 +298,7 @@ def profile_use(
     profile = profiles[name]
     registry = profile["registry"]
     user = profile["user"]
-    org_slug = profile["organization"]
+    workspace_slug = profile["workspace"]
     environment_slug = profile["environment"]
 
     if not user:
@@ -305,21 +309,21 @@ def profile_use(
         )
         return
 
-    # Resolve org slug to ID (needed for token operations)
-    org_id = resolve_org_slug_to_id(registry, org_slug, user)
-    if org_id is None:
+    # Resolve workspace slug to ID (needed for token operations)
+    workspace_id = resolve_workspace_slug_to_id(registry, workspace_slug, user)
+    if workspace_id is None:
         typer.echo(
-            f"Warning: Could not resolve organization '{org_slug}'. "
+            f"Warning: Could not resolve workspace '{workspace_slug}'. "
             "Run 'stardag auth login' to authenticate.",
             err=True,
         )
         return
 
     # Also resolve environment to populate cache
-    resolve_environment_slug_to_id(registry, org_id, environment_slug, user)
+    resolve_environment_slug_to_id(registry, workspace_id, environment_slug, user)
 
     typer.echo("Refreshing access token...")
-    token = ensure_access_token(registry, org_id, user)
+    token = ensure_access_token(registry, workspace_id, user)
     if token:
         typer.echo("Access token refreshed successfully.")
     else:
@@ -363,12 +367,12 @@ def target_roots_sync() -> None:
     """
     _validate_active_profile_cli()
     config = get_config()
-    org_id = config.context.organization_id
+    workspace_id = config.context.workspace_id
     environment_id = config.context.environment_id
 
-    if not org_id:
+    if not workspace_id:
         typer.echo(
-            "Error: No organization set. Use a profile or set STARDAG_ORGANIZATION_ID.",
+            "Error: No workspace set. Use a profile or set STARDAG_WORKSPACE_ID.",
             err=True,
         )
         raise typer.Exit(1)
@@ -386,7 +390,7 @@ def target_roots_sync() -> None:
         typer.echo(f"Syncing target roots from {api_url}...")
 
         response = client.get(
-            f"{api_url}/api/v1/ui/organizations/{org_id}/environments/{environment_id}/target-roots"
+            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments/{environment_id}/target-roots"
         )
 
         if response.status_code != 200:
@@ -401,7 +405,7 @@ def target_roots_sync() -> None:
         set_target_roots(
             target_roots,
             registry_url=api_url,
-            organization_id=org_id,
+            workspace_id=workspace_id,
             environment_id=environment_id,
         )
 
@@ -427,9 +431,9 @@ list_app = typer.Typer(help="List available resources")
 app.add_typer(list_app, name="list")
 
 
-@list_app.command("organizations")
-def list_organizations() -> None:
-    """List organizations you have access to."""
+@list_app.command("workspaces")
+def list_workspaces() -> None:
+    """List workspaces you have access to."""
     client, api_url, _ = _get_authenticated_client()
 
     try:
@@ -442,7 +446,7 @@ def list_organizations() -> None:
             raise typer.Exit(1)
 
         data = response.json()
-        organizations = data.get("organizations", [])
+        workspaces = data.get("workspaces", [])
     except Exception as e:
         if isinstance(e, typer.Exit):
             raise
@@ -451,34 +455,32 @@ def list_organizations() -> None:
     finally:
         client.close()
 
-    if not organizations:
-        typer.echo("No organizations found.")
+    if not workspaces:
+        typer.echo("No workspaces found.")
         return
 
     config = get_config()
-    current_org = config.context.organization_id
+    current_workspace = config.context.workspace_id
 
-    typer.echo("Organizations:")
-    for org in organizations:
-        marker = " *" if org["id"] == current_org else ""
-        typer.echo(
-            f"  {org['id']}  {org['name']} ({org['slug']}) [{org['role']}]{marker}"
-        )
+    typer.echo("Workspaces:")
+    for ws in workspaces:
+        marker = " *" if ws["id"] == current_workspace else ""
+        typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}) [{ws['role']}]{marker}")
 
-    if current_org:
+    if current_workspace:
         typer.echo("")
-        typer.echo("* = active organization")
+        typer.echo("* = active workspace")
 
 
 @list_app.command("environments")
 def list_environments() -> None:
-    """List environments in the active organization."""
+    """List environments in the active workspace."""
     config = get_config()
-    org_id = config.context.organization_id
+    workspace_id = config.context.workspace_id
 
-    if not org_id:
+    if not workspace_id:
         typer.echo(
-            "Error: No organization set. Use a profile or set STARDAG_ORGANIZATION_ID.",
+            "Error: No workspace set. Use a profile or set STARDAG_WORKSPACE_ID.",
             err=True,
         )
         raise typer.Exit(1)
@@ -487,7 +489,7 @@ def list_environments() -> None:
 
     try:
         response = client.get(
-            f"{api_url}/api/v1/ui/organizations/{org_id}/environments"
+            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments"
         )
 
         if response.status_code != 200:
@@ -506,17 +508,17 @@ def list_environments() -> None:
         client.close()
 
     if not environments:
-        typer.echo(f"No environments found in organization {org_id}.")
+        typer.echo(f"No environments found in workspace {workspace_id}.")
         return
 
-    current_ws = config.context.environment_id
+    current_env = config.context.environment_id
 
-    typer.echo(f"Workspaces in organization {org_id}:")
-    for ws in environments:
-        marker = " *" if ws["id"] == current_ws else ""
-        personal = " (personal)" if ws.get("owner_id") else ""
-        typer.echo(f"  {ws['id']}  {ws['name']} ({ws['slug']}){personal}{marker}")
+    typer.echo(f"Environments in workspace {workspace_id}:")
+    for env in environments:
+        marker = " *" if env["id"] == current_env else ""
+        personal = " (personal)" if env.get("owner_id") else ""
+        typer.echo(f"  {env['id']}  {env['name']} ({env['slug']}){personal}{marker}")
 
-    if current_ws:
+    if current_env:
         typer.echo("")
         typer.echo("* = active environment")

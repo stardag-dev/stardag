@@ -1,4 +1,4 @@
-"""Organization model for multi-tenancy."""
+"""Workspace model for multi-tenancy."""
 
 from __future__ import annotations
 
@@ -11,22 +11,22 @@ from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 
 if TYPE_CHECKING:
     from stardag_api.models.invite import Invite
-    from stardag_api.models.organization_member import OrganizationMember
+    from stardag_api.models.workspace_member import WorkspaceMember
     from stardag_api.models.user import User
     from stardag_api.models.environment import Environment
 
 
-class Organization(Base, TimestampMixin):
+class Workspace(Base, TimestampMixin):
     """Multi-tenancy root entity.
 
-    Users belong to organizations via OrganizationMember with roles.
+    Users belong to workspaces via WorkspaceMember with roles.
     """
 
-    __tablename__ = "organizations"
+    __tablename__ = "workspaces"
 
     # Limits
-    MAX_ORGS_PER_USER = 3
-    MAX_ENVIRONMENTS_PER_ORG = 6
+    MAX_WORKSPACES_PER_USER = 3
+    MAX_ENVIRONMENTS_PER_WORKSPACE = 6
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -56,14 +56,14 @@ class Organization(Base, TimestampMixin):
     # Relationships
     created_by: Mapped[User | None] = relationship()
     environments: Mapped[list[Environment]] = relationship(
-        back_populates="organization",
+        back_populates="workspace",
         cascade="all, delete-orphan",
     )
-    members: Mapped[list[OrganizationMember]] = relationship(
-        back_populates="organization",
+    members: Mapped[list[WorkspaceMember]] = relationship(
+        back_populates="workspace",
         cascade="all, delete-orphan",
     )
     invites: Mapped[list[Invite]] = relationship(
-        back_populates="organization",
+        back_populates="workspace",
         cascade="all, delete-orphan",
     )

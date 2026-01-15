@@ -2,7 +2,7 @@
 
 Storage model:
 - Credentials (refresh tokens): ~/.stardag/credentials/{registry}__{user}.json
-- Access token cache: ~/.stardag/access-token-cache/{registry}__{user}__{org}.json
+- Access token cache: ~/.stardag/access-token-cache/{registry}__{user}__{workspace}.json
 - Config in ~/.stardag/config.toml (TOML format)
 - Target root cache in ~/.stardag/target-root-cache.json
 
@@ -20,7 +20,7 @@ from typing import TypedDict
 from stardag.config import (
     TomlConfig,
     _looks_like_uuid,
-    cache_org_id,
+    cache_workspace_id,
     cache_environment_id,
     get_access_token_cache_path,
     get_config,
@@ -153,7 +153,7 @@ def get_refresh_token(
     return creds.get("refresh_token")
 
 
-# --- Access Token Cache (short-lived, per registry+user+org) ---
+# --- Access Token Cache (short-lived, per registry+user+workspace) ---
 
 
 class AccessTokenCache(TypedDict, total=False):
@@ -164,19 +164,19 @@ class AccessTokenCache(TypedDict, total=False):
 
 
 def load_access_token_cache(
-    registry: str, org_id: str, user: str
+    registry: str, workspace_id: str, user: str
 ) -> AccessTokenCache | None:
     """Load access token from cache.
 
     Args:
         registry: Registry name.
-        org_id: Organization ID.
+        workspace_id: Workspace ID.
         user: User identifier (email).
 
     Returns:
         AccessTokenCache dict if file exists and token is valid, None otherwise.
     """
-    path = get_access_token_cache_path(registry, org_id, user)
+    path = get_access_token_cache_path(registry, workspace_id, user)
     if not path.exists():
         return None
 
@@ -197,7 +197,7 @@ def load_access_token_cache(
 
 def save_access_token_cache(
     registry: str,
-    org_id: str,
+    workspace_id: str,
     access_token: str,
     expires_in: int,
     user: str,
@@ -206,12 +206,12 @@ def save_access_token_cache(
 
     Args:
         registry: Registry name.
-        org_id: Organization ID.
+        workspace_id: Workspace ID.
         access_token: JWT access token.
         expires_in: Token TTL in seconds.
         user: User identifier (email).
     """
-    path = get_access_token_cache_path(registry, org_id, user)
+    path = get_access_token_cache_path(registry, workspace_id, user)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Calculate expiration time (subtract 30s buffer)
@@ -229,18 +229,18 @@ def save_access_token_cache(
     path.chmod(0o600)
 
 
-def clear_access_token_cache(registry: str, org_id: str, user: str) -> bool:
+def clear_access_token_cache(registry: str, workspace_id: str, user: str) -> bool:
     """Clear cached access token.
 
     Args:
         registry: Registry name.
-        org_id: Organization ID.
+        workspace_id: Workspace ID.
         user: User identifier (email).
 
     Returns:
         True if cache was cleared, False if no cache existed.
     """
-    path = get_access_token_cache_path(registry, org_id, user)
+    path = get_access_token_cache_path(registry, workspace_id, user)
     if path.exists():
         path.unlink()
         return True
@@ -249,29 +249,29 @@ def clear_access_token_cache(registry: str, org_id: str, user: str) -> bool:
 
 def get_access_token(
     registry: str | None = None,
-    org_id: str | None = None,
+    workspace_id: str | None = None,
     user: str | None = None,
 ) -> str | None:
     """Get a valid access token, loading from cache.
 
     Args:
         registry: Registry name. If None, uses active registry.
-        org_id: Organization ID. If None, uses active org.
+        workspace_id: Workspace ID. If None, uses active workspace.
         user: User identifier (email). If None, uses user from active profile.
 
     Returns:
         Access token if available and valid, None otherwise.
     """
-    if registry is None or org_id is None or user is None:
+    if registry is None or workspace_id is None or user is None:
         config = get_config()
         registry = registry or config.context.registry_name
-        org_id = org_id or config.context.organization_id
+        workspace_id = workspace_id or config.context.workspace_id
         user = user or config.context.user
 
-    if not registry or not org_id or not user:
+    if not registry or not workspace_id or not user:
         return None
 
-    cache = load_access_token_cache(registry, org_id, user)
+    cache = load_access_token_cache(registry, workspace_id, user)
     if cache:
         return cache.get("access_token")
 
@@ -302,7 +302,7 @@ def save_toml_config(config: TomlConfig) -> None:
         for name, prof in config.profile.items():
             profile_dict: dict[str, str] = {
                 "registry": prof.registry,
-                "organization": prof.organization,
+                "workspace": prof.workspace,
                 "environment": prof.environment,
             }
             # Only include user if set (backward compatible)
@@ -375,7 +375,7 @@ def list_registries() -> dict[str, str]:
 def add_profile(
     name: str,
     registry: str,
-    organization: str,
+    workspace: str,
     environment: str,
     user: str | None = None,
 ) -> None:
@@ -384,8 +384,8 @@ def add_profile(
     Args:
         name: Profile name.
         registry: Registry name.
-        organization: Organization ID or slug.
-        environment: Workspace ID or slug.
+        workspace: Workspace ID or slug.
+        environment: Environment ID or slug.
         user: User identifier (email). Optional for multi-user support.
     """
     config = load_toml_config()
@@ -394,7 +394,7 @@ def add_profile(
     config.profile[name] = ProfileConfig(
         registry=registry,
         user=user,
-        organization=organization,
+        workspace=workspace,
         environment=environment,
     )
     save_toml_config(config)
@@ -422,7 +422,7 @@ class ProfileDetails(TypedDict):
 
     registry: str
     user: str | None
-    organization: str
+    workspace: str
     environment: str
 
 
@@ -437,7 +437,7 @@ def list_profiles() -> dict[str, ProfileDetails]:
         name: ProfileDetails(
             registry=prof.registry,
             user=prof.user,
-            organization=prof.organization,
+            workspace=prof.workspace,
             environment=prof.environment,
         )
         for name, prof in config.profile.items()
@@ -476,7 +476,7 @@ def get_active_profile() -> tuple[str | None, str | None]:
 
 def find_matching_profile(
     registry: str,
-    organization: str,
+    workspace: str,
     environment: str,
     user: str | None = None,
 ) -> str | None:
@@ -484,8 +484,8 @@ def find_matching_profile(
 
     Args:
         registry: Registry name.
-        organization: Organization slug/ID.
-        environment: Workspace slug/ID.
+        workspace: Workspace slug/ID.
+        environment: Environment slug/ID.
         user: User identifier (email). If provided, matches profiles with same user.
             If None, matches profiles with no user set.
 
@@ -497,7 +497,7 @@ def find_matching_profile(
         if (
             details["registry"] == registry
             and details["user"] == user
-            and details["organization"] == organization
+            and details["workspace"] == workspace
             and details["environment"] == environment
         ):
             return name
@@ -582,36 +582,36 @@ def set_default_profile(profile: str) -> None:
 
 def get_target_roots(
     registry_url: str | None = None,
-    organization_id: str | None = None,
+    workspace_id: str | None = None,
     environment_id: str | None = None,
 ) -> dict[str, str]:
     """Get target roots from cache.
 
     Args:
         registry_url: Registry URL. If None, uses active config.
-        organization_id: Organization ID. If None, uses active config.
-        environment_id: Workspace ID. If None, uses active config.
+        workspace_id: Workspace ID. If None, uses active config.
+        environment_id: Environment ID. If None, uses active config.
 
     Returns:
         Dict of target root name to URI prefix.
     """
     config = get_config()
     registry_url = registry_url or config.api.url
-    organization_id = organization_id or config.context.organization_id
+    workspace_id = workspace_id or config.context.workspace_id
     environment_id = environment_id or config.context.environment_id
 
-    if not registry_url or not organization_id or not environment_id:
+    if not registry_url or not workspace_id or not environment_id:
         return {}
 
     from stardag.config import get_cached_target_roots
 
-    return get_cached_target_roots(registry_url, organization_id, environment_id) or {}
+    return get_cached_target_roots(registry_url, workspace_id, environment_id) or {}
 
 
 def set_target_roots(
     target_roots: dict[str, str],
     registry_url: str | None = None,
-    organization_id: str | None = None,
+    workspace_id: str | None = None,
     environment_id: str | None = None,
 ) -> None:
     """Update target roots in cache.
@@ -619,22 +619,20 @@ def set_target_roots(
     Args:
         target_roots: Dict of target root name to URI prefix.
         registry_url: Registry URL. If None, uses active config.
-        organization_id: Organization ID. If None, uses active config.
-        environment_id: Workspace ID. If None, uses active config.
+        workspace_id: Workspace ID. If None, uses active config.
+        environment_id: Environment ID. If None, uses active config.
     """
     config = get_config()
     registry_url = registry_url or config.api.url
-    organization_id = organization_id or config.context.organization_id
+    workspace_id = workspace_id or config.context.workspace_id
     environment_id = environment_id or config.context.environment_id
 
-    if not registry_url or not organization_id or not environment_id:
-        raise ValueError(
-            "Registry URL, organization ID, and environment ID are required"
-        )
+    if not registry_url or not workspace_id or not environment_id:
+        raise ValueError("Registry URL, workspace ID, and environment ID are required")
 
     update_cached_target_roots(
         registry_url,
-        organization_id,
+        workspace_id,
         environment_id,
         target_roots,
     )
@@ -690,9 +688,9 @@ def _refresh_oidc_token(
 def _exchange_for_internal_token(
     api_url: str,
     oidc_token: str,
-    org_id: str,
+    workspace_id: str,
 ) -> dict:
-    """Exchange OIDC token for internal org-scoped token.
+    """Exchange OIDC token for internal workspace-scoped token.
 
     Returns dict with access_token and expires_in.
     Raises httpx.HTTPStatusError on failure.
@@ -705,15 +703,15 @@ def _exchange_for_internal_token(
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{api_url}/api/v1/auth/exchange",
-            json={"org_id": org_id},
+            json={"workspace_id": workspace_id},
             headers={"Authorization": f"Bearer {oidc_token}"},
         )
         response.raise_for_status()
         return response.json()
 
 
-def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
-    """Fetch user's organizations from API using OIDC token."""
+def _get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
+    """Fetch user's workspaces from API using OIDC token."""
     try:
         import httpx
     except ImportError:
@@ -727,14 +725,14 @@ def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
             )
             if response.status_code == 200:
                 data = response.json()
-                return data.get("organizations", [])
+                return data.get("workspaces", [])
     except Exception:
         pass
     return []
 
 
-def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict]:
-    """Fetch environments for an organization using internal token."""
+def _get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
+    """Fetch environments for a workspace using internal token."""
     try:
         import httpx
     except ImportError:
@@ -743,7 +741,7 @@ def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"{api_url}/api/v1/ui/organizations/{org_id}/environments",
+                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if response.status_code == 200:
@@ -755,7 +753,7 @@ def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict
 
 def ensure_access_token(
     registry: str,
-    org_id: str,
+    workspace_id: str,
     user: str,
     quiet: bool = False,
 ) -> str | None:
@@ -763,7 +761,7 @@ def ensure_access_token(
 
     Args:
         registry: Registry name.
-        org_id: Organization ID.
+        workspace_id: Workspace ID.
         user: User identifier (email).
         quiet: If True, suppress warning messages.
 
@@ -771,7 +769,7 @@ def ensure_access_token(
         Access token if available/refreshed successfully, None otherwise.
     """
     # Check for cached valid token first
-    cached = load_access_token_cache(registry, org_id, user)
+    cached = load_access_token_cache(registry, workspace_id, user)
     if cached:
         cached_token = cached.get("access_token")
         if cached_token:
@@ -810,12 +808,14 @@ def ensure_access_token(
             return None
 
         # Exchange for internal token
-        internal_tokens = _exchange_for_internal_token(registry_url, oidc_token, org_id)
+        internal_tokens = _exchange_for_internal_token(
+            registry_url, oidc_token, workspace_id
+        )
         access_token = internal_tokens["access_token"]
         expires_in = internal_tokens.get("expires_in", 600)
 
         # Cache it
-        save_access_token_cache(registry, org_id, access_token, expires_in, user)
+        save_access_token_cache(registry, workspace_id, access_token, expires_in, user)
 
         return access_token
 
@@ -823,30 +823,30 @@ def ensure_access_token(
         return None
 
 
-def resolve_org_slug_to_id(
+def resolve_workspace_slug_to_id(
     registry: str,
-    org_slug_or_id: str,
+    workspace_slug_or_id: str,
     user: str | None = None,
     oidc_token: str | None = None,
 ) -> str | None:
-    """Resolve an organization slug to its ID.
+    """Resolve a workspace slug to its ID.
 
     Args:
         registry: Registry name.
-        org_slug_or_id: Organization slug or ID.
+        workspace_slug_or_id: Workspace slug or ID.
         user: User identifier (email). Required if oidc_token not provided.
         oidc_token: Optional OIDC token. If not provided, will try to refresh.
 
     Returns:
-        Organization ID if found, None otherwise.
+        Workspace ID if found, None otherwise.
         If input looks like a UUID, returns it unchanged.
 
     Side effects:
-        Populates the ID cache with all discovered org mappings.
+        Populates the ID cache with all discovered workspace mappings.
     """
     # If it looks like a UUID, assume it's already an ID
-    if _looks_like_uuid(org_slug_or_id):
-        return org_slug_or_id
+    if _looks_like_uuid(workspace_slug_or_id):
+        return workspace_slug_or_id
 
     # Need to resolve slug - get OIDC token if not provided
     if not oidc_token:
@@ -861,25 +861,25 @@ def resolve_org_slug_to_id(
     if not registry_url:
         return None
 
-    # Fetch organizations and find matching slug
-    orgs = _get_user_organizations(registry_url, oidc_token)
+    # Fetch workspaces and find matching slug
+    workspaces = _get_user_workspaces(registry_url, oidc_token)
     result = None
-    for org in orgs:
-        org_id = org.get("id")
-        org_slug = org.get("slug")
-        # Cache all discovered orgs
-        if org_id and org_slug:
-            cache_org_id(registry, org_slug, org_id)
+    for ws in workspaces:
+        ws_id = ws.get("id")
+        ws_slug = ws.get("slug")
+        # Cache all discovered workspaces
+        if ws_id and ws_slug:
+            cache_workspace_id(registry, ws_slug, ws_id)
         # Check if this is the one we're looking for
-        if org_slug == org_slug_or_id or org_id == org_slug_or_id:
-            result = org_id
+        if ws_slug == workspace_slug_or_id or ws_id == workspace_slug_or_id:
+            result = ws_id
 
     return result
 
 
 def resolve_environment_slug_to_id(
     registry: str,
-    org_id: str,
+    workspace_id: str,
     environment_slug_or_id: str,
     user: str | None = None,
     access_token: str | None = None,
@@ -888,13 +888,13 @@ def resolve_environment_slug_to_id(
 
     Args:
         registry: Registry name.
-        org_id: Organization ID (must be resolved already).
-        environment_slug_or_id: Workspace slug or ID.
+        workspace_id: Workspace ID (must be resolved already).
+        environment_slug_or_id: Environment slug or ID.
         user: User identifier (email). Required if access_token not provided.
         access_token: Optional internal access token. If not provided, will try to get one.
 
     Returns:
-        Workspace ID if found, None otherwise.
+        Environment ID if found, None otherwise.
         If input looks like a UUID, returns it unchanged.
 
     Side effects:
@@ -908,7 +908,7 @@ def resolve_environment_slug_to_id(
     if not access_token:
         if not user:
             return None
-        access_token = ensure_access_token(registry, org_id, user, quiet=True)
+        access_token = ensure_access_token(registry, workspace_id, user, quiet=True)
         if not access_token:
             return None
 
@@ -918,17 +918,17 @@ def resolve_environment_slug_to_id(
         return None
 
     # Fetch environments and find matching slug
-    environments = _get_environments(registry_url, access_token, org_id)
+    environments = _get_environments(registry_url, access_token, workspace_id)
     result = None
-    for ws in environments:
-        ws_id = ws.get("id")
-        ws_slug = ws.get("slug")
+    for env in environments:
+        env_id = env.get("id")
+        env_slug = env.get("slug")
         # Cache all discovered environments
-        if ws_id and ws_slug:
-            cache_environment_id(registry, org_id, ws_slug, ws_id)
+        if env_id and env_slug:
+            cache_environment_id(registry, workspace_id, env_slug, env_id)
         # Check if this is the one we're looking for
-        if ws_slug == environment_slug_or_id or ws_id == environment_slug_or_id:
-            result = ws_id
+        if env_slug == environment_slug_or_id or env_id == environment_slug_or_id:
+            result = env_id
 
     return result
 

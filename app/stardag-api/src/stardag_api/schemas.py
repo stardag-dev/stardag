@@ -7,19 +7,19 @@ from pydantic import BaseModel, ConfigDict
 from stardag_api.models.enums import BuildStatus, EventType, TaskStatus
 
 
-# --- Organization Schemas ---
+# --- Workspace Schemas ---
 
 
-class OrganizationCreate(BaseModel):
-    """Schema for creating an organization."""
+class WorkspaceCreate(BaseModel):
+    """Schema for creating a workspace."""
 
     name: str
     slug: str
     description: str | None = None
 
 
-class OrganizationResponse(BaseModel):
-    """Schema for organization response."""
+class WorkspaceResponse(BaseModel):
+    """Schema for workspace response."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -47,7 +47,7 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    organization_id: str
+    workspace_id: str
     username: str
     display_name: str | None
     email: str | None
@@ -71,7 +71,7 @@ class EnvironmentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    organization_id: str
+    workspace_id: str
     name: str
     slug: str
     description: str | None

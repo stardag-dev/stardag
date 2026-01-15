@@ -3,11 +3,11 @@
 This module provides authentication dependencies for the Stardag API.
 
 Token types:
-- Internal tokens: Org-scoped JWTs minted by /auth/exchange. Required for most
+- Internal tokens: Workspace-scoped JWTs minted by /auth/exchange. Required for most
   endpoints.
 - OIDC tokens: External JWTs from the OIDC provider. Accepted by:
   - /auth/exchange (to mint internal tokens)
-  - /ui/me, /ui/me/invites (bootstrap endpoints before org selection)
+  - /ui/me, /ui/me/invites (bootstrap endpoints before workspace selection)
 - API keys: Environment-scoped keys for SDK/automation. Alternative to JWTs.
 """
 
@@ -156,33 +156,33 @@ async def get_current_user_optional(
     return user
 
 
-def get_org_id_from_token(
+def get_workspace_id_from_token(
     token: Annotated[InternalTokenPayload, Depends(get_token)],
 ) -> str:
-    """Get the organization ID from the internal token.
+    """Get the workspace ID from the internal token.
 
-    Internal tokens always have org_id - it's required.
+    Internal tokens always have workspace_id - it's required.
     """
-    return token.org_id
+    return token.workspace_id
 
 
 async def verify_environment_access(
     db: AsyncSession,
     environment_id: str,
-    token_org_id: str,
+    token_workspace_id: str,
 ) -> Environment:
-    """Verify environment exists and belongs to the token's organization.
+    """Verify environment exists and belongs to the token's workspace.
 
     Args:
         db: Database session
         environment_id: Environment to verify
-        token_org_id: Organization ID from the token (must match environment's org)
+        token_workspace_id: Workspace ID from the token (must match environment's workspace)
 
     Returns:
         The environment if valid
 
     Raises:
-        HTTPException: 404 if environment not found, 403 if org mismatch
+        HTTPException: 404 if environment not found, 403 if workspace mismatch
     """
     # Get the environment
     environment = await db.get(Environment, environment_id)
@@ -192,11 +192,11 @@ async def verify_environment_access(
             detail="Environment not found",
         )
 
-    # Verify environment belongs to the token's organization
-    if environment.organization_id != token_org_id:
+    # Verify environment belongs to the token's workspace
+    if environment.workspace_id != token_workspace_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Environment does not belong to your organization",
+            detail="Environment does not belong to your workspace",
         )
 
     return environment
@@ -274,7 +274,7 @@ class SdkAuth:
     """
 
     environment: Environment
-    org_id: str  # Organization ID (from token or API key's environment)
+    workspace_id: str  # Workspace ID (from token or API key's environment)
     api_key: ApiKey | None = None
     user: User | None = None
 
@@ -303,7 +303,7 @@ async def get_sdk_auth(
     if api_key_auth is not None:
         return SdkAuth(
             environment=api_key_auth.environment,
-            org_id=api_key_auth.environment.organization_id,
+            workspace_id=api_key_auth.environment.workspace_id,
             api_key=api_key_auth.api_key,
         )
 
@@ -323,12 +323,14 @@ async def get_sdk_auth(
                 detail="environment_id is required when using JWT authentication",
             )
 
-        # Verify environment belongs to the token's organization
-        environment = await verify_environment_access(db, environment_id, token.org_id)
+        # Verify environment belongs to the token's workspace
+        environment = await verify_environment_access(
+            db, environment_id, token.workspace_id
+        )
 
         return SdkAuth(
             environment=environment,
-            org_id=token.org_id,
+            workspace_id=token.workspace_id,
             user=user,
         )
 
@@ -360,7 +362,7 @@ async def get_oidc_token(
     """Get and validate OIDC JWT token (required).
 
     Used for bootstrap endpoints that need to work before the user has
-    selected an organization (e.g., /ui/me, /ui/me/invites).
+    selected a workspace (e.g., /ui/me, /ui/me/invites).
 
     Raises HTTPException if no token provided or token is invalid.
     """

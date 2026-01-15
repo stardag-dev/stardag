@@ -5,19 +5,19 @@ const API_BASE = API_V1_UI;
 
 // --- Types ---
 
-export interface Organization {
+export interface Workspace {
   id: string;
   name: string;
   slug: string;
   description: string | null;
 }
 
-export interface OrganizationDetail extends Organization {
+export interface WorkspaceDetail extends Workspace {
   member_count: number;
   environment_count: number;
 }
 
-export interface OrganizationSummary {
+export interface WorkspaceSummary {
   id: string;
   name: string;
   slug: string;
@@ -31,12 +31,12 @@ export interface UserProfile {
     email: string;
     display_name: string | null;
   };
-  organizations: OrganizationSummary[];
+  workspaces: WorkspaceSummary[];
 }
 
 export interface Environment {
   id: string;
-  organization_id: string;
+  workspace_id: string;
   name: string;
   slug: string;
   description: string | null;
@@ -61,8 +61,8 @@ export interface Invite {
 
 export interface PendingInvite {
   id: string;
-  organization_id: string;
-  organization_name: string;
+  workspace_id: string;
+  workspace_name: string;
   role: "owner" | "admin" | "member";
   invited_by_email: string | null;
 }
@@ -85,62 +85,62 @@ export async function fetchPendingInvites(): Promise<PendingInvite[]> {
   return response.json();
 }
 
-// --- Organizations ---
+// --- Workspaces ---
 
-export async function createOrganization(data: {
+export async function createWorkspace(data: {
   name: string;
   slug: string;
   description?: string;
-}): Promise<Organization> {
-  const response = await fetchWithAuth(`${API_BASE}/organizations`, {
+}): Promise<Workspace> {
+  const response = await fetchWithAuth(`${API_BASE}/workspaces`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || `Failed to create organization`);
+    throw new Error(error.detail || `Failed to create workspace`);
   }
   return response.json();
 }
 
-export async function fetchOrganization(orgId: string): Promise<OrganizationDetail> {
-  const response = await fetchWithAuth(`${API_BASE}/organizations/${orgId}`);
+export async function fetchWorkspace(workspaceId: string): Promise<WorkspaceDetail> {
+  const response = await fetchWithAuth(`${API_BASE}/workspaces/${workspaceId}`);
   if (!response.ok) {
-    throw new Error(`Failed to fetch organization: ${response.statusText}`);
+    throw new Error(`Failed to fetch workspace: ${response.statusText}`);
   }
   return response.json();
 }
 
-export async function updateOrganization(
-  orgId: string,
+export async function updateWorkspace(
+  workspaceId: string,
   data: { name?: string; description?: string },
-): Promise<Organization> {
-  const response = await fetchWithAuth(`${API_BASE}/organizations/${orgId}`, {
+): Promise<Workspace> {
+  const response = await fetchWithAuth(`${API_BASE}/workspaces/${workspaceId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   if (!response.ok) {
-    throw new Error(`Failed to update organization: ${response.statusText}`);
+    throw new Error(`Failed to update workspace: ${response.statusText}`);
   }
   return response.json();
 }
 
-export async function deleteOrganization(orgId: string): Promise<void> {
-  const response = await fetchWithAuth(`${API_BASE}/organizations/${orgId}`, {
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+  const response = await fetchWithAuth(`${API_BASE}/workspaces/${workspaceId}`, {
     method: "DELETE",
   });
   if (!response.ok) {
-    throw new Error(`Failed to delete organization: ${response.statusText}`);
+    throw new Error(`Failed to delete workspace: ${response.statusText}`);
   }
 }
 
 // --- Environments ---
 
-export async function fetchEnvironments(orgId: string): Promise<Environment[]> {
+export async function fetchEnvironments(workspaceId: string): Promise<Environment[]> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments`,
+    `${API_BASE}/workspaces/${workspaceId}/environments`,
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch environments: ${response.statusText}`);
@@ -149,11 +149,11 @@ export async function fetchEnvironments(orgId: string): Promise<Environment[]> {
 }
 
 export async function createEnvironment(
-  orgId: string,
+  workspaceId: string,
   data: { name: string; slug: string; description?: string },
 ): Promise<Environment> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments`,
+    `${API_BASE}/workspaces/${workspaceId}/environments`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -168,12 +168,12 @@ export async function createEnvironment(
 }
 
 export async function updateEnvironment(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
   data: { name?: string; description?: string },
 ): Promise<Environment> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -187,11 +187,11 @@ export async function updateEnvironment(
 }
 
 export async function deleteEnvironment(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
 ): Promise<void> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}`,
     { method: "DELETE" },
   );
   if (!response.ok) {
@@ -202,8 +202,8 @@ export async function deleteEnvironment(
 
 // --- Members ---
 
-export async function fetchMembers(orgId: string): Promise<Member[]> {
-  const response = await fetchWithAuth(`${API_BASE}/organizations/${orgId}/members`);
+export async function fetchMembers(workspaceId: string): Promise<Member[]> {
+  const response = await fetchWithAuth(`${API_BASE}/workspaces/${workspaceId}/members`);
   if (!response.ok) {
     throw new Error(`Failed to fetch members: ${response.statusText}`);
   }
@@ -211,12 +211,12 @@ export async function fetchMembers(orgId: string): Promise<Member[]> {
 }
 
 export async function updateMemberRole(
-  orgId: string,
+  workspaceId: string,
   memberId: string,
   role: "owner" | "admin" | "member",
 ): Promise<Member> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/members/${memberId}`,
+    `${API_BASE}/workspaces/${workspaceId}/members/${memberId}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -230,9 +230,12 @@ export async function updateMemberRole(
   return response.json();
 }
 
-export async function removeMember(orgId: string, memberId: string): Promise<void> {
+export async function removeMember(
+  workspaceId: string,
+  memberId: string,
+): Promise<void> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/members/${memberId}`,
+    `${API_BASE}/workspaces/${workspaceId}/members/${memberId}`,
     { method: "DELETE" },
   );
   if (!response.ok) {
@@ -243,8 +246,8 @@ export async function removeMember(orgId: string, memberId: string): Promise<voi
 
 // --- Invites ---
 
-export async function fetchInvites(orgId: string): Promise<Invite[]> {
-  const response = await fetchWithAuth(`${API_BASE}/organizations/${orgId}/invites`);
+export async function fetchInvites(workspaceId: string): Promise<Invite[]> {
+  const response = await fetchWithAuth(`${API_BASE}/workspaces/${workspaceId}/invites`);
   if (!response.ok) {
     throw new Error(`Failed to fetch invites: ${response.statusText}`);
   }
@@ -252,14 +255,17 @@ export async function fetchInvites(orgId: string): Promise<Invite[]> {
 }
 
 export async function createInvite(
-  orgId: string,
+  workspaceId: string,
   data: { email: string; role: "admin" | "member" },
 ): Promise<Invite> {
-  const response = await fetchWithAuth(`${API_BASE}/organizations/${orgId}/invites`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
+  const response = await fetchWithAuth(
+    `${API_BASE}/workspaces/${workspaceId}/invites`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    },
+  );
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
     throw new Error(error.detail || `Failed to create invite`);
@@ -267,9 +273,12 @@ export async function createInvite(
   return response.json();
 }
 
-export async function cancelInvite(orgId: string, inviteId: string): Promise<void> {
+export async function cancelInvite(
+  workspaceId: string,
+  inviteId: string,
+): Promise<void> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/invites/${inviteId}`,
+    `${API_BASE}/workspaces/${workspaceId}/invites/${inviteId}`,
     { method: "DELETE" },
   );
   if (!response.ok) {
@@ -277,9 +286,9 @@ export async function cancelInvite(orgId: string, inviteId: string): Promise<voi
   }
 }
 
-export async function acceptInvite(inviteId: string): Promise<Organization> {
+export async function acceptInvite(inviteId: string): Promise<Workspace> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/invites/${inviteId}/accept`,
+    `${API_BASE}/workspaces/invites/${inviteId}/accept`,
     {
       method: "POST",
     },
@@ -292,7 +301,7 @@ export async function acceptInvite(inviteId: string): Promise<Organization> {
 
 export async function declineInvite(inviteId: string): Promise<void> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/invites/${inviteId}/decline`,
+    `${API_BASE}/workspaces/invites/${inviteId}/decline`,
     {
       method: "POST",
     },
@@ -320,7 +329,7 @@ export interface ApiKeyCreateResponse extends ApiKey {
 }
 
 export async function fetchApiKeys(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
   includeRevoked = false,
 ): Promise<ApiKey[]> {
@@ -329,7 +338,7 @@ export async function fetchApiKeys(
     params.append("include_revoked", "true");
   }
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}/api-keys?${params}`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}/api-keys?${params}`,
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch API keys: ${response.statusText}`);
@@ -338,12 +347,12 @@ export async function fetchApiKeys(
 }
 
 export async function createApiKey(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
   name: string,
 ): Promise<ApiKeyCreateResponse> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}/api-keys`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}/api-keys`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -358,12 +367,12 @@ export async function createApiKey(
 }
 
 export async function revokeApiKey(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
   keyId: string,
 ): Promise<void> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}/api-keys/${keyId}`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}/api-keys/${keyId}`,
     { method: "DELETE" },
   );
   if (!response.ok) {
@@ -383,11 +392,11 @@ export interface TargetRoot {
 }
 
 export async function fetchTargetRoots(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
 ): Promise<TargetRoot[]> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}/target-roots`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}/target-roots`,
   );
   if (!response.ok) {
     throw new Error(`Failed to fetch target roots: ${response.statusText}`);
@@ -396,12 +405,12 @@ export async function fetchTargetRoots(
 }
 
 export async function createTargetRoot(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
   data: { name: string; uri_prefix: string },
 ): Promise<TargetRoot> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}/target-roots`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}/target-roots`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -416,13 +425,13 @@ export async function createTargetRoot(
 }
 
 export async function updateTargetRoot(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
   rootId: string,
   data: { name?: string; uri_prefix?: string },
 ): Promise<TargetRoot> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}/target-roots/${rootId}`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}/target-roots/${rootId}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -437,12 +446,12 @@ export async function updateTargetRoot(
 }
 
 export async function deleteTargetRoot(
-  orgId: string,
+  workspaceId: string,
   environmentId: string,
   rootId: string,
 ): Promise<void> {
   const response = await fetchWithAuth(
-    `${API_BASE}/organizations/${orgId}/environments/${environmentId}/target-roots/${rootId}`,
+    `${API_BASE}/workspaces/${workspaceId}/environments/${environmentId}/target-roots/${rootId}`,
     { method: "DELETE" },
   );
   if (!response.ok) {

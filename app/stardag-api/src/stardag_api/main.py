@@ -6,7 +6,7 @@ from stardag_api.routes import (
     auth_router,
     builds_router,
     locks_router,
-    organizations_router,
+    workspaces_router,
     search_router,
     target_roots_router,
     tasks_router,
@@ -37,7 +37,7 @@ app.include_router(auth_router, prefix="/api/v1")  # Exchange
 
 # UI routes (internal JWT auth required)
 app.include_router(ui_router, prefix="/api/v1")
-app.include_router(organizations_router, prefix="/api/v1")
+app.include_router(workspaces_router, prefix="/api/v1")
 
 # SDK routes (API key or internal JWT auth)
 app.include_router(builds_router, prefix="/api/v1")

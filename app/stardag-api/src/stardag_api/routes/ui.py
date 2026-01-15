@@ -1,9 +1,9 @@
 """UI-specific routes for bootstrap (OIDC tokens) and authenticated operations.
 
 Bootstrap endpoints (/me, /me/invites) accept OIDC tokens directly because
-they are needed before the user can select an organization for token exchange.
+they are needed before the user can select a workspace for token exchange.
 
-Other UI endpoints require org-scoped internal tokens.
+Other UI endpoints require workspace-scoped internal tokens.
 """
 
 from typing import Annotated
@@ -18,9 +18,9 @@ from stardag_api.db import get_db
 from stardag_api.models import (
     Invite,
     InviteStatus,
-    Organization,
-    OrganizationMember,
-    OrganizationRole,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
     User,
 )
 
@@ -41,22 +41,22 @@ class UserProfileResponse(BaseModel):
     display_name: str | None
 
 
-class OrganizationSummary(BaseModel):
-    """Summary of an organization for listing."""
+class WorkspaceSummary(BaseModel):
+    """Summary of a workspace for listing."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     name: str
     slug: str
-    role: OrganizationRole
+    role: WorkspaceRole
 
 
-class UserProfileWithOrgsResponse(BaseModel):
-    """User profile with their organizations."""
+class UserProfileWithWorkspacesResponse(BaseModel):
+    """User profile with their workspaces."""
 
     user: UserProfileResponse
-    organizations: list[OrganizationSummary]
+    workspaces: list[WorkspaceSummary]
 
 
 class PendingInviteResponse(BaseModel):
@@ -65,51 +65,51 @@ class PendingInviteResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    organization_id: str
-    organization_name: str
-    role: OrganizationRole
+    workspace_id: str
+    workspace_name: str
+    role: WorkspaceRole
     invited_by_email: str | None
 
 
 # --- Bootstrap Endpoints (accept OIDC tokens) ---
 
 
-@router.get("/me", response_model=UserProfileWithOrgsResponse)
+@router.get("/me", response_model=UserProfileWithWorkspacesResponse)
 async def get_current_user_profile(
     current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Get the current user's profile and organizations.
+    """Get the current user's profile and workspaces.
 
     This is a bootstrap endpoint that accepts OIDC tokens directly.
-    It returns the user's organizations so they can select one for token exchange.
+    It returns the user's workspaces so they can select one for token exchange.
     """
-    # Get user's organization memberships
+    # Get user's workspace memberships
     result = await db.execute(
-        select(OrganizationMember, Organization)
-        .join(Organization, OrganizationMember.organization_id == Organization.id)
-        .where(OrganizationMember.user_id == current_user.id)
+        select(WorkspaceMember, Workspace)
+        .join(Workspace, WorkspaceMember.workspace_id == Workspace.id)
+        .where(WorkspaceMember.user_id == current_user.id)
     )
     memberships = result.all()
 
-    organizations = [
-        OrganizationSummary(
-            id=org.id,
-            name=org.name,
-            slug=org.slug,
+    workspaces = [
+        WorkspaceSummary(
+            id=ws.id,
+            name=ws.name,
+            slug=ws.slug,
             role=membership.role,
         )
-        for membership, org in memberships
+        for membership, ws in memberships
     ]
 
-    return UserProfileWithOrgsResponse(
+    return UserProfileWithWorkspacesResponse(
         user=UserProfileResponse(
             id=current_user.id,
             external_id=current_user.external_id,
             email=current_user.email,
             display_name=current_user.display_name,
         ),
-        organizations=organizations,
+        workspaces=workspaces,
     )
 
 
@@ -123,8 +123,8 @@ async def get_pending_invites(
     This is a bootstrap endpoint that accepts OIDC tokens directly.
     """
     result = await db.execute(
-        select(Invite, Organization, User)
-        .join(Organization, Invite.organization_id == Organization.id)
+        select(Invite, Workspace, User)
+        .join(Workspace, Invite.workspace_id == Workspace.id)
         .outerjoin(User, Invite.invited_by_id == User.id)
         .where(
             Invite.email == current_user.email,
@@ -136,10 +136,10 @@ async def get_pending_invites(
     return [
         PendingInviteResponse(
             id=invite.id,
-            organization_id=invite.organization_id,
-            organization_name=org.name,
+            workspace_id=invite.workspace_id,
+            workspace_name=ws.name,
             role=invite.role,
             invited_by_email=invited_by.email if invited_by else None,
         )
-        for invite, org, invited_by in invites
+        for invite, ws, invited_by in invites
     ]

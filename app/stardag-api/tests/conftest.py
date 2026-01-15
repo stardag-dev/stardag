@@ -28,17 +28,17 @@ def get_alembic_config(connection_url: str | None = None) -> Config:
 
 
 async def seed_defaults(session: AsyncSession):
-    """Seed default organization, environment, user, and membership."""
-    from stardag_api.models import Environment, Organization, OrganizationMember, User
-    from stardag_api.models.enums import OrganizationRole
+    """Seed default workspace, environment, user, and membership."""
+    from stardag_api.models import Environment, Workspace, WorkspaceMember, User
+    from stardag_api.models.enums import WorkspaceRole
 
-    # Create default organization
-    org = Organization(
+    # Create default workspace
+    workspace = Workspace(
         id="default",
-        name="Default Organization",
+        name="Default Workspace",
         slug="default",
     )
-    session.add(org)
+    session.add(workspace)
 
     # Create default user
     user = User(
@@ -49,19 +49,19 @@ async def seed_defaults(session: AsyncSession):
     )
     session.add(user)
 
-    # Create membership (user is owner of default org)
-    membership = OrganizationMember(
+    # Create membership (user is owner of default workspace)
+    membership = WorkspaceMember(
         id="default",
-        organization_id="default",
+        workspace_id="default",
         user_id="default",
-        role=OrganizationRole.OWNER,
+        role=WorkspaceRole.OWNER,
     )
     session.add(membership)
 
     # Create default environment
     environment = Environment(
         id="default",
-        organization_id="default",
+        workspace_id="default",
         name="Default Environment",
         slug="default",
     )
@@ -106,7 +106,7 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
         SdkAuth,
         get_current_user,
         get_current_user_flexible,
-        get_org_id_from_token,
+        get_workspace_id_from_token,
         require_sdk_auth,
     )
     from stardag_api.models import Environment, User
@@ -120,7 +120,7 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
     # Create mock auth objects
     mock_environment = Environment(
         id="default",
-        organization_id="default",
+        workspace_id="default",
         name="Default Environment",
         slug="default",
     )
@@ -132,7 +132,7 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
     )
     mock_sdk_auth = SdkAuth(
         environment=mock_environment,
-        org_id="default",
+        workspace_id="default",
         user=mock_user,
     )
 
@@ -145,7 +145,7 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
     async def override_get_current_user_flexible() -> User:
         return mock_user
 
-    async def override_get_org_id_from_token() -> str:
+    async def override_get_workspace_id_from_token() -> str:
         return "default"
 
     app.dependency_overrides[get_db] = override_get_db
@@ -154,7 +154,9 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides[get_current_user_flexible] = (
         override_get_current_user_flexible
     )
-    app.dependency_overrides[get_org_id_from_token] = override_get_org_id_from_token
+    app.dependency_overrides[get_workspace_id_from_token] = (
+        override_get_workspace_id_from_token
+    )
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"

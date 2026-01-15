@@ -20,7 +20,7 @@ from stardag_api.auth.tokens import (
 )
 from stardag_api.config import oidc_settings
 from stardag_api.db import get_db
-from stardag_api.models import OrganizationMember, User
+from stardag_api.models import WorkspaceMember, User
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ class AuthConfigResponse(BaseModel):
 class TokenExchangeRequest(BaseModel):
     """Request body for token exchange."""
 
-    org_id: str
+    workspace_id: str
 
 
 class TokenExchangeResponse(BaseModel):
@@ -140,32 +140,32 @@ async def exchange_token(
     oidc_token: Annotated[TokenPayload, Depends(get_oidc_token)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Exchange an OIDC token for an org-scoped internal token.
+    """Exchange an OIDC token for a workspace-scoped internal token.
 
     This is the only endpoint that accepts OIDC tokens directly.
     All other endpoints require internal tokens from this exchange.
 
     Args:
-        request: Contains the org_id to scope the token to
+        request: Contains the workspace_id to scope the token to
         oidc_token: Validated OIDC JWT (from Authorization header)
         db: Database session
 
     Returns:
-        Internal access token scoped to the requested organization
+        Internal access token scoped to the requested workspace
 
     Raises:
         401: Invalid OIDC token
-        403: User is not a member of the requested organization
-        404: Organization not found
+        403: User is not a member of the requested workspace
+        404: Workspace not found
     """
     # Get or create user from OIDC token
     user = await get_or_create_user(db, oidc_token)
 
-    # Verify user is a member of the requested organization
+    # Verify user is a member of the requested workspace
     result = await db.execute(
-        select(OrganizationMember).where(
-            OrganizationMember.organization_id == request.org_id,
-            OrganizationMember.user_id == user.id,
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == request.workspace_id,
+            WorkspaceMember.user_id == user.id,
         )
     )
     membership = result.scalar_one_or_none()
@@ -173,14 +173,14 @@ async def exchange_token(
     if not membership:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not a member of the requested organization",
+            detail="Not a member of the requested workspace",
         )
 
-    # Create internal token with org_id
+    # Create internal token with workspace_id
     token_manager = get_token_manager()
     access_token = token_manager.create_access_token(
         user_id=user.id,
-        org_id=request.org_id,
+        workspace_id=request.workspace_id,
     )
 
     # Calculate expires_in from TTL

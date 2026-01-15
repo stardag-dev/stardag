@@ -1,7 +1,7 @@
 """Authentication module for Stardag API.
 
 Token types:
-- Internal tokens: Org-scoped JWTs minted by /auth/exchange (used by most endpoints)
+- Internal tokens: Workspace-scoped JWTs minted by /auth/exchange (used by most endpoints)
 - OIDC tokens: External JWTs from OIDC provider (for /auth/exchange and bootstrap endpoints)
 - API keys: Environment-scoped keys for SDK/automation
 """
@@ -16,7 +16,7 @@ from stardag_api.auth.dependencies import (
     get_oidc_token,
     get_optional_token,
     get_or_create_user_from_oidc,
-    get_org_id_from_token,
+    get_workspace_id_from_token,
     get_sdk_auth,
     get_token,
     require_api_key_auth,
@@ -47,7 +47,7 @@ __all__ = [
     "get_oidc_token",
     "get_optional_token",
     "get_or_create_user_from_oidc",
-    "get_org_id_from_token",
+    "get_workspace_id_from_token",
     "get_sdk_auth",
     "get_token",
     "require_api_key_auth",
