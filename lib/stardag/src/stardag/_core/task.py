@@ -18,7 +18,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from stardag._core.registry_asset import RegistryAsset
+    from stardag.registry_asset import RegistryAsset
 
 from uuid import UUID
 
