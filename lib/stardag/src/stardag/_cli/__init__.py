@@ -33,7 +33,7 @@ except ImportError:
         "Typer is required for the CLI. Install with: pip install stardag[cli]"
     )
 
-from stardag.cli import auth, config
+from stardag._cli import auth, config
 
 # Main CLI app
 app = typer.Typer(

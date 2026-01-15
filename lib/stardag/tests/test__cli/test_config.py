@@ -7,8 +7,8 @@ from unittest import mock
 import pytest
 from typer.testing import CliRunner
 
-from stardag.cli.config import app
-from stardag.cli.credentials import add_registry, list_profiles
+from stardag._cli.config import app
+from stardag._cli.credentials import add_registry, list_profiles
 
 runner = CliRunner()
 
@@ -26,7 +26,7 @@ def temp_config_dir():
                 "stardag.config.get_user_config_path", return_value=config_path
             ):
                 with mock.patch(
-                    "stardag.cli.credentials.get_user_config_path",
+                    "stardag._cli.credentials.get_user_config_path",
                     return_value=config_path,
                 ):
                     yield tmppath, config_path
@@ -65,7 +65,7 @@ class TestProfileAdd:
 
         # Mock resolve_workspace_slug_to_id to return None (can't verify)
         with mock.patch(
-            "stardag.cli.config.resolve_workspace_slug_to_id", return_value=None
+            "stardag._cli.config.resolve_workspace_slug_to_id", return_value=None
         ):
             result = runner.invoke(
                 app,
@@ -98,11 +98,11 @@ class TestProfileAdd:
         # Mock resolve_workspace_slug_to_id to return workspace_id
         # Mock resolve_environment_slug_to_id to return None (can't verify)
         with mock.patch(
-            "stardag.cli.config.resolve_workspace_slug_to_id",
+            "stardag._cli.config.resolve_workspace_slug_to_id",
             return_value="workspace-123",
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_environment_slug_to_id",
+                "stardag._cli.config.resolve_environment_slug_to_id",
                 return_value=None,
             ):
                 result = runner.invoke(
@@ -135,11 +135,11 @@ class TestProfileAdd:
 
         # Mock both resolve functions to return valid IDs
         with mock.patch(
-            "stardag.cli.config.resolve_workspace_slug_to_id",
+            "stardag._cli.config.resolve_workspace_slug_to_id",
             return_value="workspace-123",
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_environment_slug_to_id",
+                "stardag._cli.config.resolve_environment_slug_to_id",
                 return_value="env-456",
             ):
                 result = runner.invoke(
@@ -175,15 +175,15 @@ class TestProfileAdd:
         add_registry("test-registry", "http://localhost:8000")
 
         with mock.patch(
-            "stardag.cli.config.resolve_workspace_slug_to_id",
+            "stardag._cli.config.resolve_workspace_slug_to_id",
             return_value="workspace-123",
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_environment_slug_to_id",
+                "stardag._cli.config.resolve_environment_slug_to_id",
                 return_value="env-456",
             ):
                 with mock.patch(
-                    "stardag.cli.config.ensure_access_token",
+                    "stardag._cli.config.ensure_access_token",
                     return_value="mock-token",
                 ) as mock_ensure_token:
                     result = runner.invoke(
@@ -222,11 +222,11 @@ class TestProfileAdd:
         env_uuid = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
 
         with mock.patch(
-            "stardag.cli.config.resolve_workspace_slug_to_id",
+            "stardag._cli.config.resolve_workspace_slug_to_id",
             return_value=workspace_uuid,
         ):
             with mock.patch(
-                "stardag.cli.config.resolve_environment_slug_to_id",
+                "stardag._cli.config.resolve_environment_slug_to_id",
                 return_value=env_uuid,
             ):
                 result = runner.invoke(

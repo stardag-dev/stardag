@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from stardag.cli.credentials import (
+from stardag._cli.credentials import (
     add_registry,
     list_registries,
     remove_registry,
@@ -26,7 +26,7 @@ def temp_config_dir():
                 "stardag.config.get_user_config_path", return_value=config_path
             ):
                 with mock.patch(
-                    "stardag.cli.credentials.get_user_config_path",
+                    "stardag._cli.credentials.get_user_config_path",
                     return_value=config_path,
                 ):
                     yield tmppath, config_path
