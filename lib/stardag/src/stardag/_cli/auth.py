@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import typer
 
-from stardag.cli.credentials import (
+from stardag._cli.credentials import (
     Credentials,
     InvalidProfileError,
     add_profile,
@@ -46,8 +46,8 @@ from stardag.cli.credentials import (
     list_registries,
     list_registries_with_credentials,
     load_credentials,
-    resolve_workspace_slug_to_id,
     resolve_environment_slug_to_id,
+    resolve_workspace_slug_to_id,
     save_access_token_cache,
     save_credentials,
     set_default_profile,
@@ -56,8 +56,8 @@ from stardag.cli.credentials import (
 )
 from stardag.config import (
     _looks_like_uuid,
-    cache_workspace_id,
     cache_environment_id,
+    cache_workspace_id,
     get_config,
 )
 

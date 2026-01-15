@@ -6,7 +6,7 @@ Configuration is stored in ~/.stardag/config.toml.
 
 import typer
 
-from stardag.cli.credentials import (
+from stardag._cli.credentials import (
     add_registry,
     get_config_path,
     list_registries,

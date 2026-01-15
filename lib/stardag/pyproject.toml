@@ -39,7 +39,7 @@ pandas = [
 ]
 
 [project.scripts]
-stardag = "stardag.cli:app"
+stardag = "stardag._cli:app"
 
 [dependency-groups]
 dev = [

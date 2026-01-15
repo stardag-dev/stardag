@@ -6,8 +6,8 @@ Configuration is stored in ~/.stardag/config.toml.
 
 import typer
 
-from stardag.cli import registry
-from stardag.cli.credentials import (
+from stardag._cli import registry
+from stardag._cli.credentials import (
     InvalidProfileError,
     add_profile,
     ensure_access_token,
@@ -17,8 +17,8 @@ from stardag.cli.credentials import (
     list_profiles,
     list_registries,
     remove_profile,
-    resolve_workspace_slug_to_id,
     resolve_environment_slug_to_id,
+    resolve_workspace_slug_to_id,
     set_default_profile,
     set_target_roots,
     validate_active_profile,
