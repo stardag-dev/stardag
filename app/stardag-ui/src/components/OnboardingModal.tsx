@@ -5,7 +5,7 @@ import {
   fetchPendingInvites,
   type PendingInvite,
 } from "../api/organizations";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 import { useAuth } from "../context/AuthContext";
 import { Modal } from "./Modal";
 
@@ -18,7 +18,7 @@ const DISMISSED_KEY = "stardag_onboarding_dismissed";
  */
 export function OnboardingModal() {
   const { isAuthenticated } = useAuth();
-  const { organizations, isLoading, refresh } = useWorkspace();
+  const { organizations, isLoading, refresh } = useEnvironment();
 
   const [invites, setInvites] = useState<PendingInvite[]>([]);
   const [invitesLoading, setInvitesLoading] = useState(true);
@@ -210,7 +210,7 @@ export function OnboardingModal() {
       <div className="space-y-4">
         <p className="text-sm text-gray-600 dark:text-gray-400">
           To get started, you need to create an organization. Organizations help you
-          manage workspaces, team members, and API access.
+          manage environments, team members, and API access.
         </p>
 
         <div className="flex justify-end pt-2">

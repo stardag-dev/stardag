@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { createOrganization } from "../api/organizations";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 import { Logo } from "./Logo";
 import { ThemeToggle } from "./ThemeToggle";
 import { UserMenu } from "./UserMenu";
@@ -10,7 +10,7 @@ interface CreateOrganizationProps {
 }
 
 export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
-  const { refresh } = useWorkspace();
+  const { refresh } = useEnvironment();
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [description, setDescription] = useState("");
@@ -47,7 +47,7 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
         slug: orgSlug,
         description: description.trim() || undefined,
       });
-      // Refresh workspace context and select the newly created org
+      // Refresh environment context and select the newly created org
       await refresh(orgSlug);
       // Navigate to dashboard with new org in URL
       onNavigate(`/${orgSlug}`);

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from stardag_api.models.invite import Invite
     from stardag_api.models.organization_member import OrganizationMember
     from stardag_api.models.user import User
-    from stardag_api.models.workspace import Workspace
+    from stardag_api.models.environment import Environment
 
 
 class Organization(Base, TimestampMixin):
@@ -26,7 +26,7 @@ class Organization(Base, TimestampMixin):
 
     # Limits
     MAX_ORGS_PER_USER = 3
-    MAX_WORKSPACES_PER_ORG = 6
+    MAX_ENVIRONMENTS_PER_ORG = 6
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -55,7 +55,7 @@ class Organization(Base, TimestampMixin):
 
     # Relationships
     created_by: Mapped[User | None] = relationship()
-    workspaces: Mapped[list[Workspace]] = relationship(
+    environments: Mapped[list[Environment]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan",
     )

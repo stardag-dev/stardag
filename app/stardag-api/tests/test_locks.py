@@ -8,7 +8,7 @@ from httpx import AsyncClient
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import DistributedLock, Workspace
+from stardag_api.models import DistributedLock, Environment
 
 
 @pytest.mark.asyncio
@@ -298,7 +298,7 @@ async def test_release_lock_with_completion(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_list_locks(client: AsyncClient):
-    """Test listing active locks in workspace."""
+    """Test listing active locks in environment."""
     # Create multiple locks
     for i in range(3):
         owner_id = str(uuid.uuid4())
@@ -423,14 +423,14 @@ async def test_check_task_completion_status_completed(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_workspace_concurrency_limit(
+async def test_environment_concurrency_limit(
     client: AsyncClient, async_session: AsyncSession
 ):
-    """Test that workspace concurrency limit is enforced."""
-    # Set workspace max_concurrent_locks to 2
+    """Test that environment concurrency limit is enforced."""
+    # Set environment max_concurrent_locks to 2
     await async_session.execute(
-        update(Workspace)
-        .where(Workspace.id == "default")
+        update(Environment)
+        .where(Environment.id == "default")
         .values(max_concurrent_locks=2)
     )
     await async_session.commit()
@@ -461,22 +461,22 @@ async def test_workspace_concurrency_limit(
 
     # Reset limit
     await async_session.execute(
-        update(Workspace)
-        .where(Workspace.id == "default")
+        update(Environment)
+        .where(Environment.id == "default")
         .values(max_concurrent_locks=None)
     )
     await async_session.commit()
 
 
 @pytest.mark.asyncio
-async def test_workspace_concurrency_limit_same_owner_exempt(
+async def test_environment_concurrency_limit_same_owner_exempt(
     client: AsyncClient, async_session: AsyncSession
 ):
     """Test that same owner re-acquiring doesn't count against limit."""
-    # Set workspace max_concurrent_locks to 1
+    # Set environment max_concurrent_locks to 1
     await async_session.execute(
-        update(Workspace)
-        .where(Workspace.id == "default")
+        update(Environment)
+        .where(Environment.id == "default")
         .values(max_concurrent_locks=1)
     )
     await async_session.commit()
@@ -501,8 +501,8 @@ async def test_workspace_concurrency_limit_same_owner_exempt(
 
     # Reset limit
     await async_session.execute(
-        update(Workspace)
-        .where(Workspace.id == "default")
+        update(Environment)
+        .where(Environment.id == "default")
         .values(max_concurrent_locks=None)
     )
     await async_session.commit()

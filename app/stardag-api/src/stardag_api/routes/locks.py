@@ -41,7 +41,7 @@ async def acquire_lock_endpoint(
 ):
     """Acquire a distributed lock for a task.
 
-    The lock is scoped to the authenticated workspace and identified by lock_name
+    The lock is scoped to the authenticated environment and identified by lock_name
     (typically the task_id hash).
 
     The lock can be acquired if:
@@ -62,13 +62,13 @@ async def acquire_lock_endpoint(
     HTTP Status Codes:
         200: Lock acquired or already_completed
         423: Lock held by another owner
-        429: Workspace concurrency limit reached
+        429: Environment concurrency limit reached
     """
     result = await acquire_lock(
         db=db,
         lock_name=lock_name,
         owner_id=request.owner_id,
-        workspace_id=auth.workspace_id,
+        environment_id=auth.environment_id,
         ttl_seconds=request.ttl_seconds,
         check_task_completion=request.check_task_completion,
     )
@@ -98,7 +98,7 @@ async def acquire_lock_endpoint(
     if result.lock:
         lock_response = LockResponse(
             name=result.lock.name,
-            workspace_id=result.lock.workspace_id,
+            environment_id=result.lock.environment_id,
             owner_id=result.lock.owner_id,
             acquired_at=result.lock.acquired_at,
             expires_at=result.lock.expires_at,
@@ -135,12 +135,12 @@ async def renew_lock_endpoint(
         200: Lock renewed successfully or renewal failed
         409: Lock not owned by caller or does not exist
     """
-    # First verify the lock exists and belongs to this workspace
+    # First verify the lock exists and belongs to this environment
     existing = await get_lock(db, lock_name)
-    if existing and existing.workspace_id != auth.workspace_id:
+    if existing and existing.environment_id != auth.environment_id:
         raise HTTPException(
             status_code=403,
-            detail="Lock does not belong to this workspace",
+            detail="Lock does not belong to this environment",
         )
 
     renewed = await renew_lock(
@@ -186,12 +186,12 @@ async def release_lock_endpoint(
         200: Lock released successfully
         409: Lock not owned by caller or does not exist
     """
-    # First verify the lock exists and belongs to this workspace
+    # First verify the lock exists and belongs to this environment
     existing = await get_lock(db, lock_name)
-    if existing and existing.workspace_id != auth.workspace_id:
+    if existing and existing.environment_id != auth.environment_id:
         raise HTTPException(
             status_code=403,
-            detail="Lock does not belong to this workspace",
+            detail="Lock does not belong to this environment",
         )
 
     if request.task_completed and request.build_id:
@@ -200,7 +200,7 @@ async def release_lock_endpoint(
             db=db,
             lock_name=lock_name,
             owner_id=request.owner_id,
-            workspace_id=auth.workspace_id,
+            environment_id=auth.environment_id,
             build_id=request.build_id,
         )
     else:
@@ -228,7 +228,7 @@ async def list_locks_endpoint(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     include_expired: Annotated[bool, Query()] = False,
 ):
-    """List active locks in the authenticated workspace.
+    """List active locks in the authenticated environment.
 
     Useful for debugging and monitoring lock state.
 
@@ -236,18 +236,18 @@ async def list_locks_endpoint(
         include_expired: Whether to include expired locks
 
     Returns:
-        LockListResponse with all locks in the workspace
+        LockListResponse with all locks in the environment
     """
     locks = await list_locks(
         db=db,
-        workspace_id=auth.workspace_id,
+        environment_id=auth.environment_id,
         include_expired=include_expired,
     )
 
     lock_responses = [
         LockResponse(
             name=lock.name,
-            workspace_id=lock.workspace_id,
+            environment_id=lock.environment_id,
             owner_id=lock.owner_id,
             acquired_at=lock.acquired_at,
             expires_at=lock.expires_at,
@@ -282,15 +282,15 @@ async def get_lock_endpoint(
     if not lock:
         raise HTTPException(status_code=404, detail="Lock not found")
 
-    if lock.workspace_id != auth.workspace_id:
+    if lock.environment_id != auth.environment_id:
         raise HTTPException(
             status_code=403,
-            detail="Lock does not belong to this workspace",
+            detail="Lock does not belong to this environment",
         )
 
     return LockResponse(
         name=lock.name,
-        workspace_id=lock.workspace_id,
+        environment_id=lock.environment_id,
         owner_id=lock.owner_id,
         acquired_at=lock.acquired_at,
         expires_at=lock.expires_at,
@@ -309,7 +309,7 @@ async def check_task_completion_endpoint(
 ):
     """Check if a task has been completed in the registry.
 
-    Searches across all builds in the workspace for any TASK_COMPLETED event.
+    Searches across all builds in the environment for any TASK_COMPLETED event.
 
     Args:
         task_id: The task_id (hash) to check
@@ -319,7 +319,7 @@ async def check_task_completion_endpoint(
     """
     is_completed = await check_task_completed_in_registry(
         db=db,
-        workspace_id=auth.workspace_id,
+        environment_id=auth.environment_id,
         task_id=task_id,
     )
 

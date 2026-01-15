@@ -14,7 +14,7 @@ from stardag.exceptions import (
     NotAuthenticatedError,
     NotFoundError,
     TokenExpiredError,
-    WorkspaceAccessError,
+    EnvironmentAccessError,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class APIRegistry(RegistryABC):
         self,
         api_url: str | None = None,
         timeout: float | None = None,
-        workspace_id: str | None = None,
+        environment_id: str | None = None,
         api_key: str | None = None,
     ):
         # Load central config
@@ -64,8 +64,8 @@ class APIRegistry(RegistryABC):
         # Timeout: explicit > config
         self.timeout = timeout if timeout is not None else config.api.timeout
 
-        # Workspace ID: explicit > config
-        self.workspace_id = workspace_id or config.context.workspace_id
+        # Environment ID: explicit > config
+        self.environment_id = environment_id or config.context.environment_id
 
         self._client = None
         self._async_client = None
@@ -73,10 +73,10 @@ class APIRegistry(RegistryABC):
         if self.api_key:
             logger.debug("APIRegistry initialized with API key authentication")
         elif self.access_token:
-            if not self.workspace_id:
+            if not self.environment_id:
                 logger.warning(
-                    "APIRegistry: JWT auth requires workspace_id. "
-                    "Run 'stardag config set workspace <id>' to set it."
+                    "APIRegistry: JWT auth requires environment_id. "
+                    "Run 'stardag config set environment <id>' to set it."
                 )
             else:
                 logger.debug(
@@ -100,7 +100,7 @@ class APIRegistry(RegistryABC):
             InvalidTokenError: If token is invalid
             InvalidAPIKeyError: If API key is invalid
             NotAuthenticatedError: If no auth provided
-            WorkspaceAccessError: If workspace access denied
+            EnvironmentAccessError: If environment access denied
             AuthorizationError: If other 403 error
             NotFoundError: If resource not found
             APIError: For other HTTP errors
@@ -133,9 +133,9 @@ class APIRegistry(RegistryABC):
         elif status_code == 403:
             # Authorization error
             detail_lower = (detail or "").lower()
-            if "workspace" in detail_lower:
-                raise WorkspaceAccessError(
-                    workspace_id=self.workspace_id, detail=detail
+            if "environment" in detail_lower:
+                raise EnvironmentAccessError(
+                    environment_id=self.environment_id, detail=detail
                 )
             else:
                 raise AuthorizationError(f"{operation} access denied", detail=detail)
@@ -172,10 +172,10 @@ class APIRegistry(RegistryABC):
     def _get_params(self) -> dict[str, str]:
         """Get query params for API requests.
 
-        When using JWT auth, workspace_id must be passed as a query param.
+        When using JWT auth, environment_id must be passed as a query param.
         """
-        if self.access_token and not self.api_key and self.workspace_id:
-            return {"workspace_id": self.workspace_id}
+        if self.access_token and not self.api_key and self.environment_id:
+            return {"environment_id": self.environment_id}
         return {}
 
     # -------------------------------------------------------------------------

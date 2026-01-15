@@ -3,7 +3,7 @@
 Token types:
 - Internal tokens: Org-scoped JWTs minted by /auth/exchange (used by most endpoints)
 - OIDC tokens: External JWTs from OIDC provider (for /auth/exchange and bootstrap endpoints)
-- API keys: Workspace-scoped keys for SDK/automation
+- API keys: Environment-scoped keys for SDK/automation
 """
 
 from stardag_api.auth.dependencies import (
@@ -21,7 +21,7 @@ from stardag_api.auth.dependencies import (
     get_token,
     require_api_key_auth,
     require_sdk_auth,
-    verify_workspace_access,
+    verify_environment_access,
 )
 from stardag_api.auth.jwt import JWTValidator, TokenPayload as OIDCTokenPayload
 from stardag_api.auth.tokens import (
@@ -52,7 +52,7 @@ __all__ = [
     "get_token",
     "require_api_key_auth",
     "require_sdk_auth",
-    "verify_workspace_access",
+    "verify_environment_access",
     # OIDC JWT validation (for /auth/exchange and bootstrap endpoints)
     "JWTValidator",
     "OIDCTokenPayload",

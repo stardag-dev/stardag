@@ -5,7 +5,7 @@ import {
   fetchPendingInvites,
   type PendingInvite,
 } from "../api/organizations";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 
 interface PendingInvitesProps {
   /** Whether to show in compact mode (for header) */
@@ -17,7 +17,7 @@ export function PendingInvites({ compact = false }: PendingInvitesProps) {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const { refresh } = useWorkspace();
+  const { refresh } = useEnvironment();
 
   const loadInvites = useCallback(async () => {
     try {
@@ -43,7 +43,7 @@ export function PendingInvites({ compact = false }: PendingInvitesProps) {
       await acceptInvite(inviteId);
       // Remove from local state
       setInvites((prev) => prev.filter((i) => i.id !== inviteId));
-      // Refresh workspace context to load new org
+      // Refresh environment context to load new org
       await refresh();
     } catch (err) {
       console.error("Failed to accept invite:", err);

@@ -8,7 +8,7 @@ from stardag_api.auth.dependencies import get_current_user_flexible, get_token
 from stardag_api.auth.tokens import InternalTokenPayload
 from stardag_api.db import get_db
 from stardag_api.main import app
-from stardag_api.models import Organization, OrganizationMember, User, Workspace
+from stardag_api.models import Environment, Organization, OrganizationMember, User
 from stardag_api.models.enums import OrganizationRole
 
 
@@ -62,13 +62,13 @@ async def test_user_with_org(async_session: AsyncSession) -> tuple[User, Organiz
     )
     async_session.add(membership)
 
-    # Create default workspace
-    workspace = Workspace(
+    # Create default environment
+    environment = Environment(
         organization_id=org.id,
         name="Default",
         slug="default",
     )
-    async_session.add(workspace)
+    async_session.add(environment)
 
     await async_session.commit()
     await async_session.refresh(user)
@@ -246,7 +246,7 @@ async def test_get_organization(
         data = response.json()
         assert data["name"] == "Test Organization"
         assert data["member_count"] == 1
-        assert data["workspace_count"] == 1
+        assert data["environment_count"] == 1
     finally:
         app.dependency_overrides.clear()
 
@@ -385,14 +385,14 @@ async def test_delete_organization(
         app.dependency_overrides.clear()
 
 
-# --- Workspace tests ---
+# --- Environment tests ---
 
 
 @pytest.mark.asyncio
-async def test_list_workspaces(
+async def test_list_environments(
     async_engine, test_user: User, test_org_with_owner: Organization
 ):
-    """Test listing workspaces."""
+    """Test listing environments."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
     mock_token = _create_mock_internal_token(
         user_id=test_user.id,
@@ -414,7 +414,7 @@ async def test_list_workspaces(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces"
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments"
             )
 
         assert response.status_code == 200
@@ -426,10 +426,10 @@ async def test_list_workspaces(
 
 
 @pytest.mark.asyncio
-async def test_create_workspace(
+async def test_create_environment(
     async_engine, test_user: User, test_org_with_owner: Organization
 ):
-    """Test creating a workspace."""
+    """Test creating an environment."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
     mock_token = _create_mock_internal_token(
         user_id=test_user.id,
@@ -451,18 +451,18 @@ async def test_create_workspace(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.post(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces",
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments",
                 json={
-                    "name": "New Workspace",
-                    "slug": "new-workspace",
-                    "description": "A new workspace",
+                    "name": "New Environment",
+                    "slug": "new-environment",
+                    "description": "A new environment",
                 },
             )
 
         assert response.status_code == 201
         data = response.json()
-        assert data["name"] == "New Workspace"
-        assert data["slug"] == "new-workspace"
+        assert data["name"] == "New Environment"
+        assert data["slug"] == "new-environment"
     finally:
         app.dependency_overrides.clear()
 
@@ -637,22 +637,24 @@ async def test_accept_invite(
 async def test_create_target_root(
     async_engine, test_user: User, test_org_with_owner: Organization
 ):
-    """Test creating a target root in a workspace."""
+    """Test creating a target root in an environment."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
     mock_token = _create_mock_internal_token(
         user_id=test_user.id,
         org_id=test_org_with_owner.id,
     )
 
-    # Get the workspace ID
+    # Get the environment ID
     async with async_session_maker() as session:
         from sqlalchemy import select
 
         result = await session.execute(
-            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+            select(Environment).where(
+                Environment.organization_id == test_org_with_owner.id
+            )
         )
-        workspace = result.scalar_one()
-        workspace_id = workspace.id
+        environment = result.scalar_one()
+        environment_id = environment.id
 
     async def override_get_db():
         async with async_session_maker() as session:
@@ -669,7 +671,7 @@ async def test_create_target_root(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.post(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots",
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments/{environment_id}/target-roots",
                 json={
                     "name": "default",
                     "uri_prefix": "s3://my-bucket/stardag/",
@@ -680,7 +682,7 @@ async def test_create_target_root(
         data = response.json()
         assert data["name"] == "default"
         assert data["uri_prefix"] == "s3://my-bucket/stardag/"
-        assert data["workspace_id"] == workspace_id
+        assert data["environment_id"] == environment_id
         assert "id" in data
         assert "created_at" in data
     finally:
@@ -691,27 +693,29 @@ async def test_create_target_root(
 async def test_list_target_roots(
     async_engine, test_user: User, test_org_with_owner: Organization
 ):
-    """Test listing target roots in a workspace."""
+    """Test listing target roots in an environment."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
     mock_token = _create_mock_internal_token(
         user_id=test_user.id,
         org_id=test_org_with_owner.id,
     )
 
-    # Get the workspace ID and create a target root
+    # Get the environment ID and create a target root
     from stardag_api.models import TargetRoot
 
     async with async_session_maker() as session:
         from sqlalchemy import select
 
         result = await session.execute(
-            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+            select(Environment).where(
+                Environment.organization_id == test_org_with_owner.id
+            )
         )
-        workspace = result.scalar_one()
-        workspace_id = workspace.id
+        environment = result.scalar_one()
+        environment_id = environment.id
 
         target_root = TargetRoot(
-            workspace_id=workspace_id,
+            environment_id=environment_id,
             name="test-root",
             uri_prefix="/data/stardag/",
         )
@@ -733,7 +737,7 @@ async def test_list_target_roots(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots"
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments/{environment_id}/target-roots"
             )
 
         assert response.status_code == 200
@@ -756,20 +760,22 @@ async def test_update_target_root(
         org_id=test_org_with_owner.id,
     )
 
-    # Get the workspace ID and create a target root
+    # Get the environment ID and create a target root
     from stardag_api.models import TargetRoot
 
     async with async_session_maker() as session:
         from sqlalchemy import select
 
         result = await session.execute(
-            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+            select(Environment).where(
+                Environment.organization_id == test_org_with_owner.id
+            )
         )
-        workspace = result.scalar_one()
-        workspace_id = workspace.id
+        environment = result.scalar_one()
+        environment_id = environment.id
 
         target_root = TargetRoot(
-            workspace_id=workspace_id,
+            environment_id=environment_id,
             name="old-name",
             uri_prefix="/old/path/",
         )
@@ -793,7 +799,7 @@ async def test_update_target_root(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.patch(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots/{root_id}",
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments/{environment_id}/target-roots/{root_id}",
                 json={
                     "name": "new-name",
                     "uri_prefix": "/new/path/",
@@ -819,20 +825,22 @@ async def test_delete_target_root(
         org_id=test_org_with_owner.id,
     )
 
-    # Get the workspace ID and create a target root
+    # Get the environment ID and create a target root
     from stardag_api.models import TargetRoot
 
     async with async_session_maker() as session:
         from sqlalchemy import select
 
         result = await session.execute(
-            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+            select(Environment).where(
+                Environment.organization_id == test_org_with_owner.id
+            )
         )
-        workspace = result.scalar_one()
-        workspace_id = workspace.id
+        environment = result.scalar_one()
+        environment_id = environment.id
 
         target_root = TargetRoot(
-            workspace_id=workspace_id,
+            environment_id=environment_id,
             name="to-delete",
             uri_prefix="/delete/me/",
         )
@@ -857,13 +865,13 @@ async def test_delete_target_root(
         ) as client:
             # Delete the target root
             response = await client.delete(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots/{root_id}"
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments/{environment_id}/target-roots/{root_id}"
             )
             assert response.status_code == 204
 
             # Verify it's gone
             response = await client.get(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots"
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments/{environment_id}/target-roots"
             )
             assert response.status_code == 200
             data = response.json()
@@ -876,27 +884,29 @@ async def test_delete_target_root(
 async def test_create_target_root_duplicate_name(
     async_engine, test_user: User, test_org_with_owner: Organization
 ):
-    """Test that duplicate target root names in same workspace are rejected."""
+    """Test that duplicate target root names in same environment are rejected."""
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
     mock_token = _create_mock_internal_token(
         user_id=test_user.id,
         org_id=test_org_with_owner.id,
     )
 
-    # Get the workspace ID and create a target root
+    # Get the environment ID and create a target root
     from stardag_api.models import TargetRoot
 
     async with async_session_maker() as session:
         from sqlalchemy import select
 
         result = await session.execute(
-            select(Workspace).where(Workspace.organization_id == test_org_with_owner.id)
+            select(Environment).where(
+                Environment.organization_id == test_org_with_owner.id
+            )
         )
-        workspace = result.scalar_one()
-        workspace_id = workspace.id
+        environment = result.scalar_one()
+        environment_id = environment.id
 
         target_root = TargetRoot(
-            workspace_id=workspace_id,
+            environment_id=environment_id,
             name="existing-name",
             uri_prefix="/existing/",
         )
@@ -918,7 +928,7 @@ async def test_create_target_root_duplicate_name(
             transport=ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.post(
-                f"/api/v1/ui/organizations/{test_org_with_owner.id}/workspaces/{workspace_id}/target-roots",
+                f"/api/v1/ui/organizations/{test_org_with_owner.id}/environments/{environment_id}/target-roots",
                 json={
                     "name": "existing-name",  # Same name as existing
                     "uri_prefix": "/different/path/",

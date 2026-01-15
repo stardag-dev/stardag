@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchBuilds } from "../api/tasks";
-import { useWorkspace } from "../context/WorkspaceContext";
+import { useEnvironment } from "../context/EnvironmentContext";
 import type { Build, BuildStatus } from "../types/task";
 
 interface BuildsListProps {
@@ -57,7 +57,7 @@ function formatDuration(startedAt: string | null, completedAt: string | null): s
 }
 
 export function BuildsList({ onSelectBuild }: BuildsListProps) {
-  const { activeWorkspace } = useWorkspace();
+  const { activeEnvironment } = useEnvironment();
   const [builds, setBuilds] = useState<BuildWithStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +66,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
   const pageSize = 20;
 
   const loadBuilds = useCallback(async () => {
-    if (!activeWorkspace?.id) {
+    if (!activeEnvironment?.id) {
       setBuilds([]);
       setLoading(false);
       return;
@@ -78,7 +78,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
       const response = await fetchBuilds({
         page,
         page_size: pageSize,
-        workspace_id: activeWorkspace.id,
+        environment_id: activeEnvironment.id,
       });
       setBuilds(response.builds);
       setTotal(response.total);
@@ -87,7 +87,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
     } finally {
       setLoading(false);
     }
-  }, [activeWorkspace?.id, page]);
+  }, [activeEnvironment?.id, page]);
 
   useEffect(() => {
     loadBuilds();
@@ -95,10 +95,10 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
 
   const totalPages = Math.ceil(total / pageSize);
 
-  if (!activeWorkspace) {
+  if (!activeEnvironment) {
     return (
       <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
-        <p>Select a workspace to view builds</p>
+        <p>Select an environment to view builds</p>
       </div>
     );
   }
@@ -149,7 +149,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
           Recent Builds
         </h1>
         <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          {total} build{total !== 1 ? "s" : ""} in this workspace
+          {total} build{total !== 1 ? "s" : ""} in this environment
         </p>
       </div>
 

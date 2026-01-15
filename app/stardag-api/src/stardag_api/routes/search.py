@@ -257,12 +257,14 @@ async def search_tasks(
     - sort: Sort field and direction (e.g., "created_at:desc")
     - include_assets: Comma-separated asset names to include in results (e.g., "report,metrics")
     """
-    workspace_id = auth.workspace_id
+    environment_id = auth.environment_id
 
     # Build base query
-    query = select(Task).where(Task.workspace_id == workspace_id)
+    query = select(Task).where(Task.environment_id == environment_id)
     count_query = (
-        select(func.count()).select_from(Task).where(Task.workspace_id == workspace_id)
+        select(func.count())
+        .select_from(Task)
+        .where(Task.environment_id == environment_id)
     )
 
     # Parse and apply filters
@@ -327,7 +329,7 @@ async def search_tasks(
         count_query = (
             select(func.count())
             .select_from(Task)
-            .where(Task.workspace_id == workspace_id)
+            .where(Task.environment_id == environment_id)
             .join(
                 Event,
                 (Event.task_id == Task.id)
@@ -525,7 +527,7 @@ async def search_tasks(
         task_results.append(
             TaskSearchResult(
                 task_id=task.task_id,
-                workspace_id=task.workspace_id,
+                environment_id=task.environment_id,
                 task_namespace=task.task_namespace,
                 task_name=task.task_name,
                 task_data=task.task_data,
@@ -573,7 +575,7 @@ async def get_key_suggestions(
     - Core fields (task_name, task_namespace, etc.)
     - Discovered param.* keys from task_data
     """
-    workspace_id = auth.workspace_id
+    environment_id = auth.environment_id
 
     # Core keys always available
     core_keys = [
@@ -595,14 +597,14 @@ async def get_key_suggestions(
 
     if not prefix or prefix.startswith("param"):
         # Check cache for param keys (cache is per-workspace, not prefix)
-        cache_key = f"keys:{workspace_id}"
+        cache_key = f"keys:{environment_id}"
         cached_param_keys = _get_cached(cache_key)
 
         if cached_param_keys is None:
             # Get a sample of task_data to discover keys
             sample_query = (
                 select(Task.task_data)
-                .where(Task.workspace_id == workspace_id)
+                .where(Task.environment_id == environment_id)
                 .order_by(Task.created_at.desc())
                 .limit(100)
             )
@@ -634,14 +636,14 @@ async def get_key_suggestions(
 
     if not prefix or prefix.startswith("asset"):
         # Check cache for asset keys (cache is per-workspace)
-        asset_cache_key = f"asset_keys:{workspace_id}"
+        asset_cache_key = f"asset_keys:{environment_id}"
         cached_asset_keys = _get_cached(asset_cache_key)
 
         if cached_asset_keys is None:
             # Get a sample of assets to discover keys
             asset_query = (
                 select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
-                .where(TaskRegistryAsset.workspace_id == workspace_id)
+                .where(TaskRegistryAsset.environment_id == environment_id)
                 .order_by(TaskRegistryAsset.created_at.desc())
                 .limit(200)
             )
@@ -700,7 +702,7 @@ async def get_value_suggestions(
 
     Returns common values for the specified key.
     """
-    workspace_id = auth.workspace_id
+    environment_id = auth.environment_id
 
     # Handle status specially (no caching needed - static values)
     if key == "status":
@@ -716,7 +718,7 @@ async def get_value_suggestions(
 
     # Handle build_id and build_name - query from builds table
     if key in ("build_id", "build_name"):
-        cache_key = f"values:{workspace_id}:{key}"
+        cache_key = f"values:{environment_id}:{key}"
         cached_values = _get_cached(cache_key)
 
         if cached_values is None:
@@ -727,7 +729,7 @@ async def get_value_suggestions(
                 .select_from(Build)
                 .join(Event, Event.build_id == Build.id)
                 .join(Task, Task.id == Event.task_id)
-                .where(Task.workspace_id == workspace_id)
+                .where(Task.environment_id == environment_id)
                 .group_by(column)
                 .order_by(func.count(column).desc())
                 .limit(100)
@@ -748,14 +750,14 @@ async def get_value_suggestions(
     core_fields = {"task_name": Task.task_name, "task_namespace": Task.task_namespace}
 
     if key in core_fields:
-        cache_key = f"values:{workspace_id}:{key}"
+        cache_key = f"values:{environment_id}:{key}"
         cached_values = _get_cached(cache_key)
 
         if cached_values is None:
             column = core_fields[key]
             query = (
                 select(column, func.count(column))
-                .where(Task.workspace_id == workspace_id)
+                .where(Task.environment_id == environment_id)
                 .group_by(column)
                 .order_by(func.count(column).desc())
                 .limit(100)  # Cache more values for filtering
@@ -774,7 +776,7 @@ async def get_value_suggestions(
 
     # For param.* fields, sample from task_data (cached per workspace+key)
     if key.startswith("param."):
-        cache_key = f"values:{workspace_id}:{key}"
+        cache_key = f"values:{environment_id}:{key}"
         cached_values = _get_cached(cache_key)
 
         if cached_values is None:
@@ -783,7 +785,7 @@ async def get_value_suggestions(
             # Sample recent tasks
             sample_query = (
                 select(Task.task_data)
-                .where(Task.workspace_id == workspace_id)
+                .where(Task.environment_id == environment_id)
                 .order_by(Task.created_at.desc())
                 .limit(500)
             )
@@ -812,7 +814,7 @@ async def get_value_suggestions(
 
     # For asset.* fields, sample from TaskRegistryAsset.body_json
     if key.startswith("asset."):
-        cache_key = f"values:{workspace_id}:{key}"
+        cache_key = f"values:{environment_id}:{key}"
         cached_values = _get_cached(cache_key)
 
         if cached_values is None:
@@ -827,7 +829,7 @@ async def get_value_suggestions(
             # Sample assets with matching name
             sample_query = (
                 select(TaskRegistryAsset.body_json)
-                .where(TaskRegistryAsset.workspace_id == workspace_id)
+                .where(TaskRegistryAsset.environment_id == environment_id)
                 .where(TaskRegistryAsset.name == asset_name)
                 .order_by(TaskRegistryAsset.created_at.desc())
                 .limit(500)
@@ -896,7 +898,7 @@ async def get_available_columns(
     - Param columns (discovered from task_data)
     - Asset columns (discovered from assets)
     """
-    workspace_id = auth.workspace_id
+    environment_id = auth.environment_id
 
     core = [
         "task_id",
@@ -913,7 +915,7 @@ async def get_available_columns(
     # Discover param keys
     sample_query = (
         select(Task.task_data)
-        .where(Task.workspace_id == workspace_id)
+        .where(Task.environment_id == environment_id)
         .order_by(Task.created_at.desc())
         .limit(100)
     )
@@ -930,7 +932,7 @@ async def get_available_columns(
     # Discover asset keys from TaskRegistryAsset.body_json
     asset_query = (
         select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
-        .where(TaskRegistryAsset.workspace_id == workspace_id)
+        .where(TaskRegistryAsset.environment_id == environment_id)
         .order_by(TaskRegistryAsset.created_at.desc())
         .limit(200)
     )

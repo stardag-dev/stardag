@@ -20,7 +20,7 @@ from stardag_api.models.task import Task
 from stardag_api.models.task_asset import TaskRegistryAsset
 from stardag_api.models.task_dependency import TaskDependency
 from stardag_api.models.user import User
-from stardag_api.models.workspace import Workspace
+from stardag_api.models.environment import Environment
 
 __all__ = [
     "ApiKey",
@@ -42,5 +42,5 @@ __all__ = [
     "TaskStatus",
     "TimestampMixin",
     "User",
-    "Workspace",
+    "Environment",
 ]

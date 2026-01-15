@@ -87,7 +87,7 @@ class TestTomlConfig:
                     "dev": {
                         "registry": "local",
                         "organization": "my-org",
-                        "workspace": "dev-ws",
+                        "environment": "dev-ws",
                     }
                 }
             }
@@ -95,7 +95,7 @@ class TestTomlConfig:
         assert "dev" in config.profile
         assert config.profile["dev"].registry == "local"
         assert config.profile["dev"].organization == "my-org"
-        assert config.profile["dev"].workspace == "dev-ws"
+        assert config.profile["dev"].environment == "dev-ws"
 
     def test_parses_default(self):
         """Test parsing default profile setting."""
@@ -141,7 +141,7 @@ class TestLoadConfig:
         assert config.context.profile is None
         assert config.context.registry_name is None
         assert config.context.organization_id is None
-        assert config.context.workspace_id is None
+        assert config.context.environment_id is None
         assert config.access_token is None
         assert config.api_key is None
 
@@ -159,7 +159,7 @@ url = "http://my-api:9000"
 [profile.dev]
 registry = "local"
 organization = "org-123"
-workspace = "ws-456"
+environment = "ws-456"
 
 [default]
 profile = "dev"
@@ -172,7 +172,7 @@ profile = "dev"
         assert config.context.profile == "dev"
         assert config.context.registry_name == "local"
         assert config.context.organization_id == "org-123"
-        assert config.context.workspace_id == "ws-456"
+        assert config.context.environment_id == "ws-456"
         assert config.api.url == "http://my-api:9000"
 
     def test_env_vars_override_config(self, temp_stardag_dir, monkeypatch):
@@ -189,7 +189,7 @@ url = "http://registry-api:9000"
 [profile.dev]
 registry = "local"
 organization = "config-org"
-workspace = "config-ws"
+environment = "config-ws"
 
 [default]
 profile = "dev"
@@ -199,7 +199,7 @@ profile = "dev"
         # Set env vars (should override)
         monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://env-api:8080")
         monkeypatch.setenv("STARDAG_ORGANIZATION_ID", "env-org")
-        monkeypatch.setenv("STARDAG_WORKSPACE_ID", "env-ws")
+        monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "env-ws")
 
         clear_config_cache()
         config = load_config(use_project_config=False)
@@ -207,7 +207,7 @@ profile = "dev"
         # Direct env vars override profile-based config
         assert config.api.url == "http://env-api:8080"
         assert config.context.organization_id == "env-org"
-        assert config.context.workspace_id == "env-ws"
+        assert config.context.environment_id == "env-ws"
 
     def test_profile_env_var_selects_profile(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -226,12 +226,12 @@ url = "https://api.stardag.com"
 [profile.dev]
 registry = "local"
 organization = "dev-org"
-workspace = "dev-ws"
+environment = "dev-ws"
 
 [profile.prod]
 registry = "prod"
 organization = "prod-org"
-workspace = "prod-ws"
+environment = "prod-ws"
 
 [default]
 profile = "dev"
@@ -247,7 +247,7 @@ profile = "dev"
         assert config.context.profile == "prod"
         assert config.context.registry_name == "prod"
         assert config.context.organization_id == "prod-org"
-        assert config.context.workspace_id == "prod-ws"
+        assert config.context.environment_id == "prod-ws"
         assert config.api.url == "https://api.stardag.com"
 
     def test_project_config_overrides_user_config(
@@ -264,7 +264,7 @@ url = "http://localhost:8000"
 [profile.dev]
 registry = "local"
 organization = "user-org"
-workspace = "user-ws"
+environment = "user-ws"
 
 [default]
 profile = "dev"
@@ -279,7 +279,7 @@ profile = "dev"
 [profile.dev]
 registry = "local"
 organization = "project-org"
-workspace = "project-ws"
+environment = "project-ws"
 """,
         )
 
@@ -288,7 +288,7 @@ workspace = "project-ws"
 
         # Project config should override user config
         assert config.context.organization_id == "project-org"
-        assert config.context.workspace_id == "project-ws"
+        assert config.context.environment_id == "project-ws"
 
     def test_api_key_from_env_var(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -306,19 +306,19 @@ class TestContextConfig:
         assert ctx.profile is None
         assert ctx.registry_name is None
         assert ctx.organization_id is None
-        assert ctx.workspace_id is None
+        assert ctx.environment_id is None
 
     def test_with_values(self):
         ctx = ContextConfig(
             profile="dev",
             registry_name="local",
             organization_id="org-123",
-            workspace_id="ws-456",
+            environment_id="ws-456",
         )
         assert ctx.profile == "dev"
         assert ctx.registry_name == "local"
         assert ctx.organization_id == "org-123"
-        assert ctx.workspace_id == "ws-456"
+        assert ctx.environment_id == "ws-456"
 
 
 class TestConfigProvider:
@@ -395,8 +395,8 @@ class TestRegistryConfig:
 class TestProfileConfig:
     def test_required_fields(self):
         config = ProfileConfig(
-            registry="local", organization="my-org", workspace="dev-ws"
+            registry="local", organization="my-org", environment="dev-ws"
         )
         assert config.registry == "local"
         assert config.organization == "my-org"
-        assert config.workspace == "dev-ws"
+        assert config.environment == "dev-ws"

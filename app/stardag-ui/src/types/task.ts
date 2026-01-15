@@ -23,7 +23,7 @@ export interface StatusTriggeredByUser {
 // Build entity
 export interface Build {
   id: string;
-  workspace_id: string;
+  environment_id: string;
   user_id: string | null;
   name: string;
   description: string | null;
@@ -48,7 +48,7 @@ export interface BuildListResponse {
 export interface Task {
   id: number;
   task_id: string;
-  workspace_id: string;
+  environment_id: string;
   task_namespace: string;
   task_name: string;
   task_data: Record<string, unknown>;

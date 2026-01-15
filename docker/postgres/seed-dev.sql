@@ -20,6 +20,6 @@ INSERT INTO organization_members (id, organization_id, user_id, role, created_at
 VALUES ('default-member', 'default', 'testuser', 'owner', NOW())
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO workspaces (id, organization_id, name, slug, owner_id, created_at)
-VALUES ('default', 'default', 'Default Workspace', 'default', 'testuser', NOW())
+INSERT INTO environments (id, organization_id, name, slug, owner_id, created_at)
+VALUES ('default', 'default', 'Default Environment', 'default', 'testuser', NOW())
 ON CONFLICT (id) DO NOTHING;

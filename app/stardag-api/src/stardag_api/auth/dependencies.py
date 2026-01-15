@@ -8,7 +8,7 @@ Token types:
 - OIDC tokens: External JWTs from the OIDC provider. Accepted by:
   - /auth/exchange (to mint internal tokens)
   - /ui/me, /ui/me/invites (bootstrap endpoints before org selection)
-- API keys: Workspace-scoped keys for SDK/automation. Alternative to JWTs.
+- API keys: Environment-scoped keys for SDK/automation. Alternative to JWTs.
 """
 
 import logging
@@ -35,7 +35,7 @@ from stardag_api.db import get_db
 from stardag_api.models import (
     ApiKey,
     User,
-    Workspace,
+    Environment,
 )
 from stardag_api.services import api_keys as api_key_service
 
@@ -166,40 +166,40 @@ def get_org_id_from_token(
     return token.org_id
 
 
-async def verify_workspace_access(
+async def verify_environment_access(
     db: AsyncSession,
-    workspace_id: str,
+    environment_id: str,
     token_org_id: str,
-) -> Workspace:
-    """Verify workspace exists and belongs to the token's organization.
+) -> Environment:
+    """Verify environment exists and belongs to the token's organization.
 
     Args:
         db: Database session
-        workspace_id: Workspace to verify
-        token_org_id: Organization ID from the token (must match workspace's org)
+        environment_id: Environment to verify
+        token_org_id: Organization ID from the token (must match environment's org)
 
     Returns:
-        The workspace if valid
+        The environment if valid
 
     Raises:
-        HTTPException: 404 if workspace not found, 403 if org mismatch
+        HTTPException: 404 if environment not found, 403 if org mismatch
     """
-    # Get the workspace
-    workspace = await db.get(Workspace, workspace_id)
-    if not workspace:
+    # Get the environment
+    environment = await db.get(Environment, environment_id)
+    if not environment:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Workspace not found",
+            detail="Environment not found",
         )
 
-    # Verify workspace belongs to the token's organization
-    if workspace.organization_id != token_org_id:
+    # Verify environment belongs to the token's organization
+    if environment.organization_id != token_org_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Workspace does not belong to your organization",
+            detail="Environment does not belong to your organization",
         )
 
-    return workspace
+    return environment
 
 
 # --- API Key Authentication ---
@@ -210,7 +210,7 @@ class ApiKeyAuth:
     """Authentication context from an API key."""
 
     api_key: ApiKey
-    workspace: Workspace
+    environment: Environment
 
 
 async def get_api_key_auth(
@@ -233,19 +233,21 @@ async def get_api_key_auth(
             detail="Invalid API key",
         )
 
-    # Get the workspace for the API key
-    workspace = await db.get(Workspace, api_key.workspace_id)
-    if workspace is None:
+    # Get the environment for the API key
+    environment = await db.get(Environment, api_key.environment_id)
+    if environment is None:
         # This shouldn't happen, but handle it gracefully
         logger.error(
-            "API key %s has invalid workspace_id %s", api_key.id, api_key.workspace_id
+            "API key %s has invalid environment_id %s",
+            api_key.id,
+            api_key.environment_id,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="API key configuration error",
         )
 
-    return ApiKeyAuth(api_key=api_key, workspace=workspace)
+    return ApiKeyAuth(api_key=api_key, environment=environment)
 
 
 async def require_api_key_auth(
@@ -271,28 +273,28 @@ class SdkAuth:
     Supports either API key or internal JWT authentication.
     """
 
-    workspace: Workspace
-    org_id: str  # Organization ID (from token or API key's workspace)
+    environment: Environment
+    org_id: str  # Organization ID (from token or API key's environment)
     api_key: ApiKey | None = None
     user: User | None = None
 
     @property
-    def workspace_id(self) -> str:
-        """Get the workspace ID for convenience."""
-        return self.workspace.id
+    def environment_id(self) -> str:
+        """Get the environment ID for convenience."""
+        return self.environment.id
 
 
 async def get_sdk_auth(
     db: Annotated[AsyncSession, Depends(get_db)],
     api_key_auth: Annotated[ApiKeyAuth | None, Depends(get_api_key_auth)],
     token: Annotated[InternalTokenPayload | None, Depends(get_optional_token)],
-    workspace_id: str | None = None,
+    environment_id: str | None = None,
 ) -> SdkAuth | None:
     """Get SDK authentication from either API key or internal JWT token.
 
     Priority:
     1. API key (if X-API-Key header present)
-    2. Internal JWT token + workspace_id parameter
+    2. Internal JWT token + environment_id parameter
 
     Returns SdkAuth if authenticated, None if no authentication provided.
     Raises HTTPException if authentication is invalid.
@@ -300,8 +302,8 @@ async def get_sdk_auth(
     # API key takes priority
     if api_key_auth is not None:
         return SdkAuth(
-            workspace=api_key_auth.workspace,
-            org_id=api_key_auth.workspace.organization_id,
+            environment=api_key_auth.environment,
+            org_id=api_key_auth.environment.organization_id,
             api_key=api_key_auth.api_key,
         )
 
@@ -314,18 +316,18 @@ async def get_sdk_auth(
                 detail="User not found",
             )
 
-        # JWT requires workspace_id parameter
-        if workspace_id is None:
+        # JWT requires environment_id parameter
+        if environment_id is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="workspace_id is required when using JWT authentication",
+                detail="environment_id is required when using JWT authentication",
             )
 
-        # Verify workspace belongs to the token's organization
-        workspace = await verify_workspace_access(db, workspace_id, token.org_id)
+        # Verify environment belongs to the token's organization
+        environment = await verify_environment_access(db, environment_id, token.org_id)
 
         return SdkAuth(
-            workspace=workspace,
+            environment=environment,
             org_id=token.org_id,
             user=user,
         )

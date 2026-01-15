@@ -47,7 +47,7 @@ from stardag.cli.credentials import (
     list_registries_with_credentials,
     load_credentials,
     resolve_org_slug_to_id,
-    resolve_workspace_slug_to_id,
+    resolve_environment_slug_to_id,
     save_access_token_cache,
     save_credentials,
     set_default_profile,
@@ -57,7 +57,7 @@ from stardag.cli.credentials import (
 from stardag.config import (
     _looks_like_uuid,
     cache_org_id,
-    cache_workspace_id,
+    cache_environment_id,
     get_config,
 )
 
@@ -336,8 +336,8 @@ def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
     return []
 
 
-def _get_workspaces(api_url: str, access_token: str, org_id: str) -> list[dict]:
-    """Fetch workspaces for an organization."""
+def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict]:
+    """Fetch environments for an organization."""
     try:
         import httpx
     except ImportError:
@@ -346,7 +346,7 @@ def _get_workspaces(api_url: str, access_token: str, org_id: str) -> list[dict]:
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces",
+                f"{api_url}/api/v1/ui/organizations/{org_id}/environments",
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if response.status_code == 200:
@@ -357,7 +357,7 @@ def _get_workspaces(api_url: str, access_token: str, org_id: str) -> list[dict]:
 
 
 def _sync_target_roots(
-    api_url: str, access_token: str, org_id: str, workspace_id: str
+    api_url: str, access_token: str, org_id: str, environment_id: str
 ) -> None:
     """Sync target roots from server."""
     try:
@@ -368,7 +368,7 @@ def _sync_target_roots(
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"{api_url}/api/v1/ui/organizations/{org_id}/workspaces/{workspace_id}/target-roots",
+                f"{api_url}/api/v1/ui/organizations/{org_id}/environments/{environment_id}/target-roots",
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if response.status_code == 200:
@@ -378,7 +378,7 @@ def _sync_target_roots(
                     target_roots,
                     registry_url=api_url,
                     organization_id=org_id,
-                    workspace_id=workspace_id,
+                    environment_id=environment_id,
                 )
                 if target_roots:
                     typer.echo(f"Synced {len(target_roots)} target root(s)")
@@ -517,9 +517,9 @@ def login(
 
     If a profile is active (via STARDAG_PROFILE or default), this command
     will refresh credentials for that profile's registry without prompting
-    for organization/workspace selection.
+    for organization/environment selection.
 
-    For first-time setup (no profiles), you'll be guided through org/workspace
+    For first-time setup (no profiles), you'll be guided through org/environment
     selection to create your first profile.
 
     For production/CI, use the STARDAG_API_KEY environment variable instead.
@@ -724,14 +724,14 @@ def login(
         profile_details = profiles[active_profile]
         profile_user = profile_details.get("user")
         org_slug = profile_details["organization"]
-        workspace_slug = profile_details["workspace"]
+        environment_slug = profile_details["environment"]
 
         typer.echo("")
         typer.echo(f"Active profile: {active_profile}")
         if profile_user:
             typer.echo(f"  User: {profile_user}")
         typer.echo(f"  Organization: {org_slug}")
-        typer.echo(f"  Workspace: {workspace_slug}")
+        typer.echo(f"  Workspace: {environment_slug}")
 
         # Warn if logged-in user doesn't match profile user
         if profile_user and logged_in_user and profile_user != logged_in_user:
@@ -781,29 +781,31 @@ def login(
                 )
                 typer.echo("Access token cached")
 
-                # Also resolve and cache workspace ID if needed
+                # Also resolve and cache environment ID if needed
                 # Pass access_token since we have it fresh
-                workspace_id = resolve_workspace_slug_to_id(
+                environment_id = resolve_environment_slug_to_id(
                     effective_registry,
                     org_id,
-                    workspace_slug,
+                    environment_slug,
                     access_token=access_token,
                 )
-                if not workspace_id or not _looks_like_uuid(workspace_id):
-                    workspaces = _get_workspaces(effective_url, access_token, org_id)
+                if not environment_id or not _looks_like_uuid(environment_id):
+                    environments = _get_environments(
+                        effective_url, access_token, org_id
+                    )
                     matching_ws = next(
-                        (w for w in workspaces if w["slug"] == workspace_slug), None
+                        (w for w in environments if w["slug"] == environment_slug), None
                     )
                     if matching_ws:
-                        workspace_id = matching_ws["id"]
-                        cache_workspace_id(
-                            effective_registry, org_id, workspace_slug, workspace_id
+                        environment_id = matching_ws["id"]
+                        cache_environment_id(
+                            effective_registry, org_id, environment_slug, environment_id
                         )
 
                 # Sync target roots
-                if workspace_id:
+                if environment_id:
                     _sync_target_roots(
-                        effective_url, access_token, org_id, workspace_id
+                        effective_url, access_token, org_id, environment_id
                     )
 
             except Exception as e:
@@ -841,7 +843,7 @@ def login(
         typer.echo("To create a new profile:")
         typer.echo(
             "  stardag config profile add <name> "
-            f"-r {effective_registry} -o <org-slug> -w <workspace-slug>"
+            f"-r {effective_registry} -o <org-slug> -e <environment-slug>"
         )
         return
 
@@ -899,41 +901,41 @@ def login(
         typer.echo("You may need to manually create a profile")
         return
 
-    # Fetch workspaces
-    workspaces = _get_workspaces(effective_url, access_token, org_id)
+    # Fetch environments
+    environments = _get_environments(effective_url, access_token, org_id)
 
-    if not workspaces:
-        typer.echo("No workspaces found in organization")
+    if not environments:
+        typer.echo("No environments found in organization")
         return
 
-    # Select workspace
-    if len(workspaces) == 1:
-        ws = workspaces[0]
-        typer.echo(f'Using workspace: "{ws["name"]}" (/{ws["slug"]})')
+    # Select environment
+    if len(environments) == 1:
+        ws = environments[0]
+        typer.echo(f'Using environment: "{ws["name"]}" (/{ws["slug"]})')
     else:
         typer.echo("")
-        typer.echo("Select a workspace:")
-        for i, ws in enumerate(workspaces):
+        typer.echo("Select an environment:")
+        for i, ws in enumerate(environments):
             typer.echo(f'  {i + 1}. "{ws["name"]}" (/{ws["slug"]})')
 
         choice = typer.prompt("Enter number", type=int, default=1)
-        if choice < 1 or choice > len(workspaces):
+        if choice < 1 or choice > len(environments):
             typer.echo("Invalid selection")
             raise typer.Exit(1)
-        ws = workspaces[choice - 1]
+        ws = environments[choice - 1]
 
-    workspace_id = ws["id"]
-    workspace_slug = ws["slug"]
+    environment_id = ws["id"]
+    environment_slug = ws["slug"]
 
-    # Cache workspace slug -> ID mapping
-    cache_workspace_id(effective_registry, org_id, workspace_slug, workspace_id)
+    # Cache environment slug -> ID mapping
+    cache_environment_id(effective_registry, org_id, environment_slug, environment_id)
 
     # Sync target roots
-    _sync_target_roots(effective_url, access_token, org_id, workspace_id)
+    _sync_target_roots(effective_url, access_token, org_id, environment_id)
 
     # Check if a matching profile already exists (including user for multi-user)
     existing_profile = find_matching_profile(
-        effective_registry, org_slug, workspace_slug, logged_in_user
+        effective_registry, org_slug, environment_slug, logged_in_user
     )
 
     if existing_profile:
@@ -959,7 +961,7 @@ def login(
             user_part = email_parts[0]
             domain_part = email_parts[1] if len(email_parts) > 1 else None
             base_profile_name = (
-                f"{effective_registry}-{user_part}-{org_slug}-{workspace_slug}"
+                f"{effective_registry}-{user_part}-{org_slug}-{environment_slug}"
             )
             profile_name = base_profile_name
 
@@ -981,9 +983,9 @@ def login(
                             suffix += 1
                         profile_name = f"{profile_name}-{suffix}"
         else:
-            profile_name = f"{effective_registry}-{org_slug}-{workspace_slug}"
+            profile_name = f"{effective_registry}-{org_slug}-{environment_slug}"
         add_profile(
-            profile_name, effective_registry, org_slug, workspace_slug, logged_in_user
+            profile_name, effective_registry, org_slug, environment_slug, logged_in_user
         )
         typer.echo(f"Created profile: {profile_name}")
         if logged_in_user:
@@ -1108,7 +1110,7 @@ def status(
         typer.echo("Authentication: API Key (environment variable)")
         typer.echo(f"  STARDAG_API_KEY: {prefix}...")
         typer.echo("")
-        typer.echo("Note: API key determines workspace automatically.")
+        typer.echo("Note: API key determines environment automatically.")
         return
 
     # Validate active profile if set
@@ -1136,7 +1138,7 @@ def status(
             typer.echo(f"  API URL: {registry_url}")
         typer.echo(f"  User: {user}")
         typer.echo(f"  Organization: {profile_details['organization']}")
-        typer.echo(f"  Workspace: {profile_details['workspace']}")
+        typer.echo(f"  Environment: {profile_details['environment']}")
 
         typer.echo("")
         typer.echo("Authentication:")
@@ -1211,7 +1213,7 @@ def status(
             typer.echo("")
             typer.echo("To create a profile:")
             typer.echo(
-                "  stardag config profile add <name> -r <registry> -o <org> -w <workspace>"
+                "  stardag config profile add <name> -r <registry> -o <org> -e <environment>"
             )
             typer.echo("  # or run: stardag auth login (for first-time setup)")
 

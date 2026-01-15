@@ -138,7 +138,7 @@ class RegistryGlobalConcurrencyLockManager:
         config: GlobalLockConfig | None = None,
         api_url: str | None = None,
         timeout: float | None = None,
-        workspace_id: str | None = None,
+        environment_id: str | None = None,
         api_key: str | None = None,
     ) -> None:
         """Initialize the lock manager.
@@ -150,7 +150,7 @@ class RegistryGlobalConcurrencyLockManager:
             config: Lock configuration (retry timeouts, backoff, etc.).
             api_url: Override for API URL (default from config).
             timeout: Override for HTTP timeout (default from config).
-            workspace_id: Override for workspace ID (default from config).
+            environment_id: Override for workspace ID (default from config).
             api_key: Override for API key (default from config/env).
         """
         self.owner_id = owner_id or str(uuid4())
@@ -159,16 +159,16 @@ class RegistryGlobalConcurrencyLockManager:
         self._client_config = RegistryAPIClientConfig.from_config(
             api_url=api_url,
             api_key=api_key,
-            workspace_id=workspace_id,
+            environment_id=environment_id,
             timeout=timeout,
         )
         self._async_client = None
 
     def _get_params(self) -> dict[str, str]:
-        """Get query params for API requests (workspace_id for JWT auth)."""
+        """Get query params for API requests (environment_id for JWT auth)."""
         cfg = self._client_config
-        if cfg.access_token and not cfg.api_key and cfg.workspace_id:
-            return {"workspace_id": cfg.workspace_id}
+        if cfg.access_token and not cfg.api_key and cfg.environment_id:
+            return {"environment_id": cfg.environment_id}
         return {}
 
     @property

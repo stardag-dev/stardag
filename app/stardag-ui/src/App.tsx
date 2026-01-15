@@ -17,7 +17,7 @@ import { UserMenu } from "./components/UserMenu";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import type React from "react";
 import { ThemeProvider } from "./context/ThemeContext";
-import { WorkspaceProvider, useWorkspace } from "./context/WorkspaceContext";
+import { EnvironmentProvider, useEnvironment } from "./context/EnvironmentContext";
 
 // Main app layout with sidebar
 interface MainLayoutProps {
@@ -379,7 +379,7 @@ function LandingPage() {
 // URL-based routing with support for new views
 function Router() {
   const { isAuthenticated } = useAuth();
-  const { getWorkspacePath } = useWorkspace();
+  const { getEnvironmentPath } = useEnvironment();
   const [path, setPath] = useState(window.location.pathname);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -411,10 +411,10 @@ function Router() {
     if (path === "/invites") return "invites";
     if (path === "/organizations/new") return "new-org";
 
-    // Check for tasks path: /tasks, /:org/tasks, or /:org/:workspace/tasks
+    // Check for tasks path: /tasks, /:org/tasks, or /:org/:environment/tasks
     if (path === "/tasks" || path.endsWith("/tasks")) return "tasks";
 
-    // Check for build ID in path: /builds/:id or /:org/:workspace/builds/:id
+    // Check for build ID in path: /builds/:id or /:org/:environment/builds/:id
     const buildMatch = path.match(/\/builds\/([^/]+)/);
     if (buildMatch) {
       return "build";
@@ -426,7 +426,7 @@ function Router() {
   // Handle sidebar navigation
   const handleNavigation = useCallback(
     (item: NavItem) => {
-      const basePath = getWorkspacePath();
+      const basePath = getEnvironmentPath();
       switch (item) {
         case "home":
           navigateTo(basePath || "/");
@@ -439,23 +439,23 @@ function Router() {
           break;
       }
     },
-    [navigateTo, getWorkspacePath],
+    [navigateTo, getEnvironmentPath],
   );
 
   // Handle build selection
   const handleSelectBuild = useCallback(
     (buildId: string) => {
-      const basePath = getWorkspacePath();
+      const basePath = getEnvironmentPath();
       navigateTo(`${basePath}/builds/${buildId}`);
     },
-    [navigateTo, getWorkspacePath],
+    [navigateTo, getEnvironmentPath],
   );
 
   // Handle back from build view
   const handleBackFromBuild = useCallback(() => {
-    const basePath = getWorkspacePath();
+    const basePath = getEnvironmentPath();
     navigateTo(basePath || "/");
-  }, [navigateTo, getWorkspacePath]);
+  }, [navigateTo, getEnvironmentPath]);
 
   // Auth callback - always handle regardless of auth state
   if (path === "/callback") {
@@ -553,9 +553,9 @@ function App() {
     <ThemeProvider>
       <AuthProvider>
         <AuthConnector>
-          <WorkspaceProvider>
+          <EnvironmentProvider>
             <Router />
-          </WorkspaceProvider>
+          </EnvironmentProvider>
         </AuthConnector>
       </AuthProvider>
     </ThemeProvider>
