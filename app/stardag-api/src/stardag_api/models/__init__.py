@@ -7,14 +7,14 @@ from stardag_api.models.enums import (
     BuildStatus,
     EventType,
     InviteStatus,
-    OrganizationRole,
+    WorkspaceRole,
     TaskStatus,
 )
 from stardag_api.models.event import Event
 from stardag_api.models.invite import Invite
 from stardag_api.models.lock import DistributedLock
-from stardag_api.models.organization import Organization
-from stardag_api.models.organization_member import OrganizationMember
+from stardag_api.models.workspace import Workspace
+from stardag_api.models.workspace_member import WorkspaceMember
 from stardag_api.models.target_root import TargetRoot
 from stardag_api.models.task import Task
 from stardag_api.models.task_asset import TaskRegistryAsset
@@ -32,9 +32,9 @@ __all__ = [
     "EventType",
     "Invite",
     "InviteStatus",
-    "Organization",
-    "OrganizationMember",
-    "OrganizationRole",
+    "Workspace",
+    "WorkspaceMember",
+    "WorkspaceRole",
     "TargetRoot",
     "Task",
     "TaskRegistryAsset",

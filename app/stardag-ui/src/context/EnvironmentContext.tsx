@@ -9,19 +9,19 @@ import {
 import {
   fetchUserProfile,
   fetchEnvironments,
-  type OrganizationSummary,
+  type WorkspaceSummary,
   type Environment,
-} from "../api/organizations";
-import { setCurrentOrgId } from "../api/client";
+} from "../api/workspaces";
+import { setCurrentWorkspaceId } from "../api/client";
 import { useAuth } from "./AuthContext";
 
 interface EnvironmentContextType {
-  // User's organizations
-  organizations: OrganizationSummary[];
-  // Active organization
-  activeOrg: OrganizationSummary | null;
-  setActiveOrg: (org: OrganizationSummary | null) => void;
-  // Environments in active org
+  // User's workspaces
+  workspaces: WorkspaceSummary[];
+  // Active workspace
+  activeWorkspace: WorkspaceSummary | null;
+  setActiveWorkspace: (workspace: WorkspaceSummary | null) => void;
+  // Environments in active workspace
   environments: Environment[];
   // Active environment
   activeEnvironment: Environment | null;
@@ -30,17 +30,20 @@ interface EnvironmentContextType {
   isLoading: boolean;
   // Token exchange in progress
   isExchangingToken: boolean;
-  // Refresh data, optionally selecting a specific org/environment by slug
-  refresh: (preferOrgSlug?: string, preferEnvironmentSlug?: string) => Promise<void>;
-  // User's role in active org
-  activeOrgRole: "owner" | "admin" | "member" | null;
-  // Get the current URL path for org/environment
+  // Refresh data, optionally selecting a specific workspace/environment by slug
+  refresh: (
+    preferWorkspaceSlug?: string,
+    preferEnvironmentSlug?: string,
+  ) => Promise<void>;
+  // User's role in active workspace
+  activeWorkspaceRole: "owner" | "admin" | "member" | null;
+  // Get the current URL path for workspace/environment
   getEnvironmentPath: () => string;
 }
 
 const EnvironmentContext = createContext<EnvironmentContextType | null>(null);
 
-const STORAGE_KEY_ORG = "stardag_active_org_id";
+const STORAGE_KEY_WORKSPACE = "stardag_active_workspace_id";
 const STORAGE_KEY_ENVIRONMENT = "stardag_active_environment_id";
 
 interface EnvironmentProviderProps {
@@ -48,62 +51,65 @@ interface EnvironmentProviderProps {
 }
 
 export function EnvironmentProvider({ children }: EnvironmentProviderProps) {
-  const { isAuthenticated, user, exchangeForOrgToken, isExchangingToken } = useAuth();
+  const { isAuthenticated, user, exchangeForWorkspaceToken, isExchangingToken } =
+    useAuth();
 
-  const [organizations, setOrganizations] = useState<OrganizationSummary[]>([]);
-  const [activeOrg, setActiveOrgState] = useState<OrganizationSummary | null>(null);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [activeWorkspace, setActiveWorkspaceState] = useState<WorkspaceSummary | null>(
+    null,
+  );
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [activeEnvironment, setActiveEnvironmentState] = useState<Environment | null>(
     null,
   );
   const [isLoading, setIsLoading] = useState(false);
 
-  // Update client's current org ID when activeOrg changes
+  // Update client's current workspace ID when activeWorkspace changes
   useEffect(() => {
-    setCurrentOrgId(activeOrg?.id ?? null);
-  }, [activeOrg]);
+    setCurrentWorkspaceId(activeWorkspace?.id ?? null);
+  }, [activeWorkspace]);
 
-  // Load user's organizations when authenticated
-  const loadOrganizations = useCallback(
-    async (preferOrgSlug?: string, preferEnvironmentSlug?: string) => {
+  // Load user's workspaces when authenticated
+  const loadWorkspaces = useCallback(
+    async (preferWorkspaceSlug?: string, preferEnvironmentSlug?: string) => {
       if (!isAuthenticated) {
-        setOrganizations([]);
-        setActiveOrgState(null);
+        setWorkspaces([]);
+        setActiveWorkspaceState(null);
         setEnvironments([]);
         setActiveEnvironmentState(null);
-        setCurrentOrgId(null);
+        setCurrentWorkspaceId(null);
         return;
       }
 
       setIsLoading(true);
       try {
         const profile = await fetchUserProfile();
-        setOrganizations(profile.organizations);
+        setWorkspaces(profile.workspaces);
 
-        // Priority for selecting org: 1) preferOrgSlug, 2) localStorage, 3) first org
-        let orgToActivate: OrganizationSummary | null = null;
-        if (preferOrgSlug) {
-          orgToActivate =
-            profile.organizations.find((o) => o.slug === preferOrgSlug) || null;
+        // Priority for selecting workspace: 1) preferWorkspaceSlug, 2) localStorage, 3) first workspace
+        let workspaceToActivate: WorkspaceSummary | null = null;
+        if (preferWorkspaceSlug) {
+          workspaceToActivate =
+            profile.workspaces.find((w) => w.slug === preferWorkspaceSlug) || null;
         }
-        if (!orgToActivate) {
-          const savedOrgId = localStorage.getItem(STORAGE_KEY_ORG);
-          orgToActivate =
-            profile.organizations.find((o) => o.id === savedOrgId) ||
-            profile.organizations[0] ||
+        if (!workspaceToActivate) {
+          const savedWorkspaceId = localStorage.getItem(STORAGE_KEY_WORKSPACE);
+          workspaceToActivate =
+            profile.workspaces.find((w) => w.id === savedWorkspaceId) ||
+            profile.workspaces[0] ||
             null;
         }
 
-        if (orgToActivate) {
-          setActiveOrgState(orgToActivate);
-          localStorage.setItem(STORAGE_KEY_ORG, orgToActivate.id);
-          setCurrentOrgId(orgToActivate.id);
+        if (workspaceToActivate) {
+          setActiveWorkspaceState(workspaceToActivate);
+          localStorage.setItem(STORAGE_KEY_WORKSPACE, workspaceToActivate.id);
+          setCurrentWorkspaceId(workspaceToActivate.id);
 
-          // Exchange for org-scoped token
-          await exchangeForOrgToken(orgToActivate.id);
+          // Exchange for workspace-scoped token
+          await exchangeForWorkspaceToken(workspaceToActivate.id);
 
-          // Load environments for this org
-          const envs = await fetchEnvironments(orgToActivate.id);
+          // Load environments for this workspace
+          const envs = await fetchEnvironments(workspaceToActivate.id);
           setEnvironments(envs);
 
           // Priority for environment: 1) preferEnvironmentSlug, 2) localStorage, 3) first
@@ -123,44 +129,44 @@ export function EnvironmentProvider({ children }: EnvironmentProviderProps) {
           }
         }
       } catch (error) {
-        console.error("Failed to load organizations:", error);
+        console.error("Failed to load workspaces:", error);
       } finally {
         setIsLoading(false);
       }
     },
-    [isAuthenticated, exchangeForOrgToken],
+    [isAuthenticated, exchangeForWorkspaceToken],
   );
 
   useEffect(() => {
-    // Parse URL to get initial org/environment slugs
+    // Parse URL to get initial workspace/environment slugs
     const path = window.location.pathname;
-    const knownRoutes = ["/callback", "/settings", "/invites", "/organizations/new"];
-    let orgSlug: string | undefined;
+    const knownRoutes = ["/callback", "/settings", "/invites", "/workspaces/new"];
+    let workspaceSlug: string | undefined;
     let environmentSlug: string | undefined;
 
     if (!knownRoutes.some((r) => path.startsWith(r))) {
       const parts = path.split("/").filter(Boolean);
-      orgSlug = parts[0] || undefined;
+      workspaceSlug = parts[0] || undefined;
       environmentSlug = parts[1] || undefined;
     }
 
-    loadOrganizations(orgSlug, environmentSlug);
-  }, [loadOrganizations, user]);
+    loadWorkspaces(workspaceSlug, environmentSlug);
+  }, [loadWorkspaces, user]);
 
-  // Set active organization
-  const setActiveOrg = useCallback(
-    async (org: OrganizationSummary | null) => {
-      setActiveOrgState(org);
-      if (org) {
-        localStorage.setItem(STORAGE_KEY_ORG, org.id);
-        setCurrentOrgId(org.id);
+  // Set active workspace
+  const setActiveWorkspace = useCallback(
+    async (workspace: WorkspaceSummary | null) => {
+      setActiveWorkspaceState(workspace);
+      if (workspace) {
+        localStorage.setItem(STORAGE_KEY_WORKSPACE, workspace.id);
+        setCurrentWorkspaceId(workspace.id);
 
-        // Exchange for org-scoped token
-        await exchangeForOrgToken(org.id);
+        // Exchange for workspace-scoped token
+        await exchangeForWorkspaceToken(workspace.id);
 
-        // Load environments for this org
+        // Load environments for this workspace
         try {
-          const envs = await fetchEnvironments(org.id);
+          const envs = await fetchEnvironments(workspace.id);
           setEnvironments(envs);
           // Select first environment
           const firstEnvironment = envs[0] || null;
@@ -176,14 +182,14 @@ export function EnvironmentProvider({ children }: EnvironmentProviderProps) {
           setActiveEnvironmentState(null);
         }
       } else {
-        localStorage.removeItem(STORAGE_KEY_ORG);
+        localStorage.removeItem(STORAGE_KEY_WORKSPACE);
         localStorage.removeItem(STORAGE_KEY_ENVIRONMENT);
-        setCurrentOrgId(null);
+        setCurrentWorkspaceId(null);
         setEnvironments([]);
         setActiveEnvironmentState(null);
       }
     },
-    [exchangeForOrgToken],
+    [exchangeForWorkspaceToken],
   );
 
   // Set active environment
@@ -196,26 +202,26 @@ export function EnvironmentProvider({ children }: EnvironmentProviderProps) {
     }
   }, []);
 
-  // Get URL path for current org/environment
+  // Get URL path for current workspace/environment
   const getEnvironmentPath = useCallback(() => {
-    if (!activeOrg) return "/";
+    if (!activeWorkspace) return "/";
     if (!activeEnvironment || activeEnvironment.slug === "default") {
-      return `/${activeOrg.slug}`;
+      return `/${activeWorkspace.slug}`;
     }
-    return `/${activeOrg.slug}/${activeEnvironment.slug}`;
-  }, [activeOrg, activeEnvironment]);
+    return `/${activeWorkspace.slug}/${activeEnvironment.slug}`;
+  }, [activeWorkspace, activeEnvironment]);
 
   const value: EnvironmentContextType = {
-    organizations,
-    activeOrg,
-    setActiveOrg,
+    workspaces,
+    activeWorkspace,
+    setActiveWorkspace,
     environments,
     activeEnvironment,
     setActiveEnvironment,
     isLoading,
     isExchangingToken,
-    refresh: loadOrganizations,
-    activeOrgRole: activeOrg?.role || null,
+    refresh: loadWorkspaces,
+    activeWorkspaceRole: activeWorkspace?.role || null,
     getEnvironmentPath,
   };
 

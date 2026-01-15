@@ -20,13 +20,13 @@ class TestTokenExchange:
         self,
         docker_services: ServiceEndpoints,
         oidc_token: TokenSet,
-        test_organization_id: str,
+        test_workspace_id: str,
     ) -> None:
         """Test that /auth/exchange accepts OIDC tokens."""
         internal_token = exchange_oidc_for_internal_token(
             api_url=docker_services.api,
             oidc_token=oidc_token.access_token,
-            organization_id=test_organization_id,
+            workspace_id=test_workspace_id,
         )
         assert internal_token is not None
         assert len(internal_token) > 0
@@ -35,13 +35,13 @@ class TestTokenExchange:
         self,
         docker_services: ServiceEndpoints,
         internal_token: str,
-        test_organization_id: str,
+        test_workspace_id: str,
     ) -> None:
         """Test that /auth/exchange rejects internal tokens."""
         # Try to exchange an internal token (should fail)
         response = httpx.post(
             f"{docker_services.api}/api/v1/auth/exchange",
-            json={"org_id": test_organization_id},
+            json={"workspace_id": test_workspace_id},
             headers={"Authorization": f"Bearer {internal_token}"},
             timeout=30.0,
         )
@@ -51,23 +51,23 @@ class TestTokenExchange:
     def test_exchange_rejects_invalid_token(
         self,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
     ) -> None:
         """Test that /auth/exchange rejects invalid tokens."""
         response = httpx.post(
             f"{docker_services.api}/api/v1/auth/exchange",
-            json={"org_id": test_organization_id},
+            json={"workspace_id": test_workspace_id},
             headers={"Authorization": "Bearer invalid-token"},
             timeout=30.0,
         )
         assert response.status_code == 401
 
-    def test_exchange_requires_org_id(
+    def test_exchange_requires_workspace_id(
         self,
         docker_services: ServiceEndpoints,
         oidc_token: TokenSet,
     ) -> None:
-        """Test that /auth/exchange requires org_id."""
+        """Test that /auth/exchange requires workspace_id."""
         response = httpx.post(
             f"{docker_services.api}/api/v1/auth/exchange",
             json={},
@@ -145,7 +145,7 @@ class TestTokenTypeValidation:
         assert response.status_code == 200
         data = response.json()
         assert "user" in data
-        assert "organizations" in data
+        assert "workspaces" in data
 
     def test_ui_me_accepts_internal_token(
         self,
@@ -168,12 +168,12 @@ class TestApiKeyAuth:
     def test_create_api_key(
         self,
         internal_authenticated_client: httpx.Client,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test creating an API key."""
         response = internal_authenticated_client.post(
-            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/api/v1/ui/workspaces/{test_workspace_id}"
             f"/environments/{test_environment_id}/api-keys",
             json={"name": "Test API Key"},
         )
@@ -187,7 +187,7 @@ class TestApiKeyAuth:
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test that API keys can be used to create builds.
@@ -197,7 +197,7 @@ class TestApiKeyAuth:
         """
         # Create an API key
         response = internal_authenticated_client.post(
-            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/api/v1/ui/workspaces/{test_workspace_id}"
             f"/environments/{test_environment_id}/api-keys",
             json={"name": "SDK Test Key"},
         )
@@ -221,13 +221,13 @@ class TestApiKeyAuth:
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test that GET /builds supports API key auth."""
         # Create an API key
         response = internal_authenticated_client.post(
-            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/api/v1/ui/workspaces/{test_workspace_id}"
             f"/environments/{test_environment_id}/api-keys",
             json={"name": "Read Test Key"},
         )
@@ -249,13 +249,13 @@ class TestApiKeyAuth:
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test that GET /tasks supports API key auth."""
         # Create an API key
         response = internal_authenticated_client.post(
-            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/api/v1/ui/workspaces/{test_workspace_id}"
             f"/environments/{test_environment_id}/api-keys",
             json={"name": "Tasks Test Key"},
         )
@@ -332,14 +332,14 @@ class TestEndpointAccess:
                 405,
             ), f"{path} returned {response.status_code}"
 
-    def test_wrong_org_returns_403(
+    def test_wrong_workspace_returns_403(
         self,
         docker_services: ServiceEndpoints,
         internal_token: str,
     ) -> None:
-        """Test that accessing resources from wrong org returns 403."""
-        # The internal token is scoped to a specific org
-        # Try to access an environment that doesn't exist in that org
+        """Test that accessing resources from wrong workspace returns 403."""
+        # The internal token is scoped to a specific workspace
+        # Try to access an environment that doesn't exist in that workspace
         fake_environment_id = "00000000-0000-0000-0000-000000000000"
         response = httpx.get(
             f"{docker_services.api}/api/v1/builds",

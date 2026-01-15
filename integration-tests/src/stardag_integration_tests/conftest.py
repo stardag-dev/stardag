@@ -142,14 +142,14 @@ def oidc_token(
 def exchange_oidc_for_internal_token(
     api_url: str,
     oidc_token: str,
-    organization_id: str,
+    workspace_id: str,
 ) -> str:
-    """Exchange an OIDC token for an internal (org-scoped) token.
+    """Exchange an OIDC token for an internal (workspace-scoped) token.
 
     Args:
         api_url: Base API URL
         oidc_token: OIDC access token
-        organization_id: Organization ID to scope the token to
+        workspace_id: Workspace ID to scope the token to
 
     Returns:
         Internal access token
@@ -158,7 +158,7 @@ def exchange_oidc_for_internal_token(
 
     response = httpx.post(
         exchange_url,
-        json={"org_id": organization_id},
+        json={"workspace_id": workspace_id},
         headers={"Authorization": f"Bearer {oidc_token}"},
         timeout=30.0,
     )
@@ -180,7 +180,7 @@ def authenticated_client(
     """HTTP client authenticated with OIDC token.
 
     This client can access bootstrap endpoints like /ui/me.
-    For org-scoped endpoints, use internal_authenticated_client instead.
+    For workspace-scoped endpoints, use internal_authenticated_client instead.
     """
     with httpx.Client(
         base_url=docker_services.api,
@@ -190,59 +190,59 @@ def authenticated_client(
         yield client
 
 
-# --- Organization/Environment Fixtures ---
+# --- Workspace/Environment Fixtures ---
 
 
 @pytest.fixture
-def test_organization_id(
+def test_workspace_id(
     authenticated_client: httpx.Client,
 ) -> str:
-    """Get or create a test organization and return its ID.
+    """Get or create a test workspace and return its ID.
 
-    Uses the /ui/me endpoint to get the user's organizations,
+    Uses the /ui/me endpoint to get the user's workspaces,
     or creates one if none exist.
     """
-    # Get user profile with organizations
+    # Get user profile with workspaces
     response = authenticated_client.get("/api/v1/ui/me")
     if response.status_code != 200:
         raise RuntimeError(f"Failed to get user profile: {response.text}")
 
     data = response.json()
-    organizations = data.get("organizations", [])
+    workspaces = data.get("workspaces", [])
 
-    if organizations:
-        # Use the first organization
-        org_id = organizations[0]["id"]
-        logger.info("Using existing organization: %s", org_id)
-        return org_id
+    if workspaces:
+        # Use the first workspace
+        workspace_id = workspaces[0]["id"]
+        logger.info("Using existing workspace: %s", workspace_id)
+        return workspace_id
 
-    # Create a new organization
+    # Create a new workspace
     response = authenticated_client.post(
-        "/api/v1/ui/organizations",
+        "/api/v1/ui/workspaces",
         json={
-            "name": "Test Organization",
-            "slug": "test-org",
+            "name": "Test Workspace",
+            "slug": "test-workspace",
         },
     )
     if response.status_code not in (200, 201):
-        raise RuntimeError(f"Failed to create organization: {response.text}")
+        raise RuntimeError(f"Failed to create workspace: {response.text}")
 
-    org_id = response.json()["id"]
-    logger.info("Created test organization: %s", org_id)
-    return org_id
+    workspace_id = response.json()["id"]
+    logger.info("Created test workspace: %s", workspace_id)
+    return workspace_id
 
 
 @pytest.fixture
 def internal_token(
     docker_services: ServiceEndpoints,  # noqa: F811
     oidc_token: TokenSet,
-    test_organization_id: str,
+    test_workspace_id: str,
 ) -> str:
-    """Get an internal (org-scoped) token for the test user."""
+    """Get an internal (workspace-scoped) token for the test user."""
     return exchange_oidc_for_internal_token(
         api_url=docker_services.api,
         oidc_token=oidc_token.access_token,
-        organization_id=test_organization_id,
+        workspace_id=test_workspace_id,
     )
 
 
@@ -251,7 +251,7 @@ def internal_authenticated_client(
     docker_services: ServiceEndpoints,  # noqa: F811
     internal_token: str,
 ) -> Generator[httpx.Client, None, None]:
-    """HTTP client authenticated with an internal (org-scoped) token.
+    """HTTP client authenticated with an internal (workspace-scoped) token.
 
     This client can access all protected endpoints.
     """
@@ -266,12 +266,12 @@ def internal_authenticated_client(
 @pytest.fixture
 def test_environment_id(
     internal_authenticated_client: httpx.Client,
-    test_organization_id: str,
+    test_workspace_id: str,
 ) -> str:
     """Get or create a test environment and return its ID."""
-    # List environments in the organization
+    # List environments in the workspace
     response = internal_authenticated_client.get(
-        f"/api/v1/ui/organizations/{test_organization_id}/environments"
+        f"/api/v1/ui/workspaces/{test_workspace_id}/environments"
     )
     if response.status_code != 200:
         raise RuntimeError(f"Failed to list environments: {response.text}")
@@ -284,7 +284,7 @@ def test_environment_id(
 
     # Create a new environment
     response = internal_authenticated_client.post(
-        f"/api/v1/ui/organizations/{test_organization_id}/environments",
+        f"/api/v1/ui/workspaces/{test_workspace_id}/environments",
         json={
             "name": "Test Environment",
             "slug": "test-environment",

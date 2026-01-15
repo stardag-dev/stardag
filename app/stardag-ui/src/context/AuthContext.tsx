@@ -11,11 +11,11 @@ import { getUserManager } from "../auth/userManager";
 import { exchangeToken } from "../api/auth";
 import { getCognitoLogoutUrl, isCognitoIssuer } from "../auth/config";
 
-// Storage keys for org-scoped tokens
+// Storage keys for workspace-scoped tokens
 const ACCESS_TOKEN_STORAGE_PREFIX = "stardag_access_token_";
 const TOKEN_EXPIRY_STORAGE_PREFIX = "stardag_token_expiry_";
 
-interface OrgToken {
+interface WorkspaceToken {
   accessToken: string;
   expiresAt: number; // Unix timestamp in ms
 }
@@ -28,12 +28,12 @@ interface AuthContextType {
   logout: () => Promise<void>;
   // Get the OIDC access token (for token exchange only)
   getOidcAccessToken: () => Promise<string | null>;
-  // Get org-scoped access token for API calls
-  getAccessToken: (orgId: string | null) => Promise<string | null>;
-  // Exchange OIDC token for org-scoped token
-  exchangeForOrgToken: (orgId: string) => Promise<string | null>;
-  // Current org for which we have a valid token
-  currentTokenOrgId: string | null;
+  // Get workspace-scoped access token for API calls
+  getAccessToken: (workspaceId: string | null) => Promise<string | null>;
+  // Exchange OIDC token for workspace-scoped token
+  exchangeForWorkspaceToken: (workspaceId: string) => Promise<string | null>;
+  // Current workspace for which we have a valid token
+  currentTokenWorkspaceId: string | null;
   // Token exchange in progress
   isExchangingToken: boolean;
 }
@@ -44,10 +44,10 @@ interface AuthProviderProps {
   children: ReactNode;
 }
 
-// Helper to get/set org tokens from localStorage
-function getStoredOrgToken(orgId: string): OrgToken | null {
-  const token = localStorage.getItem(`${ACCESS_TOKEN_STORAGE_PREFIX}${orgId}`);
-  const expiry = localStorage.getItem(`${TOKEN_EXPIRY_STORAGE_PREFIX}${orgId}`);
+// Helper to get/set workspace tokens from localStorage
+function getStoredWorkspaceToken(workspaceId: string): WorkspaceToken | null {
+  const token = localStorage.getItem(`${ACCESS_TOKEN_STORAGE_PREFIX}${workspaceId}`);
+  const expiry = localStorage.getItem(`${TOKEN_EXPIRY_STORAGE_PREFIX}${workspaceId}`);
   if (token && expiry) {
     const expiresAt = parseInt(expiry, 10);
     // Check if not expired (with 30s buffer)
@@ -58,21 +58,30 @@ function getStoredOrgToken(orgId: string): OrgToken | null {
   return null;
 }
 
-function storeOrgToken(orgId: string, token: string, expiresIn: number): void {
+function storeWorkspaceToken(
+  workspaceId: string,
+  token: string,
+  expiresIn: number,
+): void {
   const expiresAt = Date.now() + expiresIn * 1000;
-  localStorage.setItem(`${ACCESS_TOKEN_STORAGE_PREFIX}${orgId}`, token);
-  localStorage.setItem(`${TOKEN_EXPIRY_STORAGE_PREFIX}${orgId}`, expiresAt.toString());
+  localStorage.setItem(`${ACCESS_TOKEN_STORAGE_PREFIX}${workspaceId}`, token);
+  localStorage.setItem(
+    `${TOKEN_EXPIRY_STORAGE_PREFIX}${workspaceId}`,
+    expiresAt.toString(),
+  );
 }
 
-function clearOrgToken(orgId: string): void {
-  localStorage.removeItem(`${ACCESS_TOKEN_STORAGE_PREFIX}${orgId}`);
-  localStorage.removeItem(`${TOKEN_EXPIRY_STORAGE_PREFIX}${orgId}`);
+function clearWorkspaceToken(workspaceId: string): void {
+  localStorage.removeItem(`${ACCESS_TOKEN_STORAGE_PREFIX}${workspaceId}`);
+  localStorage.removeItem(`${TOKEN_EXPIRY_STORAGE_PREFIX}${workspaceId}`);
 }
 
 export function AuthProvider({ children }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [currentTokenOrgId, setCurrentTokenOrgId] = useState<string | null>(null);
+  const [currentTokenWorkspaceId, setCurrentTokenWorkspaceId] = useState<string | null>(
+    null,
+  );
   const [isExchangingToken, setIsExchangingToken] = useState(false);
 
   const manager = getUserManager();
@@ -103,7 +112,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     const handleUserLoaded = (user: User) => setUser(user);
     const handleUserUnloaded = () => {
       setUser(null);
-      setCurrentTokenOrgId(null);
+      setCurrentTokenWorkspaceId(null);
     };
 
     manager.events.addUserLoaded(handleUserLoaded);
@@ -134,7 +143,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       console.warn("Auth not configured");
       return;
     }
-    // Clear all stored org tokens
+    // Clear all stored workspace tokens
     for (const key of Object.keys(localStorage)) {
       if (
         key.startsWith(ACCESS_TOKEN_STORAGE_PREFIX) ||
@@ -143,7 +152,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         localStorage.removeItem(key);
       }
     }
-    setCurrentTokenOrgId(null);
+    setCurrentTokenWorkspaceId(null);
 
     // Handle Cognito logout specially since it doesn't follow standard OIDC logout
     // Cognito requires client_id and uses logout_uri instead of post_logout_redirect_uri
@@ -167,7 +176,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   }, [manager]);
 
   // Get OIDC ID token (contains user claims like email, name)
-  // Used for bootstrap endpoints (/ui/me, /ui/me/invites) before org selection
+  // Used for bootstrap endpoints (/ui/me, /ui/me/invites) before workspace selection
   const getIdToken = useCallback(async (): Promise<string | null> => {
     if (!manager) return null;
 
@@ -202,13 +211,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   }, [manager]);
 
-  // Exchange OIDC token for org-scoped token
-  const exchangeForOrgToken = useCallback(
-    async (orgId: string): Promise<string | null> => {
+  // Exchange OIDC token for workspace-scoped token
+  const exchangeForWorkspaceToken = useCallback(
+    async (workspaceId: string): Promise<string | null> => {
       // Check cache first
-      const cached = getStoredOrgToken(orgId);
+      const cached = getStoredWorkspaceToken(workspaceId);
       if (cached) {
-        setCurrentTokenOrgId(orgId);
+        setCurrentTokenWorkspaceId(workspaceId);
         return cached.accessToken;
       }
 
@@ -221,13 +230,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
       setIsExchangingToken(true);
       try {
-        const response = await exchangeToken(oidcToken, orgId);
-        storeOrgToken(orgId, response.access_token, response.expires_in);
-        setCurrentTokenOrgId(orgId);
+        const response = await exchangeToken(oidcToken, workspaceId);
+        storeWorkspaceToken(workspaceId, response.access_token, response.expires_in);
+        setCurrentTokenWorkspaceId(workspaceId);
         return response.access_token;
       } catch (error) {
         console.error("Token exchange failed:", error);
-        clearOrgToken(orgId);
+        clearWorkspaceToken(workspaceId);
         return null;
       } finally {
         setIsExchangingToken(false);
@@ -236,27 +245,27 @@ export function AuthProvider({ children }: AuthProviderProps) {
     [getOidcAccessToken],
   );
 
-  // Get access token for API calls (org-scoped if orgId provided)
+  // Get access token for API calls (workspace-scoped if workspaceId provided)
   const getAccessToken = useCallback(
-    async (orgId: string | null): Promise<string | null> => {
-      // If no org specified, use ID token for bootstrap endpoints
+    async (workspaceId: string | null): Promise<string | null> => {
+      // If no workspace specified, use ID token for bootstrap endpoints
       // (ID token contains email/name claims needed by /ui/me endpoints)
       // NOTE: Access token doesn't have user claims in Cognito
-      if (!orgId) {
+      if (!workspaceId) {
         return getIdToken();
       }
 
-      // Check if we have a valid cached token for this org
-      const cached = getStoredOrgToken(orgId);
+      // Check if we have a valid cached token for this workspace
+      const cached = getStoredWorkspaceToken(workspaceId);
       if (cached) {
-        setCurrentTokenOrgId(orgId);
+        setCurrentTokenWorkspaceId(workspaceId);
         return cached.accessToken;
       }
 
       // Need to exchange for a new token
-      return exchangeForOrgToken(orgId);
+      return exchangeForWorkspaceToken(workspaceId);
     },
-    [getIdToken, exchangeForOrgToken],
+    [getIdToken, exchangeForWorkspaceToken],
   );
 
   const value: AuthContextType = {
@@ -267,8 +276,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     logout,
     getOidcAccessToken,
     getAccessToken,
-    exchangeForOrgToken,
-    currentTokenOrgId,
+    exchangeForWorkspaceToken,
+    currentTokenWorkspaceId,
     isExchangingToken,
   };
 

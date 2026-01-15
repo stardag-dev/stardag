@@ -4,7 +4,7 @@ import {
   declineInvite,
   fetchPendingInvites,
   type PendingInvite,
-} from "../api/organizations";
+} from "../api/workspaces";
 import { useEnvironment } from "../context/EnvironmentContext";
 
 interface PendingInvitesProps {
@@ -79,16 +79,16 @@ export function PendingInvites({ compact = false }: PendingInvitesProps) {
           No Pending Invitations
         </h2>
         <p className="text-gray-500 dark:text-gray-400 mb-6">
-          You don't have any pending invitations to organizations.
+          You don't have any pending invitations to workspaces.
         </p>
         <button
           onClick={() => {
-            window.history.pushState({}, "", "/organizations/new");
+            window.history.pushState({}, "", "/workspaces/new");
             window.dispatchEvent(new PopStateEvent("popstate"));
           }}
           className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
         >
-          Create an Organization
+          Create a Workspace
         </button>
       </div>
     );
@@ -135,7 +135,7 @@ export function PendingInvites({ compact = false }: PendingInvitesProps) {
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1">
                 <h3 className="font-medium text-gray-900 dark:text-gray-100">
-                  {invite.organization_name}
+                  {invite.workspace_name}
                 </h3>
                 <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
                   Role: <span className="capitalize">{invite.role}</span>

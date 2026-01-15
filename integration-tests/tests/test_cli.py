@@ -123,13 +123,13 @@ class TestCliApiKeyAuth:
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test config show when API key is set."""
         # Create an API key
         response = internal_authenticated_client.post(
-            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/api/v1/ui/workspaces/{test_workspace_id}"
             f"/environments/{test_environment_id}/api-keys",
             json={"name": "CLI Test Key"},
         )
@@ -146,13 +146,13 @@ class TestCliApiKeyAuth:
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test auth status shows API key is in use."""
         # Create an API key
         response = internal_authenticated_client.post(
-            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/api/v1/ui/workspaces/{test_workspace_id}"
             f"/environments/{test_environment_id}/api-keys",
             json={"name": "Status Test Key"},
         )
@@ -189,7 +189,7 @@ class TestCliEnvConfig:
     def test_config_with_multiple_env_vars(
         self,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test config with multiple env vars set."""
@@ -197,16 +197,13 @@ class TestCliEnvConfig:
             env = {
                 "HOME": tmpdir,
                 "STARDAG_REGISTRY_URL": docker_services.api,
-                "STARDAG_ORGANIZATION_ID": test_organization_id,
+                "STARDAG_WORKSPACE_ID": test_workspace_id,
                 "STARDAG_ENVIRONMENT_ID": test_environment_id,
             }
             result = run_stardag_cli("config", "show", env=env)
             assert result.returncode == 0
             # Should show the configured values
-            assert (
-                test_organization_id in result.stdout
-                or "Organization:" in result.stdout
-            )
+            assert test_workspace_id in result.stdout or "Workspace:" in result.stdout
 
 
 class TestCliRegistryCommands:
@@ -320,13 +317,13 @@ class TestCliLoginFlow:
         self,
         internal_authenticated_client: httpx.Client,
         docker_services: ServiceEndpoints,
-        test_organization_id: str,
+        test_workspace_id: str,
         test_environment_id: str,
     ) -> None:
         """Test that login command shows message when API key is already set."""
         # Create an API key
         response = internal_authenticated_client.post(
-            f"/api/v1/ui/organizations/{test_organization_id}"
+            f"/api/v1/ui/workspaces/{test_workspace_id}"
             f"/environments/{test_environment_id}/api-keys",
             json={"name": "Login Test Key"},
         )

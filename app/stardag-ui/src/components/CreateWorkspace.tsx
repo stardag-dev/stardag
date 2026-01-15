@@ -1,15 +1,15 @@
 import { useState } from "react";
-import { createOrganization } from "../api/organizations";
+import { createWorkspace } from "../api/workspaces";
 import { useEnvironment } from "../context/EnvironmentContext";
 import { Logo } from "./Logo";
 import { ThemeToggle } from "./ThemeToggle";
 import { UserMenu } from "./UserMenu";
 
-interface CreateOrganizationProps {
+interface CreateWorkspaceProps {
   onNavigate: (path: string) => void;
 }
 
-export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
+export function CreateWorkspace({ onNavigate }: CreateWorkspaceProps) {
   const { refresh } = useEnvironment();
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
@@ -38,22 +38,22 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
     e.preventDefault();
     if (!name.trim() || !slug.trim()) return;
 
-    const orgSlug = slug.trim();
+    const workspaceSlug = slug.trim();
     try {
       setLoading(true);
       setError(null);
-      await createOrganization({
+      await createWorkspace({
         name: name.trim(),
-        slug: orgSlug,
+        slug: workspaceSlug,
         description: description.trim() || undefined,
       });
-      // Refresh environment context and select the newly created org
-      await refresh(orgSlug);
-      // Navigate to dashboard with new org in URL
-      onNavigate(`/${orgSlug}`);
+      // Refresh environment context and select the newly created workspace
+      await refresh(workspaceSlug);
+      // Navigate to dashboard with new workspace in URL
+      onNavigate(`/${workspaceSlug}`);
     } catch (err) {
-      console.error("Failed to create organization:", err);
-      setError(err instanceof Error ? err.message : "Failed to create organization");
+      console.error("Failed to create workspace:", err);
+      setError(err instanceof Error ? err.message : "Failed to create workspace");
     } finally {
       setLoading(false);
     }
@@ -80,7 +80,7 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
       {/* Content */}
       <main className="mx-auto max-w-lg px-4 py-8">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-6">
-          Create Organization
+          Create Workspace
         </h1>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -95,14 +95,14 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
               htmlFor="name"
               className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
             >
-              Organization Name
+              Workspace Name
             </label>
             <input
               type="text"
               id="name"
               value={name}
               onChange={(e) => handleNameChange(e.target.value)}
-              placeholder="My Organization"
+              placeholder="My Workspace"
               required
               className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
@@ -122,7 +122,7 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
               onChange={(e) =>
                 setSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))
               }
-              placeholder="my-organization"
+              placeholder="my-workspace"
               required
               pattern="^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$"
               className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -143,7 +143,7 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
               id="description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What is this organization for?"
+              placeholder="What is this workspace for?"
               rows={3}
               className="w-full rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
@@ -155,7 +155,7 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
               disabled={loading || !name.trim() || !slug.trim()}
               className="flex-1 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {loading ? "Creating..." : "Create Organization"}
+              {loading ? "Creating..." : "Create Workspace"}
             </button>
             <button
               type="button"
@@ -168,7 +168,7 @@ export function CreateOrganization({ onNavigate }: CreateOrganizationProps) {
         </form>
 
         <p className="mt-6 text-center text-sm text-gray-500 dark:text-gray-400">
-          You can create up to 3 organizations.
+          You can create up to 3 workspaces.
         </p>
       </main>
     </div>

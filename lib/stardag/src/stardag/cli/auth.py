@@ -46,7 +46,7 @@ from stardag.cli.credentials import (
     list_registries,
     list_registries_with_credentials,
     load_credentials,
-    resolve_org_slug_to_id,
+    resolve_workspace_slug_to_id,
     resolve_environment_slug_to_id,
     save_access_token_cache,
     save_credentials,
@@ -56,7 +56,7 @@ from stardag.cli.credentials import (
 )
 from stardag.config import (
     _looks_like_uuid,
-    cache_org_id,
+    cache_workspace_id,
     cache_environment_id,
     get_config,
 )
@@ -218,9 +218,9 @@ def _refresh_oidc_token(
 def _exchange_for_internal_token(
     api_url: str,
     oidc_token: str,
-    org_id: str,
+    workspace_id: str,
 ) -> dict:
-    """Exchange OIDC token for internal org-scoped token via /auth/exchange."""
+    """Exchange OIDC token for internal workspace-scoped token via /auth/exchange."""
     try:
         import httpx
     except ImportError:
@@ -229,7 +229,7 @@ def _exchange_for_internal_token(
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{api_url}/api/v1/auth/exchange",
-            json={"org_id": org_id},
+            json={"workspace_id": workspace_id},
             headers={"Authorization": f"Bearer {oidc_token}"},
         )
         response.raise_for_status()
@@ -314,15 +314,15 @@ def _get_oidc_config(issuer: str) -> dict:
         return response.json()
 
 
-def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
-    """Fetch user's organizations from API using OIDC token."""
+def _get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
+    """Fetch user's workspaces from API using OIDC token."""
     try:
         import httpx
     except ImportError:
         return []
 
     try:
-        # Use /ui/me which accepts OIDC tokens directly (before org-scoped exchange)
+        # Use /ui/me which accepts OIDC tokens directly (before workspace-scoped exchange)
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
                 f"{api_url}/api/v1/ui/me",
@@ -330,14 +330,14 @@ def _get_user_organizations(api_url: str, oidc_token: str) -> list[dict]:
             )
             if response.status_code == 200:
                 data = response.json()
-                return data.get("organizations", [])
+                return data.get("workspaces", [])
     except Exception:
         pass
     return []
 
 
-def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict]:
-    """Fetch environments for an organization."""
+def _get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
+    """Fetch environments for a workspace."""
     try:
         import httpx
     except ImportError:
@@ -346,7 +346,7 @@ def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"{api_url}/api/v1/ui/organizations/{org_id}/environments",
+                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if response.status_code == 200:
@@ -357,7 +357,7 @@ def _get_environments(api_url: str, access_token: str, org_id: str) -> list[dict
 
 
 def _sync_target_roots(
-    api_url: str, access_token: str, org_id: str, environment_id: str
+    api_url: str, access_token: str, workspace_id: str, environment_id: str
 ) -> None:
     """Sync target roots from server."""
     try:
@@ -368,7 +368,7 @@ def _sync_target_roots(
     try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(
-                f"{api_url}/api/v1/ui/organizations/{org_id}/environments/{environment_id}/target-roots",
+                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments/{environment_id}/target-roots",
                 headers={"Authorization": f"Bearer {access_token}"},
             )
             if response.status_code == 200:
@@ -377,7 +377,7 @@ def _sync_target_roots(
                 set_target_roots(
                     target_roots,
                     registry_url=api_url,
-                    organization_id=org_id,
+                    workspace_id=workspace_id,
                     environment_id=environment_id,
                 )
                 if target_roots:
@@ -517,9 +517,9 @@ def login(
 
     If a profile is active (via STARDAG_PROFILE or default), this command
     will refresh credentials for that profile's registry without prompting
-    for organization/environment selection.
+    for workspace/environment selection.
 
-    For first-time setup (no profiles), you'll be guided through org/environment
+    For first-time setup (no profiles), you'll be guided through workspace/environment
     selection to create your first profile.
 
     For production/CI, use the STARDAG_API_KEY environment variable instead.
@@ -723,15 +723,15 @@ def login(
     if has_active_profile_for_registry and active_profile:
         profile_details = profiles[active_profile]
         profile_user = profile_details.get("user")
-        org_slug = profile_details["organization"]
+        workspace_slug = profile_details["workspace"]
         environment_slug = profile_details["environment"]
 
         typer.echo("")
         typer.echo(f"Active profile: {active_profile}")
         if profile_user:
             typer.echo(f"  User: {profile_user}")
-        typer.echo(f"  Organization: {org_slug}")
-        typer.echo(f"  Workspace: {environment_slug}")
+        typer.echo(f"  Workspace: {workspace_slug}")
+        typer.echo(f"  Environment: {environment_slug}")
 
         # Warn if logged-in user doesn't match profile user
         if profile_user and logged_in_user and profile_user != logged_in_user:
@@ -745,39 +745,45 @@ def login(
         # Use logged-in user for caching (profile user if different will use its own cache)
         cache_user = logged_in_user
 
-        # Resolve org slug to ID and cache access token
+        # Resolve workspace slug to ID and cache access token
         # Pass oidc_token since we have it fresh
-        org_id = resolve_org_slug_to_id(
-            effective_registry, org_slug, oidc_token=oidc_token
+        workspace_id = resolve_workspace_slug_to_id(
+            effective_registry, workspace_slug, oidc_token=oidc_token
         )
 
-        if not org_id:
-            # Need to fetch org ID from API
-            organizations = _get_user_organizations(effective_url, oidc_token)
-            matching_org = next(
-                (o for o in organizations if o["slug"] == org_slug), None
+        if not workspace_id:
+            # Need to fetch workspace ID from API
+            workspaces = _get_user_workspaces(effective_url, oidc_token)
+            matching_ws = next(
+                (w for w in workspaces if w["slug"] == workspace_slug), None
             )
-            if matching_org:
-                org_id = matching_org["id"]
-                cache_org_id(effective_registry, org_slug, org_id)
+            if matching_ws:
+                workspace_id = matching_ws["id"]
+                cache_workspace_id(effective_registry, workspace_slug, workspace_id)
             else:
                 typer.echo("")
                 typer.echo(
-                    f"Warning: Could not find organization '{org_slug}' for this user"
+                    f"Warning: Could not find workspace '{workspace_slug}' for this user"
                 )
-                typer.echo("You may need to update your profile or check org access")
+                typer.echo(
+                    "You may need to update your profile or check workspace access"
+                )
 
-        if org_id:
-            # Exchange for internal org-scoped token
-            typer.echo(f"Caching access token for {org_slug}...")
+        if workspace_id:
+            # Exchange for internal workspace-scoped token
+            typer.echo(f"Caching access token for {workspace_slug}...")
             try:
                 internal_tokens = _exchange_for_internal_token(
-                    effective_url, oidc_token, org_id
+                    effective_url, oidc_token, workspace_id
                 )
                 access_token = internal_tokens["access_token"]
                 expires_in = internal_tokens.get("expires_in", 600)
                 save_access_token_cache(
-                    effective_registry, org_id, access_token, expires_in, cache_user
+                    effective_registry,
+                    workspace_id,
+                    access_token,
+                    expires_in,
+                    cache_user,
                 )
                 typer.echo("Access token cached")
 
@@ -785,27 +791,30 @@ def login(
                 # Pass access_token since we have it fresh
                 environment_id = resolve_environment_slug_to_id(
                     effective_registry,
-                    org_id,
+                    workspace_id,
                     environment_slug,
                     access_token=access_token,
                 )
                 if not environment_id or not _looks_like_uuid(environment_id):
                     environments = _get_environments(
-                        effective_url, access_token, org_id
+                        effective_url, access_token, workspace_id
                     )
-                    matching_ws = next(
-                        (w for w in environments if w["slug"] == environment_slug), None
+                    matching_env = next(
+                        (e for e in environments if e["slug"] == environment_slug), None
                     )
-                    if matching_ws:
-                        environment_id = matching_ws["id"]
+                    if matching_env:
+                        environment_id = matching_env["id"]
                         cache_environment_id(
-                            effective_registry, org_id, environment_slug, environment_id
+                            effective_registry,
+                            workspace_id,
+                            environment_slug,
+                            environment_id,
                         )
 
                 # Sync target roots
                 if environment_id:
                     _sync_target_roots(
-                        effective_url, access_token, org_id, environment_id
+                        effective_url, access_token, workspace_id, environment_id
                     )
 
             except Exception as e:
@@ -843,99 +852,101 @@ def login(
         typer.echo("To create a new profile:")
         typer.echo(
             "  stardag config profile add <name> "
-            f"-r {effective_registry} -o <org-slug> -e <environment-slug>"
+            f"-r {effective_registry} -w <workspace-slug> -e <environment-slug>"
         )
         return
 
     # First-time setup (no profiles exist)
-    # Fetch organizations and prompt for selection
+    # Fetch workspaces and prompt for selection
     # Note: oidc_token and logged_in_user are already extracted and validated above
     assert logged_in_user is not None  # Validated earlier with exit
-    organizations = _get_user_organizations(effective_url, oidc_token)
+    workspaces = _get_user_workspaces(effective_url, oidc_token)
 
-    if not organizations:
+    if not workspaces:
         typer.echo("")
-        typer.echo("No organizations found.")
+        typer.echo("No workspaces found.")
         typer.echo("Create one in the web UI or contact your admin.")
         return
 
-    # Select organization
-    if len(organizations) == 1:
-        org = organizations[0]
-        typer.echo(f'Using organization: "{org["name"]}" (/{org["slug"]})')
+    # Select workspace
+    if len(workspaces) == 1:
+        ws = workspaces[0]
+        typer.echo(f'Using workspace: "{ws["name"]}" (/{ws["slug"]})')
     else:
         typer.echo("")
-        typer.echo("Select an organization:")
-        for i, org in enumerate(organizations):
-            typer.echo(f'  {i + 1}. "{org["name"]}" (/{org["slug"]})')
+        typer.echo("Select a workspace:")
+        for i, ws in enumerate(workspaces):
+            typer.echo(f'  {i + 1}. "{ws["name"]}" (/{ws["slug"]})')
 
         choice = typer.prompt("Enter number", type=int, default=1)
-        if choice < 1 or choice > len(organizations):
+        if choice < 1 or choice > len(workspaces):
             typer.echo("Invalid selection")
             raise typer.Exit(1)
-        org = organizations[choice - 1]
+        ws = workspaces[choice - 1]
 
-    org_id = org["id"]
-    org_slug = org["slug"]
+    workspace_id = ws["id"]
+    workspace_slug = ws["slug"]
 
-    # Cache org slug -> ID mapping
-    cache_org_id(effective_registry, org_slug, org_id)
+    # Cache workspace slug -> ID mapping
+    cache_workspace_id(effective_registry, workspace_slug, workspace_id)
 
-    # Exchange for internal org-scoped token
-    typer.echo(f"Exchanging for org-scoped token ({org_slug})...")
+    # Exchange for internal workspace-scoped token
+    typer.echo(f"Exchanging for workspace-scoped token ({workspace_slug})...")
     try:
         internal_tokens = _exchange_for_internal_token(
-            effective_url, oidc_token, org_id
+            effective_url, oidc_token, workspace_id
         )
         access_token = internal_tokens["access_token"]
         expires_in = internal_tokens.get("expires_in", 600)
 
         # Cache the access token (with user for multi-user support)
         save_access_token_cache(
-            effective_registry, org_id, access_token, expires_in, logged_in_user
+            effective_registry, workspace_id, access_token, expires_in, logged_in_user
         )
         typer.echo("Access token cached")
 
     except Exception as e:
-        typer.echo(f"Warning: Could not get org-scoped token: {e}")
+        typer.echo(f"Warning: Could not get workspace-scoped token: {e}")
         typer.echo("You may need to manually create a profile")
         return
 
     # Fetch environments
-    environments = _get_environments(effective_url, access_token, org_id)
+    environments = _get_environments(effective_url, access_token, workspace_id)
 
     if not environments:
-        typer.echo("No environments found in organization")
+        typer.echo("No environments found in workspace")
         return
 
     # Select environment
     if len(environments) == 1:
-        ws = environments[0]
-        typer.echo(f'Using environment: "{ws["name"]}" (/{ws["slug"]})')
+        env = environments[0]
+        typer.echo(f'Using environment: "{env["name"]}" (/{env["slug"]})')
     else:
         typer.echo("")
         typer.echo("Select an environment:")
-        for i, ws in enumerate(environments):
-            typer.echo(f'  {i + 1}. "{ws["name"]}" (/{ws["slug"]})')
+        for i, env in enumerate(environments):
+            typer.echo(f'  {i + 1}. "{env["name"]}" (/{env["slug"]})')
 
         choice = typer.prompt("Enter number", type=int, default=1)
         if choice < 1 or choice > len(environments):
             typer.echo("Invalid selection")
             raise typer.Exit(1)
-        ws = environments[choice - 1]
+        env = environments[choice - 1]
 
-    environment_id = ws["id"]
-    environment_slug = ws["slug"]
+    environment_id = env["id"]
+    environment_slug = env["slug"]
 
     # Cache environment slug -> ID mapping
-    cache_environment_id(effective_registry, org_id, environment_slug, environment_id)
+    cache_environment_id(
+        effective_registry, workspace_id, environment_slug, environment_id
+    )
 
     # Sync target roots
-    _sync_target_roots(effective_url, access_token, org_id, environment_id)
+    _sync_target_roots(effective_url, access_token, workspace_id, environment_id)
 
     # Check if a matching profile already exists (including user for multi-user)
     existing_profile = find_matching_profile(
-        effective_registry, org_slug, environment_slug, logged_in_user
+        effective_registry, workspace_slug, environment_slug, logged_in_user
     )
 
     if existing_profile:
@@ -961,7 +972,7 @@ def login(
             user_part = email_parts[0]
             domain_part = email_parts[1] if len(email_parts) > 1 else None
             base_profile_name = (
-                f"{effective_registry}-{user_part}-{org_slug}-{environment_slug}"
+                f"{effective_registry}-{user_part}-{workspace_slug}-{environment_slug}"
             )
             profile_name = base_profile_name
 
@@ -983,9 +994,13 @@ def login(
                             suffix += 1
                         profile_name = f"{profile_name}-{suffix}"
         else:
-            profile_name = f"{effective_registry}-{org_slug}-{environment_slug}"
+            profile_name = f"{effective_registry}-{workspace_slug}-{environment_slug}"
         add_profile(
-            profile_name, effective_registry, org_slug, environment_slug, logged_in_user
+            profile_name,
+            effective_registry,
+            workspace_slug,
+            environment_slug,
+            logged_in_user,
         )
         typer.echo(f"Created profile: {profile_name}")
         if logged_in_user:
@@ -1137,7 +1152,7 @@ def status(
         if registry_url:
             typer.echo(f"  API URL: {registry_url}")
         typer.echo(f"  User: {user}")
-        typer.echo(f"  Organization: {profile_details['organization']}")
+        typer.echo(f"  Workspace: {profile_details['workspace']}")
         typer.echo(f"  Environment: {profile_details['environment']}")
 
         typer.echo("")
@@ -1156,11 +1171,15 @@ def status(
                 )
 
                 # Check for cached access token
-                # Need to resolve org slug to ID to check token cache
-                org_slug = profile_details["organization"]
-                org_id = resolve_org_slug_to_id(registry_name, org_slug, user)
+                # Need to resolve workspace slug to ID to check token cache
+                workspace_slug = profile_details["workspace"]
+                workspace_id = resolve_workspace_slug_to_id(
+                    registry_name, workspace_slug, user
+                )
                 access_token = (
-                    get_access_token(registry_name, org_id, user) if org_id else None
+                    get_access_token(registry_name, workspace_id, user)
+                    if workspace_id
+                    else None
                 )
                 if access_token:
                     typer.echo(f"  Access token: {access_token[:20]}... (cached)")
@@ -1213,7 +1232,7 @@ def status(
             typer.echo("")
             typer.echo("To create a profile:")
             typer.echo(
-                "  stardag config profile add <name> -r <registry> -o <org> -e <environment>"
+                "  stardag config profile add <name> -r <registry> -w <workspace> -e <environment>"
             )
             typer.echo("  # or run: stardag auth login (for first-time setup)")
 
@@ -1226,29 +1245,29 @@ def refresh(
         "-r",
         help="Registry to refresh token for",
     ),
-    org_id: str = typer.Option(
+    workspace_id: str = typer.Option(
         None,
-        "--org",
-        "-o",
-        help="Organization ID to get token for",
+        "--workspace",
+        "-w",
+        help="Workspace ID to get token for",
     ),
 ) -> None:
     """Refresh the access token using stored refresh token."""
     # Validate active profile if we're going to use it
-    if not registry or not org_id:
+    if not registry or not workspace_id:
         _validate_active_profile_cli()
 
     config = get_config()
     registry_name = registry or config.context.registry_name
-    organization_id = org_id or config.context.organization_id
+    ws_id = workspace_id or config.context.workspace_id
     user = config.context.user  # Get user from active profile
 
     if not registry_name:
         typer.echo("Error: No registry specified and no active profile", err=True)
         raise typer.Exit(1)
 
-    if not organization_id:
-        typer.echo("Error: No organization specified", err=True)
+    if not ws_id:
+        typer.echo("Error: No workspace specified", err=True)
         raise typer.Exit(1)
 
     if not user:
@@ -1273,7 +1292,7 @@ def refresh(
         typer.echo(f"Error: Registry '{registry_name}' not found", err=True)
         raise typer.Exit(1)
 
-    typer.echo(f"Refreshing token for {registry_name}/{user}/{organization_id}...")
+    typer.echo(f"Refreshing token for {registry_name}/{user}/{ws_id}...")
 
     # Refresh OIDC token
     token_endpoint = creds.get("token_endpoint")
@@ -1307,14 +1326,12 @@ def refresh(
     # Exchange for internal token
     try:
         internal_tokens = _exchange_for_internal_token(
-            registry_url, tokens["access_token"], organization_id
+            registry_url, tokens["access_token"], ws_id
         )
         access_token = internal_tokens["access_token"]
         expires_in = internal_tokens.get("expires_in", 600)
 
-        save_access_token_cache(
-            registry_name, organization_id, access_token, expires_in, user
-        )
+        save_access_token_cache(registry_name, ws_id, access_token, expires_in, user)
         typer.echo("Access token refreshed and cached")
 
     except Exception as e:

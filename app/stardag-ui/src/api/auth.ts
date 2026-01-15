@@ -10,15 +10,15 @@ export interface TokenExchangeResponse {
 }
 
 /**
- * Exchange an OIDC token for an org-scoped internal token.
+ * Exchange an OIDC token for a workspace-scoped internal token.
  *
  * @param oidcToken - The OIDC access token from the identity provider
- * @param orgId - The organization ID to scope the token to
- * @returns The org-scoped internal access token
+ * @param workspaceId - The workspace ID to scope the token to
+ * @returns The workspace-scoped internal access token
  */
 export async function exchangeToken(
   oidcToken: string,
-  orgId: string,
+  workspaceId: string,
 ): Promise<TokenExchangeResponse> {
   const response = await fetch(`${API_BASE}/auth/exchange`, {
     method: "POST",
@@ -26,7 +26,7 @@ export async function exchangeToken(
       "Content-Type": "application/json",
       Authorization: `Bearer ${oidcToken}`,
     },
-    body: JSON.stringify({ org_id: orgId }),
+    body: JSON.stringify({ workspace_id: workspaceId }),
   });
 
   if (!response.ok) {

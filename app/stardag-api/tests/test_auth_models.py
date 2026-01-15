@@ -1,4 +1,4 @@
-"""Tests for auth-related models (OrganizationMember, Invite, ApiKey)."""
+"""Tests for auth-related models (WorkspaceMember, Invite, ApiKey)."""
 
 import pytest
 from sqlalchemy import select
@@ -9,83 +9,83 @@ from stardag_api.models import (
     ApiKey,
     Invite,
     InviteStatus,
-    Organization,
-    OrganizationMember,
-    OrganizationRole,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
     User,
 )
 
 
-class TestOrganizationMember:
-    """Tests for OrganizationMember model."""
+class TestWorkspaceMember:
+    """Tests for WorkspaceMember model."""
 
     async def test_create_membership(self, async_session: AsyncSession):
         """Test creating a membership relationship."""
-        # Create a new org and user
-        org = Organization(name="Test Org", slug="test-org")
+        # Create a new workspace and user
+        workspace = Workspace(name="Test Workspace", slug="test-workspace")
         user = User(external_id="user-123", email="user@test.com", display_name="Test")
-        async_session.add_all([org, user])
+        async_session.add_all([workspace, user])
         await async_session.flush()
 
         # Create membership
-        membership = OrganizationMember(
-            organization_id=org.id,
+        membership = WorkspaceMember(
+            workspace_id=workspace.id,
             user_id=user.id,
-            role=OrganizationRole.ADMIN,
+            role=WorkspaceRole.ADMIN,
         )
         async_session.add(membership)
         await async_session.commit()
 
         # Verify
         result = await async_session.execute(
-            select(OrganizationMember).where(OrganizationMember.user_id == user.id)
+            select(WorkspaceMember).where(WorkspaceMember.user_id == user.id)
         )
         saved = result.scalar_one()
-        assert saved.role == OrganizationRole.ADMIN
-        assert saved.organization_id == org.id
+        assert saved.role == WorkspaceRole.ADMIN
+        assert saved.workspace_id == workspace.id
 
     async def test_unique_membership_constraint(self, async_session: AsyncSession):
-        """Test that user can only have one membership per org."""
-        org = Organization(name="Unique Org", slug="unique-org")
+        """Test that user can only have one membership per workspace."""
+        workspace = Workspace(name="Unique Workspace", slug="unique-workspace")
         user = User(external_id="unique-user", email="unique@test.com")
-        async_session.add_all([org, user])
+        async_session.add_all([workspace, user])
         await async_session.flush()
 
         # First membership
-        m1 = OrganizationMember(
-            organization_id=org.id, user_id=user.id, role=OrganizationRole.MEMBER
+        m1 = WorkspaceMember(
+            workspace_id=workspace.id, user_id=user.id, role=WorkspaceRole.MEMBER
         )
         async_session.add(m1)
         await async_session.commit()
 
         # Duplicate should fail
-        m2 = OrganizationMember(
-            organization_id=org.id, user_id=user.id, role=OrganizationRole.ADMIN
+        m2 = WorkspaceMember(
+            workspace_id=workspace.id, user_id=user.id, role=WorkspaceRole.ADMIN
         )
         async_session.add(m2)
         with pytest.raises(IntegrityError):
             await async_session.commit()
 
-    async def test_user_multiple_orgs(self, async_session: AsyncSession):
-        """Test that a user can belong to multiple organizations."""
-        org1 = Organization(name="Org One", slug="org-one")
-        org2 = Organization(name="Org Two", slug="org-two")
-        user = User(external_id="multi-org-user", email="multi@test.com")
-        async_session.add_all([org1, org2, user])
+    async def test_user_multiple_workspaces(self, async_session: AsyncSession):
+        """Test that a user can belong to multiple workspaces."""
+        workspace1 = Workspace(name="Workspace One", slug="workspace-one")
+        workspace2 = Workspace(name="Workspace Two", slug="workspace-two")
+        user = User(external_id="multi-workspace-user", email="multi@test.com")
+        async_session.add_all([workspace1, workspace2, user])
         await async_session.flush()
 
-        m1 = OrganizationMember(
-            organization_id=org1.id, user_id=user.id, role=OrganizationRole.OWNER
+        m1 = WorkspaceMember(
+            workspace_id=workspace1.id, user_id=user.id, role=WorkspaceRole.OWNER
         )
-        m2 = OrganizationMember(
-            organization_id=org2.id, user_id=user.id, role=OrganizationRole.MEMBER
+        m2 = WorkspaceMember(
+            workspace_id=workspace2.id, user_id=user.id, role=WorkspaceRole.MEMBER
         )
         async_session.add_all([m1, m2])
         await async_session.commit()
 
         # Verify user has two memberships
         result = await async_session.execute(
-            select(OrganizationMember).where(OrganizationMember.user_id == user.id)
+            select(WorkspaceMember).where(WorkspaceMember.user_id == user.id)
         )
         memberships = result.scalars().all()
         assert len(memberships) == 2
@@ -96,11 +96,11 @@ class TestInvite:
 
     async def test_create_invite(self, async_session: AsyncSession):
         """Test creating an invite."""
-        # Use default org from fixtures
+        # Use default workspace from fixtures
         invite = Invite(
-            organization_id="default",
+            workspace_id="default",
             email="newuser@test.com",
-            role=OrganizationRole.MEMBER,
+            role=WorkspaceRole.MEMBER,
             invited_by_id="default",
         )
         async_session.add(invite)
@@ -111,14 +111,14 @@ class TestInvite:
         )
         saved = result.scalar_one()
         assert saved.status == InviteStatus.PENDING
-        assert saved.role == OrganizationRole.MEMBER
+        assert saved.role == WorkspaceRole.MEMBER
 
     async def test_invite_status_transitions(self, async_session: AsyncSession):
         """Test invite status can be changed."""
         invite = Invite(
-            organization_id="default",
+            workspace_id="default",
             email="status@test.com",
-            role=OrganizationRole.ADMIN,
+            role=WorkspaceRole.ADMIN,
         )
         async_session.add(invite)
         await async_session.commit()

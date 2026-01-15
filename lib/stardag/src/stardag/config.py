@@ -3,7 +3,7 @@
 This module provides a unified configuration system that consolidates:
 - Target factory settings (target roots)
 - API registry settings (URL, timeout, environment)
-- Active context (registry, organization, environment)
+- Active context (registry, workspace, environment)
 
 Configuration is loaded from multiple sources with the following priority:
 1. Environment variables (STARDAG_*)
@@ -21,7 +21,7 @@ Usage:
 Environment Variables (highest priority):
     STARDAG_PROFILE          - Profile name to use (looks up in config.toml)
     STARDAG_REGISTRY_URL     - Direct registry URL override
-    STARDAG_ORGANIZATION_ID  - Direct org ID override
+    STARDAG_WORKSPACE_ID     - Direct workspace ID override
     STARDAG_ENVIRONMENT_ID     - Direct environment ID override
     STARDAG_API_KEY          - API key for authentication
     STARDAG_TARGET_ROOTS     - JSON dict of target roots (override)
@@ -124,19 +124,24 @@ def get_registry_credentials_path(registry_name: str, user: str) -> Path:
     return get_credentials_dir() / f"{registry_name}__{safe_user}.json"
 
 
-def get_access_token_cache_path(registry_name: str, org_id: str, user: str) -> Path:
-    """Get the access token cache path for a registry/org/user combo.
+def get_access_token_cache_path(
+    registry_name: str, workspace_id: str, user: str
+) -> Path:
+    """Get the access token cache path for a registry/workspace/user combo.
 
     Args:
         registry_name: Name of the registry.
-        org_id: Organization ID.
+        workspace_id: Workspace ID.
         user: User identifier (email).
 
     Returns:
         Path to the access token cache file.
     """
     safe_user = _sanitize_user_for_path(user)
-    return get_access_token_cache_dir() / f"{registry_name}__{safe_user}__{org_id}.json"
+    return (
+        get_access_token_cache_dir()
+        / f"{registry_name}__{safe_user}__{workspace_id}.json"
+    )
 
 
 def find_project_config() -> Path | None:
@@ -245,7 +250,7 @@ def save_target_root_cache(cache: list[dict[str, Any]]) -> None:
 
 
 def get_cached_target_roots(
-    registry_url: str, organization_id: str, environment_id: str
+    registry_url: str, workspace_id: str, environment_id: str
 ) -> dict[str, str] | None:
     """Get cached target roots for a specific context.
 
@@ -256,7 +261,7 @@ def get_cached_target_roots(
     for entry in cache:
         if (
             entry.get("registry_url") == registry_url
-            and entry.get("organization_id") == organization_id
+            and entry.get("workspace_id") == workspace_id
             and entry.get("environment_id") == environment_id
         ):
             return entry.get("target_roots", {})
@@ -265,7 +270,7 @@ def get_cached_target_roots(
 
 def update_cached_target_roots(
     registry_url: str,
-    organization_id: str,
+    workspace_id: str,
     environment_id: str,
     target_roots: dict[str, str],
 ) -> None:
@@ -276,7 +281,7 @@ def update_cached_target_roots(
     for entry in cache:
         if (
             entry.get("registry_url") == registry_url
-            and entry.get("organization_id") == organization_id
+            and entry.get("workspace_id") == workspace_id
             and entry.get("environment_id") == environment_id
         ):
             entry["target_roots"] = target_roots
@@ -287,7 +292,7 @@ def update_cached_target_roots(
     cache.append(
         {
             "registry_url": registry_url,
-            "organization_id": organization_id,
+            "workspace_id": workspace_id,
             "environment_id": environment_id,
             "target_roots": target_roots,
         }
@@ -302,11 +307,11 @@ class IdCache(BaseModel):
     """Cache for slug to ID mappings.
 
     Structure:
-        organizations: {registry_name: {org_slug: org_id}}
-        environments: {registry_name: {org_id: {environment_slug: environment_id}}}
+        workspaces: {registry_name: {workspace_slug: workspace_id}}
+        environments: {registry_name: {workspace_id: {environment_slug: environment_id}}}
     """
 
-    organizations: dict[str, dict[str, str]] = Field(default_factory=dict)
+    workspaces: dict[str, dict[str, str]] = Field(default_factory=dict)
     environments: dict[str, dict[str, dict[str, str]]] = Field(default_factory=dict)
 
 
@@ -326,70 +331,83 @@ def save_id_cache(cache: IdCache) -> None:
     save_json_file(get_id_cache_path(), cache.model_dump())
 
 
-def get_cached_org_id(registry: str, org_slug: str) -> str | None:
-    """Get cached organization ID for a slug.
+def get_cached_workspace_id(registry: str, workspace_slug: str) -> str | None:
+    """Get cached workspace ID for a slug.
 
     Args:
         registry: Registry name.
-        org_slug: Organization slug.
+        workspace_slug: Workspace slug.
 
     Returns:
-        Organization ID if cached, None otherwise.
+        Workspace ID if cached, None otherwise.
     """
     cache = load_id_cache()
-    return cache.organizations.get(registry, {}).get(org_slug)
+    return cache.workspaces.get(registry, {}).get(workspace_slug)
 
 
-def cache_org_id(registry: str, org_slug: str, org_id: str) -> None:
-    """Cache an organization slug to ID mapping.
+def cache_workspace_id(registry: str, workspace_slug: str, workspace_id: str) -> None:
+    """Cache a workspace slug to ID mapping.
 
     Args:
         registry: Registry name.
-        org_slug: Organization slug.
-        org_id: Organization ID (UUID).
+        workspace_slug: Workspace slug.
+        workspace_id: Workspace ID (UUID).
     """
     cache = load_id_cache()
-    if registry not in cache.organizations:
-        cache.organizations[registry] = {}
-    cache.organizations[registry][org_slug] = org_id
+    if registry not in cache.workspaces:
+        cache.workspaces[registry] = {}
+    cache.workspaces[registry][workspace_slug] = workspace_id
     save_id_cache(cache)
 
 
 def get_cached_environment_id(
-    registry: str, org_id: str, environment_slug: str
+    registry: str, workspace_id: str, environment_slug: str
 ) -> str | None:
     """Get cached environment ID for a slug.
 
     Args:
         registry: Registry name.
-        org_id: Organization ID (must be resolved).
-        environment_slug: Workspace slug.
+        workspace_id: Workspace ID (must be resolved).
+        environment_slug: Environment slug.
 
     Returns:
         Environment ID if cached, None otherwise.
     """
     cache = load_id_cache()
-    return cache.environments.get(registry, {}).get(org_id, {}).get(environment_slug)
+    return (
+        cache.environments.get(registry, {}).get(workspace_id, {}).get(environment_slug)
+    )
 
 
 def cache_environment_id(
-    registry: str, org_id: str, environment_slug: str, environment_id: str
+    registry: str, workspace_id: str, environment_slug: str, environment_id: str
 ) -> None:
     """Cache an environment slug to ID mapping.
 
     Args:
         registry: Registry name.
-        org_id: Organization ID (must be resolved).
-        environment_slug: Workspace slug.
+        workspace_id: Workspace ID (must be resolved).
+        environment_slug: Environment slug.
         environment_id: Environment ID (UUID).
     """
     cache = load_id_cache()
     if registry not in cache.environments:
         cache.environments[registry] = {}
-    if org_id not in cache.environments[registry]:
-        cache.environments[registry][org_id] = {}
-    cache.environments[registry][org_id][environment_slug] = environment_id
+    if workspace_id not in cache.environments[registry]:
+        cache.environments[registry][workspace_id] = {}
+    cache.environments[registry][workspace_id][environment_slug] = environment_id
     save_id_cache(cache)
+
+
+# Backwards compatibility aliases
+def get_cached_org_id(registry: str, org_slug: str) -> str | None:
+    """DEPRECATED: Use get_cached_workspace_id instead."""
+    return get_cached_workspace_id(registry, org_slug)
+
+
+def cache_org_id(registry: str, org_slug: str, org_id: str) -> None:
+    """DEPRECATED: Use cache_workspace_id instead."""
+    cache_workspace_id(registry, org_slug, org_id)
 
 
 def _looks_like_uuid(value: str) -> bool:
@@ -416,20 +434,26 @@ class RegistryConfig(BaseModel):
 class ProfileConfig(BaseModel):
     """Profile configuration from TOML.
 
-    A profile defines the (registry, user, organization, environment) tuple.
+    A profile defines the (registry, user, workspace, environment) tuple.
 
     Attributes:
         registry: Name of the registry to use.
         user: User identifier (email) for credential lookup. Optional for
             backward compatibility - if not set, uses registry-level credentials.
-        organization: Organization ID or slug.
+        workspace: Workspace ID or slug.
         environment: Environment ID or slug.
     """
 
     registry: str
     user: str | None = None
-    organization: str
+    workspace: str
     environment: str
+
+    # Backwards compatibility alias
+    @property
+    def organization(self) -> str:
+        """DEPRECATED: Use workspace instead."""
+        return self.workspace
 
 
 class TomlConfig(BaseModel):
@@ -457,11 +481,16 @@ class TomlConfig(BaseModel):
 
         for key, value in data.get("profile", {}).items():
             if isinstance(value, dict):
-                if all(k in value for k in ("registry", "organization", "environment")):
+                # Support both "workspace" and legacy "organization" keys
+                workspace_value = value.get("workspace") or value.get("organization")
+                if (
+                    all(k in value for k in ("registry", "environment"))
+                    and workspace_value
+                ):
                     profiles[key] = ProfileConfig(
                         registry=value["registry"],
                         user=value.get("user"),  # Optional user field
-                        organization=value["organization"],
+                        workspace=workspace_value,
                         environment=value["environment"],
                     )
 
@@ -502,15 +531,21 @@ class ContextConfig(BaseModel):
         profile: Active profile name (if using profile-based config).
         registry_name: Registry name from config (for credential lookup).
         user: User identifier (email) for credential lookup.
-        organization_id: Active organization ID.
+        workspace_id: Active workspace ID.
         environment_id: Active environment ID.
     """
 
     profile: str | None = None
     registry_name: str | None = None
     user: str | None = None
-    organization_id: str | None = None
+    workspace_id: str | None = None
     environment_id: str | None = None
+
+    # Backwards compatibility alias
+    @property
+    def organization_id(self) -> str | None:
+        """DEPRECATED: Use workspace_id instead."""
+        return self.workspace_id
 
 
 class StardagSettings(BaseSettings):
@@ -519,12 +554,12 @@ class StardagSettings(BaseSettings):
     This uses pydantic-settings to read from STARDAG_* environment variables.
     """
 
-    # Profile (looks up registry/org/environment from config.toml)
+    # Profile (looks up registry/workspace/environment from config.toml)
     profile: str | None = None
 
     # Direct overrides (bypass profile)
     registry_url: str | None = None
-    organization_id: str | None = None
+    workspace_id: str | None = None
     environment_id: str | None = None
 
     # Target settings
@@ -619,18 +654,18 @@ def load_config(
     # Merge configs (project overrides user)
     toml_config = _merge_toml_configs(user_toml, project_toml)
 
-    # 3. Resolve profile → (registry, user, org, environment)
+    # 3. Resolve profile → (registry, user, workspace, environment)
     profile_name: str | None = None
     registry_name: str | None = None
     registry_url: str | None = None
     user: str | None = None
-    organization_id: str | None = None
+    workspace_id: str | None = None
     environment_id: str | None = None
 
     # Check for direct env var overrides first
     if env_settings.registry_url:
         registry_url = env_settings.registry_url
-        organization_id = env_settings.organization_id
+        workspace_id = env_settings.workspace_id
         environment_id = env_settings.environment_id
     # Then check for profile-based config
     elif env_settings.profile:
@@ -645,7 +680,7 @@ def load_config(
         if profile:
             registry_name = profile.registry
             user = profile.user  # Optional user for multi-user support
-            org_value = profile.organization  # Could be slug or ID
+            workspace_value = profile.workspace  # Could be slug or ID
             environment_value = profile.environment  # Could be slug or ID
 
             # Look up registry URL from registry name
@@ -657,32 +692,34 @@ def load_config(
                     f"Profile '{profile_name}' references unknown registry '{registry_name}'"
                 )
 
-            # Resolve organization slug to ID if needed
-            if _looks_like_uuid(org_value):
-                organization_id = org_value
+            # Resolve workspace slug to ID if needed
+            if _looks_like_uuid(workspace_value):
+                workspace_id = workspace_value
             else:
                 # Try to resolve from cache
-                cached_org_id = get_cached_org_id(registry_name, org_value)
-                if cached_org_id:
-                    organization_id = cached_org_id
+                cached_workspace_id = get_cached_workspace_id(
+                    registry_name, workspace_value
+                )
+                if cached_workspace_id:
+                    workspace_id = cached_workspace_id
                 else:
                     # Store the slug - will need to be resolved at runtime
-                    organization_id = org_value
+                    workspace_id = workspace_value
                     logger.debug(
-                        f"Organization '{org_value}' is a slug, not cached. "
+                        f"Workspace '{workspace_value}' is a slug, not cached. "
                         "Run 'stardag auth refresh' to resolve."
                     )
 
             # Resolve environment slug to ID if needed
             if _looks_like_uuid(environment_value):
                 environment_id = environment_value
-            elif organization_id and _looks_like_uuid(organization_id):
-                # Can only resolve environment if we have a resolved org ID
-                cached_ws_id = get_cached_environment_id(
-                    registry_name, organization_id, environment_value
+            elif workspace_id and _looks_like_uuid(workspace_id):
+                # Can only resolve environment if we have a resolved workspace ID
+                cached_env_id = get_cached_environment_id(
+                    registry_name, workspace_id, environment_value
                 )
-                if cached_ws_id:
-                    environment_id = cached_ws_id
+                if cached_env_id:
+                    environment_id = cached_env_id
                 else:
                     # Store the slug - will need to be resolved at runtime
                     environment_id = environment_value
@@ -691,7 +728,7 @@ def load_config(
                         "Run 'stardag auth refresh' to resolve."
                     )
             else:
-                # Org is not resolved, can't resolve environment either
+                # Workspace is not resolved, can't resolve environment either
                 environment_id = environment_value
         else:
             logger.warning(f"Profile '{profile_name}' not found in config")
@@ -705,9 +742,9 @@ def load_config(
     target_roots: dict[str, str]
     if env_settings.target_roots:
         target_roots = env_settings.target_roots
-    elif registry_url and organization_id and environment_id:
+    elif registry_url and workspace_id and environment_id:
         cached_roots = get_cached_target_roots(
-            registry_url, organization_id, environment_id
+            registry_url, workspace_id, environment_id
         )
         if cached_roots:
             target_roots = cached_roots
@@ -718,9 +755,9 @@ def load_config(
 
     # 5. Load access token from cache (if we have profile info)
     access_token: str | None = None
-    if registry_name and organization_id and user:
+    if registry_name and workspace_id and user:
         token_cache_path = get_access_token_cache_path(
-            registry_name, organization_id, user
+            registry_name, workspace_id, user
         )
         if token_cache_path.exists():
             token_data = load_json_file(token_cache_path)
@@ -744,7 +781,7 @@ def load_config(
             profile=profile_name,
             registry_name=registry_name,
             user=user,
-            organization_id=organization_id,
+            workspace_id=workspace_id,
             environment_id=environment_id,
         ),
         access_token=access_token,
@@ -881,9 +918,9 @@ def save_workspace_target_roots(
     """DEPRECATED: Use update_cached_target_roots() instead."""
     logger.warning("save_workspace_target_roots() is deprecated.")
     config = get_config()
-    if config.api.url and config.context.organization_id:
+    if config.api.url and config.context.workspace_id:
         update_cached_target_roots(
-            config.api.url, config.context.organization_id, environment_id, target_roots
+            config.api.url, config.context.workspace_id, environment_id, target_roots
         )
 
 

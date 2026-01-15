@@ -4,7 +4,7 @@ import {
   declineInvite,
   fetchPendingInvites,
   type PendingInvite,
-} from "../api/organizations";
+} from "../api/workspaces";
 import { useEnvironment } from "../context/EnvironmentContext";
 import { useAuth } from "../context/AuthContext";
 import { Modal } from "./Modal";
@@ -14,11 +14,11 @@ const DISMISSED_KEY = "stardag_onboarding_dismissed";
 /**
  * Modal that appears on first login to prompt users to:
  * 1. Accept/decline pending invites (if any)
- * 2. Create their first organization (if they have none)
+ * 2. Create their first workspace (if they have none)
  */
 export function OnboardingModal() {
   const { isAuthenticated } = useAuth();
-  const { organizations, isLoading, refresh } = useEnvironment();
+  const { workspaces, isLoading, refresh } = useEnvironment();
 
   const [invites, setInvites] = useState<PendingInvite[]>([]);
   const [invitesLoading, setInvitesLoading] = useState(true);
@@ -76,16 +76,16 @@ export function OnboardingModal() {
 
   const handleDismiss = useCallback(() => {
     setDismissed(true);
-    // Only persist dismissal if user has orgs
-    // If no orgs, modal will reappear on next login
-    if (organizations.length > 0) {
+    // Only persist dismissal if user has workspaces
+    // If no workspaces, modal will reappear on next login
+    if (workspaces.length > 0) {
       sessionStorage.setItem(DISMISSED_KEY, "true");
     }
-  }, [organizations.length]);
+  }, [workspaces.length]);
 
-  const navigateToCreateOrg = () => {
+  const navigateToCreateWorkspace = () => {
     setHidden(true);
-    window.history.pushState({}, "", "/organizations/new");
+    window.history.pushState({}, "", "/workspaces/new");
     window.dispatchEvent(new PopStateEvent("popstate"));
   };
 
@@ -96,21 +96,21 @@ export function OnboardingModal() {
 
   // Determine what to show
   const hasInvites = invites.length > 0;
-  const hasOrgs = organizations.length > 0;
+  const hasWorkspaces = workspaces.length > 0;
 
-  // If user has orgs and no invites, nothing to prompt
-  if (hasOrgs && !hasInvites) {
+  // If user has workspaces and no invites, nothing to prompt
+  if (hasWorkspaces && !hasInvites) {
     return null;
   }
 
-  // If user has orgs and dismissed, don't show
-  // But if user has NO orgs, always show (blocking) - they must create or join one
-  if (hasOrgs && dismissed) {
+  // If user has workspaces and dismissed, don't show
+  // But if user has NO workspaces, always show (blocking) - they must create or join one
+  if (hasWorkspaces && dismissed) {
     return null;
   }
 
   // Determine if modal should be blocking (no dismiss option)
-  const isBlocking = !hasOrgs;
+  const isBlocking = !hasWorkspaces;
 
   // Show pending invites modal
   if (hasInvites) {
@@ -124,7 +124,7 @@ export function OnboardingModal() {
       >
         <div className="space-y-4">
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            You have {invites.length} pending organization invitation
+            You have {invites.length} pending workspace invitation
             {invites.length > 1 ? "s" : ""}.
           </p>
 
@@ -143,7 +143,7 @@ export function OnboardingModal() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex-1 min-w-0">
                     <h3 className="font-medium text-gray-900 dark:text-gray-100 truncate">
-                      {invite.organization_name}
+                      {invite.workspace_name}
                     </h3>
                     <p className="text-xs text-gray-500 dark:text-gray-400">
                       Role: <span className="capitalize">{invite.role}</span>
@@ -174,13 +174,13 @@ export function OnboardingModal() {
           </div>
 
           <div className="flex items-center justify-between gap-3 pt-2 border-t border-gray-200 dark:border-gray-700">
-            {/* Show create org option if user has no orgs */}
+            {/* Show create workspace option if user has no workspaces */}
             {isBlocking && (
               <button
-                onClick={navigateToCreateOrg}
+                onClick={navigateToCreateWorkspace}
                 className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 underline"
               >
-                Or create a new organization
+                Or create a new workspace
               </button>
             )}
             {!isBlocking && (
@@ -197,8 +197,8 @@ export function OnboardingModal() {
     );
   }
 
-  // Show create organization modal (no orgs and no invites)
-  // This is always blocking since user has no orgs
+  // Show create workspace modal (no workspaces and no invites)
+  // This is always blocking since user has no workspaces
   return (
     <Modal
       isOpen={true}
@@ -209,16 +209,16 @@ export function OnboardingModal() {
     >
       <div className="space-y-4">
         <p className="text-sm text-gray-600 dark:text-gray-400">
-          To get started, you need to create an organization. Organizations help you
-          manage environments, team members, and API access.
+          To get started, you need to create a workspace. Workspaces help you manage
+          environments, team members, and API access.
         </p>
 
         <div className="flex justify-end pt-2">
           <button
-            onClick={navigateToCreateOrg}
+            onClick={navigateToCreateWorkspace}
             className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
           >
-            Create Organization
+            Create Workspace
           </button>
         </div>
       </div>

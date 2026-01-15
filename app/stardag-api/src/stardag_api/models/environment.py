@@ -12,21 +12,21 @@ from stardag_api.models.base import Base, TimestampMixin, generate_uuid
 if TYPE_CHECKING:
     from stardag_api.models.api_key import ApiKey
     from stardag_api.models.build import Build
-    from stardag_api.models.organization import Organization
+    from stardag_api.models.workspace import Workspace
     from stardag_api.models.target_root import TargetRoot
     from stardag_api.models.task import Task
     from stardag_api.models.user import User
 
 
 class Environment(Base, TimestampMixin):
-    """Isolated environment within an organization.
+    """Isolated environment within a workspace.
 
     Similar to a 'project' - contains builds, tasks, and their relationships.
     """
 
     __tablename__ = "environments"
     __table_args__ = (
-        UniqueConstraint("organization_id", "slug", name="uq_environment_org_slug"),
+        UniqueConstraint("workspace_id", "slug", name="uq_environment_workspace_slug"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -34,9 +34,9 @@ class Environment(Base, TimestampMixin):
         primary_key=True,
         default=generate_uuid,
     )
-    organization_id: Mapped[str] = mapped_column(
+    workspace_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("organizations.id", ondelete="CASCADE"),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -57,7 +57,7 @@ class Environment(Base, TimestampMixin):
     )
 
     # Relationships
-    organization: Mapped[Organization] = relationship(back_populates="environments")
+    workspace: Mapped[Workspace] = relationship(back_populates="environments")
     owner: Mapped[User | None] = relationship()
     builds: Mapped[list[Build]] = relationship(
         back_populates="environment",

@@ -1,16 +1,16 @@
 import { useState, useEffect } from "react";
 import { useEnvironment } from "../context/EnvironmentContext";
 import {
-  fetchOrganization,
+  fetchWorkspace,
   fetchMembers,
   fetchInvites,
   fetchEnvironments,
-  updateOrganization,
+  updateWorkspace,
   createInvite,
   cancelInvite,
   updateMemberRole,
   removeMember,
-  deleteOrganization,
+  deleteWorkspace,
   createEnvironment,
   updateEnvironment,
   deleteEnvironment,
@@ -21,22 +21,23 @@ import {
   createTargetRoot,
   updateTargetRoot,
   deleteTargetRoot,
-  type OrganizationDetail,
+  type WorkspaceDetail,
   type Member,
   type Invite,
   type Environment,
   type ApiKey,
   type TargetRoot,
-} from "../api/organizations";
+} from "../api/workspaces";
 
-interface OrganizationSettingsProps {
+interface WorkspaceSettingsProps {
   onNavigate: (path: string) => void;
 }
 
-export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) {
-  const { activeOrg, activeOrgRole, activeEnvironment, refresh } = useEnvironment();
+export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
+  const { activeWorkspace, activeWorkspaceRole, activeEnvironment, refresh } =
+    useEnvironment();
 
-  const [organization, setOrganization] = useState<OrganizationDetail | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceDetail | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
   const [environmentsList, setEnvironmentsList] = useState<Environment[]>([]);
@@ -92,48 +93,48 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   // Personal environments collapsed state
   const [showPersonalEnvironments, setShowPersonalEnvironments] = useState(false);
 
-  const isAdmin = activeOrgRole === "owner" || activeOrgRole === "admin";
-  const isOwner = activeOrgRole === "owner";
+  const isAdmin = activeWorkspaceRole === "owner" || activeWorkspaceRole === "admin";
+  const isOwner = activeWorkspaceRole === "owner";
 
   useEffect(() => {
     async function loadData() {
-      if (!activeOrg) return;
+      if (!activeWorkspace) return;
 
       setLoading(true);
       setError(null);
       try {
-        const [org, membersList, invitesList, wsList] = await Promise.all([
-          fetchOrganization(activeOrg.id),
-          fetchMembers(activeOrg.id),
-          isAdmin ? fetchInvites(activeOrg.id) : Promise.resolve([]),
-          fetchEnvironments(activeOrg.id),
+        const [ws, membersList, invitesList, envList] = await Promise.all([
+          fetchWorkspace(activeWorkspace.id),
+          fetchMembers(activeWorkspace.id),
+          isAdmin ? fetchInvites(activeWorkspace.id) : Promise.resolve([]),
+          fetchEnvironments(activeWorkspace.id),
         ]);
-        setOrganization(org);
+        setWorkspace(ws);
         setMembers(membersList);
         setInvites(invitesList);
-        setEnvironmentsList(wsList);
-        setEditName(org.name);
-        setEditDescription(org.description || "");
+        setEnvironmentsList(envList);
+        setEditName(ws.name);
+        setEditDescription(ws.description || "");
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load organization");
+        setError(err instanceof Error ? err.message : "Failed to load workspace");
       } finally {
         setLoading(false);
       }
     }
     loadData();
-  }, [activeOrg, isAdmin]);
+  }, [activeWorkspace, isAdmin]);
 
   const handleSave = async () => {
-    if (!activeOrg) return;
+    if (!activeWorkspace) return;
 
     setIsSaving(true);
     try {
-      await updateOrganization(activeOrg.id, {
+      await updateWorkspace(activeWorkspace.id, {
         name: editName,
         description: editDescription || undefined,
       });
       await refresh();
-      setOrganization((prev) =>
+      setWorkspace((prev) =>
         prev ? { ...prev, name: editName, description: editDescription } : null,
       );
     } catch (err) {
@@ -145,11 +146,11 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeOrg || !inviteEmail) return;
+    if (!activeWorkspace || !inviteEmail) return;
 
     setIsInviting(true);
     try {
-      const newInvite = await createInvite(activeOrg.id, {
+      const newInvite = await createInvite(activeWorkspace.id, {
         email: inviteEmail,
         role: inviteRole,
       });
@@ -163,9 +164,9 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleCancelInvite = async (inviteId: string) => {
-    if (!activeOrg) return;
+    if (!activeWorkspace) return;
     try {
-      await cancelInvite(activeOrg.id, inviteId);
+      await cancelInvite(activeWorkspace.id, inviteId);
       setInvites((prev) => prev.filter((i) => i.id !== inviteId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to cancel invite");
@@ -176,9 +177,9 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
     memberId: string,
     role: "owner" | "admin" | "member",
   ) => {
-    if (!activeOrg) return;
+    if (!activeWorkspace) return;
     try {
-      const updated = await updateMemberRole(activeOrg.id, memberId, role);
+      const updated = await updateMemberRole(activeWorkspace.id, memberId, role);
       setMembers((prev) => prev.map((m) => (m.id === memberId ? updated : m)));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update role");
@@ -186,10 +187,10 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleRemoveMember = async (memberId: string) => {
-    if (!activeOrg) return;
+    if (!activeWorkspace) return;
     if (!confirm("Are you sure you want to remove this member?")) return;
     try {
-      await removeMember(activeOrg.id, memberId);
+      await removeMember(activeWorkspace.id, memberId);
       setMembers((prev) => prev.filter((m) => m.id !== memberId));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to remove member");
@@ -198,15 +199,15 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
 
   const handleCreateEnvironment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeOrg || !newEnvironmentName || !newEnvironmentSlug) return;
+    if (!activeWorkspace || !newEnvironmentName || !newEnvironmentSlug) return;
 
     setIsCreatingEnvironment(true);
     try {
-      const ws = await createEnvironment(activeOrg.id, {
+      const env = await createEnvironment(activeWorkspace.id, {
         name: newEnvironmentName,
         slug: newEnvironmentSlug,
       });
-      setEnvironmentsList((prev) => [...prev, ws]);
+      setEnvironmentsList((prev) => [...prev, env]);
       setNewEnvironmentName("");
       setNewEnvironmentSlug("");
       await refresh();
@@ -218,13 +219,13 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleUpdateEnvironment = async (environmentId: string) => {
-    if (!activeOrg || !editEnvironmentName) return;
+    if (!activeWorkspace || !editEnvironmentName) return;
     try {
-      const updated = await updateEnvironment(activeOrg.id, environmentId, {
+      const updated = await updateEnvironment(activeWorkspace.id, environmentId, {
         name: editEnvironmentName,
       });
       setEnvironmentsList((prev) =>
-        prev.map((ws) => (ws.id === environmentId ? updated : ws)),
+        prev.map((env) => (env.id === environmentId ? updated : env)),
       );
       setEditingEnvironment(null);
       await refresh();
@@ -234,11 +235,11 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleDeleteEnvironment = async (environmentId: string) => {
-    if (!activeOrg) return;
+    if (!activeWorkspace) return;
     if (!confirm("Are you sure you want to delete this environment?")) return;
     try {
-      await deleteEnvironment(activeOrg.id, environmentId);
-      setEnvironmentsList((prev) => prev.filter((ws) => ws.id !== environmentId));
+      await deleteEnvironment(activeWorkspace.id, environmentId);
+      setEnvironmentsList((prev) => prev.filter((env) => env.id !== environmentId));
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete environment");
@@ -246,25 +247,25 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleDelete = async () => {
-    if (!activeOrg || deleteConfirmText !== activeOrg.slug) return;
+    if (!activeWorkspace || deleteConfirmText !== activeWorkspace.slug) return;
     try {
-      await deleteOrganization(activeOrg.id);
+      await deleteWorkspace(activeWorkspace.id);
       await refresh();
       onNavigate("/");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete organization");
+      setError(err instanceof Error ? err.message : "Failed to delete workspace");
     }
   };
 
   // Initialize default environment for new key/root creation
   useEffect(() => {
     if (environmentsList.length > 0) {
-      const defaultWs = activeEnvironment?.id || environmentsList[0].id;
+      const defaultEnv = activeEnvironment?.id || environmentsList[0].id;
       if (!newKeyEnvironment) {
-        setNewKeyEnvironment(defaultWs);
+        setNewKeyEnvironment(defaultEnv);
       }
       if (!newRootEnvironment) {
-        setNewRootEnvironment(defaultWs);
+        setNewRootEnvironment(defaultEnv);
       }
     }
   }, [environmentsList, activeEnvironment, newKeyEnvironment, newRootEnvironment]);
@@ -272,50 +273,54 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   // Load API keys for all environments
   useEffect(() => {
     async function loadAllApiKeys() {
-      if (!activeOrg || !isAdmin || environmentsList.length === 0) return;
+      if (!activeWorkspace || !isAdmin || environmentsList.length === 0) return;
       try {
-        const keysByWs = new Map<string, ApiKey[]>();
+        const keysByEnv = new Map<string, ApiKey[]>();
         await Promise.all(
-          environmentsList.map(async (ws) => {
-            const keys = await fetchApiKeys(activeOrg.id, ws.id);
-            keysByWs.set(ws.id, keys);
+          environmentsList.map(async (env) => {
+            const keys = await fetchApiKeys(activeWorkspace.id, env.id);
+            keysByEnv.set(env.id, keys);
           }),
         );
-        setApiKeysByEnvironment(keysByWs);
+        setApiKeysByEnvironment(keysByEnv);
       } catch (err) {
         console.error("Failed to load API keys:", err);
       }
     }
     loadAllApiKeys();
-  }, [activeOrg, environmentsList, isAdmin]);
+  }, [activeWorkspace, environmentsList, isAdmin]);
 
   // Load target roots for all environments
   useEffect(() => {
     async function loadAllTargetRoots() {
-      if (!activeOrg || !isAdmin || environmentsList.length === 0) return;
+      if (!activeWorkspace || !isAdmin || environmentsList.length === 0) return;
       try {
-        const rootsByWs = new Map<string, TargetRoot[]>();
+        const rootsByEnv = new Map<string, TargetRoot[]>();
         await Promise.all(
-          environmentsList.map(async (ws) => {
-            const roots = await fetchTargetRoots(activeOrg.id, ws.id);
-            rootsByWs.set(ws.id, roots);
+          environmentsList.map(async (env) => {
+            const roots = await fetchTargetRoots(activeWorkspace.id, env.id);
+            rootsByEnv.set(env.id, roots);
           }),
         );
-        setTargetRootsByEnvironment(rootsByWs);
+        setTargetRootsByEnvironment(rootsByEnv);
       } catch (err) {
         console.error("Failed to load target roots:", err);
       }
     }
     loadAllTargetRoots();
-  }, [activeOrg, environmentsList, isAdmin]);
+  }, [activeWorkspace, environmentsList, isAdmin]);
 
   const handleCreateApiKey = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeOrg || !newKeyEnvironment || !newKeyName) return;
+    if (!activeWorkspace || !newKeyEnvironment || !newKeyName) return;
 
     setIsCreatingKey(true);
     try {
-      const result = await createApiKey(activeOrg.id, newKeyEnvironment, newKeyName);
+      const result = await createApiKey(
+        activeWorkspace.id,
+        newKeyEnvironment,
+        newKeyName,
+      );
       // Add the new key to the appropriate environment's list
       setApiKeysByEnvironment((prev) => {
         const newMap = new Map(prev);
@@ -335,14 +340,14 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleRevokeApiKey = async (environmentId: string, keyId: string) => {
-    if (!activeOrg) return;
+    if (!activeWorkspace) return;
     if (
       !confirm("Are you sure you want to revoke this API key? This cannot be undone.")
     )
       return;
 
     try {
-      await revokeApiKey(activeOrg.id, environmentId, keyId);
+      await revokeApiKey(activeWorkspace.id, environmentId, keyId);
       setApiKeysByEnvironment((prev) => {
         const newMap = new Map(prev);
         const existingKeys = newMap.get(environmentId) || [];
@@ -370,11 +375,12 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   // Target Root handlers
   const handleCreateTargetRoot = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeOrg || !newRootEnvironment || !newRootName || !newRootUriPrefix) return;
+    if (!activeWorkspace || !newRootEnvironment || !newRootName || !newRootUriPrefix)
+      return;
 
     setIsCreatingRoot(true);
     try {
-      const result = await createTargetRoot(activeOrg.id, newRootEnvironment, {
+      const result = await createTargetRoot(activeWorkspace.id, newRootEnvironment, {
         name: newRootName,
         uri_prefix: newRootUriPrefix,
       });
@@ -394,12 +400,17 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleUpdateTargetRoot = async (environmentId: string, rootId: string) => {
-    if (!activeOrg || !editRootName || !editRootUriPrefix) return;
+    if (!activeWorkspace || !editRootName || !editRootUriPrefix) return;
     try {
-      const updated = await updateTargetRoot(activeOrg.id, environmentId, rootId, {
-        name: editRootName,
-        uri_prefix: editRootUriPrefix,
-      });
+      const updated = await updateTargetRoot(
+        activeWorkspace.id,
+        environmentId,
+        rootId,
+        {
+          name: editRootName,
+          uri_prefix: editRootUriPrefix,
+        },
+      );
       setTargetRootsByEnvironment((prev) => {
         const newMap = new Map(prev);
         const existingRoots = newMap.get(environmentId) || [];
@@ -416,11 +427,11 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
   };
 
   const handleDeleteTargetRoot = async (environmentId: string, rootId: string) => {
-    if (!activeOrg) return;
+    if (!activeWorkspace) return;
     if (!confirm("Are you sure you want to delete this target root?")) return;
 
     try {
-      await deleteTargetRoot(activeOrg.id, environmentId, rootId);
+      await deleteTargetRoot(activeWorkspace.id, environmentId, rootId);
       setTargetRootsByEnvironment((prev) => {
         const newMap = new Map(prev);
         const existingRoots = newMap.get(environmentId) || [];
@@ -435,10 +446,10 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
     }
   };
 
-  if (!activeOrg) {
+  if (!activeWorkspace) {
     return (
       <div className="flex h-screen items-center justify-center bg-gray-100 dark:bg-gray-900">
-        <p className="text-gray-500 dark:text-gray-400">No organization selected</p>
+        <p className="text-gray-500 dark:text-gray-400">No workspace selected</p>
       </div>
     );
   }
@@ -463,7 +474,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
             ← Back to Dashboard
           </button>
           <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
-            Organization Settings
+            Workspace Settings
           </h1>
         </div>
       </header>
@@ -478,10 +489,10 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
           </div>
         )}
 
-        {/* Organization Details */}
+        {/* Workspace Details */}
         <section className="mb-8 rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
           <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
-            Organization Details
+            Workspace Details
           </h2>
           <div className="space-y-4">
             <div>
@@ -511,7 +522,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
             <div className="text-sm text-gray-500 dark:text-gray-400">
               Slug:{" "}
               <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">
-                {organization?.slug}
+                {workspace?.slug}
               </code>
             </div>
             {isAdmin && (
@@ -643,7 +654,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
         {/* Environments */}
         <section className="mb-8 rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
           <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
-            Environments ({environmentsList.filter((ws) => !ws.owner_id).length})
+            Environments ({environmentsList.filter((env) => !env.owner_id).length})
           </h2>
 
           {/* Create environment form */}
@@ -688,11 +699,11 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
           {/* Shared environments list */}
           <div className="divide-y divide-gray-200 dark:divide-gray-700">
             {environmentsList
-              .filter((ws) => !ws.owner_id)
-              .map((ws) => (
-                <div key={ws.id} className="flex items-center justify-between py-3">
+              .filter((env) => !env.owner_id)
+              .map((env) => (
+                <div key={env.id} className="flex items-center justify-between py-3">
                   <div className="flex-1">
-                    {editingEnvironment === ws.id ? (
+                    {editingEnvironment === env.id ? (
                       <div className="flex items-center gap-2">
                         <input
                           type="text"
@@ -701,7 +712,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                           className="flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-gray-900 dark:text-gray-100"
                         />
                         <button
-                          onClick={() => handleUpdateEnvironment(ws.id)}
+                          onClick={() => handleUpdateEnvironment(env.id)}
                           className="text-blue-600 hover:text-blue-800 dark:text-blue-400"
                         >
                           Save
@@ -716,28 +727,28 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                     ) : (
                       <>
                         <div className="font-medium text-gray-900 dark:text-gray-100">
-                          {ws.name}
+                          {env.name}
                         </div>
                         <div className="text-sm text-gray-500 dark:text-gray-400">
-                          /{ws.slug}
+                          /{env.slug}
                         </div>
                       </>
                     )}
                   </div>
-                  {isAdmin && editingEnvironment !== ws.id && (
+                  {isAdmin && editingEnvironment !== env.id && (
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => {
-                          setEditingEnvironment(ws.id);
-                          setEditEnvironmentName(ws.name);
+                          setEditingEnvironment(env.id);
+                          setEditEnvironmentName(env.name);
                         }}
                         className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
                       >
                         Edit
                       </button>
-                      {environmentsList.filter((w) => !w.owner_id).length > 1 && (
+                      {environmentsList.filter((e) => !e.owner_id).length > 1 && (
                         <button
-                          onClick={() => handleDeleteEnvironment(ws.id)}
+                          onClick={() => handleDeleteEnvironment(env.id)}
                           className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
                         >
                           Delete
@@ -750,7 +761,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
           </div>
 
           {/* Personal environments (collapsed) */}
-          {environmentsList.filter((ws) => ws.owner_id).length > 0 && (
+          {environmentsList.filter((env) => env.owner_id).length > 0 && (
             <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
               <button
                 onClick={() => setShowPersonalEnvironments(!showPersonalEnvironments)}
@@ -764,23 +775,23 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                   ▶
                 </span>
                 Personal environments (
-                {environmentsList.filter((ws) => ws.owner_id).length})
+                {environmentsList.filter((env) => env.owner_id).length})
               </button>
               {showPersonalEnvironments && (
                 <div className="mt-2 ml-4 divide-y divide-gray-200 dark:divide-gray-700">
                   {environmentsList
-                    .filter((ws) => ws.owner_id)
-                    .map((ws) => (
+                    .filter((env) => env.owner_id)
+                    .map((env) => (
                       <div
-                        key={ws.id}
+                        key={env.id}
                         className="flex items-center justify-between py-2"
                       >
                         <div className="flex-1">
                           <div className="font-medium text-gray-900 dark:text-gray-100 text-sm">
-                            {ws.name}
+                            {env.name}
                           </div>
                           <div className="text-xs text-gray-500 dark:text-gray-400">
-                            /{ws.slug}
+                            /{env.slug}
                           </div>
                         </div>
                       </div>
@@ -812,9 +823,9 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                 onChange={(e) => setNewKeyEnvironment(e.target.value)}
                 className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
               >
-                {environmentsList.map((ws) => (
-                  <option key={ws.id} value={ws.id}>
-                    {ws.name}
+                {environmentsList.map((env) => (
+                  <option key={env.id} value={env.id}>
+                    {env.name}
                   </option>
                 ))}
               </select>
@@ -843,7 +854,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                     <h3 className="text-sm font-medium text-green-800 dark:text-green-200">
                       API Key Created for{" "}
                       {environmentsList.find(
-                        (ws) => ws.id === newlyCreatedKeyEnvironment,
+                        (env) => env.id === newlyCreatedKeyEnvironment,
                       )?.name || "environment"}
                     </h3>
                     <p className="mt-1 text-sm text-green-700 dark:text-green-300">
@@ -876,17 +887,17 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
 
             {/* Keys grouped by environment */}
             <div className="space-y-6">
-              {environmentsList.map((ws) => {
-                const keys = apiKeysByEnvironment.get(ws.id) || [];
+              {environmentsList.map((env) => {
+                const keys = apiKeysByEnvironment.get(env.id) || [];
                 return (
-                  <div key={ws.id}>
+                  <div key={env.id}>
                     {/* Environment header */}
                     <div className="flex items-center gap-2 mb-3">
                       <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
-                        {ws.name}
+                        {env.name}
                       </h3>
                       <span className="text-xs text-gray-500 dark:text-gray-400">
-                        /{ws.slug}
+                        /{env.slug}
                       </span>
                       <div className="flex-1 border-t border-gray-200 dark:border-gray-700 ml-2" />
                     </div>
@@ -923,7 +934,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                               </div>
                             </div>
                             <button
-                              onClick={() => handleRevokeApiKey(ws.id, key.id)}
+                              onClick={() => handleRevokeApiKey(env.id, key.id)}
                               className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
                             >
                               Revoke
@@ -960,9 +971,9 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                 onChange={(e) => setNewRootEnvironment(e.target.value)}
                 className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
               >
-                {environmentsList.map((ws) => (
-                  <option key={ws.id} value={ws.id}>
-                    {ws.name}
+                {environmentsList.map((env) => (
+                  <option key={env.id} value={env.id}>
+                    {env.name}
                   </option>
                 ))}
               </select>
@@ -993,17 +1004,17 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
 
             {/* Target roots grouped by environment */}
             <div className="space-y-6">
-              {environmentsList.map((ws) => {
-                const roots = targetRootsByEnvironment.get(ws.id) || [];
+              {environmentsList.map((env) => {
+                const roots = targetRootsByEnvironment.get(env.id) || [];
                 return (
-                  <div key={ws.id}>
+                  <div key={env.id}>
                     {/* Environment header */}
                     <div className="flex items-center gap-2 mb-3">
                       <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
-                        {ws.name}
+                        {env.name}
                       </h3>
                       <span className="text-xs text-gray-500 dark:text-gray-400">
-                        /{ws.slug}
+                        /{env.slug}
                       </span>
                       <div className="flex-1 border-t border-gray-200 dark:border-gray-700 ml-2" />
                     </div>
@@ -1032,7 +1043,9 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                                   className="flex-1 min-w-48 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-sm text-gray-900 dark:text-gray-100"
                                 />
                                 <button
-                                  onClick={() => handleUpdateTargetRoot(ws.id, root.id)}
+                                  onClick={() =>
+                                    handleUpdateTargetRoot(env.id, root.id)
+                                  }
                                   className="text-blue-600 hover:text-blue-800 dark:text-blue-400 text-sm"
                                 >
                                   Save
@@ -1069,7 +1082,7 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                                   </button>
                                   <button
                                     onClick={() =>
-                                      handleDeleteTargetRoot(ws.id, root.id)
+                                      handleDeleteTargetRoot(env.id, root.id)
                                     }
                                     className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
                                   >
@@ -1100,15 +1113,15 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                 onClick={() => setShowDeleteConfirm(true)}
                 className="rounded-md bg-red-600 px-4 py-2 text-white hover:bg-red-700"
               >
-                Delete Organization
+                Delete Workspace
               </button>
             ) : (
               <div className="space-y-3">
                 <p className="text-red-800 dark:text-red-400">
-                  This will permanently delete the organization and all associated data.
+                  This will permanently delete the workspace and all associated data.
                   Type{" "}
                   <code className="bg-red-100 dark:bg-red-800 px-1 rounded">
-                    {activeOrg.slug}
+                    {activeWorkspace.slug}
                   </code>{" "}
                   to confirm.
                 </p>
@@ -1116,13 +1129,13 @@ export function OrganizationSettings({ onNavigate }: OrganizationSettingsProps) 
                   type="text"
                   value={deleteConfirmText}
                   onChange={(e) => setDeleteConfirmText(e.target.value)}
-                  placeholder="Type organization slug"
+                  placeholder="Type workspace slug"
                   className="w-full rounded-md border border-red-300 dark:border-red-600 bg-white dark:bg-gray-800 px-3 py-2 text-gray-900 dark:text-gray-100"
                 />
                 <div className="flex gap-2">
                   <button
                     onClick={handleDelete}
-                    disabled={deleteConfirmText !== activeOrg.slug}
+                    disabled={deleteConfirmText !== activeWorkspace.slug}
                     className="rounded-md bg-red-600 px-4 py-2 text-white hover:bg-red-700 disabled:opacity-50"
                   >
                     Delete Forever

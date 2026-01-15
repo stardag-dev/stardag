@@ -15,8 +15,8 @@ from stardag_api.auth.tokens import (
 )
 from stardag_api.db import get_db
 from stardag_api.main import app
-from stardag_api.models import Organization, OrganizationMember, User
-from stardag_api.models.enums import OrganizationRole
+from stardag_api.models import Workspace, WorkspaceMember, User
+from stardag_api.models.enums import WorkspaceRole
 
 
 # --- Keycloak TokenPayload tests (for /auth/exchange) ---
@@ -304,13 +304,15 @@ def test_internal_token_manager_creates_valid_token():
         access_token_ttl_minutes=10,
     )
 
-    token = manager.create_access_token(user_id="user-123", org_id="org-456")
+    token = manager.create_access_token(
+        user_id="user-123", workspace_id="workspace-456"
+    )
     assert token is not None
 
     # Validate the token
     payload = manager.validate_token(token)
     assert payload.sub == "user-123"
-    assert payload.org_id == "org-456"
+    assert payload.workspace_id == "workspace-456"
     assert payload.iss == "test-issuer"
     assert payload.aud == "test-audience"
 
@@ -319,11 +321,11 @@ def test_internal_token_manager_validates_own_tokens():
     """Test that tokens can be validated by the same manager."""
     manager = InternalTokenManager()
 
-    token = manager.create_access_token(user_id="user-1", org_id="org-1")
+    token = manager.create_access_token(user_id="user-1", workspace_id="workspace-1")
     payload = manager.validate_token(token)
 
     assert payload.sub == "user-1"
-    assert payload.org_id == "org-1"
+    assert payload.workspace_id == "workspace-1"
 
 
 def test_internal_token_manager_rejects_invalid_token():
@@ -339,7 +341,7 @@ def test_internal_token_manager_rejects_wrong_issuer():
     manager1 = InternalTokenManager(issuer="issuer-1")
     manager2 = InternalTokenManager(issuer="issuer-2")
 
-    token = manager1.create_access_token(user_id="user-1", org_id="org-1")
+    token = manager1.create_access_token(user_id="user-1", workspace_id="workspace-1")
 
     with pytest.raises(TokenInvalidError):
         manager2.validate_token(token)
@@ -366,7 +368,7 @@ def test_internal_token_payload_from_dict():
     """Test InternalTokenPayload.from_dict."""
     payload = {
         "sub": "user-123",
-        "org_id": "org-456",
+        "workspace_id": "workspace-456",
         "iss": "stardag-api",
         "aud": "stardag",
         "exp": 9999999999,
@@ -375,16 +377,16 @@ def test_internal_token_payload_from_dict():
     token = InternalTokenPayload.from_dict(payload)
 
     assert token.sub == "user-123"
-    assert token.org_id == "org-456"
+    assert token.workspace_id == "workspace-456"
     assert token.iss == "stardag-api"
     assert token.aud == "stardag"
 
 
-def test_internal_token_payload_requires_org_id():
-    """Test that org_id is required for internal tokens."""
+def test_internal_token_payload_requires_workspace_id():
+    """Test that workspace_id is required for internal tokens."""
     payload = {
         "sub": "user-123",
-        # Missing org_id
+        # Missing workspace_id
         "iss": "stardag-api",
         "aud": "stardag",
         "exp": 9999999999,
@@ -392,7 +394,7 @@ def test_internal_token_payload_requires_org_id():
     }
     with pytest.raises(TokenInvalidError) as exc_info:
         InternalTokenPayload.from_dict(payload)
-    assert "org_id" in str(exc_info.value)
+    assert "workspace_id" in str(exc_info.value)
 
 
 # --- Helper to create mock internal tokens ---
@@ -400,23 +402,23 @@ def test_internal_token_payload_requires_org_id():
 
 def _create_internal_token(
     user_id: str,
-    org_id: str,
+    workspace_id: str,
     manager: InternalTokenManager | None = None,
 ) -> str:
     """Create a valid internal token for testing."""
     if manager is None:
         manager = InternalTokenManager()
-    return manager.create_access_token(user_id=user_id, org_id=org_id)
+    return manager.create_access_token(user_id=user_id, workspace_id=workspace_id)
 
 
 def _create_mock_internal_token_payload(
     user_id: str = "test-user-id",
-    org_id: str = "test-org-id",
+    workspace_id: str = "test-workspace-id",
 ) -> InternalTokenPayload:
     """Create a mock internal token payload for dependency overrides."""
     return InternalTokenPayload(
         sub=user_id,
-        org_id=org_id,
+        workspace_id=workspace_id,
         iss="stardag-api",
         aud="stardag",
         exp=9999999999,
@@ -477,7 +479,7 @@ async def test_me_endpoint_returns_user_profile(async_engine):
         assert response.status_code == 200
         data = response.json()
         assert "user" in data
-        assert "organizations" in data
+        assert "workspaces" in data
         assert data["user"]["external_id"] == "test-user-sub"
         assert data["user"]["email"] == "test@example.com"
     finally:
@@ -485,8 +487,8 @@ async def test_me_endpoint_returns_user_profile(async_engine):
 
 
 @pytest.mark.asyncio
-async def test_me_endpoint_returns_organizations(async_engine):
-    """Test that /api/v1/ui/me returns user's organizations.
+async def test_me_endpoint_returns_workspaces(async_engine):
+    """Test that /api/v1/ui/me returns user's workspaces.
 
     Note: /me is a bootstrap endpoint that accepts Keycloak tokens (not internal tokens).
     """
@@ -494,30 +496,30 @@ async def test_me_endpoint_returns_organizations(async_engine):
 
     async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
 
-    # Create a user with organization membership
+    # Create a user with workspace membership
     async with async_session_maker() as session:
         user = User(
-            external_id="user-with-org",
-            email="orguser@example.com",
-            display_name="Org User",
+            external_id="user-with-workspace",
+            email="workspaceuser@example.com",
+            display_name="Workspace User",
         )
         session.add(user)
         await session.commit()
         await session.refresh(user)
         mock_user = user
 
-        org = Organization(
-            name="Test Org",
-            slug="test-org",
+        workspace = Workspace(
+            name="Test Workspace",
+            slug="test-workspace",
         )
-        session.add(org)
+        session.add(workspace)
         await session.commit()
-        await session.refresh(org)
+        await session.refresh(workspace)
 
-        membership = OrganizationMember(
-            organization_id=org.id,
+        membership = WorkspaceMember(
+            workspace_id=workspace.id,
             user_id=user.id,
-            role=OrganizationRole.ADMIN,
+            role=WorkspaceRole.ADMIN,
         )
         session.add(membership)
         await session.commit()
@@ -542,10 +544,10 @@ async def test_me_endpoint_returns_organizations(async_engine):
 
         assert response.status_code == 200
         data = response.json()
-        assert len(data["organizations"]) == 1
-        assert data["organizations"][0]["name"] == "Test Org"
-        assert data["organizations"][0]["slug"] == "test-org"
-        assert data["organizations"][0]["role"] == "admin"
+        assert len(data["workspaces"]) == 1
+        assert data["workspaces"][0]["name"] == "Test Workspace"
+        assert data["workspaces"][0]["slug"] == "test-workspace"
+        assert data["workspaces"][0]["role"] == "admin"
     finally:
         app.dependency_overrides.clear()
 
@@ -584,19 +586,19 @@ async def test_me_invites_endpoint(async_engine):
         await session.refresh(invitee)
         mock_invitee = invitee
 
-        org = Organization(
-            name="Inviting Org",
-            slug="inviting-org",
+        workspace = Workspace(
+            name="Inviting Workspace",
+            slug="inviting-workspace",
         )
-        session.add(org)
+        session.add(workspace)
         await session.commit()
-        await session.refresh(org)
+        await session.refresh(workspace)
 
         invite = Invite(
             email="invitee@example.com",
-            organization_id=org.id,
+            workspace_id=workspace.id,
             invited_by_id=inviter.id,
-            role=OrganizationRole.MEMBER,
+            role=WorkspaceRole.MEMBER,
             status=InviteStatus.PENDING,
         )
         session.add(invite)
@@ -623,7 +625,7 @@ async def test_me_invites_endpoint(async_engine):
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 1
-        assert data[0]["organization_name"] == "Inviting Org"
+        assert data[0]["workspace_name"] == "Inviting Workspace"
         assert data[0]["role"] == "member"
         assert data[0]["invited_by_email"] == "inviter@example.com"
     finally:

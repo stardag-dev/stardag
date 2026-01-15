@@ -1,8 +1,8 @@
-"""Internal JWT token management for org-scoped access tokens.
+"""Internal JWT token management for workspace-scoped access tokens.
 
 This module handles:
 - RSA key management for signing/verification
-- Minting org-scoped access tokens
+- Minting workspace-scoped access tokens
 - Validating internal tokens
 - JWKS generation for public key distribution
 """
@@ -43,10 +43,10 @@ class TokenInvalidError(TokenError):
 
 @dataclass
 class InternalTokenPayload:
-    """Payload for internal org-scoped JWT tokens."""
+    """Payload for internal workspace-scoped JWT tokens."""
 
     sub: str  # User ID (internal, not OIDC external_id)
-    org_id: str  # Organization ID (required for internal tokens)
+    workspace_id: str  # Workspace ID (required for internal tokens)
     iss: str  # Issuer (stardag-api)
     aud: str  # Audience (stardag)
     exp: int  # Expiration timestamp
@@ -56,14 +56,14 @@ class InternalTokenPayload:
     def from_dict(cls, payload: dict[str, Any]) -> "InternalTokenPayload":
         """Create InternalTokenPayload from decoded JWT payload."""
         # Validate required claims
-        required = ["sub", "org_id", "iss", "aud", "exp", "iat"]
+        required = ["sub", "workspace_id", "iss", "aud", "exp", "iat"]
         for claim in required:
             if claim not in payload:
                 raise TokenInvalidError(f"Token missing required '{claim}' claim")
 
         return cls(
             sub=payload["sub"],
-            org_id=payload["org_id"],
+            workspace_id=payload["workspace_id"],
             iss=payload["iss"],
             aud=payload["aud"],
             exp=payload["exp"],
@@ -141,14 +141,14 @@ class InternalTokenManager:
     def create_access_token(
         self,
         user_id: str,
-        org_id: str,
+        workspace_id: str,
         additional_claims: dict[str, Any] | None = None,
     ) -> str:
-        """Create an org-scoped access token.
+        """Create a workspace-scoped access token.
 
         Args:
             user_id: Internal user ID (not OIDC external_id)
-            org_id: Organization ID
+            workspace_id: Workspace ID
             additional_claims: Optional additional claims to include
 
         Returns:
@@ -159,7 +159,7 @@ class InternalTokenManager:
 
         payload = {
             "sub": user_id,
-            "org_id": org_id,
+            "workspace_id": workspace_id,
             "iss": self.issuer,
             "aud": self.audience,
             "iat": int(now.timestamp()),
@@ -263,9 +263,9 @@ def get_token_manager() -> InternalTokenManager:
     return _token_manager
 
 
-def create_access_token(user_id: str, org_id: str) -> str:
+def create_access_token(user_id: str, workspace_id: str) -> str:
     """Convenience function to create an access token."""
-    return get_token_manager().create_access_token(user_id, org_id)
+    return get_token_manager().create_access_token(user_id, workspace_id)
 
 
 def validate_token(token: str) -> InternalTokenPayload:

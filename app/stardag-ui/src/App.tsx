@@ -3,11 +3,11 @@ import { setAccessTokenGetter } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
 import { BuildsList } from "./components/BuildsList";
 import { BuildView } from "./components/BuildView";
-import { CreateOrganization } from "./components/CreateOrganization";
+import { CreateWorkspace } from "./components/CreateWorkspace";
 import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
-import { OrganizationSelector } from "./components/OrganizationSelector";
-import { OrganizationSettings } from "./components/OrganizationSettings";
+import { WorkspaceSelector } from "./components/WorkspaceSelector";
+import { WorkspaceSettings } from "./components/WorkspaceSettings";
 import { PendingInvites } from "./components/PendingInvites";
 import type { NavItem } from "./components/Sidebar";
 import { Sidebar } from "./components/Sidebar";
@@ -53,7 +53,7 @@ function MainLayout({
         {showHeader && (
           <header className="flex h-14 items-center justify-between border-b border-gray-200 bg-white px-4 dark:border-gray-700 dark:bg-gray-800">
             <div className="flex items-center gap-4">
-              <OrganizationSelector />
+              <WorkspaceSelector />
             </div>
             <div className="flex items-center gap-3">
               <ThemeToggle />
@@ -175,7 +175,7 @@ function SettingsPage({
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
     >
-      <OrganizationSettings onNavigate={onNavigatePath} />
+      <WorkspaceSettings onNavigate={onNavigatePath} />
     </MainLayout>
   );
 }
@@ -409,7 +409,7 @@ function Router() {
     if (path === "/callback") return "callback";
     if (path === "/settings") return "settings";
     if (path === "/invites") return "invites";
-    if (path === "/organizations/new") return "new-org";
+    if (path === "/workspaces/new") return "new-workspace";
 
     // Check for tasks path: /tasks, /:org/tasks, or /:org/:environment/tasks
     if (path === "/tasks" || path.endsWith("/tasks")) return "tasks";
@@ -492,8 +492,8 @@ function Router() {
       case "invites":
         return <InvitesPage onNavigate={navigateTo} />;
 
-      case "new-org":
-        return <CreateOrganization onNavigate={navigateTo} />;
+      case "new-workspace":
+        return <CreateWorkspace onNavigate={navigateTo} />;
 
       case "tasks":
         return (

@@ -71,7 +71,7 @@ class TestAuthFixtures:
         assert response.status_code == 200
         data = response.json()
         assert "user" in data
-        assert "organizations" in data
+        assert "workspaces" in data
 
     def test_unauthenticated_client_rejected(
         self,
@@ -82,13 +82,13 @@ class TestAuthFixtures:
         assert response.status_code == 401
 
 
-class TestOrgAndEnvironmentFixtures:
-    """Tests for organization and environment fixtures."""
+class TestWorkspaceAndEnvironmentFixtures:
+    """Tests for workspace and environment fixtures."""
 
-    def test_organization_fixture(self, test_organization_id: str) -> None:
-        """Test that organization fixture returns a valid ID."""
-        assert test_organization_id is not None
-        assert len(test_organization_id) > 0
+    def test_workspace_fixture(self, test_workspace_id: str) -> None:
+        """Test that workspace fixture returns a valid ID."""
+        assert test_workspace_id is not None
+        assert len(test_workspace_id) > 0
 
     def test_internal_token_fixture(self, internal_token: str) -> None:
         """Test that internal token fixture returns a valid token."""
