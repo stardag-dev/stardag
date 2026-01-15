@@ -6,7 +6,7 @@ from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
-    from stardag._task import BaseTask
+    from stardag._core.task import BaseTask
 
 # Never change this value, it is used to generate stable UUID5 ids for tasks
 _DEFAULT_TASK_UUID5_NAMESPACE = UUID("9ca26b27-f7ee-4044-8b3c-e335dc5778dc")

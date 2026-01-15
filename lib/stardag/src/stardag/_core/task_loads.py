@@ -1,6 +1,6 @@
 import typing
 
-from stardag._task import Task
+from stardag._core.task import Task
 from stardag.polymorphic import Polymorphic, SubClass
 from stardag.target._base import LoadableTarget, LoadedT_co
 

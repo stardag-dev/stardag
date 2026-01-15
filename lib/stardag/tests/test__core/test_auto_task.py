@@ -1,7 +1,6 @@
 import typing
 
-from stardag._auto_task import AutoTask
-from stardag._task import auto_namespace
+from stardag import AutoTask, auto_namespace
 from stardag.target import Serializable
 from stardag.target.serialize import JSONSerializer, PlainTextSerializer
 

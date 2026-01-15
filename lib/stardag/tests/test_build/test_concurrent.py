@@ -13,8 +13,8 @@ import typing
 
 import pytest
 
-from stardag._auto_task import AutoTask
-from stardag._task import _has_custom_run_aio, auto_namespace
+from stardag import AutoTask, auto_namespace
+from stardag._core.task import _has_custom_run_aio
 from stardag.build import (
     BuildExitStatus,
     DefaultExecutionModeSelector,

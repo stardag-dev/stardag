@@ -3,9 +3,8 @@ from typing import Annotated
 import pytest
 from pydantic import ValidationError
 
-from stardag._auto_task import AutoTask
-from stardag._task import BaseTask, Task, auto_namespace
-from stardag._task_loads import TaskLoads
+from stardag import AutoTask, BaseTask, Task, auto_namespace
+from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagField
 from stardag.polymorphic import Polymorphic, SubClass
 from stardag.target import InMemoryTarget, LoadableSaveableTarget, LoadableTarget

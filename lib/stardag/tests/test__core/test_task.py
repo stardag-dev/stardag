@@ -3,9 +3,9 @@ from typing import Annotated, Type
 
 import pytest
 
-from stardag._auto_task import AutoTask
-from stardag._decorator import task as task_decorator
-from stardag._task import (
+from stardag._core.auto_task import AutoTask
+from stardag._core.decorator import task as task_decorator
+from stardag._core.task import (
     BaseTask,
     Task,
     TaskImplementationError,
@@ -14,7 +14,7 @@ from stardag._task import (
     _has_custom_run_aio,
     flatten_task_struct,
 )
-from stardag._task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
+from stardag._core.task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, SubClass, TypeId
 from stardag.target._in_memory import InMemoryTarget

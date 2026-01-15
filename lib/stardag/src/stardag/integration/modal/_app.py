@@ -5,8 +5,7 @@ import typing
 import modal
 from modal.gpu import GPU_T
 
-from stardag import BaseTask, build
-from stardag._task import TaskStruct
+from stardag import BaseTask, TaskStruct, build
 from stardag.build import TaskExecutorABC
 from stardag.integration.modal._config import modal_config_provider
 
@@ -277,8 +276,3 @@ class WorkerSelectorByName:
         return (
             f"{self.__class__.__name__}({self.name_to_worker}, {self.default_worker})"
         )
-
-
-# Backwards compatibility aliases
-WorkerSelectorByTypeName = WorkerSelectorByName
-WorkerSelectorByFamily = WorkerSelectorByName

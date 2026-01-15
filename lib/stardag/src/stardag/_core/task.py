@@ -18,15 +18,15 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from stardag._registry_asset import RegistryAsset
+    from stardag._core.registry_asset import RegistryAsset
 
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, SerializationInfo
 from typing_extensions import TypeAlias, Union
 
-from stardag._target_base import TargetType
-from stardag._task_id import _get_task_id_from_jsonable
+from stardag._core.target_base import TargetType
+from stardag._core.task_id import _get_task_id_from_jsonable
 from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.polymorphic import PolymorphicRoot
 

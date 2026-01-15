@@ -10,7 +10,6 @@ from typing import Annotated, Any
 import pandas as pd
 import stardag as sd
 from pydantic import Field
-from stardag._task import TaskRef
 from stardag.build import GlobalLockConfig
 from stardag.target import LoadedT
 
@@ -172,7 +171,7 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
         return [
             MarkdownArtifact(  # type: ignore
                 markdown=markdown,
-                key=format_key(f"{TaskRef.from_task(self).slug}-result"),
+                key=format_key(f"{sd.TaskRef.from_task(self).slug}-result"),
                 description="Metrics",
             )
         ]
@@ -216,7 +215,7 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
         return [
             TableArtifact(  # type: ignore
                 table=rows,
-                key=format_key(f"{TaskRef.from_task(self).slug}-result"),
+                key=format_key(f"{sd.TaskRef.from_task(self).slug}-result"),
                 description="Metrics by model parameters",
             )
         ]
