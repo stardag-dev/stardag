@@ -37,12 +37,15 @@
       }
     },
     {
-      "path": "infra",
-      "name": "infra"
+      "path": "docs",
+      "name": "docs",
+      "settings": {
+        "python.defaultInterpreterPath": "docs/.venv/bin/python"
+      }
     },
     {
-      "path": "docs",
-      "name": "docs"
+      "path": "infra",
+      "name": "infra"
     }
   ],
   "settings": {
