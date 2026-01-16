@@ -21,19 +21,36 @@ You'll also need a [Modal](https://modal.com/) account.
 
 ## Basic Usage
 
+Create a `StardagApp` to run your DAGs on Modal:
+
 ```python
 import modal
+from stardag.integration.modal import StardagApp, FunctionSettings
+
+# Define base image with stardag installed
+base_image = modal.Image.debian_slim().pip_install("stardag")
+
+# Create app with worker configuration
+app = StardagApp(
+    "stardag-example",
+    builder_settings=FunctionSettings(image=base_image),
+    worker_settings={
+        "default": FunctionSettings(image=base_image),
+    },
+)
+
+# Your tasks are defined normally
 import stardag as sd
-from stardag.integration.modal import modal_task
 
-app = modal.App("stardag-example")
-
-@modal_task(app)
+@sd.task
 def process_data(data: sd.Depends[list[int]]) -> int:
     return sum(data)
-```
 
-<!-- TODO: Verify modal_task decorator syntax -->
+# Run remotely via Modal
+if __name__ == "__main__":
+    task = process_data(data=some_upstream_task())
+    app.build_remote(task)
+```
 
 ## Configuration
 
@@ -44,14 +61,30 @@ def process_data(data: sd.Depends[list[int]]) -> int:
 modal token new
 ```
 
-### Environment Configuration
+### Worker Configuration
+
+Configure different workers for different task types:
 
 ```python
-image = modal.Image.debian_slim().pip_install("stardag")
+from stardag.integration.modal import StardagApp, FunctionSettings, WorkerSelectorByName
 
-@modal_task(app, image=image)
-def my_task(...):
-    pass
+gpu_image = (
+    modal.Image.debian_slim()
+    .pip_install("stardag", "torch")
+)
+
+cpu_image = modal.Image.debian_slim().pip_install("stardag")
+
+app = StardagApp(
+    "gpu-example",
+    builder_settings=FunctionSettings(image=cpu_image),
+    worker_settings={
+        "default": FunctionSettings(image=cpu_image),
+        "gpu": FunctionSettings(image=gpu_image, gpu="T4"),
+    },
+    # Route tasks to workers by name
+    worker_selector=WorkerSelectorByName({"TrainModel": "gpu"}),
+)
 ```
 
 ## Example: GPU Processing
@@ -59,38 +92,54 @@ def my_task(...):
 ```python
 import modal
 import stardag as sd
-from stardag.integration.modal import modal_task
-
-app = modal.App("gpu-example")
+from stardag.integration.modal import StardagApp, FunctionSettings
 
 gpu_image = (
     modal.Image.debian_slim()
     .pip_install("stardag", "torch")
 )
 
-@modal_task(app, image=gpu_image, gpu="T4")
+app = StardagApp(
+    "training-app",
+    builder_settings=FunctionSettings(image=gpu_image),
+    worker_settings={
+        "default": FunctionSettings(image=gpu_image, gpu="T4"),
+    },
+)
+
+@sd.task
 def train_model(data: sd.Depends[dict]) -> dict:
     import torch
     # GPU training logic
-    pass
+    return {"model": "trained"}
+
+# Run on Modal with GPU
+if __name__ == "__main__":
+    task = train_model(data=prepare_data())
+    app.build_remote(task)
 ```
 
-## Combining with Prefect
+## Using ModalTaskExecutor
 
-Use Modal for execution with Prefect for orchestration:
+For more control, use `ModalTaskExecutor` with the standard build:
 
 ```python
-from stardag.integration.prefect import build as prefect_build
-from stardag.integration.modal import modal_task
+from stardag import build
+from stardag.build import HybridConcurrentTaskExecutor, RoutedTaskExecutor
+from stardag.integration.modal import ModalTaskExecutor
 
-# Modal handles execution
-@modal_task(app)
-def heavy_computation(data: sd.Depends[list]) -> dict:
-    # Runs on Modal infrastructure
-    pass
+modal_executor = ModalTaskExecutor(
+    modal_app_name="my-app",
+    worker_selector=lambda task: "gpu" if needs_gpu(task) else "default",
+)
+local_executor = HybridConcurrentTaskExecutor()
 
-# Prefect handles orchestration
-prefect_build(heavy_computation(data=source_task()))
+routed = RoutedTaskExecutor(
+    executors={"modal": modal_executor, "local": local_executor},
+    router=lambda task: "modal" if should_run_on_modal(task) else "local",
+)
+
+build([task], task_executor=routed)
 ```
 
 ## See Also

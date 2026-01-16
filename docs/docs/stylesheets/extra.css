@@ -1,0 +1,83 @@
+/* Custom styling to match stardag-ui app */
+
+/* Slate-800 (#1e293b) for header - matches favicon background */
+:root {
+  --md-primary-fg-color: #1e293b;
+  --md-primary-fg-color--light: #334155;
+  --md-primary-fg-color--dark: #0f172a;
+}
+
+/* Dark mode adjustments */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #1e293b;
+  --md-primary-fg-color--light: #334155;
+  --md-primary-fg-color--dark: #0f172a;
+  /* Match UI's dark mode background */
+  --md-default-bg-color: #111827;
+  --md-default-bg-color--light: #1f2937;
+}
+
+/* Accent color - blue matching the UI */
+:root {
+  --md-accent-fg-color: #2563eb;
+  --md-accent-fg-color--transparent: rgba(37, 99, 235, 0.1);
+}
+
+/* Code block styling to match UI */
+.md-typeset code {
+  background-color: #f1f5f9;
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+  background-color: #1e293b;
+}
+
+/* Link colors */
+.md-typeset a {
+  color: #2563eb;
+}
+
+.md-typeset a:hover {
+  color: #1d4ed8;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: #60a5fa;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: #93c5fd;
+}
+
+/* Header logo text styling */
+.md-header__topic {
+  font-weight: 500;
+}
+
+/* Navigation tabs styling */
+.md-tabs {
+  background-color: var(--md-primary-fg-color);
+}
+
+/* Footer styling */
+.md-footer {
+  background-color: var(--md-primary-fg-color--dark);
+}
+
+/* Sidebar navigation - lighter color for section headings */
+.md-nav--primary .md-nav__title {
+  color: #64748b; /* slate-500 - lighter for better contrast */
+}
+
+.md-nav__item--section > .md-nav__link {
+  color: #64748b; /* slate-500 */
+}
+
+/* Dark mode sidebar headings */
+[data-md-color-scheme="slate"] .md-nav--primary .md-nav__title {
+  color: #94a3b8; /* slate-400 - lighter in dark mode */
+}
+
+[data-md-color-scheme="slate"] .md-nav__item--section > .md-nav__link {
+  color: #94a3b8; /* slate-400 */
+}

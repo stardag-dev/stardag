@@ -41,7 +41,7 @@ This opens a browser for OAuth authentication.
 
 ```python
 import stardag as sd
-from stardag.build.api_registry import APIRegistry
+from stardag.registry import APIRegistry
 
 # Create registry instance
 registry = APIRegistry()
@@ -112,7 +112,7 @@ This ensures all team members use consistent storage paths.
 
 ```python
 import stardag as sd
-from stardag.build.api_registry import APIRegistry
+from stardag.registry import APIRegistry
 from stardag.config import load_config
 
 # Load configuration from profile/environment

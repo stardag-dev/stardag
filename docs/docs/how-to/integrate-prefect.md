@@ -22,7 +22,7 @@ You'll also need a Prefect server or Prefect Cloud account.
 ## Basic Usage
 
 ```python
-from stardag.integration.prefect import build as prefect_build
+from stardag.integration.prefect.build import build as prefect_build
 import stardag as sd
 
 @sd.task
@@ -67,7 +67,7 @@ export PREFECT_API_URL=http://localhost:4200/api
 ## Example: ML Pipeline
 
 ```python
-from stardag.integration.prefect import build as prefect_build
+from stardag.integration.prefect.build import build as prefect_build
 import stardag as sd
 
 @sd.task
