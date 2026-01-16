@@ -53,6 +53,8 @@ export interface Task {
   task_name: string;
   task_data: Record<string, unknown>;
   version: string | null;
+  // Output URI (path to task output if it has a FileSystemTarget)
+  output_uri: string | null;
   created_at: string;
   status: TaskStatus;
   started_at: string | null;

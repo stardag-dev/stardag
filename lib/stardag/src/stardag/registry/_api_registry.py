@@ -254,12 +254,24 @@ class APIRegistry(RegistryABC):
 
     def task_register(self, build_id: str, task: BaseTask) -> None:
         """Register a task within a build."""
+        # Extract output_uri if the task has a FileSystemTarget output with a path
+        output_uri: str | None = None
+        try:
+            output_method = getattr(task, "output", None)
+            if output_method is not None:
+                output = output_method()
+                if hasattr(output, "path"):
+                    output_uri = output.path
+        except Exception:
+            pass  # Task may not have output() or it may fail - that's OK
+
         task_data = {
             "task_id": str(task.id),
             "task_namespace": task.get_namespace(),
             "task_name": task.get_name(),
             "task_data": task.model_dump(mode="json"),
             "version": task.version,
+            "output_uri": output_uri,
             "dependency_task_ids": [
                 str(dep.id) for dep in flatten_task_struct(task.requires())
             ],
@@ -368,9 +380,43 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
 
-    def task_get_metadata(self, task_id: UUID) -> TaskMetadata:  # type: ignore
-        # TODO: implement actual API call to get task metadata
-        pass
+    def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
+        """Get metadata for a registered task.
+
+        Args:
+            task_id: The UUID of the task to get metadata for.
+
+        Returns:
+            A TaskMetadata object containing task metadata.
+        """
+        from datetime import datetime
+
+        response = self.client.get(
+            f"{self.api_url}/api/v1/tasks/{task_id}/metadata",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Get metadata for task {task_id}")
+        data = response.json()
+
+        # Parse datetime strings if present
+        def parse_datetime(value: str | None) -> datetime | None:
+            if value is None:
+                return None
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        return TaskMetadata(
+            id=UUID(data["id"]),
+            body=data["body"],
+            name=data["name"],
+            name_space=data["name_space"],
+            version=data["version"],
+            output_uri=data.get("output_uri"),
+            status=data["status"],
+            registered_at=parse_datetime(data.get("registered_at")),
+            started_at=parse_datetime(data.get("started_at")),
+            completed_at=parse_datetime(data.get("completed_at")),
+            error_message=data.get("error_message"),
+        )
 
     # -------------------------------------------------------------------------
     # Client lifecycle
@@ -498,12 +544,24 @@ class APIRegistry(RegistryABC):
 
     async def task_register_aio(self, build_id: str, task: BaseTask) -> None:
         """Async version - register a task within a build."""
+        # Extract output_uri if the task has a FileSystemTarget output with a path
+        output_uri: str | None = None
+        try:
+            output_method = getattr(task, "output", None)
+            if output_method is not None:
+                output = output_method()
+                if hasattr(output, "path"):
+                    output_uri = output.path
+        except Exception:
+            pass  # Task may not have output() or it may fail - that's OK
+
         task_data = {
             "task_id": str(task.id),
             "task_namespace": task.get_namespace(),
             "task_name": task.get_name(),
             "task_data": task.model_dump(mode="json"),
             "version": task.version,
+            "output_uri": output_uri,
             "dependency_task_ids": [
                 str(dep.id) for dep in flatten_task_struct(task.requires())
             ],
@@ -606,7 +664,33 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
 
-    async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:  # type: ignore
+    async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
         """Async version of task_get_metadata."""
-        # TODO: implement actual API call to get task metadata
-        pass
+        from datetime import datetime
+
+        response = await self.async_client.get(
+            f"{self.api_url}/api/v1/tasks/{task_id}/metadata",
+            params=self._get_params(),
+        )
+        self._handle_response_error(response, f"Get metadata for task {task_id}")
+        data = response.json()
+
+        # Parse datetime strings if present
+        def parse_datetime(value: str | None) -> datetime | None:
+            if value is None:
+                return None
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        return TaskMetadata(
+            id=UUID(data["id"]),
+            body=data["body"],
+            name=data["name"],
+            name_space=data["name_space"],
+            version=data["version"],
+            output_uri=data.get("output_uri"),
+            status=data["status"],
+            registered_at=parse_datetime(data.get("registered_at")),
+            started_at=parse_datetime(data.get("started_at")),
+            completed_at=parse_datetime(data.get("completed_at")),
+            error_message=data.get("error_message"),
+        )
