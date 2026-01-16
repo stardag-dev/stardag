@@ -349,6 +349,22 @@ class BaseTask(
     def __lt__(self, other: "BaseTask") -> bool:
         return self.id < other.id
 
+    @classmethod
+    def resolve(
+        cls: type["BaseTask"],
+        namespace: str,
+        name: str,
+        extra: dict[str, Any],
+    ) -> type["BaseTask"]:
+        """Override PolymorphicRoot.resolve to handle AliasTask deserialization."""
+        aliased = extra.get("__aliased")
+        if aliased is not None:
+            from stardag._core.alias_task import AliasTask
+
+            return AliasTask
+
+        return super().resolve(namespace, name, extra)
+
 
 def auto_namespace(scope: str):
     """Set the task namespace for the module to the module import path.

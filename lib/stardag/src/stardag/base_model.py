@@ -21,6 +21,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     SerializationInfo,
+    ValidationInfo,
     model_serializer,
     model_validator,
 )
@@ -64,7 +65,7 @@ class StardagBaseModel(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _before_validate(cls, data: Any, info):
+    def _check_add_compatibility_defaults(cls, data: Any, info: ValidationInfo) -> Any:
         """If mode="compat" and value is missing, use Compatability default."""
         mode: ValidationContextMode = (
             info.context.get(CONTEXT_MODE_KEY) if info.context else None

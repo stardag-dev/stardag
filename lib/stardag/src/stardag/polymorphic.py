@@ -17,11 +17,7 @@ from typing import (
     get_origin,
 )
 
-from pydantic import (
-    BaseModel,
-    GetCoreSchemaHandler,
-    SerializationInfo,
-)
+from pydantic import BaseModel, GetCoreSchemaHandler, SerializationInfo, ValidationInfo
 from pydantic_core import core_schema
 
 from stardag.base_model import StardagBaseModel
@@ -347,7 +343,10 @@ class PolymorphicRoot(StardagBaseModel):
 
     @classmethod
     def resolve(
-        cls: type[_TPolymorphicRoot], namespace: str, name: str
+        cls: type[_TPolymorphicRoot],
+        namespace: str,
+        name: str,
+        extra: dict[str, Any],
     ) -> type[_TPolymorphicRoot]:
         type_id = TypeId(namespace=namespace, name=name)
         sub = cls._registry().get_class(type_id)
@@ -421,6 +420,18 @@ class PolymorphicRoot(StardagBaseModel):
                 **data,
             }
         return data
+
+    @classmethod
+    def _before_validate(cls, payload: Any, info: ValidationInfo) -> Any:
+        """No-op placeholder to ensure PolymorphicRoot subclasses have this method."""
+        if not isinstance(payload, dict):
+            return payload
+
+        payload = dict(payload)
+        payload.pop(NAMESPACE_KEY, None)
+        payload.pop(NAME_KEY, None)
+
+        return payload
 
     @classmethod
     def get_name(cls) -> str:
@@ -500,11 +511,24 @@ class Polymorphic:
                     f"Missing discriminator keys: {NAMESPACE_KEY}, {NAME_KEY}"
                 )
 
-            subcls = base_origin.resolve(str(namespace), str(name))
+            double_underscore_kwargs = {
+                key: value
+                for key, value in v.items()
+                if key.startswith("__")
+                and key
+                not in (
+                    NAMESPACE_KEY,
+                    NAME_KEY,
+                )
+            }
 
-            payload = dict(v)
-            payload.pop(NAMESPACE_KEY, None)
-            payload.pop(NAME_KEY, None)
+            subcls = base_origin.resolve(
+                str(namespace),
+                str(name),
+                extra=double_underscore_kwargs,
+            )
+
+            payload = subcls._before_validate(v, info)
 
             return subcls.model_validate(payload, context=info.context)
 
