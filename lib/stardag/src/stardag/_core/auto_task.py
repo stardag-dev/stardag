@@ -107,7 +107,7 @@ class AutoTask(
     def _relpath_extension(self) -> str:
         """Override to customize the file extension of the task output."""
         get_default_ext = getattr(
-            self._serializer, "get_default_extension", lambda: None
+            self.serializer, "get_default_extension", lambda: None
         )
         assert callable(get_default_ext)
         default_ext = get_default_ext()
@@ -146,5 +146,10 @@ class AutoTask(
     def output(self) -> LoadableSaveableFileSystemTarget[LoadedT]:
         return Serializable(
             wrapped=get_target(self._relpath),
-            serializer=self._serializer,
+            serializer=self.serializer,
         )
+
+    @property
+    def serializer(self):
+        """The serializer used for this task's output."""
+        return self._serializer
