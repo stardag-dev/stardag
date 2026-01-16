@@ -262,8 +262,9 @@ class APIRegistry(RegistryABC):
                 output = output_method()
                 if hasattr(output, "path"):
                     output_uri = output.path
-        except Exception:
-            pass  # Task may not have output() or it may fail - that's OK
+        except Exception as e:
+            # Log but don't fail - task may not have output() or it may fail
+            logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
 
         task_data = {
             "task_id": str(task.id),
@@ -552,8 +553,9 @@ class APIRegistry(RegistryABC):
                 output = output_method()
                 if hasattr(output, "path"):
                     output_uri = output.path
-        except Exception:
-            pass  # Task may not have output() or it may fail - that's OK
+        except Exception as e:
+            # Log but don't fail - task may not have output() or it may fail
+            logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
 
         task_data = {
             "task_id": str(task.id),

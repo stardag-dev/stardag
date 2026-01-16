@@ -294,6 +294,34 @@ async def test_get_build_graph(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_in_build_includes_output_uri(client: AsyncClient):
+    """Test that list_tasks_in_build endpoint includes output_uri."""
+    # Create a build
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Register a task with output_uri
+    task_data = {
+        "task_id": "output-uri-task",
+        "task_namespace": "test",
+        "task_name": "OutputUriTask",
+        "task_data": {},
+        "output_uri": "s3://bucket/output/path.json",
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+
+    # Start the task to create an event (so it appears in list_tasks_in_build)
+    await client.post(f"/api/v1/builds/{build_id}/tasks/output-uri-task/start")
+
+    # List tasks in build
+    response = await client.get(f"/api/v1/builds/{build_id}/tasks")
+    assert response.status_code == 200
+    tasks = response.json()
+    assert len(tasks) == 1
+    assert tasks[0]["output_uri"] == "s3://bucket/output/path.json"
+
+
+@pytest.mark.asyncio
 async def test_task_reuse_across_runs(client: AsyncClient):
     """Test that tasks are reused across builds (same task_id in same environment).
 

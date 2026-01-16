@@ -532,6 +532,7 @@ async def search_tasks(
                 task_name=task.task_name,
                 task_data=task.task_data,
                 version=task.version,
+                output_uri=task.output_uri,
                 created_at=task.created_at,
                 build_id=status_info[0] if status_info else None,
                 build_name=status_info[1] if status_info else None,
