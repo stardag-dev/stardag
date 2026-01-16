@@ -2,7 +2,7 @@ from functools import cached_property
 from typing import Annotated, Any, Generic, get_args
 from uuid import UUID
 
-from pydantic import BaseModel, SerializationInfo, ValidationInfo
+from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validator
 
 from stardag._core.auto_task import AutoTask, LoadedT
 from stardag._core.task import Task
@@ -108,6 +108,19 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
                 body=metadata.body,
             )
         )
+
+    @model_validator(mode="after")
+    def _validate_specifies_generic_loads_type(self) -> "AliasTask[LoadedT]":
+        """Ensure that the generic LoadedT type parameter is specified."""
+        orig_class = getattr(self, "__orig_class__", None)
+        assert orig_class is not None
+        loaded_type_arg = get_args(orig_class)[0]
+        if loaded_type_arg is LoadedT:
+            raise TypeError(
+                "AliasTask must be instantiated with a specific loaded type, e.g., "
+                "`AliasTask[int](...)`, or. `AliasTask[int].from_registry(...)`."
+            )
+        return self
 
     def run(self):
         raise NotImplementedError(_run_error_msg)
