@@ -1,3 +1,6 @@
+import base64
+from pickle import dumps as pickle_dumps
+
 import pytest
 
 import stardag as sd
@@ -55,26 +58,13 @@ def test_alias_task(default_in_memory_fs_target):
             "__aliased": {
                 "id": str(loads_int_task.id),
                 "uri": loads_int_task.output().path,
+                "loads_type": base64.b64encode(pickle_dumps(int)).decode("ascii"),
             },
             "__namespace": "",
             "__name": "LoadsIntTask",
             "version": "",
         },
     }
-    # b = {
-    #     "__namespace": "",
-    #     "__name": "DownstreamTask",
-    #     "version": "",
-    #     "loads_int": {
-    #         "__aliased": {
-    #             "id": "21c012fb-3772-5fbf-9d0f-ebd5b7353280",
-    #             "uri": "in-memory://LoadsIntTask/21/c0/21c012fb-3772-5fbf-9d0f-ebd5b7353280.json",
-    #         },
-    #         "__namespace": "",
-    #         "__name": "LoadsIntTask",
-    #         "version": "",
-    #     },
-    # }
     assert (
         downstream_task_with_alias_dumped == downstream_task_with_alias_dumped_expected
     )
@@ -83,3 +73,7 @@ def test_alias_task(default_in_memory_fs_target):
         downstream_task_with_alias_dumped
     )
     assert reconstructed_downstream_task == downstream_task_with_alias
+    assert (
+        reconstructed_downstream_task.loads_int.serializer  # type: ignore
+        == downstream_task_with_alias.loads_int.serializer  # type: ignore
+    )

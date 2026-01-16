@@ -1,5 +1,6 @@
 import abc
 import asyncio
+import base64
 import functools
 import inspect
 import logging
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from stardag.registry import RegistryABC
     from stardag.registry_asset import RegistryAsset
 
+from pickle import loads as pickle_loads
 from uuid import UUID
 
 from pydantic import ConfigDict, Field, SerializationInfo
@@ -362,7 +364,15 @@ class BaseTask(
         if aliased is not None:
             from stardag._core.alias_task import AliasTask
 
-            return AliasTask
+            loads_type_pickled_b64 = aliased.get("loads_type")
+            if loads_type_pickled_b64 is None:
+                raise ValueError(
+                    "Missing 'loads_type' in '__aliased' data for AliasTask "
+                    "deserialization. Ensure that the serialized data includes the "
+                    "'loads_type' field."
+                )
+            loads_type = pickle_loads(base64.b64decode(loads_type_pickled_b64))
+            return AliasTask[loads_type]
 
         return super().resolve(namespace, name, extra)
 

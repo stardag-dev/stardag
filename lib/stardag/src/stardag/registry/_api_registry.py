@@ -390,7 +390,6 @@ class APIRegistry(RegistryABC):
         Returns:
             A TaskMetadata object containing task metadata.
         """
-        from datetime import datetime
 
         response = self.client.get(
             f"{self.api_url}/api/v1/tasks/{task_id}/metadata",
@@ -399,25 +398,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Get metadata for task {task_id}")
         data = response.json()
 
-        # Parse datetime strings if present
-        def parse_datetime(value: str | None) -> datetime | None:
-            if value is None:
-                return None
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-        return TaskMetadata(
-            id=UUID(data["id"]),
-            body=data["body"],
-            name=data["name"],
-            name_space=data["name_space"],
-            version=data["version"],
-            output_uri=data.get("output_uri"),
-            status=data["status"],
-            registered_at=parse_datetime(data.get("registered_at")),
-            started_at=parse_datetime(data.get("started_at")),
-            completed_at=parse_datetime(data.get("completed_at")),
-            error_message=data.get("error_message"),
-        )
+        return TaskMetadata.model_validate(data)
 
     # -------------------------------------------------------------------------
     # Client lifecycle
@@ -668,7 +649,6 @@ class APIRegistry(RegistryABC):
 
     async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
         """Async version of task_get_metadata."""
-        from datetime import datetime
 
         response = await self.async_client.get(
             f"{self.api_url}/api/v1/tasks/{task_id}/metadata",
@@ -677,22 +657,4 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Get metadata for task {task_id}")
         data = response.json()
 
-        # Parse datetime strings if present
-        def parse_datetime(value: str | None) -> datetime | None:
-            if value is None:
-                return None
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-        return TaskMetadata(
-            id=UUID(data["id"]),
-            body=data["body"],
-            name=data["name"],
-            name_space=data["name_space"],
-            version=data["version"],
-            output_uri=data.get("output_uri"),
-            status=data["status"],
-            registered_at=parse_datetime(data.get("registered_at")),
-            started_at=parse_datetime(data.get("started_at")),
-            completed_at=parse_datetime(data.get("completed_at")),
-            error_message=data.get("error_message"),
-        )
+        return TaskMetadata.model_validate(data)
