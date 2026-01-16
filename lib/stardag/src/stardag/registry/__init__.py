@@ -14,7 +14,6 @@ The main classes are:
 from stardag.registry._api_registry import APIRegistry
 from stardag.registry._base import (
     NoOpRegistry,
-    RegisterdTaskEnvelope,
     RegistryABC,
     get_git_commit_hash,
     init_registry,
@@ -28,7 +27,6 @@ from stardag.registry._lock import (
 __all__ = [
     "APIRegistry",
     "NoOpRegistry",
-    "RegisterdTaskEnvelope",
     "RegistryABC",
     "RegistryGlobalConcurrencyLockManager",
     "RegistryLockHandle",
