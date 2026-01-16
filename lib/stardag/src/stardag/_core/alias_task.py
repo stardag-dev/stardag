@@ -1,5 +1,7 @@
+import base64
 from functools import cached_property
-from typing import Annotated, Any, Generic, get_args
+from pickle import dumps as pickle_dumps
+from typing import Annotated, Any, Generic, Type, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validator
@@ -151,7 +153,13 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
     def _serialize_extra(self, data: Any, info: SerializationInfo[Any | None]):
         data = self.aliased.body or {}
         return {
-            "__aliased": {"id": str(self.aliased.id), "uri": self.aliased.uri},
+            "__aliased": {
+                "id": str(self.aliased.id),
+                "uri": self.aliased.uri,
+                "loads_type": base64.b64encode(
+                    pickle_dumps(self._get_loads_type())
+                ).decode("ascii"),
+            },
             **data,
         }
 
@@ -176,9 +184,14 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
     @property
     def serializer(self):
         """The serializer used for this task's output."""
+        loaded_t = self._get_loads_type()
+        return get_serializer(loaded_t)
+
+    def _get_loads_type(self) -> Type[LoadedT]:
+        """Get the LoadedT type parameter of this AliasTask."""
         orig_class = getattr(self, "__orig_class__", None)
         assert orig_class is not None
         args = get_args(orig_class)
         assert len(args) == 1
         loaded_t = args[0]
-        return get_serializer(loaded_t)
+        return loaded_t

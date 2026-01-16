@@ -231,7 +231,7 @@ async def get_task_metadata(
         id=task.task_id,
         body=task.task_data,
         name=task.task_name,
-        name_space=task.task_namespace,
+        namespace=task.task_namespace,
         version=task.version or "",
         output_uri=task.output_uri,
         status=status,
