@@ -28,7 +28,7 @@ class AliasedMetadata(BaseModel):
         """Create AliasedMetadata from a given task."""
         return cls(
             id=task.id,
-            uri=task.output().path,
+            uri=task.output().uri,
             body=task.model_dump(),  # Optional
         )
 

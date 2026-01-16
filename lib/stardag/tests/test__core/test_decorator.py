@@ -67,7 +67,7 @@ def test_with_params(default_in_memory_fs_target):
     assert add_task._relpath.startswith("add_task/")
     assert add_task.b._relpath.startswith("add_task/")  # type: ignore
     assert (
-        add_task.output().path
+        add_task.output().uri
         == f"in-memory://add_task/add2/v1/1_{add_b_task.id}/result.txt"
     )
 
