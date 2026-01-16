@@ -248,6 +248,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         task_name: node.task_name,
         task_data: fullTask?.task_data ?? {},
         version: fullTask?.version ?? null,
+        output_uri: fullTask?.output_uri ?? null,
         created_at: fullTask?.created_at ?? build?.created_at ?? "",
         status: node.status,
         started_at: fullTask?.started_at ?? null,

@@ -554,6 +554,7 @@ async def register_task(
             task_name=task.task_name,
             task_data=task.task_data,
             version=task.version,
+            output_uri=task.output_uri,
         )
         db.add(db_task)
         await db.flush()  # Get the id
@@ -604,6 +605,7 @@ async def register_task(
         task_name=db_task.task_name,
         task_data=db_task.task_data,
         version=db_task.version,
+        output_uri=db_task.output_uri,
         created_at=db_task.created_at,
     )
 

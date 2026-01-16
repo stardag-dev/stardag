@@ -226,6 +226,18 @@ export function TaskDetail({
           )}
         </div>
 
+        {/* Output URI - only show when present */}
+        {task.output_uri && (
+          <div>
+            <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
+              Output URI
+            </label>
+            <p className="mt-1 text-sm font-mono text-gray-900 dark:text-gray-100 break-all">
+              {task.output_uri}
+            </p>
+          </div>
+        )}
+
         {/* Error message - only show when status is failed */}
         {task.status === "failed" && task.error_message && (
           <div>
