@@ -5,7 +5,10 @@ from uuid import UUID
 from pydantic import BaseModel, SerializationInfo, ValidationInfo
 
 from stardag._core.auto_task import AutoTask, LoadedT
+from stardag._core.task import Task
 from stardag.base_model import StardagField
+from stardag.registry import RegistryABC, registry_provider
+from stardag.target import FileSystemTarget
 from stardag.target.serialize import get_serializer
 
 _run_error_msg = "AliasTask does not implement run(), it can only be used to reference another task's output."
@@ -18,11 +21,93 @@ class AliasedMetadata(BaseModel):
     uri: str
     body: dict[str, Any] | None = None
 
+    @classmethod
+    def from_task(cls, task: Task[FileSystemTarget]) -> "AliasedMetadata":
+        """Create AliasedMetadata from a given task."""
+        return cls(
+            id=task.id,
+            uri=task.output().path,
+            body=task.model_dump(),  # Optional
+        )
+
 
 class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
-    """A task that acts as an alias to another task's output."""
+    """A task that acts as an alias to another task's output.
+
+    The purpose of `AliasTask` is to reference the output of another task that has been
+    completed but can no longer be directly instantiated, for example due to breaking
+    changes to the task's parameters. As long as the *loaded* type is still the same,
+    an `AliasTask` can be used in its place. Critically, the aliased task's ID will be
+    the same as the original task's ID, so downstream tasks depending on it will also
+    have the same IDs. It is the responsibility of the user to ensure that the aliased
+    task's output is compatible with the expected loaded type and the task ID. This is
+    typically achieved by loading the `AliasTask` from the Stardag APIRegistry, which
+    stores the necessary metadata.
+
+    An alias task can also be used to explicitly require a task to be completed and not
+    updated by code changes, but still maintian a reference to the upstream task (and
+    DAG) that produced the data.
+
+    Example:
+    ```python
+    import stardag as sd
+
+
+    class OriginalTask(sd.AutoTask[int]):
+        def run(self):
+            self.output().save(42)
+
+    original_task = OriginalTask()
+    original_task.run()
+
+    alias_task = sd.AliasTask[int](aliased=sd.AliasedMetadata.from_task(original_task))
+    assert alias_task.aliased.id == original_task.id
+    assert alias_task.complete()
+
+
+    class DownstreamTask(sd.AutoTask[int]):
+        loads_int: sd.TaskLoads[int]
+        def run(self):
+            self.output().save(self.loads_int.output().load() + 1)
+
+
+    downstream_task = DownstreamTask(loads_int=original_task)
+    downstream_task_with_alias = DownstreamTask(loads_int=alias_task)
+    assert downstream_task.id == downstream_task_with_alias.id
+    """
 
     aliased: Annotated[AliasedMetadata, StardagField(hash_exclude=True)]
+
+    @classmethod
+    def from_registry(
+        cls,
+        id: UUID,
+        registry: RegistryABC | None = None,
+    ) -> "AliasTask[LoadedT]":
+        """Create an AliasTask by loading metadata from the Stardag APIRegistry.
+
+        Args:
+            id: The UUID of the task to alias.
+            registry: An optional registry instance to use for loading metadata. If not
+                provided, the default registry from `registry_provider` will be used.
+        Returns:
+            An AliasTask instance referencing the specified task.
+        """
+        registry = registry or registry_provider.get()
+        metadata = registry.task_get_metadata(id)
+        if metadata.output_uri is None:
+            raise ValueError(
+                f"Cannot create AliasTask for task {id} without a FileSystemTarget "
+                "output."
+            )
+
+        return cls(
+            aliased=AliasedMetadata(
+                id=metadata.id,
+                uri=metadata.output_uri,
+                body=metadata.body,
+            )
+        )
 
     def run(self):
         raise NotImplementedError(_run_error_msg)

@@ -1,17 +1,14 @@
 """Base registry classes and utilities."""
 
 import abc
-import datetime
-import getpass
 import os
 import subprocess
+from datetime import datetime
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from pydantic import BaseModel
-
-from stardag.polymorphic import SubClass
+from stardag.base_model import StardagBaseModel
 from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
@@ -19,22 +16,22 @@ if TYPE_CHECKING:
     from stardag.registry_asset import RegistryAsset
 
 
-class RegisterdTaskEnvelope(BaseModel):
-    task: SubClass["BaseTask"]
-    task_id: UUID
-    user: str
-    created_at: datetime.datetime
-    commit_hash: str
+class TaskMetadata(StardagBaseModel):
+    """Metadata for a registered task in the registry."""
 
-    @classmethod
-    def new(cls, task: "BaseTask"):
-        return cls(
-            task=task,
-            task_id=task.id,
-            user=getpass.getuser(),
-            created_at=datetime.datetime.now(datetime.timezone.utc),
-            commit_hash=get_git_commit_hash(),
-        )
+    # Core Task fields
+    id: UUID
+    body: dict[str, Any]
+    name: str
+    name_space: str
+    version: str
+    output_uri: str | None  # only if the task has a FileSystemTarget output
+    # Registry Metadata fields
+    status: str
+    registered_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None
 
 
 class RegistryABC(metaclass=abc.ABCMeta):
@@ -232,6 +229,17 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    @abc.abstractmethod
+    def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
+        """Get metadata for a registered task.
+
+        Args:
+            task_id: The ID of the task to get metadata for.
+        Returns:
+            A TaskMetadata object containing task metadata.
+        """
+        pass
+
     # -------------------------------------------------------------------------
     # Async versions - default implementations delegate to sync methods
     # -------------------------------------------------------------------------
@@ -306,6 +314,10 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of task_upload_assets."""
         self.task_upload_assets(build_id, task, assets)
 
+    async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
+        """Async version of task_get_metadata."""
+        return self.task_get_metadata(task_id)
+
 
 class NoOpRegistry(RegistryABC):
     """A registry that does nothing.
@@ -323,6 +335,9 @@ class NoOpRegistry(RegistryABC):
 
     def task_register(self, build_id: str, task: "BaseTask") -> None:
         pass
+
+    def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
+        raise NotImplementedError("NoOpRegistry does not support task_get_metadata.")
 
 
 def init_registry() -> RegistryABC:
