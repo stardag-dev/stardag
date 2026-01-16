@@ -18,6 +18,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from stardag.registry import RegistryABC
     from stardag.registry_asset import RegistryAsset
 
 from uuid import UUID
@@ -364,6 +365,28 @@ class BaseTask(
             return AliasTask
 
         return super().resolve(namespace, name, extra)
+
+    @classmethod
+    def from_registry(
+        cls,
+        id: UUID,
+        registry: Union["RegistryABC", None] = None,
+    ) -> "BaseTask":
+        """Instantiate the task from the registry.
+
+        Args:
+            id: The UUID of the task to alias.
+            registry: An optional registry instance to use for loading metadata. If not
+                provided, the default registry from `registry_provider` will be used.
+        Returns:
+            An AliasTask instance referencing the specified task.
+        """
+        from stardag.registry import registry_provider
+
+        registry = registry or registry_provider.get()
+        metadata = registry.task_get_metadata(id)
+
+        return cls.model_validate(metadata.body, context={CONTEXT_MODE_KEY: "compat"})
 
 
 def auto_namespace(scope: str):
