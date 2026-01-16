@@ -7,19 +7,22 @@ edit_uri: edit/main/docs/docs/
 
 # Branding - centralized for easy updates
 # Colors extracted from app/stardag-ui
-# Primary: Blue-600 (#2563eb), Blue-700 (#1d4ed8)
+# Primary header: Slate-800 (#1e293b) - matches favicon background
+# Accent: Blue-600 (#2563eb)
 # See .claude/tasks/hosted-docs.md for full color palette
 
 theme:
   name: material
-  # TODO: Add custom logo when available
-  # logo: assets/logo.svg
-  # favicon: assets/favicon.png
+  custom_dir: overrides
+  logo: assets/favicon.svg
+  favicon: assets/favicon.svg
+  icon:
+    repo: fontawesome/brands/github
   palette:
     # Light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: blue
+      primary: custom
       accent: blue
       toggle:
         icon: material/brightness-7
@@ -27,14 +30,14 @@ theme:
     # Dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: blue
+      primary: custom
       accent: blue
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
   font:
-    text: Roboto
-    code: Roboto Mono
+    text: Inter, system-ui, sans-serif
+    code: IBM Plex Mono, monospace
   features:
     - navigation.instant
     - navigation.instant.prefetch
@@ -125,6 +128,9 @@ markdown_extensions:
 #   analytics:
 #     provider: google
 #     property: G-XXXXXXXXXX
+
+extra_css:
+  - stylesheets/extra.css
 
 extra:
   social:

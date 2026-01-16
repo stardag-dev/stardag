@@ -52,22 +52,24 @@ This is why deterministic parameter hashing is crucial.
 
 ## Build Methods
 
-### Sequential Build (Default)
+### Sequential Build
 
-Executes tasks one at a time:
+For debugging, you can use sequential execution (one task at a time):
 
 ```python
-from stardag.build.sequential import build
+from stardag.build import build_sequential
 
-build(task)  # or sd.build(task)
+build_sequential(task)  # or sd.build_sequential(task)
 ```
+
+The default `sd.build()` uses concurrent execution for better performance.
 
 ### With Registry
 
 Track builds in the Stardag API:
 
 ```python
-from stardag.build.api_registry import APIRegistry
+from stardag.registry import APIRegistry
 
 registry = APIRegistry(api_url="https://api.stardag.com")
 sd.build(task, registry=registry)
@@ -80,7 +82,7 @@ See [Using the API Registry](../how-to/use-api-registry.md).
 For orchestration and observability:
 
 ```python
-from stardag.integration.prefect import build as prefect_build
+from stardag.integration.prefect.build import build as prefect_build
 
 prefect_build(task)
 ```

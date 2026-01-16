@@ -15,27 +15,36 @@ Auto-generated API documentation from source code.
         - task
         - Task
         - AutoTask
+        - BaseTask
         - Depends
         - TaskLoads
-        - TaskSet
-        - TaskDeps
-        - TaskParam
+        - TaskRef
+        - TaskStruct
         - build
+        - build_aio
+        - build_sequential
+        - build_sequential_aio
         - namespace
         - auto_namespace
         - get_target
         - get_directory_target
         - target_factory_provider
-        - IDHasher
-        - IDHashInclude
 
 ## Build Module
 
-::: stardag.build.sequential
+::: stardag.build
     options:
       show_root_heading: true
       members:
         - build
+        - build_aio
+        - build_sequential
+        - build_sequential_aio
+        - BuildSummary
+        - BuildExitStatus
+        - FailMode
+        - HybridConcurrentTaskExecutor
+        - TaskExecutorABC
 
 ## Target Module
 
@@ -48,6 +57,17 @@ Auto-generated API documentation from source code.
         - LocalTarget
         - TargetFactory
         - target_factory_provider
+
+## Registry Module
+
+::: stardag.registry
+    options:
+      show_root_heading: true
+      members:
+        - APIRegistry
+        - RegistryABC
+        - NoOpRegistry
+        - registry_provider
 
 ## Configuration
 

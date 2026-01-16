@@ -46,7 +46,7 @@ Uses browser-based OAuth flow.
 The SDK handles API communication automatically:
 
 ```python
-from stardag.build.api_registry import APIRegistry
+from stardag.registry import APIRegistry
 
 registry = APIRegistry()
 sd.build(task, registry=registry)
