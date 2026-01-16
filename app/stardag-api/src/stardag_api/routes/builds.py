@@ -869,6 +869,7 @@ async def list_tasks_in_build(
                 task_name=task.task_name,
                 task_data=task.task_data,
                 version=task.version,
+                output_uri=task.output_uri,
                 created_at=task.created_at,
                 status=status,
                 started_at=started_at,
