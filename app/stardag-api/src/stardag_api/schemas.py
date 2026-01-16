@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict
 
 from stardag_api.models.enums import BuildStatus, EventType, TaskStatus
 
-
 # --- Workspace Schemas ---
 
 
@@ -493,7 +492,7 @@ class TaskMetadataResponse(BaseModel):
     id: str  # task_id (UUID string)
     body: dict  # Full task_data
     name: str  # task_name
-    name_space: str  # task_namespace
+    namespace: str  # task_namespace
     version: str
     output_uri: str | None  # Path to task output (if FileSystemTarget)
     # Registry Metadata fields

@@ -23,7 +23,7 @@ class TaskMetadata(StardagBaseModel):
     id: UUID
     body: dict[str, Any]
     name: str
-    name_space: str
+    namespace: str
     version: str
     output_uri: str | None  # only if the task has a FileSystemTarget output
     # Registry Metadata fields

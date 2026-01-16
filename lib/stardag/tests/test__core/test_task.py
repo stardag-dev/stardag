@@ -1,5 +1,7 @@
 import asyncio
+from datetime import datetime
 from typing import Annotated, Type
+from unittest.mock import Mock
 
 import pytest
 
@@ -17,6 +19,7 @@ from stardag._core.task import (
 from stardag._core.task_id import _get_task_id_from_jsonable, _get_task_id_jsonable
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.polymorphic import NAME_KEY, NAMESPACE_KEY, SubClass, TypeId
+from stardag.registry._base import RegistryABC, TaskMetadata
 from stardag.target._in_memory import InMemoryTarget
 from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 from stardag.utils.testing.namepace import (
@@ -563,3 +566,32 @@ class TestRunRunAioSymmetry:
         yielded = await gen.asend(None)
         assert isinstance(yielded, AsyncDynamicTask)
         assert yielded.depth == 0
+
+
+def test_from_registry(default_in_memory_fs_target):
+    class MockTask(AutoTask[str]):
+        a: int
+        b: str
+
+        def run(self):
+            self.output().save(self.a * self.b)
+
+    task = MockTask(a=5, b="test")
+    task.run()
+
+    mock_registry = Mock(spec=RegistryABC)
+    mock_registry.task_get_metadata.return_value = TaskMetadata(
+        id=task.id,
+        body=task.model_dump(),
+        name=task.get_name(),
+        namespace=task.get_namespace(),
+        version=task.version,
+        output_uri=task.output().path,
+        status="completed",
+        registered_at=datetime.now(),
+        started_at=datetime.now(),
+        completed_at=datetime.now(),
+        error_message=None,
+    )
+    loaded_task = MockTask.from_registry(id=task.id, registry=mock_registry)
+    assert loaded_task == task
