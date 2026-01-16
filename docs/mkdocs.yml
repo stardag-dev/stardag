@@ -140,7 +140,7 @@ extra:
   # pending: yellow, running: blue, completed: green, failed: red
 
 nav:
-  - Home: index.md
+  - Stardag: index.md
   - Getting Started:
       - getting-started/index.md
       - Installation: getting-started/installation.md
