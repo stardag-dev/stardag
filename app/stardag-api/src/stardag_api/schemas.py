@@ -140,6 +140,7 @@ class TaskCreate(BaseModel):
     task_name: str
     task_data: dict
     version: str | None = None
+    output_uri: str | None = None  # Path to task output (if FileSystemTarget)
     dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
 
 
@@ -155,6 +156,7 @@ class TaskResponse(BaseModel):
     task_name: str
     task_data: dict
     version: str | None
+    output_uri: str | None = None
     created_at: datetime
 
 
@@ -342,6 +344,7 @@ class TaskSearchResult(BaseModel):
     task_name: str
     task_data: dict
     version: str | None
+    output_uri: str | None = None
     created_at: datetime
     # Build context (most recent build the task appeared in)
     build_id: str | None = None
@@ -472,3 +475,30 @@ class TaskCompletionStatusResponse(BaseModel):
 
     task_id: str
     is_completed: bool
+
+
+# --- Task Metadata Schema (for SDK task_get_metadata) ---
+
+
+class TaskMetadataResponse(BaseModel):
+    """Schema for task metadata response (matches SDK TaskMetadata).
+
+    This schema is used by the SDK's task_get_metadata method to retrieve
+    task metadata for creating AliasTask instances.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    # Core Task fields
+    id: str  # task_id (UUID string)
+    body: dict  # Full task_data
+    name: str  # task_name
+    name_space: str  # task_namespace
+    version: str
+    output_uri: str | None  # Path to task output (if FileSystemTarget)
+    # Registry Metadata fields
+    status: TaskStatus
+    registered_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    error_message: str | None

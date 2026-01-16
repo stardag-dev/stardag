@@ -70,6 +70,9 @@ class Task(Base, TimestampMixin):
     # Version from task definition (optional)
     version: Mapped[str | None] = mapped_column(String(64))
 
+    # Output URI (path to task output if it has a FileSystemTarget)
+    output_uri: Mapped[str | None] = mapped_column(String(2048))
+
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="tasks")
     events: Mapped[list[Event]] = relationship(

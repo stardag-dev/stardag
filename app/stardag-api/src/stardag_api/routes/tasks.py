@@ -12,10 +12,12 @@ from stardag_api.models import Event, Task, TaskRegistryAsset
 from stardag_api.schemas import (
     EventResponse,
     TaskListResponse,
+    TaskMetadataResponse,
     TaskRegistryAssetListResponse,
     TaskRegistryAssetResponse,
     TaskResponse,
 )
+from stardag_api.services.status import get_task_global_status
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -68,6 +70,7 @@ async def list_tasks(
                 task_name=t.task_name,
                 task_data=t.task_data,
                 version=t.version,
+                output_uri=t.output_uri,
                 created_at=t.created_at,
             )
             for t in tasks
@@ -106,6 +109,7 @@ async def get_task(
         task_name=task.task_name,
         task_data=task.task_data,
         version=task.version,
+        output_uri=task.output_uri,
         created_at=task.created_at,
     )
 
@@ -193,3 +197,46 @@ async def get_task_events(
         )
         for event in events
     ]
+
+
+@router.get("/{task_id}/metadata", response_model=TaskMetadataResponse)
+async def get_task_metadata(
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Get task metadata for SDK task_get_metadata.
+
+    Returns task metadata in the format expected by the SDK's TaskMetadata class,
+    which is used by AliasTask.from_registry to create alias tasks.
+
+    Requires authentication via API key or JWT token with environment_id.
+    """
+    # Find task by task_id (hash) in workspace
+    result = await db.execute(
+        select(Task)
+        .where(Task.environment_id == auth.environment_id)
+        .where(Task.task_id == task_id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Get task status from events
+    status, started_at, completed_at, error_message, _ = await get_task_global_status(
+        db, task.id
+    )
+
+    return TaskMetadataResponse(
+        id=task.task_id,
+        body=task.task_data,
+        name=task.task_name,
+        name_space=task.task_namespace,
+        version=task.version or "",
+        output_uri=task.output_uri,
+        status=status,
+        registered_at=task.created_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        error_message=error_message,
+    )

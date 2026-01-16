@@ -577,6 +577,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         task_name: node.task_name,
         task_data: searchTask?.task_data ?? {},
         version: searchTask?.version ?? null,
+        output_uri: searchTask?.output_uri ?? null,
         created_at: searchTask?.created_at ?? "",
         status: node.status,
         started_at: searchTask?.started_at ?? null,
