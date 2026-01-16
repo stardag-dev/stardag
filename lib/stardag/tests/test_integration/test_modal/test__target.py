@@ -73,7 +73,7 @@ def ensure_app_deployed():
 def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
     uri = f"modalvol://{VOLUME_NAME}/{temp_test_dir}/test.txt"
     target = sd_modal.get_modal_target(uri)
-    assert target.path == uri
+    assert target.uri == uri
     if mount_expected:
         assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
     else:
@@ -128,7 +128,7 @@ def test_modal_mounted_volume_target_full_uri(use_mount: bool):
 def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
     target = get_target(f"{temp_test_dir}/test.txt")
     assert (
-        target.path
+        target.uri
         == f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}/{temp_test_dir}/test.txt"
     )
     if mount_expected:
@@ -244,7 +244,7 @@ def _write_read_aio_full_uri(temp_test_dir: str, mount_expected: bool):
 
     uri = f"modalvol://{VOLUME_NAME}/{temp_test_dir}/test_aio.txt"
     target = sd_modal.get_modal_target(uri)
-    assert target.path == uri
+    assert target.uri == uri
     if mount_expected:
         assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
     else:

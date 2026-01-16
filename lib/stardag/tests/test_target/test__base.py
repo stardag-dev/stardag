@@ -66,7 +66,7 @@ def test_local_target_proxy_path(tmp_path: Path):
 def test_remote_filesystem_target():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(path=uri, rfs=rfs)
+    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.open("w") as f:
@@ -88,7 +88,7 @@ def test_remote_filesystem_target():
 def test_remote_filesystem_target_binary():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(path=uri, rfs=rfs)
+    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.open("wb") as f:
@@ -108,7 +108,7 @@ def test_remote_filesystem_target_binary():
 def test_remote_filesystem_target_proxy_path():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(path=uri, rfs=rfs)
+    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.proxy_path("w") as proxy_path:
@@ -134,7 +134,7 @@ def test_cached_remote_filesystem_target(tmp_path: Path):
         root=str(tmp_path / "cache"),
     )
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(path=uri, rfs=rfs)
+    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.open("w") as f:
@@ -159,12 +159,12 @@ def test_cached_remote_filesystem_target(tmp_path: Path):
 
 
 def test_directory_target(tmp_path: Path):
-    dir_target = DirectoryTarget(path=str(tmp_path / "test"), prototype=LocalTarget)
+    dir_target = DirectoryTarget(uri=str(tmp_path / "test"), prototype=LocalTarget)
     assert not dir_target.exists()
 
     sub_a: LocalTarget = dir_target.get_sub_target("a")
     assert not sub_a.exists()
-    assert sub_a.path == str(tmp_path / "test" / "a")
+    assert sub_a.uri == str(tmp_path / "test" / "a")
     with sub_a.proxy_path("w") as sub_a_path:
         sub_a_path.write_text("A")
     assert sub_a.exists()
@@ -174,7 +174,7 @@ def test_directory_target(tmp_path: Path):
 
     sub_b: LocalTarget = dir_target / "b"
     assert not sub_b.exists()
-    assert sub_b.path == str(tmp_path / "test" / "b")
+    assert sub_b.uri == str(tmp_path / "test" / "b")
     with sub_b.proxy_path("w") as sub_b_path:
         sub_b_path.write_text("B")
     assert sub_b.exists()
@@ -228,7 +228,7 @@ async def test_local_target_open_aio_binary(tmp_path: Path):
 async def test_remote_filesystem_target_open_aio():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(path=uri, rfs=rfs)
+    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     async with target.open_aio("w") as f:
@@ -247,7 +247,7 @@ async def test_remote_filesystem_target_open_aio():
 async def test_remote_filesystem_target_open_aio_binary():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(path=uri, rfs=rfs)
+    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     async with target.open_aio("wb") as f:

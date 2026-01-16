@@ -24,8 +24,8 @@ def get_default_prefix_to_target_prototype() -> dict[str, TargetPrototype]:
     try:
         from stardag.integration.aws.s3 import s3_rfs_provider
 
-        def s3_target_from_path(path: str) -> FileSystemTarget:
-            return RemoteFileSystemTarget(path=path, rfs=s3_rfs_provider.get())
+        def s3_target_from_path(uri: str) -> FileSystemTarget:
+            return RemoteFileSystemTarget(uri=uri, rfs=s3_rfs_provider.get())
 
         prefix_to_target_prototype["s3://"] = s3_target_from_path
     except ImportError:

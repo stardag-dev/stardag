@@ -24,9 +24,9 @@ def get_volume_name_and_path(uri: str) -> tuple[str, str]:
 
 
 class ModalMountedVolumeTarget(LocalTarget):
-    def __init__(self, path: str, **kwargs):
-        super().__init__(path, **kwargs)
-        volume_name, in_volume_path = get_volume_name_and_path(path)
+    def __init__(self, uri: str, **kwargs):
+        super().__init__(uri, **kwargs)
+        volume_name, in_volume_path = get_volume_name_and_path(uri)
         mount_path = modal_config_provider.get().volume_name_to_mount_path.get(
             volume_name
         )
@@ -135,10 +135,10 @@ modal_volume_rfs_provider = resource_provider(
 )
 
 
-def get_modal_target(path: str) -> ModalMountedVolumeTarget | RemoteFileSystemTarget:
-    volume_name, in_volume_path = get_volume_name_and_path(uri=path)
+def get_modal_target(uri: str) -> ModalMountedVolumeTarget | RemoteFileSystemTarget:
+    volume_name, in_volume_path = get_volume_name_and_path(uri=uri)
     mount_path = modal_config_provider.get().volume_name_to_mount_path.get(volume_name)
     if mount_path is not None:
-        return ModalMountedVolumeTarget(path)
+        return ModalMountedVolumeTarget(uri)
     else:
-        return RemoteFileSystemTarget(path, rfs=modal_volume_rfs_provider.get())
+        return RemoteFileSystemTarget(uri, rfs=modal_volume_rfs_provider.get())

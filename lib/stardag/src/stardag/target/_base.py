@@ -151,10 +151,10 @@ class _FileSystemTargetGeneric(
     typing.Generic[BytesT],
     typing.Protocol,
 ):
-    path: str
+    uri: str
 
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
 
     def exists(self) -> bool: ...
 
@@ -289,7 +289,7 @@ class _FileSystemTargetGeneric(
             yield path
 
     def __repr__(self):
-        return f"{self.__class__.__name__}({self.path})"
+        return f"{self.__class__.__name__}({self.uri})"
 
 
 class FileSystemTarget(_FileSystemTargetGeneric[bytes], typing.Protocol):
@@ -310,12 +310,12 @@ LSFST = LoadableSaveableFileSystemTarget
 class LocalTarget(FileSystemTarget):
     """TODO use luigi-style atomic writes."""
 
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
 
     @property
     def _path(self) -> Path:
-        return Path(self.path)
+        return Path(self.uri)
 
     def exists(self) -> bool:
         return self._path.exists()
@@ -619,28 +619,28 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
 
 
 class RemoteFileSystemTarget(FileSystemTarget):
-    def __init__(self, path: str, rfs: RemoteFileSystemABC) -> None:
-        if not path.startswith(rfs.URI_PREFIX):
+    def __init__(self, uri: str, rfs: RemoteFileSystemABC) -> None:
+        if not uri.startswith(rfs.URI_PREFIX):
             raise ValueError(
-                f"Unexpected URI {path}, expected format {rfs.URI_PREFIX}..."
+                f"Unexpected URI {uri}, expected format {rfs.URI_PREFIX}..."
             )
-        self.path = path
+        self.uri = uri
         self.rfs = rfs
 
     def exists(self) -> bool:
-        return self.rfs.exists(self.path)
+        return self.rfs.exists(self.uri)
 
     def _open(self, mode: OpenMode) -> FileSystemTargetHandle:  # type: ignore
         if mode in ["r", "rb"]:
-            return _RemoteReadFileHandle(self.path, mode, self.rfs)  # type: ignore
+            return _RemoteReadFileHandle(self.uri, mode, self.rfs)  # type: ignore
         if mode in ["w", "wb"]:
-            return _RemoteWriteFileHandle(self.path, mode, self.rfs)  # type: ignore
+            return _RemoteWriteFileHandle(self.uri, mode, self.rfs)  # type: ignore
 
         raise ValueError(f"Invalid mode {mode}")  # pragma: no cover
 
     @contextlib.contextmanager
     def _readable_proxy_path(self) -> typing.Generator[Path, None, None]:
-        proxy_path = self.rfs.enter_readable_proxy_path(self.path)
+        proxy_path = self.rfs.enter_readable_proxy_path(self.uri)
         try:
             yield proxy_path
         finally:
@@ -648,10 +648,10 @@ class RemoteFileSystemTarget(FileSystemTarget):
 
     @contextlib.contextmanager
     def _writable_proxy_path(self) -> typing.Generator[Path, None, None]:
-        tmp_path = Path(tempfile.mkdtemp()) / Path(self.path).name
+        tmp_path = Path(tempfile.mkdtemp()) / Path(self.uri).name
         try:
             yield tmp_path
-            self.rfs.upload(tmp_path, self.path, ok_remove=True)
+            self.rfs.upload(tmp_path, self.uri, ok_remove=True)
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
@@ -661,19 +661,19 @@ class RemoteFileSystemTarget(FileSystemTarget):
 
     async def exists_aio(self) -> bool:
         """Asynchronously check if the remote file exists."""
-        return await self.rfs.exists_aio(self.path)
+        return await self.rfs.exists_aio(self.uri)
 
     def _open_aio(self, mode: OpenMode) -> AIOFileSystemTargetHandle:  # type: ignore
         if mode in ["r", "rb"]:
-            return _RemoteAIOReadFileHandle(self.path, mode, self.rfs)  # type: ignore
+            return _RemoteAIOReadFileHandle(self.uri, mode, self.rfs)  # type: ignore
         if mode in ["w", "wb"]:
-            return _RemoteAIOWriteFileHandle(self.path, mode, self.rfs)  # type: ignore
+            return _RemoteAIOWriteFileHandle(self.uri, mode, self.rfs)  # type: ignore
         raise ValueError(f"Invalid mode {mode}")
 
     @asynccontextmanager
     async def _readable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
         """Async version of _readable_proxy_path()."""
-        proxy_path = await self.rfs.enter_readable_proxy_path_aio(self.path)
+        proxy_path = await self.rfs.enter_readable_proxy_path_aio(self.uri)
         try:
             yield proxy_path
         finally:
@@ -682,10 +682,10 @@ class RemoteFileSystemTarget(FileSystemTarget):
     @asynccontextmanager
     async def _writable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
         """Async version of _writable_proxy_path()."""
-        tmp_path = Path(tempfile.mkdtemp()) / Path(self.path).name
+        tmp_path = Path(tempfile.mkdtemp()) / Path(self.uri).name
         try:
             yield tmp_path
-            await self.rfs.upload_aio(tmp_path, self.path, ok_remove=True)
+            await self.rfs.upload_aio(tmp_path, self.uri, ok_remove=True)
         finally:
             if await aiofiles.os.path.exists(tmp_path):
                 await aiofiles.os.remove(tmp_path)
@@ -1083,12 +1083,12 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
 
     def __init__(
         self,
-        path: str,
+        uri: str,
         prototype: typing.Type[_FSTargetType] | typing.Callable[[str], _FSTargetType],
     ) -> None:
-        self.path = path.removesuffix("/") + "/"
+        self.uri = uri.removesuffix("/") + "/"
         self.prototype = prototype
-        self._flag_target = prototype(self.path[:-1] + "._DONE")
+        self._flag_target = prototype(self.uri[:-1] + "._DONE")
         self._sub_keys = set()
 
     def exists(self) -> bool:
@@ -1106,16 +1106,16 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
                 f"Invalid relpath {relpath}, not allowed to start with '/'"
             )
         self._sub_keys.add(relpath)
-        return self.prototype(self.path + relpath)
+        return self.prototype(self.uri + relpath)
 
     def __truediv__(self, relpath: str) -> _FSTargetType:
         return self.get_sub_target(relpath)
 
     def sub_keys_target(self) -> _FSTargetType:
-        return self.prototype(self.path[:-1] + "._SUB_KEYS")
+        return self.prototype(self.uri[:-1] + "._SUB_KEYS")
 
     def __repr__(self):
-        return f"{self.__class__.__name__}({self.path})"
+        return f"{self.__class__.__name__}({self.uri})"
 
     # Async implementations
 

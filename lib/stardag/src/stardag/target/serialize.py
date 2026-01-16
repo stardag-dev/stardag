@@ -137,8 +137,8 @@ class Serializable(
         self.wrapped = wrapped
 
     @property
-    def path(self) -> str:  # type: ignore
-        return self.wrapped.path
+    def uri(self) -> str:  # type: ignore
+        return self.wrapped.uri
 
     def load(self) -> LoadedT:
         return self.serializer.load(self.wrapped)
