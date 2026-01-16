@@ -64,20 +64,36 @@
   background-color: var(--md-primary-fg-color--dark);
 }
 
-/* Sidebar navigation - lighter color for section headings */
-.md-nav--primary .md-nav__title {
-  color: #64748b; /* slate-500 - lighter for better contrast */
-}
-
-.md-nav__item--section > .md-nav__link {
-  color: #64748b; /* slate-500 */
-}
-
-/* Dark mode sidebar headings */
+/* Dark mode - Left sidebar navigation */
 [data-md-color-scheme="slate"] .md-nav--primary .md-nav__title {
-  color: #94a3b8; /* slate-400 - lighter in dark mode */
+  color: #e2e8f0; /* slate-200 - light for dark backgrounds */
 }
 
 [data-md-color-scheme="slate"] .md-nav__item--section > .md-nav__link {
-  color: #94a3b8; /* slate-400 */
+  color: #e2e8f0; /* slate-200 */
+}
+
+[data-md-color-scheme="slate"] .md-nav__link {
+  color: #cbd5e1; /* slate-300 */
+}
+
+[data-md-color-scheme="slate"] .md-nav__link:hover {
+  color: #f1f5f9; /* slate-100 */
+}
+
+[data-md-color-scheme="slate"] .md-nav__link--active {
+  color: #f8fafc; /* slate-50 - brightest for active */
+}
+
+/* Dark mode - Right sidebar (Table of Contents) */
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link {
+  color: #cbd5e1; /* slate-300 */
+}
+
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link:hover {
+  color: #f1f5f9; /* slate-100 */
+}
+
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link--active {
+  color: #f8fafc; /* slate-50 */
 }
