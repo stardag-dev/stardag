@@ -5,6 +5,54 @@ import { AssetList, ExpandButton } from "./AssetViewer";
 import { FullscreenModal } from "./FullscreenModal";
 import { StatusBadge } from "./StatusBadge";
 
+// Copy button component
+function CopyButton({ text, className = "" }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+    }
+  };
+
+  return (
+    <button
+      onClick={handleCopy}
+      className={`p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 ${className}`}
+      title={copied ? "Copied!" : "Copy to clipboard"}
+    >
+      {copied ? (
+        <svg
+          className="h-4 w-4 text-green-500"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M5 13l4 4L19 7"
+          />
+        </svg>
+      ) : (
+        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+          />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 // Helper to format event type for display
 function formatEventType(eventType: EventType): string {
   return eventType
@@ -135,9 +183,15 @@ export function TaskDetail({
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">
             {task.task_name}
           </h2>
-          <p className="font-mono text-sm text-gray-500 dark:text-gray-400 truncate">
-            {task.task_id}
-          </p>
+          <div className="flex items-center gap-1">
+            <p
+              className="font-mono text-sm text-gray-500 dark:text-gray-400 truncate"
+              title={task.task_id}
+            >
+              {task.task_id}
+            </p>
+            <CopyButton text={task.task_id} />
+          </div>
           {task.task_namespace && (
             <p className="text-sm text-gray-500 dark:text-gray-400">
               Namespace: {task.task_namespace}
@@ -232,9 +286,15 @@ export function TaskDetail({
             <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
               Output URI
             </label>
-            <p className="mt-1 text-sm font-mono text-gray-900 dark:text-gray-100 break-all">
-              {task.output_uri}
-            </p>
+            <div className="mt-1 flex items-center gap-1">
+              <p
+                className="text-sm font-mono text-gray-900 dark:text-gray-100 truncate"
+                title={task.output_uri}
+              >
+                {task.output_uri}
+              </p>
+              <CopyButton text={task.output_uri} className="flex-shrink-0" />
+            </div>
           </div>
         )}
 
