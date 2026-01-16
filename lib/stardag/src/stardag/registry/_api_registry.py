@@ -1,6 +1,7 @@
 """API-based registry that communicates with the stardag-api service."""
 
 import logging
+from uuid import UUID
 
 from stardag import BaseTask, flatten_task_struct
 from stardag.config import config_provider
@@ -14,7 +15,7 @@ from stardag.exceptions import (
     NotFoundError,
     TokenExpiredError,
 )
-from stardag.registry._base import RegistryABC, get_git_commit_hash
+from stardag.registry._base import RegistryABC, TaskMetadata, get_git_commit_hash
 from stardag.registry_asset import RegistryAsset
 
 logger = logging.getLogger(__name__)
@@ -367,6 +368,10 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
 
+    def task_get_metadata(self, task_id: UUID) -> TaskMetadata:  # type: ignore
+        # TODO: implement actual API call to get task metadata
+        pass
+
     # -------------------------------------------------------------------------
     # Client lifecycle
     # -------------------------------------------------------------------------
@@ -600,3 +605,8 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
+
+    async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:  # type: ignore
+        """Async version of task_get_metadata."""
+        # TODO: implement actual API call to get task metadata
+        pass
