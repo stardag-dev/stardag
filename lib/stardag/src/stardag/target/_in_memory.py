@@ -60,44 +60,44 @@ class InMemoryTarget(LoadableSaveableTarget[LoadedT]):
 class InMemoryFileSystemTarget(FileSystemTarget):
     """Useful in testing"""
 
-    path_to_bytes: dict[str, bytes] = {}  # Note class variable!
+    uri_to_bytes: dict[str, bytes] = {}  # Note class variable!
 
     @classmethod
     def clear_targets(cls):
-        cls.path_to_bytes = {}
+        cls.uri_to_bytes = {}
 
     @classmethod
     @contextmanager
     def cleared(cls):
         cls.clear_targets()
         try:
-            yield cls.path_to_bytes
+            yield cls.uri_to_bytes
         finally:
             cls.clear_targets()
 
-    def __init__(self, path: str):
-        self.path = path
+    def __init__(self, uri: str):
+        self.uri = uri
 
     def exists(self):  # type: ignore
-        return self.path in self.path_to_bytes
+        return self.uri in self.uri_to_bytes
 
     def _open(self, mode: OpenMode) -> FileSystemTargetHandle:  # type: ignore
         try:
             if mode == "r":
                 return _InMemoryStrReadableFileSystemTargetHandle(
-                    self.path_to_bytes[self.path]
+                    self.uri_to_bytes[self.uri]
                 )
             if mode == "rb":
                 return _InMemoryBytesReadableFileSystemTargetHandle(
-                    self.path_to_bytes[self.path]
+                    self.uri_to_bytes[self.uri]
                 )
         except KeyError:
-            raise FileNotFoundError(f"No such file: {self.path}")
+            raise FileNotFoundError(f"No such file: {self.uri}")
 
         if mode == "w":
-            return _InMemoryStrWritableFileSystemTargetHandle(self.path)
+            return _InMemoryStrWritableFileSystemTargetHandle(self.uri)
         if mode == "wb":
-            return _InMemoryBytesWritableFileSystemTargetHandle(self.path)
+            return _InMemoryBytesWritableFileSystemTargetHandle(self.uri)
 
         raise ValueError(f"Invalid mode {mode}")
 
@@ -111,12 +111,12 @@ class InMemoryFileSystemTarget(FileSystemTarget):
 class _InMemoryBytesWritableFileSystemTargetHandle(
     WritableFileSystemTargetHandle[bytes]
 ):
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
 
     def write(self, data: bytes) -> None:
-        path_to_bytes = InMemoryFileSystemTarget.path_to_bytes
-        path_to_bytes[self.path] = path_to_bytes.setdefault(self.path, b"") + data
+        uri_to_bytes = InMemoryFileSystemTarget.uri_to_bytes
+        uri_to_bytes[self.uri] = uri_to_bytes.setdefault(self.uri, b"") + data
 
     def close(self) -> None:
         pass
@@ -129,14 +129,12 @@ class _InMemoryBytesWritableFileSystemTargetHandle(
 
 
 class _InMemoryStrWritableFileSystemTargetHandle(WritableFileSystemTargetHandle[str]):
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self, uri: str) -> None:
+        self.uri = uri
 
     def write(self, data: str) -> None:
-        path_to_bytes = InMemoryFileSystemTarget.path_to_bytes
-        path_to_bytes[self.path] = (
-            path_to_bytes.setdefault(self.path, b"") + data.encode()
-        )
+        uri_to_bytes = InMemoryFileSystemTarget.uri_to_bytes
+        uri_to_bytes[self.uri] = uri_to_bytes.setdefault(self.uri, b"") + data.encode()
 
     def close(self) -> None:
         pass

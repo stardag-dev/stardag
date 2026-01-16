@@ -17,7 +17,7 @@ def test_default_local_target_tmp_path(default_local_target_tmp_path: Path):
     key = "mock/target.txt"
     target = get_target(key)
     assert isinstance(target, LocalTarget)
-    assert target.path == str(tmp_path / key)
+    assert target.uri == str(tmp_path / key)
 
 
 def test_test_default_local_target_tmp_path_matches_tmp_path(
@@ -41,11 +41,11 @@ def test_default_in_memory_target(
     key = "mock/target.txt"
     target = get_target(key)
     assert isinstance(target, InMemoryFileSystemTarget)
-    assert target.path == default_in_memory_fs_target_prefix + key
+    assert target.uri == default_in_memory_fs_target_prefix + key
 
-    assert InMemoryFileSystemTarget.path_to_bytes == {}
+    assert InMemoryFileSystemTarget.uri_to_bytes == {}
     test_data = b"test-test"
     with target.open("wb") as handle:
         handle.write(test_data)
 
-    assert InMemoryFileSystemTarget.path_to_bytes == {target.path: test_data}
+    assert InMemoryFileSystemTarget.uri_to_bytes == {target.uri: test_data}

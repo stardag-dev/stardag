@@ -27,7 +27,7 @@ def test_alias_task(default_in_memory_fs_target):
     alias_task = AliasTask[int](
         aliased=AliasedMetadata(
             id=loads_int_task.id,
-            uri=loads_int_task.output().path,
+            uri=loads_int_task.output().uri,
             body=loads_int_task.model_dump(),
         )
     )
@@ -57,7 +57,7 @@ def test_alias_task(default_in_memory_fs_target):
         "loads_int": {
             "__aliased": {
                 "id": str(loads_int_task.id),
-                "uri": loads_int_task.output().path,
+                "uri": loads_int_task.output().uri,
                 "loads_type": base64.b64encode(pickle_dumps(int)).decode("ascii"),
             },
             "__namespace": "",

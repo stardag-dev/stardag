@@ -586,7 +586,7 @@ def test_from_registry(default_in_memory_fs_target):
         name=task.get_name(),
         namespace=task.get_namespace(),
         version=task.version,
-        output_uri=task.output().path,
+        output_uri=task.output().uri,
         status="completed",
         registered_at=datetime.now(),
         started_at=datetime.now(),
