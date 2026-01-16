@@ -254,14 +254,14 @@ class APIRegistry(RegistryABC):
 
     def task_register(self, build_id: str, task: BaseTask) -> None:
         """Register a task within a build."""
-        # Extract output_uri if the task has a FileSystemTarget output with a path
+        # Extract output_uri if the task has a FileSystemTarget output with a uri
         output_uri: str | None = None
         try:
             output_method = getattr(task, "output", None)
             if output_method is not None:
                 output = output_method()
-                if hasattr(output, "path"):
-                    output_uri = output.path
+                if hasattr(output, "uri"):
+                    output_uri = output.uri
         except Exception as e:
             # Log but don't fail - task may not have output() or it may fail
             logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
@@ -526,14 +526,14 @@ class APIRegistry(RegistryABC):
 
     async def task_register_aio(self, build_id: str, task: BaseTask) -> None:
         """Async version - register a task within a build."""
-        # Extract output_uri if the task has a FileSystemTarget output with a path
+        # Extract output_uri if the task has a FileSystemTarget output with a uri
         output_uri: str | None = None
         try:
             output_method = getattr(task, "output", None)
             if output_method is not None:
                 output = output_method()
-                if hasattr(output, "path"):
-                    output_uri = output.path
+                if hasattr(output, "uri"):
+                    output_uri = output.uri
         except Exception as e:
             # Log but don't fail - task may not have output() or it may fail
             logger.debug(f"Could not extract output_uri for task {task.id}: {e}")

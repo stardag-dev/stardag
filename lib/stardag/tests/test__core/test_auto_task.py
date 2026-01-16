@@ -155,11 +155,11 @@ class TestOutput:
         assert isinstance(output, Serializable)
         assert isinstance(output.serializer, JSONSerializer)
 
-    def test_output_path_matches_relpath(self):
+    def test_output_uri_matches_relpath(self):
         task = IntAutoTask(value=42)
         output = task.output()
-        # The path includes the target prefix (e.g., "in-memory://")
-        assert output.path.endswith(task._relpath)
+        # The uri includes the target prefix (e.g., "in-memory://")
+        assert output.uri.endswith(task._relpath)
 
 
 class TestRunAndSave:
