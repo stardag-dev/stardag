@@ -138,7 +138,7 @@ async def test_get_task_metadata(client: AsyncClient):
     assert data["id"] == "metadata-task-123"
     assert data["body"] == {"param1": "value1", "param2": 42}
     assert data["name"] == "MetadataTask"
-    assert data["name_space"] == "my.namespace"
+    assert data["namespace"] == "my.namespace"
     assert data["version"] == "1.0.0"
     assert data["output_uri"] == "s3://bucket/tasks/output.json"
     assert data["status"] == "pending"  # Not started yet
