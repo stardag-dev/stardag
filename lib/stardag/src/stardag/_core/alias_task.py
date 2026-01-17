@@ -54,7 +54,7 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
 
     Example:
 
-    ```python
+    ```python fixture:default_in_memory_fs_target
     import stardag as sd
 
     class OriginalTask(sd.AutoTask[int]):

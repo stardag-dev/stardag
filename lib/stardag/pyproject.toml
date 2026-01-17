@@ -73,5 +73,5 @@ profile = "black"
 known_local_folder = ["stardag"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "src/stardag"]
+testpaths = ["tests", "src/stardag", "../../USER_GUIDE.md"]
 asyncio_mode = "auto"
