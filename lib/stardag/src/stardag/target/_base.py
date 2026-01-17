@@ -314,18 +314,18 @@ class LocalTarget(FileSystemTarget):
         self.uri = uri
 
     @property
-    def _path(self) -> Path:
+    def path(self) -> Path:
         return Path(self.uri)
 
     def exists(self) -> bool:
-        return self._path.exists()
+        return self.path.exists()
 
     def _open(self, mode: OpenMode) -> FileSystemTargetHandle:  # type: ignore
         if mode in ["r", "rb"]:
-            return self._path.open(mode)
+            return self.path.open(mode)
         if mode in ["w", "wb"]:
             return _AtomicWriteFileHandle(  # type: ignore
-                self._path,
+                self.path,
                 mode,
                 self._post_write_hook,
             )
@@ -334,15 +334,15 @@ class LocalTarget(FileSystemTarget):
 
     @contextlib.contextmanager
     def _readable_proxy_path(self) -> typing.Generator[Path, None, None]:
-        yield self._path
+        yield self.path
 
     @contextlib.contextmanager
     def _writable_proxy_path(self) -> typing.Generator[Path, None, None]:
-        tmp_path = self._path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        tmp_path = self.path.with_suffix(f".tmp-{uuid6.uuid7()}")
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             yield tmp_path
-            tmp_path.rename(self._path)  # type: ignore
+            tmp_path.rename(self.path)  # type: ignore
             self._post_write_hook()
         finally:
             if tmp_path.exists():
@@ -355,16 +355,16 @@ class LocalTarget(FileSystemTarget):
 
     async def exists_aio(self) -> bool:
         """Asynchronously check if the local file exists."""
-        return await aiofiles.os.path.exists(self._path)
+        return await aiofiles.os.path.exists(self.path)
 
     def _open_aio(self, mode: OpenMode) -> AIOFileSystemTargetHandle:  # type: ignore
         if mode in ["r", "rb"]:
             return _AIOReadFileHandle(  # type: ignore
-                self._path, typing.cast(typing.Literal["r", "rb"], mode)
+                self.path, typing.cast(typing.Literal["r", "rb"], mode)
             )
         if mode in ["w", "wb"]:
             return _AIOAtomicWriteFileHandle(  # type: ignore
-                self._path,
+                self.path,
                 typing.cast(typing.Literal["w", "wb"], mode),
                 self._post_write_hook,
             )
@@ -373,16 +373,16 @@ class LocalTarget(FileSystemTarget):
     @asynccontextmanager
     async def _readable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
         """For local files, the proxy path is the file itself."""
-        yield self._path
+        yield self.path
 
     @asynccontextmanager
     async def _writable_proxy_path_aio(self) -> typing.AsyncGenerator[Path, None]:
         """Async atomic write via temporary file."""
-        tmp_path = self._path.with_suffix(f".tmp-{uuid6.uuid7()}")
+        tmp_path = self.path.with_suffix(f".tmp-{uuid6.uuid7()}")
         await aiofiles.os.makedirs(tmp_path.parent, exist_ok=True)
         try:
             yield tmp_path
-            await aiofiles.os.rename(tmp_path, self._path)
+            await aiofiles.os.rename(tmp_path, self.path)
             self._post_write_hook()
         finally:
             if await aiofiles.os.path.exists(tmp_path):

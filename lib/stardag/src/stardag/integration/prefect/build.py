@@ -386,15 +386,15 @@ async def _completed_prefect_future(
 async def create_markdown(task: BaseTask):
     """Create a markdown artifact for a task."""
     output = getattr(task, "output", None)
-    if output is None:
-        output_path = "N/A"
+    if output is None or not callable(output):
+        output_uri = "N/A"
     else:
-        output_path = getattr(output, "path", "N/A")
+        output_uri = getattr(output(), "uri", "N/A")
 
     markdown = f"""# {TaskRef.from_task(task).slug}
 **Task id**: `{task.id}`
 **Task class**: `{task.__module__}.{task.__class__.__name__}`
-**Output path**: [{output_path}]({output_path})
+**Output URI**: [{output_uri}]({output_uri})
 **Task spec**
 ```dict
 {task.model_dump_json(indent=2)}
