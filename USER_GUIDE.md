@@ -130,15 +130,17 @@ Under the hood, target roots are managed by the global `stardag.target.TargetFac
 
 Whe you subclass `Task` directly (i.e. don't use [decorator API](#the-decorator-task-api) or extends the [`AutoTask`](#extending-the-AutoTask-auto-file-system-target-task)) it is recommended to use `stardag.target.get_target(relpath=...)` to instantiate filesystem targets returned by `Task.output()`, this way the task specifes the _relative path_ to the configured target root:
 
-```python
+```python fixture:default_in_memory_fs_target
 import stardag as sd
-# ...
 
 class MyTask(sd.Task[sd.FileSystemTarget]):
     # ...
     def output(self):
         return sd.get_target(relpath="...")
 
+    def run(self):
+        with self.output().open("w") as handle:
+            handle.write("result")
 ```
 
 For special cases you can of course instantiate and return a `FileSystemTarget` such as `LocalTarget` or `RemoteFilesystemTarget` directly in which case the globaly configured target roots have no effect.
