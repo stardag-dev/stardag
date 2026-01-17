@@ -37,7 +37,7 @@ class ModalMountedVolumeTarget(LocalTarget):
         self.local_path = mount_path / in_volume_path
 
     @property
-    def _path(self) -> Path:
+    def path(self) -> Path:
         return self.local_path
 
     def _post_write_hook(self) -> None:
