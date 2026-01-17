@@ -11,7 +11,7 @@ dependencies = [
     "mkdocs-literate-nav>=0.6",
     "mkdocs-section-index>=0.3",
     # Stardag SDK for mkdocstrings to extract docstrings
-    "stardag",
+    "stardag[api]",
     "ruff>=0.14.13",
 ]
 
@@ -22,3 +22,14 @@ dev = [
 
 [tool.uv.sources]
 stardag = { path = "../lib/stardag", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-codeblock>=0.3.1",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["docs"]
+# asyncio_mode = "auto"

@@ -6,7 +6,7 @@ Understanding how Stardag executes DAGs.
 
 The primary way to execute tasks is `sd.build()`:
 
-```python
+```python name=test_build
 import stardag as sd
 
 task = my_downstream_task(upstream=my_upstream_task())
