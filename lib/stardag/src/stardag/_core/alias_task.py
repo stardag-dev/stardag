@@ -1,7 +1,7 @@
 import base64
 from functools import cached_property
 from pickle import dumps as pickle_dumps
-from typing import Annotated, Any, Generic, Type, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Type, Union, get_args
 from uuid import UUID
 
 from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validator
@@ -9,9 +9,11 @@ from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validat
 from stardag._core.auto_task import AutoTask, LoadedT
 from stardag._core.task import Task
 from stardag.base_model import StardagField
-from stardag.registry import RegistryABC, registry_provider
 from stardag.target import FileSystemTarget
 from stardag.target.serialize import get_serializer
+
+if TYPE_CHECKING:
+    from stardag.registry import RegistryABC
 
 _run_error_msg = "AliasTask does not implement run(), it can only be used to reference another task's output."
 
@@ -51,9 +53,9 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
     DAG) that produced the data.
 
     Example:
+
     ```python
     import stardag as sd
-
 
     class OriginalTask(sd.AutoTask[int]):
         def run(self):
@@ -84,7 +86,7 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
     def from_registry(
         cls,
         id: UUID,
-        registry: RegistryABC | None = None,
+        registry: Union["RegistryABC", None] = None,
     ) -> "AliasTask[LoadedT]":
         """Create an AliasTask by loading metadata from the Stardag APIRegistry.
 
@@ -95,7 +97,12 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
         Returns:
             An AliasTask instance referencing the specified task.
         """
-        registry = registry or registry_provider.get()
+        if registry is None:
+            # Avoid circular import:
+            from stardag.registry import registry_provider  # noqa: F401
+
+            registry = registry_provider.get()
+
         metadata = registry.task_get_metadata(id)
         if metadata.output_uri is None:
             raise ValueError(

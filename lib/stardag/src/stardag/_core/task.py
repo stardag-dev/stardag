@@ -192,33 +192,7 @@ class BaseTask(
 
         Returns:
             None for simple tasks, or a Generator yielding TaskStruct for
-            tasks with dynamic dependencies.
-
-        Dynamic Dependencies Contract:
-            When a task yields dynamic dependencies via a generator, the BUILD
-            SYSTEM guarantees that ALL yielded tasks are COMPLETE before the
-            generator is resumed. The task can rely on this contract:
-
-            ```python
-            def run(self):
-                # Yield deps we need to be built first
-                deps = [TaskA(), TaskB()]
-                yield deps
-
-                # CONTRACT: When we reach here, ALL deps are complete.
-                # We can safely access their outputs.
-                result_a = deps[0].output().load()
-                result_b = deps[1].output().load()
-
-                # Yield more deps if needed
-                yield [TaskC(input=result_a)]
-
-                # Again, TaskC is complete when we reach here
-                self.output().save(final_result)
-            ```
-
-            This contract is essential for correctness - tasks can depend on
-            previously yielded tasks being complete before continuing execution.
+            tasks with dynamic dependencies (See Dynamic Dependencies Contract below).
 
         Raises:
             RuntimeError: If called from within an existing event loop when
@@ -226,6 +200,39 @@ class BaseTask(
                 directly instead.
             NotImplementedError: If run_aio() is an async generator (dynamic deps).
                 Async generators cannot be automatically converted to sync generators.
+
+
+        Dynamic Dependencies Contract:
+        When a task yields dynamic dependencies via a generator, the BUILD
+        SYSTEM guarantees that ALL yielded tasks are COMPLETE before the
+        generator is resumed. The task can rely on this contract:
+
+        ```python
+        def run(self):
+            # Do some initial work to get info about what additional dependencies
+            # are needed
+            initial_data = "..."
+
+            # Yield deps we need to be built first
+            task_a = TaskA(input=initial_data)
+            task_b = TaskB(input=initial_data)
+            yield [task_a, task_b]
+
+            # CONTRACT: When we reach here, ALL deps are complete.
+            # We can safely access their outputs.
+            result_a = task_a.output().load()
+            result_b = task_b.output().load()
+
+            # Yield more deps if needed
+            task_c = TaskC(input=result_a)
+            yield task_c
+
+            # Again, TaskC is complete when we reach here
+            self.output().save(task_c.output().load() + result_b)
+        ```
+
+        This contract is essential for correctness - tasks can depend on
+        previously yielded tasks being complete before continuing execution.
         """
         if _has_custom_run_aio(self) and not _has_custom_run(self):
             # User only implemented run_aio - run it synchronously
@@ -402,14 +409,23 @@ class BaseTask(
 def auto_namespace(scope: str):
     """Set the task namespace for the module to the module import path.
 
+    Args:
+        scope: The module scope, typically passed as `__name__`.
+
     Usage:
+
     ```python
     import stardag as sd
 
     sd.auto_namespace(__name__)
 
-    class MyTask(Task):
-        ...
+    class MyAutoNamespacedTask(sd.AutoTask[int]):
+        a: int
+
+        def run(self):
+            self.output().save(self.a)
+
+    assert MyAutoNamespacedTask.get_namespace() == __name__
     ```
     """
     module = scope
@@ -417,6 +433,26 @@ def auto_namespace(scope: str):
 
 
 def namespace(namespace: str, scope: str):
+    """Set the task namespace for the module and any submodules.
+
+    Args:
+        namespace: The namespace to set for the module.
+        scope: The module scope, typically passed as `__name__`.
+
+    Usage:
+
+    ```python
+    import stardag as sd
+    sd.namespace("my_custom_namespace", __name__)
+
+    class MyNamespacedTask(sd.Task[int]):
+        a: int
+
+        def run(self):
+            self.output().save(self.a)
+
+    assert MyNamespacedTask.get_namespace() == "my_custom_namespace"
+    """
     BaseTask._registry().add_namespace(scope, namespace)
 
 

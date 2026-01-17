@@ -49,6 +49,7 @@ dev = [
     "ipdb>=0.13.13",
     "pyright>=1.1.359",
     "ruff>=0.14.11",
+    "pytest-markdown-docs>=0.9.0",
 ]
 
 [tool.uv]
@@ -72,5 +73,5 @@ profile = "black"
 known_local_folder = ["stardag"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "src/stardag"]
 asyncio_mode = "auto"

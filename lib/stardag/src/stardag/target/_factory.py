@@ -68,7 +68,7 @@ class TargetFactory:
 
         Args:
             relpath: The path to the target, relative to the configured root path for
-              `target_root_key`.
+                `target_root_key`.
             target_root_key: The key to the target root to use.
 
         Returns:
@@ -90,7 +90,7 @@ class TargetFactory:
 
         Args:
             relpath: The path to the target, relative to the configured root path for
-              `target_root_key`.
+                `target_root_key`.
             target_root_key: The key to the target root to use.
 
         Returns:

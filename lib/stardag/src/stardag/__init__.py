@@ -34,6 +34,7 @@ TODO: Expand docstrings for all public API components.
 
 from importlib.metadata import PackageNotFoundError, version
 
+from stardag._core.alias_task import AliasedMetadata, AliasTask
 from stardag._core.auto_task import AutoTask
 from stardag._core.decorator import Depends, task
 from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
@@ -76,6 +77,8 @@ except PackageNotFoundError:
 
 __all__ = [
     "__version__",
+    "AliasedMetadata",
+    "AliasTask",
     "APIError",
     "AuthenticationError",
     "AuthorizationError",
