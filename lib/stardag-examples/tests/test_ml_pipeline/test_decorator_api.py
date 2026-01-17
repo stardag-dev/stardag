@@ -1,8 +1,8 @@
 import pytest
-from stardag_examples.ml_pipeline.decorator_api import get_metrics_dag
-
 from stardag.build import build_sequential
 from stardag.target.serialize import JSONSerializer, PandasDataFrameCSVSerializer
+
+from stardag_examples.ml_pipeline.decorator_api import get_metrics_dag
 
 try:
     import pandas as pd
@@ -14,12 +14,12 @@ except ImportError:
 def test_build_metrics_dag(default_in_memory_fs_target):
     metrics = get_metrics_dag()
     assert isinstance(metrics._serializer, JSONSerializer)
-    assert metrics.output().path.endswith(".json")
-    assert metrics.output().path.startswith(
+    assert metrics.output().uri.endswith(".json")
+    assert metrics.output().uri.startswith(
         "in-memory://examples/ml_pipeline/decorator_api/metrics/v0/"
     )
     assert isinstance(metrics.predictions._serializer, PandasDataFrameCSVSerializer)  # type: ignore
-    assert metrics.predictions.output().path.endswith(".csv")  # type: ignore
+    assert metrics.predictions.output().uri.endswith(".csv")  # type: ignore
     build_sequential([metrics])
     assert metrics.complete()
     assert metrics.output().exists()
