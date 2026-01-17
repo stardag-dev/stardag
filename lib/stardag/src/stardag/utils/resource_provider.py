@@ -61,10 +61,23 @@ def resource_provider(
     Example:
 
     ```python
+    from stardag.utils.resource_provider import resource_provider
+
     provider = resource_provider(str, default_factory=lambda: "default")
+
+    # Initialized lazily from default factory
     assert provider.get() == "default"
-    provider.set("test")
-    assert provider.get() == "test"
+
+    # Can be updated persistently
+    provider.set("updated")
+    assert provider.get() == "updated"
+
+    # Can be overridden temporarily in a context
+    with provider.override("overridden"):
+        assert provider.get() == "overridden"
+
+    # After the context, the previous resource is restored
+    assert provider.get() == "updated"
     ```
     """
 

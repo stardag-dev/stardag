@@ -6,6 +6,8 @@ import pytest
 import stardag as sd
 from stardag._core.alias_task import AliasedMetadata, AliasTask
 
+sd.auto_namespace(__name__)
+
 
 class LoadsIntTask(sd.AutoTask[int]):
     def run(self):
@@ -51,7 +53,7 @@ def test_alias_task(default_in_memory_fs_target):
 
     downstream_task_with_alias_dumped = downstream_task_with_alias.model_dump()
     downstream_task_with_alias_dumped_expected = {
-        "__namespace": "",
+        "__namespace": __name__,
         "__name": "DownstreamTask",
         "version": "",
         "loads_int": {
@@ -60,7 +62,7 @@ def test_alias_task(default_in_memory_fs_target):
                 "uri": loads_int_task.output().uri,
                 "loads_type": base64.b64encode(pickle_dumps(int)).decode("ascii"),
             },
-            "__namespace": "",
+            "__namespace": __name__,
             "__name": "LoadsIntTask",
             "version": "",
         },

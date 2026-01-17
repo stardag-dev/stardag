@@ -1,9 +1,9 @@
 """API-based registry that communicates with the stardag-api service."""
 
 import logging
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from stardag import BaseTask, flatten_task_struct
 from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
@@ -17,6 +17,9 @@ from stardag.exceptions import (
 )
 from stardag.registry._base import RegistryABC, TaskMetadata, get_git_commit_hash
 from stardag.registry_asset import RegistryAsset
+
+if TYPE_CHECKING:
+    from stardag._core.task import BaseTask
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +188,7 @@ class APIRegistry(RegistryABC):
 
     def build_start(
         self,
-        root_tasks: list[BaseTask] | None = None,
+        root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
     ) -> str:
         """Start a new build and return its ID."""
@@ -252,40 +255,16 @@ class APIRegistry(RegistryABC):
     # Sync task methods
     # -------------------------------------------------------------------------
 
-    def task_register(self, build_id: str, task: BaseTask) -> None:
+    def task_register(self, build_id: str, task: "BaseTask") -> None:
         """Register a task within a build."""
-        # Extract output_uri if the task has a FileSystemTarget output with a uri
-        output_uri: str | None = None
-        try:
-            output_method = getattr(task, "output", None)
-            if output_method is not None:
-                output = output_method()
-                if hasattr(output, "uri"):
-                    output_uri = output.uri
-        except Exception as e:
-            # Log but don't fail - task may not have output() or it may fail
-            logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
-
-        task_data = {
-            "task_id": str(task.id),
-            "task_namespace": task.get_namespace(),
-            "task_name": task.get_name(),
-            "task_data": task.model_dump(mode="json"),
-            "version": task.version,
-            "output_uri": output_uri,
-            "dependency_task_ids": [
-                str(dep.id) for dep in flatten_task_struct(task.requires())
-            ],
-        }
-
         response = self.client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
-            json=task_data,
+            json=_get_task_data_for_registration(task),
             params=self._get_params(),
         )
         self._handle_response_error(response, f"Register task {task.id}")
 
-    def task_start(self, build_id: str, task: BaseTask) -> None:
+    def task_start(self, build_id: str, task: "BaseTask") -> None:
         """Mark a task as started."""
         # Ensure task is registered first
         self.task_register(build_id, task)
@@ -296,7 +275,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Start task {task.id}")
 
-    def task_complete(self, build_id: str, task: BaseTask) -> None:
+    def task_complete(self, build_id: str, task: "BaseTask") -> None:
         """Mark a task as completed."""
         response = self.client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/complete",
@@ -305,7 +284,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Complete task {task.id}")
 
     def task_fail(
-        self, build_id: str, task: BaseTask, error_message: str | None = None
+        self, build_id: str, task: "BaseTask", error_message: str | None = None
     ) -> None:
         """Mark a task as failed."""
         params = self._get_params()
@@ -317,7 +296,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Fail task {task.id}")
 
-    def task_suspend(self, build_id: str, task: BaseTask) -> None:
+    def task_suspend(self, build_id: str, task: "BaseTask") -> None:
         """Mark a task as suspended (waiting for dynamic dependencies)."""
         response = self.client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/suspend",
@@ -325,7 +304,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Suspend task {task.id}")
 
-    def task_resume(self, build_id: str, task: BaseTask) -> None:
+    def task_resume(self, build_id: str, task: "BaseTask") -> None:
         """Mark a task as resumed (dynamic dependencies completed)."""
         response = self.client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/resume",
@@ -333,7 +312,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Resume task {task.id}")
 
-    def task_cancel(self, build_id: str, task: BaseTask) -> None:
+    def task_cancel(self, build_id: str, task: "BaseTask") -> None:
         """Cancel a task."""
         response = self.client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
@@ -342,7 +321,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Cancel task {task.id}")
 
     def task_waiting_for_lock(
-        self, build_id: str, task: BaseTask, lock_owner: str | None = None
+        self, build_id: str, task: "BaseTask", lock_owner: str | None = None
     ) -> None:
         """Record that a task is waiting for a global lock."""
         params = self._get_params()
@@ -355,7 +334,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Task {task.id} waiting for lock")
 
     def task_upload_assets(
-        self, build_id: str, task: BaseTask, assets: list[RegistryAsset]
+        self, build_id: str, task: "BaseTask", assets: list[RegistryAsset]
     ) -> None:
         """Upload assets for a completed task."""
         if not assets:
@@ -457,7 +436,7 @@ class APIRegistry(RegistryABC):
 
     async def build_start_aio(
         self,
-        root_tasks: list[BaseTask] | None = None,
+        root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
     ) -> str:
         """Async version - start a new build and return its ID."""
@@ -524,40 +503,16 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, "Exit early")
         logger.info(f"Build exited early: {build_id}")
 
-    async def task_register_aio(self, build_id: str, task: BaseTask) -> None:
+    async def task_register_aio(self, build_id: str, task: "BaseTask") -> None:
         """Async version - register a task within a build."""
-        # Extract output_uri if the task has a FileSystemTarget output with a uri
-        output_uri: str | None = None
-        try:
-            output_method = getattr(task, "output", None)
-            if output_method is not None:
-                output = output_method()
-                if hasattr(output, "uri"):
-                    output_uri = output.uri
-        except Exception as e:
-            # Log but don't fail - task may not have output() or it may fail
-            logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
-
-        task_data = {
-            "task_id": str(task.id),
-            "task_namespace": task.get_namespace(),
-            "task_name": task.get_name(),
-            "task_data": task.model_dump(mode="json"),
-            "version": task.version,
-            "output_uri": output_uri,
-            "dependency_task_ids": [
-                str(dep.id) for dep in flatten_task_struct(task.requires())
-            ],
-        }
-
         response = await self.async_client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
-            json=task_data,
+            json=_get_task_data_for_registration(task),
             params=self._get_params(),
         )
         self._handle_response_error(response, f"Register task {task.id}")
 
-    async def task_start_aio(self, build_id: str, task: BaseTask) -> None:
+    async def task_start_aio(self, build_id: str, task: "BaseTask") -> None:
         """Async version - mark a task as started."""
         await self.task_register_aio(build_id, task)
 
@@ -567,7 +522,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Start task {task.id}")
 
-    async def task_complete_aio(self, build_id: str, task: BaseTask) -> None:
+    async def task_complete_aio(self, build_id: str, task: "BaseTask") -> None:
         """Async version - mark a task as completed."""
         response = await self.async_client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/complete",
@@ -576,7 +531,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Complete task {task.id}")
 
     async def task_fail_aio(
-        self, build_id: str, task: BaseTask, error_message: str | None = None
+        self, build_id: str, task: "BaseTask", error_message: str | None = None
     ) -> None:
         """Async version - mark a task as failed."""
         params = self._get_params()
@@ -588,7 +543,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Fail task {task.id}")
 
-    async def task_suspend_aio(self, build_id: str, task: BaseTask) -> None:
+    async def task_suspend_aio(self, build_id: str, task: "BaseTask") -> None:
         """Async version - mark a task as suspended."""
         response = await self.async_client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/suspend",
@@ -596,7 +551,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Suspend task {task.id}")
 
-    async def task_resume_aio(self, build_id: str, task: BaseTask) -> None:
+    async def task_resume_aio(self, build_id: str, task: "BaseTask") -> None:
         """Async version - mark a task as resumed."""
         response = await self.async_client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/resume",
@@ -604,7 +559,7 @@ class APIRegistry(RegistryABC):
         )
         self._handle_response_error(response, f"Resume task {task.id}")
 
-    async def task_cancel_aio(self, build_id: str, task: BaseTask) -> None:
+    async def task_cancel_aio(self, build_id: str, task: "BaseTask") -> None:
         """Async version - cancel a task."""
         response = await self.async_client.post(
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
@@ -613,7 +568,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Cancel task {task.id}")
 
     async def task_waiting_for_lock_aio(
-        self, build_id: str, task: BaseTask, lock_owner: str | None = None
+        self, build_id: str, task: "BaseTask", lock_owner: str | None = None
     ) -> None:
         """Async version - record that task is waiting for global lock."""
         params = self._get_params()
@@ -626,7 +581,7 @@ class APIRegistry(RegistryABC):
         self._handle_response_error(response, f"Task {task.id} waiting for lock")
 
     async def task_upload_assets_aio(
-        self, build_id: str, task: BaseTask, assets: list[RegistryAsset]
+        self, build_id: str, task: "BaseTask", assets: list[RegistryAsset]
     ) -> None:
         """Async version - upload assets for a completed task."""
         if not assets:
@@ -658,3 +613,33 @@ class APIRegistry(RegistryABC):
         data = response.json()
 
         return TaskMetadata.model_validate(data)
+
+
+def _get_task_data_for_registration(task: "BaseTask") -> dict:
+    """Helper to serialize task data for registration API call."""
+    # Avoid circular import:
+    from stardag._core.task import flatten_task_struct  # noqa: F401
+
+    # Extract output_uri if the task has a FileSystemTarget output with a uri
+    output_uri: str | None = None
+    try:
+        output_method = getattr(task, "output", None)
+        if output_method is not None:
+            output = output_method()
+            if hasattr(output, "uri"):
+                output_uri = output.uri
+    except Exception as e:
+        # Log but don't fail - task may not have output() or it may fail
+        logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
+
+    return {
+        "task_id": str(task.id),
+        "task_namespace": task.get_namespace(),
+        "task_name": task.get_name(),
+        "task_data": task.model_dump(mode="json"),
+        "version": task.version,
+        "output_uri": output_uri,
+        "dependency_task_ids": [
+            str(dep.id) for dep in flatten_task_struct(task.requires())
+        ],
+    }
