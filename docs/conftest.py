@@ -6,7 +6,6 @@ import typing
 from pathlib import Path
 
 import pytest
-
 from stardag.target import (
     InMemoryFileSystemTarget,
     LocalTarget,
@@ -58,7 +57,9 @@ def _default_in_memory_fs_target_factory(
             yield target_factory
 
 
-@pytest.fixture(scope="function")
+# This is autoused (default for all tests) to ensure that file system targets don't
+# write to disk unless explicitly overridden in a test.
+@pytest.fixture(scope="function", autouse=True)
 def default_in_memory_fs_target(
     _default_in_memory_fs_target_factory,
 ) -> typing.Type[InMemoryFileSystemTarget]:

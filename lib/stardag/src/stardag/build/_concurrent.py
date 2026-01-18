@@ -12,7 +12,7 @@ import asyncio
 import logging
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
-from typing import Generator, Literal, Protocol
+from typing import Generator, Literal, Protocol, Sequence
 from uuid import UUID
 
 from stardag import (
@@ -390,7 +390,7 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
 
 
 async def build_aio(
-    tasks: list[BaseTask],
+    tasks: Sequence[BaseTask] | BaseTask,
     task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,
@@ -411,7 +411,8 @@ async def build_aio(
     - Optionally uses global concurrency locks for distributed execution
 
     Args:
-        tasks: List of root tasks to build (and their dependencies)
+        tasks: List of root tasks to build (and their dependencies) or a single root
+            task.
         task_executor: TaskExecutor for executing tasks (default: HybridConcurrentTaskExecutor).
             Use RoutedTaskExecutor to route tasks to different executors (e.g., Modal).
         fail_mode: How to handle task failures
@@ -428,6 +429,16 @@ async def build_aio(
     Returns:
         BuildSummary with status, task counts, and build_id
     """
+    if isinstance(tasks, BaseTask):
+        tasks = [tasks]
+    else:
+        tasks = list(tasks)
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, BaseTask):
+                raise ValueError(
+                    f"Invalid task at index {idx}: {task} (must be BaseTask)"
+                )
+
     # Determine registry: explicit > init_registry()
     if registry is None:
         registry = init_registry()
@@ -924,7 +935,7 @@ async def build_aio(
 
 
 def build(
-    tasks: list[BaseTask],
+    tasks: Sequence[BaseTask] | BaseTask,
     task_executor: TaskExecutorABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     registry: RegistryABC | None = None,

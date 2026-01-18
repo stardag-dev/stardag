@@ -25,6 +25,7 @@ stardag = { path = "../lib/stardag", editable = true }
 
 [dependency-groups]
 dev = [
+    "ipython>=8.38.0",
     "pytest>=9.0.2",
     "pytest-markdown-docs>=0.9.0",
 ]

@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_sequential(
-    tasks: list[BaseTask],
+    tasks: list[BaseTask] | BaseTask,
     registry: RegistryABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     dual_run_default: Literal["sync", "async"] = "sync",
@@ -58,7 +58,8 @@ def build_sequential(
         (`dual_run_default=="async"`) via `asyncio.run(run_aio())`.
 
     Args:
-        tasks: List of root tasks to build (and their dependencies)
+        tasks: List of root tasks to build (and their dependencies) or a single root
+            task.
         registry: Registry for tracking builds
         fail_mode: How to handle task failures
         dual_run_default: For dual tasks, prefer sync or async execution
@@ -72,6 +73,16 @@ def build_sequential(
     Returns:
         BuildSummary with status, task counts, and build_id
     """
+    if isinstance(tasks, BaseTask):
+        tasks = [tasks]
+    else:
+        tasks = list(tasks)
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, BaseTask):
+                raise ValueError(
+                    f"Invalid task at index {idx}: {task} (must be BaseTask)"
+                )
+
     if registry is None:
         registry = init_registry()
     if global_lock_config is None:
@@ -351,7 +362,7 @@ def _run_task_sequential(
 
 
 async def build_sequential_aio(
-    tasks: list[BaseTask],
+    tasks: list[BaseTask] | BaseTask,
     registry: RegistryABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     sync_run_default: Literal["thread", "blocking"] = "blocking",
@@ -371,7 +382,8 @@ async def build_sequential_aio(
     - Dual tasks: run via `await run_aio()`.
 
     Args:
-        tasks: List of root tasks to build (and their dependencies)
+        tasks: List of root tasks to build (and their dependencies) or a single root
+            task.
         registry: Registry for tracking builds
         fail_mode: How to handle task failures
         sync_run_default: For sync-only tasks, block or use thread pool
@@ -385,6 +397,15 @@ async def build_sequential_aio(
     Returns:
         BuildSummary with status, task counts, and build_id
     """
+    if isinstance(tasks, BaseTask):
+        tasks = [tasks]
+    else:
+        tasks = list(tasks)
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, BaseTask):
+                raise ValueError(
+                    f"Invalid task at index {idx}: {task} (must be BaseTask)"
+                )
     if registry is None:
         registry = init_registry()
     if global_lock_config is None:
