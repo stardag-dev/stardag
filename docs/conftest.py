@@ -15,6 +15,12 @@ from stardag.target._factory import TargetFactory
 from stardag.utils.testing.env import temp_env_vars
 
 
+def pytest_markdown_docs_globals():
+    import stardag as sd
+
+    return {"sd": sd}
+
+
 @pytest.fixture(scope="function")
 def default_local_target_tmp_path(
     tmp_path: Path,
