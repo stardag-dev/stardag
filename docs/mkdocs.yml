@@ -146,6 +146,8 @@ nav:
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quickstart.md
       - Your First DAG: getting-started/first-dag.md
+      - Using the Stardag Registry (API & UI): getting-started/registry-ui.md
+      - Using the Class-API: getting-started/class-api.md
   - Concepts:
       - concepts/index.md
       - Tasks: concepts/tasks.md

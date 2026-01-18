@@ -17,7 +17,7 @@ def get_range(limit: int) -> list[int]:
 def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
-# Create the DAG
+# Compose the DAG
 task = get_sum(integers=get_range(limit=10))
 
 # Build executes both tasks in the correct order
@@ -101,6 +101,4 @@ assert result == 45
 
 ## What's Next?
 
-- Learn about [Tasks](../concepts/tasks.md) in depth
-- Understand [Parameter Hashing](../concepts/parameter-hashing.md)
-- Explore [How to Define Tasks](../how-to/define-tasks.md) using different APIs
+- Get observability by using the [Stardag Registry](./registry-ui.mdmd).
