@@ -1,40 +1,20 @@
 # Stardag
 
-**Declarative and composable DAG framework for Python with persistent asset management.**
+**Declarative and composable DAGs.**
 
-Stardag provides a clean Python API for representing persistently stored assets - the code that produces them and their dependencies - as a declarative Directed Acyclic Graph (DAG). It emphasizes ease of use, composability, and type safety.
+Stardag provides a clean Python API for representing persistently stored assets, the code that produces them, and their dependencies as a declarative Directed Acyclic Graph (DAG). As such, it is a spritual - but highly modernized - descendant of [Luigi](https://github.com/spotify/luigi).
+
+It emphasizes _ease of use_, _composability_, and _compatibility_ with other data workflow frameworks.
+
+Stardag is built on top of, any integrates well with, Pydantic and utilizes expressive type annotations to reduce boilerplate and clarify io-contracts of tasks.
+
+See the [Core Concepts](./concepts/index.md#core-concepts) section for further details on its architecture and [Design Philosophy](./concepts/index.md#design-philosophy).
 
 ---
 
 ## Why Stardag?
 
-<div class="grid cards" markdown>
-
-- :material-puzzle: **Composable**
-
-  ***
-
-  Task instances as first-class parameters. Build complex DAGs by composing simple, reusable tasks.
-
-- :material-check-decagram: **Type Safe**
-
-  ***
-
-  Built on Pydantic with full serialization support. Expressive type annotations reduce boilerplate and clarify IO contracts.
-
-- :material-arrow-up-bold: **Bottom-Up Execution**
-
-  ***
-
-  Makefile-style "build only what's needed". Skip completed tasks automatically based on deterministic output paths.
-
-- :material-file-tree: **Deterministic Paths**
-
-  ***
-
-  Output locations determined by parameter hashes before execution. Reproducible builds across environments.
-
-</div>
+Stardag primary objectice is to boost productivity in Data Science/Machine Learning/AI workflows where the line between production" and "development/experimentation" is often blury. It gives you light-weight tools to structure and get overview of your data processing. It, cruically, provides many of the benfits of "Data-as-Code" (DaC) and help manage complexity and reduce bolilerplate.
 
 ## Quick Example
 
@@ -50,13 +30,15 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
 # Declarative DAG specification - no computation yet
-task = get_sum(integers=get_range(limit=10))
+sum_task = get_sum(integers=get_range(limit=4))
 
-# Materialize task targets
-sd.build(task)
+# Materialize all tasks' targets
+sd.build(sum_task)
 
 # Load the result
-print(task.output().load())  # 45
+assert sum_task.output().load() == 6
+# inspect intermediate results
+assert sum_task.integers.output().load() == [0, 1, 2, 3]
 ```
 
 ## The Stardag Offering
