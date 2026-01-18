@@ -51,7 +51,7 @@ Stardag consists of three components:
 | **CLI**      | Command-line tools for authentication and configuration          |
 | **Platform** | Optional API service and Web UI for monitoring and collaboration |
 
-## Next Steps
+## What's Next?
 
 ### Getting Started
 
