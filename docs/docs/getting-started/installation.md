@@ -25,14 +25,6 @@ Install the core SDK:
 
 Stardag provides optional extras for specific integrations:
 
-=== "CLI tools"
-
-    ```bash
-    pip install stardag[cli]
-    ```
-
-    Includes authentication and configuration CLI commands.
-
 === "Prefect integration"
 
     ```bash
@@ -52,7 +44,7 @@ Stardag provides optional extras for specific integrations:
 === "All extras"
 
     ```bash
-    pip install stardag[cli,prefect,s3]
+    pip install stardag[prefect,s3]
     ```
 
 ## Verify Installation

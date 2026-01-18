@@ -11,7 +11,7 @@ dependencies = [
     "mkdocs-literate-nav>=0.6",
     "mkdocs-section-index>=0.3",
     # Stardag SDK for mkdocstrings to extract docstrings
-    "stardag[api]",
+    "stardag",
     "ruff>=0.14.13",
 ]
 

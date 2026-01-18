@@ -103,7 +103,7 @@ API keys can be generated from the web UI under Organization Settings > API Keys
 Install the CLI extras and run the login command:
 
 ```bash
-pip install stardag[cli]
+pip install stardag
 stardag auth login
 ```
 

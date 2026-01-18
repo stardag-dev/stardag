@@ -17,11 +17,13 @@ import time
 from pathlib import Path
 from typing import TypedDict
 
+import httpx
+
 from stardag.config import (
     TomlConfig,
     _looks_like_uuid,
-    cache_workspace_id,
     cache_environment_id,
+    cache_workspace_id,
     get_access_token_cache_path,
     get_config,
     get_registry_credentials_path,
@@ -30,7 +32,6 @@ from stardag.config import (
     save_toml_file,
     update_cached_target_roots,
 )
-
 
 # --- Credentials (OAuth refresh tokens - per registry/user) ---
 
@@ -668,11 +669,6 @@ def _refresh_oidc_token(
     Returns the token response dict.
     Raises httpx.HTTPStatusError on failure.
     """
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
-
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -695,11 +691,6 @@ def _exchange_for_internal_token(
     Returns dict with access_token and expires_in.
     Raises httpx.HTTPStatusError on failure.
     """
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
-
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{api_url}/api/v1/auth/exchange",

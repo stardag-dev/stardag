@@ -26,12 +26,7 @@ Configuration:
     Set STARDAG_API_KEY for API key authentication.
 """
 
-try:
-    import typer
-except ImportError:
-    raise ImportError(
-        "Typer is required for the CLI. Install with: pip install stardag[cli]"
-    )
+import typer
 
 from stardag._cli import auth, config
 

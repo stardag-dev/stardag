@@ -40,7 +40,7 @@ export STARDAG_TARGET_ROOT__DEFAULT=~/.stardag/outputs
 
 ```bash
 # Install CLI
-pip install stardag[cli]
+pip install stardag
 
 # Add registry and login
 stardag config registry add local --url http://localhost:8000

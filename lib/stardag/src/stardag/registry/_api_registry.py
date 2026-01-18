@@ -4,6 +4,8 @@ import logging
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import httpx
+
 from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
@@ -155,13 +157,6 @@ class APIRegistry(RegistryABC):
     @property
     def client(self):
         if self._client is None:
-            try:
-                import httpx
-            except ImportError:
-                raise ImportError(
-                    "httpx is required for APIRegistry. "
-                    "Install it with: pip install stardag[api]"
-                )
             # Create client with appropriate auth header
             headers = {}
             if self.api_key:
@@ -417,13 +412,6 @@ class APIRegistry(RegistryABC):
     def async_client(self):
         """Lazy-initialized async HTTP client."""
         if self._async_client is None:
-            try:
-                import httpx
-            except ImportError:
-                raise ImportError(
-                    "httpx is required for APIRegistry. "
-                    "Install it with: pip install stardag[api]"
-                )
             headers = {}
             if self.api_key:
                 headers["X-API-Key"] = self.api_key
