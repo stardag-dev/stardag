@@ -9,43 +9,37 @@
 
 Install the core SDK:
 
-=== "pip"
-
-    ```bash
-    pip install stardag
-    ```
-
 === "uv"
 
     ```bash
     uv add stardag
     ```
 
+=== "pip"
+
+    ```bash
+    pip install stardag
+    ```
+
 ## Optional Extras
 
 Stardag provides optional extras for specific integrations:
 
-=== "Prefect integration"
+=== "uv"
 
     ```bash
-    pip install stardag[prefect]
+    uv add stardag[s3,modal]
     ```
 
-    Enables Prefect-based orchestration.
+    Enables S3 [Targets](../concepts/targets.md#targets) and [Modal execution](../how-to/integrate-modal.md).
 
-=== "AWS S3 targets"
+=== "pip"
 
     ```bash
-    pip install stardag[s3]
+    pip install stardag[s3,modal]
     ```
 
-    Enables S3 storage for task outputs.
-
-=== "All extras"
-
-    ```bash
-    pip install stardag[prefect,s3]
-    ```
+    Enables S3 [Targets](../concepts/targets.md#targets) and [Modal](https://modal.com) execution.
 
 ## Verify Installation
 

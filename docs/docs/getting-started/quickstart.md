@@ -29,7 +29,9 @@ Let's break down what happened:
 
 ### 1. Task Definition
 
-```python
+```{.python}
+import stardag as sd
+
 @sd.task
 def hello() -> str:
     return "Hello, Stardag!"
@@ -39,7 +41,7 @@ The `@sd.task` decorator transforms your function into a task class. The return 
 
 ### 2. Task Instantiation
 
-```python
+```{.python continuation}
 task = hello()
 ```
 
@@ -47,7 +49,7 @@ This creates a task _instance_ - a declarative specification of what to compute.
 
 ### 3. Building
 
-```python
+```{.python continuation}
 sd.build(task)
 ```
 
@@ -55,7 +57,7 @@ sd.build(task)
 
 ### 4. Loading Results
 
-```python
+```{.python continuation}
 task.output().load()
 ```
 
@@ -65,7 +67,7 @@ Retrieve the persisted result from storage.
 
 Tasks can have parameters:
 
-```python
+```{.python continuation}
 @sd.task
 def greet(name: str) -> str:
     return f"Hello, {name}!"
@@ -77,15 +79,15 @@ print(task.output().load())  # "Hello, World!"
 
 ## Key Concepts
 
-- **Declarative**: Task instances describe _what_ to compute, not _when_
-- **Persistent**: Results are saved to disk automatically
-- **Deterministic**: Output paths are determined by task parameters
+- **Declarative**: Task instances describe what to compute, not when.
+- **Persistent**: Results are saved to remote or local filesystem automatically (by default).
+- **Deterministic**: Output URIs are determined by task parameters; task instances are pointers to _assets_ which we can reason about (know the location of) before they are materialized.
 
 ## Inspecting Tasks
 
 Tasks are Pydantic models with useful properties:
 
-```python
+```{.python continuation}
 task = greet(name="World")
 
 # View the task specification
@@ -97,7 +99,7 @@ print(task.complete())
 # False (before build), True (after build)
 
 # View output path
-print(task.output().path)
+print(task.output().uri)
 # /path/to/.stardag/target-roots/default/greet/ab/cd/abcd1234....json
 ```
 

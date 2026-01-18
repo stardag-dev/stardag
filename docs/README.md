@@ -93,6 +93,14 @@ uv add some-package        # Add new dependency
 uv sync                    # Sync after pyproject.toml changes
 ```
 
+### Tun Tests
+
+Using [pytest-markdown-docs](https://github.com/modal-labs/pytest-markdown-docs).
+
+```bash
+uv run pytest --markdown-docs --markdown-docs-syntax=superfences docs/**/*.md;
+```
+
 ## CI/CD & Hosting
 
 ### GitHub Pages (Current)
