@@ -51,62 +51,17 @@ Stardag consists of three components:
 | **CLI**      | Command-line tools for authentication and configuration          |
 | **Platform** | Optional API service and Web UI for monitoring and collaboration |
 
-## Getting Started
+## Next Steps
 
-<div class="grid cards" markdown>
+### Getting Started
 
-- :material-download: **Installation**
+[Installation :material-download:](getting-started/installation.md){ .md-button }
+[Quick Start :material-rocket-launch:](getting-started/quickstart.md){ .md-button }
+[Your First DAG :material-graph:](getting-started/first-dag.md){ .md-button }
 
-  ***
+### Go Deeper
 
-  Install Stardag and get your environment ready.
-
-  [:octicons-arrow-right-24: Install](getting-started/installation.md)
-
-- :material-rocket-launch: **Quick Start**
-
-  ***
-
-  Build your first task in 5 minutes.
-
-  [:octicons-arrow-right-24: Quick Start](getting-started/quickstart.md)
-
-- :material-graph: **Your First DAG**
-
-  ***
-
-  Create a complete pipeline with dependencies.
-
-  [:octicons-arrow-right-24: Build a DAG](getting-started/first-dag.md)
-
-</div>
-
-## Why Not Just Use...?
-
-### Luigi
-
-Luigi is powerful in its simplicity but outdated. Stardag addresses Luigi's lack of composability - promoting tightly coupled DAGs and "parameter explosion". See [Composability](concepts/dependencies.md#composability) for details.
-
-### Modern Frameworks (Prefect, Dagster)
-
-Modern frameworks prioritize flexibility ("just annotate any Python function as a task") but often lack clean declarative DAG abstractions. Stardag fills this gap while integrating with these tools for orchestration.
-
-<!-- TODO: Add more detailed comparison with concrete examples -->
-
----
-
-<div class="grid" markdown>
-
-[:material-book-open-variant: **Concepts**](concepts/index.md){ .md-button }
-Learn core concepts
-
-[:material-tools: **How-To Guides**](how-to/index.md){ .md-button }
-Solve specific problems
-
-[:material-cog: **Configuration**](configuration/index.md){ .md-button }
-Configure your environment
-
-[:material-server: **Platform**](platform/index.md){ .md-button }
-API & Web UI
-
-</div>
+[Core Concepts :material-book-open-variant:](concepts/index.md){ .md-button }
+[How-To Guides :material-tools:](how-to/index.md){ .md-button }
+[Configuration :material-cog:](configuration/index.md){ .md-button }
+[Platform :material-server:](platform/index.md){ .md-button }
