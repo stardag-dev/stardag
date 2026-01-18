@@ -399,17 +399,6 @@ def cache_environment_id(
     save_id_cache(cache)
 
 
-# Backwards compatibility aliases
-def get_cached_org_id(registry: str, org_slug: str) -> str | None:
-    """DEPRECATED: Use get_cached_workspace_id instead."""
-    return get_cached_workspace_id(registry, org_slug)
-
-
-def cache_org_id(registry: str, org_slug: str, org_id: str) -> None:
-    """DEPRECATED: Use cache_workspace_id instead."""
-    cache_workspace_id(registry, org_slug, org_id)
-
-
 def _looks_like_uuid(value: str) -> bool:
     """Check if a string looks like a UUID."""
     import re
@@ -448,12 +437,6 @@ class ProfileConfig(BaseModel):
     user: str | None = None
     workspace: str
     environment: str
-
-    # Backwards compatibility alias
-    @property
-    def organization(self) -> str:
-        """DEPRECATED: Use workspace instead."""
-        return self.workspace
 
 
 class TomlConfig(BaseModel):
@@ -540,12 +523,6 @@ class ContextConfig(BaseModel):
     user: str | None = None
     workspace_id: str | None = None
     environment_id: str | None = None
-
-    # Backwards compatibility alias
-    @property
-    def organization_id(self) -> str | None:
-        """DEPRECATED: Use workspace_id instead."""
-        return self.workspace_id
 
 
 class StardagSettings(BaseSettings):
@@ -837,114 +814,3 @@ class ConfigProvider:
 
 # Global config provider instance
 config_provider = ConfigProvider()
-
-
-# --- Backwards compatibility aliases ---
-# These are deprecated and will be removed in a future version
-
-
-def get_registries_dir() -> Path:
-    """DEPRECATED: Get the registries directory."""
-    logger.warning(
-        "get_registries_dir() is deprecated. Use get_credentials_dir() instead."
-    )
-    return get_stardag_dir() / "registries"
-
-
-def get_active_registry_path() -> Path:
-    """DEPRECATED: Active registry is no longer stored in a file."""
-    logger.warning(
-        "get_active_registry_path() is deprecated. Use STARDAG_PROFILE env var."
-    )
-    return get_stardag_dir() / "active_registry"
-
-
-def get_registry_dir(registry: str) -> Path:
-    """DEPRECATED: Registry dirs are no longer used."""
-    logger.warning("get_registry_dir() is deprecated.")
-    return get_stardag_dir() / "registries" / registry
-
-
-def get_registry_config_path(registry: str) -> Path:
-    """DEPRECATED: Use get_user_config_path() for TOML config."""
-    logger.warning("get_registry_config_path() is deprecated.")
-    return get_registry_dir(registry) / "config.json"
-
-
-def load_active_registry() -> str:
-    """DEPRECATED: Load active registry from env or config."""
-    logger.warning(
-        "load_active_registry() is deprecated. Use get_config().context.registry_name"
-    )
-    config = get_config()
-    return config.context.registry_name or "local"
-
-
-def save_active_registry(registry: str) -> None:
-    """DEPRECATED: Active registry is no longer stored in a file."""
-    logger.warning(
-        "save_active_registry() is deprecated. Edit config.toml or use STARDAG_PROFILE"
-    )
-
-
-def load_active_workspace(registry: str) -> str | None:
-    """DEPRECATED: Load active workspace from env or config."""
-    logger.warning(
-        "load_active_workspace() is deprecated. Use get_config().context.environment_id"
-    )
-    config = get_config()
-    return config.context.environment_id
-
-
-def save_active_workspace(registry: str, environment_id: str) -> None:
-    """DEPRECATED: Active workspace is no longer stored in a file."""
-    logger.warning(
-        "save_active_workspace() is deprecated. Edit config.toml or use STARDAG_PROFILE"
-    )
-
-
-def load_workspace_target_roots(registry: str, environment_id: str) -> dict[str, str]:
-    """DEPRECATED: Use get_cached_target_roots() instead."""
-    logger.warning("load_workspace_target_roots() is deprecated.")
-    config = get_config()
-    if config.context.environment_id == environment_id:
-        return config.target.roots
-    return {}
-
-
-def save_workspace_target_roots(
-    registry: str, environment_id: str, target_roots: dict[str, str]
-) -> None:
-    """DEPRECATED: Use update_cached_target_roots() instead."""
-    logger.warning("save_workspace_target_roots() is deprecated.")
-    config = get_config()
-    if config.api.url and config.context.workspace_id:
-        update_cached_target_roots(
-            config.api.url, config.context.workspace_id, environment_id, target_roots
-        )
-
-
-def get_registry_active_workspace_path(registry: str) -> Path:
-    """DEPRECATED: Active workspace is no longer stored in a file."""
-    logger.warning(
-        "get_registry_active_workspace_path() is deprecated. Use STARDAG_PROFILE"
-    )
-    return get_registry_dir(registry) / "active_workspace"
-
-
-def get_registry_workspaces_dir(registry: str) -> Path:
-    """DEPRECATED: Workspace dirs are no longer used."""
-    logger.warning("get_registry_workspaces_dir() is deprecated.")
-    return get_registry_dir(registry) / "workspaces"
-
-
-def get_workspace_dir(registry: str, environment_id: str) -> Path:
-    """DEPRECATED: Workspace dirs are no longer used."""
-    logger.warning("get_workspace_dir() is deprecated.")
-    return get_registry_workspaces_dir(registry) / environment_id
-
-
-def get_workspace_target_roots_path(registry: str, environment_id: str) -> Path:
-    """DEPRECATED: Use get_target_root_cache_path() instead."""
-    logger.warning("get_workspace_target_roots_path() is deprecated.")
-    return get_workspace_dir(registry, environment_id) / "target_roots.json"

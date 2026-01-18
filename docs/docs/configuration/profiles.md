@@ -1,6 +1,6 @@
 # Profiles
 
-Profiles define a complete context for Stardag operations: registry, organization, and workspace.
+Profiles define a complete context for Stardag operations: registry, user, workspace, and environment.
 
 ## Creating Profiles
 
@@ -16,8 +16,9 @@ stardag auth login --registry central
 # Create a profile
 stardag config profile add prod \
     --registry central \
-    --organization my-company \
-    --workspace production
+    --user me@company.com \
+    --workspace my-company \
+    --environment production
 ```
 
 ### Via Config File
@@ -33,17 +34,28 @@ url = "https://api.stardag.com"
 
 [profile.dev]
 registry = "local"
-organization = "my-org"
-workspace = "development"
+user = "me@example.com"
+workspace = "my-workspace"
+environment = "development"
 
 [profile.prod]
 registry = "central"
-organization = "my-company"
-workspace = "production"
+user = "me@company.com"
+workspace = "my-company"
+environment = "production"
 
 [default]
 profile = "dev"
 ```
+
+## Profile Fields
+
+| Field         | Description                               |
+| ------------- | ----------------------------------------- |
+| `registry`    | Name of the registry (API backend) to use |
+| `user`        | User email for credential lookup          |
+| `workspace`   | Workspace slug (team/company)             |
+| `environment` | Environment slug (project/stage)          |
 
 ## Using Profiles
 
@@ -92,12 +104,12 @@ stardag config profile remove old-profile
 ~/.stardag/
 ├── config.toml                # Main configuration
 ├── id-cache.json              # Slug-to-ID mappings (auto-populated)
-├── credentials/               # Per-registry refresh tokens
-│   ├── local.json
-│   └── central.json
-├── access-token-cache/        # Short-lived org-scoped JWTs
+├── credentials/               # Per-registry, per-user refresh tokens
+│   ├── local__me@example.com.json
+│   └── central__me@company.com.json
+├── access-token-cache/        # Short-lived workspace-scoped JWTs
 │   └── ...
-├── target-root-cache.json     # Cached target roots per workspace
+├── target-root-cache.json     # Cached target roots per environment
 └── local-target-roots/        # Local file storage
 ```
 
@@ -109,8 +121,9 @@ Place `.stardag/config.toml` in your repository root:
 # .stardag/config.toml
 [profile.ci]
 registry = "central"
-organization = "my-company"
-workspace = "ci-testing"
+user = "ci@company.com"
+workspace = "my-company"
+environment = "ci-testing"
 
 [default]
 profile = "ci"
@@ -122,10 +135,10 @@ Project config takes precedence over user config.
 
 Environment variables override profile settings:
 
-| Variable                  | Description                         |
-| ------------------------- | ----------------------------------- |
-| `STARDAG_PROFILE`         | Active profile name                 |
-| `STARDAG_REGISTRY_URL`    | Registry URL (overrides profile)    |
-| `STARDAG_API_KEY`         | API key for authentication          |
-| `STARDAG_ORGANIZATION_ID` | Organization ID (overrides profile) |
-| `STARDAG_WORKSPACE_ID`    | Workspace ID (overrides profile)    |
+| Variable                 | Description                        |
+| ------------------------ | ---------------------------------- |
+| `STARDAG_PROFILE`        | Active profile name                |
+| `STARDAG_REGISTRY_URL`   | Registry URL (overrides profile)   |
+| `STARDAG_API_KEY`        | API key for authentication         |
+| `STARDAG_WORKSPACE_ID`   | Workspace ID (overrides profile)   |
+| `STARDAG_ENVIRONMENT_ID` | Environment ID (overrides profile) |
