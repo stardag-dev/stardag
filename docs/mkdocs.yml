@@ -163,7 +163,7 @@ nav:
   - Configuration:
       - configuration/index.md
       - Profiles: configuration/profiles.md
-      - Workspaces: configuration/workspaces.md
+      - Workspaces & Environments: configuration/environments.md
       - CLI Reference: configuration/cli.md
   - Platform:
       - platform/index.md

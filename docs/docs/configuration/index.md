@@ -6,16 +6,16 @@ Stardag configuration follows a hierarchical model for managing different enviro
 
 ```
 Registry (API Backend)
-  └── Organization (team/company)
-        └── Workspace (project/stage)
+  └── Workspace (team/company)
+        └── Environment (project/stage)
               └── Target Roots (storage locations)
 ```
 
 | Concept          | Description                                        |
 | ---------------- | -------------------------------------------------- |
 | **Registry**     | A Stardag API backend (local dev server or SaaS)   |
-| **Organization** | A team or company sharing access to workspaces     |
-| **Workspace**    | Logical grouping for separating projects or stages |
+| **Workspace**    | A team or company sharing access to environments   |
+| **Environment**  | Logical grouping for separating projects or stages |
 | **Target Roots** | Named storage locations for task outputs           |
 
 ## Configuration Hierarchy
@@ -47,7 +47,11 @@ stardag config registry add local --url http://localhost:8000
 stardag auth login --registry local
 
 # Create and use profile
-stardag config profile add dev -r local -o my-org -w development
+stardag config profile add dev \
+    -r local \
+    -u me@example.com \
+    -w my-workspace \
+    -e development
 stardag config profile use dev
 ```
 
@@ -57,11 +61,11 @@ stardag config profile use dev
 export STARDAG_REGISTRY_URL=https://api.stardag.com
 export STARDAG_API_KEY=sk_...
 export STARDAG_WORKSPACE_ID=...
-export STARDAG_TARGET_ROOT__DEFAULT=s3://bucket/stardag/
+export STARDAG_ENVIRONMENT_ID=...
 ```
 
 ## In This Section
 
 - **[Profiles](profiles.md)** - Switch between environments
-- **[Workspaces](workspaces.md)** - Organize projects and teams
+- **[Workspaces & Environments](environments.md)** - Organize teams and projects
 - **[CLI Reference](cli.md)** - All CLI commands
