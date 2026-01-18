@@ -28,6 +28,7 @@ import urllib.parse
 import webbrowser
 from dataclasses import dataclass
 
+import httpx
 import typer
 
 from stardag._cli.credentials import (
@@ -173,11 +174,6 @@ def _exchange_code_for_tokens(
     client_id: str,
 ) -> dict:
     """Exchange authorization code for OIDC tokens."""
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
-
     data = {
         "grant_type": "authorization_code",
         "code": code,
@@ -198,11 +194,6 @@ def _refresh_oidc_token(
     client_id: str,
 ) -> dict:
     """Refresh OIDC tokens using refresh token."""
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
-
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
@@ -221,11 +212,6 @@ def _exchange_for_internal_token(
     workspace_id: str,
 ) -> dict:
     """Exchange OIDC token for internal workspace-scoped token via /auth/exchange."""
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
-
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{api_url}/api/v1/auth/exchange",
@@ -288,11 +274,6 @@ def _get_auth_config_from_registry(api_url: str) -> dict | None:
     Returns dict with 'oidc_issuer' and 'oidc_client_id', or None if unavailable.
     """
     try:
-        import httpx
-    except ImportError:
-        return None
-
-    try:
         with httpx.Client(timeout=10.0) as client:
             response = client.get(f"{api_url}/api/v1/auth/config")
             response.raise_for_status()
@@ -303,11 +284,6 @@ def _get_auth_config_from_registry(api_url: str) -> dict | None:
 
 def _get_oidc_config(issuer: str) -> dict:
     """Fetch OIDC configuration from issuer."""
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError("httpx is required. Install with: pip install stardag[cli]")
-
     with httpx.Client(timeout=10.0) as client:
         response = client.get(f"{issuer}/.well-known/openid-configuration")
         response.raise_for_status()
@@ -316,74 +292,48 @@ def _get_oidc_config(issuer: str) -> dict:
 
 def _get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
     """Fetch user's workspaces from API using OIDC token."""
-    try:
-        import httpx
-    except ImportError:
-        return []
-
-    try:
-        # Use /ui/me which accepts OIDC tokens directly (before workspace-scoped exchange)
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/me",
-                headers={"Authorization": f"Bearer {oidc_token}"},
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("workspaces", [])
-    except Exception:
-        pass
-    return []
+    # Use /ui/me which accepts OIDC tokens directly (before workspace-scoped exchange)
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(
+            f"{api_url}/api/v1/ui/me",
+            headers={"Authorization": f"Bearer {oidc_token}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["workspaces"]
 
 
 def _get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
     """Fetch environments for a workspace."""
-    try:
-        import httpx
-    except ImportError:
-        return []
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            if response.status_code == 200:
-                return response.json()
-    except Exception:
-        pass
-    return []
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(
+            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _sync_target_roots(
     api_url: str, access_token: str, workspace_id: str, environment_id: str
 ) -> None:
     """Sync target roots from server."""
-    try:
-        import httpx
-    except ImportError:
-        return
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments/{environment_id}/target-roots",
-                headers={"Authorization": f"Bearer {access_token}"},
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(
+            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments/{environment_id}/target-roots",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if response.status_code == 200:
+            roots = response.json()
+            target_roots = {root["name"]: root["uri_prefix"] for root in roots}
+            set_target_roots(
+                target_roots,
+                registry_url=api_url,
+                workspace_id=workspace_id,
+                environment_id=environment_id,
             )
-            if response.status_code == 200:
-                roots = response.json()
-                target_roots = {root["name"]: root["uri_prefix"] for root in roots}
-                set_target_roots(
-                    target_roots,
-                    registry_url=api_url,
-                    workspace_id=workspace_id,
-                    environment_id=environment_id,
-                )
-                if target_roots:
-                    typer.echo(f"Synced {len(target_roots)} target root(s)")
-    except Exception:
-        pass
+            if target_roots:
+                typer.echo(f"Synced {len(target_roots)} target root(s)")
 
 
 def _determine_registry(

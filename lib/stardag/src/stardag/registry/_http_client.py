@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+import httpx
+
 from stardag.config import config_provider
 from stardag.exceptions import APIError
 
@@ -51,14 +53,6 @@ def get_async_http_client(config: RegistryAPIClientConfig):
     Raises:
         ImportError: If httpx is not installed.
     """
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError(
-            "httpx is required for Registry API calls. "
-            "Install it with: pip install stardag[api]"
-        )
-
     headers = {}
     if config.api_key:
         headers["X-API-Key"] = config.api_key

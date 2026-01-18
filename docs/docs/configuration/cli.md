@@ -5,7 +5,7 @@ Complete reference for Stardag CLI commands.
 ## Installation
 
 ```bash
-pip install stardag[cli]
+pip install stardag
 ```
 
 ## Global Commands

@@ -31,7 +31,7 @@ Generate API keys from the web UI under Organization Settings > API Keys.
 ### Option 2: Browser Login (Local Development)
 
 ```bash
-pip install stardag[cli]
+pip install stardag
 stardag auth login
 ```
 

@@ -4,6 +4,7 @@ Manages registries, profiles, and shows current configuration.
 Configuration is stored in ~/.stardag/config.toml.
 """
 
+import httpx
 import typer
 
 from stardag._cli import registry
@@ -50,14 +51,6 @@ def _get_authenticated_client(
 
     Returns tuple of (client, api_url, access_token) or raises Exit if not authenticated.
     """
-    try:
-        import httpx
-    except ImportError:
-        typer.echo(
-            "Error: httpx is required. Install with: pip install stardag[cli]", err=True
-        )
-        raise typer.Exit(1)
-
     # Validate active profile if we're going to use it
     if not registry or not workspace_id:
         _validate_active_profile_cli()
