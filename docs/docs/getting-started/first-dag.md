@@ -1,6 +1,6 @@
 # Your First DAG
 
-Build a complete pipeline with task dependencies.
+Build a minimal pipeline with task dependencies.
 
 ## Adding Dependencies
 
@@ -30,7 +30,7 @@ print(task.output().load())  # 45
 
 ### Declaration
 
-```python
+```{.python notest}
 def get_sum(integers: sd.Depends[list[int]]) -> int:
 ```
 
@@ -41,7 +41,7 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
 
 ### Composition
 
-```python
+```{.python notest}
 task = get_sum(integers=get_range(limit=10))
 ```
 
@@ -53,50 +53,31 @@ You pass a _task instance_ as the parameter, not a value. Stardag handles:
 
 ### Inspection
 
-```python
+```{.python continuation}
 # View dependencies
 print(task.requires())
 # {'integers': get_range(version=None, limit=10)}
 
-# View the full DAG as JSON
+# View the full DAG as JSON specification
 print(task.model_dump_json(indent=2))
-```
-
-## Building Multiple Branches
-
-DAGs can have multiple branches:
-
-```python
-@sd.task
-def add(a: float, b: float) -> float:
-    return a + b
-
-@sd.task
-def multiply(a: float, b: float) -> float:
-    return a * b
-
-@sd.task
-def combine(
-    sum_result: sd.Depends[float],
-    product_result: sd.Depends[float]
-) -> float:
-    return sum_result + product_result
-
-# Diamond-shaped DAG
-result = combine(
-    sum_result=add(a=1, b=2),
-    product_result=multiply(a=3, b=4)
-)
-
-sd.build(result)
-print(result.output().load())  # 15.0 (3 + 12)
+# {
+#   "__namespace": "",
+#   "__name": "get_sum",
+#   "version": "",
+#   "integers": {
+#     "__namespace": "",
+#     "__name": "get_range",
+#     "version": "",
+#     "limit": 10
+#   }
+# }
 ```
 
 ## Reusing Task Results
 
 Because outputs are persisted with deterministic paths, running the same task twice skips execution:
 
-```python
+```{.python continuation}
 task = get_sum(integers=get_range(limit=10))
 
 # First build - executes both tasks
@@ -112,10 +93,10 @@ This is the "Makefile-style" bottom-up execution model.
 
 Sometimes you want to call the underlying function without persistence:
 
-```python
+```{.python continuation}
 # Using .call() bypasses targets and returns the raw result
 result = get_sum.call(get_range.call(10))
-print(result)  # 45
+assert result == 45
 ```
 
 ## What's Next?
