@@ -28,7 +28,7 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
         uv run stardag auth login --registry central
         ```
 
-    You should be redirected to your browser to complete the loging.
+    You should be redirected to your browser to complete the log in.
 
     Then follow the steps to get your current profile setup. Then list your profiles to verify the setup.
 
@@ -47,13 +47,14 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
     ```
     Profiles:
 
-        local-admin-my-org-default *
-            registry: local
-            user: admin@localhost
-            workspace: my-org
-            environment: default
+    central-<username>-<username>-local *
+        registry: central
+        user: <username>@example.com
+        workspace: <username>
+        environment: local
 
-    * active profile (via [default] in /Users/andershuss/.stardag/config.toml)
+
+    * active profile (via [default] in /Users/<user>/.stardag/config.toml)
     ```
 
 === "Local `docker compose` (Self hosted)"
@@ -107,18 +108,18 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
     === "Activated venv"
 
         ```sh
-        stardag config registry add local --url https://api.stardag.com/
+        stardag config registry add local --url http://localhost:8000
         stardag auth login --registry local
         ```
 
     === "uv run ..."
 
         ```sh
-        uv run stardag config registry add local --url https://api.stardag.com/
+        uv run stardag config registry add local --url http://localhost:8000
         uv run stardag auth login --registry local
         ```
 
-    You should be redirected to your browser to complete the loging.
+    You should be redirected to your browser to complete the log in.
 
     Then follow the steps to get your current profile setup. Then list your profiles to verify the setup.
 
@@ -137,13 +138,14 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
     ```
     Profiles:
 
-        local-admin-my-org-default *
-            registry: local
-            user: admin@localhost
-            workspace: my-org
-            environment: default
+    local-<username>-<username>-local *
+        registry: local
+        user: <username>@localhost
+        workspace: <username>
+        environment: local
 
-    * active profile (via [default] in /Users/andershuss/.stardag/config.toml)
+
+    * active profile (via [default] in /Users/<user>/.stardag/config.toml)
     ```
 
 ## Build your DAG
