@@ -12,12 +12,14 @@ Token types:
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth.jwt import (
@@ -36,10 +38,183 @@ from stardag_api.models import (
     ApiKey,
     User,
     Environment,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
+    TargetRoot,
 )
 from stardag_api.services import api_keys as api_key_service
 
 logger = logging.getLogger(__name__)
+
+
+async def create_personal_workspace_for_user(db: AsyncSession, user: User) -> Workspace:
+    """Create a personal workspace for a new user.
+
+    Creates a workspace with:
+    - is_personal=True
+    - A "local" environment
+    - A default target root pointing to ~/.stardag/local-target-roots/default
+    """
+    # Generate slug from email prefix
+    email_prefix = user.email.split("@")[0].lower()
+    base_slug = re.sub(r"[^a-z0-9]+", "-", email_prefix).strip("-")[:50]
+
+    # Ensure uniqueness with suffix
+    slug = base_slug
+    suffix = 0
+    while True:
+        existing = await db.execute(select(Workspace).where(Workspace.slug == slug))
+        if not existing.scalar_one_or_none():
+            break
+        suffix += 1
+        slug = f"{base_slug}-{suffix}"
+
+    # Create workspace
+    workspace = Workspace(
+        name=f"{user.display_name or email_prefix}'s Workspace",
+        slug=slug,
+        is_personal=True,
+        created_by_id=user.id,
+    )
+    db.add(workspace)
+    await db.flush()
+
+    # Add user as owner
+    membership = WorkspaceMember(
+        workspace_id=workspace.id,
+        user_id=user.id,
+        role=WorkspaceRole.OWNER,
+    )
+    db.add(membership)
+
+    # Create "local" environment (not "default")
+    environment = Environment(
+        workspace_id=workspace.id,
+        name="Local",
+        slug="local",
+        description="Local development environment",
+        owner_id=user.id,
+    )
+    db.add(environment)
+    await db.flush()
+
+    # Create default target root pointing to ~/.stardag/local-target-roots/default
+    target_root = TargetRoot(
+        environment_id=environment.id,
+        name="default",
+        uri_prefix="~/.stardag/local-target-roots/default",
+    )
+    db.add(target_root)
+
+    logger.info(
+        "Created personal workspace %s for user %s",
+        workspace.slug,
+        user.id,
+    )
+
+    return workspace
+
+
+async def get_or_create_user_from_oidc_claims(
+    db: AsyncSession,
+    external_id: str,
+    email: str,
+    display_name: str | None,
+) -> User:
+    """Get or create a user from OIDC claims, handling race conditions.
+
+    This function handles the case where multiple requests try to create the same
+    user simultaneously by catching IntegrityError and retrying the lookup.
+    """
+    # Look up user by external_id (OIDC subject claim)
+    result = await db.execute(select(User).where(User.external_id == external_id))
+    user = result.scalar_one_or_none()
+
+    if user is not None:
+        # Update user info if changed
+        updated = False
+        if email and user.email != email:
+            user.email = email
+            updated = True
+        if display_name and user.display_name != display_name:
+            user.display_name = display_name
+            updated = True
+        if updated:
+            await db.commit()
+            logger.info("Updated user %s with new info from OIDC token", user.id)
+        return user
+
+    # User not found by external_id - check if they exist by email
+    # This handles identity provider changes (same email, different subject)
+    if email:
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+
+        if user is not None:
+            # Found user by email - update external_id to new provider
+            logger.info(
+                "User %s changed identity provider (old external_id: %s, new: %s)",
+                user.id,
+                user.external_id,
+                external_id,
+            )
+            user.external_id = external_id
+            if display_name and user.display_name != display_name:
+                user.display_name = display_name
+            await db.commit()
+            return user
+
+    # Create new user
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Token must contain email claim for user creation",
+        )
+
+    try:
+        user = User(
+            external_id=external_id,
+            email=email,
+            display_name=display_name,
+        )
+        db.add(user)
+        await db.flush()
+        await db.refresh(user)
+        logger.info("Created new user %s from OIDC token", user.id)
+
+        # Auto-create personal workspace for new user
+        await create_personal_workspace_for_user(db, user)
+        await db.commit()
+
+        return user
+    except IntegrityError:
+        # Race condition: another request created the user
+        # Rollback and retry the lookup
+        await db.rollback()
+        logger.info("Race condition on user creation, retrying lookup for %s", email)
+
+        # Retry lookup by external_id first, then by email
+        result = await db.execute(select(User).where(User.external_id == external_id))
+        user = result.scalar_one_or_none()
+        if user is not None:
+            return user
+
+        result = await db.execute(select(User).where(User.email == email))
+        user = result.scalar_one_or_none()
+        if user is not None:
+            # Update external_id if needed
+            if user.external_id != external_id:
+                user.external_id = external_id
+                await db.commit()
+            return user
+
+        # This shouldn't happen, but raise an error if we can't find the user
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create or find user after race condition",
+        )
+
 
 # HTTP Bearer token security scheme
 # auto_error=False allows us to handle missing tokens gracefully
@@ -397,61 +572,12 @@ async def get_or_create_user_from_oidc(
     If the user changed identity providers (same email, different external_id),
     we update the external_id to match the current provider.
     """
-    # Look up user by external_id (OIDC subject claim)
-    result = await db.execute(select(User).where(User.external_id == oidc_token.sub))
-    user = result.scalar_one_or_none()
-
-    if user is not None:
-        # Update user info if changed
-        updated = False
-        if oidc_token.email and user.email != oidc_token.email:
-            user.email = oidc_token.email
-            updated = True
-        if oidc_token.display_name and user.display_name != oidc_token.display_name:
-            user.display_name = oidc_token.display_name
-            updated = True
-        if updated:
-            await db.commit()
-            logger.info("Updated user %s with new info from OIDC token", user.id)
-        return user
-
-    # User not found by external_id - check if they exist by email
-    # This handles identity provider changes (same email, different subject)
-    if oidc_token.email:
-        result = await db.execute(select(User).where(User.email == oidc_token.email))
-        user = result.scalar_one_or_none()
-
-        if user is not None:
-            # Found user by email - update external_id to new provider
-            logger.info(
-                "User %s changed identity provider (old external_id: %s, new: %s)",
-                user.id,
-                user.external_id,
-                oidc_token.sub,
-            )
-            user.external_id = oidc_token.sub
-            if oidc_token.display_name and user.display_name != oidc_token.display_name:
-                user.display_name = oidc_token.display_name
-            await db.commit()
-            return user
-
-    # Create new user
-    if not oidc_token.email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Token must contain email claim for user creation",
-        )
-
-    user = User(
+    return await get_or_create_user_from_oidc_claims(
+        db=db,
         external_id=oidc_token.sub,
-        email=oidc_token.email,
+        email=oidc_token.email or "",
         display_name=oidc_token.display_name,
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    logger.info("Created new user %s from OIDC token", user.id)
-    return user
 
 
 async def get_current_user_flexible(
@@ -504,60 +630,9 @@ async def get_current_user_flexible(
         ) from e
 
     # Got a valid OIDC token - get or create user
-    result = await db.execute(select(User).where(User.external_id == oidc_payload.sub))
-    user = result.scalar_one_or_none()
-
-    if user is not None:
-        # Update user info if changed
-        updated = False
-        if oidc_payload.email and user.email != oidc_payload.email:
-            user.email = oidc_payload.email
-            updated = True
-        if oidc_payload.display_name and user.display_name != oidc_payload.display_name:
-            user.display_name = oidc_payload.display_name
-            updated = True
-        if updated:
-            await db.commit()
-            logger.info("Updated user %s with new info from OIDC token", user.id)
-        return user
-
-    # User not found by external_id - check if they exist by email
-    # This handles identity provider changes (same email, different subject)
-    if oidc_payload.email:
-        result = await db.execute(select(User).where(User.email == oidc_payload.email))
-        user = result.scalar_one_or_none()
-
-        if user is not None:
-            # Found user by email - update external_id to new provider
-            logger.info(
-                "User %s changed identity provider (old external_id: %s, new: %s)",
-                user.id,
-                user.external_id,
-                oidc_payload.sub,
-            )
-            user.external_id = oidc_payload.sub
-            if (
-                oidc_payload.display_name
-                and user.display_name != oidc_payload.display_name
-            ):
-                user.display_name = oidc_payload.display_name
-            await db.commit()
-            return user
-
-    # Create new user from OIDC token
-    if not oidc_payload.email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Token must contain email claim for user creation",
-        )
-
-    user = User(
+    return await get_or_create_user_from_oidc_claims(
+        db=db,
         external_id=oidc_payload.sub,
-        email=oidc_payload.email,
+        email=oidc_payload.email or "",
         display_name=oidc_payload.display_name,
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    logger.info("Created new user %s from OIDC token", user.id)
-    return user

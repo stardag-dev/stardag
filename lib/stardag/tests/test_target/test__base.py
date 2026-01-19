@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,15 @@ from stardag.target import (
     RemoteFileSystemTarget,
 )
 from stardag.target._base import CachedRemoteFileSystem
+
+
+def test_local_target_expands_tilde():
+    """Test that LocalTarget expands ~ to user home directory."""
+    target = LocalTarget("~/test/path.txt")
+    expected = os.path.expanduser("~/test/path.txt")
+    assert target.uri == expected
+    assert target.uri.startswith(str(Path.home()))
+    assert not target.uri.startswith("~")
 
 
 def test_local_target(tmp_path: Path):

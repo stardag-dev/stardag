@@ -10,6 +10,7 @@ export interface Workspace {
   name: string;
   slug: string;
   description: string | null;
+  is_personal?: boolean;
 }
 
 export interface WorkspaceDetail extends Workspace {
@@ -22,6 +23,7 @@ export interface WorkspaceSummary {
   name: string;
   slug: string;
   role: "owner" | "admin" | "member";
+  is_personal?: boolean;
 }
 
 export interface UserProfile {
@@ -91,6 +93,10 @@ export async function createWorkspace(data: {
   name: string;
   slug: string;
   description?: string;
+  initial_environment_name?: string;
+  initial_environment_slug?: string;
+  initial_target_root_name?: string;
+  initial_target_root_uri?: string;
 }): Promise<Workspace> {
   const response = await fetchWithAuth(`${API_BASE}/workspaces`, {
     method: "POST",

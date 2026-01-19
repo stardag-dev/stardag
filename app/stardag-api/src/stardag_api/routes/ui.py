@@ -50,6 +50,7 @@ class WorkspaceSummary(BaseModel):
     name: str
     slug: str
     role: WorkspaceRole
+    is_personal: bool = False
 
 
 class UserProfileWithWorkspacesResponse(BaseModel):
@@ -98,6 +99,7 @@ async def get_current_user_profile(
             name=ws.name,
             slug=ws.slug,
             role=membership.role,
+            is_personal=ws.is_personal,
         )
         for membership, ws in memberships
     ]

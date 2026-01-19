@@ -1,5 +1,6 @@
 import abc
 import contextlib
+import os
 import shutil
 import tempfile
 import typing
@@ -311,7 +312,8 @@ class LocalTarget(FileSystemTarget):
     """TODO use luigi-style atomic writes."""
 
     def __init__(self, uri: str) -> None:
-        self.uri = uri
+        # Expand ~ to user home directory
+        self.uri = os.path.expanduser(uri)
 
     @property
     def path(self) -> Path:

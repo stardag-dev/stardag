@@ -97,19 +97,26 @@ export function OnboardingModal() {
   // Determine what to show
   const hasInvites = invites.length > 0;
   const hasWorkspaces = workspaces.length > 0;
+  const hasOnlyPersonalWorkspace =
+    hasWorkspaces && workspaces.length === 1 && workspaces[0].is_personal === true;
 
-  // If user has workspaces and no invites, nothing to prompt
-  if (hasWorkspaces && !hasInvites) {
+  // If user has workspaces (not just personal) and no invites, nothing to prompt
+  if (hasWorkspaces && !hasOnlyPersonalWorkspace && !hasInvites) {
     return null;
   }
 
-  // If user has workspaces and dismissed, don't show
-  // But if user has NO workspaces, always show (blocking) - they must create or join one
-  if (hasWorkspaces && dismissed) {
+  // If user has workspaces (not just personal) and dismissed, don't show
+  if (hasWorkspaces && !hasOnlyPersonalWorkspace && dismissed) {
+    return null;
+  }
+
+  // If user has only personal workspace and dismissed, don't show
+  if (hasOnlyPersonalWorkspace && dismissed) {
     return null;
   }
 
   // Determine if modal should be blocking (no dismiss option)
+  // Users with only personal workspaces can dismiss (they have a workspace to use)
   const isBlocking = !hasWorkspaces;
 
   // Show pending invites modal
@@ -191,6 +198,67 @@ export function OnboardingModal() {
                 Decide Later
               </button>
             )}
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  // Show welcome modal for users with only a personal workspace
+  if (hasOnlyPersonalWorkspace && !hasInvites) {
+    const personalWorkspace = workspaces[0];
+    return (
+      <Modal
+        isOpen={true}
+        onClose={handleDismiss}
+        title="Welcome to Stardag!"
+        closeOnOverlay={false}
+        showCloseButton={true}
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            A personal workspace &quot;{personalWorkspace.name}&quot; has been created
+            for you with a &quot;local&quot; environment. This is your space to explore
+            Stardag.
+          </p>
+
+          <div className="flex flex-col gap-2 py-2">
+            <a
+              href="https://docs.stardag.com/getting-started"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Getting Started Guide
+            </a>
+            <a
+              href="https://docs.stardag.com/concepts/workspaces"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              About Workspaces
+            </a>
+          </div>
+
+          <p className="text-xs text-gray-500 dark:text-gray-500">
+            You can{" "}
+            <button
+              onClick={navigateToCreateWorkspace}
+              className="text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              create additional workspaces
+            </button>{" "}
+            later to collaborate with others.
+          </p>
+
+          <div className="flex justify-end pt-2 border-t border-gray-200 dark:border-gray-700">
+            <button
+              onClick={handleDismiss}
+              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Get Started
+            </button>
           </div>
         </div>
       </Modal>
