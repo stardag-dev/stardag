@@ -90,9 +90,6 @@ export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
-  // Personal environments collapsed state
-  const [showPersonalEnvironments, setShowPersonalEnvironments] = useState(false);
-
   const isAdmin = activeWorkspaceRole === "owner" || activeWorkspaceRole === "admin";
   const isOwner = activeWorkspaceRole === "owner";
 
@@ -654,7 +651,7 @@ export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
         {/* Environments */}
         <section className="mb-8 rounded-lg bg-white dark:bg-gray-800 p-6 shadow">
           <h2 className="mb-4 text-lg font-semibold text-gray-900 dark:text-gray-100">
-            Environments ({environmentsList.filter((env) => !env.owner_id).length})
+            Environments ({environmentsList.length})
           </h2>
 
           {/* Create environment form */}
@@ -696,110 +693,67 @@ export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
             </form>
           )}
 
-          {/* Shared environments list */}
+          {/* Environments list */}
           <div className="divide-y divide-gray-200 dark:divide-gray-700">
-            {environmentsList
-              .filter((env) => !env.owner_id)
-              .map((env) => (
-                <div key={env.id} className="flex items-center justify-between py-3">
-                  <div className="flex-1">
-                    {editingEnvironment === env.id ? (
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={editEnvironmentName}
-                          onChange={(e) => setEditEnvironmentName(e.target.value)}
-                          className="flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-gray-900 dark:text-gray-100"
-                        />
-                        <button
-                          onClick={() => handleUpdateEnvironment(env.id)}
-                          className="text-blue-600 hover:text-blue-800 dark:text-blue-400"
-                        >
-                          Save
-                        </button>
-                        <button
-                          onClick={() => setEditingEnvironment(null)}
-                          className="text-gray-500 hover:text-gray-700 dark:text-gray-400"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="font-medium text-gray-900 dark:text-gray-100">
-                          {env.name}
-                        </div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400">
-                          /{env.slug}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  {isAdmin && editingEnvironment !== env.id && (
+            {environmentsList.map((env) => (
+              <div key={env.id} className="flex items-center justify-between py-3">
+                <div className="flex-1">
+                  {editingEnvironment === env.id ? (
                     <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={editEnvironmentName}
+                        onChange={(e) => setEditEnvironmentName(e.target.value)}
+                        className="flex-1 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2 py-1 text-gray-900 dark:text-gray-100"
+                      />
                       <button
-                        onClick={() => {
-                          setEditingEnvironment(env.id);
-                          setEditEnvironmentName(env.name);
-                        }}
-                        className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+                        onClick={() => handleUpdateEnvironment(env.id)}
+                        className="text-blue-600 hover:text-blue-800 dark:text-blue-400"
                       >
-                        Edit
+                        Save
                       </button>
-                      {environmentsList.filter((e) => !e.owner_id).length > 1 && (
-                        <button
-                          onClick={() => handleDeleteEnvironment(env.id)}
-                          className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
-                        >
-                          Delete
-                        </button>
-                      )}
+                      <button
+                        onClick={() => setEditingEnvironment(null)}
+                        className="text-gray-500 hover:text-gray-700 dark:text-gray-400"
+                      >
+                        Cancel
+                      </button>
                     </div>
+                  ) : (
+                    <>
+                      <div className="font-medium text-gray-900 dark:text-gray-100">
+                        {env.name}
+                      </div>
+                      <div className="text-sm text-gray-500 dark:text-gray-400">
+                        /{env.slug}
+                      </div>
+                    </>
                   )}
                 </div>
-              ))}
-          </div>
-
-          {/* Personal environments (collapsed) */}
-          {environmentsList.filter((env) => env.owner_id).length > 0 && (
-            <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
-              <button
-                onClick={() => setShowPersonalEnvironments(!showPersonalEnvironments)}
-                className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
-              >
-                <span
-                  className={`transform transition-transform ${
-                    showPersonalEnvironments ? "rotate-90" : ""
-                  }`}
-                >
-                  ▶
-                </span>
-                Personal environments (
-                {environmentsList.filter((env) => env.owner_id).length})
-              </button>
-              {showPersonalEnvironments && (
-                <div className="mt-2 ml-4 divide-y divide-gray-200 dark:divide-gray-700">
-                  {environmentsList
-                    .filter((env) => env.owner_id)
-                    .map((env) => (
-                      <div
-                        key={env.id}
-                        className="flex items-center justify-between py-2"
+                {isAdmin && editingEnvironment !== env.id && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setEditingEnvironment(env.id);
+                        setEditEnvironmentName(env.name);
+                      }}
+                      className="text-gray-600 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+                    >
+                      Edit
+                    </button>
+                    {environmentsList.length > 1 && (
+                      <button
+                        onClick={() => handleDeleteEnvironment(env.id)}
+                        className="text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300"
                       >
-                        <div className="flex-1">
-                          <div className="font-medium text-gray-900 dark:text-gray-100 text-sm">
-                            {env.name}
-                          </div>
-                          <div className="text-xs text-gray-500 dark:text-gray-400">
-                            /{env.slug}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-              )}
-            </div>
-          )}
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </section>
 
         {/* API Keys */}
@@ -816,16 +770,19 @@ export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
             {/* Create key form */}
             <form
               onSubmit={handleCreateApiKey}
-              className="mb-6 flex flex-wrap gap-2 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+              className="mb-6 flex flex-wrap gap-2 items-center p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
             >
               <select
                 value={newKeyEnvironment}
                 onChange={(e) => setNewKeyEnvironment(e.target.value)}
                 className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
               >
+                <option value="" disabled>
+                  Environment
+                </option>
                 {environmentsList.map((env) => (
                   <option key={env.id} value={env.id}>
-                    {env.name}
+                    {env.name} (/{env.slug})
                   </option>
                 ))}
               </select>
@@ -893,11 +850,14 @@ export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
                   <div key={env.id}>
                     {/* Environment header */}
                     <div className="flex items-center gap-2 mb-3">
-                      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
+                      <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                        Environment:
+                      </span>
+                      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
                         {env.name}
                       </h3>
                       <span className="text-xs text-gray-500 dark:text-gray-400">
-                        /{env.slug}
+                        (/{env.slug})
                       </span>
                       <div className="flex-1 border-t border-gray-200 dark:border-gray-700 ml-2" />
                     </div>
@@ -964,16 +924,19 @@ export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
             {/* Create new target root form */}
             <form
               onSubmit={handleCreateTargetRoot}
-              className="mb-6 flex flex-wrap gap-2 p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
+              className="mb-6 flex flex-wrap gap-2 items-center p-4 bg-gray-50 dark:bg-gray-700/50 rounded-lg"
             >
               <select
                 value={newRootEnvironment}
                 onChange={(e) => setNewRootEnvironment(e.target.value)}
                 className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-gray-100"
               >
+                <option value="" disabled>
+                  Environment
+                </option>
                 {environmentsList.map((env) => (
                   <option key={env.id} value={env.id}>
-                    {env.name}
+                    {env.name} (/{env.slug})
                   </option>
                 ))}
               </select>
@@ -1010,11 +973,14 @@ export function WorkspaceSettings({ onNavigate }: WorkspaceSettingsProps) {
                   <div key={env.id}>
                     {/* Environment header */}
                     <div className="flex items-center gap-2 mb-3">
-                      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
+                      <span className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                        Environment:
+                      </span>
+                      <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
                         {env.name}
                       </h3>
                       <span className="text-xs text-gray-500 dark:text-gray-400">
-                        /{env.slug}
+                        (/{env.slug})
                       </span>
                       <div className="flex-1 border-t border-gray-200 dark:border-gray-700 ml-2" />
                     </div>

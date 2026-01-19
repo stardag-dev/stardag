@@ -35,9 +35,9 @@ import os
 import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -484,15 +484,27 @@ class TomlConfig(BaseModel):
         return cls(registry=registries, profile=profiles, default=default)
 
 
+def _expand_tilde_in_roots(roots: dict[str, str]) -> dict[str, str]:
+    """Expand ~ to user home directory in target root paths."""
+    return {
+        name: os.path.expanduser(uri) if uri.startswith("~/") else uri
+        for name, uri in roots.items()
+    }
+
+
+TargetRoots = Annotated[dict[str, str], AfterValidator(_expand_tilde_in_roots)]
+
+
 class TargetConfig(BaseModel):
     """Target factory configuration.
 
     Attributes:
         roots: Mapping of target root names to URI prefixes.
             Example: {"default": "/path/to/root", "s3": "s3://bucket/prefix"}
+            Paths starting with ~/ are automatically expanded to the user's home directory.
     """
 
-    roots: dict[str, str] = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
+    roots: TargetRoots = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
 
 
 class APIConfig(BaseModel):

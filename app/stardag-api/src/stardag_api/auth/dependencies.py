@@ -94,7 +94,6 @@ async def create_personal_workspace_for_user(db: AsyncSession, user: User) -> Wo
         name="Local",
         slug="local",
         description="Local development environment",
-        owner_id=user.id,
     )
     db.add(environment)
     await db.flush()
