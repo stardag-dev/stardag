@@ -41,14 +41,19 @@ class WorkspaceCreate(BaseModel):
     name: str
     slug: str
     description: str | None = None
+    # Optional fields for shared workspace setup
+    initial_environment_name: str | None = None  # Default: "Default"
+    initial_environment_slug: str | None = None  # Default: "default"
+    initial_target_root_name: str | None = None
+    initial_target_root_uri: str | None = None
 
     @field_validator("slug")
     @classmethod
     def validate_slug(cls, v: str) -> str:
-        if not re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$", v):
+        if not re.match(r"^[a-z0-9][a-z0-9_-]*[a-z0-9]$|^[a-z0-9]$", v):
             raise ValueError(
-                "Slug must be lowercase alphanumeric with hyphens, "
-                "cannot start or end with hyphen"
+                "Slug must be lowercase alphanumeric with hyphens or underscores, "
+                "cannot start or end with hyphen or underscore"
             )
         if len(v) < 2 or len(v) > 64:
             raise ValueError("Slug must be between 2 and 64 characters")
@@ -71,6 +76,7 @@ class WorkspaceResponse(BaseModel):
     name: str
     slug: str
     description: str | None
+    is_personal: bool = False
 
 
 class WorkspaceDetailResponse(WorkspaceResponse):
@@ -127,10 +133,10 @@ class EnvironmentCreate(BaseModel):
     @field_validator("slug")
     @classmethod
     def validate_slug(cls, v: str) -> str:
-        if not re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$", v):
+        if not re.match(r"^[a-z0-9][a-z0-9_-]*[a-z0-9]$|^[a-z0-9]$", v):
             raise ValueError(
-                "Slug must be lowercase alphanumeric with hyphens, "
-                "cannot start or end with hyphen"
+                "Slug must be lowercase alphanumeric with hyphens or underscores, "
+                "cannot start or end with hyphen or underscore"
             )
         if len(v) < 2 or len(v) > 64:
             raise ValueError("Slug must be between 2 and 64 characters")
@@ -158,54 +164,6 @@ class EnvironmentResponse(BaseModel):
 
 
 # --- Helper functions ---
-
-
-def generate_personal_environment_slug(email: str, suffix: int = 0) -> str:
-    """Generate a personal environment slug from email.
-
-    Format: personal-{email_prefix} or personal-{email_prefix}-{suffix}
-    """
-    email_prefix = email.split("@")[0].lower()
-    # Clean up for slug: only alphanumeric and hyphens
-    clean_prefix = re.sub(r"[^a-z0-9]+", "-", email_prefix).strip("-")[:40]
-    if suffix > 0:
-        return f"personal-{clean_prefix}-{suffix}"
-    return f"personal-{clean_prefix}"
-
-
-async def create_personal_environment(
-    db: AsyncSession, workspace_id: str, user: User
-) -> Environment:
-    """Create a personal environment for a user in a workspace.
-
-    Ensures unique slug by appending numeric suffix if needed.
-    """
-    base_slug = generate_personal_environment_slug(user.email)
-
-    # Check for existing slugs and find unique one
-    suffix = 0
-    slug = base_slug
-    while True:
-        existing = await db.execute(
-            select(Environment).where(
-                Environment.workspace_id == workspace_id,
-                Environment.slug == slug,
-            )
-        )
-        if not existing.scalar_one_or_none():
-            break
-        suffix += 1
-        slug = generate_personal_environment_slug(user.email, suffix)
-
-    environment = Environment(
-        workspace_id=workspace_id,
-        name=f"Personal ({user.email.split('@')[0]})",
-        slug=slug,
-        description=f"Personal environment for {user.email}",
-        owner_id=user.id,
-    )
-    db.add(environment)
-    return environment
 
 
 async def get_user_membership(
@@ -291,6 +249,7 @@ async def create_workspace(
         slug=data.slug,
         description=data.description,
         created_by_id=current_user.id,
+        is_personal=False,  # Explicitly not personal (user-created shared workspace)
     )
     db.add(workspace)
     await db.flush()
@@ -303,17 +262,26 @@ async def create_workspace(
     )
     db.add(membership)
 
-    # Create default environment
+    # Create initial environment (using provided names or defaults)
+    env_name = data.initial_environment_name or "Default"
+    env_slug = data.initial_environment_slug or "default"
     environment = Environment(
         workspace_id=workspace.id,
-        name="Default",
-        slug="default",
-        description="Default environment",
+        name=env_name,
+        slug=env_slug,
+        description=f"{env_name} environment",
     )
     db.add(environment)
+    await db.flush()
 
-    # Create personal environment for the creator
-    await create_personal_environment(db, workspace.id, current_user)
+    # Create initial target root if provided
+    if data.initial_target_root_name and data.initial_target_root_uri:
+        target_root = TargetRoot(
+            environment_id=environment.id,
+            name=data.initial_target_root_name,
+            uri_prefix=data.initial_target_root_uri,
+        )
+        db.add(target_root)
 
     await db.commit()
     await db.refresh(workspace)
@@ -581,6 +549,17 @@ async def create_invite(
         db, current_user.id, workspace_id, min_role=WorkspaceRole.ADMIN
     )
 
+    # Check if workspace is personal (no invites allowed)
+    workspace_result = await db.execute(
+        select(Workspace).where(Workspace.id == workspace_id)
+    )
+    workspace = workspace_result.scalar_one_or_none()
+    if workspace and workspace.is_personal:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot invite members to a personal workspace",
+        )
+
     # Check if user is already a member
     existing_user = await db.execute(select(User).where(User.email == data.email))
     user = existing_user.scalar_one_or_none()
@@ -686,9 +665,6 @@ async def accept_invite(
         role=invite.role,
     )
     db.add(membership)
-
-    # Create personal environment for the new member
-    await create_personal_environment(db, invite.workspace_id, current_user)
 
     invite.status = InviteStatus.ACCEPTED
     await db.commit()

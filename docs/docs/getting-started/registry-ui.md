@@ -6,7 +6,7 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
 
 === "stardag.com (Managed)"
 
-    Go to [app.stardag.com](https://app.stardag.com), click and [Sign In] or [Get Started] and complete the signup.
+    Go to [app.stardag.com](https://app.stardag.com) and click [Sign In] or [Get Started] and complete the signup.
 
     When signing up, an new personal **Workspace** with one **Environment** (`main`, unless you picked another name) will have been created for you.
 

@@ -942,3 +942,233 @@ async def test_create_target_root_duplicate_name(
         assert "existing-name" in data["detail"]
     finally:
         app.dependency_overrides.clear()
+
+
+# --- Personal Workspace tests ---
+
+
+@pytest.mark.asyncio
+async def test_cannot_invite_to_personal_workspace(async_engine):
+    """Test that invites to personal workspaces are rejected."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    # Create a user with a personal workspace
+    async with async_session_maker() as session:
+        user = User(
+            external_id="personal-ws-user",
+            email="personalws@example.com",
+            display_name="Personal WS User",
+        )
+        session.add(user)
+        await session.flush()
+
+        personal_workspace = Workspace(
+            name="Personal Workspace",
+            slug="personal-workspace",
+            is_personal=True,
+            created_by_id=user.id,
+        )
+        session.add(personal_workspace)
+        await session.flush()
+
+        membership = WorkspaceMember(
+            workspace_id=personal_workspace.id,
+            user_id=user.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(membership)
+        await session.commit()
+        await session.refresh(user)
+        await session.refresh(personal_workspace)
+
+    mock_token = _create_mock_internal_token(
+        user_id=user.id,
+        workspace_id=personal_workspace.id,
+    )
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/ui/workspaces/{personal_workspace.id}/invites",
+                json={
+                    "email": "invited@example.com",
+                    "role": "member",
+                },
+            )
+
+        assert response.status_code == 403
+        data = response.json()
+        assert "personal workspace" in data["detail"].lower()
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_create_workspace_with_underscores_in_slug(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test creating a workspace with underscores in slug."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return test_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/v1/ui/workspaces",
+                json={
+                    "name": "Underscore Workspace",
+                    "slug": "my_workspace_123",
+                    "description": "Workspace with underscores",
+                },
+            )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["slug"] == "my_workspace_123"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_create_workspace_with_initial_environment_and_target_root(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test creating a workspace with initial environment and target root."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return test_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/v1/ui/workspaces",
+                json={
+                    "name": "Full Setup Workspace",
+                    "slug": "full-setup-workspace",
+                    "description": "Workspace with all setup",
+                    "initial_environment_name": "Production",
+                    "initial_environment_slug": "production",
+                    "initial_target_root_name": "default",
+                    "initial_target_root_uri": "s3://my-bucket/stardag/",
+                },
+            )
+
+        assert response.status_code == 201
+        data = response.json()
+        assert data["slug"] == "full-setup-workspace"
+        workspace_id = data["id"]
+
+        # Verify the environment and target root were created
+        # Create a token for this new workspace
+        mock_token = _create_mock_internal_token(
+            user_id=test_user.id,
+            workspace_id=workspace_id,
+        )
+
+        async def override_get_token():
+            return mock_token
+
+        app.dependency_overrides[get_token] = override_get_token
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # Check environments
+            response = await client.get(
+                f"/api/v1/ui/workspaces/{workspace_id}/environments"
+            )
+            assert response.status_code == 200
+            envs = response.json()
+            # Should have the "production" environment and a personal environment
+            env_slugs = [e["slug"] for e in envs]
+            assert "production" in env_slugs
+
+            # Find the production environment
+            prod_env = next(e for e in envs if e["slug"] == "production")
+
+            # Check target roots in production environment
+            response = await client.get(
+                f"/api/v1/ui/workspaces/{workspace_id}/environments/{prod_env['id']}/target-roots"
+            )
+            assert response.status_code == 200
+            roots = response.json()
+            assert len(roots) == 1
+            assert roots[0]["name"] == "default"
+            assert roots[0]["uri_prefix"] == "s3://my-bucket/stardag/"
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_workspace_response_includes_is_personal(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test that workspace response includes is_personal field."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        workspace_id=test_workspace_with_owner.id,
+    )
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get(
+                f"/api/v1/ui/workspaces/{test_workspace_with_owner.id}"
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        # The test workspace is not personal by default
+        assert "is_personal" not in data or data.get("is_personal") is False
+    finally:
+        app.dependency_overrides.clear()
