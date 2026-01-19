@@ -42,7 +42,7 @@ export interface Environment {
   name: string;
   slug: string;
   description: string | null;
-  owner_id: string | null; // Non-null for personal environments
+  owner_id: string | null; // Deprecated: was used for personal environments
 }
 
 export interface Member {

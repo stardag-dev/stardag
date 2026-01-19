@@ -21,6 +21,30 @@ def test_local_target_expands_tilde():
     assert not target.uri.startswith("~")
 
 
+def test_target_config_expands_tilde():
+    """Test that TargetConfig expands ~ in target root paths."""
+    from stardag.config import TargetConfig
+
+    config = TargetConfig(
+        roots={
+            "local": "~/.stardag/local-target-roots/default",
+            "s3": "s3://my-bucket/prefix",
+            "absolute": "/absolute/path",
+        }
+    )
+
+    # ~ should be expanded in local path
+    assert config.roots["local"] == os.path.expanduser(
+        "~/.stardag/local-target-roots/default"
+    )
+    assert config.roots["local"].startswith(str(Path.home()))
+    assert not config.roots["local"].startswith("~")
+
+    # Non-tilde paths should remain unchanged
+    assert config.roots["s3"] == "s3://my-bucket/prefix"
+    assert config.roots["absolute"] == "/absolute/path"
+
+
 def test_local_target(tmp_path: Path):
     target = LocalTarget(str(tmp_path / "test.txt"))
     assert not target.exists()

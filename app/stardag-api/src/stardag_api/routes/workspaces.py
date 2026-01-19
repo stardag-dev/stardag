@@ -160,7 +160,7 @@ class EnvironmentResponse(BaseModel):
     name: str
     slug: str
     description: str | None
-    owner_id: str | None = None  # Non-null for personal environments
+    owner_id: str | None = None  # Deprecated: was used for personal environments
 
 
 # --- Helper functions ---
