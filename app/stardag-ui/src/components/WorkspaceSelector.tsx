@@ -115,6 +115,10 @@ export function WorkspaceSelector() {
     );
   }
 
+  // Count workspaces where user is owner (limit is 3)
+  const ownedWorkspacesCount = workspaces.filter((w) => w.role === "owner").length;
+  const canCreateWorkspace = ownedWorkspacesCount < 3;
+
   // Get first letter of workspace name for avatar
   const workspaceInitial = activeWorkspace?.name.charAt(0).toUpperCase() || "?";
 
@@ -274,29 +278,54 @@ export function WorkspaceSelector() {
 
           {/* Actions */}
           <div className="py-2">
-            <button
-              onClick={() => {
-                setIsOpen(false);
-                window.history.pushState({}, "", "/workspaces/new");
-                window.dispatchEvent(new PopStateEvent("popstate"));
-              }}
-              className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm text-blue-600 dark:text-blue-400 hover:bg-gray-100 dark:hover:bg-gray-700"
-            >
-              <svg
-                className="h-5 w-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
+            {canCreateWorkspace ? (
+              <button
+                onClick={() => {
+                  setIsOpen(false);
+                  window.history.pushState({}, "", "/workspaces/new");
+                  window.dispatchEvent(new PopStateEvent("popstate"));
+                }}
+                className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm text-blue-600 dark:text-blue-400 hover:bg-gray-100 dark:hover:bg-gray-700"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 4v16m8-8H4"
-                />
-              </svg>
-              Create New Workspace
-            </button>
+                <svg
+                  className="h-5 w-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 4v16m8-8H4"
+                  />
+                </svg>
+                Create New Workspace
+              </button>
+            ) : (
+              <div className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400">
+                <div className="flex items-center gap-3">
+                  <svg
+                    className="h-5 w-5 text-gray-400"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 4v16m8-8H4"
+                    />
+                  </svg>
+                  <span>Workspace limit reached</span>
+                </div>
+                <p className="mt-1 ml-8 text-xs">
+                  You&apos;ve created {ownedWorkspacesCount} workspaces (max 3). Delete
+                  an existing workspace to create a new one.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
