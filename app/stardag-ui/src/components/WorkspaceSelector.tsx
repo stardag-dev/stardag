@@ -139,6 +139,12 @@ export function WorkspaceSelector() {
           {isExchangingToken && (
             <div className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white dark:border-gray-800 bg-yellow-400 animate-pulse" />
           )}
+          {/* Pending invites notification badge */}
+          {!isExchangingToken && pendingInvites.length > 0 && (
+            <div className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border-2 border-white dark:border-gray-800 bg-orange-500 text-[10px] font-bold text-white">
+              {pendingInvites.length > 9 ? "9+" : pendingInvites.length}
+            </div>
+          )}
         </div>
 
         {/* Workspace and environment name */}
