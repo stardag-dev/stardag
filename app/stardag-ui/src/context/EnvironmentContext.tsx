@@ -176,6 +176,11 @@ export function EnvironmentProvider({ children }: EnvironmentProviderProps) {
           } else {
             localStorage.removeItem(STORAGE_KEY_ENVIRONMENT);
           }
+
+          // Navigate to home page when switching workspaces to avoid
+          // "not found" errors from workspace-specific resources (builds, tasks, etc.)
+          window.history.pushState({}, "", "/");
+          window.dispatchEvent(new PopStateEvent("popstate"));
         } catch (error) {
           console.error("Failed to load environments:", error);
           setEnvironments([]);
