@@ -46,6 +46,32 @@ export async function fetchWithAuth(
   });
 }
 
+// Fetch wrapper for bootstrap/user-level endpoints that always use OIDC ID token
+// Use this for endpoints like /me, /me/invites that don't require workspace-scoped tokens
+export async function fetchWithBootstrapAuth(
+  url: string,
+  options: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(options.headers);
+
+  // Always use OIDC ID token (pass null for workspaceId)
+  if (getAccessTokenFn) {
+    try {
+      const token = await getAccessTokenFn(null);
+      if (token) {
+        headers.set("Authorization", `Bearer ${token}`);
+      }
+    } catch (error) {
+      console.warn("Failed to get bootstrap access token:", error);
+    }
+  }
+
+  return fetch(url, {
+    ...options,
+    headers,
+  });
+}
+
 // Fetch with explicit workspace ID (for cases where you need a specific workspace's token)
 export async function fetchWithWorkspaceAuth(
   url: string,
