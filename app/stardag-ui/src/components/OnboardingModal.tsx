@@ -97,8 +97,14 @@ export function OnboardingModal() {
   // Determine what to show
   const hasInvites = invites.length > 0;
   const hasWorkspaces = workspaces.length > 0;
+  // Check for personal workspace - either explicitly marked or effectively personal
+  // (single workspace where user is owner with is_personal undefined - for backwards
+  // compatibility with data created before is_personal field was added)
   const hasOnlyPersonalWorkspace =
-    hasWorkspaces && workspaces.length === 1 && workspaces[0].is_personal === true;
+    hasWorkspaces &&
+    workspaces.length === 1 &&
+    workspaces[0].role === "owner" &&
+    workspaces[0].is_personal !== false;
 
   // Count workspaces where user is owner (limit is 3)
   const ownedWorkspacesCount = workspaces.filter((w) => w.role === "owner").length;
@@ -123,7 +129,135 @@ export function OnboardingModal() {
   // Users with only personal workspaces can dismiss (they have a workspace to use)
   const isBlocking = !hasWorkspaces;
 
-  // Show pending invites modal
+  // Show welcome modal for users with only a personal workspace (with or without invites)
+  if (hasOnlyPersonalWorkspace) {
+    const personalWorkspace = workspaces[0];
+    return (
+      <Modal
+        isOpen={true}
+        onClose={handleDismiss}
+        title="Welcome to Stardag!"
+        closeOnOverlay={false}
+        showCloseButton={true}
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            A personal workspace &quot;{personalWorkspace.name}&quot; has been created
+            for you with a &quot;local&quot; environment. This is your space to explore
+            Stardag.
+          </p>
+
+          {/* Show pending invites if any */}
+          {hasInvites && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-orange-500" />
+                <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                  You have {invites.length} pending invitation
+                  {invites.length > 1 ? "s" : ""}
+                </h3>
+              </div>
+
+              {error && (
+                <div className="rounded-md bg-red-50 dark:bg-red-900/30 p-3 text-sm text-red-700 dark:text-red-300">
+                  {error}
+                </div>
+              )}
+
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {invites.map((invite) => (
+                  <div
+                    key={invite.id}
+                    className="rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-medium text-gray-900 dark:text-gray-100 truncate">
+                          {invite.workspace_name}
+                        </h4>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          Role: <span className="capitalize">{invite.role}</span>
+                          {invite.invited_by_email && (
+                            <> &middot; From: {invite.invited_by_email}</>
+                          )}
+                        </p>
+                      </div>
+                      <div className="flex gap-2 shrink-0">
+                        <button
+                          onClick={() => handleAccept(invite.id)}
+                          disabled={actionLoading === invite.id}
+                          className="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                        >
+                          {actionLoading === invite.id ? "..." : "Accept"}
+                        </button>
+                        <button
+                          onClick={() => handleDecline(invite.id)}
+                          disabled={actionLoading === invite.id}
+                          className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-2.5 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 disabled:opacity-50"
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Show helpful links only if no invites */}
+          {!hasInvites && (
+            <div className="flex flex-col gap-2 py-2">
+              <a
+                href="https://docs.stardag.com/getting-started"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                Getting Started Guide
+              </a>
+              <a
+                href="https://docs.stardag.com/concepts/workspaces"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                About Workspaces
+              </a>
+            </div>
+          )}
+
+          {canCreateWorkspace ? (
+            <p className="text-xs text-gray-500 dark:text-gray-500">
+              You can{" "}
+              <button
+                onClick={navigateToCreateWorkspace}
+                className="text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                create additional workspaces
+              </button>{" "}
+              later to collaborate with others.
+            </p>
+          ) : (
+            <p className="text-xs text-gray-500 dark:text-gray-500">
+              You&apos;ve reached the workspace limit ({ownedWorkspacesCount}/3).
+            </p>
+          )}
+
+          <div className="flex justify-end pt-2 border-t border-gray-200 dark:border-gray-700">
+            <button
+              onClick={handleDismiss}
+              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Get Started
+            </button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
+  // Show pending invites modal for users with multiple workspaces (non-personal)
   if (hasInvites) {
     return (
       <Modal
@@ -207,73 +341,6 @@ export function OnboardingModal() {
                 Decide Later
               </button>
             )}
-          </div>
-        </div>
-      </Modal>
-    );
-  }
-
-  // Show welcome modal for users with only a personal workspace
-  if (hasOnlyPersonalWorkspace && !hasInvites) {
-    const personalWorkspace = workspaces[0];
-    return (
-      <Modal
-        isOpen={true}
-        onClose={handleDismiss}
-        title="Welcome to Stardag!"
-        closeOnOverlay={false}
-        showCloseButton={true}
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">
-            A personal workspace &quot;{personalWorkspace.name}&quot; has been created
-            for you with a &quot;local&quot; environment. This is your space to explore
-            Stardag.
-          </p>
-
-          <div className="flex flex-col gap-2 py-2">
-            <a
-              href="https://docs.stardag.com/getting-started"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-            >
-              Getting Started Guide
-            </a>
-            <a
-              href="https://docs.stardag.com/concepts/workspaces"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
-            >
-              About Workspaces
-            </a>
-          </div>
-
-          {canCreateWorkspace ? (
-            <p className="text-xs text-gray-500 dark:text-gray-500">
-              You can{" "}
-              <button
-                onClick={navigateToCreateWorkspace}
-                className="text-blue-600 dark:text-blue-400 hover:underline"
-              >
-                create additional workspaces
-              </button>{" "}
-              later to collaborate with others.
-            </p>
-          ) : (
-            <p className="text-xs text-gray-500 dark:text-gray-500">
-              You&apos;ve reached the workspace limit ({ownedWorkspacesCount}/3).
-            </p>
-          )}
-
-          <div className="flex justify-end pt-2 border-t border-gray-200 dark:border-gray-700">
-            <button
-              onClick={handleDismiss}
-              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-            >
-              Get Started
-            </button>
           </div>
         </div>
       </Modal>

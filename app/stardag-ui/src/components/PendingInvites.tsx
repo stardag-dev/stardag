@@ -79,17 +79,28 @@ export function PendingInvites({ compact = false }: PendingInvitesProps) {
           No Pending Invitations
         </h2>
         <p className="text-gray-500 dark:text-gray-400 mb-6">
-          You don't have any pending invitations to workspaces.
+          You don&apos;t have any pending invitations to workspaces.
         </p>
-        <button
-          onClick={() => {
-            window.history.pushState({}, "", "/workspaces/new");
-            window.dispatchEvent(new PopStateEvent("popstate"));
-          }}
-          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-        >
-          Create a Workspace
-        </button>
+        <div className="flex flex-col items-center gap-3">
+          <button
+            onClick={() => {
+              window.history.pushState({}, "", "/");
+              window.dispatchEvent(new PopStateEvent("popstate"));
+            }}
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+          >
+            Back to Dashboard
+          </button>
+          <button
+            onClick={() => {
+              window.history.pushState({}, "", "/workspaces/new");
+              window.dispatchEvent(new PopStateEvent("popstate"));
+            }}
+            className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 underline"
+          >
+            Create a New Workspace
+          </button>
+        </div>
       </div>
     );
   }

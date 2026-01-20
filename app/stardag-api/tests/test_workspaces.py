@@ -1655,3 +1655,234 @@ async def test_invite_flow_full_cycle(
         assert len(invites) == 0
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_personal_workspace_is_personal_flag_in_profile(async_engine):
+    """Test that /me returns is_personal=true for personal workspaces.
+
+    This is critical for the onboarding modal to display correctly for new users.
+    """
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    # Create a user with a personal workspace (simulating new user signup)
+    async with async_session_maker() as session:
+        user = User(
+            external_id="new-signup-user",
+            email="newsignup@example.com",
+            display_name="New Signup User",
+        )
+        session.add(user)
+        await session.flush()
+
+        # Create personal workspace (as would happen in auto-create)
+        personal_workspace = Workspace(
+            name="New Signup User's Workspace",
+            slug="new-signup-user-workspace",
+            is_personal=True,
+            created_by_id=user.id,
+        )
+        session.add(personal_workspace)
+        await session.flush()
+
+        membership = WorkspaceMember(
+            workspace_id=personal_workspace.id,
+            user_id=user.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(membership)
+
+        # Create local environment
+        environment = Environment(
+            workspace_id=personal_workspace.id,
+            name="Local",
+            slug="local",
+        )
+        session.add(environment)
+
+        await session.commit()
+        await session.refresh(user)
+
+    # Fetch profile as the new user
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/ui/me")
+
+        assert response.status_code == 200
+        data = response.json()
+
+        # Verify user info
+        assert data["user"]["email"] == "newsignup@example.com"
+
+        # Verify workspace info - MUST have is_personal=True
+        assert len(data["workspaces"]) == 1
+        workspace = data["workspaces"][0]
+        assert workspace["is_personal"] is True
+        assert workspace["role"] == "owner"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_new_user_with_personal_workspace_and_pending_invite(async_engine):
+    """Test the full onboarding flow: new user with personal workspace and pending invite.
+
+    This tests the scenario where:
+    1. An existing user invites someone to their workspace
+    2. The invitee signs up (gets auto-created personal workspace)
+    3. The invitee should see both their personal workspace AND the pending invite
+
+    This is the critical scenario for the onboarding modal.
+    """
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    # Step 1: Create an existing workspace owner who will invite someone
+    async with async_session_maker() as session:
+        owner = User(
+            external_id="workspace-owner",
+            email="owner@example.com",
+            display_name="Workspace Owner",
+        )
+        session.add(owner)
+        await session.flush()
+
+        team_workspace = Workspace(
+            name="Team Workspace",
+            slug="team-workspace",
+            is_personal=False,
+        )
+        session.add(team_workspace)
+        await session.flush()
+
+        owner_membership = WorkspaceMember(
+            workspace_id=team_workspace.id,
+            user_id=owner.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(owner_membership)
+
+        # Create an invite for a new user
+        from stardag_api.models import Invite, InviteStatus
+
+        invite = Invite(
+            workspace_id=team_workspace.id,
+            email="newbie@example.com",
+            role=WorkspaceRole.MEMBER,
+            invited_by_id=owner.id,
+            status=InviteStatus.PENDING,
+        )
+        session.add(invite)
+        await session.commit()
+        await session.refresh(invite)
+        invite_id = invite.id
+
+    # Step 2: New user signs up (simulated by creating user + personal workspace)
+    async with async_session_maker() as session:
+        newbie = User(
+            external_id="newbie-user",
+            email="newbie@example.com",
+            display_name="New User",
+        )
+        session.add(newbie)
+        await session.flush()
+
+        personal_workspace = Workspace(
+            name="New User's Workspace",
+            slug="new-user-workspace",
+            is_personal=True,
+            created_by_id=newbie.id,
+        )
+        session.add(personal_workspace)
+        await session.flush()
+
+        newbie_membership = WorkspaceMember(
+            workspace_id=personal_workspace.id,
+            user_id=newbie.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(newbie_membership)
+
+        # Create local environment
+        environment = Environment(
+            workspace_id=personal_workspace.id,
+            name="Local",
+            slug="local",
+        )
+        session.add(environment)
+
+        await session.commit()
+        await session.refresh(newbie)
+
+    # Step 3: Verify the new user sees their personal workspace with is_personal=True
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return newbie
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # Check profile - should have 1 personal workspace
+            response = await client.get("/api/v1/ui/me")
+            assert response.status_code == 200
+            profile = response.json()
+
+            assert len(profile["workspaces"]) == 1
+            assert profile["workspaces"][0]["is_personal"] is True
+            assert profile["workspaces"][0]["role"] == "owner"
+
+            # Check pending invites - should have 1 invite
+            response = await client.get("/api/v1/ui/me/invites")
+            assert response.status_code == 200
+            invites = response.json()
+
+            assert len(invites) == 1
+            assert invites[0]["workspace_name"] == "Team Workspace"
+            assert invites[0]["id"] == invite_id
+
+            # Accept the invite
+            response = await client.post(
+                f"/api/v1/ui/workspaces/invites/{invite_id}/accept"
+            )
+            assert response.status_code == 200
+
+            # Verify user now has 2 workspaces
+            response = await client.get("/api/v1/ui/me")
+            assert response.status_code == 200
+            profile = response.json()
+
+            assert len(profile["workspaces"]) == 2
+            workspace_names = {ws["name"] for ws in profile["workspaces"]}
+            assert "New User's Workspace" in workspace_names
+            assert "Team Workspace" in workspace_names
+
+            # Verify is_personal flags are correct
+            for ws in profile["workspaces"]:
+                if ws["name"] == "New User's Workspace":
+                    assert ws["is_personal"] is True
+                elif ws["name"] == "Team Workspace":
+                    assert ws["is_personal"] is False
+    finally:
+        app.dependency_overrides.clear()
