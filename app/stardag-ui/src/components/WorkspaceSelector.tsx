@@ -27,14 +27,14 @@ export function WorkspaceSelector() {
   const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  // Load pending invites when authenticated and no workspaces
+  // Load pending invites when authenticated (regardless of workspace count)
   useEffect(() => {
-    if (isAuthenticated && workspaces.length === 0 && !isLoading) {
+    if (isAuthenticated && !isLoading) {
       fetchPendingInvites()
         .then(setPendingInvites)
         .catch((err) => console.error("Failed to load invites:", err));
     }
-  }, [isAuthenticated, workspaces.length, isLoading]);
+  }, [isAuthenticated, isLoading]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -273,6 +273,38 @@ export function WorkspaceSelector() {
                     </div>
                   </button>
                 ))}
+            </div>
+          )}
+
+          {/* Pending Invites section */}
+          {pendingInvites.length > 0 && (
+            <div className="border-b border-gray-200 dark:border-gray-700 py-2">
+              <button
+                onClick={() => {
+                  setIsOpen(false);
+                  window.history.pushState({}, "", "/invites");
+                  window.dispatchEvent(new PopStateEvent("popstate"));
+                }}
+                className="flex w-full items-center gap-3 px-4 py-2 text-left text-sm text-orange-600 dark:text-orange-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <svg
+                  className="h-5 w-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                  />
+                </svg>
+                <span>
+                  {pendingInvites.length} pending invite
+                  {pendingInvites.length > 1 ? "s" : ""}
+                </span>
+              </button>
             </div>
           )}
 

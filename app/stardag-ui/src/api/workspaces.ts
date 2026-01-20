@@ -1,4 +1,4 @@
-import { fetchWithAuth } from "./client";
+import { fetchWithAuth, fetchWithBootstrapAuth } from "./client";
 import { API_V1_UI } from "./config";
 
 const API_BASE = API_V1_UI;
@@ -70,9 +70,10 @@ export interface PendingInvite {
 }
 
 // --- User Profile ---
+// These endpoints use OIDC ID token (bootstrap auth) since they're user-level, not workspace-scoped
 
 export async function fetchUserProfile(): Promise<UserProfile> {
-  const response = await fetchWithAuth(`${API_BASE}/me`);
+  const response = await fetchWithBootstrapAuth(`${API_BASE}/me`);
   if (!response.ok) {
     throw new Error(`Failed to fetch profile: ${response.statusText}`);
   }
@@ -80,7 +81,7 @@ export async function fetchUserProfile(): Promise<UserProfile> {
 }
 
 export async function fetchPendingInvites(): Promise<PendingInvite[]> {
-  const response = await fetchWithAuth(`${API_BASE}/me/invites`);
+  const response = await fetchWithBootstrapAuth(`${API_BASE}/me/invites`);
   if (!response.ok) {
     throw new Error(`Failed to fetch invites: ${response.statusText}`);
   }
@@ -292,8 +293,9 @@ export async function cancelInvite(
   }
 }
 
+// Accept/decline invites use bootstrap auth since user may not be in the workspace yet
 export async function acceptInvite(inviteId: string): Promise<Workspace> {
-  const response = await fetchWithAuth(
+  const response = await fetchWithBootstrapAuth(
     `${API_BASE}/workspaces/invites/${inviteId}/accept`,
     {
       method: "POST",
@@ -306,7 +308,7 @@ export async function acceptInvite(inviteId: string): Promise<Workspace> {
 }
 
 export async function declineInvite(inviteId: string): Promise<void> {
-  const response = await fetchWithAuth(
+  const response = await fetchWithBootstrapAuth(
     `${API_BASE}/workspaces/invites/${inviteId}/decline`,
     {
       method: "POST",

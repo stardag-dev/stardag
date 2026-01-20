@@ -1172,3 +1172,486 @@ async def test_workspace_response_includes_is_personal(
         assert "is_personal" not in data or data.get("is_personal") is False
     finally:
         app.dependency_overrides.clear()
+
+
+# --- Invite flow tests (bootstrap endpoints) ---
+
+
+@pytest.mark.asyncio
+async def test_fetch_pending_invites(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test fetching pending invites for a user via /me/invites endpoint.
+
+    This is a bootstrap endpoint that uses OIDC ID token (not workspace-scoped token).
+    """
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    # Create another user who will receive the invites
+    async with async_session_maker() as session:
+        invited_user = User(
+            external_id="invited-user-pending",
+            email="pendinguser@example.com",
+            display_name="Pending User",
+        )
+        session.add(invited_user)
+        await session.flush()
+
+        # Give them a personal workspace (as would happen on first login)
+        personal_workspace = Workspace(
+            name="Pending User's Workspace",
+            slug="pending-user-workspace",
+            is_personal=True,
+            created_by_id=invited_user.id,
+        )
+        session.add(personal_workspace)
+        await session.flush()
+
+        membership = WorkspaceMember(
+            workspace_id=personal_workspace.id,
+            user_id=invited_user.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(membership)
+
+        # Create two pending invites for this user
+        from stardag_api.models import Invite, InviteStatus
+
+        invite1 = Invite(
+            workspace_id=test_workspace_with_owner.id,
+            email=invited_user.email,
+            role=WorkspaceRole.MEMBER,
+            invited_by_id=test_user.id,
+            status=InviteStatus.PENDING,
+        )
+        session.add(invite1)
+
+        # Create another workspace with another invite
+        other_workspace = Workspace(
+            name="Other Workspace",
+            slug="other-workspace-invites",
+        )
+        session.add(other_workspace)
+        await session.flush()
+
+        other_owner = User(
+            external_id="other-owner",
+            email="other-owner@example.com",
+            display_name="Other Owner",
+        )
+        session.add(other_owner)
+        await session.flush()
+
+        other_membership = WorkspaceMember(
+            workspace_id=other_workspace.id,
+            user_id=other_owner.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(other_membership)
+
+        invite2 = Invite(
+            workspace_id=other_workspace.id,
+            email=invited_user.email,
+            role=WorkspaceRole.ADMIN,
+            invited_by_id=other_owner.id,
+            status=InviteStatus.PENDING,
+        )
+        session.add(invite2)
+
+        await session.commit()
+        await session.refresh(invited_user)
+
+    # Now fetch pending invites as the invited user (bootstrap endpoint)
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return invited_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/ui/me/invites")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 2
+
+        # Verify the invite data structure
+        workspace_names = {invite["workspace_name"] for invite in data}
+        assert "Test Workspace" in workspace_names
+        assert "Other Workspace" in workspace_names
+
+        # Check that each invite has the expected fields
+        for invite in data:
+            assert "id" in invite
+            assert "workspace_id" in invite
+            assert "workspace_name" in invite
+            assert "role" in invite
+            assert "invited_by_email" in invite
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_decline_invite(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test declining an invite via /invites/{id}/decline endpoint.
+
+    This is a bootstrap endpoint that uses OIDC ID token.
+    """
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    # Create user who will decline the invite
+    async with async_session_maker() as session:
+        declining_user = User(
+            external_id="declining-user",
+            email="declining@example.com",
+            display_name="Declining User",
+        )
+        session.add(declining_user)
+        await session.flush()
+
+        # Give them a personal workspace
+        personal_workspace = Workspace(
+            name="Declining User's Workspace",
+            slug="declining-user-workspace",
+            is_personal=True,
+            created_by_id=declining_user.id,
+        )
+        session.add(personal_workspace)
+        await session.flush()
+
+        membership = WorkspaceMember(
+            workspace_id=personal_workspace.id,
+            user_id=declining_user.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(membership)
+
+        from stardag_api.models import Invite, InviteStatus
+
+        invite = Invite(
+            workspace_id=test_workspace_with_owner.id,
+            email=declining_user.email,
+            role=WorkspaceRole.MEMBER,
+            invited_by_id=test_user.id,
+            status=InviteStatus.PENDING,
+        )
+        session.add(invite)
+        await session.commit()
+        await session.refresh(invite)
+        await session.refresh(declining_user)
+        invite_id = invite.id
+
+    # Decline the invite
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return declining_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/ui/workspaces/invites/{invite_id}/decline"
+            )
+
+        assert response.status_code == 204
+
+        # Verify there are no more pending invites
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/ui/me/invites")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 0
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_accept_invite_wrong_user(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test that a user cannot accept an invite meant for a different email."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    # Create an invite for one email
+    async with async_session_maker() as session:
+        from stardag_api.models import Invite, InviteStatus
+
+        invite = Invite(
+            workspace_id=test_workspace_with_owner.id,
+            email="specific@example.com",  # Invite is for this email
+            role=WorkspaceRole.MEMBER,
+            invited_by_id=test_user.id,
+            status=InviteStatus.PENDING,
+        )
+        session.add(invite)
+        await session.commit()
+        await session.refresh(invite)
+        invite_id = invite.id
+
+    # Create a different user who will try to accept
+    async with async_session_maker() as session:
+        wrong_user = User(
+            external_id="wrong-user",
+            email="different@example.com",  # Different email
+            display_name="Wrong User",
+        )
+        session.add(wrong_user)
+        await session.commit()
+        await session.refresh(wrong_user)
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return wrong_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/ui/workspaces/invites/{invite_id}/accept"
+            )
+
+        # Should be not found - invite is for a different email
+        # (The API returns 404 rather than 403 to not leak invite existence)
+        assert response.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_fetch_user_profile_with_workspaces(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test fetching user profile via /me endpoint.
+
+    This is a bootstrap endpoint that returns user info and workspace list.
+    """
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return test_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/ui/me")
+
+        assert response.status_code == 200
+        data = response.json()
+
+        # Check user info
+        assert "user" in data
+        assert data["user"]["email"] == test_user.email
+        assert data["user"]["id"] == test_user.id
+
+        # Check workspaces list
+        assert "workspaces" in data
+        assert len(data["workspaces"]) == 1
+        assert data["workspaces"][0]["name"] == "Test Workspace"
+        assert data["workspaces"][0]["role"] == "owner"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_invite_flow_full_cycle(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """Test the complete invite flow: create invite, fetch pending, accept.
+
+    This tests the full cycle that a user goes through when being invited.
+    """
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    # Step 1: Owner creates an invite (workspace-scoped endpoint)
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        workspace_id=test_workspace_with_owner.id,
+    )
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/ui/workspaces/{test_workspace_with_owner.id}/invites",
+                json={
+                    "email": "newmember@example.com",
+                    "role": "member",
+                },
+            )
+        assert response.status_code == 201
+        invite_data = response.json()
+        invite_id = invite_data["id"]
+    finally:
+        app.dependency_overrides.clear()
+
+    # Step 2: New user signs up and gets a personal workspace
+    async with async_session_maker() as session:
+        new_user = User(
+            external_id="new-member-user",
+            email="newmember@example.com",  # Matches the invite
+            display_name="New Member",
+        )
+        session.add(new_user)
+        await session.flush()
+
+        # Auto-created personal workspace
+        personal_workspace = Workspace(
+            name="New Member's Workspace",
+            slug="new-member-workspace",
+            is_personal=True,
+            created_by_id=new_user.id,
+        )
+        session.add(personal_workspace)
+        await session.flush()
+
+        personal_membership = WorkspaceMember(
+            workspace_id=personal_workspace.id,
+            user_id=new_user.id,
+            role=WorkspaceRole.OWNER,
+        )
+        session.add(personal_membership)
+        await session.commit()
+        await session.refresh(new_user)
+
+    # Step 3: New user fetches their pending invites (bootstrap endpoint)
+    async def override_get_current_user_flexible():
+        return new_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/ui/me/invites")
+
+        assert response.status_code == 200
+        invites = response.json()
+        assert len(invites) == 1
+        assert invites[0]["workspace_name"] == "Test Workspace"
+        assert invites[0]["id"] == invite_id
+    finally:
+        app.dependency_overrides.clear()
+
+    # Step 4: New user accepts the invite (bootstrap endpoint)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                f"/api/v1/ui/workspaces/invites/{invite_id}/accept"
+            )
+
+        assert response.status_code == 200
+        workspace_data = response.json()
+        assert workspace_data["id"] == test_workspace_with_owner.id
+    finally:
+        app.dependency_overrides.clear()
+
+    # Step 5: Verify user now has access to both workspaces via /me
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/ui/me")
+
+        assert response.status_code == 200
+        profile = response.json()
+        assert len(profile["workspaces"]) == 2
+
+        workspace_names = {ws["name"] for ws in profile["workspaces"]}
+        assert "New Member's Workspace" in workspace_names
+        assert "Test Workspace" in workspace_names
+
+        # Check roles
+        for ws in profile["workspaces"]:
+            if ws["name"] == "New Member's Workspace":
+                assert ws["role"] == "owner"
+            elif ws["name"] == "Test Workspace":
+                assert ws["role"] == "member"
+    finally:
+        app.dependency_overrides.clear()
+
+    # Step 6: Verify no more pending invites
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/ui/me/invites")
+
+        assert response.status_code == 200
+        invites = response.json()
+        assert len(invites) == 0
+    finally:
+        app.dependency_overrides.clear()
