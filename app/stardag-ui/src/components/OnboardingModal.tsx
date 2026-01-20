@@ -100,6 +100,10 @@ export function OnboardingModal() {
   const hasOnlyPersonalWorkspace =
     hasWorkspaces && workspaces.length === 1 && workspaces[0].is_personal === true;
 
+  // Count workspaces where user is owner (limit is 3)
+  const ownedWorkspacesCount = workspaces.filter((w) => w.role === "owner").length;
+  const canCreateWorkspace = ownedWorkspacesCount < 3;
+
   // If user has workspaces (not just personal) and no invites, nothing to prompt
   if (hasWorkspaces && !hasOnlyPersonalWorkspace && !hasInvites) {
     return null;
@@ -181,14 +185,19 @@ export function OnboardingModal() {
           </div>
 
           <div className="flex items-center justify-between gap-3 pt-2 border-t border-gray-200 dark:border-gray-700">
-            {/* Show create workspace option if user has no workspaces */}
-            {isBlocking && (
+            {/* Show create workspace option if user has no workspaces and can create */}
+            {isBlocking && canCreateWorkspace && (
               <button
                 onClick={navigateToCreateWorkspace}
                 className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 underline"
               >
                 Or create a new workspace
               </button>
+            )}
+            {isBlocking && !canCreateWorkspace && (
+              <span className="text-sm text-gray-500 dark:text-gray-400">
+                Workspace limit reached ({ownedWorkspacesCount}/3)
+              </span>
             )}
             {!isBlocking && (
               <button
@@ -241,16 +250,22 @@ export function OnboardingModal() {
             </a>
           </div>
 
-          <p className="text-xs text-gray-500 dark:text-gray-500">
-            You can{" "}
-            <button
-              onClick={navigateToCreateWorkspace}
-              className="text-blue-600 dark:text-blue-400 hover:underline"
-            >
-              create additional workspaces
-            </button>{" "}
-            later to collaborate with others.
-          </p>
+          {canCreateWorkspace ? (
+            <p className="text-xs text-gray-500 dark:text-gray-500">
+              You can{" "}
+              <button
+                onClick={navigateToCreateWorkspace}
+                className="text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                create additional workspaces
+              </button>{" "}
+              later to collaborate with others.
+            </p>
+          ) : (
+            <p className="text-xs text-gray-500 dark:text-gray-500">
+              You&apos;ve reached the workspace limit ({ownedWorkspacesCount}/3).
+            </p>
+          )}
 
           <div className="flex justify-end pt-2 border-t border-gray-200 dark:border-gray-700">
             <button
