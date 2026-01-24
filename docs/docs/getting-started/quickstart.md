@@ -23,8 +23,6 @@ sd.build(task)
 print(task.output().load())  # "Hello, Stardag!"
 ```
 
-## Understanding the Flow
-
 Let's break down what happened:
 
 ### 1. Task Definition
