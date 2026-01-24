@@ -1,12 +1,12 @@
-# Using the Class-API for Defining Tasks
+# Using the Class-API to Define Tasks
 
 In the previous section, we used the `@sd.task` _Function Decorator_-API to define tasks. This is suitable if you want the least boilerplate possible to turn basic python functions into stardag tasks and DAGs.
 
-For more control, and to some extent clarity, you can define tasks by subclassing [`sd.BaseTask`](../reference/api.md#stardag.BaseTask), [`sd.Task`](../reference/api.md#stardag.Task), [`sd.AutoTask`](../reference/api.md#stardag.AutoTask).
+For more control and clarity you can define tasks by subclassing [`sd.BaseTask`](../reference/api.md#stardag.BaseTask), [`sd.Task`](../reference/api.md#stardag.Task), [`sd.AutoTask`](../reference/api.md#stardag.AutoTask).
 
 !!! info "Stardag Tasks are Pydantic Models"
 
-    Note that all of these base classes (and all stardag tasks!) _are_ pydantic [`BaseModel`](https://docs.pydantic.dev/latest/api/base_model/)s, and hence pretty much anything that you can do with a pydantic model, you can also do with tasks, including serialization, validation, field annotations and etc.
+    Note that all of these base classes (and all stardag tasks) _are_ pydantic [`BaseModel`](https://docs.pydantic.dev/latest/api/base_model/)s. Anything that you can do with a pydantic model, you can also do with tasks, including serialization, validation, field annotations and etc.
 
 For most scenarios, _the Class-API is the recommended way to define tasks_.
 
@@ -27,7 +27,7 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
 root_task = get_sum(integers=get_range(limit=10))
 ```
 
-The corresponding way to use the class API but still get as much out of the box as possible is to subclass [`sd.AutoTask`](../reference/api.md#stardag.AutoTask). The following produces a functionally equivalent DAG:
+The corresponding way to use the Class API, and keep boilerplate to a minimum, is to subclass [`sd.AutoTask`](../reference/api.md#stardag.AutoTask). The following produces a functionally equivalent DAG:
 
 ```python
 class Range(sd.AutoTask[list[int]]):
@@ -71,18 +71,18 @@ With [`sd.AutoTask`](../reference/api.md#stardag.AutoTask) subclassing, the resu
 class Sum(sd.AutoTask[int]):
 ```
 
-This let's `AutoTask` automatically implement the `output()` with the appropriate Serializer and target URI. Under the hood, this is roughly the corresponding implementaton of `output()`:
+This let's `AutoTask` automatically implement the `output()` with the appropriate Serializer and target URI. The returned `Target` implements the `load()` and `save()` methods which take care of de/serialization and persistance.
 
-```{.python notest}
-    # ...
-    def output(self) -> LoadableSaveableFileSystemTarget[int]:
-        return Serializable(
-            wrapped=sd.get_target(default_relpath(self)),
-            serializer=JSONSerializer(int),
-        )
-```
+??? info "See the corresponding implementaton of `output()` under the hood"
 
-Which implements the `load()` and `save()` methods which take care of de/serialization and persistance.
+    ```{.python notest}
+        # ...
+        def output(self) -> LoadableSaveableFileSystemTarget[int]:
+            return Serializable(
+                wrapped=sd.get_target(default_relpath(self)),
+                serializer=JSONSerializer(int),
+            )
+    ```
 
 ### Specifying dependencies
 
@@ -107,9 +107,9 @@ class Sum(sd.AutoTask[int]):
     integers: sd.TaskLoads[list[int]]
 ```
 
-In the former case `integers: Range`, only instances of `Range` task is accepted, validated by standard pydantic validation logic (remember all tasks are pydantic `BaseModel`s). But this is an unnecessarilly specific and narrow constrain since the implementation of `Sum` only depdens on that `integers.output().load()` returns `list[int]`. This syntax `TaskLoads[<type>]` is what allows for smooth composability of tasks into DAGs, while still being declarative.
+In the former case, `integers: Range`, only instances of `Range` task is accepted, validated by standard pydantic validation logic (remember all tasks are pydantic `BaseModel`s). But this is an unnecessarilly specific and narrow constrain since the implementation of `Sum` only depdens on that `integers.output().load()` returns `list[int]`. This syntax `TaskLoads[<type>]` is what allows for smooth composability of tasks into DAGs, while still being declarative.
 
-Note that so far we have only specified expectations on the `integers` input argument of the `Sum` task. To properly declare that this is an upstream dependency of `Sum`, we also need to return it from the `requires()` method:
+Note that so far we have only specified expectations on the `integers` _input argument_ of the `Sum` task. To declare that this is also an _upstream dependency_ of `Sum`, we need to return it from the `requires()` method:
 
 ```{.python notest}
 class Sum(sd.AutoTask[int]):

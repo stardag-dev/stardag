@@ -1,20 +1,22 @@
 # Stardag
 
-**Declarative and composable DAGs.**
+## Declarative and composable DAGs
 
-Stardag provides a clean Python API for representing persistently stored assets, the code that produces them, and their dependencies as a declarative Directed Acyclic Graph (DAG). As such, it is a spritual - but highly modernized - descendant of [Luigi](https://github.com/spotify/luigi).
+Stardag provides a clean Python API for representing persistently stored assets, the code that produces them, and their dependencies as a declarative Directed Acyclic Graph (DAG). It is a spiritual—but highly modernized—descendant of [Luigi](https://github.com/spotify/luigi), designed for iterative data and ML workflows.
 
-It emphasizes _ease of use_, _composability_, and _compatibility_ with other data workflow frameworks.
+It emphasizes _ease of use_, _composability_, and _compatibility_ with existing data workflow frameworks, rather than locking you into a closed ecosystem.
 
-Stardag is built on top of, any integrates well with, Pydantic and utilizes expressive type annotations to reduce boilerplate and clarify io-contracts of tasks.
+Stardag is built on top of, and integrates seamlessly with, Pydantic. It uses expressive type annotations to reduce boilerplate and make task I/O contracts explicit. This enables composable tasks and pipelines, while still maintaining a fully declarative specification of every produced asset.
 
-See the [Core Concepts](./concepts/index.md#core-concepts) section for further details on its architecture and [Design Philosophy](./concepts/index.md#design-philosophy).
+See the [Core Concepts](./concepts/index.md#core-concepts) section for a deeper dive into the architecture, and [Design Philosophy](./concepts/index.md#design-philosophy) for the guiding principles behind the project.
 
 ---
 
-## Why Stardag?
+## Why Use Stardag?
 
-Stardag primary objectice is to boost productivity in Data Science/Machine Learning/AI workflows where the line between production" and "development/experimentation" is often blury. It gives you light-weight tools to structure and get overview of your data processing. It, cruically, provides many of the benfits of "Data-as-Code" (DaC) and help manage complexity and reduce bolilerplate.
+Stardag’s primary objective is to boost productivity in Data Science, Machine Learning, and AI workflows, where the line between production and development or experimentation is often blurry.
+
+It provides lightweight tools to structure data processing, make dependencies explicit, and maintain a clear overview of how assets are produced. Crucially, it brings many of the benefits of _Data-as-Code_ (DaC) to everyday workflows: managing complexity, improving reproducibility, and reducing boilerplate, without sacrificing flexibility or developer ergonomics.
 
 ## Quick Example
 

@@ -1,6 +1,6 @@
 # Using the Stardag Registry - API & UI
 
-So far we have mostly leveraged stardag to store and retrive intemediate task outputs (persistent caching) and materialized them with bottom up "make-style" execution. Next we will leverage the Stardag **Registry** to, among other things, get some observability of our DAGs execution.
+So far we have mostly leveraged stardag to store and retrive intemediate task outputs (persistent caching) and materialized them with bottom up, make-style, execution. Next we will leverage the Stardag **Registry** to, among other things, get some observability of our DAGs execution.
 
 ## Get setup
 
@@ -8,11 +8,11 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
 
     Go to [app.stardag.com](https://app.stardag.com) and click [Sign In] or [Get Started] and complete the signup.
 
-    When signing up, an new personal **Workspace** with one **Environment** (`main`, unless you picked another name) will have been created for you.
+    When signing up, a new personal **Workspace** with one **Environment** (`main`, unless you picked another name) will have been created for you.
 
     ### Setup your profile and Authenticate
 
-    Active the virtual environment where you have `stardag` installed, or for example prefix commands with `uv run`:
+    Active the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
 
     === "Activated venv"
 
@@ -99,11 +99,11 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
 
     In your browser, navigate to [localhost:3000](http://localhost:3000/), click and [Sign In] or [Get Started]. Click [Register] and sign up with a new user. You can use any email and password, e.g. `me@localhost` and `mypass`.
 
-    When signing up, an new personal **Workspace** with one **Environment** (`main`, unless you picked another name) will have been created for you.
+    When signing up, a new personal **Workspace** with one **Environment** (`main`, unless you picked another name) will have been created for you.
 
     ### Setup your profile and Authenticate
 
-    Active the virtual environment where you have `stardag` installed, or for example prefix commands with `uv run`:
+    Active the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
 
     === "Activated venv"
 
@@ -150,7 +150,7 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
 
 ## Build your DAG
 
-Now let's build the dag from the previous example again, but make sure to set `get_range`'s `limit` argument to something new, so that we need to actually build something (otherwise all tasks will be materialized already from previous runs).
+Now let's build the DAG from the previous example again, but make sure to set `get_range`'s `limit` argument to something new, so that we need to actually build something (otherwise all tasks will be materialized already from previous runs).
 
 ```python
 import stardag as sd

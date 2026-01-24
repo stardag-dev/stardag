@@ -39,15 +39,18 @@ Stardag is built around a few key abstractions:
 
 ### Declarative Over Imperative
 
-Tasks are _specifications_ of what to compute, not instructions to execute. This separation enables:
+Tasks are _specifications_ of what to compute, not (only) instructions to execute. This separation enables:
 
 - Inspection before execution
 - Serialization of the full DAG
-- Intelligent caching and skip logic
+- Efficinet caching and skip logic
+- Data as Code (DaC)
 
-### Composition Over Inheritance
+Moreover, especially in experimental Machine Learning workflows, it can be extremely valuable with a human readable and searchable specification of any asset produced. Each task is a self-contained specification of the compelete provenance of its persistently stored target. Done right this allows inspection of the "diff" between the specification of, say, two different instances of ML-model performance metrics; Why is one better than the other? Which hyper-parameters have changed? Is the same training dataset and filtering used?
 
-Tasks are composed by passing task instances as parameters, not by inheriting from parent tasks. This promotes:
+### Composition (Over Inheritance and/or Static DAG Topology)
+
+Tasks are composed by passing task instances as parameters. This promotes:
 
 - Loose coupling
 - Reusability
@@ -60,6 +63,10 @@ Given the same parameters, a task always:
 - Has the same ID (via parameter hashing)
 - Writes to the same output location
 - Produces the same result (assuming pure functions)
+
+### The Right Tool for the Job
+
+Stardag happily aknowledges that the declarative DAG abstraction is _not_ suitable for all data processing/workflows. That's why its ambition is to be interoperable with other modern data workflow frameworks, such as [Prefect](https://www.prefect.io/), that lacks the declarative DAG abstraction (both as an SDK and at the execution layer).
 
 ## Mental Model
 
