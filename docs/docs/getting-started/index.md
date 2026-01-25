@@ -1,6 +1,6 @@
 # Getting Started
 
-This section will get you up and running with Stardag quickly.
+_Welcome!_ This section will get you up and running with Stardag quickly.
 
 ## Prerequisites
 
@@ -9,22 +9,18 @@ This section will get you up and running with Stardag quickly.
 
 ## Learning Path
 
-1. **[Installation](installation.md)** - Install Stardag and verify your setup
-2. **[Quick Start](quickstart.md)** - Create and run your first task
-3. **[Your First DAG](first-dag.md)** - Build a complete pipeline with dependencies
+1. **[Installation](installation.md)** - Install Stardag and verify your setup (~2 minutes)
+2. **[Quick Start](quickstart.md)** - Create and run your first task (~5 minutes)
+3. **[Your First DAG](first-dag.md)** - Build a complete pipeline with dependencies (~5 minutes)
+4. **[Stardag Registry Web UI](registry-ui.md)** - Use the Stardag Registry Web UI (~5-10 minutes)
+5. **[Using the Class API](registry-ui.md)** - Learn to take full control of your tasks (~5-10 minutes)
 
 ## What You'll Learn
 
 By the end of this section, you'll be able to:
 
 - Install and configure Stardag
-- Define tasks using the `@task` decorator
-- Specify task dependencies with `sd.Depends`
-- Build and run DAGs
+- Define tasks and compose them into DAGs
+- Build DAGs
 - Access task outputs
-
-## Time Required
-
-- Installation: ~2 minutes
-- Quick Start: ~5 minutes
-- First DAG: ~10 minutes
+- Use the Stardag Registry Web UI

@@ -1,4 +1,4 @@
-# Using the Stardag Registry - API & UI
+# Using the Stardag Registry Web UI
 
 So far we have mostly leveraged stardag to store and retrive intemediate task outputs (persistent caching) and materialized them with bottom up, make-style, execution. Next we will leverage the Stardag **Registry** to, among other things, get some observability of our DAGs execution.
 
