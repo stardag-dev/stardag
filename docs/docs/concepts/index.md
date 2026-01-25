@@ -2,17 +2,19 @@
 
 Understanding these concepts will help you get the most out of Stardag.
 
+!!! info "🚧 **Work in progress** 🚧"
+
+    This section is still taking shape. Questions, feedback, and suggestions are very welcome — feel free to [email us](mailto:hello@stardag.dev?subject=Stardag%20docs%20feedback) or [open an issue on GitHub](https://github.com/stardag-dev/stardag/issues/new) if anything is unclear.
+
 ## Overview
 
 Stardag is built around a few key abstractions:
 
-| Concept                                       | Description                              |
-| --------------------------------------------- | ---------------------------------------- |
-| **[Tasks](tasks.md)**                         | Units of work that produce outputs       |
-| **[Dependencies](dependencies.md)**           | How tasks depend on each other's outputs |
-| **[Parameter Hashing](parameter-hashing.md)** | Deterministic task identification        |
-| **[Targets](targets.md)**                     | Where and how outputs are stored         |
-| **[Build & Execution](build-execution.md)**   | How DAGs are executed                    |
+| Concept                                     | Description                                                 |
+| ------------------------------------------- | ----------------------------------------------------------- |
+| **[Tasks](tasks.md)**                       | Units of work that produce outputs and declare dependencies |
+| **[Targets](targets.md)**                   | Where and how outputs are stored                            |
+| **[Build & Execution](build-execution.md)** | How DAGs are executed                                       |
 
 ## The Big Picture
 

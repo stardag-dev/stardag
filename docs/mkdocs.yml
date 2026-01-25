@@ -151,8 +151,6 @@ nav:
   - Concepts:
       - concepts/index.md
       - Tasks: concepts/tasks.md
-      - Dependencies: concepts/dependencies.md
-      - Parameter Hashing: concepts/parameter-hashing.md
       - Targets: concepts/targets.md
       - Build & Execution: concepts/build-execution.md
   - How-To Guides:
