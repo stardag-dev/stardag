@@ -1,5 +1,9 @@
 # Stardag
 
+!!! info "🚧 **Work in progress** 🚧"
+
+    This documentation is still taking shape. Questions, feedback, and suggestions are very welcome — feel free to [email us](mailto:hello@stardag.dev?subject=Stardag%20docs%20feedback) or [open an issue on GitHub](https://github.com/stardag-dev/stardag/issues/new) if anything is unclear or missing.
+
 ## Declarative and composable DAGs
 
 Stardag provides a clean Python API for representing persistently stored assets, the code that produces them, and their dependencies as a declarative Directed Acyclic Graph (DAG). It is a spiritual—but highly modernized—descendant of [Luigi](https://github.com/spotify/luigi), designed for iterative data and ML workflows.
