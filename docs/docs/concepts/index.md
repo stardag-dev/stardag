@@ -10,11 +10,14 @@ Understanding these concepts will help you get the most out of Stardag.
 
 Stardag is built around a few key abstractions:
 
-| Concept                                     | Description                                                 |
-| ------------------------------------------- | ----------------------------------------------------------- |
-| **[Tasks](tasks.md)**                       | Units of work that produce outputs and declare dependencies |
-| **[Targets](targets.md)**                   | Where and how outputs are stored                            |
-| **[Build & Execution](build-execution.md)** | How DAGs are executed                                       |
+| Concept                                     | Description                                                           |
+| ------------------------------------------- | --------------------------------------------------------------------- |
+| **[Tasks](tasks.md)**                       | Units of work that produce outputs and declare dependencies           |
+| **[Targets](targets.md)**                   | Where and how outputs are stored                                      |
+| **[Dependencies](dependencies.md)**         | How task dependencies are declared                                    |
+| **[Parameters](parameters.md)**             | How to use task parameters and how they are hashed to get the task id |
+| **[Async](build-execution.md)**             |                                                                       |
+| **[Build & Execution](build-execution.md)** | How DAGs are executed                                                 |
 
 ## The Big Picture
 

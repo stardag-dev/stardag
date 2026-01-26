@@ -49,7 +49,7 @@ To defined how tasks depends on other tasks, each task must also implement the m
 
 for which `BaseTask` default implementation simply returns `None` (no dependencies). When a task do return one or more tasks, it can - _and should_ - make the assumprion that:
 
-- When `self.run()` is executed, all tasks returned from `self.requires()` are completed.
+- all tasks returned from `self.requires()` are complete when `self.run()` is executed.
 
 To some extent, _that's it_.
 
@@ -66,69 +66,6 @@ assert world_state == {"hello": 5}
 ```
 
 In the following section we will cover the fact the most tasks uses `Target`s, and in particular `FileSystemTarget`s, to persistently store their output and for downstream tasks to retrive it as input.
-
-## The Typical `Task` uses `Target`s
-
-In most scenarios, downstream tasks needs to load the output from upstream dependencies, for this purpose the class `Task`, which inherits `BaseTask` introduces the concept of `Target`s.
-
-Its extension of `BaseTask` can be summarized in seven lines of code:
-
-```{.python notest}
-class Task(BaseTask, Generic[TargetType]):
-    def complete(self) -> bool:
-        return self.output().exists()
-
-    @abstractmethod
-    def output(self) -> TargetType:
-        ...
-```
-
-That is, it adds a default implemention of `complete` which checks if the return value of the new (abstract) methods `output` exists. Generally, the _only_ requirement on the `TargetType` returned from output is that it can report its existance. Strictly speaking, that is implements the protocol:
-
-```{.python notest}
-class Target(Protocol):
-    def exists(self) -> bool:
-        """Check if the target exists."""
-        ...
-```
-
-Note that `Task` is implemented with `TargetType` as a _generic_ type variable. This means that when you subclass `Task`, you need to declare the type of target the `output` returns. This is critical for composability of tasks and allows typcheckers to verify that chained tasks are compatible in terms of their I/O.
-
-## The Typical `Target` uses a File System
-
-Moreover, the most commonly used `Target` persists, retrives and checks existance of one or many files/objects in a file system. To this end Stardag implements the `FileSystemTarget`.
-
-You can, and it is in some cases motivated to, return a target for a certain type of file system with an absolute path/URI
-
-```python
-import stardag as sd
-
-class MyTask(sd.Task[sd.LocalTarget]):
-
-    def run(self):
-        with self.output().open("w") as handle:
-            handle.write("result")
-
-    def output(self) -> sd.LocalTarget:
-        return sd.LocalTarget("/absolute/path/to/file.txt")
-```
-
-However, you are strongly encouraged to instead use the methos `sd.get_target`:
-
-```python
-import stardag as sd
-
-class MyTask(sd.Task[sd.FileSystemTarget]):
-
-    def run(self):
-        with self.output().open("w") as handle:
-            handle.write("result")
-
-    def output(self) -> sd.FileSystemTarget:
-        return sd.get_target("path/to/file.txt")
-```
-
-The main benifit here
 
 <!--
 ## Three Ways to Define Tasks
