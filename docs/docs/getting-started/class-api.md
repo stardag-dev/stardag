@@ -178,6 +178,5 @@ So in with the class-API we are responsible for loading output from dependencies
 
 ## What's Next?
 
+- Understand Stardag's core [Concepts](../concepts/index.md)
 - Learn about [Tasks](../concepts/tasks.md) in depth
-- Understand [Parameter Hashing](../concepts/parameter-hashing.md)
-<!-- - Explore [How to Define Tasks](../how-to/define-tasks.md) using different APIs -->

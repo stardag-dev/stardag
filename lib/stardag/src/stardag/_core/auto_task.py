@@ -2,6 +2,7 @@ import abc
 import typing
 
 from stardag._core.task import Task
+from stardag.config import DEFAULT_TARGET_ROOT_KEY
 from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
 from stardag.target.serialize import get_serializer
 
@@ -143,9 +144,14 @@ class AutoTask(
 
         return relpath
 
+    @property
+    def _target_root_key(self) -> str:
+        """Override to customize the target root key for this task's output."""
+        return DEFAULT_TARGET_ROOT_KEY
+
     def output(self) -> LoadableSaveableFileSystemTarget[LoadedT]:
         return Serializable(
-            wrapped=get_target(self._relpath),
+            wrapped=get_target(self._relpath, target_root_key=self._target_root_key),
             serializer=self.serializer,
         )
 
