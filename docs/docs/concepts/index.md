@@ -16,7 +16,7 @@ Stardag is built around a few key abstractions:
 | **[Targets](targets.md)**                   | Where and how outputs are stored                                      |
 | **[Dependencies](dependencies.md)**         | How task dependencies are declared                                    |
 | **[Parameters](parameters.md)**             | How to use task parameters and how they are hashed to get the task id |
-| **[Async](build-execution.md)**             |                                                                       |
+| **[AsyncIO](asyncio.md)**                   | How to use and implement asyncio tasks and targets execution          |
 | **[Build & Execution](build-execution.md)** | How DAGs are executed                                                 |
 
 ## The Big Picture

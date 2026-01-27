@@ -2,140 +2,131 @@
 
 Dependencies define how tasks relate to each other and form the DAG structure.
 
-## Dependency Types
+## Declaring Dependencies
 
-Stardag provides several ways to declare dependencies:
-
-### `sd.Depends[T]`
-
-Inject a task's output directly into the function:
+Task dependencies are declared via the method `requires`:
 
 ```python
-@sd.task
-def downstream(data: sd.Depends[list[int]]) -> int:
-    # data is already loaded - it's list[int], not a task
-    return sum(data)
-```
+Number = int | float
 
-The upstream task's output is loaded automatically.
-
-### `sd.TaskLoads[T]`
-
-Get access to the task object (for class-based tasks):
-
-```python
-class Downstream(sd.AutoTask[int]):
-    data: sd.TaskLoads[list[int]]
+class AddAB(sd.AutoTask[Number]):
 
     def requires(self):
-        return self.data  # Return the task for dependency tracking
+        return {
+            "a": ATask(),
+            "b": BTask(),
+        }
 
     def run(self):
-        loaded = self.data.output().load()  # Manually load
-        self.output().save(sum(loaded))
+        deps = self.requires()
+        a = deps["a"].output().load()
+        b = deps["b"].output().load()
+        result = a + b
+        self output().save(results)
 ```
 
-Use when you need the task object, not just its output.
+This task declares hardcoded dependencies resulting in a _static_ DAG, both in terms of topology and precise nodes.
 
-### `sd.TaskSet[T]`
+We can use parameters to forward information to dependencies:
 
-Handle multiple tasks of the same type:
+```{.python notest}
+ParamType = ...  # Some information to forward to A/BTask
 
-```python
-@sd.task
-def aggregate(items: sd.TaskSet[int]) -> int:
-    return sum(item for item in items)
+class AddParameterizedAB(sd.AutoTask[Number]):
+    a_param: ParamType
+    b_param: ParamType
 
-# Usage
-result = aggregate(items=[task_a(), task_b(), task_c()])
-```
-
-<!-- TODO: Verify TaskSet behavior and usage patterns -->
-
-## Composability
-
-Stardag's key innovation is treating task instances as first-class parameters.
-
-### The Problem with Traditional DAG Frameworks
-
-In Luigi and similar frameworks, dependencies are often expressed through inheritance:
-
-```python
-# Luigi-style (not Stardag)
-class ChildTask(luigi.Task):
     def requires(self):
-        return ParentTask()  # Tightly coupled!
+        return {
+            "a": ATask(a=self.a_param),
+            "b": BTask(b=self.b_param),
+        }
 ```
 
-This creates tightly coupled DAGs where changing upstream tasks requires modifying downstream code.
+Now we have a DAG with fixed topology, but have parameterized the nodes.
 
-### Stardag's Solution
+We can extend this pattern with conditional logic to achive parameterized topolgy with a predefined set of alternatives:
 
-Tasks receive dependencies as parameters:
+```{.python notest}
+ParamType = ...  # Some information to forward to A/BTask
 
-```python
-@sd.task
-def downstream(upstream: sd.Depends[int]) -> int:
-    return upstream * 2
+class AddParameterizedABAndMaybeC(sd.AutoTask[Number]):
+    a_param: ParamType
+    b_param: ParamType
+    c_param: ParamType | None  # optionally include a third dependency
 
-# Compose at instantiation time
-result = downstream(upstream=task_a())
-# Or use a different upstream
-result = downstream(upstream=task_b())
+    def requires(self):
+        deps = {
+            "a": ATask(a=self.a_param),
+            "b": BTask(b=self.b_param),
+        }
+        if c_param:
+            deps["c"] = CTask(self.c_param)
+
+        return deps
 ```
 
-Benefits:
+## Dependency Injection
+
+The pattern above quickly becomes verbose and inflexible, here dependency injection comes to the rescue:
+
+```{.python notest}
+class Add(sd.AutoTask[Number]):
+    values: list[sd.TaskLoads[Number]]
+
+    def requires(self):
+        return self.values
+
+    def run(self):
+        result = sum([dep.output().load() for dep in self.values])
+        self.output().save(result)
+```
+
+Now we have effectively _arbitrarilly_ parameterized the upstream dependencies, the definition of nodes as well as the DAG topology. Each elemet of `values` can be any task type, as long as its `output().load()` returns a `Number`.
+
+We can also accept raw data as parameters _or_ tasks which output loads this data, by:
+
+```{.python notest}
+class Add(sd.AutoTask[Number]):
+    values: list[sd.TaskLoads[Number] | Number]
+
+    def requires(self):
+        return [value for value in self.values if isinstance(value, sd.BaseTask)]
+
+    def run(self):
+        result = sum(
+            [
+                value.output().load() if isinstance(value, sd.BaseTask)
+                else value
+                for value in self.values
+            ]
+        )
+        self.output().save(result)
+```
+
+### Benefits of Dependency Injection:
 
 - **Loose coupling**: Downstream tasks don't know upstream implementation
 - **Reusability**: Same task works with different inputs
 - **Testability**: Easy to mock dependencies
 - **Flexibility**: Compose DAGs dynamically
 
-## Type Contracts
+## Decorator API
 
-Dependencies have type expectations:
+When using the decorator API, `requires` is implemented automatically based on parameters annotated with `sd.Depends`:
 
 ```python
 @sd.task
-def process(data: sd.Depends[list[int]]) -> float:
-    return sum(data) / len(data)
+def add(a: sd.Depends[Number], b: sd.Depends[Number]) -> Number:
+    return a + b
 ```
 
-The `list[int]` type annotation declares:
+---
 
-1. What type the upstream task must output
-2. What type will be received at runtime
+!!! info "🚧 **Work in progress** 🚧"
 
-This creates clear contracts between tasks.
+    This documentation is still taking shape. It should soon cover:
 
-## Dynamic Dependencies
-
-For dependencies that depend on parameters, use class-based tasks:
-
-```python
-class ProcessMultiple(sd.AutoTask[list[int]]):
-    count: int
-
-    def requires(self):
-        # Generate dependencies based on parameters
-        return [GenerateData(index=i) for i in range(self.count)]
-
-    def run(self):
-        results = [dep.output().load() for dep in self.requires()]
-        self.output().save(results)
-```
-
-<!-- TODO: Add more examples of dynamic dependencies -->
-
-## Inspecting Dependencies
-
-```python
-task = downstream(upstream=source(x=1))
-
-# View immediate dependencies
-print(task.requires())
-# {'upstream': source(version=None, x=1)}
-
-# Full JSON representation includes nested tasks
-print(task.model_dump_json(indent=2))
-```
+    - Dynamic dependencies (which requires upstream tasks to be executed before we know which additional dependencies are needed)
+    - Common patterns and best practices
+    - Context on how *Polymorphism* is handled via `PolymorphicRoot`s class registry.

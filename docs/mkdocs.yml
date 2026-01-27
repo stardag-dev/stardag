@@ -154,6 +154,7 @@ nav:
       - Targets: concepts/targets.md
       - Dependencies: concepts/dependencies.md
       - Parameters: concepts/parameters.md
+      - AsyncIO: concepts/asyncio.md
       - Build & Execution: concepts/build-execution.md
   - How-To Guides:
       - how-to/index.md
