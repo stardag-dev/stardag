@@ -25,7 +25,9 @@ class AddAB(sd.AutoTask[Number]):
         self output().save(results)
 ```
 
-This task declares hardcoded dependencies resulting in a _static_ DAG, both in terms of topology and precise nodes.
+The return type of `requires` can be a singe `BaseTask` or any nested list or dictionary of `BaseTask`s.
+
+The task above declares hardcoded dependencies resulting in a _static_ DAG, both in terms of topology and each node.
 
 We can use parameters to forward information to dependencies:
 
@@ -43,9 +45,9 @@ class AddParameterizedAB(sd.AutoTask[Number]):
         }
 ```
 
-Now we have a DAG with fixed topology, but have parameterized the nodes.
+Now we have a DAG with fixed topology, but parameterized nodes.
 
-We can extend this pattern with conditional logic to achive parameterized topolgy with a predefined set of alternatives:
+We can extend this pattern with conditional logic to achive parameterized topolgy within a predefined set of alternatives:
 
 ```{.python notest}
 ParamType = ...  # Some information to forward to A/BTask
@@ -82,9 +84,9 @@ class Add(sd.AutoTask[Number]):
         self.output().save(result)
 ```
 
-Now we have effectively _arbitrarilly_ parameterized the upstream dependencies, the definition of nodes as well as the DAG topology. Each elemet of `values` can be any task type, as long as its `output().load()` returns a `Number`.
+Now we have effectively _arbitrarilly_ parameterized the upstream dependencies, the definition of nodes as well as the DAG topology. Each element of `values` can be any task type, as long as its `output().load()` returns a `Number`.
 
-We can also accept raw data as parameters _or_ tasks which output loads this data, by:
+We can also accept raw data _or_ tasks, which output loads the same data type, as parameters by:
 
 ```{.python notest}
 class Add(sd.AutoTask[Number]):
@@ -127,6 +129,7 @@ def add(a: sd.Depends[Number], b: sd.Depends[Number]) -> Number:
 
     This documentation is still taking shape. It should soon cover:
 
+    - Limitations of the `@task` decorator API
     - Dynamic dependencies (which requires upstream tasks to be executed before we know which additional dependencies are needed)
     - Common patterns and best practices
     - Context on how *Polymorphism* is handled via `PolymorphicRoot`s class registry.
