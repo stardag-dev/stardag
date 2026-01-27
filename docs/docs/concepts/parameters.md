@@ -1,8 +1,53 @@
-# Parameter Hashing
+# Task Parameters
+
+Parameters define the behaviour of a tasks run method, what the task does. Since Stardag tasks _are_ pydantic `BaseModel`s, we can use all pydantic features and patterns/best practices to declare a task's parameters.
+
+As covered in previous sections, we can also pass other (arbitrarilly nested) task instances as parameters; since they are also pydanic `BaseModel`s, this nesting is natural and results in a well defined JSON schema.
+
+## Polymorophisim and `TaskLoads[...]`
+
+A central feature that Stardag adds on top of standard pydantic is support for generalized _polymorphisim_. Consider the example below:
+
+```{.python notest}
+class TrainedModel(sd.AutoTask[MyModel]):
+    config: MyModelConfig  # A regular pydantic model
+    dataset: Dataset  # A specific Stardag Task
+
+    def requires(self):
+        return self.dataset
+
+    def run(self):
+        training_data = self.dataset.output().load()
+        model = MyModel(config)
+        model.fit(training_data)
+        self.output().save(model)
+        # ...
+```
+
+Here, we have declared that the `dataset` must be a specific task of type `Dataset`. This could be fine, but we typically want to be able to compare different training and test datasets from different sources with different pre-processing etc. and this is typically best reflected by differently composed tasks/DAGs.
+
+Looking closer at the `run` method, we actually only care about the data type of `training_data` in:
+
+```{.python notest}
+training_data = self.dataset.output().load()
+```
+
+We can express this by instead using:
+
+```python
+MyDataType = ...  # For example a pandas DataFrame with a pandera schema
+
+class TrainedModel(sd.AutoTask[MyModel]):
+    config: MyModelConfig  # A regular pydantic model
+    dataset: sd.TaskLoads[MyDataType]  # *Any* task, which output().load() -> MyDataType.
+
+```
+
+`TaskLoads[<Type>]` is short for _any Stardag task for which the return type of `output().loads()` is `<Type>`_.
+
+## Parameter Hashing
 
 Parameter hashing gives each task instance a unique, deterministic identifier based on its parameters.
-
-## Why Hashing?
 
 Parameter hashing solves several problems:
 
@@ -13,7 +58,7 @@ Parameter hashing solves several problems:
 
 ## The Task ID
 
-Every task has a `task_id` property:
+Every task has an `id` property:
 
 ```python
 @sd.task
@@ -21,56 +66,16 @@ def add(a: int, b: int) -> int:
     return a + b
 
 task = add(a=1, b=2)
-print(task.task_id)
-# 'a1b2c3d4e5f6...'  (SHA-1 hash)
+print(task.id)
+# fa9b74b1-1cde-5676-8650-dbcf755a2699  (UUID-5)
 ```
 
 The task ID is derived from:
 
-- Task family (class name or function name)
+- Task name (class name or function name, unless overriden)
 - Task namespace
 - Task version
 - All parameter values (recursively hashed)
-
-## How Hashing Works
-
-### Simple Parameters
-
-Scalar values are included directly in the hash:
-
-```python
-task = add(a=1, b=2)
-
-print(task._id_hash_jsonable())
-# {
-#     'namespace': '',
-#     'family': 'add',
-#     'parameters': {'version': None, 'a': 1, 'b': 2}
-# }
-```
-
-### Task Parameters
-
-When a parameter is itself a task, its task ID is used:
-
-```python
-@sd.task
-def multiply(x: sd.Depends[int], factor: int) -> int:
-    return x * factor
-
-task = multiply(x=add(a=1, b=2), factor=3)
-
-print(task._id_hash_jsonable())
-# {
-#     'namespace': '',
-#     'family': 'multiply',
-#     'parameters': {
-#         'version': None,
-#         'x': 'a1b2c3d4...',  # Task ID of add(1, 2)
-#         'factor': 3
-#     }
-# }
-```
 
 This recursive hashing ensures that:
 
@@ -79,82 +84,29 @@ This recursive hashing ensures that:
 
 ## Output Paths
 
-The task ID determines the output path:
+The task ID should typically determin the output path, and does so automatically when using the Decorator API or `AutoTask`:
 
 ```python
 task = add(a=1, b=2)
 print(task.output().path)
-# /path/to/.stardag/target-roots/default/add/a1/b2/a1b2c3d4....json
+# /path/to/.stardag/local-target-roots/default/add/fa/9b/fa9b74b1-1cde-5676-8650-dbcf755a2699.json
 ```
 
-The path structure is:
+The default path structure is:
 
 ```
-<target_root>/<family>/<id[0:2]>/<id[2:4]>/<id>.json
+<target_root>/[<namespace>/]<name>/<id[0:2]>/<id[2:4]>/<id>.json
 ```
 
-The `id[0:2]/id[2:4]` directory structure prevents having too many files in a single directory.
+The `id[0:2]/id[2:4]` directory structure prevents having too many files in a single directory (facilitate file browsing in some filesystems).
 
-## Customizing Hashing
+!!! info "🚧 **Work in progress** 🚧"
 
-### Excluding Parameters
+    This documentation is still taking shape. It should soon cover:
 
-Use `IDHashInclude` to exclude parameters from the hash:
-
-```python
-from stardag import IDHashInclude
-
-@sd.task
-def process(
-    data: sd.Depends[list[int]],
-    debug: Annotated[bool, IDHashInclude(False)] = False
-) -> int:
-    if debug:
-        print("Processing...")
-    return sum(data)
-```
-
-The `debug` parameter won't affect the task ID.
-
-<!-- TODO: Verify IDHashInclude syntax and add more examples -->
-
-### Custom Hash Functions
-
-For complex objects, implement custom hashing:
-
-<!-- TODO: Document IDHasher and custom hash functions -->
-
-## Implications
-
-### Same Parameters = Same Output Location
-
-```python
-task1 = add(a=1, b=2)
-task2 = add(a=1, b=2)
-
-assert task1.task_id == task2.task_id
-assert task1.output().path == task2.output().path
-```
-
-### Parameter Changes = New Output Location
-
-```python
-task1 = add(a=1, b=2)
-task2 = add(a=1, b=3)  # Different 'b'
-
-assert task1.task_id != task2.task_id
-```
-
-### Version Changes = New Output Location
-
-```python
-@sd.task(version="1")
-def compute(x: int) -> int:
-    return x
-
-@sd.task(version="2")
-def compute_v2(x: int) -> int:
-    return x * 2
-
-# Different versions = different task IDs
-```
+    - How (and when) to exclude parameters from hashing -> task ID
+    - How Task ID is obtained in more detail
+    - Customizing hash behaviour
+    - Compatiility mode validation
+    - Task versioning
+    - Best practices (examples for experimental ML and model hyperparameters)
