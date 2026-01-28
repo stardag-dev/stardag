@@ -62,15 +62,31 @@ Workspace: my-company
 
 ### List Workspaces
 
-```bash
-stardag config list workspaces
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config list workspaces
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config list workspaces
+    ```
 
 ### List Environments
 
-```bash
-stardag config list environments
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config list environments
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config list environments
+    ```
 
 Lists environments in the active workspace.
 
@@ -87,15 +103,30 @@ Each environment has its own target root configuration:
 | `default` | `s3://company/stardag/prod/` | Primary storage   |
 | `archive` | `s3://company/archive/`      | Long-term storage |
 
+!!! info "Local paths with ~/"
+Target root paths starting with `~/` are automatically expanded to the user's home directory.
+
 ### Synchronizing Target Roots
 
-```bash
-# Fetch latest from server
-stardag config target-roots sync
+=== "Activated venv"
 
-# View current configuration
-stardag config target-roots list
-```
+    ```bash
+    # Fetch latest from server
+    stardag config target-roots sync
+
+    # View current configuration
+    stardag config target-roots list
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    # Fetch latest from server
+    uv run stardag config target-roots sync
+
+    # View current configuration
+    uv run stardag config target-roots list
+    ```
 
 ### Why Sync?
 
@@ -109,9 +140,17 @@ Target roots are defined centrally to ensure all team members use consistent pat
 
 ## Current Context
 
-```bash
-stardag config show
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config show
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config show
+    ```
 
 ## Best Practices
 

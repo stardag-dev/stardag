@@ -31,7 +31,7 @@ The platform adds value for:
 
 1. Visit [app.stardag.com](https://app.stardag.com)
 2. Sign up with GitHub
-3. Create an organization and workspace
+3. Create a workspace and environment
 4. Configure your SDK (see [Quick Start](../getting-started/quickstart.md))
 
 ### Self-Hosted

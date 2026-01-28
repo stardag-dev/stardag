@@ -38,22 +38,51 @@ export STARDAG_TARGET_ROOT__DEFAULT=~/.stardag/outputs
 
 ### With API Service
 
-```bash
-# Install CLI
-pip install stardag
+=== "uv"
 
-# Add registry and login
-stardag config registry add local --url http://localhost:8000
-stardag auth login --registry local
+    ```bash
+    uv add stardag
+    ```
 
-# Create and use profile
-stardag config profile add dev \
-    -r local \
-    -u me@example.com \
-    -w my-workspace \
-    -e development
-stardag config profile use dev
-```
+=== "pip"
+
+    ```bash
+    pip install stardag
+    ```
+
+Then configure:
+
+=== "Activated venv"
+
+    ```bash
+    # Add registry and login
+    stardag config registry add local --url http://localhost:8000
+    stardag auth login --registry local
+
+    # Create and use profile
+    stardag config profile add dev \
+        -r local \
+        -u me@example.com \
+        -w my-workspace \
+        -e development
+    stardag config profile use dev
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    # Add registry and login
+    uv run stardag config registry add local --url http://localhost:8000
+    uv run stardag auth login --registry local
+
+    # Create and use profile
+    uv run stardag config profile add dev \
+        -r local \
+        -u me@example.com \
+        -w my-workspace \
+        -e development
+    uv run stardag config profile use dev
+    ```
 
 ### Production (CI/CD)
 
