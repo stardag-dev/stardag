@@ -34,7 +34,7 @@ training_data = self.dataset.output().load()
 
 We can express this by instead using:
 
-```python
+```{.python notest}
 MyDataType = ...  # For example a pandas DataFrame with a pandera schema
 
 class TrainedModel(sd.AutoTask[MyModel]):
@@ -61,13 +61,14 @@ Parameter hashing solves several problems:
 Every task has an `id` property:
 
 ```python
+from uuid import UUID
+
 @sd.task
 def add(a: int, b: int) -> int:
     return a + b
 
 task = add(a=1, b=2)
-print(task.id)
-# fa9b74b1-1cde-5676-8650-dbcf755a2699  (UUID-5)
+assert task.id == UUID("fa9b74b1-1cde-5676-8650-dbcf755a2699")  # UUID-5
 ```
 
 The task ID is derived from:
@@ -82,13 +83,13 @@ This recursive hashing ensures that:
 - Changes to upstream parameters change downstream IDs
 - The full DAG lineage is captured in the hash
 
-## Output Paths
+## Output URIs
 
-The task ID should typically determin the output path, and does so automatically when using the Decorator API or `AutoTask`:
+The task ID should typically determin the output URI, and does so automatically when using the Decorator API or `AutoTask`:
 
-```python
+```{.python continuation}
 task = add(a=1, b=2)
-print(task.output().path)
+print(task.output().uri)
 # /path/to/.stardag/local-target-roots/default/add/fa/9b/fa9b74b1-1cde-5676-8650-dbcf755a2699.json
 ```
 

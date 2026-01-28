@@ -85,11 +85,16 @@ export STARDAG_TARGET_ROOT__LOCAL=/local/cache/
 Select a root in your task:
 
 ```python
-# Default root
-sd.get_target("path/file.json", task=self)
+from stardag.utils.testing import target_roots_override
 
-# Specific root
-sd.get_target("path/file.json", task=self, root="archive")
+with target_roots_override(
+    {"default": "/default", "archive": "/archive"}
+):
+    # Default root
+    sd.get_target("path/file.json")
+
+    # Specific root
+    sd.get_target("path/file.json", target_root_key="archive")
 ```
 
 <!-- TODO: Verify root selection syntax -->
@@ -115,7 +120,7 @@ target_factory_provider.set(factory)
 
 For temporary configuration:
 
-```python
+```{.python notest}
 from stardag.target import target_factory_provider, TargetFactory
 
 with target_factory_provider.override(
