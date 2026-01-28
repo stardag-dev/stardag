@@ -23,7 +23,7 @@ class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
             # TODO not really possible to type hint this (?) :/ Below would only allow
             # the same signature as the function, not TaskLoads[<type>]
             #    *args: _PWrapped.args, **kwargs: _PWrapped.kwargs
-            # and if the user is forced to type hit the function with
+            # and if the user is forced to type hint the function with
             # <type> | TaskLoads[<type>], then it doesn't make sense inside the function
             **kwargs: typing.Any,
         ) -> None: ...
