@@ -1,5 +1,6 @@
 import json
 import typing
+from contextlib import contextmanager
 
 from stardag.config import DEFAULT_TARGET_ROOT_KEY, config_provider
 from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
@@ -46,7 +47,7 @@ class TargetFactory:
     def __init__(
         self,
         target_roots: dict[str, str] | None = None,
-        prefixt_to_target_prototype: PrefixToTargetPrototype | None = None,
+        prefix_to_target_prototype: PrefixToTargetPrototype | None = None,
     ) -> None:
         # If no target_roots provided, get from central config
         if target_roots is None:
@@ -55,8 +56,8 @@ class TargetFactory:
         self.target_roots = {
             key: value.removesuffix("/") + "/" for key, value in target_roots.items()
         }
-        self.prefixt_to_target_prototype = (
-            prefixt_to_target_prototype or get_default_prefix_to_target_prototype()
+        self.prefix_to_target_prototype = (
+            prefix_to_target_prototype or get_default_prefix_to_target_prototype()
         )
 
     def get_target(
@@ -120,16 +121,16 @@ class TargetFactory:
         return f"{target_root}{relpath}"
 
     def _get_target_prototype(self, path: str) -> TargetPrototype:
-        for prefix, target_prototype in self.prefixt_to_target_prototype.items():
+        for prefix, target_prototype in self.prefix_to_target_prototype.items():
             if path.startswith(prefix):
                 return target_prototype
         raise ValueError(
             f"URI {path} does not match any of the configured prefixes: "
-            f"{list(self.prefixt_to_target_prototype.keys())}."
+            f"{list(self.prefix_to_target_prototype.keys())}."
         )
 
     def _is_full_path(self, path: str) -> bool:
-        for prefix in self.prefixt_to_target_prototype.keys():
+        for prefix in self.prefix_to_target_prototype.keys():
             if path.startswith(prefix):
                 return True
 
@@ -160,3 +161,18 @@ def get_directory_target(
         relpath=relpath,
         target_root_key=target_root_key,
     )
+
+
+@contextmanager
+def _target_roots_override(
+    target_roots: dict[str, str],
+) -> typing.Generator[None, None, None]:
+    """Context manager to temporarily override the target roots in the TargetFactory."""
+    factory = target_factory_provider.get()
+    with target_factory_provider.override(
+        TargetFactory(
+            target_roots=target_roots,
+            prefix_to_target_prototype=factory.prefix_to_target_prototype,
+        )
+    ):
+        yield

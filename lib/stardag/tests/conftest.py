@@ -50,7 +50,7 @@ def default_local_target_tmp_path(
         with target_factory_provider.override(
             TargetFactory(
                 target_roots=target_roots,
-                prefixt_to_target_prototype={"/": LocalTarget},
+                prefix_to_target_prototype={"/": LocalTarget},
             )
         ):
             yield default_root
@@ -68,7 +68,7 @@ def _default_in_memory_fs_target_factory(
     with target_factory_provider.override(
         TargetFactory(
             target_roots={"default": default_in_memory_fs_target_prefix},
-            prefixt_to_target_prototype={
+            prefix_to_target_prototype={
                 default_in_memory_fs_target_prefix: InMemoryFileSystemTarget
             },
         )
