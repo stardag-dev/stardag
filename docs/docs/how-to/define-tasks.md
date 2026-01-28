@@ -1,3 +1,5 @@
+_NOTE this page is WIP. It is not complete and contains inaccuracies, currently excluded from docs site_.
+
 # Define Tasks
 
 Stardag provides three APIs for defining tasks, each suited to different use cases.
@@ -38,9 +40,8 @@ def count_words(text: sd.Depends[str]) -> int:
 
 ```python
 @sd.task(
-    family="CleanData",           # Custom task name (default: function name)
-    namespace="preprocessing",    # Organize tasks
-    version="1.0",               # Invalidate cache when changed
+    name="CleanData",           # Custom task name (default: function name)
+    version="1.0",              # Updates output URI and task ID when changed
 )
 def clean_data(raw: sd.Depends[str]) -> str:
     return raw.strip()

@@ -22,7 +22,7 @@ class AddAB(sd.AutoTask[Number]):
         a = deps["a"].output().load()
         b = deps["b"].output().load()
         result = a + b
-        self output().save(results)
+        self.output().save(results)
 ```
 
 The return type of `requires` can be a singe `BaseTask` or any nested list or dictionary of `BaseTask`s.
@@ -118,6 +118,8 @@ class Add(sd.AutoTask[Number]):
 When using the decorator API, `requires` is implemented automatically based on parameters annotated with `sd.Depends`:
 
 ```python
+Number = int | float
+
 @sd.task
 def add(a: sd.Depends[Number], b: sd.Depends[Number]) -> Number:
     return a + b

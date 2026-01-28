@@ -21,9 +21,15 @@ def pytest_markdown_docs_globals():
     return {"sd": sd}
 
 
+@pytest.fixture(scope="session")
+def default_in_memory_fs_target_prefix():
+    return "in-memory://"
+
+
 @pytest.fixture(scope="function")
 def default_local_target_tmp_path(
     tmp_path: Path,
+    default_in_memory_fs_target_prefix: str,
 ) -> typing.Generator[Path, None, None]:
     import json
 
@@ -36,15 +42,13 @@ def default_local_target_tmp_path(
         with target_factory_provider.override(
             TargetFactory(
                 target_roots=target_roots,
-                prefixt_to_target_prototype={"/": LocalTarget},
+                prefix_to_target_prototype={
+                    "/": LocalTarget,
+                    default_in_memory_fs_target_prefix: InMemoryFileSystemTarget,
+                },
             )
         ):
             yield default_root
-
-
-@pytest.fixture(scope="session")
-def default_in_memory_fs_target_prefix():
-    return "in-memory://"
 
 
 @pytest.fixture(scope="function")
@@ -54,8 +58,9 @@ def _default_in_memory_fs_target_factory(
     with target_factory_provider.override(
         TargetFactory(
             target_roots={"default": default_in_memory_fs_target_prefix},
-            prefixt_to_target_prototype={
-                default_in_memory_fs_target_prefix: InMemoryFileSystemTarget
+            prefix_to_target_prototype={
+                "/": LocalTarget,
+                default_in_memory_fs_target_prefix: InMemoryFileSystemTarget,
             },
         )
     ) as target_factory:
