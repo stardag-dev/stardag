@@ -6,20 +6,39 @@ Profiles define a complete context for Stardag operations: registry, user, works
 
 ### Via CLI
 
-```bash
-# Add a registry first
-stardag config registry add central --url https://api.stardag.com
+=== "Activated venv"
 
-# Login to the registry
-stardag auth login --registry central
+    ```bash
+    # Add a registry first
+    stardag config registry add central --url https://api.stardag.com
 
-# Create a profile
-stardag config profile add prod \
-    --registry central \
-    --user me@company.com \
-    --workspace my-company \
-    --environment production
-```
+    # Login to the registry
+    stardag auth login --registry central
+
+    # Create a profile
+    stardag config profile add prod \
+        --registry central \
+        --user me@company.com \
+        --workspace my-company \
+        --environment production
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    # Add a registry first
+    uv run stardag config registry add central --url https://api.stardag.com
+
+    # Login to the registry
+    uv run stardag auth login --registry central
+
+    # Create a profile
+    uv run stardag config profile add prod \
+        --registry central \
+        --user me@company.com \
+        --workspace my-company \
+        --environment production
+    ```
 
 ### Via Config File
 
@@ -61,9 +80,17 @@ profile = "dev"
 
 ### Set Default Profile
 
-```bash
-stardag config profile use prod
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile use prod
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile use prod
+    ```
 
 ### Environment Variable
 
@@ -82,21 +109,45 @@ STARDAG_PROFILE=dev python my_script.py
 
 ### List Profiles
 
-```bash
-stardag config profile list
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile list
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile list
+    ```
 
 ### Show Current Configuration
 
-```bash
-stardag config show
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config show
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config show
+    ```
 
 ### Remove Profile
 
-```bash
-stardag config profile remove old-profile
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile remove old-profile
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile remove old-profile
+    ```
 
 ## File Structure
 

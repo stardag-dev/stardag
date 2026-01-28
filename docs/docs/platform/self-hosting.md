@@ -8,61 +8,76 @@ Deploy your own Stardag API and UI.
 - PostgreSQL database (or use included container)
 - OAuth/OIDC provider (optional, for authentication)
 
-## Quick Start with Docker Compose
+## Local Development Stack
 
-### 1. Clone the Repository
+The repository includes a `docker-compose.yml` for running the full stack locally. This is intended for:
+
+- Local development and testing
+- Running a personal local registry
+- Evaluating the platform before deploying
+
+!!! warning "Not for Production"
+The local Docker Compose setup uses development defaults (simple passwords, Keycloak in dev mode). For production deployment, see [Production Deployment](#production-deployment) below.
+
+### Start the Stack
 
 ```bash
 git clone https://github.com/andhus/stardag.git
 cd stardag
-```
-
-### 2. Configure Environment
-
-Copy and edit the example environment file:
-
-```bash
-cp app/.env.example app/.env
-```
-
-Key settings:
-
-```bash
-# Database
-STARDAG_API_DATABASE_HOST=db
-STARDAG_API_DATABASE_NAME=stardag
-STARDAG_API_DATABASE_USER=stardag
-STARDAG_API_DATABASE_PASSWORD=your-secure-password
-
-# OIDC (optional - for OAuth login)
-OIDC_ISSUER_URL=https://your-idp.com
-OIDC_AUDIENCE=your-client-id
-
-# CORS
-STARDAG_API_CORS_ORIGINS=http://localhost:5173
-```
-
-### 3. Start Services
-
-```bash
-cd app
-docker-compose up -d
+docker compose up -d
 ```
 
 This starts:
 
-- PostgreSQL database
-- Stardag API (port 8000)
-- Stardag UI (port 5173)
+| Service     | Port | Description                    |
+| ----------- | ---- | ------------------------------ |
+| PostgreSQL  | 5432 | Database                       |
+| Keycloak    | 8080 | OAuth/OIDC provider (dev mode) |
+| Stardag API | 8000 | REST API                       |
+| Stardag UI  | 3000 | Web dashboard                  |
 
-### 4. Verify
+The stack automatically:
+
+- Runs database migrations
+- Seeds development data
+- Configures Keycloak with a `stardag` realm
+
+### Verify
 
 ```bash
 # Check API health
 curl http://localhost:8000/health
 
 # Open UI
-open http://localhost:5173
+open http://localhost:3000
+
+# Keycloak admin console
+open http://localhost:8080  # admin/admin
+```
+
+### Configure SDK
+
+Point your SDK to the local registry:
+
+=== "Activated venv"
+
+    ```bash
+    stardag config registry add local --url http://localhost:8000
+    stardag auth login --registry local
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config registry add local --url http://localhost:8000
+    uv run stardag auth login --registry local
+    ```
+
+### Stop the Stack
+
+```bash
+docker compose down        # Stop containers
+docker compose down -v     # Stop and remove volumes (reset data)
 ```
 
 ## Production Deployment
@@ -85,7 +100,7 @@ This creates:
 - Cognito for authentication
 - Route 53 DNS records
 
-See [AWS Deployment Guide](https://github.com/andhus/stardag/blob/main/.claude/tasks/registry-service/aws-deployment.md) for details.
+See the `infra/aws-cdk/` directory for configuration details.
 
 ### Manual Deployment
 

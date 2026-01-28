@@ -33,16 +33,16 @@ Interactive graph showing:
 - Execution history
 - Error logs (for failed tasks)
 
-### Organization Management
+### Workspace Management
 
 - Member management
-- Role assignments
-- API key generation
+- Role assignments (owner, admin, member)
+- Invite and remove members
 
-### Workspace Settings
+### Environment Settings
 
 - Target root configuration
-- Workspace-level API keys
+- Environment-scoped API keys
 - Access control
 
 ## Authentication
@@ -51,7 +51,7 @@ The UI uses OAuth for authentication:
 
 1. Click "Sign In"
 2. Authenticate with GitHub (or other configured IdP)
-3. Select organization and workspace
+3. Select workspace and environment
 
 ## Quick Actions
 
@@ -67,7 +67,7 @@ Navigate to Builds to see recent executions.
 
 ### Generate API Key
 
-1. Go to Organization Settings
+1. Go to Workspace Settings
 2. Navigate to API Keys
 3. Click "Create API Key"
 4. Copy and store securely

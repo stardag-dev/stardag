@@ -4,17 +4,33 @@ Complete reference for Stardag CLI commands.
 
 ## Installation
 
-```bash
-pip install stardag
-```
+=== "uv"
+
+    ```bash
+    uv add stardag
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install stardag
+    ```
 
 ## Global Commands
 
 ### Version
 
-```bash
-stardag version
-```
+=== "Activated venv"
+
+    ```bash
+    stardag version
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag version
+    ```
 
 Show SDK version.
 
@@ -22,9 +38,17 @@ Show SDK version.
 
 ### Login
 
-```bash
-stardag auth login [--registry NAME]
-```
+=== "Activated venv"
+
+    ```bash
+    stardag auth login [--registry NAME]
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag auth login [--registry NAME]
+    ```
 
 Opens browser for OAuth authentication.
 
@@ -34,25 +58,49 @@ Opens browser for OAuth authentication.
 
 ### Status
 
-```bash
-stardag auth status
-```
+=== "Activated venv"
+
+    ```bash
+    stardag auth status
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag auth status
+    ```
 
 Show current authentication status.
 
 ### Refresh
 
-```bash
-stardag auth refresh
-```
+=== "Activated venv"
+
+    ```bash
+    stardag auth refresh
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag auth refresh
+    ```
 
 Refresh access token for current profile.
 
 ### Logout
 
-```bash
-stardag auth logout
-```
+=== "Activated venv"
+
+    ```bash
+    stardag auth logout
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag auth logout
+    ```
 
 Clear stored credentials.
 
@@ -60,9 +108,17 @@ Clear stored credentials.
 
 ### Show Configuration
 
-```bash
-stardag config show
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config show
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config show
+    ```
 
 Display current configuration and context.
 
@@ -70,46 +126,99 @@ Display current configuration and context.
 
 ### List Registries
 
-```bash
-stardag config registry list
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config registry list
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config registry list
+    ```
 
 ### Add Registry
 
-```bash
-stardag config registry add NAME --url URL
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config registry add NAME --url URL
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config registry add NAME --url URL
+    ```
 
 **Example:**
 
-```bash
-stardag config registry add central --url https://api.stardag.com
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config registry add central --url https://api.stardag.com
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config registry add central --url https://api.stardag.com
+    ```
 
 ### Remove Registry
 
-```bash
-stardag config registry remove NAME
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config registry remove NAME
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config registry remove NAME
+    ```
 
 ## Profile Management
 
 ### List Profiles
 
-```bash
-stardag config profile list
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile list
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile list
+    ```
 
 ### Add Profile
 
-```bash
-stardag config profile add NAME \
-    --registry REGISTRY \
-    --user USER \
-    --workspace WORKSPACE \
-    --environment ENVIRONMENT \
-    [--default]
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile add NAME \
+        --registry REGISTRY \
+        --user USER \
+        --workspace WORKSPACE \
+        --environment ENVIRONMENT \
+        [--default]
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile add NAME \
+        --registry REGISTRY \
+        --user USER \
+        --workspace WORKSPACE \
+        --environment ENVIRONMENT \
+        [--default]
+    ```
 
 **Options:**
 
@@ -121,44 +230,89 @@ stardag config profile add NAME \
 
 **Example:**
 
-```bash
-stardag config profile add prod \
-    -r central \
-    -u me@company.com \
-    -w my-company \
-    -e production \
-    --default
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile add prod \
+        -r central \
+        -u me@company.com \
+        -w my-company \
+        -e production \
+        --default
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile add prod \
+        -r central \
+        -u me@company.com \
+        -w my-company \
+        -e production \
+        --default
+    ```
 
 ### Use Profile
 
-```bash
-stardag config profile use NAME
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile use NAME
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile use NAME
+    ```
 
 Set the default profile (also refreshes access token).
 
 ### Remove Profile
 
-```bash
-stardag config profile remove NAME
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config profile remove NAME
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config profile remove NAME
+    ```
 
 ## Workspace & Environment Commands
 
 ### List Workspaces
 
-```bash
-stardag config list workspaces
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config list workspaces
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config list workspaces
+    ```
 
 List workspaces you have access to.
 
 ### List Environments
 
-```bash
-stardag config list environments
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config list environments
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config list environments
+    ```
 
 List environments in the active workspace.
 
@@ -166,17 +320,33 @@ List environments in the active workspace.
 
 ### List Target Roots
 
-```bash
-stardag config target-roots list
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config target-roots list
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config target-roots list
+    ```
 
 Show cached target roots for current environment.
 
 ### Sync Target Roots
 
-```bash
-stardag config target-roots sync
-```
+=== "Activated venv"
+
+    ```bash
+    stardag config target-roots sync
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    uv run stardag config target-roots sync
+    ```
 
 Fetch latest target roots from server.
 
@@ -198,39 +368,79 @@ All CLI behavior can be overridden with environment variables:
 
 ### Initial Setup
 
-```bash
-# Add registry
-stardag config registry add local --url http://localhost:8000
+=== "Activated venv"
 
-# Login
-stardag auth login --registry local
+    ```bash
+    # Add registry
+    stardag config registry add local --url http://localhost:8000
 
-# Create profile
-stardag config profile add dev \
-    -r local \
-    -u me@example.com \
-    -w my-workspace \
-    -e development \
-    --default
+    # Login
+    stardag auth login --registry local
 
-# Verify
-stardag config show
-```
+    # Create profile
+    stardag config profile add dev \
+        -r local \
+        -u me@example.com \
+        -w my-workspace \
+        -e development \
+        --default
+
+    # Verify
+    stardag config show
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    # Add registry
+    uv run stardag config registry add local --url http://localhost:8000
+
+    # Login
+    uv run stardag auth login --registry local
+
+    # Create profile
+    uv run stardag config profile add dev \
+        -r local \
+        -u me@example.com \
+        -w my-workspace \
+        -e development \
+        --default
+
+    # Verify
+    uv run stardag config show
+    ```
 
 ### Switch Environments
 
-```bash
-# Create multiple profiles
-stardag config profile add dev -r local -u me@example.com -w my-workspace -e dev
-stardag config profile add prod -r central -u me@company.com -w my-company -e prod
+=== "Activated venv"
 
-# Switch between them
-stardag config profile use dev
-stardag config profile use prod
+    ```bash
+    # Create multiple profiles
+    stardag config profile add dev -r local -u me@example.com -w my-workspace -e dev
+    stardag config profile add prod -r central -u me@company.com -w my-company -e prod
 
-# Or use environment variable
-export STARDAG_PROFILE=prod
-```
+    # Switch between them
+    stardag config profile use dev
+    stardag config profile use prod
+
+    # Or use environment variable
+    export STARDAG_PROFILE=prod
+    ```
+
+=== "uv run ..."
+
+    ```bash
+    # Create multiple profiles
+    uv run stardag config profile add dev -r local -u me@example.com -w my-workspace -e dev
+    uv run stardag config profile add prod -r central -u me@company.com -w my-company -e prod
+
+    # Switch between them
+    uv run stardag config profile use dev
+    uv run stardag config profile use prod
+
+    # Or use environment variable
+    export STARDAG_PROFILE=prod
+    ```
 
 ### CI/CD Setup
 
