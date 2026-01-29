@@ -25,26 +25,30 @@ An **environment** is a logical grouping within a workspace that provides:
 - Isolated task and build history
 - Separate target root configurations
 - Dedicated API keys for CI/CD
-- Team-level access control
 
 ## Common Patterns
-
-### By Project
-
-```
-Workspace: my-company
-├── Environment: ml-pipeline
-├── Environment: data-etl
-└── Environment: analytics-dashboard
-```
 
 ### By Stage
 
 ```
 Workspace: my-company
-├── Environment: project-dev
-├── Environment: project-staging
-└── Environment: project-prod
+└── Environment: main (or prod)
+├── Environment: dev
+└── Environment: staging
+```
+
+### By Project
+
+!!! tip "Avoid too granular environments"
+
+    Only split environments by projects if your projects are truly independent. If you think you might reference tasks in one project from another project, they should be in the *same* environment.
+
+```
+Workspace: my-company
+├── Environment: ml-pipeline_main
+├── Environment: ml-pipeline_dev
+└── Environment: analytics-dashboard_main
+└── Environment: analytics-dashboard_dev
 ```
 
 ### Personal Environments
@@ -53,7 +57,8 @@ Auto-created `personal-{username}` environment for individual work:
 
 ```
 Workspace: my-company
-├── Environment: team-project
+├── Environment: main
+├── Environment: dev
 ├── Environment: personal-alice
 └── Environment: personal-bob
 ```
@@ -104,7 +109,8 @@ Each environment has its own target root configuration:
 | `archive` | `s3://company/archive/`      | Long-term storage |
 
 !!! info "Local paths with ~/"
-Target root paths starting with `~/` are automatically expanded to the user's home directory.
+
+    Target root paths starting with `~/` are automatically expanded to the user's home directory. They mostly make sense for personal/local environments.
 
 ### Synchronizing Target Roots
 

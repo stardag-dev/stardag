@@ -16,7 +16,7 @@ Profiles define a complete context for Stardag operations: registry, user, works
     stardag auth login --registry central
 
     # Create a profile
-    stardag config profile add prod \
+    stardag config profile add my-company_prod \
         --registry central \
         --user me@company.com \
         --workspace my-company \
@@ -33,7 +33,7 @@ Profiles define a complete context for Stardag operations: registry, user, works
     uv run stardag auth login --registry central
 
     # Create a profile
-    uv run stardag config profile add prod \
+    uv run stardag config profile add my-company_prod \
         --registry central \
         --user me@company.com \
         --workspace my-company \
@@ -51,20 +51,20 @@ url = "http://localhost:8000"
 [registry.central]
 url = "https://api.stardag.com"
 
-[profile.dev]
+[profile.local_dev]
 registry = "local"
 user = "me@example.com"
 workspace = "my-workspace"
 environment = "development"
 
-[profile.prod]
+[profile.my-company_prod]
 registry = "central"
 user = "me@company.com"
 workspace = "my-company"
 environment = "production"
 
 [default]
-profile = "dev"
+profile = "local_dev"
 ```
 
 ## Profile Fields
@@ -166,21 +166,7 @@ STARDAG_PROFILE=dev python my_script.py
 
 ## Project-Level Profiles
 
-Place `.stardag/config.toml` in your repository root:
-
-```toml
-# .stardag/config.toml
-[profile.ci]
-registry = "central"
-user = "ci@company.com"
-workspace = "my-company"
-environment = "ci-testing"
-
-[default]
-profile = "ci"
-```
-
-Project config takes precedence over user config.
+You can place a `.stardag/config.toml` in your repository root. This will be merged with user config in `~/.stardag/config.toml`. Project config takes precedence over user config. Since the profiles contain user details, a project level config should typically be git-ignored for multi-user projects (but keeping project level configs can still be helpful to set defaults per project/repo).
 
 ## Environment Variable Overrides
 
