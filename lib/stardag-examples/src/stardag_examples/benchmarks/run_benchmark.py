@@ -51,7 +51,6 @@ from stardag.registry import (
 from stardag.target import InMemoryFileSystemTarget
 from stardag.target._factory import TargetFactory, target_factory_provider
 
-
 # Registry mode type
 RegistryMode = Literal["noop", "local", "remote"]
 
@@ -357,7 +356,7 @@ def main():
     with target_factory_provider.override(
         TargetFactory(
             target_roots={"default": target_root},
-            prefixt_to_target_prototype={"/": InMemoryFileSystemTarget},
+            prefix_to_target_prototype={"/": InMemoryFileSystemTarget},
         )
     ):
         all_results: list[BenchmarkResult] = []
