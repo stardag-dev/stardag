@@ -51,7 +51,9 @@ Uses browser-based OAuth flow.
 
 ## SDK Integration
 
-The SDK handles API communication automatically:
+The SDK handles API communication automatically, and uses registry based on your [configuration](../configuration/index.md).
+
+Yoy can also pass a registry implementation to the [`build` functions](../concepts/build-execution.md#the-build-functions) explicitly:
 
 ```python
 from stardag.registry import APIRegistry
