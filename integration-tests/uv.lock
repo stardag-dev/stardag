@@ -597,19 +597,12 @@ name = "stardag"
 source = { editable = "../lib/stardag" }
 dependencies = [
     { name = "aiofiles" },
+    { name = "httpx" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "uuid6" },
-]
-
-[package.optional-dependencies]
-api = [
-    { name = "httpx" },
-]
-cli = [
-    { name = "httpx" },
     { name = "tomli-w" },
     { name = "typer" },
+    { name = "uuid6" },
 ]
 
 [package.metadata]
@@ -620,19 +613,18 @@ requires-dist = [
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
     { name = "boto3-stubs", extras = ["s3"], marker = "extra == 's3'" },
     { name = "botocore", marker = "extra == 's3'", specifier = ">=1.36" },
-    { name = "httpx", marker = "extra == 'api'", specifier = ">=0.27.0" },
-    { name = "httpx", marker = "extra == 'cli'", specifier = ">=0.27.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.0.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.1.0" },
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "pydantic-settings", specifier = ">=2.7.1" },
-    { name = "tomli-w", marker = "extra == 'cli'", specifier = ">=1.0.0" },
-    { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12.0" },
+    { name = "tomli-w", specifier = ">=1.0.0" },
+    { name = "typer", specifier = ">=0.12.0" },
     { name = "types-aioboto3", extras = ["s3"], marker = "extra == 's3'" },
     { name = "uuid6", specifier = ">=2024.7.10" },
 ]
-provides-extras = ["api", "cli", "modal", "pandas", "prefect", "s3"]
+provides-extras = ["modal", "pandas", "prefect", "s3"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -641,6 +633,7 @@ dev = [
     { name = "pyright", specifier = ">=1.1.359" },
     { name = "pytest", specifier = ">=8.2.2" },
     { name = "pytest-asyncio", specifier = ">=0.23.7" },
+    { name = "pytest-markdown-docs", specifier = ">=0.9.0" },
     { name = "ruff", specifier = ">=0.14.11" },
 ]
 
@@ -654,7 +647,7 @@ dependencies = [
     { name = "pytest-asyncio" },
     { name = "pytest-timeout" },
     { name = "python-dotenv" },
-    { name = "stardag", extra = ["api", "cli"] },
+    { name = "stardag" },
 ]
 
 [package.optional-dependencies]

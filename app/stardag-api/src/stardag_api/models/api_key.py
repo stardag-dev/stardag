@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
     from stardag_api.models.user import User
@@ -25,13 +26,13 @@ class ApiKey(Base, TimestampMixin):
 
     __tablename__ = "api_keys"
 
-    id: Mapped[str] = mapped_column(
-        String(36),
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
         primary_key=True,
-        default=generate_uuid,
+        default=generate_uuid7,
     )
-    environment_id: Mapped[str] = mapped_column(
-        String(36),
+    environment_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -51,8 +52,8 @@ class ApiKey(Base, TimestampMixin):
         String(255),
         nullable=False,
     )
-    created_by_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )

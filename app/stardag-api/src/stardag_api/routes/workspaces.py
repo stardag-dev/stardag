@@ -8,6 +8,7 @@ Other endpoints require workspace-scoped internal tokens.
 
 import re
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -72,7 +73,7 @@ class WorkspaceResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: UUID
     name: str
     slug: str
     description: str | None
@@ -91,8 +92,8 @@ class MemberResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    user_id: str
+    id: UUID
+    user_id: UUID
     email: str
     display_name: str | None
     role: WorkspaceRole
@@ -116,7 +117,7 @@ class InviteResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: UUID
     email: str
     role: WorkspaceRole
     status: InviteStatus
@@ -155,19 +156,19 @@ class EnvironmentResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    workspace_id: str
+    id: UUID
+    workspace_id: UUID
     name: str
     slug: str
     description: str | None
-    owner_id: str | None = None  # Deprecated: was used for personal environments
+    owner_id: UUID | None = None  # Deprecated: was used for personal environments
 
 
 # --- Helper functions ---
 
 
 async def get_user_membership(
-    db: AsyncSession, user_id: str, workspace_id: str
+    db: AsyncSession, user_id: UUID, workspace_id: UUID
 ) -> WorkspaceMember | None:
     """Get user's membership in a workspace."""
     result = await db.execute(
@@ -181,8 +182,8 @@ async def get_user_membership(
 
 async def require_workspace_access(
     db: AsyncSession,
-    user_id: str,
-    workspace_id: str,
+    user_id: UUID,
+    workspace_id: UUID,
     min_role: WorkspaceRole | None = None,
 ) -> WorkspaceMember:
     """Require user has access to workspace, optionally with minimum role."""
@@ -291,7 +292,7 @@ async def create_workspace(
 
 @router.get("/{workspace_id}", response_model=WorkspaceDetailResponse)
 async def get_workspace(
-    workspace_id: str,
+    workspace_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -319,7 +320,7 @@ async def get_workspace(
 
 @router.patch("/{workspace_id}", response_model=WorkspaceResponse)
 async def update_workspace(
-    workspace_id: str,
+    workspace_id: UUID,
     data: WorkspaceUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -347,7 +348,7 @@ async def update_workspace(
 
 @router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_workspace(
-    workspace_id: str,
+    workspace_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -370,7 +371,7 @@ async def delete_workspace(
 
 @router.get("/{workspace_id}/members", response_model=list[MemberResponse])
 async def list_members(
-    workspace_id: str,
+    workspace_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -398,8 +399,8 @@ async def list_members(
 
 @router.patch("/{workspace_id}/members/{member_id}", response_model=MemberResponse)
 async def update_member_role(
-    workspace_id: str,
-    member_id: str,
+    workspace_id: UUID,
+    member_id: UUID,
     data: MemberUpdateRole,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -450,8 +451,8 @@ async def update_member_role(
     "/{workspace_id}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT
 )
 async def remove_member(
-    workspace_id: str,
-    member_id: str,
+    workspace_id: UUID,
+    member_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -503,7 +504,7 @@ async def remove_member(
 
 @router.get("/{workspace_id}/invites", response_model=list[InviteResponse])
 async def list_invites(
-    workspace_id: str,
+    workspace_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -539,7 +540,7 @@ async def list_invites(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_invite(
-    workspace_id: str,
+    workspace_id: UUID,
     data: InviteCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -609,8 +610,8 @@ async def create_invite(
     "/{workspace_id}/invites/{invite_id}", status_code=status.HTTP_204_NO_CONTENT
 )
 async def cancel_invite(
-    workspace_id: str,
-    invite_id: str,
+    workspace_id: UUID,
+    invite_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -636,7 +637,7 @@ async def cancel_invite(
 
 @router.post("/invites/{invite_id}/accept", response_model=WorkspaceResponse)
 async def accept_invite(
-    invite_id: str,
+    invite_id: UUID,
     current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -674,7 +675,7 @@ async def accept_invite(
 
 @router.post("/invites/{invite_id}/decline", status_code=status.HTTP_204_NO_CONTENT)
 async def decline_invite(
-    invite_id: str,
+    invite_id: UUID,
     current_user: Annotated[User, Depends(get_current_user_flexible)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -702,7 +703,7 @@ async def decline_invite(
 
 @router.get("/{workspace_id}/environments", response_model=list[EnvironmentResponse])
 async def list_environments(
-    workspace_id: str,
+    workspace_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -721,7 +722,7 @@ async def list_environments(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_environment(
-    workspace_id: str,
+    workspace_id: UUID,
     data: EnvironmentCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -774,8 +775,8 @@ async def create_environment(
     "/{workspace_id}/environments/{environment_id}", response_model=EnvironmentResponse
 )
 async def get_environment(
-    workspace_id: str,
-    environment_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -799,8 +800,8 @@ async def get_environment(
     "/{workspace_id}/environments/{environment_id}", response_model=EnvironmentResponse
 )
 async def update_environment(
-    workspace_id: str,
-    environment_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
     data: EnvironmentUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -836,8 +837,8 @@ async def update_environment(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_environment(
-    workspace_id: str,
-    environment_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -884,11 +885,11 @@ class ApiKeyResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    environment_id: str
+    id: UUID
+    environment_id: UUID
     name: str
     key_prefix: str
-    created_by_id: str | None
+    created_by_id: UUID | None
     created_at: str  # ISO format datetime
     last_used_at: str | None
     revoked_at: str | None
@@ -927,8 +928,8 @@ class TargetRootResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    environment_id: str
+    id: UUID
+    environment_id: UUID
     name: str
     uri_prefix: str
     created_at: str  # ISO format datetime
@@ -942,8 +943,8 @@ class TargetRootResponse(BaseModel):
     response_model=list[ApiKeyResponse],
 )
 async def list_api_keys(
-    workspace_id: str,
-    environment_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     include_revoked: bool = False,
@@ -986,8 +987,8 @@ async def list_api_keys(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_api_key(
-    workspace_id: str,
-    environment_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
     data: ApiKeyCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1033,9 +1034,9 @@ async def create_api_key(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def revoke_api_key(
-    workspace_id: str,
-    environment_id: str,
-    key_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
+    key_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -1071,8 +1072,8 @@ async def revoke_api_key(
     response_model=list[TargetRootResponse],
 )
 async def list_target_roots(
-    workspace_id: str,
-    environment_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -1112,8 +1113,8 @@ async def list_target_roots(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_target_root(
-    workspace_id: str,
-    environment_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
     data: TargetRootCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1169,9 +1170,9 @@ async def create_target_root(
     response_model=TargetRootResponse,
 )
 async def get_target_root(
-    workspace_id: str,
-    environment_id: str,
-    root_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
+    root_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
@@ -1212,9 +1213,9 @@ async def get_target_root(
     response_model=TargetRootResponse,
 )
 async def update_target_root(
-    workspace_id: str,
-    environment_id: str,
-    root_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
+    root_id: UUID,
     data: TargetRootUpdate,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -1279,9 +1280,9 @@ async def update_target_root(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_target_root(
-    workspace_id: str,
-    environment_id: str,
-    root_id: str,
+    workspace_id: UUID,
+    environment_id: UUID,
+    root_id: UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):

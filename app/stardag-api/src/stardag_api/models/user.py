@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import String
+from sqlalchemy import String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
     from stardag_api.models.build import Build
@@ -23,10 +24,10 @@ class User(Base, TimestampMixin):
 
     __tablename__ = "users"
 
-    id: Mapped[str] = mapped_column(
-        String(36),
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
         primary_key=True,
-        default=generate_uuid,
+        default=generate_uuid7,
     )
     # OIDC subject claim - unique identifier from identity provider
     external_id: Mapped[str] = mapped_column(

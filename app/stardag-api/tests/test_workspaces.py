@@ -1,5 +1,7 @@
 """Tests for workspace management routes."""
 
+from uuid import UUID
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -13,16 +15,16 @@ from stardag_api.models.enums import WorkspaceRole
 
 
 def _create_mock_internal_token(
-    user_id: str,
-    workspace_id: str,
+    user_id: UUID,
+    workspace_id: UUID,
 ) -> InternalTokenPayload:
     """Create a mock internal token payload for testing.
 
     Internal tokens use the internal user ID (not external_id from OIDC).
     """
     return InternalTokenPayload(
-        sub=user_id,
-        workspace_id=workspace_id,
+        sub=str(user_id),
+        workspace_id=str(workspace_id),
         iss="stardag-api",
         aud="stardag",
         exp=9999999999,
@@ -627,7 +629,7 @@ async def test_accept_invite(
 
         assert response.status_code == 200
         data = response.json()
-        assert data["id"] == test_workspace_with_owner.id
+        assert data["id"] == str(test_workspace_with_owner.id)
     finally:
         app.dependency_overrides.clear()
 
@@ -684,7 +686,7 @@ async def test_create_target_root(
         data = response.json()
         assert data["name"] == "default"
         assert data["uri_prefix"] == "s3://my-bucket/stardag/"
-        assert data["environment_id"] == environment_id
+        assert data["environment_id"] == str(environment_id)
         assert "id" in data
         assert "created_at" in data
     finally:
@@ -1483,7 +1485,7 @@ async def test_fetch_user_profile_with_workspaces(
         # Check user info
         assert "user" in data
         assert data["user"]["email"] == test_user.email
-        assert data["user"]["id"] == test_user.id
+        assert data["user"]["id"] == str(test_user.id)
 
         # Check workspaces list
         assert "workspaces" in data
@@ -1605,7 +1607,7 @@ async def test_invite_flow_full_cycle(
 
         assert response.status_code == 200
         workspace_data = response.json()
-        assert workspace_data["id"] == test_workspace_with_owner.id
+        assert workspace_data["id"] == str(test_workspace_with_owner.id)
     finally:
         app.dependency_overrides.clear()
 
@@ -1860,7 +1862,7 @@ async def test_new_user_with_personal_workspace_and_pending_invite(async_engine)
 
             assert len(invites) == 1
             assert invites[0]["workspace_name"] == "Team Workspace"
-            assert invites[0]["id"] == invite_id
+            assert invites[0]["id"] == str(invite_id)
 
             # Accept the invite
             response = await client.post(

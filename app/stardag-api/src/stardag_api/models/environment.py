@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
     from stardag_api.models.api_key import ApiKey
@@ -29,13 +30,13 @@ class Environment(Base, TimestampMixin):
         UniqueConstraint("workspace_id", "slug", name="uq_environment_workspace_slug"),
     )
 
-    id: Mapped[str] = mapped_column(
-        String(36),
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
         primary_key=True,
-        default=generate_uuid,
+        default=generate_uuid7,
     )
-    workspace_id: Mapped[str] = mapped_column(
-        String(36),
+    workspace_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -44,8 +45,8 @@ class Environment(Base, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text)
     # Personal environment owner (null for shared environments)
-    owner_id: Mapped[str | None] = mapped_column(
-        String(36),
+    owner_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True,

@@ -7,6 +7,7 @@ Locks are scoped to environment and identified by lock name (typically task_id).
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
+from uuid import UUID
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -41,7 +42,7 @@ def _utc_now() -> datetime:
 
 async def check_task_completed_in_registry(
     db: AsyncSession,
-    environment_id: str,
+    environment_id: UUID,
     task_id: str,
 ) -> bool:
     """Check if a task has a TASK_COMPLETED event in the registry.
@@ -81,7 +82,7 @@ async def check_task_completed_in_registry(
 
 async def get_environment_lock_count(
     db: AsyncSession,
-    environment_id: str,
+    environment_id: UUID,
 ) -> int:
     """Get the count of active (non-expired) locks for an environment.
 
@@ -104,7 +105,7 @@ async def get_environment_lock_count(
 
 async def get_environment_max_concurrent_locks(
     db: AsyncSession,
-    environment_id: str,
+    environment_id: UUID,
 ) -> int | None:
     """Get the max concurrent locks limit for an environment.
 
@@ -125,7 +126,7 @@ async def acquire_lock(
     db: AsyncSession,
     lock_name: str,
     owner_id: str,
-    environment_id: str,
+    environment_id: UUID,
     ttl_seconds: int,
     check_task_completion: bool = True,
 ) -> LockAcquisitionResult:
@@ -293,8 +294,8 @@ async def release_lock_with_completion(
     db: AsyncSession,
     lock_name: str,
     owner_id: str,
-    environment_id: str,
-    build_id: str,
+    environment_id: UUID,
+    build_id: UUID,
 ) -> bool:
     """Release a lock and record task completion in the same transaction.
 
@@ -362,7 +363,7 @@ async def get_lock(
 
 async def list_locks(
     db: AsyncSession,
-    environment_id: str,
+    environment_id: UUID,
     include_expired: bool = False,
 ) -> list[DistributedLock]:
     """List locks for an environment.
@@ -391,7 +392,7 @@ async def list_locks(
 
 async def cleanup_expired_locks(
     db: AsyncSession,
-    environment_id: str | None = None,
+    environment_id: UUID | None = None,
 ) -> int:
     """Clean up expired locks.
 

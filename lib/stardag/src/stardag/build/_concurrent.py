@@ -404,7 +404,7 @@ async def build_aio(
     max_concurrent_discover: int = 50,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
-    resume_build_id: str | None = None,
+    resume_build_id: UUID | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -949,7 +949,7 @@ def build(
     max_concurrent_discover: int = 50,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
-    resume_build_id: str | None = None,
+    resume_build_id: UUID | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 

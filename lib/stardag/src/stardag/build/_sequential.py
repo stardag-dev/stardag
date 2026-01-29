@@ -42,7 +42,7 @@ def build_sequential(
     registry: RegistryABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     dual_run_default: Literal["sync", "async"] = "sync",
-    resume_build_id: str | None = None,
+    resume_build_id: UUID | None = None,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
 ) -> BuildSummary:
@@ -296,7 +296,7 @@ def _run_task_sequential(
     task: BaseTask,
     completion_cache: set[UUID],
     all_tasks: dict[UUID, BaseTask],
-    build_id: str,
+    build_id: UUID,
     registry: RegistryABC,
     dual_run_default: Literal["sync", "async"],
 ) -> None:
@@ -366,7 +366,7 @@ async def build_sequential_aio(
     registry: RegistryABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     sync_run_default: Literal["thread", "blocking"] = "blocking",
-    resume_build_id: str | None = None,
+    resume_build_id: UUID | None = None,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
 ) -> BuildSummary:
@@ -621,7 +621,7 @@ async def _run_task_sequential_aio(
     task: BaseTask,
     completion_cache: set[UUID],
     all_tasks: dict[UUID, BaseTask],
-    build_id: str,
+    build_id: UUID,
     registry: RegistryABC,
     sync_run_default: Literal["thread", "blocking"],
 ) -> None:

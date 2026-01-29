@@ -5,6 +5,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from uuid import UUID
+
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,7 +42,7 @@ class AuthConfigResponse(BaseModel):
 class TokenExchangeRequest(BaseModel):
     """Request body for token exchange."""
 
-    workspace_id: str
+    workspace_id: UUID
 
 
 class TokenExchangeResponse(BaseModel):
@@ -179,8 +181,8 @@ async def exchange_token(
     # Create internal token with workspace_id
     token_manager = get_token_manager()
     access_token = token_manager.create_access_token(
-        user_id=user.id,
-        workspace_id=request.workspace_id,
+        user_id=str(user.id),
+        workspace_id=str(request.workspace_id),
     )
 
     # Calculate expires_in from TTL

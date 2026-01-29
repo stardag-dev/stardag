@@ -46,7 +46,7 @@ export interface BuildListResponse {
 
 // Task with status (from build context)
 export interface Task {
-  id: number;
+  id: string;
   task_id: string;
   environment_id: string;
   task_namespace: string;
@@ -78,7 +78,7 @@ export interface TaskListResponse {
 
 // Graph structures
 export interface TaskNode {
-  id: number;
+  id: string;
   task_id: string;
   task_name: string;
   task_namespace: string;
@@ -87,8 +87,8 @@ export interface TaskNode {
 }
 
 export interface TaskEdge {
-  source: number; // upstream task internal id
-  target: number; // downstream task internal id
+  source: string; // upstream task internal id
+  target: string; // downstream task internal id
 }
 
 export interface TaskGraphResponse {
@@ -103,7 +103,7 @@ export type TaskAssetType = "markdown" | "json";
 // - markdown: { content: "<markdown string>" }
 // - json: the actual JSON data dict
 export interface TaskAsset {
-  id: number;
+  id: string;
   task_id: string;
   asset_type: TaskAssetType;
   name: string;
@@ -136,7 +136,7 @@ export type EventType =
 export interface TaskEvent {
   id: string;
   build_id: string;
-  task_id: number | null;
+  task_id: string | null;
   event_type: EventType;
   created_at: string;
   error_message: string | null;

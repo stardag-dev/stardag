@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import ForeignKey, Index, JSON, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, JSON, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
     from stardag_api.models.event import Event
@@ -36,8 +37,12 @@ class Task(Base, TimestampMixin):
         Index("ix_tasks_environment_namespace", "environment_id", "task_namespace"),
     )
 
-    # Auto-increment primary key for efficient joins
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # UUID7 primary key for time-sortable, globally unique IDs
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=generate_uuid7,
+    )
 
     # Deterministic hash from SDK, unique within workspace
     task_id: Mapped[str] = mapped_column(
@@ -45,8 +50,8 @@ class Task(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    environment_id: Mapped[str] = mapped_column(
-        String(36),
+    environment_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
         index=True,

@@ -3,12 +3,14 @@
 import pytest
 from httpx import AsyncClient
 
+from tests.conftest import DEFAULT_ENVIRONMENT_ID_STR
+
 
 @pytest.mark.asyncio
 async def test_create_build(client: AsyncClient):
     """Test creating a new run."""
     build_data = {
-        "environment_id": "default",
+        "environment_id": DEFAULT_ENVIRONMENT_ID_STR,
         "user": "default",
         "commit_hash": "abc123",
         "root_task_ids": [],
@@ -17,7 +19,7 @@ async def test_create_build(client: AsyncClient):
     response = await client.post("/api/v1/builds", json=build_data)
     assert response.status_code == 201
     data = response.json()
-    assert data["environment_id"] == "default"
+    assert data["environment_id"] == DEFAULT_ENVIRONMENT_ID_STR
     assert data["status"] == "running"  # Build starts in buildning state
     assert data["name"] is not None  # Has memorable slug
     assert "-" in data["name"]  # Format: adjective-noun-number
@@ -29,7 +31,7 @@ async def test_create_build_minimal(client: AsyncClient):
     response = await client.post("/api/v1/builds", json={})
     assert response.status_code == 201
     data = response.json()
-    assert data["environment_id"] == "default"
+    assert data["environment_id"] == DEFAULT_ENVIRONMENT_ID_STR
     assert data["status"] == "running"
 
 
@@ -51,7 +53,9 @@ async def test_get_build(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_get_build_not_found(client: AsyncClient):
     """Test that getting a non-existent run returns 404."""
-    response = await client.get("/api/v1/builds/nonexistent-id")
+    # Use a valid UUID format that doesn't exist in the database
+    fake_uuid = "00000000-0000-0000-0000-000000000099"
+    response = await client.get(f"/api/v1/builds/{fake_uuid}")
     assert response.status_code == 404
 
 
@@ -63,7 +67,8 @@ async def test_list_builds(client: AsyncClient):
         await client.post("/api/v1/builds", json={})
 
     response = await client.get(
-        "/api/v1/builds", params={"environment_id": "default", "page_size": 2}
+        "/api/v1/builds",
+        params={"environment_id": DEFAULT_ENVIRONMENT_ID_STR, "page_size": 2},
     )
     assert response.status_code == 200
     data = response.json()

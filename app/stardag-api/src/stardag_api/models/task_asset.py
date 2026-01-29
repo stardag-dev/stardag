@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from sqlalchemy import (
     ForeignKey,
@@ -10,10 +11,11 @@ from sqlalchemy import (
     JSON,
     String,
     UniqueConstraint,
+    Uuid,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
     from stardag_api.models.task import Task
@@ -43,18 +45,23 @@ class TaskRegistryAsset(Base, TimestampMixin):
         Index("ix_task_registry_assets_environment", "environment_id"),
     )
 
-    # Auto-increment primary key
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # UUID7 primary key
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=generate_uuid7,
+    )
 
     # Foreign key to tasks table (internal PK, not task_id hash)
-    task_pk: Mapped[int] = mapped_column(
+    task_pk: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("tasks.id", ondelete="CASCADE"),
         nullable=False,
     )
 
     # Environment for access control
-    environment_id: Mapped[str] = mapped_column(
-        String(36),
+    environment_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("environments.id", ondelete="CASCADE"),
         nullable=False,
     )

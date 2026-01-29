@@ -1,6 +1,7 @@
 """Pydantic schemas for API request/response models."""
 
 from datetime import datetime
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
@@ -22,7 +23,7 @@ class WorkspaceResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: UUID
     name: str
     slug: str
     description: str | None
@@ -45,8 +46,8 @@ class UserResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    workspace_id: str
+    id: UUID
+    workspace_id: UUID
     username: str
     display_name: str | None
     email: str | None
@@ -69,8 +70,8 @@ class EnvironmentResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    workspace_id: str
+    id: UUID
+    workspace_id: UUID
     name: str
     slug: str
     description: str | None
@@ -93,7 +94,7 @@ class BuildCreate(BaseModel):
 class StatusTriggeredByUser(BaseModel):
     """User info for who triggered a manual status change."""
 
-    id: str
+    id: str  # external_id from auth provider (stored in event metadata)
     email: str
     display_name: str | None
 
@@ -103,9 +104,9 @@ class BuildResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    environment_id: str
-    user_id: str | None
+    id: UUID
+    environment_id: UUID
+    user_id: UUID | None
     name: str
     description: str | None
     commit_hash: str | None
@@ -148,9 +149,9 @@ class TaskResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
+    id: UUID
     task_id: str
-    environment_id: str
+    environment_id: UUID
     task_namespace: str
     task_name: str
     task_data: dict
@@ -170,7 +171,7 @@ class TaskWithStatusResponse(TaskResponse):
     # Global status fields
     waiting_for_lock: bool = False
     # Build where the status-determining event occurred (for cross-build indicators)
-    status_build_id: str | None = None
+    status_build_id: UUID | None = None
 
 
 class TaskEventResponse(BaseModel):
@@ -196,7 +197,7 @@ class EventCreate(BaseModel):
     """Schema for creating an event (internal use)."""
 
     event_type: EventType
-    task_id: int | None = None
+    task_id: UUID | None = None
     error_message: str | None = None
     event_metadata: dict | None = None
 
@@ -206,9 +207,9 @@ class EventResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    build_id: str
-    task_id: int | None
+    id: UUID
+    build_id: UUID
+    task_id: UUID | None
     event_type: EventType
     created_at: datetime
     error_message: str | None
@@ -230,14 +231,14 @@ class EventListResponse(BaseModel):
 class TaskDependencyResponse(BaseModel):
     """Schema for task dependency edge."""
 
-    upstream_task_id: int
-    downstream_task_id: int
+    upstream_task_id: UUID
+    downstream_task_id: UUID
 
 
 class TaskNode(BaseModel):
     """Node in the task graph."""
 
-    id: int
+    id: UUID
     task_id: str
     task_name: str
     task_namespace: str
@@ -248,8 +249,8 @@ class TaskNode(BaseModel):
 class TaskEdge(BaseModel):
     """Edge in the task graph."""
 
-    source: int  # upstream task id
-    target: int  # downstream task id
+    source: UUID  # upstream task id
+    target: UUID  # downstream task id
 
 
 class TaskGraphResponse(BaseModel):
@@ -273,11 +274,11 @@ class ApiKeyResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    environment_id: str
+    id: UUID
+    environment_id: UUID
     name: str
     key_prefix: str
-    created_by_id: str | None
+    created_by_id: UUID | None
     created_at: datetime
     last_used_at: datetime | None
     revoked_at: datetime | None
@@ -315,7 +316,7 @@ class TaskRegistryAssetResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: int
+    id: UUID
     task_id: str  # The task_id hash (not the internal PK)
     asset_type: str
     name: str
@@ -338,7 +339,7 @@ class TaskSearchResult(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     task_id: str
-    environment_id: str
+    environment_id: UUID
     task_namespace: str
     task_name: str
     task_data: dict
@@ -346,7 +347,7 @@ class TaskSearchResult(BaseModel):
     output_uri: str | None = None
     created_at: datetime
     # Build context (most recent build the task appeared in)
-    build_id: str | None = None
+    build_id: UUID | None = None
     build_name: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     started_at: datetime | None = None
@@ -425,7 +426,7 @@ class LockReleaseRequest(BaseModel):
 
     owner_id: str  # The expected owner
     task_completed: bool = False  # Whether the task completed successfully
-    build_id: str | None = None  # Build ID if recording completion
+    build_id: UUID | None = None  # Build ID if recording completion
 
 
 class LockResponse(BaseModel):
@@ -434,7 +435,7 @@ class LockResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     name: str
-    environment_id: str
+    environment_id: UUID
     owner_id: str
     acquired_at: datetime
     expires_at: datetime

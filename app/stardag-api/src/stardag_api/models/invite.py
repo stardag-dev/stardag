@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 from stardag_api.models.enums import InviteStatus, WorkspaceRole
 
 if TYPE_CHECKING:
@@ -35,13 +36,13 @@ class Invite(Base, TimestampMixin):
         ),
     )
 
-    id: Mapped[str] = mapped_column(
-        String(36),
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
         primary_key=True,
-        default=generate_uuid,
+        default=generate_uuid7,
     )
-    workspace_id: Mapped[str] = mapped_column(
-        String(36),
+    workspace_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
@@ -62,8 +63,8 @@ class Invite(Base, TimestampMixin):
         default=InviteStatus.PENDING,
         index=True,
     )
-    invited_by_id: Mapped[str] = mapped_column(
-        String(36),
+    invited_by_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )

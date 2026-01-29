@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import ForeignKey, Index, Integer, UniqueConstraint
+from sqlalchemy import ForeignKey, Index, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
     from stardag_api.models.task import Task
@@ -36,15 +37,19 @@ class TaskDependency(Base, TimestampMixin):
         Index("ix_task_dep_downstream", "downstream_task_id"),
     )
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=generate_uuid7,
+    )
 
-    upstream_task_id: Mapped[int] = mapped_column(
-        Integer,
+    upstream_task_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("tasks.id", ondelete="CASCADE"),
         nullable=False,
     )
-    downstream_task_id: Mapped[int] = mapped_column(
-        Integer,
+    downstream_task_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("tasks.id", ondelete="CASCADE"),
         nullable=False,
     )
