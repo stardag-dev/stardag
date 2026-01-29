@@ -125,7 +125,7 @@ async def get_environment_max_concurrent_locks(
 async def acquire_lock(
     db: AsyncSession,
     lock_name: str,
-    owner_id: str,
+    owner_id: UUID,
     environment_id: UUID,
     ttl_seconds: int,
     check_task_completion: bool = True,
@@ -163,6 +163,10 @@ async def acquire_lock(
                 acquired=False,
             )
 
+    # Convert owner_id to str for cross-database compatibility
+    # (SQLite returns str, PostgreSQL returns UUID, and pg_insert doesn't apply type processors)
+    owner_id_str = str(owner_id)
+
     # Check environment concurrency limit
     max_locks = await get_environment_max_concurrent_locks(db, environment_id)
     if max_locks is not None:
@@ -174,7 +178,8 @@ async def acquire_lock(
         existing_lock = existing_lock_result.scalar_one_or_none()
 
         # If we don't have an existing lock (or it's not ours), check the limit
-        if existing_lock is None or existing_lock.owner_id != owner_id:
+        # Compare as strings for cross-database compatibility
+        if existing_lock is None or str(existing_lock.owner_id) != owner_id_str:
             if current_count >= max_locks:
                 return LockAcquisitionResult(
                     status=LockAcquisitionStatus.CONCURRENCY_LIMIT_REACHED,
@@ -187,7 +192,7 @@ async def acquire_lock(
     stmt = pg_insert(DistributedLock).values(
         name=lock_name,
         environment_id=environment_id,
-        owner_id=owner_id,
+        owner_id=owner_id_str,
         acquired_at=now,
         expires_at=expires_at,
         version=0,
@@ -199,20 +204,22 @@ async def acquire_lock(
     stmt = stmt.on_conflict_do_update(
         index_elements=["name"],
         set_={
-            "owner_id": owner_id,
+            "owner_id": owner_id_str,
             "acquired_at": now,
             "expires_at": expires_at,
             "version": DistributedLock.version + 1,
         },
         where=(
-            (DistributedLock.expires_at <= now) | (DistributedLock.owner_id == owner_id)
+            (DistributedLock.expires_at <= now)
+            | (DistributedLock.owner_id == owner_id_str)
         ),
     ).returning(DistributedLock)
 
     result = await db.execute(stmt)
     lock = result.scalar_one_or_none()
 
-    if lock is not None and lock.owner_id == owner_id:
+    # Compare as strings for cross-database compatibility (SQLite returns str, PostgreSQL returns UUID)
+    if lock is not None and str(lock.owner_id) == owner_id_str:
         # Successfully acquired or re-acquired
         return LockAcquisitionResult(
             status=LockAcquisitionStatus.ACQUIRED,
@@ -231,7 +238,7 @@ async def acquire_lock(
 async def renew_lock(
     db: AsyncSession,
     lock_name: str,
-    owner_id: str,
+    owner_id: UUID,
     ttl_seconds: int,
 ) -> bool:
     """Renew an existing lock's TTL.
@@ -249,11 +256,12 @@ async def renew_lock(
     """
     now = _utc_now()
     expires_at = now + timedelta(seconds=ttl_seconds)
+    owner_id_str = str(owner_id)
 
     result = await db.execute(
         update(DistributedLock)
         .where(DistributedLock.name == lock_name)
-        .where(DistributedLock.owner_id == owner_id)
+        .where(DistributedLock.owner_id == owner_id_str)
         .values(expires_at=expires_at, version=DistributedLock.version + 1)
         .returning(DistributedLock.name)
     )
@@ -265,7 +273,7 @@ async def renew_lock(
 async def release_lock(
     db: AsyncSession,
     lock_name: str,
-    owner_id: str,
+    owner_id: UUID,
 ) -> bool:
     """Release a lock.
 
@@ -279,10 +287,11 @@ async def release_lock(
     Returns:
         True if successfully released, False otherwise
     """
+    owner_id_str = str(owner_id)
     result = await db.execute(
         delete(DistributedLock)
         .where(DistributedLock.name == lock_name)
-        .where(DistributedLock.owner_id == owner_id)
+        .where(DistributedLock.owner_id == owner_id_str)
         .returning(DistributedLock.name)
     )
 
@@ -293,7 +302,7 @@ async def release_lock(
 async def release_lock_with_completion(
     db: AsyncSession,
     lock_name: str,
-    owner_id: str,
+    owner_id: UUID,
     environment_id: UUID,
     build_id: UUID,
 ) -> bool:
@@ -331,10 +340,11 @@ async def release_lock_with_completion(
         db.add(completion_event)
 
     # Release the lock
+    owner_id_str = str(owner_id)
     result = await db.execute(
         delete(DistributedLock)
         .where(DistributedLock.name == lock_name)
-        .where(DistributedLock.owner_id == owner_id)
+        .where(DistributedLock.owner_id == owner_id_str)
         .returning(DistributedLock.name)
     )
 
