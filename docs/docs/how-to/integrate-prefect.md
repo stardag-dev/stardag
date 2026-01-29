@@ -2,6 +2,15 @@
 
 Use Prefect for orchestration, observability, and workflow management.
 
+---
+
+!!! info "🚧 **Work in progress** 🚧"
+
+    This documentation is still taking shape. It should soon cover how to get the most out of Stardag with Prefect for observability and orchestration.
+
+    For now see: [ML Pipeline Example](https://github.com/andhus/stardag/tree/main/lib/stardag-examples/src/stardag_examples/ml_pipeline)
+
+<!--
 ## Overview
 
 The Prefect integration provides:
@@ -100,23 +109,8 @@ View in Prefect UI:
 
 ![Prefect UI showing ML pipeline](https://github.com/user-attachments/assets/372c40c4-ca14-49b3-bbf6-18b758ddce5f)
 
-<!-- TODO: Replace with actual screenshot from docs -->
-
-## Advanced Usage
-
-### Custom Flow Configuration
-
-<!-- TODO: Document custom flow configuration options -->
-
-### Retry Logic
-
-<!-- TODO: Document retry configuration -->
-
-### Scheduling
-
-<!-- TODO: Document scheduling with Prefect -->
 
 ## See Also
 
 - [ML Pipeline Example](https://github.com/andhus/stardag/tree/main/lib/stardag-examples/src/stardag_examples/ml_pipeline) - Complete example
-- [Prefect Documentation](https://docs.prefect.io/) - Prefect features
+- [Prefect Documentation](https://docs.prefect.io/) - Prefect features -->

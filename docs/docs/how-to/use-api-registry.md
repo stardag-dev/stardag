@@ -1,3 +1,5 @@
+_NOTE this page is WIP. It is not complete and contains inaccuracies, currently excluded from docs site._
+
 # Use the API Registry
 
 Track task builds with the Stardag API service for visibility and collaboration.

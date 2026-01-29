@@ -1,4 +1,4 @@
-_NOTE this page is WIP. It is not complete and contains inaccuracies, currently excluded from docs site_.
+_NOTE this page is WIP. It is not complete and contains inaccuracies, currently excluded from docs site._
 
 # Define Tasks
 

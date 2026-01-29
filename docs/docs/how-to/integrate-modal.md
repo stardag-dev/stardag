@@ -19,6 +19,15 @@ pip install stardag[modal]
 
 You'll also need a [Modal](https://modal.com/) account.
 
+---
+
+!!! info "🚧 **Work in progress** 🚧"
+
+    This documentation is still taking shape. It should soon cover how to execute your Stardag DAGs on Modal.
+
+    For now see: [Modal Examples](https://github.com/andhus/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal)
+
+<!--
 ## Basic Usage
 
 Create a `StardagApp` to run your DAGs on Modal:
@@ -146,5 +155,4 @@ build([task], task_executor=routed)
 
 - [Modal Examples](https://github.com/andhus/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal) - Example implementations
 - [Modal Documentation](https://modal.com/docs) - Modal features
-
-<!-- TODO: Add more detailed Modal integration documentation -->
+ -->
