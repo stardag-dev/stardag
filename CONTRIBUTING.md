@@ -10,11 +10,11 @@ Please be respectful and constructive in all interactions. We're building someth
 
 Stardag uses a split licensing model. **Your contribution's license depends on where in the codebase you're contributing:**
 
-| Directory | License    | CLA Required |
-| --------- | ---------- | ------------ |
-| `lib/`    | Apache 2.0 | No           |
-| `docs/`   | Apache 2.0 | No           |
-| `app/`    | BSL 1.1    | **Yes**      |
+| Directory               | License    | CLA Required |
+| ----------------------- | ---------- | ------------ |
+| `lib/` (SDK & Examples) | Apache 2.0 | No           |
+| `docs/`                 | Apache 2.0 | No           |
+| `app/` (API & UI)       | BSL 1.1    | **Yes**      |
 
 ### Why the split?
 

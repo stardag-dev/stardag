@@ -87,7 +87,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guid
 
 ## License
 
-- **SDK** (`lib/stardag`): [Apache License 2.0](lib/stardag/LICENSE)
+- **SDK & Examples** (`lib/`): [Apache License 2.0](lib/stardag/LICENSE)
 - **API & UI** (`app/`): [BSL 1.1](app/LICENSE) — free for self-hosted use, converts to Apache 2.0 in 2029
 
 See [LICENSE](LICENSE) for details.
