@@ -3,8 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/stardag.svg)](https://pypi.org/project/stardag/)
 [![Python versions](https://img.shields.io/pypi/pyversions/stardag.svg)](https://pypi.org/project/stardag/)
 [![Documentation](https://img.shields.io/badge/docs-stardag--dev.github.io-blue)](https://stardag-dev.github.io/stardag/)
-
-<!-- [![License](https://img.shields.io/github/license/stardag-dev/stardag.svg)](LICENSE) -->
+[![License](https://img.shields.io/badge/license-Apache%202.0%20%2F%20BSL%201.1-blue)](LICENSE)
 
 **Declarative and composable DAGs for Python.**
 
@@ -86,11 +85,10 @@ The SDK works fully standalone—the platform adds value for teams needing share
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-<!-- TODO: Add CONTRIBUTING.md -->
-
 ## License
 
-<!-- TODO: Add LICENSE file -->
+- **SDK** (`lib/stardag`): [Apache License 2.0](lib/stardag/LICENSE)
+- **API & UI** (`app/`): [BSL 1.1](app/LICENSE) — free for self-hosted use, converts to Apache 2.0 in 2029
 
 See [LICENSE](LICENSE) for details.
 
