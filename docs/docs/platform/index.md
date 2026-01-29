@@ -22,7 +22,7 @@ The platform adds value for:
 - **Team collaboration** - Shared task visibility
 - **Build monitoring** - Track long-running pipelines
 - **Centralized configuration** - Consistent target roots across team
-- **Audit trails** - Build history and status
+- **Audit trails** - Build history and status, including commit hashes etc. for debugging and reproducibility
 - **Coordination** - Prevent duplicate builds
 
 ## Getting Started

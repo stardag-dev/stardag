@@ -4,11 +4,11 @@ The Stardag Web UI provides a dashboard for monitoring builds and managing your 
 
 ## Accessing the UI
 
-| Environment | URL                                        |
-| ----------- | ------------------------------------------ |
-| SaaS        | [app.stardag.com](https://app.stardag.com) |
-| Local dev   | [localhost:5173](http://localhost:5173)    |
-| Self-hosted | Your configured domain                     |
+| Environment                  | URL                                        |
+| ---------------------------- | ------------------------------------------ |
+| SaaS                         | [app.stardag.com](https://app.stardag.com) |
+| Local dev (`docker compose`) | [localhost:3000](http://localhost:3000)    |
+| Self-hosted                  | Your configured domain                     |
 
 ## Features
 
