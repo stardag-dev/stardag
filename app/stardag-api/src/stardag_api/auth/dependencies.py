@@ -359,13 +359,20 @@ async def verify_environment_access(
         The environment if valid
 
     Raises:
-        HTTPException: 404 if environment not found, 403 if workspace mismatch
+        HTTPException: 404 if environment not found or invalid UUID, 403 if workspace mismatch
     """
     # Convert strings to UUID if needed
-    if isinstance(environment_id, str):
-        environment_id = UUID(environment_id)
-    if isinstance(token_workspace_id, str):
-        token_workspace_id = UUID(token_workspace_id)
+    try:
+        if isinstance(environment_id, str):
+            environment_id = UUID(environment_id)
+        if isinstance(token_workspace_id, str):
+            token_workspace_id = UUID(token_workspace_id)
+    except ValueError:
+        # Invalid UUID string - treat as not found
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Environment not found",
+        )
 
     # Get the environment
     environment = await db.get(Environment, environment_id)
