@@ -127,7 +127,7 @@ uv run pre-commit run --all-files
 ## Questions?
 
 - Open a [GitHub Discussion](https://github.com/stardag-dev/stardag/discussions)
-- Email: hello@stardag.dev
+- Email: info@stardag.com
 
 ## Thank You!
 

@@ -10,11 +10,11 @@ By submitting a pull request or other contribution to files in the `app/` direct
 
 - **"Contribution"**: Any code, documentation, or other material you submit to the `app/` directory of this repository.
 - **"Project"**: The Stardag platform components located in the `app/` directory.
-- **"We/Us"**: Stardag Labs and its successors.
+- **"We/Us"**: Anders Huss and successors or assigns.
 
 ### 2. Grant of Rights
 
-You grant to Stardag Labs:
+You grant to Anders Huss:
 
 a) A perpetual, worldwide, non-exclusive, royalty-free, irrevocable license to use, reproduce, modify, prepare derivative works of, publicly display, publicly perform, sublicense, and distribute your Contributions and any derivative works.
 
@@ -58,7 +58,7 @@ I have read and agree to the Contributor License Agreement (app/CLA.md).
 
 ### 7. Questions
 
-If you have questions about this CLA, please contact: hello@stardag.dev
+If you have questions about this CLA, please contact: info@stardag.com
 
 ---
 
