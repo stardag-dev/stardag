@@ -5,7 +5,7 @@ description = "Declarative and composable DAG framework for Python with persiste
 readme = "../../README.md"
 license = "Apache-2.0"
 authors = [{ name = "Anders Huss", email = "info@stardag.com" }]
-requires-python = ">=3.10,<3.14"  # TODO update modal deps
+requires-python = ">=3.10,<3.15"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -15,6 +15,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
