@@ -236,11 +236,18 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
 
     async def setup(self) -> None:
         """Initialize worker pools."""
+        import multiprocessing as mp
+
         self._async_semaphore = asyncio.Semaphore(self.max_async_workers)
         self._thread_pool = ThreadPoolExecutor(max_workers=self.max_thread_workers)
         if self.max_process_workers:
+            # Use 'spawn' explicitly for cross-platform compatibility.
+            # Python 3.14 changed the default from 'fork' to 'forkserver' on Linux,
+            # which can cause issues with environment variable inheritance.
+            # 'spawn' is the safest option and works consistently across platforms.
             self._process_pool = ProcessPoolExecutor(
-                max_workers=self.max_process_workers
+                max_workers=self.max_process_workers,
+                mp_context=mp.get_context("spawn"),
             )
 
     async def teardown(self) -> None:
