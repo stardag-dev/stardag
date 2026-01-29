@@ -9,8 +9,10 @@ To manually deploy:
 
 import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
+import tomllib
 
 from stardag import FileSystemTarget, get_target
 from stardag.target import RemoteFileSystemTarget
@@ -37,13 +39,28 @@ except ImportError:
 MOUNT_PATH = "/data"
 ROOT_DEFAULT = "stardag/root/default"
 
+
+def _get_deps_for_modal_image() -> list[str]:
+    """Extract dependencies from pyproject.toml for Modal image.
+
+    Returns empty list when running inside Modal (pyproject.toml not available),
+    since deps are already installed in the image at that point.
+    """
+    try:
+        pyproject_path = Path(__file__).parents[3] / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            pyproject = tomllib.load(f)
+    except (IndexError, FileNotFoundError):
+        return []
+
+    result = list(pyproject["project"]["dependencies"])
+    result += pyproject["project"].get("optional-dependencies", {}).get("modal", [])
+    result += pyproject.get("dependency-groups", {}).get("dev", [])
+    return result
+
+
 TEST_IMAGE = modal.Image.debian_slim(python_version="3.12").pip_install(
-    # TODO extract from pyproject.toml
-    "pydantic>=2.8.2",
-    "pydantic-settings>=2.7.1",
-    "uuid6>=2024.7.10",
-    "pytest>=8.2.2",
-    "aiofiles>=23.1.0",
+    *_get_deps_for_modal_image()
 )
 
 TEST_APP_NAME = "stardag-testing"
