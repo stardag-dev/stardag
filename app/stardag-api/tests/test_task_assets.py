@@ -153,8 +153,10 @@ async def test_get_assets_task_not_found(client: AsyncClient):
 async def test_upload_assets_build_not_found(client: AsyncClient):
     """Test uploading assets to non-existent build."""
     assets = [{"type": "markdown", "name": "test", "body": {"content": "test"}}]
+    # Use a valid UUID format that doesn't exist in the database
+    fake_uuid = "00000000-0000-0000-0000-000000000099"
     response = await client.post(
-        "/api/v1/builds/nonexistent/tasks/sometask/assets", json=assets
+        f"/api/v1/builds/{fake_uuid}/tasks/sometask/assets", json=assets
     )
     assert response.status_code == 404
 

@@ -4,6 +4,7 @@ import re
 import time
 from collections import Counter
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select, text
@@ -380,7 +381,7 @@ async def search_tasks(
             all_statuses = await get_all_task_global_statuses(db, all_task_ids)
 
             # Filter by status
-            def matches_status_filters(task_id: int) -> bool:
+            def matches_status_filters(task_id: UUID) -> bool:
                 status_info = all_statuses.get(task_id)
                 if not status_info:
                     return False
@@ -422,8 +423,8 @@ async def search_tasks(
     # Get global status for each task (considers events across ALL builds)
     task_ids = [t.id for t in tasks]
     task_status_map: dict[
-        int,
-        tuple[str | None, str | None, TaskStatus, str | None, str | None, str | None],
+        UUID,
+        tuple[UUID | None, str | None, TaskStatus, str | None, str | None, str | None],
     ] = {}
 
     if task_ids:
@@ -453,7 +454,7 @@ async def search_tasks(
 
         # Get build info for display
         build_ids = {e.build_id for e in latest_events_list}
-        builds_map: dict[str, Build] = {}
+        builds_map: dict[UUID, Build] = {}
         if build_ids:
             builds_result = await db.execute(
                 select(Build).where(Build.id.in_(build_ids))
@@ -461,7 +462,7 @@ async def search_tasks(
             builds_map = {b.id: b for b in builds_result.scalars().all()}
 
         # Map tasks to their latest build context and global status
-        task_to_latest_build: dict[int, Build] = {}
+        task_to_latest_build: dict[UUID, Build] = {}
         for event in latest_events_list:
             if event.task_id and event.build_id in builds_map:
                 task_to_latest_build[event.task_id] = builds_map[event.build_id]
@@ -488,7 +489,7 @@ async def search_tasks(
             )
 
     # Get asset counts
-    asset_counts: dict[int, int] = {}
+    asset_counts: dict[UUID, int] = {}
     if task_ids:
         asset_count_result = await db.execute(
             select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
@@ -499,7 +500,7 @@ async def search_tasks(
 
     # Get asset data for requested assets
     task_asset_data: dict[
-        int, dict[str, dict]
+        UUID, dict[str, dict]
     ] = {}  # task_pk -> asset_name -> body_json
     if task_ids and include_assets:
         asset_names = [

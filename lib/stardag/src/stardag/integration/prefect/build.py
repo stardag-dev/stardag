@@ -75,7 +75,7 @@ class _PrefectTaskRunWrapper:
 
     def __init__(
         self,
-        build_id: str,
+        build_id: UUID,
         task_executor: TaskExecutorABC | None = None,
         registry: RegistryABC | None = None,
         before_run_callback: AsyncRunCallback | None = None,
@@ -173,7 +173,7 @@ async def build(
     on_complete_callback: AsyncRunCallback | None = None,
     wait_for_completion: bool = True,
     registry: RegistryABC | None = None,
-    resume_build_id: str | None = None,
+    resume_build_id: UUID | None = None,
 ) -> dict[str, PrefectConcurrentFuture]:
     """Build a stardag task DAG using Prefect for orchestration.
 

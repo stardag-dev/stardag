@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from alembic import command
@@ -27,6 +28,18 @@ def get_alembic_config(connection_url: str | None = None) -> Config:
     return alembic_cfg
 
 
+# Fixed UUIDs for test fixtures (deterministic for reproducibility)
+DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
+DEFAULT_WORKSPACE_ID = UUID("00000000-0000-0000-0000-000000000002")
+DEFAULT_ENVIRONMENT_ID = UUID("00000000-0000-0000-0000-000000000003")
+DEFAULT_MEMBERSHIP_ID = UUID("00000000-0000-0000-0000-000000000004")
+
+# String versions for test assertions (JSON responses serialize UUIDs to strings)
+DEFAULT_USER_ID_STR = str(DEFAULT_USER_ID)
+DEFAULT_WORKSPACE_ID_STR = str(DEFAULT_WORKSPACE_ID)
+DEFAULT_ENVIRONMENT_ID_STR = str(DEFAULT_ENVIRONMENT_ID)
+
+
 async def seed_defaults(session: AsyncSession):
     """Seed default workspace, environment, user, and membership."""
     from stardag_api.models import Environment, Workspace, WorkspaceMember, User
@@ -34,7 +47,7 @@ async def seed_defaults(session: AsyncSession):
 
     # Create default workspace
     workspace = Workspace(
-        id="default",
+        id=DEFAULT_WORKSPACE_ID,
         name="Default Workspace",
         slug="default",
     )
@@ -42,7 +55,7 @@ async def seed_defaults(session: AsyncSession):
 
     # Create default user
     user = User(
-        id="default",
+        id=DEFAULT_USER_ID,
         external_id="default-local-user",
         email="default@localhost",
         display_name="Default User",
@@ -51,17 +64,17 @@ async def seed_defaults(session: AsyncSession):
 
     # Create membership (user is owner of default workspace)
     membership = WorkspaceMember(
-        id="default",
-        workspace_id="default",
-        user_id="default",
+        id=DEFAULT_MEMBERSHIP_ID,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user_id=DEFAULT_USER_ID,
         role=WorkspaceRole.OWNER,
     )
     session.add(membership)
 
     # Create default environment
     environment = Environment(
-        id="default",
-        workspace_id="default",
+        id=DEFAULT_ENVIRONMENT_ID,
+        workspace_id=DEFAULT_WORKSPACE_ID,
         name="Default Environment",
         slug="default",
     )
@@ -119,20 +132,20 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
 
     # Create mock auth objects
     mock_environment = Environment(
-        id="default",
-        workspace_id="default",
+        id=DEFAULT_ENVIRONMENT_ID,
+        workspace_id=DEFAULT_WORKSPACE_ID,
         name="Default Environment",
         slug="default",
     )
     mock_user = User(
-        id="default",
+        id=DEFAULT_USER_ID,
         external_id="default-local-user",
         email="default@localhost",
         display_name="Default User",
     )
     mock_sdk_auth = SdkAuth(
         environment=mock_environment,
-        workspace_id="default",
+        workspace_id=DEFAULT_WORKSPACE_ID,
         user=mock_user,
     )
 
@@ -145,8 +158,8 @@ async def client(async_engine) -> AsyncGenerator[AsyncClient, None]:
     async def override_get_current_user_flexible() -> User:
         return mock_user
 
-    async def override_get_workspace_id_from_token() -> str:
-        return "default"
+    async def override_get_workspace_id_from_token() -> UUID:
+        return DEFAULT_WORKSPACE_ID
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[require_sdk_auth] = override_require_sdk_auth

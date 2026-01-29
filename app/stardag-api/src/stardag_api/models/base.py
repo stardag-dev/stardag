@@ -1,15 +1,19 @@
 """Base model classes and utilities."""
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID
 
 from sqlalchemy import DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from uuid_utils import uuid7
 
 
-def generate_uuid() -> str:
-    """Generate a UUID string."""
-    return str(uuid4())
+def generate_uuid7() -> UUID:
+    """Generate a UUID7 (time-sortable UUID).
+
+    Converts uuid_utils.UUID to standard uuid.UUID for compatibility.
+    """
+    return UUID(bytes=uuid7().bytes)
 
 
 def utc_now() -> datetime:

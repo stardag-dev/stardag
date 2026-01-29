@@ -7,6 +7,7 @@ Other UI endpoints require workspace-scoped internal tokens.
 """
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict
@@ -35,7 +36,7 @@ class UserProfileResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: UUID
     external_id: str
     email: str
     display_name: str | None
@@ -46,7 +47,7 @@ class WorkspaceSummary(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
+    id: UUID
     name: str
     slug: str
     role: WorkspaceRole
@@ -65,8 +66,8 @@ class PendingInviteResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    id: str
-    workspace_id: str
+    id: UUID
+    workspace_id: UUID
     workspace_name: str
     role: WorkspaceRole
     invited_by_email: str | None

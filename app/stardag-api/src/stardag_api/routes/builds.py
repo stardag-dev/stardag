@@ -1,6 +1,7 @@
 """Build management routes - primary interface for SDK."""
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -70,7 +71,7 @@ async def _get_triggered_by_user(
 
 
 async def _get_build_and_task(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: AsyncSession,
     auth: SdkAuth,
@@ -98,7 +99,7 @@ async def _get_build_and_task(
 
 
 async def _create_task_event(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     event_type: EventType,
     db: AsyncSession,
@@ -249,7 +250,7 @@ async def list_builds(
 
 @router.get("/{build_id}", response_model=BuildResponse)
 async def get_build(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
@@ -290,7 +291,7 @@ async def get_build(
 
 @router.post("/{build_id}/complete", response_model=BuildResponse)
 async def complete_build(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     triggered_by_user_id: str | None = None,
@@ -347,7 +348,7 @@ async def complete_build(
 
 @router.post("/{build_id}/fail", response_model=BuildResponse)
 async def fail_build(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     error_message: str | None = None,
@@ -407,7 +408,7 @@ async def fail_build(
 
 @router.post("/{build_id}/cancel", response_model=BuildResponse)
 async def cancel_build(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     triggered_by_user_id: str | None = None,
@@ -464,7 +465,7 @@ async def cancel_build(
 
 @router.post("/{build_id}/exit-early", response_model=BuildResponse)
 async def exit_early(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     reason: str | None = None,
@@ -515,7 +516,7 @@ async def exit_early(
 
 @router.post("/{build_id}/tasks", response_model=TaskResponse, status_code=201)
 async def register_task(
-    build_id: str,
+    build_id: UUID,
     task: TaskCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -612,7 +613,7 @@ async def register_task(
 
 @router.post("/{build_id}/tasks/{task_id}/start", response_model=TaskEventResponse)
 async def start_task(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -623,7 +624,7 @@ async def start_task(
 
 @router.post("/{build_id}/tasks/{task_id}/complete", response_model=TaskEventResponse)
 async def complete_task(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -636,7 +637,7 @@ async def complete_task(
 
 @router.post("/{build_id}/tasks/{task_id}/fail", response_model=TaskEventResponse)
 async def fail_task(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -650,7 +651,7 @@ async def fail_task(
 
 @router.post("/{build_id}/tasks/{task_id}/suspend", response_model=TaskEventResponse)
 async def suspend_task(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -663,7 +664,7 @@ async def suspend_task(
 
 @router.post("/{build_id}/tasks/{task_id}/resume", response_model=TaskEventResponse)
 async def resume_task(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -674,7 +675,7 @@ async def resume_task(
 
 @router.post("/{build_id}/tasks/{task_id}/cancel", response_model=TaskEventResponse)
 async def cancel_task(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -689,7 +690,7 @@ async def cancel_task(
     "/{build_id}/tasks/{task_id}/waiting-for-lock", response_model=TaskEventResponse
 )
 async def task_waiting_for_lock(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
@@ -721,7 +722,7 @@ async def task_waiting_for_lock(
     status_code=201,
 )
 async def upload_task_registry_assets(
-    build_id: str,
+    build_id: UUID,
     task_id: str,
     assets: list[TaskRegistryAssetCreate],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -805,7 +806,7 @@ async def upload_task_registry_assets(
 
 @router.get("/{build_id}/tasks", response_model=list[TaskWithStatusResponse])
 async def list_tasks_in_build(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
@@ -841,7 +842,7 @@ async def list_tasks_in_build(
     statuses = await get_all_task_global_statuses(db, task_ids)
 
     # Get asset counts per task
-    asset_counts: dict[int, int] = {}
+    asset_counts: dict[UUID, int] = {}
     if task_ids:
         asset_count_result = await db.execute(
             select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
@@ -886,7 +887,7 @@ async def list_tasks_in_build(
 
 @router.get("/{build_id}/events", response_model=list[EventResponse])
 async def list_build_events(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
@@ -925,7 +926,7 @@ async def list_build_events(
 
 @router.get("/{build_id}/graph", response_model=TaskGraphResponse)
 async def get_build_graph(
-    build_id: str,
+    build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
@@ -962,7 +963,7 @@ async def get_build_graph(
     statuses = await get_all_task_global_statuses(db, task_ids_list)
 
     # Get asset counts per task
-    asset_counts: dict[int, int] = {}
+    asset_counts: dict[UUID, int] = {}
     if task_ids:
         asset_count_result = await db.execute(
             select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))

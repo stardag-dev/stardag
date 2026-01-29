@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, generate_uuid, utc_now
+from stardag_api.models.base import Base, generate_uuid7, utc_now
 from stardag_api.models.enums import EventType
 
 if TYPE_CHECKING:
@@ -35,23 +36,23 @@ class Event(Base):
         Index("ix_events_build_task_type", "build_id", "task_id", "event_type"),
     )
 
-    id: Mapped[str] = mapped_column(
-        String(36),
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
         primary_key=True,
-        default=generate_uuid,
+        default=generate_uuid7,
     )
 
     # Always required - every event belongs to a build
-    build_id: Mapped[str] = mapped_column(
-        String(36),
+    build_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("builds.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
 
     # Optional - task-level events have this, build-level events may not
-    task_id: Mapped[int | None] = mapped_column(
-        Integer,
+    task_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
         ForeignKey("tasks.id", ondelete="CASCADE"),
         nullable=True,
         index=True,

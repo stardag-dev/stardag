@@ -15,6 +15,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -288,8 +289,10 @@ async def get_token(
         ) from e
 
 
-async def get_user_by_id(db: AsyncSession, user_id: str) -> User | None:
+async def get_user_by_id(db: AsyncSession, user_id: str | UUID) -> User | None:
     """Get a user by internal ID."""
+    if isinstance(user_id, str):
+        user_id = UUID(user_id)
     return await db.get(User, user_id)
 
 
@@ -342,8 +345,8 @@ def get_workspace_id_from_token(
 
 async def verify_environment_access(
     db: AsyncSession,
-    environment_id: str,
-    token_workspace_id: str,
+    environment_id: str | UUID,
+    token_workspace_id: str | UUID,
 ) -> Environment:
     """Verify environment exists and belongs to the token's workspace.
 
@@ -358,6 +361,12 @@ async def verify_environment_access(
     Raises:
         HTTPException: 404 if environment not found, 403 if workspace mismatch
     """
+    # Convert strings to UUID if needed
+    if isinstance(environment_id, str):
+        environment_id = UUID(environment_id)
+    if isinstance(token_workspace_id, str):
+        token_workspace_id = UUID(token_workspace_id)
+
     # Get the environment
     environment = await db.get(Environment, environment_id)
     if not environment:
@@ -448,12 +457,12 @@ class SdkAuth:
     """
 
     environment: Environment
-    workspace_id: str  # Workspace ID (from token or API key's environment)
+    workspace_id: UUID  # Workspace ID (from token or API key's environment)
     api_key: ApiKey | None = None
     user: User | None = None
 
     @property
-    def environment_id(self) -> str:
+    def environment_id(self) -> UUID:
         """Get the environment ID for convenience."""
         return self.environment.id
 
@@ -504,7 +513,7 @@ async def get_sdk_auth(
 
         return SdkAuth(
             environment=environment,
-            workspace_id=token.workspace_id,
+            workspace_id=UUID(token.workspace_id),
             user=user,
         )
 

@@ -15,6 +15,7 @@ dependencies = [
     "python-jose[cryptography]>=3.3.0",
     "httpx>=0.27.0",
     "bcrypt>=4.0.0",
+    "uuid_utils>=0.9.0",
 ]
 
 [dependency-groups]

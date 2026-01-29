@@ -9,6 +9,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import DistributedLock, Environment
+from tests.conftest import DEFAULT_ENVIRONMENT_ID
 
 
 @pytest.mark.asyncio
@@ -430,7 +431,7 @@ async def test_environment_concurrency_limit(
     # Set environment max_concurrent_locks to 2
     await async_session.execute(
         update(Environment)
-        .where(Environment.id == "default")
+        .where(Environment.id == DEFAULT_ENVIRONMENT_ID)
         .values(max_concurrent_locks=2)
     )
     await async_session.commit()
@@ -462,7 +463,7 @@ async def test_environment_concurrency_limit(
     # Reset limit
     await async_session.execute(
         update(Environment)
-        .where(Environment.id == "default")
+        .where(Environment.id == DEFAULT_ENVIRONMENT_ID)
         .values(max_concurrent_locks=None)
     )
     await async_session.commit()
@@ -476,7 +477,7 @@ async def test_environment_concurrency_limit_same_owner_exempt(
     # Set environment max_concurrent_locks to 1
     await async_session.execute(
         update(Environment)
-        .where(Environment.id == "default")
+        .where(Environment.id == DEFAULT_ENVIRONMENT_ID)
         .values(max_concurrent_locks=1)
     )
     await async_session.commit()
@@ -502,7 +503,7 @@ async def test_environment_concurrency_limit_same_owner_exempt(
     # Reset limit
     await async_session.execute(
         update(Environment)
-        .where(Environment.id == "default")
+        .where(Environment.id == DEFAULT_ENVIRONMENT_ID)
         .values(max_concurrent_locks=None)
     )
     await async_session.commit()

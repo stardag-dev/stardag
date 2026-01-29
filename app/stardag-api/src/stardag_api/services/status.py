@@ -1,6 +1,7 @@
 """Status derivation from events."""
 
 from datetime import datetime
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +10,7 @@ from stardag_api.models import BuildStatus, Event, EventType, TaskStatus
 
 
 async def get_build_status(
-    db: AsyncSession, build_id: str
+    db: AsyncSession, build_id: UUID
 ) -> tuple[BuildStatus, datetime | None, datetime | None, str | None]:
     """Get derived build status from events.
 
@@ -70,7 +71,7 @@ async def get_build_status(
 
 
 async def get_task_status_in_build(
-    db: AsyncSession, build_id: str, task_db_id: int
+    db: AsyncSession, build_id: UUID, task_db_id: UUID
 ) -> tuple[TaskStatus, datetime | None, datetime | None, str | None]:
     """Get derived task status from events for a specific build.
 
@@ -125,8 +126,8 @@ async def get_task_status_in_build(
 
 
 async def get_all_task_statuses_in_build(
-    db: AsyncSession, build_id: str
-) -> dict[int, tuple[TaskStatus, datetime | None, datetime | None, str | None]]:
+    db: AsyncSession, build_id: UUID
+) -> dict[UUID, tuple[TaskStatus, datetime | None, datetime | None, str | None]]:
     """Get derived status for all tasks in a build.
 
     Returns:
@@ -142,7 +143,7 @@ async def get_all_task_statuses_in_build(
 
     # Build status for each task
     statuses: dict[
-        int, tuple[TaskStatus, datetime | None, datetime | None, str | None]
+        UUID, tuple[TaskStatus, datetime | None, datetime | None, str | None]
     ] = {}
 
     for event in events:
@@ -188,8 +189,8 @@ async def get_all_task_statuses_in_build(
 
 
 async def get_task_global_status(
-    db: AsyncSession, task_db_id: int
-) -> tuple[TaskStatus, datetime | None, datetime | None, str | None, str | None]:
+    db: AsyncSession, task_db_id: UUID
+) -> tuple[TaskStatus, datetime | None, datetime | None, str | None, UUID | None]:
     """Get task status considering events from ALL builds.
 
     This provides a "global" view of task status across all builds in the workspace.
@@ -217,7 +218,7 @@ async def get_task_global_status(
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
-    completed_in_build_id: str | None = None
+    completed_in_build_id: UUID | None = None
 
     for event in events:
         if event.event_type == EventType.TASK_COMPLETED:
@@ -246,10 +247,10 @@ async def get_task_global_status(
 
 
 async def get_all_task_global_statuses(
-    db: AsyncSession, task_db_ids: list[int]
+    db: AsyncSession, task_db_ids: list[UUID]
 ) -> dict[
-    int,
-    tuple[TaskStatus, datetime | None, datetime | None, str | None, str | None, bool],
+    UUID,
+    tuple[TaskStatus, datetime | None, datetime | None, str | None, UUID | None, bool],
 ]:
     """Get global status for multiple tasks considering events from ALL builds.
 
@@ -275,9 +276,9 @@ async def get_all_task_global_statuses(
 
     # Initialize statuses for all requested tasks
     statuses: dict[
-        int,
+        UUID,
         tuple[
-            TaskStatus, datetime | None, datetime | None, str | None, str | None, bool
+            TaskStatus, datetime | None, datetime | None, str | None, UUID | None, bool
         ],
     ] = {
         task_id: (TaskStatus.PENDING, None, None, None, None, False)
@@ -285,7 +286,7 @@ async def get_all_task_global_statuses(
     }
 
     # Track per-task state as we process events
-    task_states: dict[int, dict] = {
+    task_states: dict[UUID, dict] = {
         task_id: {
             "status": TaskStatus.PENDING,
             "started_at": None,

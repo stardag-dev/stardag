@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Callable, Generator, Generic, Protocol, TypeVar
+from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
 
@@ -47,7 +48,7 @@ class BuildSummary:
 
     status: BuildExitStatus
     task_count: TaskCount
-    build_id: str | None = None
+    build_id: UUID | None = None
     error: BaseException | None = None
 
     def __repr__(self) -> str:

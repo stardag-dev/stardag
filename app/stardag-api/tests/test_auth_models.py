@@ -14,6 +14,7 @@ from stardag_api.models import (
     WorkspaceRole,
     User,
 )
+from tests.conftest import DEFAULT_ENVIRONMENT_ID, DEFAULT_USER_ID, DEFAULT_WORKSPACE_ID
 
 
 class TestWorkspaceMember:
@@ -98,10 +99,10 @@ class TestInvite:
         """Test creating an invite."""
         # Use default workspace from fixtures
         invite = Invite(
-            workspace_id="default",
+            workspace_id=DEFAULT_WORKSPACE_ID,
             email="newuser@test.com",
             role=WorkspaceRole.MEMBER,
-            invited_by_id="default",
+            invited_by_id=DEFAULT_USER_ID,
         )
         async_session.add(invite)
         await async_session.commit()
@@ -116,7 +117,7 @@ class TestInvite:
     async def test_invite_status_transitions(self, async_session: AsyncSession):
         """Test invite status can be changed."""
         invite = Invite(
-            workspace_id="default",
+            workspace_id=DEFAULT_WORKSPACE_ID,
             email="status@test.com",
             role=WorkspaceRole.ADMIN,
         )
@@ -140,11 +141,11 @@ class TestApiKey:
     async def test_create_api_key(self, async_session: AsyncSession):
         """Test creating an API key."""
         api_key = ApiKey(
-            environment_id="default",
+            environment_id=DEFAULT_ENVIRONMENT_ID,
             name="Test Key",
             key_prefix="sk_test_",
             key_hash="$2b$12$fakehash",
-            created_by_id="default",
+            created_by_id=DEFAULT_USER_ID,
         )
         async_session.add(api_key)
         await async_session.commit()
@@ -162,7 +163,7 @@ class TestApiKey:
         from datetime import datetime, timezone
 
         api_key = ApiKey(
-            environment_id="default",
+            environment_id=DEFAULT_ENVIRONMENT_ID,
             name="Revocable Key",
             key_prefix="sk_rev_",
             key_hash="$2b$12$fakehash2",

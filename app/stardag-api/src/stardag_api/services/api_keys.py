@@ -2,6 +2,7 @@
 
 import secrets
 from datetime import datetime, timezone
+from uuid import UUID
 
 import bcrypt
 from sqlalchemy import select
@@ -15,7 +16,7 @@ KEY_PREFIX = "sk_"
 KEY_RANDOM_BYTES = 24  # 32 chars in base64
 
 
-def generate_api_key(environment_id: str) -> tuple[str, str, str]:
+def generate_api_key(environment_id: UUID) -> tuple[str, str, str]:
     """Generate a new API key.
 
     Returns:
@@ -28,8 +29,8 @@ def generate_api_key(environment_id: str) -> tuple[str, str, str]:
     random_part = secrets.token_urlsafe(KEY_RANDOM_BYTES)
 
     # Create the full key with prefix
-    # Use first 6 chars of environment_id for namespacing
-    environment_prefix = environment_id[:6]
+    # Use first 6 chars of environment_id hex for namespacing
+    environment_prefix = environment_id.hex[:6]
     full_key = f"{KEY_PREFIX}{environment_prefix}_{random_part}"
 
     # Extract prefix for display (first 8 chars after sk_)
@@ -59,9 +60,9 @@ def verify_api_key(full_key: str, key_hash: str) -> bool:
 
 async def create_api_key(
     db: AsyncSession,
-    environment_id: str,
+    environment_id: UUID,
     name: str,
-    created_by_id: str | None = None,
+    created_by_id: UUID | None = None,
 ) -> tuple[ApiKey, str]:
     """Create a new API key for an environment.
 
@@ -93,7 +94,7 @@ async def create_api_key(
 
 async def list_api_keys(
     db: AsyncSession,
-    environment_id: str,
+    environment_id: UUID,
     include_revoked: bool = False,
 ) -> list[ApiKey]:
     """List API keys for an environment.
@@ -119,7 +120,7 @@ async def list_api_keys(
 
 async def get_api_key_by_id(
     db: AsyncSession,
-    key_id: str,
+    key_id: UUID,
 ) -> ApiKey | None:
     """Get an API key by its ID.
 
@@ -135,7 +136,7 @@ async def get_api_key_by_id(
 
 async def revoke_api_key(
     db: AsyncSession,
-    key_id: str,
+    key_id: UUID,
 ) -> ApiKey | None:
     """Revoke an API key.
 

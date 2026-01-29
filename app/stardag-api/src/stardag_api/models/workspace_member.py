@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
-from sqlalchemy import Enum, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Enum, ForeignKey, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 from stardag_api.models.enums import WorkspaceRole
 
 if TYPE_CHECKING:
@@ -27,19 +28,19 @@ class WorkspaceMember(Base, TimestampMixin):
         UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member"),
     )
 
-    id: Mapped[str] = mapped_column(
-        String(36),
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
         primary_key=True,
-        default=generate_uuid,
+        default=generate_uuid7,
     )
-    workspace_id: Mapped[str] = mapped_column(
-        String(36),
+    workspace_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
