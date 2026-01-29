@@ -1,10 +1,10 @@
 # AsyncIO
 
-Stardag natively support `async` implementation of `Task`s and `Target`s.
+Stardag natively supports `async` implementation of `Task`s and `Target`s.
 
-A task can implement either - _or both_ - of the methods `def run(self)` and `async def run_aio(self)`. Which method is used dependes on what's implemented and the build logic used, which is discussed in the next section [Build & Execution](./build-execution.md).
+A task can implement either - _or both_ - of the methods `def run(self)` and `async def run_aio(self)`. Which method is used depends on what's implemented and the build logic used, which is discussed in the next section [Build & Execution](./build-execution.md).
 
-Stardag's built-in `FileSystemTarget`s (for, for example, local disk, S3 and Modal volumes) already implement complete async interfaces. Even if your task only implement the sync `def run(self)` method, the async implementation of targets can provide significant (order(s) of magnitude) speedup in traversing DAGs wiht a large number of dependencies.
+Stardag's built-in `FileSystemTarget`s (for, for example, local disk, S3 and Modal volumes) already implement complete async interfaces. Even if your task only implements the sync `def run(self)` method, the async implementation of targets can provide significant (order(s) of magnitude) speedup in traversing DAGs with a large number of dependencies.
 
 ---
 

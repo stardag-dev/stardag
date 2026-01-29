@@ -4,7 +4,7 @@ Targets represent where and how task outputs are stored.
 
 ## The Typical `Task` uses a `Target`
 
-In most scenarios, downstream tasks needs to load the output from upstream dependencies, for this purpose the class [`Task`](../reference/api.md#stardag.Task), which inherits [`BaseTask`](../reference/api.md#stardag.BaseTask) introduces the concept of `Target`s.
+In most scenarios, downstream tasks need to load the output from upstream dependencies. For this purpose the class [`Task`](../reference/api.md#stardag.Task), which inherits [`BaseTask`](../reference/api.md#stardag.BaseTask), introduces the concept of `Target`s.
 
 Its extension of [`BaseTask`](../reference/api.md#stardag.BaseTask) can be summarized in seven lines of code:
 
@@ -18,7 +18,7 @@ class Task(BaseTask, Generic[TargetType]):
         ...
 ```
 
-That is, it adds a default implemention of `complete` which checks if the return value of the new (abstract) methods `output` exists. Generally, the _only_ requirement on the `TargetType` returned from output is that it can report its existance. Strictly speaking, that it implements the protocol:
+That is, it adds a default implementation of `complete` which checks if the return value of the new (abstract) method `output` exists. Generally, the _only_ requirement on the `TargetType` returned from output is that it can report its existence. Strictly speaking, that it implements the protocol:
 
 ```{.python notest}
 class Target(Protocol):
@@ -27,11 +27,11 @@ class Target(Protocol):
         ...
 ```
 
-Note that [`Task`](../reference/api.md#stardag.Task) is implemented with `TargetType` as a _generic_ type variable. This means that when you subclass [`Task`](../reference/api.md#stardag.Task), you need to declare the type of target the `output` returns. This is critical for composability of tasks and allows typcheckers to verify that chained tasks are compatible in terms of their I/O.
+Note that [`Task`](../reference/api.md#stardag.Task) is implemented with `TargetType` as a _generic_ type variable. This means that when you subclass [`Task`](../reference/api.md#stardag.Task), you need to declare the type of target the `output` returns. This is critical for composability of tasks and allows type checkers to verify that chained tasks are compatible in terms of their I/O.
 
 ## The Typical `Target` uses a File System
 
-Moreover, the most commonly used `Target` persists, retrives and checks existance of one or many files/objects in a file system. To this end Stardag implements the [`FileSystemTarget`](../reference/api.md#stardag.FileSystemTarget).
+Moreover, the most commonly used `Target` persists, retrieves and checks existence of one or many files/objects in a file system. To this end Stardag implements the [`FileSystemTarget`](../reference/api.md#stardag.FileSystemTarget).
 
 You can, and it is in some cases motivated to, return a target for a certain type of file system with an absolute path/URI
 
@@ -63,7 +63,7 @@ class MyTask(sd.Task[sd.FileSystemTarget]):
         return sd.get_target("path/to/file.txt")
 ```
 
-The main benifit here is that you can configure the file system and root directory/URI-prefix _centrally and decoupled_ from your tasks. This means for example that you can trivially jump between experimenting fully locally and running pipelines in production (or staging etc.).
+The main benefit here is that you can configure the file system and root directory/URI-prefix _centrally and decoupled_ from your tasks. This means for example that you can trivially jump between experimenting fully locally and running pipelines in production (or staging etc.).
 
 ## Target Roots
 

@@ -93,7 +93,7 @@ uv add some-package        # Add new dependency
 uv sync                    # Sync after pyproject.toml changes
 ```
 
-### Tun Tests
+### Run Tests
 
 Using [pytest-markdown-docs](https://github.com/modal-labs/pytest-markdown-docs).
 
@@ -134,7 +134,7 @@ Deployment is configured via `.github/workflows/docs.yml`.
 
 To use `docs.stardag.com`:
 
-1. Add CNAME record: `docs.stardag.com` → `andhus.github.io`
+1. Add CNAME record: `docs.stardag.com` → `stardag-dev.github.io`
 2. Create `docs/docs/CNAME` with content: `docs.stardag.com`
 3. Update `site_url` in `mkdocs.yml`
 4. Enable "Enforce HTTPS" in GitHub Pages settings

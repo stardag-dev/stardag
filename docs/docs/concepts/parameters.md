@@ -2,11 +2,11 @@
 
 Parameters define the behaviour of a tasks run method, what the task does. Since Stardag tasks _are_ pydantic `BaseModel`s, we can use all pydantic features and patterns/best practices to declare a task's parameters.
 
-As covered in previous sections, we can also pass other (arbitrarilly nested) task instances as parameters; since they are also pydanic `BaseModel`s, this nesting is natural and results in a well defined JSON schema.
+As covered in previous sections, we can also pass other (arbitrarily nested) task instances as parameters; since they are also pydantic `BaseModel`s, this nesting is natural and results in a well-defined JSON schema.
 
-## Polymorophisim and `TaskLoads[...]`
+## Polymorphism and `TaskLoads[...]`
 
-A central feature that Stardag adds on top of standard pydantic is support for generalized _polymorphisim_. Consider the example below:
+A central feature that Stardag adds on top of standard pydantic is support for generalized _polymorphism_. Consider the example below:
 
 ```{.python notest}
 class TrainedModel(sd.AutoTask[MyModel]):
@@ -43,7 +43,7 @@ class TrainedModel(sd.AutoTask[MyModel]):
 
 ```
 
-`TaskLoads[<Type>]` is short for _any Stardag task for which the return type of `output().loads()` is `<Type>`_.
+`TaskLoads[<Type>]` is short for _any Stardag task for which the return type of `output().load()` is `<Type>`_.
 
 ## Parameter Hashing
 
@@ -73,7 +73,7 @@ assert task.id == UUID("fa9b74b1-1cde-5676-8650-dbcf755a2699")  # UUID-5
 
 The task ID is derived from:
 
-- Task name (class name or function name, unless overriden)
+- Task name (class name or function name, unless overridden)
 - Task namespace
 - Task version
 - All parameter values (recursively hashed)
@@ -85,7 +85,7 @@ This recursive hashing ensures that:
 
 ## Output URIs
 
-The task ID should typically determin the output URI, and does so automatically when using the Decorator API or `AutoTask`:
+The task ID should typically determine the output URI, and does so automatically when using the Decorator API or `AutoTask`:
 
 ```{.python continuation}
 task = add(a=1, b=2)
@@ -108,6 +108,6 @@ The `id[0:2]/id[2:4]` directory structure prevents having too many files in a si
     - How (and when) to exclude parameters from hashing -> task ID
     - How Task ID is obtained in more detail
     - Customizing hash behaviour
-    - Compatiility mode validation
+    - Compatibility mode validation
     - Task versioning
     - Best practices (examples for experimental ML and model hyperparameters)

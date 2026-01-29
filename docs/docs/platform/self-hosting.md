@@ -16,7 +16,7 @@ The local Docker Compose setup uses development defaults (simple passwords, Keyc
 ### Start the Stack
 
 ```bash
-git clone https://github.com/andhus/stardag.git
+git clone https://github.com/stardag-dev/stardag.git
 cd stardag
 docker compose up -d
 ```

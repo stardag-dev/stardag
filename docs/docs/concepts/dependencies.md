@@ -22,10 +22,10 @@ class AddAB(sd.AutoTask[Number]):
         a = deps["a"].output().load()
         b = deps["b"].output().load()
         result = a + b
-        self.output().save(results)
+        self.output().save(result)
 ```
 
-The return type of `requires` can be a singe `BaseTask` or any nested list or dictionary of `BaseTask`s.
+The return type of `requires` can be a single `BaseTask` or any nested list or dictionary of `BaseTask`s.
 
 The task above declares hardcoded dependencies resulting in a _static_ DAG, both in terms of topology and each node.
 
@@ -47,7 +47,7 @@ class AddParameterizedAB(sd.AutoTask[Number]):
 
 Now we have a DAG with fixed topology, but parameterized nodes.
 
-We can extend this pattern with conditional logic to achive parameterized topolgy within a predefined set of alternatives:
+We can extend this pattern with conditional logic to achieve parameterized topology within a predefined set of alternatives:
 
 ```{.python notest}
 ParamType = ...  # Some information to forward to A/BTask
@@ -84,7 +84,7 @@ class Add(sd.AutoTask[Number]):
         self.output().save(result)
 ```
 
-Now we have effectively _arbitrarilly_ parameterized the upstream dependencies, the definition of nodes as well as the DAG topology. Each element of `values` can be any task type, as long as its `output().load()` returns a `Number`.
+Now we have effectively _arbitrarily_ parameterized the upstream dependencies, the definition of nodes as well as the DAG topology. Each element of `values` can be any task type, as long as its `output().load()` returns a `Number`.
 
 We can also accept raw data _or_ tasks, which output loads the same data type, as parameters by:
 

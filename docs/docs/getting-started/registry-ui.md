@@ -1,6 +1,6 @@
 # Using the Stardag Registry Web UI
 
-So far we have mostly leveraged stardag to store and retrive intemediate task outputs (persistent caching) and materialized them with bottom up, make-style, execution. Next we will leverage the Stardag **Registry** to, among other things, get some observability of our DAGs execution.
+So far we have mostly leveraged stardag to store and retrieve intermediate task outputs (persistent caching) and materialized them with bottom-up, make-style, execution. Next we will leverage the Stardag **Registry** to, among other things, get some observability of our DAGs execution.
 
 ## Get setup
 
@@ -12,7 +12,7 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
 
     ### Setup your profile and Authenticate
 
-    Active the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
+    Activate the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
 
     === "Activated venv"
 
@@ -103,7 +103,7 @@ So far we have mostly leveraged stardag to store and retrive intemediate task ou
 
     ### Setup your profile and Authenticate
 
-    Active the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
+    Activate the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
 
     === "Activated venv"
 

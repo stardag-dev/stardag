@@ -48,10 +48,10 @@ Tasks are _specifications_ of what to compute, not (only) instructions to execut
 
 - Inspection before execution
 - Serialization of the full DAG
-- Efficinet caching and skip logic
+- Efficient caching and skip logic
 - Data as Code (DaC)
 
-Moreover, especially in experimental Machine Learning workflows, it can be extremely valuable with a human readable and searchable specification of any asset produced. Each task is a self-contained specification of the compelete provenance of its persistently stored target. Done right this allows inspection of the "diff" between the specification of, say, two different instances of ML-model performance metrics; Why is one better than the other? Which hyper-parameters have changed? Is the same training dataset and filtering used?
+Moreover, especially in experimental Machine Learning workflows, it can be extremely valuable with a human readable and searchable specification of any asset produced. Each task is a self-contained specification of the complete provenance of its persistently stored target. Done right this allows inspection of the "diff" between the specification of, say, two different instances of ML-model performance metrics; Why is one better than the other? Which hyper-parameters have changed? Is the same training dataset and filtering used?
 
 ### Composition (Over Inheritance and/or Static DAG Topology)
 
@@ -71,7 +71,7 @@ Given the same parameters, a task always:
 
 ### The Right Tool for the Job
 
-Stardag happily aknowledges that the declarative DAG abstraction is _not_ suitable for all data processing/workflows. That's why its ambition is to be interoperable with other modern data workflow frameworks, such as [Prefect](https://www.prefect.io/), that lacks the declarative DAG abstraction (both as an SDK and at the execution layer).
+Stardag happily acknowledges that the declarative DAG abstraction is _not_ suitable for all data processing/workflows. That's why its ambition is to be interoperable with other modern data workflow frameworks, such as [Prefect](https://www.prefect.io/), that lacks the declarative DAG abstraction (both as an SDK and at the execution layer).
 
 ## Mental Model
 

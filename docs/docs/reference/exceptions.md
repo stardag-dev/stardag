@@ -70,7 +70,7 @@ from stardag import AuthorizationError
 Raised when authenticated but not authorized:
 
 - Insufficient permissions
-- Wrong organization/workspace
+- Wrong workspace/environment
 - Resource access denied
 
 ### TokenExpiredError

@@ -25,7 +25,7 @@ You'll also need a [Modal](https://modal.com/) account.
 
     This documentation is still taking shape. It should soon cover how to execute your Stardag DAGs on Modal.
 
-    For now see: [Modal Examples](https://github.com/andhus/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal)
+    For now see: [Modal Examples](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal)
 
 <!--
 ## Basic Usage
@@ -153,6 +153,6 @@ build([task], task_executor=routed)
 
 ## See Also
 
-- [Modal Examples](https://github.com/andhus/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal) - Example implementations
+- [Modal Examples](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal) - Example implementations
 - [Modal Documentation](https://modal.com/docs) - Modal features
  -->

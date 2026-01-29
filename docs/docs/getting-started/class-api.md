@@ -71,7 +71,7 @@ With [`sd.AutoTask`](../reference/api.md#stardag.AutoTask) subclassing, the resu
 class Sum(sd.AutoTask[int]):
 ```
 
-This let's `AutoTask` automatically implement the `output()` with the appropriate Serializer and target URI. The returned `Target` implements the `load()` and `save()` methods which take care of de/serialization and persistance.
+This lets `AutoTask` automatically implement the `output()` with the appropriate Serializer and target URI. The returned `Target` implements the `load()` and `save()` methods which take care of de/serialization and persistence.
 
 ??? info "See the corresponding implementaton of `output()` under the hood"
 
@@ -107,7 +107,7 @@ class Sum(sd.AutoTask[int]):
     integers: sd.TaskLoads[list[int]]
 ```
 
-In the former case, `integers: Range`, only instances of `Range` task is accepted, validated by standard pydantic validation logic (remember all tasks are pydantic `BaseModel`s). But this is an unnecessarilly specific and narrow constrain since the implementation of `Sum` only depdens on that `integers.output().load()` returns `list[int]`. This syntax `TaskLoads[<type>]` is what allows for smooth composability of tasks into DAGs, while still being declarative.
+In the former case, `integers: Range`, only instances of `Range` task is accepted, validated by standard pydantic validation logic (remember all tasks are pydantic `BaseModel`s). But this is an unnecessarily specific and narrow constraint since the implementation of `Sum` only depends on that `integers.output().load()` returns `list[int]`. This syntax `TaskLoads[<type>]` is what allows for smooth composability of tasks into DAGs, while still being declarative.
 
 Note that so far we have only specified expectations on the `integers` _input argument_ of the `Sum` task. To declare that this is also an _upstream dependency_ of `Sum`, we need to return it from the `requires()` method:
 
@@ -121,7 +121,7 @@ class Sum(sd.AutoTask[int]):
 
 ??? info "Why do you need to implement `requires()` when you already declare `sd.TaskLoads`?"
 
-    With the decorator-API, input arguments with type annotation `sd.Depends[<type>]` were autoamtically returned from the generated task's `requires()` method. But in the more capable class-API case, it is better to be explicit because:
+    With the decorator-API, input arguments with type annotation `sd.Depends[<type>]` were automatically returned from the generated task's `requires()` method. But in the more capable class-API case, it is better to be explicit because:
 
     1. Tasks can be passed as inputs in nested data structures (`parameter: dict[str, list[TaskLoads[<type>]]]`) which makes it more complex to parse arguments to extract the tasks.
     2. We might not want to depend on the input task directly, but include it as input to other dependencies e.g.:
@@ -162,7 +162,7 @@ The `run` (or `run_aio` in the case of async tasks) method implements the actual
 2. Transform the data (apply the main run logic)
 3. Save the data to the task target
 
-So in with the class-API we are responsible for loading output from dependencies and storing the results to the target, but the automaticaly implemented `output()` (returning a `LoadableSaveableFileSystemTarget`) makes this straight forward:
+So with the class-API we are responsible for loading output from dependencies and storing the results to the target, but the automatically implemented `output()` (returning a `LoadableSaveableFileSystemTarget`) makes this straightforward:
 
 ```{.python notest}
     # ...
