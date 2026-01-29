@@ -101,4 +101,4 @@ assert result == 45
 
 ## What's Next?
 
-Get observability by using the [Stardag Registry](./registry-ui.mdmd).
+Get observability by using the [Stardag Registry](./registry-ui.md).

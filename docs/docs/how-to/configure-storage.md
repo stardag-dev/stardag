@@ -1,3 +1,5 @@
+_NOTE this page is WIP. It is not complete and contains inaccuracies, currently excluded from docs site._
+
 # Configure Storage
 
 Set up target roots for different environments and storage backends.
