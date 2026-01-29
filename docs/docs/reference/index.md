@@ -49,5 +49,5 @@ Auto-generated documentation from source code:
 
 ## External Resources
 
-- [GitHub Repository](https://github.com/andhus/stardag)
+- [GitHub Repository](https://github.com/stardag-dev/stardag)
 - [PyPI Package](https://pypi.org/project/stardag/)

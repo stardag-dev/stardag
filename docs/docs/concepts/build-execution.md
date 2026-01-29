@@ -30,7 +30,7 @@ Step 6: Execute C, save output
 
 The primary way to execute tasks is `sd.build` or `await sd.build_aio`.
 
-Mostly for testing and debuging, there is also `sd.build_sequential` and `sd.build_sequential_aio`.
+Mostly for testing and debugging, there is also `sd.build_sequential` and `sd.build_sequential_aio`.
 
 !!! info "🚧 **Work in progress** 🚧"
 

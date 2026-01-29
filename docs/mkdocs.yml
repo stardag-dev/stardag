@@ -1,8 +1,8 @@
 site_name: Stardag
 site_description: Declarative and composable DAG framework for Python with persistent asset management
-site_url: https://andhus.github.io/stardag/ # TODO: Update to https://docs.stardag.com when custom domain is configured
-repo_name: andhus/stardag
-repo_url: https://github.com/andhus/stardag
+site_url: https://stardag-dev.github.io/stardag/ # TODO: Update to https://docs.stardag.com when custom domain is configured
+repo_name: stardag-dev/stardag
+repo_url: https://github.com/stardag-dev/stardag
 edit_uri: edit/main/docs/docs/
 
 # Branding - centralized for easy updates
@@ -106,7 +106,7 @@ markdown_extensions:
   - pymdownx.magiclink:
       normalize_issue_symbols: true
       repo_url_shorthand: true
-      user: andhus
+      user: stardag-dev
       repo: stardag
   - pymdownx.mark
   - pymdownx.smartsymbols
@@ -135,7 +135,7 @@ extra_css:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/andhus/stardag
+      link: https://github.com/stardag-dev/stardag
   # Status colors (matching UI)
   # pending: yellow, running: blue, completed: green, failed: red
 

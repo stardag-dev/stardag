@@ -36,24 +36,24 @@ class MyTask(sd.BaseTask):
         return self.parameter in world_state
 ```
 
-Even if contrived, it emphaises the the fundamental contract of a stardag task; At the very least, any task must implement the methods `complete` and `run`, and:
+Even if contrived, it emphasizes the fundamental contract of a stardag task; At the very least, any task must implement the methods `complete` and `run`, and:
 
 - `complete` should return `True` only if the task's desired world state is achieved
-- `run` should only execute succesfully once this state is achieved
+- `run` should only execute successfully once this state is achieved
 
-To defined how tasks depends on other tasks, each task must also implement the method:
+To define how tasks depend on other tasks, each task must also implement the method:
 
 ```{.python notest}
     def requires(self) -> TaskStruct | None:
 ```
 
-for which `BaseTask` default implementation simply returns `None` (no dependencies). When a task do return one or more tasks, it can - _and should_ - make the assumprion that:
+for which `BaseTask` default implementation simply returns `None` (no dependencies). When a task does return one or more tasks, it can - _and should_ - make the assumption that:
 
 - all tasks returned from `self.requires()` are complete when `self.run()` is executed.
 
 To some extent, _that's it_.
 
-This allows us to implement build logic that traverses the Directled Acyclic Graph (DAG) of tasks and executes `run`, in the correct order until the final desired tasks are complete.
+This allows us to implement build logic that traverses the Directed Acyclic Graph (DAG) of tasks and executes `run` in the correct order until the final desired tasks are complete.
 
 ```{.python continuation}
 # instantiate an instance
@@ -65,4 +65,4 @@ sd.build(my_task)
 assert world_state == {"hello": 5}
 ```
 
-In the following section we will cover the fact the most tasks uses `Target`s, and in particular `FileSystemTarget`s, to persistently store their output and for downstream tasks to retrive it as input.
+In the following section we will cover the fact that most tasks use `Target`s, and in particular `FileSystemTarget`s, to persistently store their output and for downstream tasks to retrieve it as input.

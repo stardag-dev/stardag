@@ -1,6 +1,6 @@
 # Getting Started
 
-_Welcome!_ This section will get you up and running with Stardag quickly.
+This section will get you up and running with Stardag quickly.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ _Welcome!_ This section will get you up and running with Stardag quickly.
 2. **[Quick Start](quickstart.md)** - Create and run your first task (~5 minutes)
 3. **[Your First DAG](first-dag.md)** - Build a complete pipeline with dependencies (~5 minutes)
 4. **[Stardag Registry Web UI](registry-ui.md)** - Use the Stardag Registry Web UI (~5-10 minutes)
-5. **[Using the Class API](registry-ui.md)** - Learn to take full control of your tasks (~5-10 minutes)
+5. **[Using the Class API](class-api.md)** - Learn to take full control of your tasks (~5-10 minutes)
 
 ## What You'll Learn
 
