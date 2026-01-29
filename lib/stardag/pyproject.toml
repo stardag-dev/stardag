@@ -2,8 +2,21 @@
 name = "stardag"
 dynamic = ["version"]
 description = "Declarative and composable DAG framework for Python with persistent asset management"
-authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
+readme = "../../README.md"
+license = "Apache-2.0"
+authors = [{ name = "Anders Huss", email = "info@stardag.com" }]
 requires-python = ">=3.10,<3.14"  # TODO update modal deps
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "aiofiles>=25.1.0",
     "pydantic>=2.8.2",
