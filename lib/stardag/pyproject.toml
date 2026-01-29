@@ -2,7 +2,7 @@
 name = "stardag"
 dynamic = ["version"]
 description = "Declarative and composable DAG framework for Python with persistent asset management"
-readme = "../../README.md"
+readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Anders Huss", email = "info@stardag.com" }]
 requires-python = ">=3.10,<3.15"
