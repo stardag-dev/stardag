@@ -136,6 +136,12 @@ def logged_in_context(
         viewport={"width": 1280, "height": 720},
         ignore_https_errors=True,
     )
+    # Auto-dismiss the onboarding modal by setting sessionStorage before page loads
+    # sessionStorage is not persisted by Playwright's storage_state(), so we use
+    # add_init_script to set it on every page load
+    context.add_init_script(
+        "sessionStorage.setItem('stardag_onboarding_dismissed', 'true');"
+    )
     yield context
     context.close()
 
