@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import DistributedLock, Environment
@@ -507,3 +507,73 @@ async def test_environment_concurrency_limit_same_owner_exempt(
         .values(max_concurrent_locks=None)
     )
     await async_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_owner_id_comparison_with_uuid_type(
+    client: AsyncClient, async_session: AsyncSession
+):
+    """Test that owner_id comparisons work correctly with UUID objects.
+
+    This test verifies that the lock service correctly handles UUID/string
+    comparisons, which was a bug when SQLite returned strings but PostgreSQL
+    returned UUID objects. The comparison should work regardless of the
+    underlying database's type representation.
+    """
+    # Use a proper UUID object (as the API schema now requires)
+    owner_uuid = uuid.uuid4()
+    owner_id = str(owner_uuid)
+
+    # Acquire a lock
+    response = await client.post(
+        "/api/v1/locks/uuid-type-test/acquire",
+        json={"owner_id": owner_id, "ttl_seconds": 60, "check_task_completion": False},
+    )
+    assert response.status_code == 200
+    assert response.json()["acquired"] is True
+    lock_data = response.json()["lock"]
+
+    # Verify the owner_id in response matches what we sent
+    assert lock_data["owner_id"] == owner_id
+
+    # Directly query the database and verify comparison works
+    result = await async_session.execute(
+        select(DistributedLock).where(DistributedLock.name == "uuid-type-test")
+    )
+    lock = result.scalar_one()
+
+    # The critical test: verify that string comparison of owner_id works
+    # This is what caught the bug - SQLite returns str, PostgreSQL returns UUID
+    assert str(lock.owner_id) == owner_id
+
+    # Re-acquire with same owner should work (re-entrant)
+    response = await client.post(
+        "/api/v1/locks/uuid-type-test/acquire",
+        json={"owner_id": owner_id, "ttl_seconds": 60, "check_task_completion": False},
+    )
+    assert response.status_code == 200
+    assert response.json()["acquired"] is True
+
+    # Renew should work
+    response = await client.post(
+        "/api/v1/locks/uuid-type-test/renew",
+        json={"owner_id": owner_id, "ttl_seconds": 120},
+    )
+    assert response.status_code == 200
+    assert response.json()["renewed"] is True
+
+    # Different owner should fail
+    different_owner = str(uuid.uuid4())
+    response = await client.post(
+        "/api/v1/locks/uuid-type-test/renew",
+        json={"owner_id": different_owner, "ttl_seconds": 120},
+    )
+    assert response.status_code == 409
+
+    # Release should work with original owner
+    response = await client.post(
+        "/api/v1/locks/uuid-type-test/release",
+        json={"owner_id": owner_id, "task_completed": False},
+    )
+    assert response.status_code == 200
+    assert response.json()["released"] is True

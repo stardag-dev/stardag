@@ -409,7 +409,7 @@ class AvailableColumnsResponse(BaseModel):
 class LockAcquireRequest(BaseModel):
     """Schema for acquiring a distributed lock."""
 
-    owner_id: str  # UUID identifying the lock owner (stable across retries)
+    owner_id: UUID  # UUID identifying the lock owner (stable across retries)
     ttl_seconds: int = 60  # Time-to-live in seconds
     check_task_completion: bool = True  # Check if task is already completed
 
@@ -417,14 +417,14 @@ class LockAcquireRequest(BaseModel):
 class LockRenewRequest(BaseModel):
     """Schema for renewing a distributed lock."""
 
-    owner_id: str  # The expected owner
+    owner_id: UUID  # The expected owner
     ttl_seconds: int = 60  # New TTL in seconds
 
 
 class LockReleaseRequest(BaseModel):
     """Schema for releasing a distributed lock."""
 
-    owner_id: str  # The expected owner
+    owner_id: UUID  # The expected owner
     task_completed: bool = False  # Whether the task completed successfully
     build_id: UUID | None = None  # Build ID if recording completion
 
@@ -436,7 +436,7 @@ class LockResponse(BaseModel):
 
     name: str
     environment_id: UUID
-    owner_id: str
+    owner_id: UUID
     acquired_at: datetime
     expires_at: datetime
     version: int
