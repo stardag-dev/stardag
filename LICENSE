@@ -4,7 +4,7 @@ Stardag uses a split licensing model:
 
 | Component | License | Location |
 |-----------|---------|----------|
-| **SDK & Examples** (`lib/`) | Apache License 2.0 | [lib/stardag/LICENSE](lib/stardag/LICENSE) |
+| **SDK & Examples** (`lib/`) | Apache License 2.0 | [lib/LICENSE](lib/LICENSE) |
 | **API & UI** (`app/`) | Business Source License 1.1 | [app/LICENSE](app/LICENSE) |
 
 ## Summary
