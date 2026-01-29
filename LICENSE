@@ -1,0 +1,15 @@
+# Stardag Licensing
+
+Stardag uses a split licensing model:
+
+| Component | License | Location |
+|-----------|---------|----------|
+| **SDK** (`lib/stardag`) | Apache License 2.0 | [lib/stardag/LICENSE](lib/stardag/LICENSE) |
+| **API & UI** (`app/`) | Business Source License 1.1 | [app/LICENSE](app/LICENSE) |
+
+## Summary
+
+- **SDK (Apache 2.0)**: Use freely for any purpose, including commercial products
+- **API & UI (BSL 1.1)**: Use freely including self-hosted production, but cannot offer as a competing hosted service. Converts to Apache 2.0 on 2029-01-29.
+
+For questions about licensing, contact: hello@stardag.dev
