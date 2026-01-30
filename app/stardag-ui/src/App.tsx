@@ -422,7 +422,8 @@ function LandingPage() {
             </span>
           </div>
           <h2 className="mb-8 text-2xl font-bold text-white sm:text-3xl">
-            Declarative DAGs for Data & ML
+            <span className="whitespace-nowrap">Declarative DAGs</span>{" "}
+            <span className="whitespace-nowrap">for Data & ML</span>
           </h2>
           <p className="mb-10 text-lg text-gray-300 sm:text-xl">
             A modern Python framework for building composable pipelines with persistent
