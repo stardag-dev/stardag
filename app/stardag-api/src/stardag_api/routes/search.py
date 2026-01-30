@@ -1,0 +1,952 @@
+"""Task search routes - advanced filtering and autocomplete."""
+
+import re
+import time
+from collections import Counter
+from typing import Annotated, Any
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from stardag_api.auth import SdkAuth, require_sdk_auth
+from stardag_api.db import get_db
+from stardag_api.models import Build, Event, Task, TaskRegistryAsset
+from stardag_api.models.enums import TaskStatus
+from stardag_api.schemas import (
+    AvailableColumnsResponse,
+    KeySuggestion,
+    KeySuggestionsResponse,
+    TaskSearchResponse,
+    TaskSearchResult,
+    ValueSuggestion,
+    ValueSuggestionsResponse,
+)
+from stardag_api.services.status import get_all_task_global_statuses
+
+router = APIRouter(prefix="/tasks/search", tags=["search"])
+
+# Simple in-memory cache for suggestions with TTL (5 minutes)
+_suggestions_cache: dict[str, tuple[float, Any]] = {}
+_CACHE_TTL_SECONDS = 300
+
+
+def _get_cached(key: str) -> Any | None:
+    """Get a value from cache if not expired."""
+    if key in _suggestions_cache:
+        timestamp, value = _suggestions_cache[key]
+        if time.time() - timestamp < _CACHE_TTL_SECONDS:
+            return value
+        # Expired, remove from cache
+        del _suggestions_cache[key]
+    return None
+
+
+def _set_cached(key: str, value: Any) -> None:
+    """Set a value in cache with current timestamp."""
+    _suggestions_cache[key] = (time.time(), value)
+
+
+# Filter operators and their SQL equivalents
+OPERATORS = {
+    "=": "=",
+    "!=": "!=",
+    ">": ">",
+    "<": "<",
+    ">=": ">=",
+    "<=": "<=",
+    "~": "ILIKE",  # substring/contains
+}
+
+
+def parse_filter_string(filter_str: str) -> list[tuple[str, str, str]]:
+    """Parse filter string into list of (key, operator, value) tuples.
+
+    Format: key:op:value,key:op:value,...
+    Examples:
+        - task_name:=:training
+        - param.lr:>:0.01
+        - task_namespace:~:ml
+    """
+    if not filter_str:
+        return []
+
+    filters = []
+    # Split by comma, but handle escaped commas
+    parts = filter_str.split(",")
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        # Parse key:op:value or key:value (default op is =)
+        match = re.match(r"^([^:]+):([=!<>~]+)?:?(.*)$", part)
+        if match:
+            key, op, value = match.groups()
+            op = op or "="
+            if op in OPERATORS:
+                filters.append((key.strip(), op, value.strip()))
+
+    return filters
+
+
+def build_jsonb_condition(
+    key: str,
+    operator: str,
+    value: str,
+    task_alias: str = "tasks",
+    param_suffix: str = "",
+) -> tuple[str | None, bool, str | None]:
+    """Build a SQL condition for JSONB filtering.
+
+    Handles:
+    - Core fields (task_name, task_namespace, etc.)
+    - Build fields (build_id, build_name) - requires join
+    - param.* fields (task_data JSONB)
+    - asset.* fields (asset body_json JSONB) - uses EXISTS subquery
+    - status (from latest event)
+
+    Returns:
+        Tuple of (condition_string, needs_build_join, asset_name_for_filter)
+        asset_name_for_filter is set when filtering on asset.* keys
+    """
+    sql_op = OPERATORS.get(operator)
+    if not sql_op:
+        return None, False, None
+
+    # Core fields - direct column access on tasks table
+    core_fields = {
+        "task_name",
+        "task_namespace",
+        "task_id",
+        "created_at",
+        "version",
+    }
+
+    if key in core_fields:
+        param_name = f"filter_{key}{param_suffix}"
+        if sql_op == "ILIKE":
+            return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'", False, None
+        return f"{task_alias}.{key} {sql_op} :{param_name}", False, None
+
+    # Build fields - require join to events and builds tables
+    if key == "build_id":
+        param_name = f"filter_build_id{param_suffix}"
+        if sql_op == "ILIKE":
+            return f"builds.id ILIKE '%' || :{param_name} || '%'", True, None
+        return f"builds.id {sql_op} :{param_name}", True, None
+
+    if key == "build_name":
+        param_name = f"filter_build_name{param_suffix}"
+        if sql_op == "ILIKE":
+            return f"builds.name ILIKE '%' || :{param_name} || '%'", True, None
+        return f"builds.name {sql_op} :{param_name}", True, None
+
+    # Parameter fields - JSONB access
+    if key.startswith("param."):
+        json_path = key[6:]  # Remove 'param.' prefix
+        path_parts = json_path.split(".")
+
+        # Build JSONB path access
+        jsonb_path = f"{task_alias}.task_data"
+        for i, part in enumerate(path_parts):
+            # Check for array access like items[0]
+            array_match = re.match(r"(\w+)\[(\d+)\]", part)
+            if array_match:
+                field, index = array_match.groups()
+                jsonb_path = f"({jsonb_path}->'{field}')->{index}"
+            else:
+                if i == len(path_parts) - 1:
+                    # Last part - use ->> for text extraction
+                    jsonb_path = f"{jsonb_path}->>'{part}'"
+                else:
+                    jsonb_path = f"{jsonb_path}->'{part}'"
+
+        safe_key = (
+            key.replace(".", "_").replace("[", "_").replace("]", "_").replace("-", "_")
+        )
+        param_name = f"filter_{safe_key}{param_suffix}"
+
+        if sql_op == "ILIKE":
+            return f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'", False, None
+        elif operator in (">", "<", ">=", "<="):
+            # Numeric comparison - cast both sides to float
+            # Use CAST() syntax to avoid SQLAlchemy misinterpreting ::float as part of param name
+            return (
+                (
+                    f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} "
+                    f"CAST(:{param_name} AS DOUBLE PRECISION)"
+                ),
+                False,
+                None,
+            )
+        else:
+            return f"({jsonb_path}) {sql_op} :{param_name}", False, None
+
+    # Asset fields - EXISTS subquery on task_registry_assets table
+    # Format: asset.{asset_name}.{json_path}
+    if key.startswith("asset."):
+        rest = key[6:]  # Remove 'asset.' prefix
+        parts = rest.split(".", 1)
+        if len(parts) < 2:
+            return None, False, None
+
+        asset_name = parts[0]
+        json_path = parts[1]
+        path_parts = json_path.split(".")
+
+        # Build JSONB path access for asset body_json
+        jsonb_path = "asset_filter.body_json"
+        for i, part in enumerate(path_parts):
+            array_match = re.match(r"(\w+)\[(\d+)\]", part)
+            if array_match:
+                field, index = array_match.groups()
+                jsonb_path = f"({jsonb_path}->'{field}')->{index}"
+            else:
+                if i == len(path_parts) - 1:
+                    jsonb_path = f"{jsonb_path}->>'{part}'"
+                else:
+                    jsonb_path = f"{jsonb_path}->'{part}'"
+
+        safe_key = (
+            key.replace(".", "_").replace("[", "_").replace("]", "_").replace("-", "_")
+        )
+        param_name = f"filter_{safe_key}{param_suffix}"
+        asset_name_param = f"filter_asset_name{param_suffix}"
+
+        # Build EXISTS subquery condition
+        if sql_op == "ILIKE":
+            value_condition = f"({jsonb_path}) ILIKE '%' || :{param_name} || '%'"
+        elif operator in (">", "<", ">=", "<="):
+            value_condition = (
+                f"CAST({jsonb_path} AS DOUBLE PRECISION) {sql_op} "
+                f"CAST(:{param_name} AS DOUBLE PRECISION)"
+            )
+        else:
+            value_condition = f"({jsonb_path}) {sql_op} :{param_name}"
+
+        # EXISTS subquery to check for matching asset
+        condition = (
+            f"EXISTS (SELECT 1 FROM task_registry_assets asset_filter "
+            f"WHERE asset_filter.task_pk = {task_alias}.id "
+            f"AND asset_filter.name = :{asset_name_param} "
+            f"AND {value_condition})"
+        )
+        return condition, False, asset_name
+
+    return None, False, None
+
+
+@router.get("", response_model=TaskSearchResponse)
+async def search_tasks(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+    filter: str | None = None,
+    q: str | None = None,  # Text search
+    sort: str = "created_at:desc",
+    include_assets: str | None = None,  # Comma-separated asset names to include
+):
+    """Search tasks with advanced filtering.
+
+    Query parameters:
+    - filter: Comma-separated filters (e.g., "task_name:~:train,param.lr:>:0.01")
+    - q: Text search across task name and namespace
+    - sort: Sort field and direction (e.g., "created_at:desc")
+    - include_assets: Comma-separated asset names to include in results (e.g., "report,metrics")
+    """
+    environment_id = auth.environment_id
+
+    # Build base query
+    query = select(Task).where(Task.environment_id == environment_id)
+    count_query = (
+        select(func.count())
+        .select_from(Task)
+        .where(Task.environment_id == environment_id)
+    )
+
+    # Parse and apply filters
+    filter_params: dict[str, str] = {}
+    conditions: list[str] = []
+    needs_build_join = False
+    # Status filters are applied post-query since status is derived from events
+    status_filters: list[tuple[str, str]] = []  # (operator, value) pairs
+
+    if filter:
+        parsed_filters = parse_filter_string(filter)
+        for i, (key, op, value) in enumerate(parsed_filters):
+            # Handle status filter separately (post-query)
+            if key == "status":
+                status_filters.append((op, value.lower()))
+                continue
+
+            # Use index suffix to ensure unique parameter names for range queries
+            # e.g., param.x:>:5 and param.x:<:100 need different param names
+            param_suffix = f"_{i}"
+            condition, requires_build, asset_name = build_jsonb_condition(
+                key, op, value, "tasks", param_suffix
+            )
+            if condition:
+                conditions.append(condition)
+                safe_key = (
+                    key.replace(".", "_")
+                    .replace("[", "_")
+                    .replace("]", "_")
+                    .replace("-", "_")
+                )
+                filter_params[f"filter_{safe_key}{param_suffix}"] = value
+                if requires_build:
+                    needs_build_join = True
+                # Add asset name parameter for asset.* filters
+                if asset_name:
+                    filter_params[f"filter_asset_name{param_suffix}"] = asset_name
+
+    # Text search across name and namespace
+    if q:
+        q_lower = f"%{q.lower()}%"
+        conditions.append(
+            "(LOWER(tasks.task_name) LIKE :q_param OR LOWER(tasks.task_namespace) LIKE :q_param)"
+        )
+        filter_params["q_param"] = q_lower
+
+    # Add build join if needed for build_id/build_name filtering
+    if needs_build_join:
+        # Join tasks -> events -> builds to filter by build
+        # Using a correlated subquery to get the latest event time per task
+        latest_event_time_subquery = (
+            select(func.max(Event.created_at))
+            .where(Event.task_id == Task.id)
+            .correlate(Task)
+            .scalar_subquery()
+        )
+        query = query.join(
+            Event,
+            (Event.task_id == Task.id)
+            & (Event.created_at == latest_event_time_subquery),
+        ).join(Build, Build.id == Event.build_id)
+        count_query = (
+            select(func.count())
+            .select_from(Task)
+            .where(Task.environment_id == environment_id)
+            .join(
+                Event,
+                (Event.task_id == Task.id)
+                & (Event.created_at == latest_event_time_subquery),
+            )
+            .join(Build, Build.id == Event.build_id)
+        )
+
+    # Apply conditions using raw SQL for JSONB
+    if conditions:
+        combined_condition = " AND ".join(conditions)
+        query = query.where(text(combined_condition).bindparams(**filter_params))
+        count_query = count_query.where(
+            text(combined_condition).bindparams(**filter_params)
+        )
+
+    # Apply sorting
+    sort_parts = sort.split(":")
+    sort_field = sort_parts[0] if sort_parts else "created_at"
+    sort_dir = sort_parts[1] if len(sort_parts) > 1 else "desc"
+
+    # Map sort field to column
+    sort_columns = {
+        "created_at": Task.created_at,
+        "task_name": Task.task_name,
+        "task_namespace": Task.task_namespace,
+    }
+    sort_column = sort_columns.get(sort_field, Task.created_at)
+    if sort_dir == "asc":
+        query = query.order_by(sort_column.asc())
+    else:
+        query = query.order_by(sort_column.desc())
+
+    # If status filter is present, we need to:
+    # 1. Fetch all tasks (no SQL pagination) since status is computed post-query
+    # 2. Get global statuses for all tasks
+    # 3. Filter by status in Python
+    # 4. Paginate in Python
+    if status_filters:
+        # Fetch all matching tasks (limit to 10000 to prevent OOM)
+        query = query.limit(10000)
+        result = await db.execute(query)
+        all_tasks = list(result.scalars().all())
+
+        if all_tasks:
+            # Get global statuses for all tasks
+            all_task_ids = [t.id for t in all_tasks]
+            all_statuses = await get_all_task_global_statuses(db, all_task_ids)
+
+            # Filter by status
+            def matches_status_filters(task_id: UUID) -> bool:
+                status_info = all_statuses.get(task_id)
+                if not status_info:
+                    return False
+                status_str = status_info[0].value.lower()  # e.g., "completed"
+                for op, value in status_filters:
+                    if op == "=":
+                        if status_str != value:
+                            return False
+                    elif op == "!=":
+                        if status_str == value:
+                            return False
+                    elif op == "~":  # contains
+                        if value not in status_str:
+                            return False
+                return True
+
+            filtered_tasks = [t for t in all_tasks if matches_status_filters(t.id)]
+            total = len(filtered_tasks)
+
+            # Apply pagination in Python
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            tasks = filtered_tasks[start_idx:end_idx]
+        else:
+            tasks = []
+            total = 0
+    else:
+        # No status filter - use normal SQL pagination
+        total_result = await db.execute(count_query)
+        total = total_result.scalar() or 0
+
+        # Apply pagination
+        query = query.offset((page - 1) * page_size).limit(page_size)
+
+        # Execute query
+        result = await db.execute(query)
+        tasks = result.scalars().all()
+
+    # Get global status for each task (considers events across ALL builds)
+    task_ids = [t.id for t in tasks]
+    task_status_map: dict[
+        UUID,
+        tuple[UUID | None, str | None, TaskStatus, str | None, str | None, str | None],
+    ] = {}
+
+    if task_ids:
+        # Get global statuses - this looks at events across all builds
+        # to determine the true status (e.g., COMPLETED takes precedence)
+        global_statuses = await get_all_task_global_statuses(db, task_ids)
+
+        # Get the most recent build context for display (for build_id/build_name)
+        # Using a subquery to find the latest event per task
+        latest_event_subquery = (
+            select(
+                Event.task_id,
+                func.max(Event.created_at).label("latest_event_time"),
+            )
+            .where(Event.task_id.in_(task_ids))
+            .group_by(Event.task_id)
+            .subquery()
+        )
+
+        latest_events = select(Event).join(
+            latest_event_subquery,
+            (Event.task_id == latest_event_subquery.c.task_id)
+            & (Event.created_at == latest_event_subquery.c.latest_event_time),
+        )
+        events_result = await db.execute(latest_events)
+        latest_events_list = events_result.scalars().all()
+
+        # Get build info for display
+        build_ids = {e.build_id for e in latest_events_list}
+        builds_map: dict[UUID, Build] = {}
+        if build_ids:
+            builds_result = await db.execute(
+                select(Build).where(Build.id.in_(build_ids))
+            )
+            builds_map = {b.id: b for b in builds_result.scalars().all()}
+
+        # Map tasks to their latest build context and global status
+        task_to_latest_build: dict[UUID, Build] = {}
+        for event in latest_events_list:
+            if event.task_id and event.build_id in builds_map:
+                task_to_latest_build[event.task_id] = builds_map[event.build_id]
+
+        # Build final status map using global status but latest build for context
+        for task_id in task_ids:
+            # Global status: (status, started_at, completed_at, error_message, status_build_id, waiting_for_lock)
+            global_status = global_statuses.get(
+                task_id, (TaskStatus.PENDING, None, None, None, None, False)
+            )
+            latest_build = task_to_latest_build.get(task_id)
+
+            task_status_map[task_id] = (
+                latest_build.id if latest_build else None,  # build_id for display
+                latest_build.name if latest_build else None,  # build_name for display
+                global_status[0],  # status (global)
+                global_status[1].isoformat()
+                if global_status[1]
+                else None,  # started_at
+                global_status[2].isoformat()
+                if global_status[2]
+                else None,  # completed_at
+                global_status[3],  # error_message
+            )
+
+    # Get asset counts
+    asset_counts: dict[UUID, int] = {}
+    if task_ids:
+        asset_count_result = await db.execute(
+            select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
+            .where(TaskRegistryAsset.task_pk.in_(task_ids))
+            .group_by(TaskRegistryAsset.task_pk)
+        )
+        asset_counts = {row[0]: row[1] for row in asset_count_result.all()}
+
+    # Get asset data for requested assets
+    task_asset_data: dict[
+        UUID, dict[str, dict]
+    ] = {}  # task_pk -> asset_name -> body_json
+    if task_ids and include_assets:
+        asset_names = [
+            name.strip() for name in include_assets.split(",") if name.strip()
+        ]
+        if asset_names:
+            asset_query = select(
+                TaskRegistryAsset.task_pk,
+                TaskRegistryAsset.name,
+                TaskRegistryAsset.body_json,
+            ).where(
+                TaskRegistryAsset.task_pk.in_(task_ids),
+                TaskRegistryAsset.name.in_(asset_names),
+            )
+            asset_result = await db.execute(asset_query)
+            for task_pk, asset_name, body_json in asset_result.all():
+                if task_pk not in task_asset_data:
+                    task_asset_data[task_pk] = {}
+                task_asset_data[task_pk][asset_name] = body_json or {}
+
+    # Build response
+    task_results = []
+    for task in tasks:
+        status_info = task_status_map.get(task.id)
+        task_results.append(
+            TaskSearchResult(
+                task_id=task.task_id,
+                environment_id=task.environment_id,
+                task_namespace=task.task_namespace,
+                task_name=task.task_name,
+                task_data=task.task_data,
+                version=task.version,
+                output_uri=task.output_uri,
+                created_at=task.created_at,
+                build_id=status_info[0] if status_info else None,
+                build_name=status_info[1] if status_info else None,
+                status=status_info[2] if status_info else TaskStatus.PENDING,
+                started_at=status_info[3] if status_info else None,  # type: ignore
+                completed_at=status_info[4] if status_info else None,  # type: ignore
+                error_message=status_info[5] if status_info else None,
+                asset_count=asset_counts.get(task.id, 0),
+                asset_data=task_asset_data.get(task.id, {}),
+            )
+        )
+
+    # Get available columns (core + discovered param keys)
+    available_columns = [
+        "task_name",
+        "task_namespace",
+        "status",
+        "build_name",
+        "created_at",
+    ]
+
+    return TaskSearchResponse(
+        tasks=task_results,
+        total=total,
+        page=page,
+        page_size=page_size,
+        available_columns=available_columns,
+    )
+
+
+@router.get("/keys", response_model=KeySuggestionsResponse)
+async def get_key_suggestions(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    prefix: str = "",
+    limit: int = 20,
+):
+    """Get key suggestions for autocomplete.
+
+    Returns available filter keys including:
+    - Core fields (task_name, task_namespace, etc.)
+    - Discovered param.* keys from task_data
+    """
+    environment_id = auth.environment_id
+
+    # Core keys always available
+    core_keys = [
+        KeySuggestion(key="task_name", type="string"),
+        KeySuggestion(key="task_namespace", type="string"),
+        KeySuggestion(key="task_id", type="string"),
+        KeySuggestion(key="status", type="string"),
+        KeySuggestion(key="build_id", type="string"),
+        KeySuggestion(key="build_name", type="string"),
+        KeySuggestion(key="created_at", type="datetime"),
+    ]
+
+    # Filter by prefix
+    if prefix and not prefix.startswith("param.") and not prefix.startswith("asset."):
+        core_keys = [k for k in core_keys if k.key.startswith(prefix)]
+
+    # Get param keys from task_data (cached)
+    param_keys: list[KeySuggestion] = []
+
+    if not prefix or prefix.startswith("param"):
+        # Check cache for param keys (cache is per-workspace, not prefix)
+        cache_key = f"keys:{environment_id}"
+        cached_param_keys = _get_cached(cache_key)
+
+        if cached_param_keys is None:
+            # Get a sample of task_data to discover keys
+            sample_query = (
+                select(Task.task_data)
+                .where(Task.environment_id == environment_id)
+                .order_by(Task.created_at.desc())
+                .limit(100)
+            )
+            sample_result = await db.execute(sample_query)
+            sample_tasks = sample_result.scalars().all()
+
+            # Extract unique keys from task_data
+            key_counter: Counter[str] = Counter()
+            for task_data in sample_tasks:
+                if isinstance(task_data, dict):
+                    _extract_keys(task_data, "param", key_counter)
+
+            # Cache all discovered keys (up to 100)
+            cached_param_keys = [
+                (key, count) for key, count in key_counter.most_common(100)
+            ]
+            _set_cached(cache_key, cached_param_keys)
+
+        # Filter by prefix and convert to suggestions
+        prefix_filter = prefix[6:] if prefix.startswith("param.") else ""
+        for key, count in cached_param_keys:
+            if not prefix_filter or key.startswith(f"param.{prefix_filter}"):
+                param_keys.append(KeySuggestion(key=key, type="string", count=count))
+            if len(param_keys) >= limit:
+                break
+
+    # Get asset keys from TaskRegistryAsset.body_json (cached)
+    asset_keys: list[KeySuggestion] = []
+
+    if not prefix or prefix.startswith("asset"):
+        # Check cache for asset keys (cache is per-workspace)
+        asset_cache_key = f"asset_keys:{environment_id}"
+        cached_asset_keys = _get_cached(asset_cache_key)
+
+        if cached_asset_keys is None:
+            # Get a sample of assets to discover keys
+            asset_query = (
+                select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
+                .where(TaskRegistryAsset.environment_id == environment_id)
+                .order_by(TaskRegistryAsset.created_at.desc())
+                .limit(200)
+            )
+            asset_result = await db.execute(asset_query)
+            sample_assets = asset_result.all()
+
+            # Extract unique keys from body_json
+            asset_key_counter: Counter[str] = Counter()
+            for asset_name, body_json in sample_assets:
+                if isinstance(body_json, dict):
+                    _extract_keys(body_json, f"asset.{asset_name}", asset_key_counter)
+
+            # Cache all discovered keys (up to 100)
+            cached_asset_keys = [
+                (key, count) for key, count in asset_key_counter.most_common(100)
+            ]
+            _set_cached(asset_cache_key, cached_asset_keys)
+
+        # Filter by prefix and convert to suggestions
+        prefix_filter = prefix[6:] if prefix.startswith("asset.") else ""
+        for key, count in cached_asset_keys:
+            if not prefix_filter or key.startswith(f"asset.{prefix_filter}"):
+                asset_keys.append(KeySuggestion(key=key, type="string", count=count))
+            if len(asset_keys) >= limit:
+                break
+
+    all_keys = core_keys + param_keys + asset_keys
+    return KeySuggestionsResponse(keys=all_keys[:limit])
+
+
+def _extract_keys(data: dict, prefix: str, counter: Counter[str], max_depth: int = 3):
+    """Recursively extract keys from nested dict."""
+    if max_depth <= 0:
+        return
+
+    for key, value in data.items():
+        full_key = f"{prefix}.{key}"
+        counter[full_key] += 1
+
+        if isinstance(value, dict):
+            _extract_keys(value, full_key, counter, max_depth - 1)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            # Sample first element of list
+            _extract_keys(value[0], f"{full_key}[0]", counter, max_depth - 1)
+
+
+@router.get("/values", response_model=ValueSuggestionsResponse)
+async def get_value_suggestions(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    key: str,
+    prefix: str = "",
+    limit: int = 20,
+):
+    """Get value suggestions for a specific key.
+
+    Returns common values for the specified key.
+    """
+    environment_id = auth.environment_id
+
+    # Handle status specially (no caching needed - static values)
+    if key == "status":
+        values = [
+            ValueSuggestion(value="pending"),
+            ValueSuggestion(value="running"),
+            ValueSuggestion(value="completed"),
+            ValueSuggestion(value="failed"),
+        ]
+        if prefix:
+            values = [v for v in values if v.value.startswith(prefix)]
+        return ValueSuggestionsResponse(values=values)
+
+    # Handle build_id and build_name - query from builds table
+    if key in ("build_id", "build_name"):
+        cache_key = f"values:{environment_id}:{key}"
+        cached_values = _get_cached(cache_key)
+
+        if cached_values is None:
+            column = Build.id if key == "build_id" else Build.name
+            # Get builds in workspace via events
+            query = (
+                select(column, func.count(column))
+                .select_from(Build)
+                .join(Event, Event.build_id == Build.id)
+                .join(Task, Task.id == Event.task_id)
+                .where(Task.environment_id == environment_id)
+                .group_by(column)
+                .order_by(func.count(column).desc())
+                .limit(100)
+            )
+            result = await db.execute(query)
+            cached_values = [(str(row[0]), row[1]) for row in result.all() if row[0]]
+            _set_cached(cache_key, cached_values)
+
+        # Filter by prefix
+        values = [
+            ValueSuggestion(value=v, count=c)
+            for v, c in cached_values
+            if not prefix or v.lower().startswith(prefix.lower())
+        ][:limit]
+        return ValueSuggestionsResponse(values=values)
+
+    # For core string fields, get distinct values (cached per workspace+key)
+    core_fields = {"task_name": Task.task_name, "task_namespace": Task.task_namespace}
+
+    if key in core_fields:
+        cache_key = f"values:{environment_id}:{key}"
+        cached_values = _get_cached(cache_key)
+
+        if cached_values is None:
+            column = core_fields[key]
+            query = (
+                select(column, func.count(column))
+                .where(Task.environment_id == environment_id)
+                .group_by(column)
+                .order_by(func.count(column).desc())
+                .limit(100)  # Cache more values for filtering
+            )
+            result = await db.execute(query)
+            cached_values = [(str(row[0]), row[1]) for row in result.all() if row[0]]
+            _set_cached(cache_key, cached_values)
+
+        # Filter by prefix
+        values = [
+            ValueSuggestion(value=v, count=c)
+            for v, c in cached_values
+            if not prefix or v.lower().startswith(prefix.lower())
+        ][:limit]
+        return ValueSuggestionsResponse(values=values)
+
+    # For param.* fields, sample from task_data (cached per workspace+key)
+    if key.startswith("param."):
+        cache_key = f"values:{environment_id}:{key}"
+        cached_values = _get_cached(cache_key)
+
+        if cached_values is None:
+            json_path = key[6:].split(".")
+
+            # Sample recent tasks
+            sample_query = (
+                select(Task.task_data)
+                .where(Task.environment_id == environment_id)
+                .order_by(Task.created_at.desc())
+                .limit(500)
+            )
+            sample_result = await db.execute(sample_query)
+            sample_tasks = sample_result.scalars().all()
+
+            # Extract values for the specified path
+            value_counter: Counter[str] = Counter()
+            for task_data in sample_tasks:
+                if isinstance(task_data, dict):
+                    value = _get_nested_value(task_data, json_path)
+                    if value is not None:
+                        value_counter[str(value)] += 1
+
+            # Cache all discovered values (up to 100)
+            cached_values = list(value_counter.most_common(100))
+            _set_cached(cache_key, cached_values)
+
+        # Filter by prefix
+        values = [
+            ValueSuggestion(value=v, count=c)
+            for v, c in cached_values
+            if not prefix or v.startswith(prefix)
+        ][:limit]
+        return ValueSuggestionsResponse(values=values)
+
+    # For asset.* fields, sample from TaskRegistryAsset.body_json
+    if key.startswith("asset."):
+        cache_key = f"values:{environment_id}:{key}"
+        cached_values = _get_cached(cache_key)
+
+        if cached_values is None:
+            # Parse asset.{name}.{path} format
+            parts = key[6:].split(".", 1)  # Remove 'asset.' prefix, split at first dot
+            if len(parts) < 2:
+                return ValueSuggestionsResponse(values=[])
+
+            asset_name = parts[0]
+            json_path = parts[1].split(".")
+
+            # Sample assets with matching name
+            sample_query = (
+                select(TaskRegistryAsset.body_json)
+                .where(TaskRegistryAsset.environment_id == environment_id)
+                .where(TaskRegistryAsset.name == asset_name)
+                .order_by(TaskRegistryAsset.created_at.desc())
+                .limit(500)
+            )
+            sample_result = await db.execute(sample_query)
+            sample_assets = sample_result.scalars().all()
+
+            # Extract values for the specified path
+            value_counter: Counter[str] = Counter()
+            for body_json in sample_assets:
+                if isinstance(body_json, dict):
+                    value = _get_nested_value(body_json, json_path)
+                    if value is not None:
+                        value_counter[str(value)] += 1
+
+            # Cache all discovered values (up to 100)
+            cached_values = list(value_counter.most_common(100))
+            _set_cached(cache_key, cached_values)
+
+        # Filter by prefix
+        values = [
+            ValueSuggestion(value=v, count=c)
+            for v, c in cached_values
+            if not prefix or v.startswith(prefix)
+        ][:limit]
+        return ValueSuggestionsResponse(values=values)
+
+    return ValueSuggestionsResponse(values=[])
+
+
+def _get_nested_value(data: dict, path: list[str]) -> str | None:
+    """Get a nested value from a dict using a path."""
+    current = data
+    for part in path:
+        # Handle array access
+        array_match = re.match(r"(\w+)\[(\d+)\]", part)
+        if array_match:
+            field, index = array_match.groups()
+            if isinstance(current, dict) and field in current:
+                current = current[field]
+                if isinstance(current, list) and int(index) < len(current):
+                    current = current[int(index)]
+                else:
+                    return None
+            else:
+                return None
+        elif isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return None
+
+    if isinstance(current, (str, int, float, bool)):
+        return str(current)
+    return None
+
+
+@router.get("/columns", response_model=AvailableColumnsResponse)
+async def get_available_columns(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Get all available columns for the results table.
+
+    Returns:
+    - Core columns (always available)
+    - Param columns (discovered from task_data)
+    - Asset columns (discovered from assets)
+    """
+    environment_id = auth.environment_id
+
+    core = [
+        "task_id",
+        "task_name",
+        "task_namespace",
+        "status",
+        "build_id",
+        "build_name",
+        "created_at",
+        "started_at",
+        "completed_at",
+    ]
+
+    # Discover param keys
+    sample_query = (
+        select(Task.task_data)
+        .where(Task.environment_id == environment_id)
+        .order_by(Task.created_at.desc())
+        .limit(100)
+    )
+    sample_result = await db.execute(sample_query)
+    sample_tasks = sample_result.scalars().all()
+
+    key_counter: Counter[str] = Counter()
+    for task_data in sample_tasks:
+        if isinstance(task_data, dict):
+            _extract_keys(task_data, "param", key_counter)
+
+    params = [k for k, _ in key_counter.most_common(50)]
+
+    # Discover asset keys from TaskRegistryAsset.body_json
+    asset_query = (
+        select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
+        .where(TaskRegistryAsset.environment_id == environment_id)
+        .order_by(TaskRegistryAsset.created_at.desc())
+        .limit(200)
+    )
+    asset_result = await db.execute(asset_query)
+    sample_assets = asset_result.all()
+
+    asset_key_counter: Counter[str] = Counter()
+    for asset_name, body_json in sample_assets:
+        if isinstance(body_json, dict):
+            # Use asset.{name} as prefix
+            _extract_keys(body_json, f"asset.{asset_name}", asset_key_counter)
+
+    assets = [k for k, _ in asset_key_counter.most_common(50)]
+
+    return AvailableColumnsResponse(core=core, params=params, assets=assets)

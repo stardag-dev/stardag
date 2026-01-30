@@ -23,3 +23,16 @@ _build/
 .mypy_cache/
 .pytest_cache/
 /.ruff_cache/
+.tox/
+
+# Node.js
+node_modules/
+
+# MkDocs build output
+docs/site/
+
+# AWS CDK deployment config (contains secrets)
+infra/aws-cdk/.env.deploy
+
+# Private deployment documentation (contains account-specific info)
+infra/PRIVATE_README.md

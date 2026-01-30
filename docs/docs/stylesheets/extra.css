@@ -1,0 +1,120 @@
+/* Custom styling to match stardag-ui app */
+
+/* Slate-800 (#1e293b) for header - matches favicon background */
+:root {
+  --md-primary-fg-color: #1e293b;
+  --md-primary-fg-color--light: #334155;
+  --md-primary-fg-color--dark: #0f172a;
+}
+
+/* Dark mode adjustments */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #1e293b;
+  --md-primary-fg-color--light: #334155;
+  --md-primary-fg-color--dark: #0f172a;
+  /* Match UI's dark mode background */
+  --md-default-bg-color: #111827;
+  --md-default-bg-color--light: #1f2937;
+}
+
+/* Accent color - blue matching the UI */
+:root {
+  --md-accent-fg-color: #2563eb;
+  --md-accent-fg-color--transparent: rgba(37, 99, 235, 0.1);
+}
+
+/* Code block styling to match UI */
+.md-typeset code {
+  background-color: #f1f5f9;
+}
+
+[data-md-color-scheme="slate"] .md-typeset code {
+  background-color: #1e293b;
+}
+
+/* Link colors */
+.md-typeset a {
+  color: #2563eb;
+}
+
+.md-typeset a:hover {
+  color: #1d4ed8;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: #60a5fa;
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: #93c5fd;
+}
+
+/* Inline code inside links - ensure text is visible */
+.md-typeset a code {
+  color: #2563eb;
+  background-color: rgba(37, 99, 235, 0.1);
+}
+
+.md-typeset a:hover code {
+  color: #1d4ed8;
+  background-color: rgba(29, 78, 216, 0.15);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a code {
+  color: #60a5fa;
+  background-color: rgba(96, 165, 250, 0.15);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover code {
+  color: #93c5fd;
+  background-color: rgba(147, 197, 253, 0.2);
+}
+
+/* Header logo text styling */
+.md-header__topic {
+  font-weight: 500;
+}
+
+/* Navigation tabs styling */
+.md-tabs {
+  background-color: var(--md-primary-fg-color);
+}
+
+/* Footer styling */
+.md-footer {
+  background-color: var(--md-primary-fg-color--dark);
+}
+
+/* Dark mode - Left sidebar navigation */
+[data-md-color-scheme="slate"] .md-nav--primary .md-nav__title {
+  color: #e2e8f0; /* slate-200 - light for dark backgrounds */
+}
+
+[data-md-color-scheme="slate"] .md-nav__item--section > .md-nav__link {
+  color: #e2e8f0; /* slate-200 */
+}
+
+[data-md-color-scheme="slate"] .md-nav__link {
+  color: #cbd5e1; /* slate-300 */
+}
+
+[data-md-color-scheme="slate"] .md-nav__link:hover {
+  color: #f1f5f9; /* slate-100 */
+}
+
+[data-md-color-scheme="slate"] .md-nav__link--active {
+  color: #f8fafc; /* slate-50 - brightest for active */
+}
+
+/* Dark mode - Right sidebar (Table of Contents) */
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link {
+  color: #cbd5e1; /* slate-300 */
+}
+
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link:hover {
+  color: #f1f5f9; /* slate-100 */
+}
+
+[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__link--active {
+  color: #f8fafc; /* slate-50 */
+}

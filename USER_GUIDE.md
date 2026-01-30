@@ -20,11 +20,11 @@ The following three ways of specifying a `root_task`, its _dependencies_, _persi
 ```python
 import stardag as sd
 
-@sd.task(family="Range")
+@sd.task(name="Range")
 def get_range(limit: int) -> list[int]:
     return list(range(limit))
 
-@sd.task(family="Sum")
+@sd.task(name="Sum")
 def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
@@ -66,7 +66,7 @@ from stardag.target.serialize import JSONSerializer, Serializable
 def default_relpath(task: sd.Task) -> str:
     return "/".join(
         [
-            task.get_family(),
+            task.get_name(),
             task.task_id[:2],
             task.task_id[2:4],
             f"{task.task_id}.json",
@@ -78,7 +78,7 @@ class Range(sd.Task[LoadableSaveableFileSystemTarget[list[int]]]):
 
     def output(self) -> LoadableSaveableFileSystemTarget[list[int]]:
         return Serializable(
-            wrapped=sd.get_target(default_relpath(self), task=self),
+            wrapped=sd.get_target(default_relpath(self)),
             serializer=JSONSerializer(list[int]),
         )
 
@@ -93,7 +93,7 @@ class Sum(sd.Task[LoadableSaveableFileSystemTarget[int]]):
 
     def output(self) -> LoadableSaveableFileSystemTarget[int]:
         return Serializable(
-            wrapped=sd.get_target(default_relpath(self), task=self),
+            wrapped=sd.get_target(default_relpath(self)),
             serializer=JSONSerializer(int),
         )
 
@@ -116,29 +116,31 @@ In typicall usage, most task will have their output saved to a filesystem; local
 Each task only specifies its output location _relative to_ a (or multiple) globaly configured _target root(s)_. To configure these, use the following environment variables:
 
 ```sh
-export STARDAG_TARGET_ROOT__DEFAULT=<abspath or URI>
-export STARDAG_TARGET_ROOT__OTHER=<abspath or URI>
+export STARDAG_TARGET_ROOTS__DEFAULT=<abspath or URI>
+export STARDAG_TARGET_ROOTS__OTHER=<abspath or URI>
 ```
 
 or equivalent with JSON notation:
 
 ```sh
-export STARDAG_TARGET_ROOT='{"default": <abspath or URI>, "other": <abspath or URI>}'
+export STARDAG_TARGET_ROOTS='{"default": <abspath or URI>, "other": <abspath or URI>}'
 ```
 
 Under the hood, target roots are managed by the global `stardag.target.TargetFactory` instance obtained by `stardag.target.target_factory_provider.get()`. For maximal flexibility you can instantiate a `TargetFactory` (or a custom subclass) explicitly and set it to `target_factory_provider.set(TargetFactory(target_roots={...}))`.
 
 Whe you subclass `Task` directly (i.e. don't use [decorator API](#the-decorator-task-api) or extends the [`AutoTask`](#extending-the-AutoTask-auto-file-system-target-task)) it is recommended to use `stardag.target.get_target(relpath=...)` to instantiate filesystem targets returned by `Task.output()`, this way the task specifes the _relative path_ to the configured target root:
 
-```python
+```python fixture:default_in_memory_fs_target
 import stardag as sd
-# ...
 
 class MyTask(sd.Task[sd.FileSystemTarget]):
     # ...
     def output(self):
-        return sd.get_target(relpath="...", task=self)
+        return sd.get_target(relpath="...")
 
+    def run(self):
+        with self.output().open("w") as handle:
+            handle.write("result")
 ```
 
 For special cases you can of course instantiate and return a `FileSystemTarget` such as `LocalTarget` or `RemoteFilesystemTarget` directly in which case the globaly configured target roots have no effect.
@@ -148,7 +150,7 @@ For special cases you can of course instantiate and return a `FileSystemTarget` 
 A common use case for the globaly configured target roots is to switch target filesystem depending on the environemt. In local development you'd typically use a directory of choice on your local filesystem (or you could even set it by active git feature branch etc.). In testing you can setup pytest fixtures to use a temporary directory (separate for each test) or an in-memory filesystem (TODO document both), and in production you would typically select remote storage such as AWS S3:
 
 ```sh
-export STARDAG_TARGET_ROOT__DEFAULT="s3://my-bucket/stardag/root-default/"
+export STARDAG_TARGET_ROOTS__DEFAULT="s3://my-bucket/stardag/root-default/"
 ```
 
 ### Serialization

@@ -1,0 +1,56 @@
+"""TargetRoot model for storage location configuration."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+from uuid import UUID
+
+from sqlalchemy import ForeignKey, String, UniqueConstraint, Uuid
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
+
+if TYPE_CHECKING:
+    from stardag_api.models.environment import Environment
+
+
+class TargetRoot(Base, TimestampMixin):
+    """Target root path configuration for an environment.
+
+    Defines named URI prefixes where task outputs are stored.
+    These are shared across all users in an environment to ensure consistent
+    task output locations (e.g., S3 bucket paths, local directories).
+
+    The `name` is unique within an environment and is used by tasks to reference
+    which storage location to use.
+    """
+
+    __tablename__ = "target_roots"
+    __table_args__ = (
+        UniqueConstraint(
+            "environment_id", "name", name="uq_target_root_environment_name"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid,
+        primary_key=True,
+        default=generate_uuid7,
+    )
+    environment_id: Mapped[UUID] = mapped_column(
+        Uuid,
+        ForeignKey("environments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+    )
+    uri_prefix: Mapped[str] = mapped_column(
+        String(512),
+        nullable=False,
+    )
+
+    # Relationships
+    environment: Mapped[Environment] = relationship(back_populates="target_roots")

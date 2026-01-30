@@ -1,0 +1,119 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: stardag
+      POSTGRES_PASSWORD: stardag
+      POSTGRES_DB: stardag
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stardag"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_MANAGEMENT_PORT: "9000"
+    volumes:
+      - ./docker/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - keycloak_data:/opt/keycloak/data
+    command:
+      - start-dev
+      - --import-realm
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/localhost/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"UP\"' <&3",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  migrations:
+    build:
+      context: ./app/stardag-api
+      dockerfile: Dockerfile
+    environment:
+      # Admin role: can CREATE/ALTER/DROP tables
+      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag_admin:stardag_admin@db:5432/stardag
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  seed:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: stardag_admin
+    volumes:
+      - ./docker/postgres/seed-dev.sql:/seed-dev.sql:ro
+    command:
+      [
+        "psql",
+        "-h",
+        "db",
+        "-U",
+        "stardag_admin",
+        "-d",
+        "stardag",
+        "-f",
+        "/seed-dev.sql",
+      ]
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+
+  api:
+    build:
+      context: ./app/stardag-api
+      dockerfile: Dockerfile
+    environment:
+      # Service role: can only SELECT/INSERT/UPDATE/DELETE
+      STARDAG_API_DATABASE_URL: postgresql+asyncpg://stardag_service:stardag_service@db:5432/stardag
+      # OIDC configuration for JWT validation
+      OIDC_ISSUER_URL: http://keycloak:8080/realms/stardag
+      OIDC_AUDIENCE: stardag-ui,stardag-sdk,stardag-test
+      # External issuer URL (for token validation from browser)
+      OIDC_EXTERNAL_ISSUER_URL: http://localhost:8080/realms/stardag
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+      # Keycloak is optional - API starts without it, auth routes will fail
+      keycloak:
+        condition: service_started
+
+  ui:
+    build:
+      context: ./app/stardag-ui
+      dockerfile: Dockerfile
+      args:
+        VITE_OIDC_ISSUER: http://localhost:8080/realms/stardag
+        VITE_OIDC_CLIENT_ID: stardag-ui
+        VITE_OIDC_REDIRECT_URI: http://localhost:3000/callback
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  keycloak_data:

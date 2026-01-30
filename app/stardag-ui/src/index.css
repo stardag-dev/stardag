@@ -1,0 +1,33 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+/* React Flow dark mode overrides */
+.dark .react-flow__controls-button {
+  background-color: rgb(31, 41, 55);
+  border-color: rgb(55, 65, 81);
+  fill: rgb(156, 163, 175);
+}
+
+.dark .react-flow__controls-button:hover {
+  background-color: rgb(55, 65, 81);
+}
+
+.dark .react-flow__minimap {
+  background-color: rgb(31, 41, 55);
+}
+
+.dark .react-flow__attribution {
+  background-color: transparent;
+}
+
+.dark .react-flow__attribution a {
+  color: rgb(107, 114, 128);
+}

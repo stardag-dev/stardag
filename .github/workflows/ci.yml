@@ -20,19 +20,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # Set environment variables to skip pyright hook (requires installed venv so
-      # run in tox environment)
-      - name: Set environment variable to skip
-        run: echo "SKIP=pyright" >> $GITHUB_ENV
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app/stardag-ui
+      # Skip pyright hooks in pre-commit (they're informational with || true anyway)
+      # Pyright runs separately in tox when needed
+      - name: Set environment variable to skip pyright
+        run: echo "SKIP=pyright-stardag,pyright-stardag-examples,pyright-stardag-api,pyright-integration-tests" >> $GITHUB_ENV
       - uses: pre-commit/action@v3.0.1
 
-  test-and-type-check:
-    name: Test and type check
+  test-python:
+    name: Test Python (${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         os: [ubuntu-latest]
 
     steps:
@@ -52,6 +61,185 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .tox
-          key: ${{ runner.os }}-${{ matrix.python-version }}-tox-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          key: ${{ runner.os }}-${{ matrix.python-version }}-tox-${{ hashFiles('**/pyproject.toml', 'uv.lock') }}
       - name: Test with tox
         run: tox
+
+  test-frontend:
+    name: Test Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/stardag-ui
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app/stardag-ui
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: app/stardag-ui
+
+      - name: Start docker-compose services
+        run: docker compose up -d --build
+        working-directory: docker
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for Keycloak..."
+          for i in {1..60}; do
+            # Use OIDC discovery endpoint - health endpoint is on port 9000 which is not exposed
+            if curl -sf http://localhost:8080/realms/stardag/.well-known/openid-configuration > /dev/null 2>&1; then
+              echo "Keycloak is ready!"
+              break
+            fi
+            echo "Waiting for Keycloak... ($i/60)"
+            sleep 5
+          done
+
+          echo "Waiting for API..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "API is ready!"
+              break
+            fi
+            echo "Waiting for API... ($i/30)"
+            sleep 2
+          done
+
+      - name: Install tox
+        run: pip install tox
+
+      - name: Run integration tests
+        run: tox -e integration
+
+      - name: Run integration tests pyright
+        run: tox -e integration-pyright
+
+      - name: Show docker logs on failure
+        if: failure()
+        run: docker compose logs
+        working-directory: docker
+
+      - name: Stop docker-compose services
+        if: always()
+        run: docker compose down -v
+        working-directory: docker
+
+  integration-tests-browser:
+    name: Integration Tests (Browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: app/stardag-ui/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app/stardag-ui
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: app/stardag-ui
+
+      - name: Start docker-compose services
+        run: docker compose up -d --build
+        working-directory: docker
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for Keycloak..."
+          for i in {1..60}; do
+            # Use OIDC discovery endpoint - health endpoint is on port 9000 which is not exposed
+            if curl -sf http://localhost:8080/realms/stardag/.well-known/openid-configuration > /dev/null 2>&1; then
+              echo "Keycloak is ready!"
+              break
+            fi
+            echo "Waiting for Keycloak... ($i/60)"
+            sleep 5
+          done
+
+          echo "Waiting for API..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "API is ready!"
+              break
+            fi
+            echo "Waiting for API... ($i/30)"
+            sleep 2
+          done
+
+          echo "Waiting for UI..."
+          for i in {1..30}; do
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "UI is ready!"
+              break
+            fi
+            echo "Waiting for UI... ($i/30)"
+            sleep 2
+          done
+
+      - name: Install tox
+        run: pip install tox
+
+      - name: Run browser integration tests
+        run: tox -e integration-browser
+
+      - name: Show docker logs on failure
+        if: failure()
+        run: docker compose logs
+        working-directory: docker
+
+      - name: Stop docker-compose services
+        if: always()
+        run: docker compose down -v
+        working-directory: docker

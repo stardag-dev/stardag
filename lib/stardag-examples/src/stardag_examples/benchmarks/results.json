@@ -1,0 +1,65 @@
+[
+  {
+    "scenario": "io_bound_tree",
+    "config": "sequential",
+    "duration": 1.5690063749207184,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_tree",
+    "config": "concurrent_thread",
+    "duration": 0.4106643330305815,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "io_bound_tree",
+    "config": "concurrent_blocking",
+    "duration": 0.4101690410170704,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_tree",
+    "config": "sequential",
+    "duration": 0.3078918330138549,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_tree",
+    "config": "concurrent_thread",
+    "duration": 0.2912732909899205,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "cpu_bound_tree",
+    "config": "concurrent_process",
+    "duration": 1.0776381250470877,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_tree",
+    "config": "sequential",
+    "duration": 0.0007163749542087317,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_tree",
+    "config": "concurrent_thread",
+    "duration": 0.00198154104873538,
+    "success": true,
+    "error": null
+  },
+  {
+    "scenario": "light_tree",
+    "config": "concurrent_blocking",
+    "duration": 0.001131041906774044,
+    "success": true,
+    "error": null
+  }
+]
