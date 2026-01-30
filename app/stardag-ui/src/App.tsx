@@ -461,13 +461,18 @@ function LandingPage() {
 
           {/* Final CTA */}
           <div className="mt-20 mb-8 text-center">
-            <p className="mb-6 text-lg text-gray-400 italic">
-              Never send an asset on Slack or hardcode another file path{" "}
-              <code className="rounded bg-gray-800 px-2 py-1 text-sm text-gray-300">
-                mydata_v4_extra-cleaning-final2.h5
-              </code>{" "}
-              again.
-            </p>
+            <blockquote className="mx-auto max-w-2xl">
+              <p className="mb-4 text-xl text-gray-300 italic sm:text-2xl">
+                "I just want to stop sending assets on Slack and hardcoding paths like{" "}
+                <code className="rounded bg-gray-800 px-2 py-1 text-base text-gray-400">
+                  dataset_v4_cleaned-FINAL2.h5
+                </code>
+                "
+              </p>
+              <footer className="mb-8 text-gray-500">
+                — 94% of data scientists (probably)
+              </footer>
+            </blockquote>
             <button
               onClick={login}
               className="rounded-md bg-blue-600 px-6 py-3 text-base font-medium text-white transition-colors hover:bg-blue-700 sm:text-lg"
