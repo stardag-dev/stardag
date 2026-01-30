@@ -477,7 +477,7 @@ function LandingPage() {
               onClick={login}
               className="rounded-md bg-blue-600 px-6 py-3 text-base font-medium text-white transition-colors hover:bg-blue-700 sm:text-lg"
             >
-              Start building now
+              Start building with confidence
             </button>
           </div>
         </div>
