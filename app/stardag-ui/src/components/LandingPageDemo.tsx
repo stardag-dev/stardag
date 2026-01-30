@@ -1,26 +1,155 @@
-import { useState } from "react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-import { DagGraph } from "./DagGraph";
+import { useState, useEffect } from "react";
+import { DagGraph, type LayoutDirection } from "./DagGraph";
 import type { TaskWithContext } from "../hooks/useTasks";
 import type { TaskGraphResponse } from "../types/task";
 
+// Hook to detect if screen is wide (for responsive DAG direction)
+function useIsWideScreen(breakpoint = 1024) {
+  const [isWide, setIsWide] = useState(
+    typeof window !== "undefined" ? window.innerWidth >= breakpoint : true,
+  );
+
+  useEffect(() => {
+    const handleResize = () => setIsWide(window.innerWidth >= breakpoint);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [breakpoint]);
+
+  return isWide;
+}
+
 // Python code snippet
-const PYTHON_CODE = `dataset = Dataset(dump=Dump(), params=preprocess_params)
-train_dataset = Subset(dataset=dataset, filter=train_partition)
-test_dataset = Subset(dataset=dataset, filter=test_partition)
+const PYTHON_CODE = `dataset = Dataset(
+    dump=Dump(),
+    params=preprocess_params
+)
+train_dataset = Subset(dataset, filter=train_partition)
+test_dataset = Subset(dataset, filter=test_partition)
 metrics = Metrics(
     predictions=Predictions(
         trained_model=TrainedModel(
             model=LogisticRegression(),
             dataset=train_dataset,
-            seed=0,
         ),
         dataset=test_dataset,
     )
 )
 print(metrics.model_dump_json(indent=2))
 sd.build(metrics)`;
+
+// Simple Python syntax highlighter with VS Code-like colors
+function PythonHighlight({ code }: { code: string }) {
+  const highlightCode = (text: string) => {
+    // Order matters - more specific patterns first
+    const patterns: [RegExp, string][] = [
+      // Strings (single and double quoted)
+      [/"[^"]*"|'[^']*'/g, "text-[#ce9178]"],
+      // Comments
+      [/#.*/g, "text-[#6a9955]"],
+      // Numbers
+      [/\b\d+\b/g, "text-[#b5cea8]"],
+      // Keywords
+      [
+        /\b(import|from|as|def|class|return|if|else|elif|for|while|in|and|or|not|True|False|None)\b/g,
+        "text-[#c586c0]",
+      ],
+      // Built-in functions
+      [/\b(print|len|range|str|int|float|list|dict|set)\b/g, "text-[#dcdcaa]"],
+      // Class names (capitalized words followed by opening paren)
+      [/\b([A-Z][a-zA-Z0-9]*)\s*\(/g, "text-[#4ec9b0]"],
+      // Function/method calls
+      [/\.([a-z_][a-z0-9_]*)\s*\(/gi, "text-[#dcdcaa]"],
+      // Variables/identifiers (handled by default color)
+    ];
+
+    // Simple tokenizer - process line by line for better control
+    const lines = text.split("\n");
+    return lines.map((line, lineIndex) => {
+      // Find all matches for all patterns
+      const allMatches: {
+        match: string;
+        index: number;
+        className: string;
+      }[] = [];
+
+      patterns.forEach(([pattern, className]) => {
+        const regex = new RegExp(pattern.source, pattern.flags);
+        let match;
+        while ((match = regex.exec(line)) !== null) {
+          // For class names pattern, we want to highlight only the class name, not the paren
+          if (pattern.source.includes("([A-Z]")) {
+            allMatches.push({
+              match: match[1],
+              index: match.index,
+              className,
+            });
+          } else if (pattern.source.includes("\\.([a-z_]")) {
+            // For method calls, include the dot
+            allMatches.push({
+              match: "." + match[1],
+              index: match.index,
+              className,
+            });
+          } else {
+            allMatches.push({
+              match: match[0],
+              index: match.index,
+              className,
+            });
+          }
+        }
+      });
+
+      // Sort by index
+      allMatches.sort((a, b) => a.index - b.index);
+
+      // Build tokens, avoiding overlaps
+      let lastEnd = 0;
+      const finalTokens: React.ReactNode[] = [];
+
+      allMatches.forEach((m, i) => {
+        if (m.index >= lastEnd) {
+          // Add plain text before this match
+          if (m.index > lastEnd) {
+            finalTokens.push(
+              <span key={`${lineIndex}-plain-${i}`} className="text-[#9cdcfe]">
+                {line.slice(lastEnd, m.index)}
+              </span>,
+            );
+          }
+          // Add the highlighted match
+          finalTokens.push(
+            <span key={`${lineIndex}-match-${i}`} className={m.className}>
+              {m.match}
+            </span>,
+          );
+          lastEnd = m.index + m.match.length;
+        }
+      });
+
+      // Add remaining plain text
+      if (lastEnd < line.length) {
+        finalTokens.push(
+          <span key={`${lineIndex}-end`} className="text-[#9cdcfe]">
+            {line.slice(lastEnd)}
+          </span>,
+        );
+      }
+
+      return (
+        <div key={lineIndex}>
+          {finalTokens.length > 0 ? finalTokens : <span>&nbsp;</span>}
+        </div>
+      );
+    });
+  };
+
+  return (
+    <pre className="m-0 bg-transparent p-4 font-mono text-[0.8rem] leading-relaxed text-left">
+      <code>{highlightCode(code)}</code>
+    </pre>
+  );
+}
 
 // JSON representation (cleaned up per user request)
 const JSON_DATA = {
@@ -111,7 +240,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Dump",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 1,
+      asset_count: 0,
     },
     {
       id: 2,
@@ -119,7 +248,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Dataset",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 1,
+      asset_count: 0,
     },
     {
       id: 3,
@@ -127,7 +256,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Subset (train)",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 1,
+      asset_count: 0,
     },
     {
       id: 4,
@@ -135,7 +264,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Subset (test)",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 1,
+      asset_count: 0,
     },
     {
       id: 5,
@@ -143,7 +272,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "TrainedModel",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 1,
+      asset_count: 0,
     },
     {
       id: 6,
@@ -210,12 +339,13 @@ function CollapsibleJson({
   const isObject = typeof data === "object" && data !== null && !Array.isArray(data);
   const isArray = Array.isArray(data);
   const isExpandable = isObject || isArray;
+  const indent = level > 0 ? 16 : 0;
 
   if (!isExpandable) {
     return (
-      <div className="flex" style={{ paddingLeft: level * 16 }}>
+      <div className="flex flex-wrap" style={{ paddingLeft: indent }}>
         <span className="text-purple-400">"{label}"</span>
-        <span className="text-gray-400">: </span>
+        <span className="text-gray-400">:&nbsp;</span>
         <span
           className={
             typeof data === "string"
@@ -237,24 +367,24 @@ function CollapsibleJson({
     : `{${Object.keys(data as object).length} keys}`;
 
   return (
-    <div style={{ paddingLeft: level * 16 }}>
+    <div style={{ paddingLeft: indent }}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-1 hover:bg-gray-700/50 rounded px-1 -ml-1"
+        className="-ml-1 flex items-center gap-1 rounded px-1 hover:bg-gray-700/50"
       >
-        <span className="text-gray-500 w-4">{isOpen ? "▼" : "▶"}</span>
+        <span className="w-4 text-gray-500">{isOpen ? "▼" : "▶"}</span>
         <span className="text-purple-400">"{label}"</span>
-        <span className="text-gray-400">: </span>
+        <span className="text-gray-400">:&nbsp;</span>
         {!isOpen && <span className="text-gray-500">{preview}</span>}
       </button>
       {isOpen && (
-        <div className="border-l border-gray-700 ml-2">
+        <div className="ml-2 border-l border-gray-700">
           {entries.map(([key, value], index) => (
             <CollapsibleJson
               key={String(key)}
               label={String(key)}
               data={value}
-              level={1}
+              level={level + 1}
               defaultOpen={
                 // Auto-expand first level task objects
                 typeof value === "object" &&
@@ -274,23 +404,19 @@ function CollapsibleJson({
 // Card wrapper component
 interface DemoCardProps {
   title: string;
-  subtitle: string;
   icon: React.ReactNode;
   children: React.ReactNode;
   className?: string;
 }
 
-function DemoCard({ title, subtitle, icon, children, className = "" }: DemoCardProps) {
+function DemoCard({ title, icon, children, className = "" }: DemoCardProps) {
   return (
     <div
       className={`flex flex-col rounded-xl bg-gray-800/50 border border-gray-700/50 overflow-hidden ${className}`}
     >
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-700/50">
+      <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-700/50">
         <div className="text-blue-400">{icon}</div>
-        <div>
-          <h3 className="text-lg font-semibold text-white">{title}</h3>
-          <p className="text-sm text-gray-400">{subtitle}</p>
-        </div>
+        <h3 className="text-lg font-semibold text-white">{title}</h3>
       </div>
       <div className="flex-1 overflow-hidden">{children}</div>
     </div>
@@ -299,24 +425,26 @@ function DemoCard({ title, subtitle, icon, children, className = "" }: DemoCardP
 
 // Main demo component
 export function LandingPageDemo() {
+  const isWideScreen = useIsWideScreen();
+  const dagDirection: LayoutDirection = isWideScreen ? "LR" : "TB";
+
   return (
     <div className="mt-20 w-full min-w-0">
-      <div className="text-center mb-10">
-        <h2 className="text-2xl font-bold text-white sm:text-3xl mb-3">
+      <div className="mb-10 text-center">
+        <h2 className="mb-3 text-2xl font-bold text-white sm:text-3xl">
           See It in Action
         </h2>
-        <p className="text-gray-400 max-w-2xl mx-auto">
-          Define your pipeline in Python, inspect the full specification as JSON, and
-          visualize the dependency graph.
+        <p className="mx-auto max-w-2xl text-gray-400">
+          Define your pipeline in Python, inspect the specification, and visualize the
+          dependency graph and progress.
         </p>
       </div>
 
-      {/* Desktop: 3 columns, Mobile: vertical stack */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      {/* Desktop: 2 columns top + full width bottom, Mobile: vertical stack */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         {/* Define - Python Code */}
         <DemoCard
           title="Define"
-          subtitle="Composable Python tasks"
           icon={
             <svg
               className="h-6 w-6"
@@ -333,28 +461,14 @@ export function LandingPageDemo() {
             </svg>
           }
         >
-          <div className="h-80 overflow-auto">
-            <SyntaxHighlighter
-              language="python"
-              style={oneDark}
-              customStyle={{
-                margin: 0,
-                padding: "1rem",
-                background: "transparent",
-                fontSize: "0.8rem",
-                lineHeight: "1.5",
-              }}
-              showLineNumbers={false}
-            >
-              {PYTHON_CODE}
-            </SyntaxHighlighter>
+          <div className="h-72 overflow-auto">
+            <PythonHighlight code={PYTHON_CODE} />
           </div>
         </DemoCard>
 
         {/* Inspect - JSON */}
         <DemoCard
           title="Inspect"
-          subtitle="Full task specification"
           icon={
             <svg
               className="h-6 w-6"
@@ -371,25 +485,25 @@ export function LandingPageDemo() {
             </svg>
           }
         >
-          <div className="h-80 overflow-auto p-4 font-mono text-xs">
-            <div className="text-gray-400">{"{"}</div>
-            {Object.entries(JSON_DATA).map(([key, value]) => (
-              <CollapsibleJson
-                key={key}
-                label={key}
-                data={value}
-                defaultOpen={key === "predictions"}
-                level={1}
-              />
-            ))}
-            <div className="text-gray-400">{"}"}</div>
+          <div className="h-72 overflow-auto p-4 font-mono text-xs text-left">
+            <span className="text-gray-400">{"{"}</span>
+            <div className="ml-4">
+              {Object.entries(JSON_DATA).map(([key, value]) => (
+                <CollapsibleJson
+                  key={key}
+                  label={key}
+                  data={value}
+                  defaultOpen={key === "predictions"}
+                />
+              ))}
+            </div>
+            <span className="text-gray-400">{"}"}</span>
           </div>
         </DemoCard>
 
-        {/* Visualize - DAG Graph */}
+        {/* Visualize - DAG Graph - spans full width on desktop */}
         <DemoCard
           title="Visualize"
-          subtitle="Interactive dependency graph"
           icon={
             <svg
               className="h-6 w-6"
@@ -401,18 +515,20 @@ export function LandingPageDemo() {
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 strokeWidth={2}
-                d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"
+                d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"
               />
             </svg>
           }
-          className="lg:row-span-1"
+          className="lg:col-span-2"
         >
-          <div className="h-80">
+          <div className="h-72">
             <DagGraph
+              key={dagDirection}
               tasks={MOCK_TASKS}
               graph={MOCK_GRAPH}
               selectedTaskId={null}
               onTaskClick={() => {}}
+              defaultDirection={dagDirection}
             />
           </div>
         </DemoCard>
