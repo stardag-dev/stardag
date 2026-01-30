@@ -4,6 +4,7 @@ import { AuthCallback } from "./components/AuthCallback";
 import { BuildsList } from "./components/BuildsList";
 import { BuildView } from "./components/BuildView";
 import { CreateWorkspace } from "./components/CreateWorkspace";
+import { LandingPageDemo } from "./components/LandingPageDemo";
 import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { WorkspaceSelector } from "./components/WorkspaceSelector";
@@ -454,6 +455,8 @@ function LandingPage() {
           </div>
 
           <UspsCarousel />
+
+          <LandingPageDemo />
         </div>
       </main>
     </div>
