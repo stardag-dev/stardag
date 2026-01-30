@@ -401,7 +401,7 @@ function LandingPage() {
   return (
     <div className="flex min-h-screen flex-col overflow-x-hidden bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
       <header className="flex items-center justify-between px-6 py-4">
-        <Logo size="lg" className="text-white" />
+        <Logo size="md" className="text-white" />
         <button
           onClick={login}
           className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-700"
@@ -410,9 +410,9 @@ function LandingPage() {
         </button>
       </header>
 
-      <main className="flex flex-1 items-center justify-center px-6 pt-8 md:pt-0">
+      <main className="flex flex-1 items-center justify-center px-6 pb-16 pt-8 md:pt-0">
         <div className="min-w-0 max-w-5xl text-center">
-          <div className="mb-6 mt-8 md:mt-0">
+          <div className="mb-8 mt-8 md:mt-0">
             <span
               className="select-none font-mono text-4xl font-medium text-white sm:text-5xl md:text-6xl"
               style={{ fontFamily: "'IBM Plex Mono', monospace" }}
@@ -420,15 +420,15 @@ function LandingPage() {
               Stardag
             </span>
           </div>
-          <h2 className="mb-6 text-2xl font-bold text-white sm:text-3xl">
+          <h2 className="mb-8 text-2xl font-bold text-white sm:text-3xl">
             Declarative DAGs for Data & ML
           </h2>
-          <p className="mb-8 text-lg text-gray-300 sm:text-xl">
+          <p className="mb-10 text-lg text-gray-300 sm:text-xl">
             A modern Python framework for building composable pipelines with persistent
             asset management. Track provenance, ensure reproducibility, and iterate
             faster on data science and ML workflows.
           </p>
-          <div className="flex flex-col items-center gap-3 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-4">
+          <div className="flex flex-col items-center gap-3 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-4 mb-4">
             <button
               onClick={login}
               className="w-full rounded-md bg-blue-600 px-6 py-3 text-base font-medium text-white transition-colors hover:bg-blue-700 sm:w-auto sm:text-lg"
