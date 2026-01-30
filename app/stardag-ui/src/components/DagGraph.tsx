@@ -99,6 +99,7 @@ interface DagGraphProps {
   onTaskClick: (taskId: string) => void;
   buildId?: string;
   onStatusBuildClick?: (buildId: string) => void;
+  defaultDirection?: LayoutDirection;
 }
 
 const nodeTypes: NodeTypes = {
@@ -158,9 +159,10 @@ export function DagGraph({
   onTaskClick,
   buildId,
   onStatusBuildClick,
+  defaultDirection = "LR",
 }: DagGraphProps) {
   const { theme } = useTheme();
-  const [direction, setDirection] = useState<LayoutDirection>("LR");
+  const [direction, setDirection] = useState<LayoutDirection>(defaultDirection);
 
   // Build maps for lookups
   const taskByTaskId = useMemo(
