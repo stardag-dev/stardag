@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { setAccessTokenGetter } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
 import { BuildsList } from "./components/BuildsList";
@@ -244,12 +244,162 @@ function InvitesPage({ onNavigate }: InvitesPageProps) {
   );
 }
 
+// USP cards data
+const USP_CARDS = [
+  {
+    title: "Declarative & Composable",
+    description:
+      "Tasks are Pydantic-based specifications, not just code. Loose coupling, full reusability, easy testing, and static type checking of I/O contracts.",
+    color: "text-blue-400",
+    icon: (
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
+      />
+    ),
+  },
+  {
+    title: "Provenance & Reproducibility",
+    description:
+      "Searchable and human-readable specifications of how any asset was produced. Compare any two assets to see what changed.",
+    color: "text-green-400",
+    icon: (
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
+      />
+    ),
+  },
+  {
+    title: "Smart Execution",
+    description:
+      "Makefile-style with persistent caching: build only what's incomplete. Full asyncio support, manage concurrency, remote execution with Modal.",
+    color: "text-purple-400",
+    icon: (
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth={2}
+        d="M13 10V3L4 14h7v7l9-11h-7z"
+      />
+    ),
+  },
+];
+
+// USP carousel component with auto-advance on mobile
+function UspsCarousel() {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
+
+  // Auto-advance carousel on mobile
+  useEffect(() => {
+    const isMobile = window.innerWidth < 768;
+    if (!isMobile || isPaused) return;
+
+    const interval = setInterval(() => {
+      setActiveIndex((prev) => (prev + 1) % USP_CARDS.length);
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [isPaused]);
+
+  // Scroll to active card
+  useEffect(() => {
+    if (!scrollRef.current) return;
+    const cardWidth = scrollRef.current.offsetWidth;
+    scrollRef.current.scrollTo({
+      left: activeIndex * cardWidth,
+      behavior: "smooth",
+    });
+  }, [activeIndex]);
+
+  // Update active index on manual scroll
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const cardWidth = scrollRef.current.offsetWidth;
+    const newIndex = Math.round(scrollRef.current.scrollLeft / cardWidth);
+    if (newIndex !== activeIndex) {
+      setActiveIndex(newIndex);
+    }
+  };
+
+  const cardContent = (card: (typeof USP_CARDS)[0]) => (
+    <>
+      <div className={`mb-3 ${card.color}`}>
+        <svg className="h-8 w-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          {card.icon}
+        </svg>
+      </div>
+      <h3 className="mb-2 text-base font-semibold text-white sm:text-lg">
+        {card.title}
+      </h3>
+      <p className="text-sm text-gray-400">{card.description}</p>
+    </>
+  );
+
+  return (
+    <div className="mt-16 w-full min-w-0">
+      {/* Mobile carousel - uses grid for reliable sizing */}
+      <div className="min-w-0 md:hidden">
+        <div
+          ref={scrollRef}
+          className="grid min-w-0 auto-cols-[100%] grid-flow-col snap-x snap-mandatory gap-4 overflow-x-auto"
+          style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+          onScroll={handleScroll}
+          onTouchStart={() => setIsPaused(true)}
+          onTouchEnd={() => setIsPaused(false)}
+        >
+          {USP_CARDS.map((card, index) => (
+            <div
+              key={index}
+              className="min-w-0 snap-start overflow-hidden rounded-lg bg-gray-800/50 p-5 text-left"
+            >
+              {cardContent(card)}
+            </div>
+          ))}
+        </div>
+
+        {/* Dots indicator */}
+        <div className="mt-4 flex justify-center gap-2">
+          {USP_CARDS.map((_, index) => (
+            <button
+              key={index}
+              onClick={() => {
+                setActiveIndex(index);
+                setIsPaused(true);
+              }}
+              className={`h-2 w-2 rounded-full transition-colors ${
+                index === activeIndex ? "bg-blue-500" : "bg-gray-600"
+              }`}
+              aria-label={`Go to slide ${index + 1}`}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Desktop grid */}
+      <div className="hidden gap-6 text-left md:grid md:grid-cols-3">
+        {USP_CARDS.map((card, index) => (
+          <div key={index} className="rounded-lg bg-gray-800/50 p-6">
+            {cardContent(card)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Landing page for non-authenticated users
 function LandingPage() {
   const { login } = useAuth();
 
   return (
-    <div className="flex min-h-screen flex-col bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
+    <div className="flex min-h-screen flex-col overflow-x-hidden bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">
       <header className="flex items-center justify-between px-6 py-4">
         <Logo size="lg" className="text-white" />
         <button
@@ -260,118 +410,52 @@ function LandingPage() {
         </button>
       </header>
 
-      <main className="flex flex-1 items-center justify-center px-6">
-        <div className="max-w-2xl text-center">
-          <div className="mb-6">
+      <main className="flex flex-1 items-center justify-center px-6 pt-8 md:pt-0">
+        <div className="min-w-0 max-w-5xl text-center">
+          <div className="mb-6 mt-8 md:mt-0">
             <span
-              className="select-none font-mono text-6xl font-medium text-white"
+              className="select-none font-mono text-4xl font-medium text-white sm:text-5xl md:text-6xl"
               style={{ fontFamily: "'IBM Plex Mono', monospace" }}
             >
               Stardag
             </span>
           </div>
-          <h2 className="mb-6 text-3xl font-bold text-white">
-            Declarative DAG Framework
+          <h2 className="mb-6 text-2xl font-bold text-white sm:text-3xl">
+            Declarative DAGs for Data & ML
           </h2>
-          <p className="mb-8 text-xl text-gray-300">
-            Build composable data pipelines with type-safe tasks, deterministic outputs,
-            and bottom-up execution. Track, monitor, and manage your workflows with
-            ease.
+          <p className="mb-8 text-lg text-gray-300 sm:text-xl">
+            A modern Python framework for building composable pipelines with persistent
+            asset management. Track provenance, ensure reproducibility, and iterate
+            faster on data science and ML workflows.
           </p>
-          <div className="flex justify-center gap-4">
+          <div className="flex flex-col items-center gap-3 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-4">
             <button
               onClick={login}
-              className="rounded-md bg-blue-600 px-6 py-3 text-lg font-medium text-white transition-colors hover:bg-blue-700"
+              className="w-full rounded-md bg-blue-600 px-6 py-3 text-base font-medium text-white transition-colors hover:bg-blue-700 sm:w-auto sm:text-lg"
             >
               Get Started
             </button>
             <a
-              href="https://github.com/andhus/stardag"
+              href="https://docs.stardag.dev"
               target="_blank"
               rel="noopener noreferrer"
-              className="rounded-md border border-gray-600 px-6 py-3 text-lg font-medium text-gray-300 transition-colors hover:bg-gray-800"
+              className="w-full rounded-md border border-gray-600 px-6 py-3 text-center text-base font-medium text-gray-300 transition-colors hover:bg-gray-800 sm:w-auto sm:text-lg"
             >
-              View on GitHub
+              Documentation
+            </a>
+            <a
+              href="https://github.com/stardag-dev/stardag"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full rounded-md border border-gray-600 px-6 py-3 text-center text-base font-medium text-gray-300 transition-colors hover:bg-gray-800 sm:w-auto sm:text-lg"
+            >
+              GitHub
             </a>
           </div>
 
-          <div className="mt-16 grid grid-cols-1 gap-8 text-left md:grid-cols-3">
-            <div className="rounded-lg bg-gray-800/50 p-6">
-              <div className="mb-3 text-blue-400">
-                <svg
-                  className="h-8 w-8"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM4 13a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zM16 13a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"
-                  />
-                </svg>
-              </div>
-              <h3 className="mb-2 text-lg font-semibold text-white">
-                Composable Tasks
-              </h3>
-              <p className="text-sm text-gray-400">
-                Build complex pipelines from simple, reusable task components with full
-                type safety.
-              </p>
-            </div>
-            <div className="rounded-lg bg-gray-800/50 p-6">
-              <div className="mb-3 text-green-400">
-                <svg
-                  className="h-8 w-8"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                  />
-                </svg>
-              </div>
-              <h3 className="mb-2 text-lg font-semibold text-white">
-                Deterministic Outputs
-              </h3>
-              <p className="text-sm text-gray-400">
-                Parameter-based hashing ensures reproducible builds and efficient
-                caching.
-              </p>
-            </div>
-            <div className="rounded-lg bg-gray-800/50 p-6">
-              <div className="mb-3 text-purple-400">
-                <svg
-                  className="h-8 w-8"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M13 10V3L4 14h7v7l9-11h-7z"
-                  />
-                </svg>
-              </div>
-              <h3 className="mb-2 text-lg font-semibold text-white">Smart Execution</h3>
-              <p className="text-sm text-gray-400">
-                Bottom-up, Makefile-style execution builds only what's needed.
-              </p>
-            </div>
-          </div>
+          <UspsCarousel />
         </div>
       </main>
-
-      <footer className="px-6 py-4 text-center text-sm text-gray-500">
-        Built with Stardag
-      </footer>
     </div>
   );
 }
