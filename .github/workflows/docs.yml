@@ -1,27 +1,15 @@
 # GitHub Actions workflow for deploying MkDocs documentation to GitHub Pages
-#
-# TODO: This workflow is prepared but not yet enabled.
-# To enable:
-# 1. Enable GitHub Pages in repo settings (Settings > Pages)
-# 2. Set source to "GitHub Actions"
-# 3. Uncomment the 'on:' triggers below
-#
-# Manual deployment:
-# 1. Go to Actions tab
-# 2. Select "Deploy Documentation" workflow
-# 3. Click "Run workflow"
 
 name: Deploy Documentation
 
 on:
-  # TODO: Uncomment to enable automatic deployment
-  # push:
-  #   branches:
-  #     - main
-  #   paths:
-  #     - 'docs/**'
-  #     - 'lib/stardag/src/stardag/**'
-  #     - '.github/workflows/docs.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "lib/stardag/src/stardag/**"
+      - ".github/workflows/docs.yml"
 
   # Allow manual trigger
   workflow_dispatch:
