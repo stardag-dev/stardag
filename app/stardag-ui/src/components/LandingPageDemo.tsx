@@ -407,12 +407,14 @@ interface DemoCardProps {
   icon: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  style?: React.CSSProperties;
 }
 
-function DemoCard({ title, icon, children, className = "" }: DemoCardProps) {
+function DemoCard({ title, icon, children, className = "", style }: DemoCardProps) {
   return (
     <div
       className={`flex flex-col rounded-xl bg-gray-800/50 border border-gray-700/50 overflow-hidden ${className}`}
+      style={style}
     >
       <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-700/50">
         <div className="text-blue-400">{icon}</div>
@@ -425,8 +427,11 @@ function DemoCard({ title, icon, children, className = "" }: DemoCardProps) {
 
 // Main demo component
 export function LandingPageDemo() {
-  const isWideScreen = useIsWideScreen();
-  const dagDirection: LayoutDirection = isWideScreen ? "LR" : "TB";
+  // 750px breakpoint for horizontal layout
+  const isHorizontalLayout = useIsWideScreen(750);
+  // 550px breakpoint for DAG direction and height
+  const isDagWide = useIsWideScreen(550);
+  const dagDirection: LayoutDirection = isDagWide ? "LR" : "TB";
 
   return (
     <div className="mt-20 w-full min-w-0">
@@ -441,7 +446,10 @@ export function LandingPageDemo() {
       </div>
 
       {/* Desktop: 2 columns top + full width bottom, Mobile: vertical stack */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      <div
+        className="grid gap-6"
+        style={{ gridTemplateColumns: isHorizontalLayout ? "repeat(2, 1fr)" : "1fr" }}
+      >
         {/* Define - Python Code */}
         <DemoCard
           title="Define"
@@ -519,9 +527,10 @@ export function LandingPageDemo() {
               />
             </svg>
           }
-          className="lg:col-span-2"
+          style={isHorizontalLayout ? { gridColumn: "span 2" } : undefined}
         >
-          <div className="h-72">
+          {/* Height increases by ~50% when in vertical DAG mode (below 550px) */}
+          <div style={{ height: isDagWide ? "18rem" : "27rem" }}>
             <DagGraph
               key={dagDirection}
               tasks={MOCK_TASKS}
