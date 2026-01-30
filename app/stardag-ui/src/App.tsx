@@ -458,6 +458,23 @@ function LandingPage() {
           <UspsCarousel />
 
           <LandingPageDemo />
+
+          {/* Final CTA */}
+          <div className="mt-20 mb-8 text-center">
+            <p className="mb-6 text-lg text-gray-400 italic">
+              Never send an asset on Slack or hardcode another file path{" "}
+              <code className="rounded bg-gray-800 px-2 py-1 text-sm text-gray-300">
+                mydata_v4_extra-cleaning-final2.h5
+              </code>{" "}
+              again.
+            </p>
+            <button
+              onClick={login}
+              className="rounded-md bg-blue-600 px-6 py-3 text-base font-medium text-white transition-colors hover:bg-blue-700 sm:text-lg"
+            >
+              Start building now
+            </button>
+          </div>
         </div>
       </main>
     </div>
