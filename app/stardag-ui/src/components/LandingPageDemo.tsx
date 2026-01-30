@@ -235,7 +235,7 @@ const JSON_DATA = {
 const MOCK_GRAPH: TaskGraphResponse = {
   nodes: [
     {
-      id: 1,
+      id: "1",
       task_id: "dump-1",
       task_name: "Dump",
       task_namespace: "ml_pipeline",
@@ -243,7 +243,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       asset_count: 0,
     },
     {
-      id: 2,
+      id: "2",
       task_id: "dataset-1",
       task_name: "Dataset",
       task_namespace: "ml_pipeline",
@@ -251,7 +251,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       asset_count: 0,
     },
     {
-      id: 3,
+      id: "3",
       task_id: "subset-train",
       task_name: "Subset (train)",
       task_namespace: "ml_pipeline",
@@ -259,7 +259,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       asset_count: 0,
     },
     {
-      id: 4,
+      id: "4",
       task_id: "subset-test",
       task_name: "Subset (test)",
       task_namespace: "ml_pipeline",
@@ -267,7 +267,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       asset_count: 0,
     },
     {
-      id: 5,
+      id: "5",
       task_id: "trained-model-1",
       task_name: "TrainedModel",
       task_namespace: "ml_pipeline",
@@ -275,7 +275,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       asset_count: 0,
     },
     {
-      id: 6,
+      id: "6",
       task_id: "predictions-1",
       task_name: "Predictions",
       task_namespace: "ml_pipeline",
@@ -283,7 +283,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       asset_count: 0,
     },
     {
-      id: 7,
+      id: "7",
       task_id: "metrics-1",
       task_name: "Metrics",
       task_namespace: "ml_pipeline",
@@ -292,13 +292,13 @@ const MOCK_GRAPH: TaskGraphResponse = {
     },
   ],
   edges: [
-    { source: 1, target: 2 }, // Dump -> Dataset
-    { source: 2, target: 3 }, // Dataset -> Subset (train)
-    { source: 2, target: 4 }, // Dataset -> Subset (test)
-    { source: 3, target: 5 }, // Subset (train) -> TrainedModel
-    { source: 5, target: 6 }, // TrainedModel -> Predictions
-    { source: 4, target: 6 }, // Subset (test) -> Predictions
-    { source: 6, target: 7 }, // Predictions -> Metrics
+    { source: "1", target: "2" }, // Dump -> Dataset
+    { source: "2", target: "3" }, // Dataset -> Subset (train)
+    { source: "2", target: "4" }, // Dataset -> Subset (test)
+    { source: "3", target: "5" }, // Subset (train) -> TrainedModel
+    { source: "5", target: "6" }, // TrainedModel -> Predictions
+    { source: "4", target: "6" }, // Subset (test) -> Predictions
+    { source: "6", target: "7" }, // Predictions -> Metrics
   ],
 };
 
