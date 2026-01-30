@@ -438,7 +438,7 @@ function LandingPage() {
               Get Started
             </button>
             <a
-              href="https://docs.stardag.dev"
+              href="https://docs.stardag.com"
               target="_blank"
               rel="noopener noreferrer"
               className="w-full rounded-md border border-gray-600 px-6 py-3 text-center text-base font-medium text-gray-300 transition-colors hover:bg-gray-800 sm:w-auto sm:text-lg"
