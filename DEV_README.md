@@ -187,54 +187,6 @@ You should see tasks appearing in the web UI at http://localhost:3000.
 uv run stardag auth logout
 ```
 
-## Dynamic Dependencies Contract
-
-Tasks can yield dynamic dependencies during execution. The build system provides
-a critical guarantee:
-
-**Contract: ALL yielded tasks are COMPLETE before the generator is resumed.**
-
-This means tasks can safely rely on previously yielded dependencies being complete:
-
-```python
-class MyTask(AutoTask):
-    def run(self):
-        # Yield deps we need to be built first
-        deps = [TaskA(), TaskB()]
-        yield deps
-
-        # CONTRACT: When execution reaches here, ALL deps are complete.
-        # We can safely access their outputs.
-        result_a = deps[0].output().load()
-        result_b = deps[1].output().load()
-
-        # Yield more deps based on previous results
-        yield [TaskC(input=result_a)]
-
-        # TaskC is complete when we reach here
-        final_result = process(result_b)
-        self.output().save(final_result)
-```
-
-### Cross-Process Execution (Process Pool, Remote)
-
-For execution in separate processes (ProcessPoolExecutor, Modal, etc.), the
-build system implements **idempotent re-execution**:
-
-1. Task runs in subprocess, generator is driven until it yields incomplete deps
-2. Yielded deps (TaskStruct) are returned to main process (generators can't be pickled)
-3. Main process builds the deps
-4. Task is re-executed from scratch in subprocess
-5. Generator is driven again - since deps are now complete, it continues past the yield
-6. Repeat until generator completes
-
-This pattern requires tasks with dynamic deps to be **idempotent** - they should
-produce the same yields and outputs when re-executed with complete dependencies.
-
 ## Contributing
 
-1. Create a feature branch
-2. Make changes
-3. Run `tox -e pre-commit` to format/lint
-4. Run tests for affected packages
-5. Submit PR
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting changes.

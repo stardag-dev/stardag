@@ -41,30 +41,12 @@ See [CLA.md](app/CLA.md) for the full agreement. By submitting a PR to `app/`, y
 
 ### Development Setup
 
-```bash
-# Clone the repo
-git clone https://github.com/stardag-dev/stardag.git
-cd stardag
+See [DEV_README.md](DEV_README.md) for complete setup instructions, including:
 
-# Install SDK in development mode
-cd lib/stardag
-uv sync --all-extras
-
-# Run tests
-uv run pytest
-
-# Run pre-commit hooks
-uv run pre-commit run --all-files
-```
-
-### Running the Full Stack (API + UI)
-
-```bash
-# From repo root
-docker compose up -d
-```
-
-See [docs/platform/self-hosting.md](https://stardag-dev.github.io/stardag/platform/self-hosting/) for details.
+- Installing all packages
+- Running tests and linting
+- Running the full stack (API + UI)
+- Authentication for local development
 
 ## Making Contributions
 
