@@ -463,7 +463,7 @@ function LandingPage() {
           <div className="mt-20 mb-8 text-center">
             <blockquote className="mx-auto max-w-2xl">
               <p className="mb-4 text-xl text-gray-300 italic sm:text-2xl">
-                "I just want to stop sending assets on Slack and hardcoding paths like{" "}
+                "I just want to stop sharing files on Slack with names like{" "}
                 <code className="rounded bg-gray-800 px-2 py-1 text-base text-gray-400">
                   dataset_v4_cleaned-FINAL2.h5
                 </code>

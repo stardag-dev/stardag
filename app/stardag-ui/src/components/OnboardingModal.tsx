@@ -217,12 +217,12 @@ export function OnboardingModal() {
                 Getting Started Guide
               </a>
               <a
-                href="https://docs.stardag.com/concepts/workspaces"
+                href="https://docs.stardag.com/configuration/environments/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-sm text-blue-600 dark:text-blue-400 hover:underline"
               >
-                About Workspaces
+                About Workspaces and Environments
               </a>
             </div>
           )}

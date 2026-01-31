@@ -426,7 +426,7 @@ export function CreateWorkspace({ onNavigate }: CreateWorkspaceProps) {
                     Configure where task outputs will be stored. This is typically an
                     S3/GCS bucket or Modal volume. Read more in the{" "}
                     <a
-                      href="https://docs.stardag.com/stardag/concepts/targets/#target-roots"
+                      href="https://docs.stardag.com/concepts/targets/#target-roots"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 underline"
