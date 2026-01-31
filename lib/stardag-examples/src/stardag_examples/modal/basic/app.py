@@ -2,6 +2,7 @@ import os
 
 import modal
 import stardag.integration.modal as sd_modal
+from stardag.config import config_provider
 from stardag.registry._base import get_git_commit_hash
 
 VOLUME_NAME = "stardag-default"
@@ -13,13 +14,22 @@ USE_LOCAL_STARDAG = os.environ.get("STARDAG_USE_LOCAL_SOURCE", "").lower() in (
     "true",
 )
 
+
+def get_profile_env_vars() -> dict[str, str]:
+    """Read active profile and return env vars for Modal."""
+    config = config_provider.get()
+    return {  # type: ignore
+        "STARDAG_REGISTRY_URL": config.api.url,
+        "STARDAG_WORKSPACE_ID": config.context.workspace_id,
+        "STARDAG_ENVIRONMENT_ID": config.context.environment_id,
+        "COMMIT_HASH": get_git_commit_hash(),
+    }
+
+
 base_image = modal.Image.debian_slim(python_version="3.12")
 env_vars = {
     "STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
-    "STARDAG_REGISTRY_URL": "https://api.stardag.com/",
-    "STARDAG_ORGANIZATION_ID": "10e051fa-886e-4ac3-a8e9-10b444fba8ac",
-    "STARDAG_WORKSPACE_ID": "699ad95c-09ba-4f26-aa48-7a4181882f82",
-    "COMMIT_HASH": get_git_commit_hash(),
+    **get_profile_env_vars(),
 }
 if USE_LOCAL_STARDAG:
     # Development mode: use local stardag source
@@ -39,7 +49,7 @@ if USE_LOCAL_STARDAG:
 else:
     # Production mode: install from PyPI
     image = (
-        base_image.pip_install("stardag[modal]>=0.0.3")
+        base_image.pip_install("stardag[modal]>=0.1.0")
         .env(env_vars)
         .add_local_python_source("stardag_examples")
     )
