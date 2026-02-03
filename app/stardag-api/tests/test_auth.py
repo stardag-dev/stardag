@@ -552,6 +552,129 @@ async def test_me_endpoint_returns_workspaces(async_engine):
         app.dependency_overrides.clear()
 
 
+# --- Personal workspace creation tests ---
+
+
+@pytest.mark.asyncio
+async def test_create_personal_workspace_generates_unique_slug(async_engine):
+    """Test that personal workspace creation generates unique slug with random suffix."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from stardag_api.auth.dependencies import create_personal_workspace_for_user
+
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async with async_session_maker() as session:
+        # Create first user with email that will generate slug "testuser"
+        user1 = User(
+            external_id="user-1-ext",
+            email="testuser@example.com",
+            display_name="Test User",
+        )
+        session.add(user1)
+        await session.commit()
+        await session.refresh(user1)
+
+        # Create personal workspace for user1
+        workspace1 = await create_personal_workspace_for_user(session, user1)
+        await session.commit()
+
+        assert workspace1.slug == "testuser"  # First one gets the base slug
+        assert workspace1.is_personal is True
+        assert workspace1.name == "Test User's Workspace"
+
+        # Create second user with same email prefix
+        user2 = User(
+            external_id="user-2-ext",
+            email="testuser@different.com",
+            display_name="Test User 2",
+        )
+        session.add(user2)
+        await session.commit()
+        await session.refresh(user2)
+
+        # Create personal workspace for user2 - should get slug with random suffix
+        workspace2 = await create_personal_workspace_for_user(session, user2)
+        await session.commit()
+
+        # Second workspace should have a different slug with random suffix
+        assert workspace2.slug != workspace1.slug
+        assert workspace2.slug.startswith("testuser-")
+        assert len(workspace2.slug) > len("testuser-")  # Has suffix
+        assert workspace2.is_personal is True
+
+
+@pytest.mark.asyncio
+async def test_create_personal_workspace_allows_duplicate_names(async_engine):
+    """Test that personal workspaces can have duplicate names (only slug must be unique)."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from stardag_api.auth.dependencies import create_personal_workspace_for_user
+
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async with async_session_maker() as session:
+        # Create two users with the same display name
+        user1 = User(
+            external_id="user-dup-name-1",
+            email="alice@company1.com",
+            display_name="Anders Huss",
+        )
+        session.add(user1)
+        await session.commit()
+        await session.refresh(user1)
+
+        workspace1 = await create_personal_workspace_for_user(session, user1)
+        await session.commit()
+
+        user2 = User(
+            external_id="user-dup-name-2",
+            email="bob@company2.com",
+            display_name="Anders Huss",
+        )
+        session.add(user2)
+        await session.commit()
+        await session.refresh(user2)
+
+        workspace2 = await create_personal_workspace_for_user(session, user2)
+        await session.commit()
+
+        # Both workspaces should have the same name (duplicate allowed)
+        assert workspace1.name == "Anders Huss's Workspace"
+        assert workspace2.name == "Anders Huss's Workspace"
+
+        # But slugs must be unique
+        assert workspace1.slug != workspace2.slug
+
+
+@pytest.mark.asyncio
+async def test_create_personal_workspace_uses_email_prefix_for_name_fallback(
+    async_engine,
+):
+    """Test that workspace name falls back to email prefix when display_name is None."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from stardag_api.auth.dependencies import create_personal_workspace_for_user
+
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async with async_session_maker() as session:
+        user = User(
+            external_id="user-no-display-name",
+            email="johnny@example.com",
+            display_name=None,  # No display name
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+
+        workspace = await create_personal_workspace_for_user(session, user)
+        await session.commit()
+
+        assert workspace.name == "johnny's Workspace"
+        assert workspace.slug == "johnny"
+
+
 @pytest.mark.asyncio
 async def test_me_invites_endpoint(async_engine):
     """Test that /api/v1/ui/me/invites returns pending invites.
