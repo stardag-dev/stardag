@@ -13,6 +13,7 @@ Token types:
 
 import logging
 import re
+import secrets
 from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
@@ -25,8 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth.jwt import (
     AuthenticationError,
-    TokenPayload as OIDCTokenPayload,
     get_jwt_validator,
+)
+from stardag_api.auth.jwt import (
+    TokenPayload as OIDCTokenPayload,
 )
 from stardag_api.auth.tokens import (
     InternalTokenPayload,
@@ -37,12 +40,12 @@ from stardag_api.auth.tokens import (
 from stardag_api.db import get_db
 from stardag_api.models import (
     ApiKey,
-    User,
     Environment,
+    TargetRoot,
+    User,
     Workspace,
     WorkspaceMember,
     WorkspaceRole,
-    TargetRoot,
 )
 from stardag_api.services import api_keys as api_key_service
 
@@ -61,19 +64,25 @@ async def create_personal_workspace_for_user(db: AsyncSession, user: User) -> Wo
     email_prefix = user.email.split("@")[0].lower()
     base_slug = re.sub(r"[^a-z0-9]+", "-", email_prefix).strip("-")[:50]
 
-    # Ensure uniqueness with suffix
+    # Generate name from display name or email prefix (names are not unique)
+    display_name = user.display_name or email_prefix
+    name = f"{display_name}'s Workspace"
+
+    # Ensure slug uniqueness with random suffix (doesn't leak info like increments)
     slug = base_slug
-    suffix = 0
-    while True:
-        existing = await db.execute(select(Workspace).where(Workspace.slug == slug))
-        if not existing.scalar_one_or_none():
+    for hex_nbytes in [2, 2, 2, 3, 3, 3, 4]:  # Try increasing suffix lengths
+        slug_exists = await db.execute(select(Workspace).where(Workspace.slug == slug))
+        if not slug_exists.scalar_one_or_none():
             break
-        suffix += 1
-        slug = f"{base_slug}-{suffix}"
+        # Add random suffix on collision
+        slug = f"{base_slug}-{secrets.token_hex(hex_nbytes)}"
+    else:
+        # This is extremely unlikely, we'll have bigger problems at this stage ;)
+        raise RuntimeError("Failed to generate unique workspace slug")
 
     # Create workspace
     workspace = Workspace(
-        name=f"{user.display_name or email_prefix}'s Workspace",
+        name=name,
         slug=slug,
         is_personal=True,
         created_by_id=user.id,
