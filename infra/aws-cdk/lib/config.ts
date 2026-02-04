@@ -19,6 +19,12 @@ function optionalEnv(name: string, defaultValue: string): string {
   return process.env[name] ?? defaultValue;
 }
 
+function optionalBoolEnv(name: string, defaultValue: boolean): boolean {
+  const value = process.env[name];
+  if (value === undefined) return defaultValue;
+  return value.toLowerCase() === "true" || value === "1";
+}
+
 export interface StardagConfig {
   // AWS
   awsAccountId: string;
@@ -37,6 +43,9 @@ export interface StardagConfig {
   // Google OAuth
   googleClientId: string;
   googleClientSecret: string;
+
+  // Optional features
+  sesEnabled: boolean;
 }
 
 export function loadConfig(): StardagConfig {
@@ -62,6 +71,9 @@ export function loadConfig(): StardagConfig {
     // Google OAuth
     googleClientId: requireEnv("GOOGLE_CLIENT_ID"),
     googleClientSecret: requireEnv("GOOGLE_CLIENT_SECRET"),
+
+    // Optional features (opt-in)
+    sesEnabled: optionalBoolEnv("SES_ENABLED", false),
   };
 }
 

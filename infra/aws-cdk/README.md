@@ -9,6 +9,7 @@ AWS CDK infrastructure for deploying Stardag SAAS application.
 - **Database:** Aurora Serverless v2 PostgreSQL
 - **Auth:** Cognito User Pool with Google IdP
 - **DNS:** Route 53
+- **Email:** AWS SES (optional, for transactional emails)
 
 ## Stacks
 
@@ -158,7 +159,18 @@ UI_SUBDOMAIN=app
 # Google OAuth
 GOOGLE_CLIENT_ID=your-client-id
 GOOGLE_CLIENT_SECRET=your-client-secret
+
+# Optional Features
+SES_ENABLED=true  # Enable AWS SES for transactional emails
 ```
+
+### Optional Features
+
+| Feature     | Env Var       | Default | Description                                      |
+| ----------- | ------------- | ------- | ------------------------------------------------ |
+| SES (Email) | `SES_ENABLED` | `false` | AWS SES for transactional emails (invites, etc.) |
+
+**SES (Email):** When enabled, creates an SES email identity for your domain with automatic DKIM DNS records. Requires the domain to be configured in Route 53. After deployment, you'll need to request SES production access in the AWS Console (sandbox mode only allows sending to verified emails).
 
 ## CDK Commands
 

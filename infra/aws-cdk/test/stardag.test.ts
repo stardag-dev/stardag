@@ -14,6 +14,7 @@ const mockConfig = {
   uiDomain: "app.example.com",
   googleClientId: "test-client-id.apps.googleusercontent.com",
   googleClientSecret: "test-client-secret",
+  sesEnabled: false, // Opt-in feature, disabled by default
 };
 
 describe("StardagStack", () => {
