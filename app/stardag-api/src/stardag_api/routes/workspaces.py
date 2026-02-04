@@ -29,6 +29,7 @@ from stardag_api.models import (
     Environment,
 )
 from stardag_api.services import api_keys as api_key_service
+from stardag_api.services.email import get_email_service
 
 router = APIRouter(prefix="/ui/workspaces", tags=["workspaces"])
 
@@ -603,8 +604,6 @@ async def create_invite(
     await db.refresh(invite)
 
     # Send invitation email (fire-and-forget, don't block on failure)
-    from stardag_api.services.email import get_email_service
-
     email_service = get_email_service()
     is_new_user = user is None  # user lookup happened earlier in the function
     inviter_name = current_user.display_name or current_user.email.split("@")[0]
