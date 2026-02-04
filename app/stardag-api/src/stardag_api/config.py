@@ -54,18 +54,28 @@ class JWTSettings(BaseSettings):
 
 
 class EmailSettings(BaseSettings):
-    """Email configuration for transactional emails via AWS SES."""
+    """Email configuration for transactional emails via AWS SES.
 
-    # Enable/disable email sending
+    In production, these values are provided by CDK via environment variables:
+    - EMAIL_ENABLED=true
+    - EMAIL_FROM_ADDRESS=noreply@{domain}
+    - EMAIL_FROM_NAME=Stardag
+    - EMAIL_SES_REGION={aws-region}
+    - EMAIL_APP_URL=https://{ui-domain}
+
+    Local development defaults assume email is disabled.
+    """
+
+    # Enable/disable email sending (disabled by default, CDK sets to true when SES configured)
     enabled: bool = False
-    # From address (must be verified in SES)
-    from_address: str = "noreply@stardag.com"
+    # From address (must be verified in SES) - set by CDK to noreply@{domain}
+    from_address: str = "noreply@localhost"
     # From display name
     from_name: str = "Stardag"
     # AWS SES region
     ses_region: str = "us-east-1"
-    # App URL for links in emails
-    app_url: str = "https://app.stardag.com"
+    # App URL for links in emails - set by CDK to https://{ui-domain}
+    app_url: str = "http://localhost:5173"
 
     model_config = SettingsConfigDict(env_prefix="EMAIL_")
 
