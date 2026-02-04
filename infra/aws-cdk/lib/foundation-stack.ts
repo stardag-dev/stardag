@@ -8,6 +8,7 @@ import { StardagVpc } from "./constructs/vpc";
 import { StardagDatabase } from "./constructs/database";
 import { StardagCognito } from "./constructs/cognito";
 import { StardagDns } from "./constructs/dns";
+import { StardagSes } from "./constructs/ses";
 
 export interface FoundationStackProps extends cdk.StackProps {
   config: StardagConfig;
@@ -45,6 +46,9 @@ export class FoundationStack extends cdk.Stack {
 
   // DNS (optional, only if custom domain configured)
   public readonly dns?: StardagDns;
+
+  // SES (optional, only if custom domain configured)
+  public readonly ses?: StardagSes;
 
   constructor(scope: Construct, id: string, props: FoundationStackProps) {
     super(scope, id, props);
@@ -116,6 +120,17 @@ export class FoundationStack extends cdk.Stack {
         apiSubdomain: config.apiSubdomain,
         uiSubdomain: config.uiSubdomain,
       });
+
+      // =============================================================
+      // SES Email Identity (opt-in, requires DNS for DKIM records)
+      // Enable with SES_ENABLED=true in .env.deploy
+      // =============================================================
+      if (config.sesEnabled) {
+        this.ses = new StardagSes(this, "Ses", {
+          domainName: config.domainName,
+          hostedZone: this.dns.hostedZone,
+        });
+      }
     }
 
     // =============================================================

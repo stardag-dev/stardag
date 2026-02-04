@@ -550,12 +550,17 @@ async def create_invite(
         db, current_user.id, workspace_id, min_role=WorkspaceRole.ADMIN
     )
 
-    # Check if workspace is personal (no invites allowed)
+    # Get workspace and check if personal (no invites allowed)
     workspace_result = await db.execute(
         select(Workspace).where(Workspace.id == workspace_id)
     )
     workspace = workspace_result.scalar_one_or_none()
-    if workspace and workspace.is_personal:
+    if workspace is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found",
+        )
+    if workspace.is_personal:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot invite members to a personal workspace",
@@ -596,6 +601,23 @@ async def create_invite(
     db.add(invite)
     await db.commit()
     await db.refresh(invite)
+
+    # Send invitation email (fire-and-forget, don't block on failure)
+    from stardag_api.services.email import get_email_service
+
+    email_service = get_email_service()
+    is_new_user = user is None  # user lookup happened earlier in the function
+    inviter_name = current_user.display_name or current_user.email.split("@")[0]
+
+    await email_service.send_invite_email(
+        to_email=data.email,
+        workspace_name=workspace.name,
+        inviter_name=inviter_name,
+        inviter_email=current_user.email,
+        role=data.role.value.title(),  # "member" -> "Member"
+        invite_link=f"{email_service.app_url}/invites",
+        is_new_user=is_new_user,
+    )
 
     return InviteResponse(
         id=invite.id,

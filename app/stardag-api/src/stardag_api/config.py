@@ -53,6 +53,23 @@ class JWTSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="JWT_")
 
 
+class EmailSettings(BaseSettings):
+    """Email configuration for transactional emails via AWS SES."""
+
+    # Enable/disable email sending
+    enabled: bool = False
+    # From address (must be verified in SES)
+    from_address: str = "noreply@stardag.com"
+    # From display name
+    from_name: str = "Stardag"
+    # AWS SES region
+    ses_region: str = "us-east-1"
+    # App URL for links in emails
+    app_url: str = "https://app.stardag.com"
+
+    model_config = SettingsConfigDict(env_prefix="EMAIL_")
+
+
 class OIDCSettings(BaseSettings):
     """OIDC configuration for JWT validation."""
 
@@ -103,3 +120,4 @@ class OIDCSettings(BaseSettings):
 settings = Settings()
 jwt_settings = JWTSettings()
 oidc_settings = OIDCSettings()
+email_settings = EmailSettings()

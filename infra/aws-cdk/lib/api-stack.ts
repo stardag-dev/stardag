@@ -92,6 +92,11 @@ export class ApiStack extends cdk.Stack {
     foundation.dbServiceSecret.grantRead(taskDefinition.taskRole);
     foundation.dbAdminSecret.grantRead(taskDefinition.taskRole);
 
+    // Grant task role permission to send emails via SES
+    if (foundation.ses) {
+      foundation.ses.grantSendEmail(taskDefinition.taskRole);
+    }
+
     // Add container
     taskDefinition.addContainer("Api", {
       // Use image from ECR repository
@@ -116,6 +121,12 @@ export class ApiStack extends cdk.Stack {
         OIDC_JWKS_URL: `${foundation.cognitoIssuerUrl}/.well-known/jwks.json`,
         // CORS
         STARDAG_API_CORS_ORIGINS: `https://${config.uiDomain},http://localhost:3000,http://localhost:5173`,
+        // Email configuration (SES)
+        EMAIL_ENABLED: foundation.ses ? "true" : "false",
+        EMAIL_FROM_ADDRESS: `noreply@${config.domainName}`,
+        EMAIL_FROM_NAME: "Stardag",
+        EMAIL_SES_REGION: this.region,
+        EMAIL_APP_URL: `https://${config.uiDomain}`,
       },
       secrets: {
         // Inject database credentials from Secrets Manager
