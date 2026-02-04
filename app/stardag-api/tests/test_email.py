@@ -201,9 +201,9 @@ class TestEmailServiceIntegration:
         assert create_response.status_code == 201
         workspace = create_response.json()
 
-        # Mock the email service at its source (imported locally in the route)
+        # Mock the email service where it's imported (top-level import in workspaces)
         with patch(
-            "stardag_api.services.email.get_email_service"
+            "stardag_api.routes.workspaces.get_email_service"
         ) as mock_get_email_service:
             mock_service = MagicMock()
             mock_service.app_url = "https://app.test.com"
