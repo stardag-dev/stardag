@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import typing
 
@@ -44,7 +45,9 @@ from modal.gpu import GPU_T
 
 from stardag import BaseTask, TaskStruct, build
 from stardag.build import TaskExecutorABC
+from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._config import modal_config_provider
+from stardag.registry._base import get_git_commit_hash
 
 try:
     from stardag.integration.prefect.build import build_flow as prefect_build_flow
@@ -92,11 +95,6 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
             'COMMIT_HASH': 'abc123...'
         }
     """
-    import os
-
-    from stardag.config import clear_config_cache, config_provider, load_config
-    from stardag.registry._base import get_git_commit_hash
-
     # Load config for specific profile if provided
     if profile:
         # Temporarily set STARDAG_PROFILE to load that profile's config
@@ -160,6 +158,43 @@ def get_profile_secret(profile: str | None = None) -> modal.Secret:
     """
     env_vars = get_profile_env_vars(profile)
     return modal.Secret.from_dict(typing.cast(dict[str, str | None], env_vars))
+
+
+def get_target_roots_volumes(
+    target_roots: dict[str, str] | None = None,
+    create_if_missing: bool = True,
+) -> dict[str, modal.Volume]:
+    """Get Modal volumes for configured target roots.
+
+    This is a helper to convert stardag target roots into Modal volumes that can
+    be mounted into functions. It assumes that any target root with a "modalvol://"
+    URI corresponds to a Modal volume.
+
+    Args:
+        target_roots: Dict of target root key to URI or None (default from config).
+        create_if_missing: Whether to create the Modal volume if it doesn't exist.
+
+    Returns:
+        Dict of target root key to modal.Volume instance.
+
+    Example:
+        >>> target_roots = {"default": "modalvol://my-volume"}
+        >>> volumes = get_target_roots_volumes(target_roots)
+        >>> print(volumes)
+        {'default': <modal.Volume object at ...>}
+    """
+    if target_roots is None:
+        config = config_provider.get()
+        target_roots = config.target.roots
+
+    volumes = {}
+    for key, uri in target_roots.items():
+        if uri.startswith("modalvol://"):
+            volume_name = uri[len("modalvol://") :].split("/")[0]
+            volumes[key] = modal.Volume.from_name(
+                volume_name, create_if_missing=create_if_missing
+            )
+    return volumes
 
 
 # --- Function settings ---
@@ -271,6 +306,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         pass
 
     async def _reload_volumes(self):
+        # TODO fix this strange inconsistency
         modal_config = modal_config_provider.get()
         for volume_name in modal_config.volume_name_to_mount_path.keys():
             vol = modal.Volume.from_name(volume_name, create_if_missing=True)
@@ -445,6 +481,7 @@ class StardagApp:
         self,
         *,
         extra_secrets: list[modal.Secret] | None = None,
+        create_volumes_if_missing: bool = True,
     ) -> None:
         """Finalize the app by creating Modal functions.
 
@@ -460,6 +497,9 @@ class StardagApp:
         """
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
+
+        # Ensure volumes for target roots exist before creating functions
+        get_target_roots_volumes(create_if_missing=create_volumes_if_missing)
 
         extra_secrets = extra_secrets or []
 

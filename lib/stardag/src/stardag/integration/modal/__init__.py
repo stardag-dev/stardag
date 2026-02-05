@@ -6,6 +6,7 @@ from stardag.integration.modal._app import (
     get_profile_env_vars,
     get_profile_secret,
 )
+from stardag.integration.modal._config import with_stardag_on_image
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
     ModalMountedVolumeTarget,
@@ -24,4 +25,5 @@ __all__ = [
     "WorkerSelectorByName",
     "get_profile_env_vars",
     "get_profile_secret",
+    "with_stardag_on_image",
 ]

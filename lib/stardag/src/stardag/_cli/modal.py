@@ -313,8 +313,8 @@ def deploy(
 
                     target_roots = json.loads(env_vars["STARDAG_TARGET_ROOTS"])
                     console.print("[dim]  Target roots:[/dim]")
-                    for name, uri in target_roots.items():
-                        console.print(f"[dim]    {name}: {uri}[/dim]")
+                    for target_root_name, uri in target_roots.items():
+                        console.print(f"[dim]    {target_root_name}: {uri}[/dim]")
                 extra_secrets.append(
                     modal.Secret.from_dict(dict(env_vars))  # type: ignore[arg-type]
                 )
