@@ -19,6 +19,8 @@ Usage:
     stardag config list workspaces
     stardag config list environments
 
+    stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
+
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.
     Set STARDAG_REGISTRY_URL, STARDAG_WORKSPACE_ID, STARDAG_ENVIRONMENT_ID
@@ -28,7 +30,7 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, config
+from stardag._cli import auth, config, modal
 
 # Main CLI app
 app = typer.Typer(
@@ -40,6 +42,7 @@ app = typer.Typer(
 # Add subcommands
 app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
+app.add_typer(modal.app, name="modal")
 
 
 @app.command()
