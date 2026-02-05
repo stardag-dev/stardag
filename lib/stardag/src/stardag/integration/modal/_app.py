@@ -34,6 +34,7 @@ Example usage:
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
 import typing
@@ -77,6 +78,7 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
         - STARDAG_REGISTRY_URL: API endpoint
         - STARDAG_WORKSPACE_ID: Workspace UUID
         - STARDAG_ENVIRONMENT_ID: Environment UUID
+        - STARDAG_TARGET_ROOTS: JSON dict of target roots (pydantic-settings parses this)
         - COMMIT_HASH: Current git commit (for traceability)
 
     Example:
@@ -86,6 +88,7 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
             'STARDAG_REGISTRY_URL': 'https://api.stardag.com',
             'STARDAG_WORKSPACE_ID': '...',
             'STARDAG_ENVIRONMENT_ID': '...',
+            'STARDAG_TARGET_ROOTS': '{"default": "s3://bucket/prefix"}',
             'COMMIT_HASH': 'abc123...'
         }
     """
@@ -119,6 +122,10 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
         env_vars["STARDAG_WORKSPACE_ID"] = config.context.workspace_id
     if config.context.environment_id:
         env_vars["STARDAG_ENVIRONMENT_ID"] = config.context.environment_id
+
+    # Add target roots as JSON (pydantic-settings parses JSON for nested fields)
+    if config.target.roots:
+        env_vars["STARDAG_TARGET_ROOTS"] = json.dumps(config.target.roots)
 
     # Add git commit for traceability
     commit_hash = get_git_commit_hash()

@@ -277,6 +277,14 @@ def deploy(
                 console.print(
                     f"[dim]  Environment ID: {env_vars.get('STARDAG_ENVIRONMENT_ID', 'N/A')}[/dim]"
                 )
+                # Display target roots
+                if "STARDAG_TARGET_ROOTS" in env_vars:
+                    import json
+
+                    target_roots = json.loads(env_vars["STARDAG_TARGET_ROOTS"])
+                    console.print("[dim]  Target roots:[/dim]")
+                    for name, uri in target_roots.items():
+                        console.print(f"[dim]    {name}: {uri}[/dim]")
                 extra_secrets.append(
                     modal.Secret.from_dict(dict(env_vars))  # type: ignore[arg-type]
                 )
@@ -299,6 +307,14 @@ def deploy(
                 console.print(
                     f"[dim]  Environment ID: {env_vars.get('STARDAG_ENVIRONMENT_ID', 'N/A')}[/dim]"
                 )
+                # Display target roots
+                if "STARDAG_TARGET_ROOTS" in env_vars:
+                    import json
+
+                    target_roots = json.loads(env_vars["STARDAG_TARGET_ROOTS"])
+                    console.print("[dim]  Target roots:[/dim]")
+                    for name, uri in target_roots.items():
+                        console.print(f"[dim]    {name}: {uri}[/dim]")
                 extra_secrets.append(
                     modal.Secret.from_dict(dict(env_vars))  # type: ignore[arg-type]
                 )
