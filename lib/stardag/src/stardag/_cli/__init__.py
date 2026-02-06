@@ -30,7 +30,7 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, config, modal
+from stardag._cli import auth, config
 
 # Main CLI app
 app = typer.Typer(
@@ -42,7 +42,14 @@ app = typer.Typer(
 # Add subcommands
 app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
-app.add_typer(modal.app, name="modal")
+
+# Add modal subcommand only if modal is installed
+try:
+    from stardag._cli import modal
+
+    app.add_typer(modal.app, name="modal")
+except ImportError:
+    pass
 
 
 @app.command()

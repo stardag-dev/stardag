@@ -744,6 +744,7 @@ def load_config(
         target_roots = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
 
     # 5. Load access token from cache (if we have profile info)
+    # If token is expired, try to refresh it automatically
     access_token: str | None = None
     if registry_name and workspace_id and user:
         token_cache_path = get_access_token_cache_path(
@@ -757,6 +758,19 @@ def load_config(
             expires_at = token_data.get("expires_at", 0)
             if expires_at > time.time():
                 access_token = token_data.get("access_token")
+
+        # If no valid token in cache, try to refresh it
+        if not access_token:
+            try:
+                # Lazy import to avoid circular dependency
+                from stardag._cli.credentials import ensure_access_token
+
+                access_token = ensure_access_token(
+                    registry_name, workspace_id, user, quiet=True
+                )
+            except Exception:
+                # Silently fail - user can manually refresh with `stardag auth refresh`
+                pass
 
     # 6. Get API key from env
     api_key = env_settings.api_key or os.environ.get("STARDAG_API_KEY")
