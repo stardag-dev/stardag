@@ -29,7 +29,7 @@ image = sd_modal.with_stardag_on_image(
 
 # Define the StardagApp
 app = sd_modal.StardagApp(
-    "stardag-examples-basic",
+    "stardag_examples-basic",
     builder_settings=sd_modal.FunctionSettings(
         image=image,
         secrets=[

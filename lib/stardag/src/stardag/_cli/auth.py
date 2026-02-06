@@ -597,12 +597,19 @@ def login(
     webbrowser.open(auth_url)
 
     # Wait for callback
-    typer.echo("Waiting for authentication...")
+    typer.echo("Waiting for authentication... (press Ctrl-C to cancel)")
     timeout = 120  # 2 minutes
     start = time.time()
 
-    while OAuthCallbackHandler.auth_result is None and time.time() - start < timeout:
-        time.sleep(0.5)
+    try:
+        while (
+            OAuthCallbackHandler.auth_result is None and time.time() - start < timeout
+        ):
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        typer.echo("\nAuthentication cancelled.")
+        server.server_close()
+        raise typer.Exit(1)
 
     server.server_close()
 

@@ -67,11 +67,69 @@ def _get_stardag_deps_for_image(include_dev_deps: bool = False) -> list[str]:
     since deps are already installed in the image at that point.
     """
     pyproject_path = Path(__file__).parents[4] / "pyproject.toml"
+    if not pyproject_path.exists():
+        return []
+
+    return get_package_deps(
+        pyproject_path=pyproject_path,
+        groups=["dev"] if include_dev_deps else None,
+        optional=["modal"],
+    )
+
+
+def get_package_deps(
+    pyproject_path: Path | str,
+    *,
+    groups: list[str] | None = None,
+    optional: list[str] | None = None,
+) -> list[str]:
+    """Extract dependencies from pyproject.toml.
+
+    Args:
+        pyproject_path: The path to the pyproject.toml file or if any other file it
+            looks for first pyproject.toml in the parent directories.
+        groups: The dependency groups to include (e.g. ["dev"]). If None, does not
+            include any groups.
+        optional: The optional dependencies to include (e.g. ["modal"]). If None, does
+            not include any optional dependencies.
+
+    Returns:
+        A list of dependencies, with version specifiers.
+
+    Raises:
+        FileNotFoundError: If the pyproject.toml file is not found.
+        ValueError: If a specified dependency group or optional dependency is not found.
+    """
+    pyproject_path = Path(pyproject_path)
+    if pyproject_path.name != "pyproject.toml":
+        # look for first pyproject.toml in parent directories
+        current_path = (
+            pyproject_path.parent if pyproject_path.is_file() else pyproject_path
+        )
+        while True:
+            pyproject_path = current_path / "pyproject.toml"
+            if pyproject_path.exists():
+                break
+            if current_path.parent == current_path:
+                raise FileNotFoundError("Could not find pyproject.toml")
+            current_path = current_path.parent
+
+    groups = groups or []
+    optional = optional or []
+
     with open(pyproject_path, "rb") as f:
         pyproject = tomllib.load(f)
 
     result = list(pyproject["project"]["dependencies"])
-    result += pyproject["project"].get("optional-dependencies", {}).get("modal", [])
-    if include_dev_deps:
-        result += pyproject.get("dependency-groups", {}).get("dev", [])
+    for group in groups:
+        try:
+            result += pyproject.get("dependency-groups", {})[group]
+        except KeyError:
+            raise ValueError(f"Dependency group '{group}' not found in pyproject.toml")
+    for opt in optional:
+        try:
+            result += pyproject["project"].get("optional-dependencies", {})[opt]
+        except KeyError:
+            raise ValueError(f"Optional dependency '{opt}' not found in pyproject.toml")
+
     return result
