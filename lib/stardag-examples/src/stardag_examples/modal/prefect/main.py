@@ -11,6 +11,6 @@ def worker_selector(task: sd.BaseTask) -> str:
 
 
 if __name__ == "__main__":
-    dag = get_benchmark_dag()
+    dag = get_benchmark_dag(snapshot_slug="dev1")
     res = app.build_spawn(dag, worker_selector=worker_selector)
     print(res)

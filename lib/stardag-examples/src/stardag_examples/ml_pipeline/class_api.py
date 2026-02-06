@@ -222,10 +222,22 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
 
 
 def get_metrics_dag(
-    dump: Dump | None = None,
+    snapshot_slug: str = "default",
     preprocess_params: base.ProcessParams = base.ProcessParams(),
 ):
-    dump = dump or Dump()
+    """Get the DAG for calculating metrics for a single model.
+
+    Args:
+        snapshot_slug: The slug for the dump to use. In this mock example, it is just
+            a way to update task ids to force re-running the DAG.
+        preprocess_params: The parameters to use for preprocessing the data. Can also
+            be changed to force re-running the DAG (and has some actual impact on
+            training).
+
+    Returns:
+        Metrics: The metrics task representing the DAG for calculating metrics.
+    """
+    dump = Dump(snapshot_slug=snapshot_slug)
 
     dataset = Dataset(dump=dump, params=preprocess_params)
 
@@ -262,10 +274,22 @@ def get_metrics_dag(
 
 
 def get_benchmark_dag(
-    dump: Dump | None = None,
+    snapshot_slug: str = "default",
     preprocess_params: base.ProcessParams = base.ProcessParams(),
 ):
-    dump = dump or Dump()
+    """Get the DAG for benchmarking multiple models.
+
+    Args:
+        snapshot_slug: The slug for the dump to use. In this mock example, it is
+            just a way to update task ids to force re-running the DAG.
+        preprocess_params: The parameters to use for preprocessing the data. Can also
+            be changed to force re-running the DAG (and has some actual impact on
+            training).
+    Returns:
+        Benchmark: The benchmark task representing the DAG for benchmarking multiple
+            models.
+    """
+    dump = Dump(snapshot_slug=snapshot_slug)
 
     dataset = Dataset(dump=dump, params=preprocess_params)
 
