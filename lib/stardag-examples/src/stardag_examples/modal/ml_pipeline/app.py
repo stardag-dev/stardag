@@ -7,20 +7,17 @@ base_image = modal.Image.debian_slim(python_version="3.12")
 image = sd_modal.with_stardag_on_image(
     modal.Image.debian_slim(python_version="3.12").pip_install(
         # helper to pull in all dependencies of current package (stardag-examples)
-        # including optional "prefect" and "ml-pipeline" deps
-        sd_modal.get_package_deps(__file__, optional=["prefect", "ml-pipeline"]),
+        # including optional "ml-pipeline" deps
+        *sd_modal.get_package_deps(__file__, optional=["ml-pipeline"]),
     )
 ).add_local_python_source("stardag_examples")
 
 app = sd_modal.StardagApp(
-    "stardag_examples-prefect",
-    builder_type="prefect",  # NOTE: prefect builder
+    "stardag_examples-ml_pipeline",
     builder_settings=sd_modal.FunctionSettings(
         image=image,
         secrets=[
-            # Contains PREFECT_API_KEY and PREFECT_API_URL
-            modal.Secret.from_name("prefect-api"),
-            # Contains STARDAG_API_KEY
+            # required for communication with registry
             modal.Secret.from_name("stardag-api-key"),
         ],
     ),

@@ -33,12 +33,13 @@ import json
 import logging
 import os
 import sys
-from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any
 
 from pydantic import AfterValidator, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from stardag.utils.resource_provider import resource_provider
 
 logger = logging.getLogger(__name__)
 
@@ -743,6 +744,7 @@ def load_config(
         target_roots = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
 
     # 5. Load access token from cache (if we have profile info)
+    # If token is expired, try to refresh it automatically
     access_token: str | None = None
     if registry_name and workspace_id and user:
         token_cache_path = get_access_token_cache_path(
@@ -756,6 +758,19 @@ def load_config(
             expires_at = token_data.get("expires_at", 0)
             if expires_at > time.time():
                 access_token = token_data.get("access_token")
+
+        # If no valid token in cache, try to refresh it
+        if not access_token:
+            try:
+                # Lazy import to avoid circular dependency
+                from stardag._cli.credentials import ensure_access_token
+
+                access_token = ensure_access_token(
+                    registry_name, workspace_id, user, quiet=True
+                )
+            except Exception:
+                # Silently fail - user can manually refresh with `stardag auth refresh`
+                pass
 
     # 6. Get API key from env
     api_key = env_settings.api_key or os.environ.get("STARDAG_API_KEY")
@@ -778,7 +793,9 @@ def load_config(
     )
 
 
-@lru_cache(maxsize=1)
+config_provider = resource_provider(StardagConfig, default_factory=load_config)
+
+
 def get_config() -> StardagConfig:
     """Get the cached global configuration.
 
@@ -788,41 +805,9 @@ def get_config() -> StardagConfig:
     Returns:
         The global StardagConfig instance.
     """
-    return load_config()
+    return config_provider.get()
 
 
 def clear_config_cache() -> None:
     """Clear the cached configuration, forcing reload on next get_config()."""
-    get_config.cache_clear()
-
-
-# --- Config provider for dependency injection ---
-
-
-class ConfigProvider:
-    """Provider for StardagConfig that supports dependency injection.
-
-    This allows tests and advanced use cases to override the config.
-    """
-
-    def __init__(self) -> None:
-        self._override: StardagConfig | None = None
-
-    def get(self) -> StardagConfig:
-        """Get the current configuration."""
-        if self._override is not None:
-            return self._override
-        return get_config()
-
-    def set(self, config: StardagConfig) -> None:
-        """Override the configuration."""
-        self._override = config
-
-    def reset(self) -> None:
-        """Reset to default configuration loading."""
-        self._override = None
-        clear_config_cache()
-
-
-# Global config provider instance
-config_provider = ConfigProvider()
+    config_provider.clear()

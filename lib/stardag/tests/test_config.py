@@ -9,11 +9,9 @@ from stardag.config import (
     DEFAULT_API_URL,
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
-    ConfigProvider,
     ContextConfig,
     ProfileConfig,
     RegistryConfig,
-    StardagConfig,
     TomlConfig,
     clear_config_cache,
     find_project_config,
@@ -319,45 +317,6 @@ class TestContextConfig:
         assert ctx.registry_name == "local"
         assert ctx.workspace_id == "workspace-123"
         assert ctx.environment_id == "env-456"
-
-
-class TestConfigProvider:
-    def test_get_returns_loaded_config(self, temp_stardag_dir, monkeypatch):
-        monkeypatch.chdir(temp_stardag_dir.parent)
-
-        provider = ConfigProvider()
-        config = provider.get()
-
-        assert isinstance(config, StardagConfig)
-
-    def test_set_overrides_config(self):
-        from stardag.config import APIConfig
-
-        provider = ConfigProvider()
-        custom_config = StardagConfig(
-            api=APIConfig(url="http://custom:1234", timeout=99.0)
-        )
-
-        provider.set(custom_config)
-
-        assert provider.get().api.url == "http://custom:1234"
-        assert provider.get().api.timeout == 99.0
-
-    def test_reset_clears_override(self, temp_stardag_dir, monkeypatch):
-        from stardag.config import APIConfig
-
-        monkeypatch.chdir(temp_stardag_dir.parent)
-
-        provider = ConfigProvider()
-        custom_config = StardagConfig(
-            api=APIConfig(url="http://custom:1234", timeout=99.0)
-        )
-
-        provider.set(custom_config)
-        assert provider.get().api.url == "http://custom:1234"
-
-        provider.reset()
-        assert provider.get().api.url == DEFAULT_API_URL
 
 
 class TestGetConfig:

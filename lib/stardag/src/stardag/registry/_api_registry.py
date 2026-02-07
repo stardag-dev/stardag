@@ -1,10 +1,12 @@
 """API-based registry that communicates with the stardag-api service."""
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 from uuid import UUID
 
 import httpx
+from httpx_retries import Retry, RetryTransport
 
 from stardag.config import config_provider
 from stardag.exceptions import (
@@ -24,6 +26,15 @@ if TYPE_CHECKING:
     from stardag._core.task import BaseTask
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration for transient errors (connection issues, timeouts, etc.)
+# Retries on: TimeoutException, NetworkError (includes ReadError), RemoteProtocolError
+_RETRY_CONFIG = Retry(
+    total=3,
+    backoff_factor=0.5,
+    # Also retry POST since our API calls are idempotent (task state transitions)
+    allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
+)
 
 
 class APIRegistry(RegistryABC):
@@ -75,6 +86,9 @@ class APIRegistry(RegistryABC):
 
         self._client = None
         self._async_client = None
+        self._async_client_loop = (
+            None  # Track which event loop the async client belongs to
+        )
 
         if self.api_key:
             logger.debug("APIRegistry initialized with API key authentication")
@@ -157,7 +171,7 @@ class APIRegistry(RegistryABC):
     @property
     def client(self):
         if self._client is None:
-            # Create client with appropriate auth header
+            # Create client with appropriate auth header and retry transport
             headers = {}
             if self.api_key:
                 # API key auth (production/CI)
@@ -165,7 +179,10 @@ class APIRegistry(RegistryABC):
             elif self.access_token:
                 # JWT auth from browser login (local dev)
                 headers["Authorization"] = f"Bearer {self.access_token}"
-            self._client = httpx.Client(timeout=self.timeout, headers=headers)
+            transport = RetryTransport(retry=_RETRY_CONFIG)
+            self._client = httpx.Client(
+                timeout=self.timeout, headers=headers, transport=transport
+            )
         return self._client
 
     def _get_params(self) -> dict[str, str]:
@@ -410,16 +427,52 @@ class APIRegistry(RegistryABC):
 
     @property
     def async_client(self):
-        """Lazy-initialized async HTTP client."""
-        if self._async_client is None:
+        """Lazy-initialized async HTTP client with retry transport.
+
+        The client is recreated if the event loop changes, which can happen
+        when running in frameworks like Prefect that create new event loops
+        for task execution.
+        """
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        # Recreate client if loop changed or client doesn't exist
+        if self._async_client is None or self._async_client_loop != current_loop:
+            # Close old client if it exists
+            old_client = self._async_client
+            if old_client is not None:
+                # Schedule close on the old loop if possible, otherwise just discard
+                try:
+                    if self._async_client_loop and self._async_client_loop.is_running():
+                        self._async_client_loop.call_soon_threadsafe(
+                            lambda c=old_client: asyncio.create_task(c.aclose())
+                        )
+                except Exception:
+                    pass  # Best effort cleanup
+
             headers = {}
             if self.api_key:
                 headers["X-API-Key"] = self.api_key
             elif self.access_token:
                 headers["Authorization"] = f"Bearer {self.access_token}"
-            self._async_client = httpx.AsyncClient(
-                timeout=self.timeout, headers=headers
+            # Use limits to prevent stale connection issues
+            # keepalive_expiry=5 closes idle connections after 5 seconds
+            limits = httpx.Limits(
+                max_connections=10,
+                max_keepalive_connections=5,
+                keepalive_expiry=5,
             )
+            transport = RetryTransport(retry=_RETRY_CONFIG)
+            self._async_client = httpx.AsyncClient(
+                timeout=self.timeout,
+                headers=headers,
+                limits=limits,
+                transport=transport,
+            )
+            self._async_client_loop = current_loop
         return self._async_client
 
     async def build_start_aio(
