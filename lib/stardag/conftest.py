@@ -1,5 +1,5 @@
-"""Fixtures for markdown-docs tests of docstrings (hence must be outside of
-src/stardag)."""
+"""Fixtures for markdown-docs tests of docstrings (hence not enough to keep in
+tests/.)."""
 
 import os
 import typing
@@ -9,32 +9,23 @@ import pytest
 
 from stardag.target import (
     InMemoryFileSystemTarget,
-    LocalTarget,
     target_factory_provider,
 )
 from stardag.target._factory import TargetFactory
-from stardag.utils.testing.env import temp_env_vars
+from stardag.testing import target_roots_override, temp_env_vars
 
 
 @pytest.fixture(scope="function")
 def default_local_target_tmp_path(
     tmp_path: Path,
 ) -> typing.Generator[Path, None, None]:
-    import json
-
     default_root = tmp_path.absolute() / "default-root"
     default_root.mkdir(parents=True, exist_ok=False)
 
-    # Set env var so subprocesses (multiprocessing) can pick it up
+    # NOTE sets env var so subprocesses (multiprocessing) can pick it up
     target_roots = {"default": str(default_root)}
-    with temp_env_vars({"STARDAG_TARGET_ROOTS": json.dumps(target_roots)}):
-        with target_factory_provider.override(
-            TargetFactory(
-                target_roots=target_roots,
-                prefix_to_target_prototype={"/": LocalTarget},
-            )
-        ):
-            yield default_root
+    with target_roots_override(target_roots):
+        yield default_root
 
 
 @pytest.fixture(scope="session")

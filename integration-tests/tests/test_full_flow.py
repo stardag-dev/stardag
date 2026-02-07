@@ -3,7 +3,10 @@
 These tests verify complete workflows across API, SDK, and UI components.
 """
 
+from pathlib import Path
+
 import httpx
+from stardag.testing import target_roots_override
 
 from stardag_integration_tests.conftest import (
     TokenSet,
@@ -612,19 +615,16 @@ class TestSDKBuildWorkflow:
         docker_services: ServiceEndpoints,
         test_workspace_id: str,
         test_environment_id: str,
+        tmp_path: Path,
     ) -> None:
         """Test building a simple DAG using the SDK.
 
         Creates a 3-task DAG: add(1,2) -> multiply(*2) -> format
         Verifies all tasks are registered and build is completed.
         """
-        import os
-        import tempfile
 
         import stardag as sd
         from stardag.registry import APIRegistry
-        from stardag.config import config_provider
-        from stardag.target import target_factory_provider
 
         # Create an API key for this test
         response = internal_authenticated_client.post(
@@ -636,89 +636,71 @@ class TestSDKBuildWorkflow:
         api_key = response.json()["key"]
 
         # Use a temporary directory for task outputs
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Set environment variable to configure target root
-            old_env = os.environ.get("STARDAG_TARGET_ROOTS__DEFAULT")
-            os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = tmpdir
+        target_roots = {"default": str(tmp_path)}
+        with target_roots_override(target_roots):
 
-            # Reset config and target factory to pick up new env var
-            config_provider.clear()
-            target_factory_provider.set(None)  # type: ignore[arg-type]
+            @sd.task
+            def add_numbers(a: int, b: int) -> int:
+                """Add two numbers."""
+                return a + b
 
+            @sd.task
+            def multiply_by_two(value: int) -> int:
+                """Multiply by two."""
+                return value * 2
+
+            @sd.task
+            def format_result(value: int) -> str:
+                """Format the result."""
+                return f"Result: {value}"
+
+            # Create a simple DAG
+            step1 = add_numbers(a=1, b=2)  # = 3
+            step2 = multiply_by_two(value=step1)  # = 6
+            final_task = format_result(value=step2)
+
+            # Create registry with API key
+            registry = APIRegistry(
+                api_url=docker_services.api,
+                api_key=api_key,
+            )
+
+            # Build the DAG (use build_sequential to avoid event loop conflict
+            # with Playwright's async runtime)
             try:
-
-                @sd.task
-                def add_numbers(a: int, b: int) -> int:
-                    """Add two numbers."""
-                    return a + b
-
-                @sd.task
-                def multiply_by_two(value: int) -> int:
-                    """Multiply by two."""
-                    return value * 2
-
-                @sd.task
-                def format_result(value: int) -> str:
-                    """Format the result."""
-                    return f"Result: {value}"
-
-                # Create a simple DAG
-                step1 = add_numbers(a=1, b=2)  # = 3
-                step2 = multiply_by_two(value=step1)  # = 6
-                final_task = format_result(value=step2)
-
-                # Create registry with API key
-                registry = APIRegistry(
-                    api_url=docker_services.api,
-                    api_key=api_key,
-                )
-
-                # Build the DAG (use build_sequential to avoid event loop conflict
-                # with Playwright's async runtime)
-                try:
-                    build_summary = sd.build_sequential([final_task], registry=registry)
-                finally:
-                    registry.close()
-
-                # Get the build ID from the summary
-                build_id = build_summary.build_id
-                assert build_id is not None
-
-                # Verify build exists and is completed
-                response = httpx.get(
-                    f"{docker_services.api}/api/v1/builds/{build_id}",
-                    headers={"X-API-Key": api_key},
-                    timeout=30.0,
-                )
-                assert response.status_code == 200
-                build = response.json()
-                assert build["status"] == "completed"
-
-                # Verify tasks were registered
-                response = httpx.get(
-                    f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-                    headers={"X-API-Key": api_key},
-                    timeout=30.0,
-                )
-                assert response.status_code == 200
-                tasks = response.json()
-                assert len(tasks) == 3
-
-                # All tasks should be completed
-                task_statuses = {t["task_name"]: t["status"] for t in tasks}
-                assert task_statuses.get("add_numbers") == "completed"
-                assert task_statuses.get("multiply_by_two") == "completed"
-                assert task_statuses.get("format_result") == "completed"
-
+                build_summary = sd.build_sequential([final_task], registry=registry)
             finally:
-                # Restore environment
-                if old_env is not None:
-                    os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = old_env
-                else:
-                    os.environ.pop("STARDAG_TARGET_ROOTS__DEFAULT", None)
-                # Reset providers again
-                config_provider.clear()
-                target_factory_provider.set(None)  # type: ignore[arg-type]
+                registry.close()
+
+            # Get the build ID from the summary
+            build_id = build_summary.build_id
+            assert build_id is not None
+
+            # Verify build exists and is completed
+            response = httpx.get(
+                f"{docker_services.api}/api/v1/builds/{build_id}",
+                headers={"X-API-Key": api_key},
+                timeout=30.0,
+            )
+            assert response.status_code == 200
+            build = response.json()
+            assert build["status"] == "completed"
+
+            # Verify tasks were registered
+            response = httpx.get(
+                f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
+                headers={"X-API-Key": api_key},
+                timeout=30.0,
+            )
+            assert response.status_code == 200
+            tasks = response.json()
+            assert len(tasks) == 3
+
+            # All tasks should be completed
+            task_statuses = {t["task_name"]: t["status"] for t in tasks}
+            assert task_statuses.get("add_numbers") == "completed"
+            assert task_statuses.get("multiply_by_two") == "completed"
+            assert task_statuses.get("format_result") == "completed"
 
     def test_sdk_build_with_diamond_dag(
         self,
@@ -742,8 +724,8 @@ class TestSDKBuildWorkflow:
         import tempfile
 
         import stardag as sd
-        from stardag.registry import APIRegistry
         from stardag.config import config_provider
+        from stardag.registry import APIRegistry
         from stardag.target import target_factory_provider
 
         # Create an API key for this test
