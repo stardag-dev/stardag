@@ -19,7 +19,7 @@ app = sd_modal.StardagApp(
         image=image,
         secrets=[
             # Contains PREFECT_API_KEY and PREFECT_API_URL
-            modal.Secret.from_name("prefect-api-key"),
+            modal.Secret.from_name("prefect-api"),
             # Contains STARDAG_API_KEY
             modal.Secret.from_name("stardag-api-key"),
         ],
