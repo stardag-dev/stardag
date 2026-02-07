@@ -642,7 +642,7 @@ class TestSDKBuildWorkflow:
             os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = tmpdir
 
             # Reset config and target factory to pick up new env var
-            config_provider.reset()
+            config_provider.clear()
             target_factory_provider.set(None)  # type: ignore[arg-type]
 
             try:
@@ -717,7 +717,7 @@ class TestSDKBuildWorkflow:
                 else:
                     os.environ.pop("STARDAG_TARGET_ROOTS__DEFAULT", None)
                 # Reset providers again
-                config_provider.reset()
+                config_provider.clear()
                 target_factory_provider.set(None)  # type: ignore[arg-type]
 
     def test_sdk_build_with_diamond_dag(
@@ -761,7 +761,7 @@ class TestSDKBuildWorkflow:
             os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = tmpdir
 
             # Reset config and target factory to pick up new env var
-            config_provider.reset()
+            config_provider.clear()
             target_factory_provider.set(None)  # type: ignore[arg-type]
 
             try:
@@ -856,5 +856,5 @@ class TestSDKBuildWorkflow:
                 else:
                     os.environ.pop("STARDAG_TARGET_ROOTS__DEFAULT", None)
                 # Reset providers again
-                config_provider.reset()
+                config_provider.clear()
                 target_factory_provider.set(None)  # type: ignore[arg-type]
