@@ -14,9 +14,17 @@ Run Stardag tasks on Modal's serverless infrastructure.
 
 ## Prerequisites
 
-```bash
-pip install stardag[modal]
-```
+=== "uv"
+
+    ```bash
+    uv add stardag[modal]
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install stardag[modal]
+    ```
 
 You'll also need a [Modal](https://modal.com/) account:
 
@@ -45,26 +53,27 @@ my_package/
 import modal
 import stardag.integration.modal as sd_modal
 
-VOLUME_NAME = "stardag-default"
-volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+# Define the Modal image with Stardag installed
+image = sd_modal.with_stardag_on_image(
+    modal.Image.debian_slim(python_version="3.12")
+).add_local_python_source("my_package")
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install("stardag[modal]")
-    .env({"STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default"})
-    .add_local_python_source("my_package")
-)
-
-stardag_app = sd_modal.StardagApp(
+# Define the StardagApp
+app = sd_modal.StardagApp(
     "my-stardag-app",
-    builder_settings=sd_modal.FunctionSettings(image=image),
+    builder_settings=sd_modal.FunctionSettings(
+        image=image,
+        secrets=[
+            modal.Secret.from_name("stardag-api-key"),
+        ],
+    ),
     worker_settings={
         "default": sd_modal.FunctionSettings(image=image),
     },
 )
-
-app = stardag_app.modal_app
 ```
+
+The `sd_modal.with_stardag_on_image()` helper installs the correct version of Stardag on your image.
 
 ### 2. Define Your Tasks
 
@@ -72,9 +81,11 @@ app = stardag_app.modal_app
 # my_package/tasks.py
 import stardag as sd
 
+
 @sd.task(name="Range")
 def get_range(limit: int) -> list[int]:
     return list(range(limit))
+
 
 @sd.task(name="Sum")
 def get_sum(integers: sd.Depends[list[int]]) -> int:
@@ -83,87 +94,113 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
 
 ### 3. Deploy and Run
 
-Deploy to Modal:
+Deploy using the Stardag CLI:
 
 ```bash
-modal deploy my_package/app.py
+stardag modal deploy my_package/app.py
 ```
 
 Run your DAG:
 
 ```python
 # my_package/main.py
-from my_package.app import stardag_app
+from my_package.app import app
 from my_package.tasks import get_range, get_sum
 
 if __name__ == "__main__":
     dag = get_sum(integers=get_range(limit=10))
-    stardag_app.build_spawn(dag)
+    res = app.build_spawn(dag)
+    print(res)
 ```
 
 You'll see the `build` and `worker_default` functions invoked in the Modal UI.
-
-### 4. Retrieve Results Locally
-
-Configure the same target root locally:
-
-```bash
-export STARDAG_TARGET_ROOTS__DEFAULT=modalvol://stardag-default/root/default
-```
-
-Then load the result:
-
-```python
-from my_package.tasks import get_range, get_sum
-
-dag = get_sum(integers=get_range(limit=10))
-print(dag.output().load())  # 45
-```
 
 ## Running the Examples
 
 The examples package includes ready-to-run Modal examples:
 
-```bash
-cd lib/stardag-examples
-uv sync --extra modal
+=== "uv"
 
-# Basic example
-modal deploy stardag_examples/modal/basic/app.py
-python stardag_examples/modal/basic/main.py
-```
+    ```bash
+    cd lib/stardag-examples
+    uv sync --extra modal
+
+    # Deploy basic example
+    stardag modal deploy stardag_examples/modal/basic/app.py
+
+    # Run
+    uv run python -m stardag_examples.modal.basic.main
+    ```
+
+=== "pip"
+
+    ```bash
+    cd lib/stardag-examples
+    pip install -e ".[modal]"
+
+    # Deploy basic example
+    stardag modal deploy stardag_examples/modal/basic/app.py
+
+    # Run
+    python -m stardag_examples.modal.basic.main
+    ```
 
 ## With Prefect Observability
 
-For production workloads, combine Modal with Prefect for observability:
+For production workloads, combine Modal with Prefect for observability.
 
-```bash
-modal deploy stardag_examples/modal/prefect/app.py
-python stardag_examples/modal/prefect/main.py
-```
+=== "uv"
+
+    ```bash
+    cd lib/stardag-examples
+    uv sync --extra modal --extra prefect --extra ml-pipeline
+
+    # Deploy
+    stardag modal deploy stardag_examples/modal/prefect/app.py
+
+    # Run
+    uv run python -m stardag_examples.modal.prefect.main
+    ```
+
+=== "pip"
+
+    ```bash
+    cd lib/stardag-examples
+    pip install -e ".[modal,prefect,ml-pipeline]"
+
+    # Deploy
+    stardag modal deploy stardag_examples/modal/prefect/app.py
+
+    # Run
+    python -m stardag_examples.modal.prefect.main
+    ```
 
 ### App Configuration
 
 ```python
+# app.py
 import modal
 import stardag.integration.modal as sd_modal
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install("stardag[modal,prefect]", "pandas", "scikit-learn")
-    .env({
-        "PREFECT_API_URL": "https://api.prefect.cloud/api/accounts/<id>/workspaces/<id>",
-        "STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/root/default",
-    })
-    .add_local_python_source("my_package")
-)
+# Define the Modal image with Stardag and dependencies
+image = sd_modal.with_stardag_on_image(
+    modal.Image.debian_slim(python_version="3.12").pip_install(
+        # Helper to pull dependencies from pyproject.toml
+        sd_modal.get_package_deps(__file__, optional=["prefect", "ml-pipeline"]),
+    )
+).add_local_python_source("stardag_examples")
 
-stardag_app = sd_modal.StardagApp(
+app = sd_modal.StardagApp(
     "my-app-with-prefect",
     builder_type="prefect",  # Enable Prefect orchestration
     builder_settings=sd_modal.FunctionSettings(
         image=image,
-        secrets=[modal.Secret.from_name("prefect-api-key")],
+        secrets=[
+            # Contains PREFECT_API_KEY and PREFECT_API_URL
+            modal.Secret.from_name("prefect-api"),
+            # Contains STARDAG_API_KEY
+            modal.Secret.from_name("stardag-api-key"),
+        ],
     ),
     worker_settings={
         "default": sd_modal.FunctionSettings(image=image, cpu=1),
@@ -177,15 +214,23 @@ stardag_app = sd_modal.StardagApp(
 Route tasks to different workers based on their requirements:
 
 ```python
+# main.py
 import stardag as sd
 
-def worker_selector(task: sd.Task) -> str:
+from stardag_examples.ml_pipeline.class_api import get_benchmark_dag
+from stardag_examples.modal.prefect.app import app
+
+
+def worker_selector(task: sd.BaseTask) -> str:
     if task.get_name() == "TrainedModel":
         return "large"  # Heavy computation
     return "default"
 
-dag = get_benchmark_dag()
-stardag_app.build_spawn(dag, worker_selector=worker_selector)
+
+if __name__ == "__main__":
+    dag = get_benchmark_dag()
+    res = app.build_spawn(dag, worker_selector=worker_selector)
+    print(res)
 ```
 
 ### View in Prefect UI
@@ -199,12 +244,11 @@ Tasks run concurrently as soon as their dependencies complete:
 Configure GPU workers for ML training:
 
 ```python
-gpu_image = (
-    modal.Image.debian_slim()
-    .pip_install("stardag[modal]", "torch")
+gpu_image = sd_modal.with_stardag_on_image(
+    modal.Image.debian_slim().pip_install("torch")
 )
 
-stardag_app = sd_modal.StardagApp(
+app = sd_modal.StardagApp(
     "gpu-training",
     builder_settings=sd_modal.FunctionSettings(image=gpu_image),
     worker_settings={
@@ -235,12 +279,12 @@ stardag_app = sd_modal.StardagApp(
 | `memory`  | Memory in MB                                |
 | `secrets` | List of Modal secrets                       |
 
-### Environment Variables
+### Helper Functions
 
-| Variable                        | Description                                           |
-| ------------------------------- | ----------------------------------------------------- |
-| `STARDAG_TARGET_ROOTS__DEFAULT` | Target root URI (e.g., `modalvol://volume-name/path`) |
-| `PREFECT_API_URL`               | Prefect API URL (for Prefect integration)             |
+| Function                                       | Description                                          |
+| ---------------------------------------------- | ---------------------------------------------------- |
+| `sd_modal.with_stardag_on_image(image)`        | Install Stardag on a Modal image                     |
+| `sd_modal.get_package_deps(path, optional=[])` | Get dependencies from pyproject.toml for pip_install |
 
 ## See Also
 

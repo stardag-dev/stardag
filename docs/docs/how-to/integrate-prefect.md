@@ -13,70 +13,137 @@ The Prefect integration provides:
 
 ## Prerequisites
 
-```bash
-pip install stardag[prefect]
-```
+=== "uv"
+
+    ```bash
+    uv add stardag[prefect]
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install stardag[prefect]
+    ```
 
 You'll also need a Prefect server or Prefect Cloud account.
 
 ## Setup
 
-### Option 1: Local Prefect Server
+=== "Local Prefect Server"
 
-Start a local Prefect server:
+    Start a local Prefect server:
 
-```bash
-prefect server start
-```
+    ```bash
+    prefect server start
+    ```
 
-Then, in a separate terminal:
+    Then, in a separate terminal:
 
-```bash
-export PREFECT_API_URL="http://127.0.0.1:4200/api"
-```
+    ```bash
+    export PREFECT_API_URL="http://127.0.0.1:4200/api"
+    ```
 
-### Option 2: Prefect Cloud
+=== "Prefect Cloud"
 
-Sign up at [prefect.io](https://www.prefect.io/) then:
+    Sign up at [prefect.io](https://www.prefect.io/) then:
 
-```bash
-prefect cloud login
-```
+    ```bash
+    prefect cloud login
+    ```
 
 ## Basic Usage
 
 Use the Prefect builder to execute your DAG with Prefect orchestration:
 
 ```python
-from stardag.integration.prefect.build import build as prefect_build
+import asyncio
+
 import stardag as sd
+from prefect import flow
+from stardag.integration.prefect.build import build as prefect_build
+
 
 @sd.task
 def fetch_data(source: str) -> list[int]:
     return [1, 2, 3, 4, 5]
 
+
 @sd.task
 def process(data: sd.Depends[list[int]]) -> int:
     return sum(data)
 
-# Build using Prefect orchestration
-task = process(data=fetch_data(source="api"))
-prefect_build(task)
+
+@flow
+async def my_flow():
+    task = process(data=fetch_data(source="api"))
+    await prefect_build(task)
+
+
+if __name__ == "__main__":
+    asyncio.run(my_flow())
 ```
 
 ## Running the Example
 
 The examples package includes a ready-to-run Prefect example:
 
-```bash
-cd lib/stardag-examples
-uv sync --extra prefect --extra ml-pipeline
-uv run python -m stardag_examples.prefect.main
-```
+=== "uv"
+
+    ```bash
+    cd lib/stardag-examples
+    uv sync --extra prefect --extra ml-pipeline
+    uv run python -m stardag_examples.prefect.main
+    ```
+
+=== "pip"
+
+    ```bash
+    cd lib/stardag-examples
+    pip install -e ".[prefect,ml-pipeline]"
+    python -m stardag_examples.prefect.main
+    ```
 
 You'll see Prefect logs in your terminal. Navigate to the Prefect UI and click "latest run" to see your DAG:
 
 ![Prefect UI showing DAG execution](https://github.com/user-attachments/assets/372c40c4-ca14-49b3-bbf6-18b758ddce5f)
+
+## Example: ML Pipeline with Prefect
+
+The actual example from the source code:
+
+```python
+import asyncio
+
+import stardag as sd
+from prefect import flow
+from stardag.integration.prefect.build import build as prefect_build
+from stardag.integration.prefect.build import create_markdown
+
+from stardag_examples.ml_pipeline.class_api import get_metrics_dag
+
+
+async def custom_callback(task):
+    """Upload artifacts to Prefect Cloud for tasks that implement the special method."""
+    if hasattr(task, "prefect_on_complete_artifacts"):
+        for artifact in task.prefect_on_complete_artifacts():
+            await artifact.create()
+
+
+@flow
+async def build_dag(task: sd.Task):
+    """A flow that builds any stardag Task."""
+    await prefect_build(
+        task,
+        before_run_callback=create_markdown,
+        on_complete_callback=custom_callback,
+    )
+
+
+if __name__ == "__main__":
+    metrics = get_metrics_dag()
+    asyncio.run(build_dag(metrics))
+    print(metrics.output().load())
+```
 
 ## Viewing in Prefect UI
 
@@ -92,41 +159,7 @@ After running with `prefect_build()`:
 
 ## Concurrent Execution
 
-Prefect automatically executes independent tasks concurrently. Tasks run as soon as their dependencies complete:
-
-```python
-@sd.task
-def step_a() -> int:
-    return 1
-
-@sd.task
-def step_b() -> int:
-    return 2
-
-@sd.task
-def combine(a: sd.Depends[int], b: sd.Depends[int]) -> int:
-    return a + b
-
-# step_a and step_b run concurrently
-# combine waits for both to complete
-result = combine(a=step_a(), b=step_b())
-prefect_build(result)
-```
-
-## Example: ML Pipeline with Prefect
-
-Combine the [ML Pipeline example](ml-pipeline-example.md) with Prefect:
-
-```python
-from stardag.integration.prefect.build import build as prefect_build
-from stardag_examples.ml_pipeline.decorator_api import get_benchmark_dag
-
-# Get the benchmark DAG (trains multiple models)
-dag = get_benchmark_dag()
-
-# Build with Prefect - models train concurrently
-prefect_build(dag)
-```
+Prefect automatically executes independent tasks concurrently. Tasks run as soon as their dependencies complete.
 
 ## Configuration
 

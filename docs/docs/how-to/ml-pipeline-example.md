@@ -20,10 +20,19 @@ The composable nature of Stardag makes it easy to:
 
 ## Prerequisites
 
-```bash
-cd lib/stardag-examples
-uv sync --extra ml-pipeline
-```
+=== "uv"
+
+    ```bash
+    cd lib/stardag-examples
+    uv sync --extra ml-pipeline
+    ```
+
+=== "pip"
+
+    ```bash
+    cd lib/stardag-examples
+    pip install -e ".[ml-pipeline]"
+    ```
 
 ## Project Structure
 
@@ -42,9 +51,17 @@ ml_pipeline/
 
 The base module implements all business logic without any DAG framework - just plain Python:
 
-```bash
-uv run python -m stardag_examples.ml_pipeline.base
-```
+=== "uv"
+
+    ```bash
+    uv run python -m stardag_examples.ml_pipeline.base
+    ```
+
+=== "pip"
+
+    ```bash
+    python -m stardag_examples.ml_pipeline.base
+    ```
 
 Output:
 
@@ -61,9 +78,17 @@ Output:
 
 Wraps the base logic into Stardag tasks using class inheritance:
 
-```bash
-uv run python -m stardag_examples.ml_pipeline.class_api
-```
+=== "uv"
+
+    ```bash
+    uv run python -m stardag_examples.ml_pipeline.class_api
+    ```
+
+=== "pip"
+
+    ```bash
+    python -m stardag_examples.ml_pipeline.class_api
+    ```
 
 This produces a full task specification showing the complete dependency graph, followed by metrics.
 
@@ -71,9 +96,17 @@ This produces a full task specification showing the complete dependency graph, f
 
 The same pipeline using the decorator syntax:
 
-```bash
-uv run python -m stardag_examples.ml_pipeline.decorator_api
-```
+=== "uv"
+
+    ```bash
+    uv run python -m stardag_examples.ml_pipeline.decorator_api
+    ```
+
+=== "pip"
+
+    ```bash
+    python -m stardag_examples.ml_pipeline.decorator_api
+    ```
 
 ## Key Concepts Demonstrated
 
