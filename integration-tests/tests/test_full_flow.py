@@ -3,9 +3,11 @@
 These tests verify complete workflows across API, SDK, and UI components.
 """
 
+import typing
 from pathlib import Path
 
 import httpx
+import pytest
 from stardag.testing import target_roots_override
 
 from stardag_integration_tests.conftest import (
@@ -600,6 +602,16 @@ class TestTaskAssetsWorkflow:
         assert assets[0]["body"]["source"] == "api_key"
 
 
+@pytest.fixture(scope="function")
+def temporary_default_target_root(
+    tmp_path: Path,
+) -> typing.Generator[Path, None, None]:
+    """Fixture to set temporary target roots for tests."""
+    target_roots = {"default": str(tmp_path)}
+    with target_roots_override(target_roots):
+        yield tmp_path
+
+
 class TestSDKBuildWorkflow:
     """Test building DAGs using the stardag SDK with the API registry.
 
@@ -615,7 +627,7 @@ class TestSDKBuildWorkflow:
         docker_services: ServiceEndpoints,
         test_workspace_id: str,
         test_environment_id: str,
-        tmp_path: Path,
+        temporary_default_target_root: Path,
     ) -> None:
         """Test building a simple DAG using the SDK.
 
@@ -635,72 +647,68 @@ class TestSDKBuildWorkflow:
         assert response.status_code == 201
         api_key = response.json()["key"]
 
-        # Use a temporary directory for task outputs
-        target_roots = {"default": str(tmp_path)}
-        with target_roots_override(target_roots):
+        @sd.task
+        def add_numbers(a: int, b: int) -> int:
+            """Add two numbers."""
+            return a + b
 
-            @sd.task
-            def add_numbers(a: int, b: int) -> int:
-                """Add two numbers."""
-                return a + b
+        @sd.task
+        def multiply_by_two(value: int) -> int:
+            """Multiply by two."""
+            return value * 2
 
-            @sd.task
-            def multiply_by_two(value: int) -> int:
-                """Multiply by two."""
-                return value * 2
+        @sd.task
+        def format_result(value: int) -> str:
+            """Format the result."""
+            return f"Result: {value}"
 
-            @sd.task
-            def format_result(value: int) -> str:
-                """Format the result."""
-                return f"Result: {value}"
+        # Create a simple DAG
+        step1 = add_numbers(a=1, b=2)  # = 3
+        step2 = multiply_by_two(value=step1)  # = 6
+        final_task = format_result(value=step2)
 
-            # Create a simple DAG
-            step1 = add_numbers(a=1, b=2)  # = 3
-            step2 = multiply_by_two(value=step1)  # = 6
-            final_task = format_result(value=step2)
+        # Create registry with API key
+        registry = APIRegistry(
+            api_url=docker_services.api,
+            api_key=api_key,
+        )
 
-            # Create registry with API key
-            registry = APIRegistry(
-                api_url=docker_services.api,
-                api_key=api_key,
-            )
+        # Build the DAG (use build_sequential to avoid event loop conflict
+        # with Playwright's async runtime)
+        try:
+            build_summary = sd.build_sequential([final_task], registry=registry)
+        finally:
+            registry.close()
 
-            # Build the DAG (use build_sequential to avoid event loop conflict
-            # with Playwright's async runtime)
-            try:
-                build_summary = sd.build_sequential([final_task], registry=registry)
-            finally:
-                registry.close()
+        # Get the build ID from the summary
+        build_id = build_summary.build_id
+        assert build_id is not None
 
-            # Get the build ID from the summary
-            build_id = build_summary.build_id
-            assert build_id is not None
+        # Verify build exists and is completed
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/builds/{build_id}",
+            headers={"X-API-Key": api_key},
+            timeout=30.0,
+        )
+        assert response.status_code == 200
+        build = response.json()
+        assert build["status"] == "completed"
 
-            # Verify build exists and is completed
-            response = httpx.get(
-                f"{docker_services.api}/api/v1/builds/{build_id}",
-                headers={"X-API-Key": api_key},
-                timeout=30.0,
-            )
-            assert response.status_code == 200
-            build = response.json()
-            assert build["status"] == "completed"
+        # Verify tasks were registered
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
+            headers={"X-API-Key": api_key},
+            timeout=30.0,
+        )
+        assert response.status_code == 200
+        tasks = response.json()
+        assert len(tasks) == 3
 
-            # Verify tasks were registered
-            response = httpx.get(
-                f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-                headers={"X-API-Key": api_key},
-                timeout=30.0,
-            )
-            assert response.status_code == 200
-            tasks = response.json()
-            assert len(tasks) == 3
-
-            # All tasks should be completed
-            task_statuses = {t["task_name"]: t["status"] for t in tasks}
-            assert task_statuses.get("add_numbers") == "completed"
-            assert task_statuses.get("multiply_by_two") == "completed"
-            assert task_statuses.get("format_result") == "completed"
+        # All tasks should be completed
+        task_statuses = {t["task_name"]: t["status"] for t in tasks}
+        assert task_statuses.get("add_numbers") == "completed"
+        assert task_statuses.get("multiply_by_two") == "completed"
+        assert task_statuses.get("format_result") == "completed"
 
     def test_sdk_build_with_diamond_dag(
         self,
@@ -708,6 +716,7 @@ class TestSDKBuildWorkflow:
         docker_services: ServiceEndpoints,
         test_workspace_id: str,
         test_environment_id: str,
+        temporary_default_target_root: Path,
     ) -> None:
         r"""Test building a diamond-shaped DAG using the SDK.
 
@@ -720,13 +729,9 @@ class TestSDKBuildWorkflow:
 
         This tests that the SDK correctly handles shared dependencies.
         """
-        import os
-        import tempfile
 
         import stardag as sd
-        from stardag.config import config_provider
         from stardag.registry import APIRegistry
-        from stardag.target import target_factory_provider
 
         # Create an API key for this test
         response = internal_authenticated_client.post(
@@ -737,106 +742,83 @@ class TestSDKBuildWorkflow:
         assert response.status_code == 201
         api_key = response.json()["key"]
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Set environment variable to configure target root
-            old_env = os.environ.get("STARDAG_TARGET_ROOTS__DEFAULT")
-            os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = tmpdir
+        @sd.task
+        def start_value(x: int) -> int:
+            """Starting value."""
+            return x
 
-            # Reset config and target factory to pick up new env var
-            config_provider.clear()
-            target_factory_provider.set(None)  # type: ignore[arg-type]
+        @sd.task
+        def left_branch(value: int) -> int:
+            """Left branch: multiply by 2."""
+            return value * 2
 
-            try:
+        @sd.task
+        def right_branch(value: int) -> int:
+            """Right branch: add 10."""
+            return value + 10
 
-                @sd.task
-                def start_value(x: int) -> int:
-                    """Starting value."""
-                    return x
+        @sd.task
+        def merge_branches(left: int, right: int) -> int:
+            """Merge: add both branches."""
+            return left + right
 
-                @sd.task
-                def left_branch(value: int) -> int:
-                    """Left branch: multiply by 2."""
-                    return value * 2
+        # Create diamond DAG
+        start = start_value(x=5)  # = 5
+        left = left_branch(value=start)  # = 10
+        right = right_branch(value=start)  # = 15
+        final_task = merge_branches(left=left, right=right)  # = 25
 
-                @sd.task
-                def right_branch(value: int) -> int:
-                    """Right branch: add 10."""
-                    return value + 10
+        # Create registry with API key
+        registry = APIRegistry(
+            api_url=docker_services.api,
+            api_key=api_key,
+        )
 
-                @sd.task
-                def merge_branches(left: int, right: int) -> int:
-                    """Merge: add both branches."""
-                    return left + right
+        # Build the DAG (use build_sequential to avoid event loop conflict
+        # with Playwright's async runtime)
+        try:
+            build_summary = sd.build_sequential([final_task], registry=registry)
+        finally:
+            registry.close()
 
-                # Create diamond DAG
-                start = start_value(x=5)  # = 5
-                left = left_branch(value=start)  # = 10
-                right = right_branch(value=start)  # = 15
-                final_task = merge_branches(left=left, right=right)  # = 25
+        # Get the build ID from the summary
+        build_id = build_summary.build_id
+        assert build_id is not None
 
-                # Create registry with API key
-                registry = APIRegistry(
-                    api_url=docker_services.api,
-                    api_key=api_key,
-                )
+        # Verify build is completed
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/builds/{build_id}",
+            headers={"X-API-Key": api_key},
+            timeout=30.0,
+        )
+        assert response.status_code == 200
+        build = response.json()
+        assert build["status"] == "completed"
 
-                # Build the DAG (use build_sequential to avoid event loop conflict
-                # with Playwright's async runtime)
-                try:
-                    build_summary = sd.build_sequential([final_task], registry=registry)
-                finally:
-                    registry.close()
+        # Verify all 4 tasks were registered
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
+            headers={"X-API-Key": api_key},
+            timeout=30.0,
+        )
+        assert response.status_code == 200
+        tasks = response.json()
+        assert len(tasks) == 4
 
-                # Get the build ID from the summary
-                build_id = build_summary.build_id
-                assert build_id is not None
+        # All tasks should be completed
+        for task in tasks:
+            assert task["status"] == "completed", f"{task['task_name']} not completed"
 
-                # Verify build is completed
-                response = httpx.get(
-                    f"{docker_services.api}/api/v1/builds/{build_id}",
-                    headers={"X-API-Key": api_key},
-                    timeout=30.0,
-                )
-                assert response.status_code == 200
-                build = response.json()
-                assert build["status"] == "completed"
+        # Verify the task graph structure
+        response = httpx.get(
+            f"{docker_services.api}/api/v1/builds/{build_id}/graph",
+            headers={"X-API-Key": api_key},
+            timeout=30.0,
+        )
+        assert response.status_code == 200
+        graph = response.json()
 
-                # Verify all 4 tasks were registered
-                response = httpx.get(
-                    f"{docker_services.api}/api/v1/builds/{build_id}/tasks",
-                    headers={"X-API-Key": api_key},
-                    timeout=30.0,
-                )
-                assert response.status_code == 200
-                tasks = response.json()
-                assert len(tasks) == 4
-
-                # All tasks should be completed
-                for task in tasks:
-                    assert task["status"] == "completed", (
-                        f"{task['task_name']} not completed"
-                    )
-
-                # Verify the task graph structure
-                response = httpx.get(
-                    f"{docker_services.api}/api/v1/builds/{build_id}/graph",
-                    headers={"X-API-Key": api_key},
-                    timeout=30.0,
-                )
-                assert response.status_code == 200
-                graph = response.json()
-
-                # Should have 4 nodes and 4 edges
-                # (start->left, start->right, left->merge, right->merge)
-                assert len(graph["nodes"]) == 4
-                assert len(graph["edges"]) == 4
-
-            finally:
-                # Restore environment
-                if old_env is not None:
-                    os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = old_env
-                else:
-                    os.environ.pop("STARDAG_TARGET_ROOTS__DEFAULT", None)
-                # Reset providers again
-                config_provider.clear()
-                target_factory_provider.set(None)  # type: ignore[arg-type]
+        # Should have 4 nodes and 4 edges
+        # (start->left, start->right, left->merge, right->merge)
+        assert len(graph["nodes"]) == 4
+        assert len(graph["edges"]) == 4
