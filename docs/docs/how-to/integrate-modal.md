@@ -16,19 +16,19 @@ Run Stardag tasks on Modal's serverless infrastructure.
 
 === "uv"
 
-    ```bash
+    ```sh
     uv add stardag[modal]
     ```
 
 === "pip"
 
-    ```bash
+    ```sh
     pip install stardag[modal]
     ```
 
 You'll also need a [Modal](https://modal.com/) account:
 
-```bash
+```sh
 modal token new
 ```
 
@@ -96,7 +96,7 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
 
 Deploy using the Stardag CLI:
 
-```bash
+```sh
 stardag modal deploy my_package/app.py
 ```
 
@@ -121,7 +121,7 @@ The examples package includes ready-to-run Modal examples:
 
 === "uv"
 
-    ```bash
+    ```sh
     cd lib/stardag-examples
     uv sync --extra modal
 
@@ -134,7 +134,7 @@ The examples package includes ready-to-run Modal examples:
 
 === "pip"
 
-    ```bash
+    ```sh
     cd lib/stardag-examples
     pip install -e ".[modal]"
 
@@ -151,7 +151,7 @@ For production workloads, combine Modal with Prefect for observability.
 
 === "uv"
 
-    ```bash
+    ```sh
     cd lib/stardag-examples
     uv sync --extra modal --extra prefect --extra ml-pipeline
 
@@ -164,7 +164,7 @@ For production workloads, combine Modal with Prefect for observability.
 
 === "pip"
 
-    ```bash
+    ```sh
     cd lib/stardag-examples
     pip install -e ".[modal,prefect,ml-pipeline]"
 

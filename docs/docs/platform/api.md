@@ -17,7 +17,7 @@ The API enables:
 
 For programmatic access (CI/CD, scripts):
 
-```bash
+```sh
 export STARDAG_API_KEY=sk_your_api_key_here
 ```
 
@@ -27,15 +27,15 @@ Generate keys from the Web UI under Workspace Settings > API Keys.
 
 For interactive use (CLI, web):
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag auth login
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag auth login
     ```
 

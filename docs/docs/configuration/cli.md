@@ -6,13 +6,13 @@ Complete reference for Stardag CLI commands.
 
 === "uv"
 
-    ```bash
+    ```sh
     uv add stardag
     ```
 
 === "pip"
 
-    ```bash
+    ```sh
     pip install stardag
     ```
 
@@ -20,15 +20,15 @@ Complete reference for Stardag CLI commands.
 
 ### Version
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag version
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag version
     ```
 
@@ -38,15 +38,15 @@ Show SDK version.
 
 ### Login
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag auth login [--registry NAME]
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag auth login [--registry NAME]
     ```
 
@@ -58,15 +58,15 @@ Opens browser for OAuth authentication.
 
 ### Status
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag auth status
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag auth status
     ```
 
@@ -74,15 +74,15 @@ Show current authentication status.
 
 ### Refresh
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag auth refresh
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag auth refresh
     ```
 
@@ -90,15 +90,15 @@ Refresh access token for current profile.
 
 ### Logout
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag auth logout
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag auth logout
     ```
 
@@ -108,15 +108,15 @@ Clear stored credentials.
 
 ### Show Configuration
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config show
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config show
     ```
 
@@ -126,57 +126,57 @@ Display current configuration and context.
 
 ### List Registries
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config registry list
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config registry list
     ```
 
 ### Add Registry
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config registry add NAME --url URL
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config registry add NAME --url URL
     ```
 
 **Example:**
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config registry add central --url https://api.stardag.com
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config registry add central --url https://api.stardag.com
     ```
 
 ### Remove Registry
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config registry remove NAME
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config registry remove NAME
     ```
 
@@ -184,23 +184,23 @@ Display current configuration and context.
 
 ### List Profiles
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile list
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile list
     ```
 
 ### Add Profile
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile add NAME \
         --registry REGISTRY \
         --user USER \
@@ -211,7 +211,7 @@ Display current configuration and context.
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile add NAME \
         --registry REGISTRY \
         --user USER \
@@ -230,9 +230,9 @@ Display current configuration and context.
 
 **Example:**
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile add prod \
         -r central \
         -u me@company.com \
@@ -243,7 +243,7 @@ Display current configuration and context.
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile add prod \
         -r central \
         -u me@company.com \
@@ -254,15 +254,15 @@ Display current configuration and context.
 
 ### Use Profile
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile use NAME
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile use NAME
     ```
 
@@ -270,15 +270,15 @@ Set the default profile (also refreshes access token).
 
 ### Remove Profile
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile remove NAME
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile remove NAME
     ```
 
@@ -286,15 +286,15 @@ Set the default profile (also refreshes access token).
 
 ### List Workspaces
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config list workspaces
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config list workspaces
     ```
 
@@ -302,15 +302,15 @@ List workspaces you have access to.
 
 ### List Environments
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config list environments
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config list environments
     ```
 
@@ -320,15 +320,15 @@ List environments in the active workspace.
 
 ### List Target Roots
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config target-roots list
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config target-roots list
     ```
 
@@ -336,15 +336,15 @@ Show cached target roots for current environment.
 
 ### Sync Target Roots
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config target-roots sync
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config target-roots sync
     ```
 
@@ -368,9 +368,9 @@ All CLI behavior can be overridden with environment variables:
 
 ### Initial Setup
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     # Add registry
     stardag config registry add local --url http://localhost:8000
 
@@ -391,7 +391,7 @@ All CLI behavior can be overridden with environment variables:
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     # Add registry
     uv run stardag config registry add local --url http://localhost:8000
 
@@ -412,9 +412,9 @@ All CLI behavior can be overridden with environment variables:
 
 ### Switch Environments
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     # Create multiple profiles
     stardag config profile add dev -r local -u me@example.com -w my-workspace -e dev
     stardag config profile add prod -r central -u me@company.com -w my-company -e prod
@@ -429,7 +429,7 @@ All CLI behavior can be overridden with environment variables:
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     # Create multiple profiles
     uv run stardag config profile add dev -r local -u me@example.com -w my-workspace -e dev
     uv run stardag config profile add prod -r central -u me@company.com -w my-company -e prod
@@ -444,7 +444,7 @@ All CLI behavior can be overridden with environment variables:
 
 ### CI/CD Setup
 
-```bash
+```sh
 # No interactive login needed - use API key
 export STARDAG_REGISTRY_URL=https://api.stardag.com
 export STARDAG_API_KEY=sk_...

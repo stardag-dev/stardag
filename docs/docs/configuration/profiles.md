@@ -6,9 +6,9 @@ Profiles define a complete context for Stardag operations: registry, user, works
 
 ### Via CLI
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     # Add a registry first
     stardag config registry add central --url https://api.stardag.com
 
@@ -25,7 +25,7 @@ Profiles define a complete context for Stardag operations: registry, user, works
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     # Add a registry first
     uv run stardag config registry add central --url https://api.stardag.com
 
@@ -80,27 +80,27 @@ profile = "local_dev"
 
 ### Set Default Profile
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile use prod
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile use prod
     ```
 
 ### Environment Variable
 
-```bash
+```sh
 export STARDAG_PROFILE=prod
 ```
 
 ### Temporary Override
 
-```bash
+```sh
 # Run single command with different profile
 STARDAG_PROFILE=dev python my_script.py
 ```
@@ -109,43 +109,43 @@ STARDAG_PROFILE=dev python my_script.py
 
 ### List Profiles
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile list
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile list
     ```
 
 ### Show Current Configuration
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config show
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config show
     ```
 
 ### Remove Profile
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config profile remove old-profile
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config profile remove old-profile
     ```
 

@@ -67,29 +67,29 @@ Workspace: my-company
 
 ### List Workspaces
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config list workspaces
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config list workspaces
     ```
 
 ### List Environments
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config list environments
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config list environments
     ```
 
@@ -114,9 +114,9 @@ Each environment has its own target root configuration:
 
 ### Synchronizing Target Roots
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     # Fetch latest from server
     stardag config target-roots sync
 
@@ -126,7 +126,7 @@ Each environment has its own target root configuration:
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     # Fetch latest from server
     uv run stardag config target-roots sync
 
@@ -146,15 +146,15 @@ Target roots are defined centrally to ensure all team members use consistent pat
 
 ## Current Context
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config show
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config show
     ```
 

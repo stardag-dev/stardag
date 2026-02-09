@@ -80,7 +80,7 @@ The core idea is that you define a set of named (the `target_root_key`) _base_ p
 
 Via environment variables:
 
-```bash
+```sh
 # The "default" root
 export STARDAG_TARGET_ROOT__DEFAULT="s3://some-bucket/prefix/"
 
@@ -90,7 +90,7 @@ export STARDAG_TARGET_ROOT__INGESTION="s3://some-other-bucket/prefix/"
 
 Or equivalently via a single JSON-encoded environment variable:
 
-```bash
+```sh
 export STARDAG_TARGET_ROOTS=\
     '{"default": "s3://some-bucket/prefix/", "ingestion": "s3://some-other-bucket/prefix/"}'
 ```

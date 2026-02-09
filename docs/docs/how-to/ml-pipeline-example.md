@@ -1,6 +1,6 @@
 # ML Pipeline Example
 
-A complete example of building an ML pipeline with Stardag.
+Example of a typical ML pipeline with Stardag.
 
 ## Overview
 
@@ -16,27 +16,56 @@ The composable nature of Stardag makes it easy to:
 - Train and evaluate models on any data subset
 - Nest the standard "fit-predict-metrics" flow into larger benchmarks
 - Run N-fold cross validation or hyperparameter search
-- Track all upstream dependencies that produced each result
+- Track upstream dependencies that produced each result
 
 ## Prerequisites
 
+Clone the repo
+
+=== "HTTPS"
+
+    Clone using the web URL.
+
+    ```sh
+    git clone https://github.com/stardag-dev/stardag.git
+    cd stardag/lib/stardag-examples
+    ```
+
+=== "SSH"
+
+    Use a password-protected SSH key.
+
+    ```sh
+    git clone git@github.com:stardag-dev/stardag.git
+    cd stardag/lib/stardag-examples
+    ```
+
+=== "GitHub CLI"
+
+    Use the GitHub official CLI. [Learn more](https://cli.github.com/)
+
+    ```sh
+    gh repo clone stardag-dev/stardag
+    cd stardag/lib/stardag-examples
+    ```
+
+And install the package (with `ml-pipeline` extra dependencies)
+
 === "uv"
 
-    ```bash
-    cd lib/stardag-examples
+    ```sh
     uv sync --extra ml-pipeline
     ```
 
 === "pip"
 
-    ```bash
-    cd lib/stardag-examples
+    ```sh
     pip install -e ".[ml-pipeline]"
     ```
 
 ## Project Structure
 
-The example provides three implementations showing different API styles:
+The example provides a vanilla Python implementation of the ML pipeline (no DAG/data workflow framework or persistent caching used) and then the wrapping of the core business logic into Stardag, using the Class and Decorator API respectively.
 
 ```
 ml_pipeline/
@@ -47,65 +76,18 @@ ml_pipeline/
 
 ## Running the Examples
 
-### Plain Python (base.py)
+Just execute any of the modules as is:
 
-The base module implements all business logic without any DAG framework - just plain Python:
+=== "Active venv"
 
-=== "uv"
-
-    ```bash
-    uv run python -m stardag_examples.ml_pipeline.base
+    ```sh
+    uv run python -m stardag_examples.ml_pipeline.base  # | class_api | decorator_api
     ```
 
-=== "pip"
+=== "uv run ..."
 
-    ```bash
-    python -m stardag_examples.ml_pipeline.base
-    ```
-
-Output:
-
-```json
-{
-  "accuracy": 0.796,
-  "precision": 0.819,
-  "recall": 0.637,
-  "f1": 0.717
-}
-```
-
-### Class API (class_api.py)
-
-Wraps the base logic into Stardag tasks using class inheritance:
-
-=== "uv"
-
-    ```bash
-    uv run python -m stardag_examples.ml_pipeline.class_api
-    ```
-
-=== "pip"
-
-    ```bash
-    python -m stardag_examples.ml_pipeline.class_api
-    ```
-
-This produces a full task specification showing the complete dependency graph, followed by metrics.
-
-### Decorator API (decorator_api.py)
-
-The same pipeline using the decorator syntax:
-
-=== "uv"
-
-    ```bash
-    uv run python -m stardag_examples.ml_pipeline.decorator_api
-    ```
-
-=== "pip"
-
-    ```bash
-    python -m stardag_examples.ml_pipeline.decorator_api
+    ```sh
+    python -m stardag_examples.ml_pipeline.base  # | class_api | decorator_api
     ```
 
 ## Key Concepts Demonstrated
@@ -122,7 +104,7 @@ The file path of any persisted result contains a hash of _all upstream dependenc
 
 Tasks can be composed into larger pipelines:
 
-```python
+```{.python notest}
 # Single experiment
 experiment = Metrics(
     predictions=Predictions(
@@ -132,68 +114,34 @@ experiment = Metrics(
 )
 
 # Benchmark across multiple models
-benchmark = [
-    experiment_for_model(model)
-    for model in [LogisticRegression(), DecisionTree(), RandomForest()]
-]
+class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
+    train_dataset: Subset
+    test_dataset: Subset
+    models: tuple[base.HyperParameters, ...]
+    seed: int = 0
+
+    def requires(self):  # type: ignore
+        return [
+            Metrics(
+                predictions=Predictions(
+                    trained_model=TrainedModel(
+                        model=model,
+                        dataset=self.train_dataset,
+                        seed=self.seed,
+                    ),
+                    dataset=self.test_dataset,
+                )
+            )
+            for model in self.models
+        ]
+    # ...
 ```
 
-### Data Filtering
+## Source Code
 
-The example includes flexible data filtering with:
-
-- Category-based filtering
-- Segment filtering
-- Random partitioning for train/test splits
-
-```python
-train_filter = DataFilter(
-    random_partition=RandomPartition(
-        num_buckets=3,
-        include_buckets=[0, 1],  # 2/3 for training
-    )
-)
-```
-
-## Example Output
-
-When running with the class API, you'll see the full task specification:
-
-```json
-{
-  "version": "0",
-  "predictions": {
-    "trained_model": {
-      "model": { "type": "LogisticRegression", "penalty": "l2" },
-      "dataset": {
-        "filter": {
-          "random_partition": {
-            "num_buckets": 3,
-            "include_buckets": [0, 1]
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-Followed by the computed metrics:
-
-```json
-{
-  "accuracy": 0.762,
-  "precision": 0.802,
-  "recall": 0.525,
-  "f1": 0.634
-}
-```
+View the full source on GitHub: [stardag-examples/ml_pipeline](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/ml_pipeline)
 
 ## Next Steps
 
 - [Integrate with Prefect](integrate-prefect.md) - Add observability to your ML pipeline
 - [Integrate with Modal](integrate-modal.md) - Run training on serverless GPUs
-
-## Source Code
-
-View the full source on GitHub: [stardag-examples/ml_pipeline](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/ml_pipeline)

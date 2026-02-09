@@ -10,7 +10,7 @@ Set up target roots for different environments and storage backends.
 
 Set target roots via environment variables:
 
-```bash
+```sh
 # Default target root (required)
 export STARDAG_TARGET_ROOT__DEFAULT=/path/to/outputs
 
@@ -23,7 +23,7 @@ export STARDAG_TARGET_ROOT__TEMP=/tmp/stardag
 
 For complex configurations:
 
-```bash
+```sh
 export STARDAG_TARGET_ROOTS='{
     "default": "/local/outputs",
     "archive": "s3://my-bucket/archive/",
@@ -35,7 +35,7 @@ export STARDAG_TARGET_ROOTS='{
 
 ### Local Development
 
-```bash
+```sh
 # ~/.bashrc or ~/.zshrc
 export STARDAG_TARGET_ROOT__DEFAULT=~/.stardag/outputs
 ```
@@ -59,13 +59,13 @@ def isolated_targets(tmp_path):
 
 ### Production (AWS S3)
 
-```bash
+```sh
 export STARDAG_TARGET_ROOT__DEFAULT=s3://my-bucket/stardag/prod/
 ```
 
 Ensure AWS credentials are configured:
 
-```bash
+```sh
 # Via environment
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
@@ -78,7 +78,7 @@ export AWS_PROFILE=production
 
 Define multiple roots for different purposes:
 
-```bash
+```sh
 export STARDAG_TARGET_ROOT__DEFAULT=s3://bucket/current/
 export STARDAG_TARGET_ROOT__ARCHIVE=s3://bucket/archive/
 export STARDAG_TARGET_ROOT__LOCAL=/local/cache/
@@ -140,13 +140,13 @@ with target_factory_provider.override(
 
 Install S3 support:
 
-```bash
+```sh
 pip install stardag[s3]
 ```
 
 ### Configuration
 
-```bash
+```sh
 export STARDAG_TARGET_ROOT__DEFAULT=s3://my-bucket/stardag/
 
 # AWS credentials (one of):
@@ -185,7 +185,7 @@ s3://my-bucket/stardag/my_task/ab/cd/abcd1234.json
 
 Ensure `STARDAG_TARGET_ROOT__DEFAULT` is set:
 
-```bash
+```sh
 echo $STARDAG_TARGET_ROOT__DEFAULT
 ```
 

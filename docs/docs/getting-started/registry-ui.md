@@ -14,7 +14,7 @@ So far we have mostly leveraged stardag to store and retrieve intermediate task 
 
     Activate the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
 
-    === "Activated venv"
+    === "Active venv"
 
         ```sh
         stardag config registry add central --url https://api.stardag.com/
@@ -32,7 +32,7 @@ So far we have mostly leveraged stardag to store and retrieve intermediate task 
 
     Then follow the steps to get your current profile setup. Then list your profiles to verify the setup.
 
-    === "Activated venv"
+    === "Active venv"
 
         ```sh
         stardag config profile list
@@ -68,27 +68,27 @@ So far we have mostly leveraged stardag to store and retrieve intermediate task 
 
     === "HTTPS"
 
-        ```
+        Clone using the web URL.
+
+        ```sh
         git clone https://github.com/stardag-dev/stardag.git
         ```
 
-        Clone using the web URL.
-
     === "SSH"
-
-        ```
-        git clone git@github.com:stardag-dev/stardag.git
-        ```
 
         Use a password-protected SSH key.
 
+        ```sh
+        git clone git@github.com:stardag-dev/stardag.git
+        ```
+
     === "GitHub CLI"
 
-        ```
+        Use the GitHub official CLI. [Learn more](https://cli.github.com/)
+
+        ```sh
         gh repo clone stardag-dev/stardag
         ```
-
-        Use the GitHub official CLI. [Learn more](https://cli.github.com/)
 
     ### Start services locally
 
@@ -105,7 +105,7 @@ So far we have mostly leveraged stardag to store and retrieve intermediate task 
 
     Activate the virtual environment where you have `stardag` installed (or prefix commands with `uv run`):
 
-    === "Activated venv"
+    === "Active venv"
 
         ```sh
         stardag config registry add local --url http://localhost:8000
@@ -123,7 +123,7 @@ So far we have mostly leveraged stardag to store and retrieve intermediate task 
 
     Then follow the steps to get your current profile setup. Then list your profiles to verify the setup.
 
-    === "Activated venv"
+    === "Active venv"
 
         ```sh
         stardag config profile list

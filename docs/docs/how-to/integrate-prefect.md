@@ -4,24 +4,25 @@ Use Prefect for orchestration, observability, and workflow management.
 
 ## Overview
 
-The Prefect integration provides:
+The Prefect integration provides (near-zero boilerplate) logic to build any Stardag DAG such that the execution gets mapped to native Prefect abstractions:
 
-- Prefect flow and task wrappers for Stardag tasks
-- Observability via Prefect UI
-- Concurrent task execution
-- Retry logic and error handling
+- Get observability via the **Prefect UI**
+- Manage concurrent task execution, retry logic and error handling via native [**Prefect Task Runners**](https://docs.prefect.io/v3/api-ref/python/prefect-task_runners#task_runners)
+- _Still leverage Stardag for Makefile-style/bottom-up execution and persistent caching_
 
 ## Prerequisites
 
+Stardag with `prefect` extra dependencies installed:
+
 === "uv"
 
-    ```bash
+    ```sh
     uv add stardag[prefect]
     ```
 
 === "pip"
 
-    ```bash
+    ```sh
     pip install stardag[prefect]
     ```
 
@@ -33,13 +34,13 @@ You'll also need a Prefect server or Prefect Cloud account.
 
     Start a local Prefect server:
 
-    ```bash
+    ```sh
     prefect server start
     ```
 
     Then, in a separate terminal:
 
-    ```bash
+    ```sh
     export PREFECT_API_URL="http://127.0.0.1:4200/api"
     ```
 
@@ -47,7 +48,7 @@ You'll also need a Prefect server or Prefect Cloud account.
 
     Sign up at [prefect.io](https://www.prefect.io/) then:
 
-    ```bash
+    ```sh
     prefect cloud login
     ```
 
@@ -83,22 +84,50 @@ if __name__ == "__main__":
     asyncio.run(my_flow())
 ```
 
-## Running the Example
+## Running the `stardag-examples` Example
 
 The examples package includes a ready-to-run Prefect example:
+Clone the repo
+
+=== "HTTPS"
+
+    Clone using the web URL.
+
+    ```sh
+    git clone https://github.com/stardag-dev/stardag.git
+    cd stardag/lib/stardag-examples
+    ```
+
+=== "SSH"
+
+    Use a password-protected SSH key.
+
+    ```sh
+    git clone git@github.com:stardag-dev/stardag.git
+    cd stardag/lib/stardag-examples
+    ```
+
+=== "GitHub CLI"
+
+    Use the GitHub official CLI. [Learn more](https://cli.github.com/)
+
+    ```sh
+    gh repo clone stardag-dev/stardag
+    cd stardag/lib/stardag-examples
+    ```
+
+And install the package (with `ml-pipeline` extra dependencies)
 
 === "uv"
 
-    ```bash
-    cd lib/stardag-examples
+    ```sh
     uv sync --extra prefect --extra ml-pipeline
     uv run python -m stardag_examples.prefect.main
     ```
 
 === "pip"
 
-    ```bash
-    cd lib/stardag-examples
+    ```sh
     pip install -e ".[prefect,ml-pipeline]"
     python -m stardag_examples.prefect.main
     ```

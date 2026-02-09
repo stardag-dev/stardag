@@ -11,13 +11,13 @@ Install the core SDK:
 
 === "uv"
 
-    ```bash
+    ```sh
     uv add stardag
     ```
 
 === "pip"
 
-    ```bash
+    ```sh
     pip install stardag
     ```
 
@@ -27,7 +27,7 @@ Stardag provides optional extras for specific integrations:
 
 === "uv"
 
-    ```bash
+    ```sh
     uv add stardag[s3,modal]
     ```
 
@@ -35,7 +35,7 @@ Stardag provides optional extras for specific integrations:
 
 === "pip"
 
-    ```bash
+    ```sh
     pip install stardag[s3,modal]
     ```
 

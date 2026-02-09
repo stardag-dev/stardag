@@ -15,7 +15,7 @@ The local Docker Compose setup uses development defaults (simple passwords, Keyc
 
 ### Start the Stack
 
-```bash
+```sh
 git clone https://github.com/stardag-dev/stardag.git
 cd stardag
 docker compose up -d
@@ -38,7 +38,7 @@ The stack automatically:
 
 ### Verify
 
-```bash
+```sh
 # Check API health
 curl http://localhost:8000/health
 
@@ -53,23 +53,23 @@ open http://localhost:8080  # admin/admin
 
 Point your SDK to the local registry:
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     stardag config registry add local --url http://localhost:8000
     stardag auth login --registry local
     ```
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     uv run stardag config registry add local --url http://localhost:8000
     uv run stardag auth login --registry local
     ```
 
 ### Stop the Stack
 
-```bash
+```sh
 docker compose down        # Stop containers
 docker compose down -v     # Stop and remove volumes (reset data)
 ```
@@ -84,7 +84,7 @@ docker compose down -v     # Stop and remove volumes (reset data)
 
 The project includes AWS CDK infrastructure:
 
-```bash
+```sh
 cd infra/aws-cdk
 npm install
 npx cdk deploy --all
