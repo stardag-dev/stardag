@@ -61,7 +61,7 @@ import asyncio
 
 import stardag as sd
 from prefect import flow
-from stardag.integration.prefect.build import build as prefect_build
+from stardag.integration.prefect import build_aio as prefect_build
 
 
 @sd.task
@@ -145,8 +145,8 @@ import asyncio
 
 import stardag as sd
 from prefect import flow
-from stardag.integration.prefect.build import build as prefect_build
-from stardag.integration.prefect.build import create_markdown
+from stardag.integration.prefect import build_aio as prefect_build
+from stardag.integration.prefect import create_markdown
 
 from stardag_examples.ml_pipeline.class_api import get_metrics_dag
 

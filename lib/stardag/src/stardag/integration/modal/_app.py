@@ -50,8 +50,8 @@ from stardag.integration.modal._config import modal_config_provider
 from stardag.registry._base import get_git_commit_hash
 
 try:
-    from stardag.integration.prefect.build import build_flow as prefect_build_flow
-    from stardag.integration.prefect.build import (
+    from stardag.integration.prefect import (
+        build_flow as prefect_build_flow,
         create_markdown,
         upload_task_on_complete_artifacts,
     )
