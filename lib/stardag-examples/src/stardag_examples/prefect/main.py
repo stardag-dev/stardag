@@ -26,7 +26,7 @@ import asyncio
 
 import stardag as sd
 from prefect import flow
-from stardag.integration.prefect import build_aio as prefect_build
+from stardag.integration.prefect import build_aio as prefect_build_aio
 from stardag.integration.prefect import create_markdown
 
 from stardag_examples.ml_pipeline.class_api import get_metrics_dag
@@ -47,7 +47,7 @@ async def build_dag(task: sd.Task):
     prefect. This means that if this flow is deployed to Prefect Cloud, the json
     representation of any task can be submitted to the flow via the UI.
     """
-    await prefect_build(
+    await prefect_build_aio(
         task,
         before_run_callback=create_markdown,
         on_complete_callback=custom_callback,

@@ -4,7 +4,7 @@ Use Prefect for orchestration, observability, and workflow management.
 
 ## Overview
 
-The Prefect integration provides (near-zero boilerplate) logic to build any Stardag DAG such that the execution gets mapped to native Prefect abstractions:
+The Prefect integration provides (near-zero boilerplate) logic to build any Stardag DAG such that the execution gets mapped to native Prefect primitives:
 
 - Get observability via the **Prefect UI**
 - Manage concurrent task execution, retry logic and error handling via native [**Prefect Task Runners**](https://docs.prefect.io/v3/api-ref/python/prefect-task_runners#task_runners)
@@ -56,12 +56,12 @@ You'll also need a Prefect server or Prefect Cloud account.
 
 Use the Prefect builder to execute your DAG with Prefect orchestration:
 
-```python
+```{.python notest}
 import asyncio
 
 import stardag as sd
 from prefect import flow
-from stardag.integration.prefect import build_aio as prefect_build
+from stardag.integration.prefect import build_aio as prefect_build_aio
 
 
 @sd.task
@@ -77,17 +77,23 @@ def process(data: sd.Depends[list[int]]) -> int:
 @flow
 async def my_flow():
     task = process(data=fetch_data(source="api"))
-    await prefect_build(task)
+    await prefect_build_aio(task)
 
 
 if __name__ == "__main__":
     asyncio.run(my_flow())
 ```
 
+The only thing needed to build your DAG using Prefect primitives is to replace `stardag.build_aio` with `stardag.integration.prefect.build_aio`.
+
+You can call `stardag.integration.prefect.build_aio` anywhere in an existing Prefect flow and mix Prefect's imperative execution with Stardag's bottom-up, persistently cached execution to your liking.
+
+A difference between `stardag.build_aio` and `stardag.integration.prefect.build_aio` is that the latter returns `dict[str, PrefectConcurrentFuture]` - a mapping from `task.id` to a Prefect future. If you set `build_aio(..., wait_for_completion=False)`, the function will return as soon as the DAG is traversed and all tasks are submitted to the native Prefect [`TaskRunner`](https://docs.prefect.io/v3/api-ref/python/prefect-task_runners#task_runners), so that you can continue submitting other Prefect tasks to the task runner conditioned on Stardag tasks having completed.
+
 ## Running the `stardag-examples` Example
 
-The examples package includes a ready-to-run Prefect example:
-Clone the repo
+The examples package includes a ready-to-run Prefect example.
+Clone the repo:
 
 === "HTTPS"
 
@@ -135,60 +141,6 @@ And install the package (with `ml-pipeline` extra dependencies)
 You'll see Prefect logs in your terminal. Navigate to the Prefect UI and click "latest run" to see your DAG:
 
 ![Prefect UI showing DAG execution](https://github.com/user-attachments/assets/372c40c4-ca14-49b3-bbf6-18b758ddce5f)
-
-## Example: ML Pipeline with Prefect
-
-The actual example from the source code:
-
-```python
-import asyncio
-
-import stardag as sd
-from prefect import flow
-from stardag.integration.prefect import build_aio as prefect_build
-from stardag.integration.prefect import create_markdown
-
-from stardag_examples.ml_pipeline.class_api import get_metrics_dag
-
-
-async def custom_callback(task):
-    """Upload artifacts to Prefect Cloud for tasks that implement the special method."""
-    if hasattr(task, "prefect_on_complete_artifacts"):
-        for artifact in task.prefect_on_complete_artifacts():
-            await artifact.create()
-
-
-@flow
-async def build_dag(task: sd.Task):
-    """A flow that builds any stardag Task."""
-    await prefect_build(
-        task,
-        before_run_callback=create_markdown,
-        on_complete_callback=custom_callback,
-    )
-
-
-if __name__ == "__main__":
-    metrics = get_metrics_dag()
-    asyncio.run(build_dag(metrics))
-    print(metrics.output().load())
-```
-
-## Viewing in Prefect UI
-
-After running with `prefect_build()`:
-
-1. Open your Prefect UI (http://localhost:4200 for local, or Prefect Cloud)
-2. Navigate to Flow Runs
-3. Click on the latest run to see:
-   - Task dependencies as a graph
-   - Task states (pending, running, completed, failed)
-   - Execution timeline
-   - Logs and artifacts
-
-## Concurrent Execution
-
-Prefect automatically executes independent tasks concurrently. Tasks run as soon as their dependencies complete.
 
 ## Configuration
 
