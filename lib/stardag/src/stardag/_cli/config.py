@@ -4,17 +4,14 @@ Manages registries, profiles, and shows current configuration.
 Configuration is stored in ~/.stardag/config.toml.
 """
 
-import httpx
 import typer
 
 from stardag._cli import registry
+from stardag._cli._helpers import get_authenticated_client, validate_active_profile_cli
 from stardag._cli.credentials import (
-    InvalidProfileError,
     add_profile,
     ensure_access_token,
-    get_access_token,
     get_config_path,
-    get_registry_url,
     list_profiles,
     list_registries,
     remove_profile,
@@ -22,7 +19,6 @@ from stardag._cli.credentials import (
     resolve_workspace_slug_to_id,
     set_default_profile,
     set_target_roots,
-    validate_active_profile,
 )
 from stardag.config import get_config
 
@@ -32,67 +28,13 @@ app = typer.Typer(help="Manage Stardag CLI configuration")
 app.add_typer(registry.app, name="registry")
 
 
-def _validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:
-    """Validate active profile and exit with error if invalid.
-
-    Wrapper around validate_active_profile() that handles CLI error output.
-    """
-    try:
-        return validate_active_profile()
-    except InvalidProfileError as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
-
-
-def _get_authenticated_client(
-    registry: str | None = None, workspace_id: str | None = None
-):
-    """Get an authenticated HTTP client.
-
-    Returns tuple of (client, api_url, access_token) or raises Exit if not authenticated.
-    """
-    # Validate active profile if we're going to use it
-    if not registry or not workspace_id:
-        _validate_active_profile_cli()
-
-    config = get_config()
-    registry_name = registry or config.context.registry_name
-    ws_id = workspace_id or config.context.workspace_id
-
-    if not registry_name:
-        typer.echo(
-            "Error: No registry configured. Set STARDAG_PROFILE or run 'stardag auth login'.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    api_url = get_registry_url(registry_name)
-    if not api_url:
-        typer.echo(f"Error: Registry '{registry_name}' not found.", err=True)
-        raise typer.Exit(1)
-
-    # Get access token from cache
-    access_token = get_access_token(registry_name, ws_id)
-    if not access_token:
-        typer.echo(
-            "Error: No access token. Run 'stardag auth refresh' or 'stardag auth login'.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-    client = httpx.Client(timeout=10.0, headers=headers)
-
-    return client, api_url, access_token
-
-
 # --- Main config commands ---
 
 
 @app.command("show")
 def show_config() -> None:
     """Show current configuration and active context."""
-    _validate_active_profile_cli()
+    validate_active_profile_cli()
     config = get_config()
 
     typer.echo("Configuration:")
@@ -224,7 +166,7 @@ def profile_add(
 def profile_list() -> None:
     """List all configured profiles."""
     profiles = list_profiles()
-    active_profile, active_source = _validate_active_profile_cli()
+    active_profile, active_source = validate_active_profile_cli()
 
     if not profiles:
         typer.echo("No profiles configured.")
@@ -336,7 +278,7 @@ app.add_typer(target_roots_app, name="target-roots")
 @target_roots_app.command("list")
 def target_roots_list() -> None:
     """List cached target roots for the active context."""
-    _validate_active_profile_cli()
+    validate_active_profile_cli()
     config = get_config()
     target_roots = config.target.roots
 
@@ -358,7 +300,7 @@ def target_roots_sync() -> None:
     Fetches the latest target roots configuration from the central API
     for the active environment.
     """
-    _validate_active_profile_cli()
+    validate_active_profile_cli()
     config = get_config()
     workspace_id = config.context.workspace_id
     environment_id = config.context.environment_id
@@ -377,7 +319,7 @@ def target_roots_sync() -> None:
         )
         raise typer.Exit(1)
 
-    client, api_url, _ = _get_authenticated_client()
+    client, api_url, _ = get_authenticated_client()
 
     try:
         typer.echo(f"Syncing target roots from {api_url}...")
@@ -427,7 +369,7 @@ app.add_typer(list_app, name="list")
 @list_app.command("workspaces")
 def list_workspaces() -> None:
     """List workspaces you have access to."""
-    client, api_url, _ = _get_authenticated_client()
+    client, api_url, _ = get_authenticated_client()
 
     try:
         response = client.get(f"{api_url}/api/v1/ui/me")
@@ -478,7 +420,7 @@ def list_environments() -> None:
         )
         raise typer.Exit(1)
 
-    client, api_url, _ = _get_authenticated_client()
+    client, api_url, _ = get_authenticated_client()
 
     try:
         response = client.get(
