@@ -32,7 +32,7 @@ An **environment** is a logical grouping within a workspace that provides:
 
 ```
 Workspace: my-company
-└── Environment: main (or prod)
+├── Environment: main (or prod)
 ├── Environment: dev
 └── Environment: staging
 ```
@@ -47,7 +47,7 @@ Workspace: my-company
 Workspace: my-company
 ├── Environment: ml-pipeline_main
 ├── Environment: ml-pipeline_dev
-└── Environment: analytics-dashboard_main
+├── Environment: analytics-dashboard_main
 └── Environment: analytics-dashboard_dev
 ```
 

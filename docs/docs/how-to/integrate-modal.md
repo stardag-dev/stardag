@@ -8,9 +8,128 @@ Run Stardag tasks on Modal's serverless infrastructure.
 
 - Serverless execution of tasks
 - Automatic scaling
-- GPU support
-- Custom container environments
-- Multiple worker types for different workloads
+- Flexible routing of individual tasks to appropriate compute resources, including GPU access
+
+## Prerequisites
+
+### Modal Account
+
+- [Sign up](https://modal.com/apps) for a [Modal](https://modal.com/) account.
+- Optionally create a new dedicated [Modal environment](https://modal.com/docs/guide/environments), or stick with the default `main` environment.
+
+### Stardag Registry Environment (Optional)
+
+You are recommended to get set up to use the Stardag Registry. Sign up at `app.stardag.com` or follow [the setup guide](../getting-started/registry-ui.md#get-setup) for running it locally or self hosted.
+
+You can also run Stardag on Modal, completely without the Registry.
+
+=== "With Registry"
+
+    **Create a new envrionment**
+
+    WIP
+
+=== "Without Registry"
+
+    You're all set. Just skip using a Stardag API-key in the examples.
+
+## Minimal Example from Scratch
+
+We are going to create a new minimal standalone python project with the folowing structure:
+
+```
+stardag-modal/
+├── stardag_modal/
+|   ├── __init__.py
+|   └── main.py
+└── pyproject.toml
+```
+
+Create the new project (with `uv` for build system)
+
+```sh
+mkdir stardag-modal
+cd stardag-modal
+cat > pyproject.toml << 'EOF'
+[project]
+name = "stardag_modal"
+version = "0.0.1"
+requires-python = ">=3.10"
+dependencies = ["stardag[modal]", "modal"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+EOF
+mkdir stardag_modal
+touch stardag_modal/__init__.py
+touch stardag_modal/main.py
+```
+
+And install it:
+
+```sh
+uv sync
+```
+
+Now in `stardag_modal/main.py` let's define some minimal tasks that we can compose into a DAG:
+
+```{.python notest}
+# stardag_modal/main.py
+import modal
+import stardag as sd
+import stardag.integration.modal as sd_modal
+
+
+@sd.task(name="Range")
+def get_range(limit: int) -> list[int]:
+    return list(range(limit))
+
+
+@sd.task(name="Sum")
+def get_sum(integers: sd.Depends[list[int]]) -> int:
+    return sum(integers)
+
+```
+
+Then let's define the modal image we will be using:
+
+```{.python notest}
+# stardag_modal/main.py continued...
+
+# Define the Modal image
+image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .uv_sync()
+    .add_local_python_source("stardag_modal")
+)
+
+# Define the StardagApp
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(
+        image=image,
+        secrets=[
+            # required for communication with registry
+            modal.Secret.from_name("stardag-api-key"),
+        ],
+    ),
+    worker_settings={
+        "default": sd_modal.FunctionSettings(image=image),
+    },
+)
+```
+
+And finally a main section for building the DAG on modal:
+
+```{.python notest}
+# stardag_modal/main.py continued...
+
+if __name__ == "__main__":
+    dag = get_sum(integers=get_range(limit=21))
+    res = app.build_spawn(dag)
+    print(res)
+```
 
 ## Prerequisites
 
@@ -26,11 +145,19 @@ Run Stardag tasks on Modal's serverless infrastructure.
     pip install stardag[modal]
     ```
 
-You'll also need a [Modal](https://modal.com/) account:
+You'll also need a [Modal](https://modal.com/) account. [Sign up](https://modal.com/apps) and authenticate you local workstation:
 
-```sh
-modal token new
-```
+=== "Active venv"
+
+    ```sh
+    modal token new
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run modal token new
+    ```
 
 ## Project Structure
 

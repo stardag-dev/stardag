@@ -140,7 +140,11 @@ And install the package (with `ml-pipeline` extra dependencies)
 
 You'll see Prefect logs in your terminal. Navigate to the Prefect UI and click "latest run" to see your DAG:
 
-![Prefect UI showing DAG execution](https://github.com/user-attachments/assets/372c40c4-ca14-49b3-bbf6-18b758ddce5f)
+![Prefect UI showing DAG execution](https://github.com/user-attachments/assets/3bc3f6af-503c-4eb0-bad9-61ad25c747c0)
+
+Click the artifacts to get more details about the task:
+
+![Task details](https://github.com/user-attachments/assets/3e761707-3d4f-442f-8685-70ce4e5bda63)
 
 ## Configuration
 
