@@ -27,6 +27,14 @@ image = sd_modal.with_stardag_on_image(
     modal.Image.debian_slim(python_version="3.12")
 ).add_local_python_source("stardag_examples")
 
+# TODO change to installing from PyPI once updated
+# Define the Modal image
+# image = (
+#     modal.Image.debian_slim(python_version="3.12")
+#     .uv_sync()
+#     .add_local_python_source("stardag_examples")
+# )
+
 # Define the StardagApp
 app = sd_modal.StardagApp(
     "stardag_examples-basic",
