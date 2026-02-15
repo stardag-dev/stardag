@@ -10,20 +10,20 @@ Set up target roots for different environments and storage backends.
 
 Set target roots via environment variables:
 
-```bash
+```sh
 # Default target root (required)
-export STARDAG_TARGET_ROOT__DEFAULT=/path/to/outputs
+export STARDAG_TARGET_ROOTS__DEFAULT=/path/to/outputs
 
 # Additional named roots
-export STARDAG_TARGET_ROOT__ARCHIVE=/path/to/archive
-export STARDAG_TARGET_ROOT__TEMP=/tmp/stardag
+export STARDAG_TARGET_ROOTS__ARCHIVE=/path/to/archive
+export STARDAG_TARGET_ROOTS__TEMP=/tmp/stardag
 ```
 
 ### JSON Format
 
 For complex configurations:
 
-```bash
+```sh
 export STARDAG_TARGET_ROOTS='{
     "default": "/local/outputs",
     "archive": "s3://my-bucket/archive/",
@@ -35,9 +35,9 @@ export STARDAG_TARGET_ROOTS='{
 
 ### Local Development
 
-```bash
+```sh
 # ~/.bashrc or ~/.zshrc
-export STARDAG_TARGET_ROOT__DEFAULT=~/.stardag/outputs
+export STARDAG_TARGET_ROOTS__DEFAULT=~/.stardag/outputs
 ```
 
 ### Testing
@@ -53,19 +53,19 @@ import os
 @pytest.fixture(autouse=True)
 def isolated_targets(tmp_path):
     """Use isolated target root for each test."""
-    os.environ["STARDAG_TARGET_ROOT__DEFAULT"] = str(tmp_path)
+    os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = str(tmp_path)
     yield
 ```
 
 ### Production (AWS S3)
 
-```bash
-export STARDAG_TARGET_ROOT__DEFAULT=s3://my-bucket/stardag/prod/
+```sh
+export STARDAG_TARGET_ROOTS__DEFAULT=s3://my-bucket/stardag/prod/
 ```
 
 Ensure AWS credentials are configured:
 
-```bash
+```sh
 # Via environment
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
@@ -78,10 +78,10 @@ export AWS_PROFILE=production
 
 Define multiple roots for different purposes:
 
-```bash
-export STARDAG_TARGET_ROOT__DEFAULT=s3://bucket/current/
-export STARDAG_TARGET_ROOT__ARCHIVE=s3://bucket/archive/
-export STARDAG_TARGET_ROOT__LOCAL=/local/cache/
+```sh
+export STARDAG_TARGET_ROOTS__DEFAULT=s3://bucket/current/
+export STARDAG_TARGET_ROOTS__ARCHIVE=s3://bucket/archive/
+export STARDAG_TARGET_ROOTS__LOCAL=/local/cache/
 ```
 
 Select a root in your task:
@@ -140,14 +140,14 @@ with target_factory_provider.override(
 
 Install S3 support:
 
-```bash
+```sh
 pip install stardag[s3]
 ```
 
 ### Configuration
 
-```bash
-export STARDAG_TARGET_ROOT__DEFAULT=s3://my-bucket/stardag/
+```sh
+export STARDAG_TARGET_ROOTS__DEFAULT=s3://my-bucket/stardag/
 
 # AWS credentials (one of):
 export AWS_ACCESS_KEY_ID=...
@@ -183,10 +183,10 @@ s3://my-bucket/stardag/my_task/ab/cd/abcd1234.json
 
 ### "Target root not configured"
 
-Ensure `STARDAG_TARGET_ROOT__DEFAULT` is set:
+Ensure `STARDAG_TARGET_ROOTS__DEFAULT` is set:
 
-```bash
-echo $STARDAG_TARGET_ROOT__DEFAULT
+```sh
+echo $STARDAG_TARGET_ROOTS__DEFAULT
 ```
 
 ### "Permission denied"

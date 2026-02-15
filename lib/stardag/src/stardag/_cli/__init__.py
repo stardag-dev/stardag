@@ -19,6 +19,17 @@ Usage:
     stardag config list workspaces
     stardag config list environments
 
+    stardag env list
+    stardag env create <name> [--slug <slug>] [--target-root name=uri ...]
+    stardag env delete <slug-or-id> [--force]
+    stardag env target-roots list [--env <env>]
+    stardag env target-roots add <name> <uri> [--env <env>]
+    stardag env target-roots remove <name> [--env <env>]
+    stardag env target-roots set <name=uri ...> [--json <json>] [--env <env>]
+
+    stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
+    stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
+
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.
     Set STARDAG_REGISTRY_URL, STARDAG_WORKSPACE_ID, STARDAG_ENVIRONMENT_ID
@@ -28,7 +39,7 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, config
+from stardag._cli import auth, config, env
 
 # Main CLI app
 app = typer.Typer(
@@ -40,6 +51,15 @@ app = typer.Typer(
 # Add subcommands
 app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
+app.add_typer(env.app, name="env")
+
+# Add modal subcommand only if modal is installed
+try:
+    from stardag._cli import modal
+
+    app.add_typer(modal.app, name="modal")
+except ImportError:
+    pass
 
 
 @app.command()

@@ -31,30 +31,30 @@ Settings are resolved in priority order (highest to lowest):
 
 ### Local Development
 
-```bash
+```sh
 # Set target root for local outputs
-export STARDAG_TARGET_ROOT__DEFAULT=~/.stardag/outputs
+export STARDAG_TARGET_ROOTS__DEFAULT=~/.stardag/outputs
 ```
 
 ### With API Service
 
 === "uv"
 
-    ```bash
+    ```sh
     uv add stardag
     ```
 
 === "pip"
 
-    ```bash
+    ```sh
     pip install stardag
     ```
 
 Then configure:
 
-=== "Activated venv"
+=== "Active venv"
 
-    ```bash
+    ```sh
     # Add registry and login
     stardag config registry add local --url http://localhost:8000
     stardag auth login --registry local
@@ -70,7 +70,7 @@ Then configure:
 
 === "uv run ..."
 
-    ```bash
+    ```sh
     # Add registry and login
     uv run stardag config registry add local --url http://localhost:8000
     uv run stardag auth login --registry local
@@ -86,7 +86,7 @@ Then configure:
 
 ### Production (CI/CD)
 
-```bash
+```sh
 export STARDAG_REGISTRY_URL=https://api.stardag.com
 export STARDAG_API_KEY=sk_...
 export STARDAG_WORKSPACE_ID=...

@@ -350,12 +350,8 @@ def init_registry() -> RegistryABC:
 
     config = config_provider.get()
 
-    # Use API registry if we have authentication or explicit API URL set
-    if (
-        config.api_key
-        or config.access_token
-        or config.api.url != "http://localhost:8000"
-    ):
+    # Use API registry if we have authentication or an explicit API URL
+    if config.api_key or config.access_token or config.api.url is not None:
         return APIRegistry()
 
     return NoOpRegistry()

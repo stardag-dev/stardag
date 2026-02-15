@@ -3,12 +3,18 @@
 This module provides functions to build stardag tasks using Prefect for
 orchestration. Prefect handles scheduling and dependency management via
 its task submission system.
+
+TODO: Further interface alignment with stardag.build:
+    - Return BuildSummary alongside/instead of futures dict
+    - Add max_concurrent_discover parameter for DAG discovery optimization
+    - Consider global_lock_manager/global_lock_config support (complex - Prefect
+      has its own concurrency primitives via work pools and concurrency limits)
 """
 
 import asyncio
 import logging
 import typing
-from typing import Generator
+from typing import Generator, Sequence
 from uuid import UUID
 
 from prefect import flow
@@ -26,8 +32,8 @@ from stardag._core.task import (
     _has_custom_run_aio,
     flatten_task_struct,
 )
-from stardag.build import TaskExecutorABC
-from stardag.integration.prefect.utils import format_key
+from stardag.build import FailMode, TaskExecutorABC
+from stardag.integration.prefect._utils import format_key
 from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,7 @@ class _PrefectTaskRunWrapper:
             Useful for creating Prefect artifacts or custom logging.
         on_complete_callback: Async callback invoked after each task completes
             successfully. Useful for uploading artifacts to Prefect Cloud.
+        fail_mode: How to handle task failures (FAIL_FAST or FAIL_ALL_COMPLETED).
 
     Example with Modal remote execution:
         from stardag.integration.modal import ModalTaskExecutor
@@ -80,12 +87,14 @@ class _PrefectTaskRunWrapper:
         registry: RegistryABC | None = None,
         before_run_callback: AsyncRunCallback | None = None,
         on_complete_callback: AsyncRunCallback | None = None,
+        fail_mode: FailMode = FailMode.FAIL_FAST,
     ):
         self.build_id = build_id
         self.task_executor = task_executor
         self.registry = registry or registry_provider.get()
         self.before_run_callback = before_run_callback
         self.on_complete_callback = on_complete_callback
+        self.fail_mode = fail_mode
 
     async def _execute_locally(
         self, task: BaseTask
@@ -151,6 +160,10 @@ class _PrefectTaskRunWrapper:
 
         except Exception as e:
             await self.registry.task_fail_aio(self.build_id, task, str(e))
+            if self.fail_mode == FailMode.FAIL_FAST:
+                raise
+            # For FAIL_ALL_COMPLETED, we still need to re-raise to mark task as failed
+            # in Prefect, but the build will continue with other tasks
             raise
 
 
@@ -162,24 +175,26 @@ async def build_flow(task: BaseTask, **kwargs):
     prefect. This means that if this flow is deployed to Prefect Cloud, the json
     representation of any task can be submitted to the flow via the UI.
     """
-    return await build(task, **kwargs)
+    return await build_aio(task, **kwargs)
 
 
-async def build(
-    task: BaseTask,
+async def build_aio(
+    tasks: Sequence[BaseTask] | BaseTask,
     *,
     task_executor: TaskExecutorABC | None = None,
+    fail_mode: FailMode = FailMode.FAIL_FAST,
     before_run_callback: AsyncRunCallback | None = None,
     on_complete_callback: AsyncRunCallback | None = None,
     wait_for_completion: bool = True,
     registry: RegistryABC | None = None,
     resume_build_id: UUID | None = None,
 ) -> dict[str, PrefectConcurrentFuture]:
-    """Build a stardag task DAG using Prefect for orchestration.
+    """Build stardag task DAG(s) using Prefect for orchestration.
 
     Args:
-        task: The root task to build
+        tasks: Root task(s) to build. Can be a single task or a sequence of tasks.
         task_executor: Optional TaskExecutorABC for custom task execution (e.g., Modal)
+        fail_mode: How to handle task failures (FAIL_FAST or FAIL_ALL_COMPLETED)
         before_run_callback: Called before each task runs
         on_complete_callback: Called after each task completes
         wait_for_completion: Whether to wait for all tasks to complete
@@ -190,6 +205,17 @@ async def build(
     Returns:
         Dict mapping task IDs to Prefect futures
     """
+    # Normalize input to list
+    if isinstance(tasks, BaseTask):
+        task_list = [tasks]
+    else:
+        task_list = list(tasks)
+        for idx, task in enumerate(task_list):
+            if not isinstance(task, BaseTask):
+                raise ValueError(
+                    f"Invalid task at index {idx}: {task} (must be BaseTask)"
+                )
+
     if registry is None:
         registry = registry_provider.get()
 
@@ -197,7 +223,7 @@ async def build(
     if resume_build_id is not None:
         build_id = resume_build_id
     else:
-        build_id = await registry.build_start_aio(root_tasks=[task])
+        build_id = await registry.build_start_aio(root_tasks=task_list)
 
     run_wrapper = _PrefectTaskRunWrapper(
         build_id=build_id,
@@ -205,6 +231,7 @@ async def build(
         registry=registry,
         before_run_callback=before_run_callback,
         on_complete_callback=on_complete_callback,
+        fail_mode=fail_mode,
     )
 
     task_id_to_future: dict[UUID, PrefectConcurrentFuture | None] = {}
@@ -213,46 +240,48 @@ async def build(
         UUID, tuple[list[BaseTask], PrefectConcurrentFuture]
     ] = {}
 
-    res = await build_dag_recursive(
-        task,
-        run_wrapper=run_wrapper,
-        task_id_to_future=task_id_to_future,
-        task_id_to_dynamic_future=task_id_to_dynamic_future,
-        task_id_to_dynamic_deps=task_id_to_dynamic_deps,
-        visited=set(),
-    )
-
-    while res is None:
-        # Get next completed dynamic task
-        task_id, dynamic_future = await next(
-            asyncio.as_completed(
-                [
-                    _completed_prefect_future(task_id, prefect_future)
-                    for task_id, prefect_future in task_id_to_dynamic_future.items()
-                ]
-            )
-        )
-        del task_id_to_dynamic_future[task_id]  # important to avoid infinite loop
-        result = dynamic_future.result()
-        task_id, dynamic_deps = result
-        if dynamic_deps is None:
-            # task completed
-            task_id_to_future[task_id] = dynamic_future
-        else:
-            prev_dynamic_deps, _ = task_id_to_dynamic_deps.get(task_id, ([], None))
-            task_id_to_dynamic_deps[task_id] = (
-                prev_dynamic_deps + dynamic_deps,
-                dynamic_future,
-            )
-
-        res = await build_dag_recursive(
-            task,
+    # Build all root tasks
+    for root_task in task_list:
+        res = await _build_dag_recursive(
+            root_task,
             run_wrapper=run_wrapper,
             task_id_to_future=task_id_to_future,
             task_id_to_dynamic_future=task_id_to_dynamic_future,
             task_id_to_dynamic_deps=task_id_to_dynamic_deps,
             visited=set(),
         )
+
+        while res is None:
+            # Get next completed dynamic task
+            task_id, dynamic_future = await next(
+                asyncio.as_completed(
+                    [
+                        _completed_prefect_future(task_id, prefect_future)
+                        for task_id, prefect_future in task_id_to_dynamic_future.items()
+                    ]
+                )
+            )
+            del task_id_to_dynamic_future[task_id]  # important to avoid infinite loop
+            result = dynamic_future.result()
+            task_id, dynamic_deps = result
+            if dynamic_deps is None:
+                # task completed
+                task_id_to_future[task_id] = dynamic_future
+            else:
+                prev_dynamic_deps, _ = task_id_to_dynamic_deps.get(task_id, ([], None))
+                task_id_to_dynamic_deps[task_id] = (
+                    prev_dynamic_deps + dynamic_deps,
+                    dynamic_future,
+                )
+
+            res = await _build_dag_recursive(
+                root_task,
+                run_wrapper=run_wrapper,
+                task_id_to_future=task_id_to_future,
+                task_id_to_dynamic_future=task_id_to_dynamic_future,
+                task_id_to_dynamic_deps=task_id_to_dynamic_deps,
+                visited=set(),
+            )
 
     if wait_for_completion:
         for future in task_id_to_future.values():
@@ -265,7 +294,63 @@ async def build(
     return task_id_to_future  # type: ignore
 
 
-async def build_dag_recursive(
+def build(
+    tasks: Sequence[BaseTask] | BaseTask,
+    *,
+    task_executor: TaskExecutorABC | None = None,
+    fail_mode: FailMode = FailMode.FAIL_FAST,
+    before_run_callback: AsyncRunCallback | None = None,
+    on_complete_callback: AsyncRunCallback | None = None,
+    wait_for_completion: bool = True,
+    registry: RegistryABC | None = None,
+    resume_build_id: UUID | None = None,
+) -> dict[str, PrefectConcurrentFuture]:
+    """Build stardag task DAG(s) using Prefect (sync wrapper for build_aio).
+
+    This is the recommended entry point for building tasks from synchronous code.
+    Wraps the async build_aio() function.
+
+    Note:
+        This function cannot be called from within an already running event loop.
+        If you're in an async context (e.g., inside an async function, or using
+        frameworks like Playwright, FastAPI, etc.), use `await build_aio()` instead.
+
+    Args:
+        tasks: Root task(s) to build. Can be a single task or a sequence of tasks.
+        task_executor: Optional TaskExecutorABC for custom task execution (e.g., Modal)
+        fail_mode: How to handle task failures (FAIL_FAST or FAIL_ALL_COMPLETED)
+        before_run_callback: Called before each task runs
+        on_complete_callback: Called after each task completes
+        wait_for_completion: Whether to wait for all tasks to complete
+        registry: Registry for tracking task execution
+        resume_build_id: Optional build ID to resume.
+
+    Returns:
+        Dict mapping task IDs to Prefect futures
+    """
+    try:
+        return asyncio.run(
+            build_aio(
+                tasks,
+                task_executor=task_executor,
+                fail_mode=fail_mode,
+                before_run_callback=before_run_callback,
+                on_complete_callback=on_complete_callback,
+                wait_for_completion=wait_for_completion,
+                registry=registry,
+                resume_build_id=resume_build_id,
+            )
+        )
+    except RuntimeError as e:
+        if "cannot be called from a running event loop" in str(e):
+            raise RuntimeError(
+                "build() cannot be used from within an already running event loop. "
+                "Use 'await build_aio()' instead."
+            ) from e
+        raise
+
+
+async def _build_dag_recursive(
     task: BaseTask,
     *,
     run_wrapper: _PrefectTaskRunWrapper,
@@ -297,7 +382,7 @@ async def build_dag_recursive(
     dynamic_deps, prev_dynamic_future = task_id_to_dynamic_deps.get(task.id, ([], None))
     upstream_tasks = flatten_task_struct(task.requires()) + dynamic_deps
     upstream_build_results = [
-        await build_dag_recursive(
+        await _build_dag_recursive(
             dep,
             run_wrapper=run_wrapper,
             task_id_to_future=task_id_to_future,
@@ -413,3 +498,13 @@ async def upload_task_on_complete_artifacts(task: BaseTask):
     if hasattr(task, "prefect_on_complete_artifacts"):
         for artifact in task.prefect_on_complete_artifacts():  # type: ignore[attr-defined]
             await artifact.create()
+
+
+__all__ = [
+    "AsyncRunCallback",
+    "build",
+    "build_aio",
+    "build_flow",
+    "create_markdown",
+    "upload_task_on_complete_artifacts",
+]

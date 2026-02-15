@@ -2,17 +2,11 @@
 
 Practical guides for common tasks and integrations.
 
-<!-- ## Task Definition
+## Examples
 
-- **[Define Tasks](define-tasks.md)** - Three ways to define tasks
-
-## Configuration
-
-- **[Configure Storage](configure-storage.md)** - Set up target roots for different environments -->
+- **[ML Pipeline Example](ml-pipeline-example.md)** - Complete walkthrough of an ML pipeline
 
 ## Integrations
-
-<!-- - **[Use the API Registry](use-api-registry.md)** - Track builds with the Stardag API -->
 
 - **[Integrate with Prefect](integrate-prefect.md)** - Orchestration and observability
 - **[Integrate with Modal](integrate-modal.md)** - Serverless execution
@@ -20,9 +14,3 @@ Practical guides for common tasks and integrations.
 ## Prerequisites
 
 These guides assume you've completed the [Getting Started](../getting-started/index.md) section.
-
----
-
-!!! info "🚧 **Work in progress** 🚧"
-
-    This documentation is still taking shape. It should soon provide more guides for how to best approach typical use cases with Stardag.

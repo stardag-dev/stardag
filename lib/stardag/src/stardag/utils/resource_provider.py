@@ -10,18 +10,23 @@ logger = logging.getLogger(__name__)
 
 _ResourceType = TypeVar("_ResourceType")
 
+_ResourceUnset = object()  # Sentinel for unset resource, distinct from None
+
 
 class ResourceProvider(Generic[_ResourceType]):
     def __init__(self):
-        self._resource: _ResourceType | None = None
+        self._resource: _ResourceType = _ResourceUnset  # type: ignore
 
     def get(self) -> _ResourceType:
-        if self._resource is None:
+        if self._resource is _ResourceUnset:
             self._resource = self.default_factory()
         return self._resource
 
     def set(self, resource: _ResourceType):
         self._resource = resource
+
+    def clear(self):
+        self._resource = _ResourceUnset  # type: ignore
 
     def default_factory(self, **kwargs) -> _ResourceType:
         """Needs to be implemented by subclasses.

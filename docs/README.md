@@ -13,7 +13,7 @@ cd docs
 uv sync
 
 # Start development server (live reload)
-uv run mkdocs serve
+uv run mkdocs serve --livereload
 # Open http://localhost:8000
 
 # Build static site
@@ -130,24 +130,7 @@ Deployment is configured via `.github/workflows/docs.yml`.
 2. Select "Deploy Documentation"
 3. Click "Run workflow"
 
-### Custom Domain (Future)
-
-To use `docs.stardag.com`:
-
-1. Add CNAME record: `docs.stardag.com` → `stardag-dev.github.io`
-2. Create `docs/docs/CNAME` with content: `docs.stardag.com`
-3. Update `site_url` in `mkdocs.yml`
-4. Enable "Enforce HTTPS" in GitHub Pages settings
-
 ## Content Guidelines
-
-### TODOs
-
-Use HTML comments for TODOs that need verification:
-
-```markdown
-<!-- TODO: Verify this behavior with maintainer -->
-```
 
 ### Code Examples
 

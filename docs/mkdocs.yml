@@ -158,9 +158,7 @@ nav:
       - Build & Execution: concepts/build-execution.md
   - How-To Guides:
       - how-to/index.md
-      # - Define Tasks: how-to/define-tasks.md
-      # - Configure Storage: how-to/configure-storage.md
-      # - Use the API Registry: how-to/use-api-registry.md
+      - ML Pipeline Example: how-to/ml-pipeline-example.md
       - Integrate with Prefect: how-to/integrate-prefect.md
       - Integrate with Modal: how-to/integrate-modal.md
   - Configuration:

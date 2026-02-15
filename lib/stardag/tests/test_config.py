@@ -4,16 +4,15 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import ValidationError
+
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
-    DEFAULT_API_URL,
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
-    ConfigProvider,
     ContextConfig,
     ProfileConfig,
     RegistryConfig,
-    StardagConfig,
     TomlConfig,
     clear_config_cache,
     find_project_config,
@@ -136,7 +135,7 @@ class TestLoadConfig:
         config = load_config(use_project_config=False)
 
         assert config.target.roots == {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
-        assert config.api.url == DEFAULT_API_URL
+        assert config.api.url is None
         assert config.api.timeout == DEFAULT_API_TIMEOUT
         assert config.context.profile is None
         assert config.context.registry_name is None
@@ -321,45 +320,6 @@ class TestContextConfig:
         assert ctx.environment_id == "env-456"
 
 
-class TestConfigProvider:
-    def test_get_returns_loaded_config(self, temp_stardag_dir, monkeypatch):
-        monkeypatch.chdir(temp_stardag_dir.parent)
-
-        provider = ConfigProvider()
-        config = provider.get()
-
-        assert isinstance(config, StardagConfig)
-
-    def test_set_overrides_config(self):
-        from stardag.config import APIConfig
-
-        provider = ConfigProvider()
-        custom_config = StardagConfig(
-            api=APIConfig(url="http://custom:1234", timeout=99.0)
-        )
-
-        provider.set(custom_config)
-
-        assert provider.get().api.url == "http://custom:1234"
-        assert provider.get().api.timeout == 99.0
-
-    def test_reset_clears_override(self, temp_stardag_dir, monkeypatch):
-        from stardag.config import APIConfig
-
-        monkeypatch.chdir(temp_stardag_dir.parent)
-
-        provider = ConfigProvider()
-        custom_config = StardagConfig(
-            api=APIConfig(url="http://custom:1234", timeout=99.0)
-        )
-
-        provider.set(custom_config)
-        assert provider.get().api.url == "http://custom:1234"
-
-        provider.reset()
-        assert provider.get().api.url == DEFAULT_API_URL
-
-
 class TestGetConfig:
     def test_caches_result(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -383,9 +343,9 @@ class TestGetConfig:
 
 
 class TestRegistryConfig:
-    def test_default_url(self):
-        config = RegistryConfig()
-        assert config.url == DEFAULT_API_URL
+    def test_url_is_required(self):
+        with pytest.raises(ValidationError):
+            RegistryConfig()  # type: ignore[call-arg]
 
     def test_custom_url(self):
         config = RegistryConfig(url="https://api.stardag.com")

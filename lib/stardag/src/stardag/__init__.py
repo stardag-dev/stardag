@@ -50,6 +50,7 @@ from stardag._core.task import (
 from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.build import build, build_aio, build_sequential, build_sequential_aio
+from stardag.config import config_provider
 from stardag.exceptions import (
     APIError,
     AuthenticationError,
@@ -89,6 +90,7 @@ __all__ = [
     "build_aio",
     "build_sequential",
     "build_sequential_aio",
+    "config_provider",
     "Depends",
     "DirectoryTarget",
     "FileSystemTarget",

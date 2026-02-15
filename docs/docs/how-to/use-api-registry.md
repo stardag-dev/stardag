@@ -22,7 +22,7 @@ The API Registry:
 
 ### Option 1: API Key (Recommended for CI/CD)
 
-```bash
+```sh
 export STARDAG_API_KEY=sk_your_api_key_here
 export STARDAG_REGISTRY_URL=https://api.stardag.com
 export STARDAG_WORKSPACE_ID=your-workspace-id
@@ -32,7 +32,7 @@ Generate API keys from the web UI under Organization Settings > API Keys.
 
 ### Option 2: Browser Login (Local Development)
 
-```bash
+```sh
 pip install stardag
 stardag auth login
 ```
@@ -56,7 +56,7 @@ sd.build(my_task, registry=registry)
 
 ### Via Environment Variables
 
-```bash
+```sh
 export STARDAG_REGISTRY_URL=https://api.stardag.com
 export STARDAG_WORKSPACE_ID=workspace-uuid
 export STARDAG_API_KEY=sk_...
@@ -64,7 +64,7 @@ export STARDAG_API_KEY=sk_...
 
 ### Via Profile
 
-```bash
+```sh
 # Set up profile (one-time)
 stardag config profile add prod \
     --registry central \
@@ -100,7 +100,7 @@ Features:
 
 Target roots are configured centrally per workspace:
 
-```bash
+```sh
 # Sync target roots from server
 stardag config target-roots sync
 
@@ -149,13 +149,13 @@ The SDK caches target roots locally. You can read task outputs without API conne
 
 Check credentials:
 
-```bash
+```sh
 stardag auth status
 ```
 
 Re-authenticate if needed:
 
-```bash
+```sh
 stardag auth login
 ```
 
@@ -163,7 +163,7 @@ stardag auth login
 
 Verify workspace ID:
 
-```bash
+```sh
 stardag config show
 ```
 
@@ -171,7 +171,7 @@ stardag config show
 
 Sync from server:
 
-```bash
+```sh
 stardag config target-roots sync
 ```
 

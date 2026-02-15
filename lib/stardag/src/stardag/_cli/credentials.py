@@ -681,7 +681,7 @@ def _refresh_oidc_token(
         return response.json()
 
 
-def _exchange_for_internal_token(
+def exchange_for_internal_token(
     api_url: str,
     oidc_token: str,
     workspace_id: str,
@@ -701,7 +701,7 @@ def _exchange_for_internal_token(
         return response.json()
 
 
-def _get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
+def get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
     """Fetch user's workspaces from API using OIDC token."""
     try:
         import httpx
@@ -722,7 +722,7 @@ def _get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
     return []
 
 
-def _get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
+def get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
     """Fetch environments for a workspace using internal token."""
     try:
         import httpx
@@ -799,7 +799,7 @@ def ensure_access_token(
             return None
 
         # Exchange for internal token
-        internal_tokens = _exchange_for_internal_token(
+        internal_tokens = exchange_for_internal_token(
             registry_url, oidc_token, workspace_id
         )
         access_token = internal_tokens["access_token"]
@@ -843,7 +843,7 @@ def resolve_workspace_slug_to_id(
     if not oidc_token:
         if not user:
             return None
-        oidc_token = _get_fresh_oidc_token(registry, user)
+        oidc_token = get_fresh_oidc_token(registry, user)
         if not oidc_token:
             return None
 
@@ -853,7 +853,7 @@ def resolve_workspace_slug_to_id(
         return None
 
     # Fetch workspaces and find matching slug
-    workspaces = _get_user_workspaces(registry_url, oidc_token)
+    workspaces = get_user_workspaces(registry_url, oidc_token)
     result = None
     for ws in workspaces:
         ws_id = ws.get("id")
@@ -909,7 +909,7 @@ def resolve_environment_slug_to_id(
         return None
 
     # Fetch environments and find matching slug
-    environments = _get_environments(registry_url, access_token, workspace_id)
+    environments = get_environments(registry_url, access_token, workspace_id)
     result = None
     for env in environments:
         env_id = env.get("id")
@@ -924,7 +924,7 @@ def resolve_environment_slug_to_id(
     return result
 
 
-def _get_fresh_oidc_token(registry: str, user: str) -> str | None:
+def get_fresh_oidc_token(registry: str, user: str) -> str | None:
     """Get a fresh OIDC access token by refreshing.
 
     Args:
