@@ -124,19 +124,10 @@ Clone the repo:
 
 And install the package (with `ml-pipeline` extra dependencies)
 
-=== "uv"
-
-    ```sh
-    uv sync --extra prefect --extra ml-pipeline
-    uv run python -m stardag_examples.prefect.main
-    ```
-
-=== "pip"
-
-    ```sh
-    pip install -e ".[prefect,ml-pipeline]"
-    python -m stardag_examples.prefect.main
-    ```
+```sh
+uv sync --extra prefect --extra ml-pipeline
+uv run python -m stardag_examples.prefect.main
+```
 
 You'll see Prefect logs in your terminal. Navigate to the Prefect UI and click "latest run" to see your DAG:
 
@@ -156,7 +147,7 @@ Click the artifacts to get more details about the task:
 
 ### Using with Modal
 
-For running Prefect-orchestrated DAGs on Modal's serverless infrastructure, see [Integrate with Modal](integrate-modal.md#with-prefect-observability).
+For running Prefect-observed Stardag on Modal's serverless infrastructure, see [Integrate with Modal](integrate-modal.md) and the [Modal/Prefect Example](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal/prefect).
 
 ## See Also
 

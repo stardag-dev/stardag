@@ -33,7 +33,7 @@ Settings are resolved in priority order (highest to lowest):
 
 ```sh
 # Set target root for local outputs
-export STARDAG_TARGET_ROOT__DEFAULT=~/.stardag/outputs
+export STARDAG_TARGET_ROOTS__DEFAULT=~/.stardag/outputs
 ```
 
 ### With API Service

@@ -98,7 +98,7 @@ except TokenExpiredError:
 ```python
 # Error: No target root configured for 'default'
 # Solution:
-export STARDAG_TARGET_ROOT__DEFAULT=/path/to/outputs
+export STARDAG_TARGET_ROOTS__DEFAULT=/path/to/outputs
 ```
 
 ### Task Not Complete

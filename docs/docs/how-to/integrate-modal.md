@@ -19,15 +19,13 @@ Run Stardag tasks on Modal's serverless infrastructure.
 
 ### Stardag Registry Environment (Optional)
 
-You are recommended to get set up to use the Stardag Registry. Sign up at `app.stardag.com` or follow [the setup guide](../getting-started/registry-ui.md#get-setup) for running it locally or self hosted.
+You are recommended to get set up to use the Stardag Registry.
 
 You can also run Stardag on Modal, completely without the Registry.
 
 === "With Registry"
 
-    **Create a new envrionment**
-
-    WIP
+    Sign up at `app.stardag.com` or follow [the setup guide](../getting-started/registry-ui.md#get-setup) for running it self hosted.
 
 === "Without Registry"
 
@@ -35,7 +33,7 @@ You can also run Stardag on Modal, completely without the Registry.
 
 ## Minimal Example from Scratch
 
-We are going to create a new minimal standalone python project with the folowing structure:
+We are going to create a new minimal python project with the folowing structure:
 
 ```
 stardag-modal/
@@ -44,6 +42,8 @@ stardag-modal/
 |   └── main.py
 └── pyproject.toml
 ```
+
+### Create and install the project
 
 Create the new project (with `uv` for build system)
 
@@ -94,58 +94,73 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
 
 Then let's define the modal image we will be using:
 
+=== "With Registry"
+
+    ```{.python notest}
+    # stardag_modal/main.py continued...
+
+    # Define the Modal image
+    image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .uv_sync()
+        .add_local_python_source("stardag_modal")
+    )
+
+    # Define the StardagApp
+    app = sd_modal.StardagApp(
+        "stardag-poc",
+        builder_settings=sd_modal.FunctionSettings(
+            image=image,
+            secrets=[
+                # required for communication with registry
+                modal.Secret.from_name("stardag-api-key"),
+            ],
+        ),
+        worker_settings={
+            "default": sd_modal.FunctionSettings(image=image),
+        },
+    )
+    ```
+
+=== "Without Registry"
+
+    ```{.python notest}
+    # stardag_modal/main.py continued...
+
+    # Define the Modal image
+    image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .uv_sync()
+        .add_local_python_source("stardag_modal")
+    )
+
+    # Define the StardagApp
+    app = sd_modal.StardagApp(
+        "stardag-poc",
+        builder_settings=sd_modal.FunctionSettings(image=image),
+        worker_settings={
+            "default": sd_modal.FunctionSettings(image=image),
+        },
+    )
+    ```
+
+And finally, compose the tasks and add a main section for building them on modal:
+
 ```{.python notest}
 # stardag_modal/main.py continued...
 
-# Define the Modal image
-image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .uv_sync()
-    .add_local_python_source("stardag_modal")
-)
-
-# Define the StardagApp
-app = sd_modal.StardagApp(
-    "stardag-poc",
-    builder_settings=sd_modal.FunctionSettings(
-        image=image,
-        secrets=[
-            # required for communication with registry
-            modal.Secret.from_name("stardag-api-key"),
-        ],
-    ),
-    worker_settings={
-        "default": sd_modal.FunctionSettings(image=image),
-    },
-)
-```
-
-And finally a main section for building the DAG on modal:
-
-```{.python notest}
-# stardag_modal/main.py continued...
+root_task = get_sum(integers=get_range(limit=21))
 
 if __name__ == "__main__":
-    dag = get_sum(integers=get_range(limit=21))
-    res = app.build_spawn(dag)
+    res = app.build_spawn(root_task)
     print(res)
 ```
 
-## Prerequisites
+Now that we have the code inplace and `stardag` and `modal` Python packages installed, we need to setup the environement before we can run the example.
 
-=== "uv"
+### Set up your Modal environment
 
-    ```sh
-    uv add stardag[modal]
-    ```
-
-=== "pip"
-
-    ```sh
-    pip install stardag[modal]
-    ```
-
-You'll also need a [Modal](https://modal.com/) account. [Sign up](https://modal.com/apps) and authenticate you local workstation:
+Authenticate with modal (if you haven't already):
 
 === "Active venv"
 
@@ -159,92 +174,183 @@ You'll also need a [Modal](https://modal.com/) account. [Sign up](https://modal.
     uv run modal token new
     ```
 
-## Project Structure
-
-We recommend organizing your Modal code in a proper package structure:
-
-```
-my_package/
-  __init__.py    # (can be empty)
-  app.py         # Modal app definition
-  tasks.py       # Stardag task definitions
-  main.py        # Entry point
-```
-
-## Basic Example
-
-### 1. Define Your Modal App
-
-```python
-# my_package/app.py
-import modal
-import stardag.integration.modal as sd_modal
-
-# Define the Modal image with Stardag installed
-image = sd_modal.with_stardag_on_image(
-    modal.Image.debian_slim(python_version="3.12")
-).add_local_python_source("my_package")
-
-# Define the StardagApp
-app = sd_modal.StardagApp(
-    "my-stardag-app",
-    builder_settings=sd_modal.FunctionSettings(
-        image=image,
-        secrets=[
-            modal.Secret.from_name("stardag-api-key"),
-        ],
-    ),
-    worker_settings={
-        "default": sd_modal.FunctionSettings(image=image),
-    },
-)
-```
-
-The `sd_modal.with_stardag_on_image()` helper installs the correct version of Stardag on your image.
-
-### 2. Define Your Tasks
-
-```python
-# my_package/tasks.py
-import stardag as sd
-
-
-@sd.task(name="Range")
-def get_range(limit: int) -> list[int]:
-    return list(range(limit))
-
-
-@sd.task(name="Sum")
-def get_sum(integers: sd.Depends[list[int]]) -> int:
-    return sum(integers)
-```
-
-### 3. Deploy and Run
-
-Deploy using the Stardag CLI:
+If you've created and want to use a dedicated Modal environment, make sure to also set:
 
 ```sh
-stardag modal deploy my_package/app.py
+export MODAL_ENVIRONMENT=<my-env>
 ```
 
-Run your DAG:
+### Set up your Stardag environment
 
-```python
-# my_package/main.py
-from my_package.app import app
-from my_package.tasks import get_range, get_sum
+When running stardag on modal we must use a remote filesystem for our [target roots](../concepts/targets.md#target-roots). A natural choice when running on Modal is to use Modal volumes:
 
-if __name__ == "__main__":
-    dag = get_sum(integers=get_range(limit=10))
-    res = app.build_spawn(dag)
-    print(res)
+=== "With Registry"
+
+    Create a new isolated Stardag enviornment:
+
+    === "Active venv"
+
+
+        ```sh
+        stardag env create "Modal PoC" --target-root "default=modalvol://stardag-poc/target-roots/default"
+        ```
+
+    === "uv run ..."
+
+        ```sh
+        uv run stardag env create "Modal PoC" --target-root "default=modalvol://stardag-poc/target-roots/default"
+        ```
+
+    Add and activate a new profile for the environment:
+
+    === "Active venv"
+
+
+        ```sh
+        stardag config profile add modal-poc --env modal-poc --default
+        ```
+
+    === "uv run ..."
+
+        ```sh
+        uv run stardag config profile add modal-poc --env modal-poc --default
+        ```
+
+
+    We also need to give modal functions access to the Stardag Registry:
+
+    === "Active venv"
+
+        ```sh
+        stardag modal stardag-api-key create
+        ```
+
+    === "uv run ..."
+
+        ```sh
+        uv run stardag modal stardag-api-key create
+        ```
+
+=== "Without Registry"
+
+    Point the default target root to a Modal Volume via the environment variable:
+
+    ```sh
+    export STARDAG_TARGET_ROOTS__DEFAULT="modalvol://stardag-poc/target-roots/default"
+    ```
+
+### Deploy the app
+
+Now let's deploy the app to to modal.
+
+=== "Active venv"
+
+    ```sh
+    stardag modal deploy stardag_modal/main.py
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run stardag modal deploy stardag_modal/main.py
+    ```
+
+You should see output like:
+
+```
+Using active stardag profile
+  Registry URL: https://api.stardag.com
+  Workspace ID: <ws-id>
+  Environment ID: <env-id>
+  Target roots:
+    default: modalvol://stardag-poc/target-roots/default
+Modal volumes:
+  default: stardag-poc
+Functions:
+  build
+  worker_default
+✓ Created objects.
+├── 🔨 Created mount PythonPackage:stardag_modal
+├── 🔨 Created mount PythonPackage:stardag
+├── 🔨 Created function build.
+└── 🔨 Created function worker_default.
+✓ App deployed in 2.592s! 🎉
+
+View Deployment: https://modal.com/apps/<modal-user>/<modal-env>/deployed/stardag-poc
 ```
 
-You'll see the `build` and `worker_default` functions invoked in the Modal UI.
+You can also navigate to your modal apps in the relevant environment and should see:
 
-## Running the Examples
+![Deployed Stardag app in modal](https://github.com/user-attachments/assets/631cf248-8df9-4a45-9de8-50f7e9128e53)
 
-The examples package includes ready-to-run Modal examples:
+### Run the app
+
+Now let's execute the `main.py` module:
+
+=== "Active venv"
+
+    ```sh
+    python stardag_modal/main.py
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run python stardag_modal/main.py
+    ```
+
+Then navigate to the app in the modal UI, to follow the execution progres.
+
+### Inspect the results
+
+The easiest way to get the results is to instantiate the desired task and load its output.
+
+=== "Active venv"
+
+    ```sh
+    python -c "from stardag_modal.main import root_task; \
+        print(root_task.output().uri); \
+        print(root_task.output().load())"
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run python -c "from stardag_modal.main import root_task; \
+        print(root_task.output().uri); \
+        print(root_task.output().load())"
+    ```
+
+Output:
+
+```
+modalvol://stardag-poc/target-roots/default/Sum/e0/e6/e0e66321-c097-534f-b2ae-a95e51ff9373.json
+210
+```
+
+You can also "tab" your way through the DAG dependencies to access `root_task.integers`:
+
+=== "Active venv"
+
+    ```sh
+    python -c "from stardag_modal.main import root_task; \
+        print(root_task.integers.output().load())"
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run python -c "from stardag_modal.main import root_task; \
+        print(root_task.integers.output().load())"
+    ```
+
+If you connected to the stardag registry, you can also click the lastet build in inspect the DAG execution.
+
+![modal-poc dag in the Registry UI](https://github.com/user-attachments/assets/08e2d3b1-17f5-4b3d-b6ed-1b91c8a3f968)
+
+<!-- TODO below needs significant cleanup.
+## Running the `stardag-examples` Examples
+
 
 === "uv"
 
@@ -413,9 +519,11 @@ app = sd_modal.StardagApp(
 | `sd_modal.with_stardag_on_image(image)`        | Install Stardag on a Modal image                     |
 | `sd_modal.get_package_deps(path, optional=[])` | Get dependencies from pyproject.toml for pip_install |
 
+-->
+
 ## See Also
 
+- [Stardag Modal Examples](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal) - Ready-to-run Modal examples in the `stardag-examples` package.
+- [Modal Documentation](https://modal.com/docs) - Modal features
 - [ML Pipeline Example](ml-pipeline-example.md) - Complete ML pipeline walkthrough
 - [Integrate with Prefect](integrate-prefect.md) - Prefect orchestration
-- [Modal Examples](https://github.com/stardag-dev/stardag/tree/main/lib/stardag-examples/src/stardag_examples/modal) - Source code
-- [Modal Documentation](https://modal.com/docs) - Modal features

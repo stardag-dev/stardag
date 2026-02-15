@@ -82,10 +82,10 @@ Via environment variables:
 
 ```sh
 # The "default" root
-export STARDAG_TARGET_ROOT__DEFAULT="s3://some-bucket/prefix/"
+export STARDAG_TARGET_ROOTS__DEFAULT="s3://some-bucket/prefix/"
 
 # Additional root named "ingestion"
-export STARDAG_TARGET_ROOT__INGESTION="s3://some-other-bucket/prefix/"
+export STARDAG_TARGET_ROOTS__INGESTION="s3://some-other-bucket/prefix/"
 ```
 
 Or equivalently via a single JSON-encoded environment variable:

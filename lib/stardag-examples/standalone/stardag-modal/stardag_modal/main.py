@@ -41,7 +41,8 @@ app = sd_modal.StardagApp(
     },
 )
 
+root_task = get_sum(integers=get_range(limit=5))
+
 if __name__ == "__main__":
-    dag = get_sum(integers=get_range(limit=21))
-    res = app.build_spawn(dag)
+    res = app.build_spawn(root_task)
     print(res)

@@ -354,15 +354,15 @@ Fetch latest target roots from server.
 
 All CLI behavior can be overridden with environment variables:
 
-| Variable                    | Description                   |
-| --------------------------- | ----------------------------- |
-| `STARDAG_PROFILE`           | Active profile name           |
-| `STARDAG_REGISTRY_URL`      | Registry API URL              |
-| `STARDAG_API_KEY`           | API key (bypasses OAuth)      |
-| `STARDAG_WORKSPACE_ID`      | Workspace UUID                |
-| `STARDAG_ENVIRONMENT_ID`    | Environment UUID              |
-| `STARDAG_TARGET_ROOTS`      | JSON string of target roots   |
-| `STARDAG_TARGET_ROOT__NAME` | Specific target root override |
+| Variable                     | Description                   |
+| ---------------------------- | ----------------------------- |
+| `STARDAG_PROFILE`            | Active profile name           |
+| `STARDAG_REGISTRY_URL`       | Registry API URL              |
+| `STARDAG_API_KEY`            | API key (bypasses OAuth)      |
+| `STARDAG_WORKSPACE_ID`       | Workspace UUID                |
+| `STARDAG_ENVIRONMENT_ID`     | Environment UUID              |
+| `STARDAG_TARGET_ROOTS`       | JSON string of target roots   |
+| `STARDAG_TARGET_ROOTS__NAME` | Specific target root override |
 
 ## Common Workflows
 
