@@ -49,7 +49,7 @@ Clone the repo
     cd stardag/lib/stardag-examples
     ```
 
-And install the package (with `ml-pipeline` extra dependencies)
+And install the package (with `ml-pipeline` extra dependencies):
 
 === "uv"
 
@@ -65,7 +65,7 @@ And install the package (with `ml-pipeline` extra dependencies)
 
 ## Project Structure
 
-The example provides a vanilla Python implementation of the ML pipeline (no DAG/data workflow framework or persistent caching used) and then the wrapping of the core business logic into Stardag, using the Class and Decorator API respectively.
+The example provides a plain Python implementation of the ML pipeline (no framework or persistent caching) alongside equivalent Stardag wrapping using the Class API and Decorator API.
 
 ```
 ml_pipeline/
@@ -81,13 +81,13 @@ Just execute any of the modules as is:
 === "Active venv"
 
     ```sh
-    uv run python -m stardag_examples.ml_pipeline.base  # | class_api | decorator_api
+    python -m stardag_examples.ml_pipeline.base  # | class_api | decorator_api
     ```
 
 === "uv run ..."
 
     ```sh
-    python -m stardag_examples.ml_pipeline.base  # | class_api | decorator_api
+    uv run python -m stardag_examples.ml_pipeline.base  # | class_api | decorator_api
     ```
 
 ## Key Concepts Demonstrated

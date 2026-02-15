@@ -92,8 +92,7 @@ A difference between `stardag.build_aio` and `stardag.integration.prefect.build_
 
 ## Running the `stardag-examples` Example
 
-The examples package includes a ready-to-run Prefect example.
-Clone the repo:
+The examples package includes a ready-to-run Prefect example. First, clone the repo:
 
 === "HTTPS"
 
@@ -122,7 +121,7 @@ Clone the repo:
     cd stardag/lib/stardag-examples
     ```
 
-And install the package (with `ml-pipeline` extra dependencies)
+And install the package (with `prefect` and `ml-pipeline` extra dependencies):
 
 ```sh
 uv sync --extra prefect --extra ml-pipeline

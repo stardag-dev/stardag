@@ -19,13 +19,13 @@ Run Stardag tasks on Modal's serverless infrastructure.
 
 ### Stardag Registry Environment (Optional)
 
-You are recommended to get set up to use the Stardag Registry.
+We recommend setting up the Stardag Registry.
 
 You can also run Stardag on Modal, completely without the Registry.
 
 === "With Registry"
 
-    Sign up at `app.stardag.com` or follow [the setup guide](../getting-started/registry-ui.md#get-setup) for running it self hosted.
+    Sign up at `app.stardag.com` or follow [the setup guide](../getting-started/registry-ui.md#get-setup) for running it self-hosted.
 
 === "Without Registry"
 
@@ -33,19 +33,19 @@ You can also run Stardag on Modal, completely without the Registry.
 
 ## Minimal Example from Scratch
 
-We are going to create a new minimal python project with the folowing structure:
+We are going to create a new minimal Python project with the following structure:
 
 ```
 stardag-modal/
 ├── stardag_modal/
-|   ├── __init__.py
-|   └── main.py
+│   ├── __init__.py
+│   └── main.py
 └── pyproject.toml
 ```
 
 ### Create and install the project
 
-Create the new project (with `uv` for build system)
+Create the new project (with `uv` as build system):
 
 ```sh
 mkdir stardag-modal
@@ -156,7 +156,7 @@ if __name__ == "__main__":
     print(res)
 ```
 
-Now that we have the code inplace and `stardag` and `modal` Python packages installed, we need to setup the environement before we can run the example.
+Now that we have the code in place and the `stardag` and `modal` Python packages installed, we need to set up the environment before we can run the example.
 
 ### Set up your Modal environment
 
@@ -182,11 +182,11 @@ export MODAL_ENVIRONMENT=<my-env>
 
 ### Set up your Stardag environment
 
-When running stardag on modal we must use a remote filesystem for our [target roots](../concepts/targets.md#target-roots). A natural choice when running on Modal is to use Modal volumes:
+When running Stardag on Modal, we must use a remote filesystem for our [target roots](../concepts/targets.md#target-roots). A natural choice when running on Modal is to use Modal volumes:
 
 === "With Registry"
 
-    Create a new isolated Stardag enviornment:
+    Create a new isolated Stardag environment:
 
     === "Active venv"
 
@@ -241,7 +241,7 @@ When running stardag on modal we must use a remote filesystem for our [target ro
 
 ### Deploy the app
 
-Now let's deploy the app to to modal.
+Now let's deploy the app to Modal.
 
 === "Active venv"
 
@@ -299,11 +299,11 @@ Now let's execute the `main.py` module:
     uv run python stardag_modal/main.py
     ```
 
-Then navigate to the app in the modal UI, to follow the execution progres.
+Then navigate to the app in the Modal UI to follow the execution progress.
 
 ### Inspect the results
 
-The easiest way to get the results is to instantiate the desired task and load its output.
+The easiest way to get the results is to use an instance of the desired task and load its output.
 
 === "Active venv"
 
@@ -344,7 +344,7 @@ You can also "tab" your way through the DAG dependencies to access `root_task.in
         print(root_task.integers.output().load())"
     ```
 
-If you connected to the stardag registry, you can also click the lastet build in inspect the DAG execution.
+If you connected to the Stardag Registry, you can also click the latest build to inspect the DAG execution.
 
 ![modal-poc dag in the Registry UI](https://github.com/user-attachments/assets/08e2d3b1-17f5-4b3d-b6ed-1b91c8a3f968)
 

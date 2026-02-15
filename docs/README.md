@@ -13,7 +13,7 @@ cd docs
 uv sync
 
 # Start development server (live reload)
-uv run mkdocs serve  --livereload
+uv run mkdocs serve --livereload
 # Open http://localhost:8000
 
 # Build static site
