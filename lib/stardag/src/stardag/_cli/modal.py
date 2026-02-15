@@ -548,7 +548,16 @@ def deploy(
                 )
 
         # Finalize the app with profile secrets
-        stardag_app_instance.finalize(extra_secrets=extra_secrets)
+        finalize_result = stardag_app_instance.finalize(extra_secrets=extra_secrets)
+
+        if finalize_result.volumes:
+            console.print("[cyan]Modal volumes:[/cyan]")
+            for root_key, vol in finalize_result.volumes.items():
+                console.print(f"[dim]  {root_key}: {vol.name}[/dim]")
+
+        console.print("[cyan]Functions:[/cyan]")
+        for func_name in finalize_result.functions:
+            console.print(f"[dim]  {func_name}[/dim]")
 
     # Get the underlying Modal app
     modal_app = stardag_app_instance.modal_app

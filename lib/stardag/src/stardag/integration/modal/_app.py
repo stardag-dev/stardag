@@ -191,10 +191,24 @@ def get_target_roots_volumes(
     for key, uri in target_roots.items():
         if uri.startswith("modalvol://"):
             volume_name = uri[len("modalvol://") :].split("/")[0]
-            volumes[key] = modal.Volume.from_name(
+            vol = modal.Volume.from_name(
                 volume_name, create_if_missing=create_if_missing
             )
+            vol.hydrate()
+            volumes[key] = vol
     return volumes
+
+
+class FinalizeResult(typing.NamedTuple):
+    """Result of StardagApp.finalize().
+
+    Attributes:
+        volumes: Dict of target root key to Modal Volume instance.
+        functions: List of created Modal function names.
+    """
+
+    volumes: dict[str, modal.Volume]
+    functions: list[str]
 
 
 # --- Function settings ---
@@ -482,7 +496,7 @@ class StardagApp:
         *,
         extra_secrets: list[modal.Secret] | None = None,
         create_volumes_if_missing: bool = True,
-    ) -> None:
+    ) -> FinalizeResult:
         """Finalize the app by creating Modal functions.
 
         This method creates the builder and worker functions on the Modal app.
@@ -491,6 +505,11 @@ class StardagApp:
         Args:
             extra_secrets: Additional secrets to inject into all functions.
                 This is where profile-based environment variables are injected.
+            create_volumes_if_missing: Whether to create Modal volumes for
+                target roots if they don't exist.
+
+        Returns:
+            FinalizeResult with created volumes and function names.
 
         Raises:
             RuntimeError: If finalize() has already been called.
@@ -499,7 +518,7 @@ class StardagApp:
             raise RuntimeError("StardagApp has already been finalized")
 
         # Ensure volumes for target roots exist before creating functions
-        get_target_roots_volumes(create_if_missing=create_volumes_if_missing)
+        volumes = get_target_roots_volumes(create_if_missing=create_volumes_if_missing)
 
         extra_secrets = extra_secrets or []
 
@@ -520,6 +539,8 @@ class StardagApp:
             }
         )(build_function)
 
+        function_names = ["build"]
+
         # Create worker functions
         for worker_name, settings in self._worker_settings.items():
             worker_settings: dict[str, typing.Any] = dict(settings)
@@ -528,15 +549,19 @@ class StardagApp:
             )
             worker_settings["secrets"] = existing_worker_secrets + extra_secrets
 
+            func_name = f"worker_{worker_name}"
             self.modal_app.function(
                 **{
                     **worker_settings,
-                    "name": f"worker_{worker_name}",
+                    "name": func_name,
                     "serialized": True,
                 }
             )(_run)
+            function_names.append(func_name)
 
         self._is_finalized = True
+
+        return FinalizeResult(volumes=volumes, functions=function_names)
 
     def build_spawn(
         self, task: BaseTask, worker_selector: WorkerSelector | None = None

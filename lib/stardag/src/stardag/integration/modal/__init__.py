@@ -1,4 +1,5 @@
 from stardag.integration.modal._app import (
+    FinalizeResult,
     FunctionSettings,
     StardagApp,
     WorkerSelector,
@@ -16,6 +17,7 @@ from stardag.integration.modal._target import (
 
 __all__ = [
     "StardagApp",
+    "FinalizeResult",
     "FunctionSettings",
     "MODAL_VOLUME_URI_PREFIX",
     "ModalMountedVolumeTarget",
