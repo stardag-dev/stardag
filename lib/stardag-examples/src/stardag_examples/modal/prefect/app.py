@@ -8,7 +8,7 @@ image = sd_modal.with_stardag_on_image(
     modal.Image.debian_slim(python_version="3.12").pip_install(
         # helper to pull in all dependencies of current package (stardag-examples)
         # including optional "prefect" and "ml-pipeline" deps
-        sd_modal.get_package_deps(__file__, optional=["prefect", "ml-pipeline"]),
+        *sd_modal.get_package_deps(__file__, optional=["prefect", "ml-pipeline"]),
     )
 ).add_local_python_source("stardag_examples")
 

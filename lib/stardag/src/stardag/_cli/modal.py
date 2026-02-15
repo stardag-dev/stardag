@@ -235,43 +235,46 @@ def stardag_api_key_create(
         stardag_profile, stardag_workspace, stardag_env
     )
 
-    if api_key_name is None:
-        api_key_name = f"modal-{modal_env or 'default'}"
-
-    console.print("\n[cyan]Using stardag context:[/cyan]")
-    console.print(f"  Registry: {api_url}")
-    console.print(f"  Workspace: {ws_id}")
-    console.print(f"  Environment: {env_id}")
-    console.print()
-
-    full_key, key_prefix = _create_stardag_api_key(
-        client, api_url, ws_id, env_id, api_key_name
-    )
-    console.print(
-        f'[green]Created Stardag API key: "{api_key_name}" '
-        f"(prefix: {key_prefix})[/green]"
-    )
-
     try:
-        _push_modal_secret(secret_name, {"STARDAG_API_KEY": full_key}, modal_env)
-    except Exception:
-        error_console.print(
-            "[yellow]API key was created successfully. Key value:[/yellow]"
-        )
-        error_console.print(f"[yellow]  {full_key}[/yellow]")
-        error_console.print("[yellow]Create the Modal secret manually:[/yellow]")
-        error_console.print(
-            f"[yellow]  modal secret create {secret_name} "
-            f'STARDAG_API_KEY="{full_key}"[/yellow]'
-        )
-        raise typer.Exit(1)
+        if api_key_name is None:
+            api_key_name = f"modal-{modal_env or 'default'}"
 
-    modal_env_display = f" (Modal environment: {modal_env})" if modal_env else ""
-    console.print(
-        f'[green]Pushed Modal secret: "{secret_name}"{modal_env_display}[/green]'
-    )
-    console.print("\n[dim]Use in your app:[/dim]")
-    console.print(f'[dim]  modal.Secret.from_name("{secret_name}")[/dim]')
+        console.print("\n[cyan]Using stardag context:[/cyan]")
+        console.print(f"  Registry: {api_url}")
+        console.print(f"  Workspace: {ws_id}")
+        console.print(f"  Environment: {env_id}")
+        console.print()
+
+        full_key, key_prefix = _create_stardag_api_key(
+            client, api_url, ws_id, env_id, api_key_name
+        )
+        console.print(
+            f'[green]Created Stardag API key: "{api_key_name}" '
+            f"(prefix: {key_prefix})[/green]"
+        )
+
+        try:
+            _push_modal_secret(secret_name, {"STARDAG_API_KEY": full_key}, modal_env)
+        except Exception:
+            error_console.print(
+                "[yellow]API key was created successfully. Key value:[/yellow]"
+            )
+            error_console.print(f"[yellow]  {full_key}[/yellow]")
+            error_console.print("[yellow]Create the Modal secret manually:[/yellow]")
+            error_console.print(
+                f"[yellow]  modal secret create {secret_name} "
+                f'STARDAG_API_KEY="{full_key}"[/yellow]'
+            )
+            raise typer.Exit(1)
+
+        modal_env_display = f" (Modal environment: {modal_env})" if modal_env else ""
+        console.print(
+            f'[green]Pushed Modal secret: "{secret_name}"{modal_env_display}[/green]'
+        )
+        console.print("\n[dim]Use in your app:[/dim]")
+        console.print(f'[dim]  modal.Secret.from_name("{secret_name}")[/dim]')
+    finally:
+        client.close()
 
 
 def _import_file_or_module(file_or_module: str, use_module_mode: bool) -> object:

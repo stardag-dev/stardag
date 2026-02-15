@@ -54,7 +54,7 @@ def with_stardag_on_image(
     ) or local_stardag_source == "yes"
 
     if use_local_stardag_source:
-        sd_deps = _get_stardag_deps_for_image(include_dev_deps=True)
+        sd_deps = _get_stardag_deps_for_image(include_dev_deps=False)
         return image.pip_install(*sd_deps).add_local_python_source("stardag")
     else:
         return image.pip_install(f"stardag[modal]=={version}")
