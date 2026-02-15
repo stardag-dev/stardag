@@ -542,6 +542,11 @@ class StardagSettings(BaseSettings):
     """Top-level settings loaded from environment variables.
 
     This uses pydantic-settings to read from STARDAG_* environment variables.
+
+    Note: target_roots is handled manually in load_config() to support both
+    STARDAG_TARGET_ROOTS='{"key": "val"}' (JSON) and
+    STARDAG_TARGET_ROOTS__KEY=val (per-key) formats without relying on
+    pydantic-settings' env_nested_delimiter (which has compatibility issues).
     """
 
     # Profile (looks up registry/workspace/environment from config.toml)
@@ -552,9 +557,6 @@ class StardagSettings(BaseSettings):
     workspace_id: str | None = None
     environment_id: str | None = None
 
-    # Target settings
-    target_roots: dict[str, str] | None = None
-
     # API settings
     api_timeout: float | None = None
 
@@ -563,9 +565,42 @@ class StardagSettings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="STARDAG_",
-        env_nested_delimiter="__",
         extra="ignore",
     )
+
+
+def _parse_target_roots_from_env() -> dict[str, str] | None:
+    """Parse target roots from environment variables.
+
+    Supports two formats (JSON takes precedence):
+      STARDAG_TARGET_ROOTS='{"default": "/path", "s3": "s3://bucket"}'
+      STARDAG_TARGET_ROOTS__DEFAULT=/path
+      STARDAG_TARGET_ROOTS__S3=s3://bucket
+
+    Returns:
+        Parsed target roots dict, or None if no env vars are set.
+    """
+    # JSON format takes precedence
+    json_value = os.environ.get("STARDAG_TARGET_ROOTS")
+    if json_value:
+        try:
+            roots = json.loads(json_value)
+            if isinstance(roots, dict):
+                return roots
+        except json.JSONDecodeError:
+            logger.warning(
+                f"Could not parse STARDAG_TARGET_ROOTS as JSON: {json_value}"
+            )
+
+    # Fall back to STARDAG_TARGET_ROOTS__<KEY>=<value> format
+    prefix = "STARDAG_TARGET_ROOTS__"
+    roots: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key.startswith(prefix):
+            root_name = key[len(prefix) :].lower()
+            if root_name:
+                roots[root_name] = value
+    return roots if roots else None
 
 
 class StardagConfig(BaseModel):
@@ -726,8 +761,9 @@ def load_config(
     # 4. Resolve target roots
     # Priority: env > cached > default
     target_roots: dict[str, str]
-    if env_settings.target_roots:
-        target_roots = env_settings.target_roots
+    env_target_roots = _parse_target_roots_from_env()
+    if env_target_roots:
+        target_roots = env_target_roots
     elif registry_url and workspace_id and environment_id:
         cached_roots = get_cached_target_roots(
             registry_url, workspace_id, environment_id
