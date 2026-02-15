@@ -11,7 +11,13 @@ from stardag._cli._helpers import get_authenticated_client, validate_active_prof
 from stardag._cli.credentials import (
     add_profile,
     ensure_access_token,
+    exchange_for_internal_token,
+    get_active_profile,
     get_config_path,
+    get_environments,
+    get_fresh_oidc_token,
+    get_registry_url,
+    get_user_workspaces,
     list_profiles,
     list_registries,
     remove_profile,
@@ -76,16 +82,40 @@ profile_app = typer.Typer(help="Manage profiles")
 app.add_typer(profile_app, name="profile")
 
 
+def _find_user_for_registry(registry: str) -> str | None:
+    """Find a user with stored credentials for the given registry.
+
+    Returns the user email if exactly one is found, None otherwise.
+    """
+    from stardag.config import get_credentials_dir
+
+    creds_dir = get_credentials_dir()
+    if not creds_dir.exists():
+        return None
+
+    prefix = f"{registry}__"
+    users: list[str] = []
+    for path in creds_dir.glob(f"{prefix}*.json"):
+        safe_user = path.stem[len(prefix) :]
+        # Reverse the sanitization from _sanitize_user_for_path
+        user = safe_user.replace("_at_", "@")
+        users.append(user)
+
+    if len(users) == 1:
+        return users[0]
+    return None
+
+
 @profile_app.command("add")
 def profile_add(
     name: str = typer.Argument(..., help="Profile name"),
-    registry: str = typer.Option(..., "--registry", "-r", help="Registry name"),
-    user: str = typer.Option(..., "--user", "-u", help="User email"),
-    workspace: str = typer.Option(
-        ..., "--workspace", "-w", help="Workspace slug (or ID)"
+    registry: str | None = typer.Option(None, "--registry", "-r", help="Registry name"),
+    user: str | None = typer.Option(None, "--user", "-u", help="User email"),
+    workspace: str | None = typer.Option(
+        None, "--workspace", "-w", help="Workspace slug (or ID)"
     ),
-    environment: str = typer.Option(
-        ..., "--environment", "-e", help="Environment slug (or ID)"
+    environment: str | None = typer.Option(
+        None, "--environment", "-e", help="Environment slug (or ID)"
     ),
     set_default: bool = typer.Option(
         False, "--default", "-d", help="Set as default profile"
@@ -96,13 +126,56 @@ def profile_add(
     A profile defines the (registry, user, workspace, environment) tuple
     for easy switching between different contexts.
 
-    Workspace and environment should be specified by slug for readability.
-    The IDs are resolved and cached automatically when authenticated.
+    All options are optional — values are inherited from the active profile
+    when not specified. If workspace or environment is not provided, you'll
+    be prompted to select interactively.
 
     Examples:
+        stardag config profile add prod
+        stardag config profile add staging -e staging
         stardag config profile add local-dev -r local -u me@example.com -w my-workspace -e development
         stardag config profile add prod -r cloud -u me@work.com -w my-company -e production --default
     """
+    # --- Load active profile defaults ---
+    active_profile_defaults: dict[str, str | None] = {
+        "registry": None,
+        "user": None,
+        "workspace": None,
+        "environment": None,
+    }
+    active_name, _ = get_active_profile()
+    if active_name:
+        profiles = list_profiles()
+        if active_name in profiles:
+            p = profiles[active_name]
+            active_profile_defaults = {
+                "registry": p["registry"],
+                "user": p.get("user"),
+                "workspace": p["workspace"],
+                "environment": p["environment"],
+            }
+
+    # --- Resolve registry ---
+    if not registry:
+        registry = active_profile_defaults["registry"]
+        if not registry:
+            registries = list_registries()
+            if len(registries) == 1:
+                registry = next(iter(registries))
+            elif len(registries) == 0:
+                typer.echo(
+                    "Error: No registries configured. Run 'stardag auth login' first.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            else:
+                typer.echo(
+                    "Error: Multiple registries configured. "
+                    "Use --registry to specify one.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
     # Verify registry exists
     registries = list_registries()
     if registry not in registries:
@@ -110,9 +183,74 @@ def profile_add(
         typer.echo("Add it with: stardag config registry add <name> --url <url>")
         raise typer.Exit(1)
 
+    registry_url = get_registry_url(registry)
+    if not registry_url:
+        typer.echo(f"Error: Could not get URL for registry '{registry}'.", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Using registry: {registry} ({registry_url})")
+
+    # --- Resolve user ---
+    if not user:
+        user = active_profile_defaults["user"]
+        if not user:
+            # Try to find a user with credentials for this registry
+            user = _find_user_for_registry(registry)
+            if not user:
+                typer.echo(
+                    "Error: Could not determine user. Use --user to specify.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+    typer.echo(f"Using user: {user}")
+
+    # Track OIDC token to avoid redundant refreshes
+    oidc_token: str | None = None
+
+    # --- Resolve workspace (interactive if needed) ---
+    if not workspace:
+        oidc_token = get_fresh_oidc_token(registry, user)
+        if not oidc_token:
+            typer.echo(
+                "Error: Could not get authentication token. "
+                "Run 'stardag auth login' first.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        workspaces = get_user_workspaces(registry_url, oidc_token)
+        if not workspaces:
+            typer.echo("Error: No workspaces found.", err=True)
+            raise typer.Exit(1)
+
+        if len(workspaces) == 1:
+            ws = workspaces[0]
+            workspace = ws["slug"]
+            typer.echo(f"Using workspace: {workspace}")
+        else:
+            # Sort with active profile's workspace first
+            active_ws = active_profile_defaults["workspace"]
+            if active_ws:
+                workspaces.sort(key=lambda w: w["slug"] != active_ws)
+
+            typer.echo("")
+            typer.echo("Select workspace:")
+            for i, ws in enumerate(workspaces):
+                typer.echo(f"  {i + 1}. {ws['slug']}")
+
+            choice = typer.prompt("Enter number", type=int, default=1)
+            if choice < 1 or choice > len(workspaces):
+                typer.echo("Invalid selection")
+                raise typer.Exit(1)
+            ws = workspaces[choice - 1]
+            workspace = ws["slug"]
+
+    # At this point workspace is guaranteed to be set (by CLI arg or interactive selection)
+    assert workspace is not None
+
     # Resolve and cache workspace slug -> ID
-    # This validates the slug exists and populates the cache
-    workspace_id = resolve_workspace_slug_to_id(registry, workspace, user)
+    workspace_id = resolve_workspace_slug_to_id(
+        registry, workspace, user, oidc_token=oidc_token
+    )
     if workspace_id is None:
         typer.echo(
             f"Error: Could not verify workspace '{workspace}'. "
@@ -122,6 +260,60 @@ def profile_add(
         raise typer.Exit(1)
     elif workspace_id != workspace:
         typer.echo(f"Verified workspace '{workspace}' (cached ID)")
+
+    # --- Resolve environment (interactive if needed) ---
+    if not environment:
+        # Get an access token for this workspace
+        access_token = ensure_access_token(registry, workspace_id, user)
+        if not access_token:
+            # Try direct OIDC exchange
+            if not oidc_token:
+                oidc_token = get_fresh_oidc_token(registry, user)
+            if oidc_token:
+                try:
+                    internal = exchange_for_internal_token(
+                        registry_url, oidc_token, workspace_id
+                    )
+                    access_token = internal["access_token"]
+                except Exception:
+                    pass
+
+        if not access_token:
+            typer.echo(
+                "Error: Could not get access token. Run 'stardag auth login' first.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        environments = get_environments(registry_url, access_token, workspace_id)
+        if not environments:
+            typer.echo("Error: No environments found.", err=True)
+            raise typer.Exit(1)
+
+        if len(environments) == 1:
+            env = environments[0]
+            environment = env["slug"]
+            typer.echo(f"Using environment: {environment}")
+        else:
+            # Sort with active profile's environment first
+            active_env = active_profile_defaults["environment"]
+            if active_env:
+                environments.sort(key=lambda e: e["slug"] != active_env)
+
+            typer.echo("")
+            typer.echo("Select environment:")
+            for i, env in enumerate(environments):
+                typer.echo(f"  {i + 1}. {env['slug']}")
+
+            choice = typer.prompt("Enter number", type=int, default=1)
+            if choice < 1 or choice > len(environments):
+                typer.echo("Invalid selection")
+                raise typer.Exit(1)
+            env = environments[choice - 1]
+            environment = env["slug"]
+
+    # At this point environment is guaranteed to be set
+    assert environment is not None
 
     # Resolve and cache environment slug -> ID
     environment_id = resolve_environment_slug_to_id(

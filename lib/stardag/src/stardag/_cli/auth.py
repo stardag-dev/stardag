@@ -206,7 +206,7 @@ def _refresh_oidc_token(
         return response.json()
 
 
-def _exchange_for_internal_token(
+def exchange_for_internal_token(
     api_url: str,
     oidc_token: str,
     workspace_id: str,
@@ -290,7 +290,7 @@ def _get_oidc_config(issuer: str) -> dict:
         return response.json()
 
 
-def _get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
+def get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
     """Fetch user's workspaces from API using OIDC token."""
     # Use /ui/me which accepts OIDC tokens directly (before workspace-scoped exchange)
     with httpx.Client(timeout=10.0) as client:
@@ -303,7 +303,7 @@ def _get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
         return data["workspaces"]
 
 
-def _get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
+def get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
     """Fetch environments for a workspace."""
     with httpx.Client(timeout=10.0) as client:
         response = client.get(
@@ -710,7 +710,7 @@ def login(
 
         if not workspace_id:
             # Need to fetch workspace ID from API
-            workspaces = _get_user_workspaces(effective_url, oidc_token)
+            workspaces = get_user_workspaces(effective_url, oidc_token)
             matching_ws = next(
                 (w for w in workspaces if w["slug"] == workspace_slug), None
             )
@@ -730,7 +730,7 @@ def login(
             # Exchange for internal workspace-scoped token
             typer.echo(f"Caching access token for {workspace_slug}...")
             try:
-                internal_tokens = _exchange_for_internal_token(
+                internal_tokens = exchange_for_internal_token(
                     effective_url, oidc_token, workspace_id
                 )
                 access_token = internal_tokens["access_token"]
@@ -753,7 +753,7 @@ def login(
                     access_token=access_token,
                 )
                 if not environment_id or not _looks_like_uuid(environment_id):
-                    environments = _get_environments(
+                    environments = get_environments(
                         effective_url, access_token, workspace_id
                     )
                     matching_env = next(
@@ -817,7 +817,7 @@ def login(
     # Fetch workspaces and prompt for selection
     # Note: oidc_token and logged_in_user are already extracted and validated above
     assert logged_in_user is not None  # Validated earlier with exit
-    workspaces = _get_user_workspaces(effective_url, oidc_token)
+    workspaces = get_user_workspaces(effective_url, oidc_token)
 
     if not workspaces:
         typer.echo("")
@@ -850,7 +850,7 @@ def login(
     # Exchange for internal workspace-scoped token
     typer.echo(f"Exchanging for workspace-scoped token ({workspace_slug})...")
     try:
-        internal_tokens = _exchange_for_internal_token(
+        internal_tokens = exchange_for_internal_token(
             effective_url, oidc_token, workspace_id
         )
         access_token = internal_tokens["access_token"]
@@ -868,7 +868,7 @@ def login(
         return
 
     # Fetch environments
-    environments = _get_environments(effective_url, access_token, workspace_id)
+    environments = get_environments(effective_url, access_token, workspace_id)
 
     if not environments:
         typer.echo("No environments found in workspace")
@@ -1282,7 +1282,7 @@ def refresh(
 
     # Exchange for internal token
     try:
-        internal_tokens = _exchange_for_internal_token(
+        internal_tokens = exchange_for_internal_token(
             registry_url, tokens["access_token"], ws_id
         )
         access_token = internal_tokens["access_token"]
