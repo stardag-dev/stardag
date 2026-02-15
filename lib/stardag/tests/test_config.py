@@ -298,6 +298,51 @@ environment = "project-env"
 
         assert config.api_key == "my-api-key"
 
+    def test_target_roots_from_json_env_var(self, temp_stardag_dir, monkeypatch):
+        """STARDAG_TARGET_ROOTS as a JSON string sets target roots."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv(
+            "STARDAG_TARGET_ROOTS",
+            '{"default": "/tmp/root", "s3": "s3://bucket/prefix"}',
+        )
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.target.roots == {
+            "default": "/tmp/root",
+            "s3": "s3://bucket/prefix",
+        }
+
+    def test_target_roots_from_double_underscore_env_vars(
+        self, temp_stardag_dir, monkeypatch
+    ):
+        """STARDAG_TARGET_ROOTS__<KEY>=<uri> env vars set individual target roots."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_TARGET_ROOTS__DEFAULT", "/tmp/root")
+        monkeypatch.setenv("STARDAG_TARGET_ROOTS__S3", "s3://bucket/prefix")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.target.roots == {
+            "default": "/tmp/root",
+            "s3": "s3://bucket/prefix",
+        }
+
+    def test_target_roots_json_overrides_double_underscore(
+        self, temp_stardag_dir, monkeypatch
+    ):
+        """STARDAG_TARGET_ROOTS (JSON) takes precedence over __KEY env vars."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_TARGET_ROOTS", '{"json-root": "/from/json"}')
+        monkeypatch.setenv("STARDAG_TARGET_ROOTS__IGNORED", "/should/be/ignored")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.target.roots == {"json-root": "/from/json"}
+
 
 class TestContextConfig:
     def test_default_values(self):
