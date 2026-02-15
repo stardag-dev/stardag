@@ -13,18 +13,27 @@ Usage:
     stardag modal deploy -m my_package.my_mod
     stardag modal deploy my_script.py::stardag_app
     stardag modal deploy my_script.py --profile production
+    stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env]
 """
 
 import importlib
 import importlib.util
 import inspect
+import os
 import sys
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import typer
 from rich.console import Console
 
+from stardag._cli._helpers import get_authenticated_client
+from stardag._cli.credentials import (
+    resolve_environment_slug_to_id,
+    resolve_workspace_slug_to_id,
+)
+from stardag.config import clear_config_cache, get_config
 from stardag.integration.modal import StardagApp
 
 # Check if modal is available
@@ -44,6 +53,225 @@ app = typer.Typer(
 
 console = Console()
 error_console = Console(stderr=True)
+
+# Sub-typer for stardag-api-key management
+stardag_api_key_app = typer.Typer(help="Manage Stardag API keys in Modal")
+app.add_typer(stardag_api_key_app, name="stardag-api-key")
+
+
+def _resolve_stardag_context(
+    profile: str | None,
+    workspace_override: str | None,
+    env_override: str | None,
+) -> tuple[httpx.Client, str, str, str]:
+    """Resolve stardag context and get authenticated client.
+
+    Returns (client, api_url, workspace_id, environment_id).
+    """
+    old_profile = os.environ.get("STARDAG_PROFILE")
+    try:
+        if profile:
+            os.environ["STARDAG_PROFILE"] = profile
+            clear_config_cache()
+
+        client, api_url, access_token = get_authenticated_client()
+        config = get_config()
+
+        registry_name = config.context.registry_name
+        user = config.context.user
+        workspace_id = config.context.workspace_id
+        environment_id = config.context.environment_id
+
+        if workspace_override and registry_name:
+            resolved = resolve_workspace_slug_to_id(
+                registry_name, workspace_override, user
+            )
+            if not resolved:
+                error_console.print(
+                    f"[bold red]Could not resolve workspace: {workspace_override}[/bold red]"
+                )
+                raise typer.Exit(1)
+            workspace_id = resolved
+
+        if env_override and registry_name and workspace_id:
+            resolved = resolve_environment_slug_to_id(
+                registry_name, workspace_id, env_override, user, access_token
+            )
+            if not resolved:
+                error_console.print(
+                    f"[bold red]Could not resolve environment: {env_override}[/bold red]"
+                )
+                raise typer.Exit(1)
+            environment_id = resolved
+
+        if not workspace_id:
+            error_console.print(
+                "[bold red]No workspace configured.[/bold red]\n"
+                "Set STARDAG_PROFILE or use -w/--stardag-workspace."
+            )
+            raise typer.Exit(1)
+
+        if not environment_id:
+            error_console.print(
+                "[bold red]No environment configured.[/bold red]\n"
+                "Set STARDAG_PROFILE or use -e/--stardag-env."
+            )
+            raise typer.Exit(1)
+
+        return client, api_url, workspace_id, environment_id
+    finally:
+        if old_profile is not None:
+            os.environ["STARDAG_PROFILE"] = old_profile
+        else:
+            os.environ.pop("STARDAG_PROFILE", None)
+        if profile:
+            clear_config_cache()
+
+
+def _create_stardag_api_key(
+    client: httpx.Client,
+    api_url: str,
+    workspace_id: str,
+    environment_id: str,
+    key_name: str,
+) -> tuple[str, str]:
+    """Create a Stardag API key. Returns (full_key, key_prefix)."""
+    url = (
+        f"{api_url}/api/v1/ui/workspaces/{workspace_id}"
+        f"/environments/{environment_id}/api-keys"
+    )
+    response = client.post(url, json={"name": key_name})
+
+    if response.status_code == 201:
+        data = response.json()
+        return data["key"], data["key_prefix"]
+
+    if response.status_code == 401:
+        error_console.print(
+            "[bold red]Authentication error.[/bold red]\n"
+            "Try running: stardag auth refresh"
+        )
+        raise typer.Exit(1)
+
+    if response.status_code == 403:
+        error_console.print(
+            "[bold red]Permission denied.[/bold red]\n"
+            "You need admin or higher role to create API keys."
+        )
+        raise typer.Exit(1)
+
+    error_console.print(
+        f"[bold red]API error ({response.status_code}):[/bold red] {response.text}"
+    )
+    raise typer.Exit(1)
+
+
+def _push_modal_secret(
+    secret_name: str,
+    env_dict: dict[str, str],
+    modal_env: str | None,
+) -> None:
+    """Push a named secret to Modal (idempotent: delete + create)."""
+    import modal
+
+    environment_name = modal_env or ""
+    try:
+        modal.Secret.objects.delete(
+            secret_name, allow_missing=True, environment_name=environment_name
+        )
+        modal.Secret.objects.create(
+            secret_name, env_dict, environment_name=environment_name
+        )
+    except Exception as e:
+        error_console.print(f"[bold red]Modal error: {e}[/bold red]")
+        raise
+
+
+@stardag_api_key_app.command("create")
+def stardag_api_key_create(
+    stardag_workspace: Optional[str] = typer.Option(
+        None,
+        "-w",
+        "--stardag-workspace",
+        help="Stardag workspace slug or ID. Defaults to active profile.",
+    ),
+    stardag_env: Optional[str] = typer.Option(
+        None,
+        "-e",
+        "--stardag-env",
+        help="Stardag environment slug or ID. Defaults to active profile.",
+    ),
+    stardag_profile: Optional[str] = typer.Option(
+        None,
+        "-p",
+        "--stardag-profile",
+        help="Stardag profile to use. Defaults to active profile.",
+    ),
+    modal_env: Optional[str] = typer.Option(
+        None,
+        "--modal-env",
+        help="Modal environment name. Defaults to Modal's default environment.",
+    ),
+    secret_name: str = typer.Option(
+        "stardag-api-key",
+        "--secret-name",
+        help="Name of the Modal secret to create.",
+    ),
+    api_key_name: Optional[str] = typer.Option(
+        None,
+        "--api-key-name",
+        help='Name for the Stardag API key. Defaults to "modal-{modal_env}".',
+    ),
+) -> None:
+    """Create a Stardag API key and push it as a Modal secret."""
+    if not MODAL_AVAILABLE:
+        error_console.print(
+            "[bold red]Modal is not installed.[/bold red]\n"
+            "Install it with: pip install stardag[modal]"
+        )
+        raise typer.Exit(1)
+
+    client, api_url, ws_id, env_id = _resolve_stardag_context(
+        stardag_profile, stardag_workspace, stardag_env
+    )
+
+    if api_key_name is None:
+        api_key_name = f"modal-{modal_env or 'default'}"
+
+    console.print("\n[cyan]Using stardag context:[/cyan]")
+    console.print(f"  Registry: {api_url}")
+    console.print(f"  Workspace: {ws_id}")
+    console.print(f"  Environment: {env_id}")
+    console.print()
+
+    full_key, key_prefix = _create_stardag_api_key(
+        client, api_url, ws_id, env_id, api_key_name
+    )
+    console.print(
+        f'[green]Created Stardag API key: "{api_key_name}" '
+        f"(prefix: {key_prefix})[/green]"
+    )
+
+    try:
+        _push_modal_secret(secret_name, {"STARDAG_API_KEY": full_key}, modal_env)
+    except Exception:
+        error_console.print(
+            "[yellow]API key was created successfully. Key value:[/yellow]"
+        )
+        error_console.print(f"[yellow]  {full_key}[/yellow]")
+        error_console.print("[yellow]Create the Modal secret manually:[/yellow]")
+        error_console.print(
+            f"[yellow]  modal secret create {secret_name} "
+            f'STARDAG_API_KEY="{full_key}"[/yellow]'
+        )
+        raise typer.Exit(1)
+
+    modal_env_display = f" (Modal environment: {modal_env})" if modal_env else ""
+    console.print(
+        f'[green]Pushed Modal secret: "{secret_name}"{modal_env_display}[/green]'
+    )
+    console.print("\n[dim]Use in your app:[/dim]")
+    console.print(f'[dim]  modal.Secret.from_name("{secret_name}")[/dim]')
 
 
 def _import_file_or_module(file_or_module: str, use_module_mode: bool) -> object:

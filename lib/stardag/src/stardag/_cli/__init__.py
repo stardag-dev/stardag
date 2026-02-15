@@ -28,6 +28,7 @@ Usage:
     stardag env target-roots set <name=uri ...> [--json <json>] [--env <env>]
 
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
+    stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
 
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.
