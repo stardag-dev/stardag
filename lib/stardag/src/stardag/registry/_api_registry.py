@@ -76,7 +76,13 @@ class APIRegistry(RegistryABC):
         self.access_token = config.access_token if not self.api_key else None
 
         # API URL: explicit > config
-        self.api_url = (api_url or config.api.url).rstrip("/")
+        resolved_url = api_url or config.api.url
+        if not resolved_url:
+            raise ValueError(
+                "APIRegistry requires a registry URL. "
+                "Set STARDAG_REGISTRY_URL or configure a profile with a registry."
+            )
+        self.api_url = resolved_url.rstrip("/")
 
         # Timeout: explicit > config
         self.timeout = timeout if timeout is not None else config.api.timeout

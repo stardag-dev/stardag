@@ -418,7 +418,7 @@ class RegistryConfig(BaseModel):
         url: Base URL of the Stardag API registry.
     """
 
-    url: str = DEFAULT_API_URL
+    url: str
 
 
 class ProfileConfig(BaseModel):
@@ -516,7 +516,7 @@ class APIConfig(BaseModel):
         timeout: Request timeout in seconds.
     """
 
-    url: str = DEFAULT_API_URL
+    url: str | None = None
     timeout: float = DEFAULT_API_TIMEOUT
 
 
@@ -722,10 +722,6 @@ def load_config(
                 environment_id = environment_value
         else:
             logger.warning(f"Profile '{profile_name}' not found in config")
-
-    # Apply defaults
-    if not registry_url:
-        registry_url = DEFAULT_API_URL
 
     # 4. Resolve target roots
     # Priority: env > cached > default

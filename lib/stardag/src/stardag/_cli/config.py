@@ -53,7 +53,7 @@ def show_config() -> None:
     else:
         typer.echo("  Profile: (none - using env vars or defaults)")
     typer.echo(f"  Registry: {config.context.registry_name or '(not set)'}")
-    typer.echo(f"  API URL: {config.api.url}")
+    typer.echo(f"  API URL: {config.api.url or '(none - local mode)'}")
     typer.echo(f"  Workspace: {config.context.workspace_id or '(not set)'}")
     typer.echo(f"  Environment: {config.context.environment_id or '(not set)'}")
 

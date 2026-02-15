@@ -499,9 +499,10 @@ def deploy(
             console.print(f"[cyan]Using stardag profile: {profile}[/cyan]")
             env_vars = get_profile_env_vars(profile)
             if env_vars:
-                console.print(
-                    f"[dim]  Registry URL: {env_vars.get('STARDAG_REGISTRY_URL', 'N/A')}[/dim]"
+                registry_display = env_vars.get(
+                    "STARDAG_REGISTRY_URL", "none (local mode)"
                 )
+                console.print(f"[dim]  Registry: {registry_display}[/dim]")
                 console.print(
                     f"[dim]  Workspace ID: {env_vars.get('STARDAG_WORKSPACE_ID', 'N/A')}[/dim]"
                 )
@@ -529,9 +530,10 @@ def deploy(
             env_vars = get_profile_env_vars()
             if env_vars:
                 console.print("[cyan]Using active stardag profile[/cyan]")
-                console.print(
-                    f"[dim]  Registry URL: {env_vars.get('STARDAG_REGISTRY_URL', 'N/A')}[/dim]"
+                registry_display = env_vars.get(
+                    "STARDAG_REGISTRY_URL", "none (local mode)"
                 )
+                console.print(f"[dim]  Registry: {registry_display}[/dim]")
                 console.print(
                     f"[dim]  Workspace ID: {env_vars.get('STARDAG_WORKSPACE_ID', 'N/A')}[/dim]"
                 )

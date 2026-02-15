@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import ValidationError
+
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
-    DEFAULT_API_URL,
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
     ContextConfig,
@@ -134,7 +135,7 @@ class TestLoadConfig:
         config = load_config(use_project_config=False)
 
         assert config.target.roots == {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
-        assert config.api.url == DEFAULT_API_URL
+        assert config.api.url is None
         assert config.api.timeout == DEFAULT_API_TIMEOUT
         assert config.context.profile is None
         assert config.context.registry_name is None
@@ -342,9 +343,9 @@ class TestGetConfig:
 
 
 class TestRegistryConfig:
-    def test_default_url(self):
-        config = RegistryConfig()
-        assert config.url == DEFAULT_API_URL
+    def test_url_is_required(self):
+        with pytest.raises(ValidationError):
+            RegistryConfig()  # type: ignore[call-arg]
 
     def test_custom_url(self):
         config = RegistryConfig(url="https://api.stardag.com")

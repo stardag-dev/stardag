@@ -35,8 +35,15 @@ class RegistryAPIClientConfig:
         # Access token from config (browser login, only if no API key)
         resolved_access_token = config.access_token if not resolved_api_key else None
 
+        resolved_url = api_url or config.api.url
+        if not resolved_url:
+            raise ValueError(
+                "Registry API client requires a URL. "
+                "Set STARDAG_REGISTRY_URL or configure a profile."
+            )
+
         return cls(
-            api_url=(api_url or config.api.url).rstrip("/"),
+            api_url=resolved_url.rstrip("/"),
             api_key=resolved_api_key,
             access_token=resolved_access_token,
             environment_id=environment_id or config.context.environment_id,
