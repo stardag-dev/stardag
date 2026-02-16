@@ -1,15 +1,32 @@
+import logging
 from functools import lru_cache
 from pathlib import Path
 
 import modal
-from modal.exception import NotFoundError
+from modal.exception import NotFoundError, ResourceExhaustedError
 from modal.volume import FileEntryType
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from stardag.integration.modal._config import modal_config_provider
 from stardag.target import LocalTarget, RemoteFileSystemABC, RemoteFileSystemTarget
 from stardag.utils.resource_provider import resource_provider
 
+logger = logging.getLogger(__name__)
+
 MODAL_VOLUME_URI_PREFIX = "modalvol://"
+
+_retry_on_rate_limit = retry(
+    retry=retry_if_exception_type(ResourceExhaustedError),
+    wait=wait_exponential_jitter(initial=0.5, max=10),
+    stop=stop_after_attempt(6),
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
+)
 
 
 def get_volume_name_and_path(uri: str) -> tuple[str, str]:
@@ -53,15 +70,14 @@ class ModalMountedVolumeTarget(LocalTarget):
 class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
     URI_PREFIX = MODAL_VOLUME_URI_PREFIX
 
+    @_retry_on_rate_limit
     def exists(self, uri: str) -> bool:
         volume_name, in_volume_path = get_volume_name_and_path(uri)
         volume = _get_volume(volume_name)
-
         try:
             # recursive=False: we're checking a single file, not listing a subtree
             entry = next(volume.iterdir(in_volume_path, recursive=False))
             return entry.type == FileEntryType.FILE and entry.path == in_volume_path
-
         except NotFoundError:
             return False
         except StopIteration:
@@ -83,17 +99,16 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
 
     # Async implementations using Modal's .aio interface
 
+    @_retry_on_rate_limit
     async def exists_aio(self, uri: str) -> bool:
         """Asynchronously check if the file exists in the Modal volume."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
         volume = _get_volume(volume_name)
-
         try:
             # recursive=False: we're checking a single file, not listing a subtree
             async for entry in volume.iterdir.aio(in_volume_path, recursive=False):
                 return entry.type == FileEntryType.FILE and entry.path == in_volume_path
             return False
-
         except NotFoundError:
             return False
         except FileNotFoundError:
