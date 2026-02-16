@@ -1,12 +1,14 @@
+import sys
+
 import modal
 import stardag.integration.modal as sd_modal
 
-base_image = modal.Image.debian_slim(python_version="3.12")
-
+# Must match local Python version for Modal serialization compatibility
+python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 # Define the Modal image
 image = (
-    modal.Image.debian_slim(python_version="3.12")
+    modal.Image.debian_slim(python_version=python_version)
     .uv_sync(extras=["ml-pipeline"])
     .add_local_python_source("stardag_examples")
 )

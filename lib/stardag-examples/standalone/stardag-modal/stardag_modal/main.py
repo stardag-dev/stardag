@@ -1,3 +1,5 @@
+import sys
+
 import modal
 import stardag as sd
 import stardag.integration.modal as sd_modal
@@ -13,9 +15,12 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
 
+# Must match local Python version for Modal serialization compatibility
+python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+
 # Define the Modal image
 image = (
-    modal.Image.debian_slim(python_version="3.14")
+    modal.Image.debian_slim(python_version=python_version)
     .uv_sync()  # installs *dependencies* using UV but not `stardag_modal` itself.
     .add_local_python_source("stardag_modal")  # adds `stardag_modal` source
 )
