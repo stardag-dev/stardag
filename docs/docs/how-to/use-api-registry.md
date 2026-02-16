@@ -96,19 +96,22 @@ Features:
 - Historical build records
 - Task output inspection
 
-## Target Root Synchronization
+## Target Root Management
 
-Target roots are configured centrally per workspace:
+Target roots are configured centrally per environment:
 
 ```sh
-# Sync target roots from server
-stardag config target-roots sync
+# View current target roots
+stardag environment target-roots list
 
-# View current configuration
-stardag config target-roots list
+# Set target roots
+stardag environment target-roots set default=s3://bucket/outputs
+
+# Add a target root
+stardag environment target-roots add s3 s3://my-bucket/data
 ```
 
-This ensures all team members use consistent storage paths.
+Changes are automatically synced to the local cache. This ensures all team members use consistent storage paths.
 
 ## Example: Production Workflow
 
@@ -169,10 +172,10 @@ stardag config show
 
 ### "Target root mismatch"
 
-Sync from server:
+Check target roots on the server:
 
 ```sh
-stardag config target-roots sync
+stardag environment target-roots list
 ```
 
 ## See Also

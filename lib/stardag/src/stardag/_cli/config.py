@@ -25,7 +25,6 @@ from stardag._cli.credentials import (
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
     set_default_profile,
-    set_target_roots,
 )
 from stardag.config import get_config
 
@@ -463,97 +462,6 @@ def profile_use(
             "Run 'stardag auth refresh' to authenticate.",
             err=True,
         )
-
-
-# --- Target roots commands ---
-
-target_roots_app = typer.Typer(help="Manage target roots")
-app.add_typer(target_roots_app, name="target-roots")
-
-
-@target_roots_app.command("list")
-def target_roots_list() -> None:
-    """List cached target roots for the active context."""
-    validate_active_profile_cli()
-    config = get_config()
-    target_roots = config.target.roots
-
-    if not target_roots:
-        typer.echo("No target roots cached.")
-        typer.echo("")
-        typer.echo("Run 'stardag config target-roots sync' to fetch from server.")
-        return
-
-    typer.echo("Target Roots:")
-    for name, uri_prefix in sorted(target_roots.items()):
-        typer.echo(f"  {name}: {uri_prefix}")
-
-
-@target_roots_app.command("sync")
-def target_roots_sync() -> None:
-    """Sync target roots from the API.
-
-    Fetches the latest target roots configuration from the central API
-    for the active environment.
-    """
-    validate_active_profile_cli()
-    config = get_config()
-    workspace_id = config.context.workspace_id
-    environment_id = config.context.environment_id
-
-    if not workspace_id:
-        typer.echo(
-            "Error: No workspace set. Use a profile or set STARDAG_WORKSPACE_ID.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    if not environment_id:
-        typer.echo(
-            "Error: No environment set. Use a profile or set STARDAG_ENVIRONMENT_ID.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    client, api_url, _ = get_authenticated_client()
-
-    try:
-        typer.echo(f"Syncing target roots from {api_url}...")
-
-        response = client.get(
-            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments/{environment_id}/target-roots"
-        )
-
-        if response.status_code != 200:
-            typer.echo(
-                f"Error: Failed to fetch target roots: {response.status_code}", err=True
-            )
-            raise typer.Exit(1)
-
-        roots = response.json()
-        target_roots = {root["name"]: root["uri_prefix"] for root in roots}
-
-        set_target_roots(
-            target_roots,
-            registry_url=api_url,
-            workspace_id=workspace_id,
-            environment_id=environment_id,
-        )
-
-        if target_roots:
-            typer.echo(f"Synced {len(target_roots)} target root(s):")
-            for name, uri_prefix in sorted(target_roots.items()):
-                typer.echo(f"  {name}: {uri_prefix}")
-        else:
-            typer.echo("No target roots configured for this environment.")
-
-    except Exception as e:
-        if isinstance(e, typer.Exit):
-            raise
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
-    finally:
-        client.close()
 
 
 # --- List commands (legacy, kept for convenience) ---

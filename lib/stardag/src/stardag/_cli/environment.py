@@ -438,6 +438,7 @@ def target_roots_add(
 
         if response.status_code == 201:
             typer.echo(f"Target root '{name}' added: {uri}")
+            _sync_target_roots_cache(client, api_url, workspace_id, environment_id)
         else:
             _handle_api_error(response, f"target root '{name}'")
             raise typer.Exit(1)
@@ -503,6 +504,7 @@ def target_roots_remove(
 
         if response.status_code == 204:
             typer.echo(f"Target root '{name}' removed.")
+            _sync_target_roots_cache(client, api_url, workspace_id, environment_id)
         else:
             _handle_api_error(response, "target root")
             raise typer.Exit(1)
@@ -676,7 +678,7 @@ def target_roots_set(
         typer.echo("Target roots updated successfully.")
 
         # Update local cache
-        _sync_target_roots_cache(api_url, workspace_id, environment_id, desired)
+        _sync_target_roots_cache(client, api_url, workspace_id, environment_id, desired)
 
     except typer.Exit:
         raise
@@ -691,13 +693,22 @@ def target_roots_set(
 
 
 def _sync_target_roots_cache(
+    client: httpx.Client,
     api_url: str,
     workspace_id: str,
     environment_id: str,
-    target_roots: dict[str, str],
+    target_roots: dict[str, str] | None = None,
 ) -> None:
-    """Update the local target roots cache after a server-side change."""
+    """Update the local target roots cache after a server-side change.
+
+    If target_roots is None, re-fetches from the API to get the current state.
+    """
     try:
+        if target_roots is None:
+            roots = _list_target_roots_api(
+                client, api_url, workspace_id, environment_id
+            )
+            target_roots = {root["name"]: root["uri_prefix"] for root in roots}
         set_cached_target_roots(
             target_roots,
             registry_url=api_url,

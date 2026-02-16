@@ -318,37 +318,27 @@ List environments in the active workspace.
 
 ## Target Root Commands
 
-### List Target Roots
+Target roots are managed under `stardag environment target-roots`. Changes are automatically synced to the local cache.
 
 === "Active venv"
 
     ```sh
-    stardag config target-roots list
+    stardag environment target-roots list
+    stardag environment target-roots add <name> <uri>
+    stardag environment target-roots remove <name>
+    stardag environment target-roots set <name=uri ...>
     ```
 
 === "uv run ..."
 
     ```sh
-    uv run stardag config target-roots list
+    uv run stardag environment target-roots list
+    uv run stardag environment target-roots add <name> <uri>
+    uv run stardag environment target-roots remove <name>
+    uv run stardag environment target-roots set <name=uri ...>
     ```
 
-Show cached target roots for current environment.
-
-### Sync Target Roots
-
-=== "Active venv"
-
-    ```sh
-    stardag config target-roots sync
-    ```
-
-=== "uv run ..."
-
-    ```sh
-    uv run stardag config target-roots sync
-    ```
-
-Fetch latest target roots from server.
+See `stardag environment target-roots --help` for full options (e.g. `--env` to target a specific environment).
 
 ## Environment Variables
 
