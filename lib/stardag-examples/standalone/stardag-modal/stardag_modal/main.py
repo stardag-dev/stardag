@@ -13,18 +13,12 @@ def get_sum(integers: sd.Depends[list[int]]) -> int:
     return sum(integers)
 
 
-# Define the Modal image with Stardag installed
-image = sd_modal.with_stardag_on_image(
-    modal.Image.debian_slim(python_version="3.14")
-).add_local_python_source("stardag_modal")
-
-# TODO change to installing from PyPI once updated
 # Define the Modal image
-# image = (
-#     modal.Image.debian_slim(python_version="3.12")
-#     .uv_sync()
-#     .add_local_python_source("stardag_modal")
-# )
+image = (
+    modal.Image.debian_slim(python_version="3.14")
+    .uv_sync()  # installs *dependencies* using UV but not `stardag_modal` itself.
+    .add_local_python_source("stardag_modal")  # adds `stardag_modal` source
+)
 
 # Define the StardagApp
 app = sd_modal.StardagApp(
