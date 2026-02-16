@@ -14,6 +14,7 @@ from stardag._cli.credentials import (
     exchange_for_internal_token,
     get_active_profile,
     get_config_path,
+    get_default_profile,
     get_environments,
     get_fresh_oidc_token,
     get_registry_url,
@@ -24,7 +25,6 @@ from stardag._cli.credentials import (
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
     set_default_profile,
-    set_target_roots,
 )
 from stardag.config import get_config
 
@@ -54,8 +54,23 @@ def show_config() -> None:
         typer.echo("  Profile: (none - using env vars or defaults)")
     typer.echo(f"  Registry: {config.context.registry_name or '(not set)'}")
     typer.echo(f"  API URL: {config.api.url or '(none - local mode)'}")
-    typer.echo(f"  Workspace: {config.context.workspace_id or '(not set)'}")
-    typer.echo(f"  Environment: {config.context.environment_id or '(not set)'}")
+    # Show slugs alongside IDs if the profile stores a slug (not a raw UUID)
+    ws_slug = None
+    env_slug = None
+    if config.context.profile:
+        prof = list_profiles().get(config.context.profile)
+        if prof:
+            if prof["workspace"] != config.context.workspace_id:
+                ws_slug = prof["workspace"]
+            if prof["environment"] != config.context.environment_id:
+                env_slug = prof["environment"]
+
+    ws_id = config.context.workspace_id or "(not set)"
+    env_id = config.context.environment_id or "(not set)"
+    ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
+    env_display = f"{env_id} ({env_slug})" if env_slug else env_id
+    typer.echo(f"  Workspace: {ws_display}")
+    typer.echo(f"  Environment: {env_display}")
 
     typer.echo("")
     typer.echo("Target Roots:")
@@ -397,8 +412,11 @@ def profile_remove(
     name: str = typer.Argument(..., help="Profile name to remove"),
 ) -> None:
     """Remove a profile from configuration."""
+    was_default = get_default_profile() == name
     if remove_profile(name):
         typer.echo(f"Profile '{name}' removed.")
+        if was_default:
+            typer.echo("(Default profile has been unset.)")
     else:
         typer.echo(f"Profile '{name}' not found.")
         raise typer.Exit(1)
@@ -459,97 +477,6 @@ def profile_use(
             "Run 'stardag auth refresh' to authenticate.",
             err=True,
         )
-
-
-# --- Target roots commands ---
-
-target_roots_app = typer.Typer(help="Manage target roots")
-app.add_typer(target_roots_app, name="target-roots")
-
-
-@target_roots_app.command("list")
-def target_roots_list() -> None:
-    """List cached target roots for the active context."""
-    validate_active_profile_cli()
-    config = get_config()
-    target_roots = config.target.roots
-
-    if not target_roots:
-        typer.echo("No target roots cached.")
-        typer.echo("")
-        typer.echo("Run 'stardag config target-roots sync' to fetch from server.")
-        return
-
-    typer.echo("Target Roots:")
-    for name, uri_prefix in sorted(target_roots.items()):
-        typer.echo(f"  {name}: {uri_prefix}")
-
-
-@target_roots_app.command("sync")
-def target_roots_sync() -> None:
-    """Sync target roots from the API.
-
-    Fetches the latest target roots configuration from the central API
-    for the active environment.
-    """
-    validate_active_profile_cli()
-    config = get_config()
-    workspace_id = config.context.workspace_id
-    environment_id = config.context.environment_id
-
-    if not workspace_id:
-        typer.echo(
-            "Error: No workspace set. Use a profile or set STARDAG_WORKSPACE_ID.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    if not environment_id:
-        typer.echo(
-            "Error: No environment set. Use a profile or set STARDAG_ENVIRONMENT_ID.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-    client, api_url, _ = get_authenticated_client()
-
-    try:
-        typer.echo(f"Syncing target roots from {api_url}...")
-
-        response = client.get(
-            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments/{environment_id}/target-roots"
-        )
-
-        if response.status_code != 200:
-            typer.echo(
-                f"Error: Failed to fetch target roots: {response.status_code}", err=True
-            )
-            raise typer.Exit(1)
-
-        roots = response.json()
-        target_roots = {root["name"]: root["uri_prefix"] for root in roots}
-
-        set_target_roots(
-            target_roots,
-            registry_url=api_url,
-            workspace_id=workspace_id,
-            environment_id=environment_id,
-        )
-
-        if target_roots:
-            typer.echo(f"Synced {len(target_roots)} target root(s):")
-            for name, uri_prefix in sorted(target_roots.items()):
-                typer.echo(f"  {name}: {uri_prefix}")
-        else:
-            typer.echo("No target roots configured for this environment.")
-
-    except Exception as e:
-        if isinstance(e, typer.Exit):
-            raise
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
-    finally:
-        client.close()
 
 
 # --- List commands (legacy, kept for convenience) ---

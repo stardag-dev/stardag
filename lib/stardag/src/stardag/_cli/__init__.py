@@ -14,8 +14,6 @@ Usage:
     stardag config profile list
     stardag config profile use <name>
     stardag config profile remove <name>
-    stardag config target-roots list
-    stardag config target-roots sync
     stardag config list workspaces
     stardag config list environments
 

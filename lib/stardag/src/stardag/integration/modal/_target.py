@@ -1,14 +1,33 @@
+import logging
+from functools import lru_cache
 from pathlib import Path
 
+import aiofiles
 import modal
-from grpclib import GRPCError, Status
+from modal.exception import NotFoundError, ResourceExhaustedError
 from modal.volume import FileEntryType
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from stardag.integration.modal._config import modal_config_provider
 from stardag.target import LocalTarget, RemoteFileSystemABC, RemoteFileSystemTarget
 from stardag.utils.resource_provider import resource_provider
 
+logger = logging.getLogger(__name__)
+
 MODAL_VOLUME_URI_PREFIX = "modalvol://"
+
+_retry_on_rate_limit = retry(
+    retry=retry_if_exception_type(ResourceExhaustedError),
+    wait=wait_exponential_jitter(initial=0.5, max=10),
+    stop=stop_after_attempt(6),
+    before_sleep=before_sleep_log(logger, logging.DEBUG),
+)
 
 
 def get_volume_name_and_path(uri: str) -> tuple[str, str]:
@@ -23,6 +42,11 @@ def get_volume_name_and_path(uri: str) -> tuple[str, str]:
     return volume, path
 
 
+@lru_cache(maxsize=16)
+def _get_volume(volume_name: str) -> modal.Volume:
+    return modal.Volume.from_name(volume_name)
+
+
 class ModalMountedVolumeTarget(LocalTarget):
     def __init__(self, uri: str, **kwargs):
         super().__init__(uri, **kwargs)
@@ -33,7 +57,7 @@ class ModalMountedVolumeTarget(LocalTarget):
         if mount_path is None:
             raise ValueError(f"Volume '{volume_name}' is not mounted")
 
-        self.volume = modal.Volume.from_name(volume_name)
+        self.volume = _get_volume(volume_name)
         self.local_path = mount_path / in_volume_path
 
     @property
@@ -47,75 +71,55 @@ class ModalMountedVolumeTarget(LocalTarget):
 class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
     URI_PREFIX = MODAL_VOLUME_URI_PREFIX
 
+    @_retry_on_rate_limit
     def exists(self, uri: str) -> bool:
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = modal.Volume.from_name(volume_name)
-
+        volume = _get_volume(volume_name)
         try:
-            entry = next(volume.iterdir(in_volume_path))
-            if entry.type == FileEntryType.FILE and entry.path == in_volume_path:
-                return True
-            else:
-                return False
-
-        # This is what happens when running in modal function
-        except GRPCError as exc:
-            if exc.status == Status.NOT_FOUND:
-                return False
-
-            raise
-
-        # This is what happens when running outside of modal functions
+            # recursive=False: we're checking a single file, not listing a subtree
+            entry = next(volume.iterdir(in_volume_path, recursive=False))
+            return entry.type == FileEntryType.FILE and entry.path == in_volume_path
+        except NotFoundError:
+            return False
         except StopIteration:
-            # The prefix is a directory, with no entries
             return False
         except FileNotFoundError:
-            # No entry found
             return False
 
     def download(self, uri: str, destination: Path):
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = modal.Volume.from_name(volume_name)
+        volume = _get_volume(volume_name)
         with destination.open("wb") as dest_handle:
             volume.read_file_into_fileobj(in_volume_path, dest_handle)
 
     def upload(self, source: Path, uri: str, ok_remove: bool = False):
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = modal.Volume.from_name(volume_name)
+        volume = _get_volume(volume_name)
         with volume.batch_upload() as batch:
             batch.put_file(source, in_volume_path)
 
     # Async implementations using Modal's .aio interface
 
+    @_retry_on_rate_limit
     async def exists_aio(self, uri: str) -> bool:
         """Asynchronously check if the file exists in the Modal volume."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = modal.Volume.from_name(volume_name)
-
+        volume = _get_volume(volume_name)
         try:
-            async for entry in volume.iterdir.aio(in_volume_path):
-                if entry.type == FileEntryType.FILE and entry.path == in_volume_path:
-                    return True
-                return False
+            # recursive=False: we're checking a single file, not listing a subtree
+            async for entry in volume.iterdir.aio(in_volume_path, recursive=False):
+                return entry.type == FileEntryType.FILE and entry.path == in_volume_path
             return False
-
-        except GRPCError as exc:
-            if exc.status == Status.NOT_FOUND:
-                return False
-            raise
-
+        except NotFoundError:
+            return False
         except FileNotFoundError:
             return False
 
     async def download_aio(self, uri: str, destination: Path) -> None:
         """Asynchronously download a file from the Modal volume."""
-        import aiofiles
-
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = modal.Volume.from_name(volume_name)
+        volume = _get_volume(volume_name)
 
-        # Modal's read_file returns an iterator of bytes chunks
-        # We need to write them to the destination file
         async with aiofiles.open(destination, "wb") as dest_handle:
             async for chunk in volume.read_file.aio(in_volume_path):
                 await dest_handle.write(chunk)
@@ -123,9 +127,8 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
     async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
         """Asynchronously upload a file to the Modal volume."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
-        volume = modal.Volume.from_name(volume_name)
+        volume = _get_volume(volume_name)
 
-        # Modal's batch_upload is a context manager, use the async version
         async with volume.batch_upload.aio() as batch:
             batch.put_file(source, in_volume_path)
 

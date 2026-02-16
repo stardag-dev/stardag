@@ -413,6 +413,9 @@ def remove_profile(name: str) -> bool:
     config = load_toml_config()
     if name in config.profile:
         del config.profile[name]
+        # Unset default if the removed profile was the default
+        if config.default.get("profile") == name:
+            del config.default["profile"]
         save_toml_config(config)
         return True
     return False

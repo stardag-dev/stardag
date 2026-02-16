@@ -112,37 +112,38 @@ Each environment has its own target root configuration:
 
     Target root paths starting with `~/` are automatically expanded to the user's home directory. They mostly make sense for personal/local environments.
 
-### Synchronizing Target Roots
+### Managing Target Roots
+
+Target roots are managed via the `stardag environment target-roots` commands. All mutations automatically sync the local cache.
 
 === "Active venv"
 
     ```sh
-    # Fetch latest from server
-    stardag config target-roots sync
+    # View current target roots
+    stardag environment target-roots list
 
-    # View current configuration
-    stardag config target-roots list
+    # Add, remove, or set target roots
+    stardag environment target-roots add <name> <uri>
+    stardag environment target-roots remove <name>
+    stardag environment target-roots set default=s3://bucket/outputs
     ```
 
 === "uv run ..."
 
     ```sh
-    # Fetch latest from server
-    uv run stardag config target-roots sync
-
-    # View current configuration
-    uv run stardag config target-roots list
+    uv run stardag environment target-roots list
+    uv run stardag environment target-roots add <name> <uri>
+    uv run stardag environment target-roots remove <name>
+    uv run stardag environment target-roots set default=s3://bucket/outputs
     ```
 
-### Why Sync?
+### Why Central Target Roots?
 
 Target roots are defined centrally to ensure all team members use consistent paths. The SDK:
 
-1. Fetches roots on login/sync
-2. Caches locally for offline access
+1. Caches roots locally for offline access
+2. Auto-syncs the cache on every target root change
 3. Validates against server on builds
-4. Auto-syncs new roots
-5. Requires explicit sync for modifications
 
 ## Current Context
 

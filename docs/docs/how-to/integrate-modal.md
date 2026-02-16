@@ -54,8 +54,8 @@ cat > pyproject.toml << 'EOF'
 [project]
 name = "stardag_modal"
 version = "0.0.1"
-requires-python = ">=3.10"
-dependencies = ["stardag[modal]", "modal"]
+requires-python = ">=3.12"
+dependencies = ["stardag[modal]>=0.1.2", "modal"]
 
 [build-system]
 requires = ["hatchling"]
@@ -76,6 +76,8 @@ Now in `stardag_modal/main.py` let's define some minimal tasks that we can compo
 
 ```{.python notest}
 # stardag_modal/main.py
+import sys
+
 import modal
 import stardag as sd
 import stardag.integration.modal as sd_modal
@@ -99,9 +101,12 @@ Then let's define the modal image we will be using:
     ```{.python notest}
     # stardag_modal/main.py continued...
 
+    # Must match local Python version for Modal serialization compatibility
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+
     # Define the Modal image
     image = (
-        modal.Image.debian_slim(python_version="3.12")
+        modal.Image.debian_slim(python_version=python_version)
         .uv_sync()
         .add_local_python_source("stardag_modal")
     )
@@ -127,9 +132,12 @@ Then let's define the modal image we will be using:
     ```{.python notest}
     # stardag_modal/main.py continued...
 
+    # Must match local Python version for Modal serialization compatibility
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+
     # Define the Modal image
     image = (
-        modal.Image.debian_slim(python_version="3.12")
+        modal.Image.debian_slim(python_version=python_version)
         .uv_sync()
         .add_local_python_source("stardag_modal")
     )
@@ -412,12 +420,17 @@ For production workloads, combine Modal with Prefect for observability.
 
 ```python
 # app.py
+import sys
+
 import modal
 import stardag.integration.modal as sd_modal
 
+# Must match local Python version for Modal serialization compatibility
+python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+
 # Define the Modal image with Stardag and dependencies
 image = sd_modal.with_stardag_on_image(
-    modal.Image.debian_slim(python_version="3.12").pip_install(
+    modal.Image.debian_slim(python_version=python_version).pip_install(
         # Helper to pull dependencies from pyproject.toml
         sd_modal.get_package_deps(__file__, optional=["prefect", "ml-pipeline"]),
     )

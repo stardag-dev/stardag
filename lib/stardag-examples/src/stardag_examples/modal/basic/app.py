@@ -3,9 +3,9 @@
 This module demonstrates how to define a StardagApp for Modal deployment.
 
 Key concepts:
-1. User has control over the image definition (`sd_modal.with_stardag_on_image` just
-pip install latest version of Stardag, or local source if on local dev version)
-2. Local sources should be added LAST for optimal layer caching
+1. User has control over the image definition. `uv_sync` installs dependencies but not
+    the local source, which is added separately with `add_local_python_source`.
+2. Local sources should be added LAST for layer caching
 3. Profile environment variables are injected by the CLI at deploy time
 
 Usage:
@@ -19,21 +19,29 @@ Usage:
     python main.py
 """
 
+import sys
+
 import modal
 import stardag.integration.modal as sd_modal
 
-# Define the Modal image with Stardag installed
-image = sd_modal.with_stardag_on_image(
-    modal.Image.debian_slim(python_version="3.12")
-).add_local_python_source("stardag_examples")
+# Must match local Python version for Modal serialization compatibility
+python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
-# TODO change to installing from PyPI once updated
 # Define the Modal image
-# image = (
-#     modal.Image.debian_slim(python_version="3.12")
-#     .uv_sync()
-#     .add_local_python_source("stardag_examples")
-# )
+image = (
+    modal.Image.debian_slim(python_version=python_version)
+    .uv_sync()
+    .add_local_python_source("stardag_examples")
+)
+
+# Optionally use this instead to use local source for stardag itself.
+# image = sd_modal.with_stardag_on_image(
+#     modal.Image.debian_slim(python_version=python_version).pip_install(
+#         # helper to pull in all dependencies of current package (stardag-examples)
+#         *sd_modal.get_package_deps(__file__),
+#     )
+# ).add_local_python_source("stardag_examples")
+
 
 # Define the StardagApp
 app = sd_modal.StardagApp(

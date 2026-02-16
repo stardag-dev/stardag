@@ -30,6 +30,8 @@ from rich.console import Console
 
 from stardag._cli._helpers import get_authenticated_client
 from stardag._cli.credentials import (
+    get_active_profile,
+    list_profiles,
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
 )
@@ -57,6 +59,61 @@ error_console = Console(stderr=True)
 # Sub-typer for stardag-api-key management
 stardag_api_key_app = typer.Typer(help="Manage Stardag API keys in Modal")
 app.add_typer(stardag_api_key_app, name="stardag-api-key")
+
+
+def _get_profile_slugs(
+    profile_name: str | None,
+    workspace_id: str | None = None,
+    environment_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Get workspace and environment slugs from a profile.
+
+    Returns (workspace_slug, environment_slug) where slug is None if
+    the profile value matches the resolved ID (i.e. it's already a UUID).
+    """
+    if not profile_name:
+        profile_name_resolved, _ = get_active_profile()
+        profile_name = profile_name_resolved
+
+    if not profile_name:
+        return None, None
+
+    profiles = list_profiles()
+    prof = profiles.get(profile_name)
+    if not prof:
+        return None, None
+
+    ws_slug = prof["workspace"] if prof["workspace"] != workspace_id else None
+    env_slug = prof["environment"] if prof["environment"] != environment_id else None
+    return ws_slug, env_slug
+
+
+def _print_stardag_context(
+    env_vars: dict[str, str],
+    profile_name: str | None = None,
+) -> None:
+    """Print stardag context info (registry, workspace, environment, target roots)."""
+    import json
+
+    registry = env_vars.get("STARDAG_REGISTRY_URL", "none (local mode)")
+    ws_id = env_vars.get("STARDAG_WORKSPACE_ID", "N/A")
+    env_id = env_vars.get("STARDAG_ENVIRONMENT_ID", "N/A")
+
+    ws_slug, env_slug = _get_profile_slugs(profile_name, ws_id, env_id)
+
+    console.print(f"[dim]  Registry: {registry}[/dim]")
+
+    ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
+    console.print(f"[dim]  Workspace: {ws_display}[/dim]")
+
+    env_display = f"{env_id} ({env_slug})" if env_slug else env_id
+    console.print(f"[dim]  Environment: {env_display}[/dim]")
+
+    if "STARDAG_TARGET_ROOTS" in env_vars:
+        target_roots = json.loads(env_vars["STARDAG_TARGET_ROOTS"])
+        console.print("[dim]  Target roots:[/dim]")
+        for name, uri in target_roots.items():
+            console.print(f"[dim]    {name}: {uri}[/dim]")
 
 
 def _resolve_stardag_context(
@@ -239,10 +296,14 @@ def stardag_api_key_create(
         if api_key_name is None:
             api_key_name = f"modal-{modal_env or 'default'}"
 
+        ws_slug, env_slug = _get_profile_slugs(stardag_profile, ws_id, env_id)
+        ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
+        env_display = f"{env_id} ({env_slug})" if env_slug else env_id
+
         console.print("\n[cyan]Using stardag context:[/cyan]")
         console.print(f"  Registry: {api_url}")
-        console.print(f"  Workspace: {ws_id}")
-        console.print(f"  Environment: {env_id}")
+        console.print(f"  Workspace: {ws_display}")
+        console.print(f"  Environment: {env_display}")
         console.print()
 
         full_key, key_prefix = _create_stardag_api_key(
@@ -499,24 +560,7 @@ def deploy(
             console.print(f"[cyan]Using stardag profile: {profile}[/cyan]")
             env_vars = get_profile_env_vars(profile)
             if env_vars:
-                registry_display = env_vars.get(
-                    "STARDAG_REGISTRY_URL", "none (local mode)"
-                )
-                console.print(f"[dim]  Registry: {registry_display}[/dim]")
-                console.print(
-                    f"[dim]  Workspace ID: {env_vars.get('STARDAG_WORKSPACE_ID', 'N/A')}[/dim]"
-                )
-                console.print(
-                    f"[dim]  Environment ID: {env_vars.get('STARDAG_ENVIRONMENT_ID', 'N/A')}[/dim]"
-                )
-                # Display target roots
-                if "STARDAG_TARGET_ROOTS" in env_vars:
-                    import json
-
-                    target_roots = json.loads(env_vars["STARDAG_TARGET_ROOTS"])
-                    console.print("[dim]  Target roots:[/dim]")
-                    for name, uri in target_roots.items():
-                        console.print(f"[dim]    {name}: {uri}[/dim]")
+                _print_stardag_context(env_vars, profile)
                 extra_secrets.append(
                     modal.Secret.from_dict(dict(env_vars))  # type: ignore[arg-type]
                 )
@@ -530,24 +574,7 @@ def deploy(
             env_vars = get_profile_env_vars()
             if env_vars:
                 console.print("[cyan]Using active stardag profile[/cyan]")
-                registry_display = env_vars.get(
-                    "STARDAG_REGISTRY_URL", "none (local mode)"
-                )
-                console.print(f"[dim]  Registry: {registry_display}[/dim]")
-                console.print(
-                    f"[dim]  Workspace ID: {env_vars.get('STARDAG_WORKSPACE_ID', 'N/A')}[/dim]"
-                )
-                console.print(
-                    f"[dim]  Environment ID: {env_vars.get('STARDAG_ENVIRONMENT_ID', 'N/A')}[/dim]"
-                )
-                # Display target roots
-                if "STARDAG_TARGET_ROOTS" in env_vars:
-                    import json
-
-                    target_roots = json.loads(env_vars["STARDAG_TARGET_ROOTS"])
-                    console.print("[dim]  Target roots:[/dim]")
-                    for target_root_name, uri in target_roots.items():
-                        console.print(f"[dim]    {target_root_name}: {uri}[/dim]")
+                _print_stardag_context(env_vars)
                 extra_secrets.append(
                     modal.Secret.from_dict(dict(env_vars))  # type: ignore[arg-type]
                 )
