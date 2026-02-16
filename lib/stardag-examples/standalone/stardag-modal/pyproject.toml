@@ -1,7 +1,7 @@
 [project]
 name = "stardag_modal"
 version = "0.1.0"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = ["stardag[modal]>=0.1.2", "modal"]
 
 [build-system]

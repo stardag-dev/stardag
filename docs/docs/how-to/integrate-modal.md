@@ -54,7 +54,7 @@ cat > pyproject.toml << 'EOF'
 [project]
 name = "stardag_modal"
 version = "0.0.1"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = ["stardag[modal]>=0.1.2", "modal"]
 
 [build-system]
