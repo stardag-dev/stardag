@@ -63,16 +63,14 @@ app.add_typer(stardag_api_key_app, name="stardag-api-key")
 
 def _get_profile_slugs(
     profile_name: str | None,
+    workspace_id: str | None = None,
+    environment_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Get workspace and environment slugs from a profile.
 
     Returns (workspace_slug, environment_slug) where slug is None if
-    the profile value is already a UUID (i.e. no human-readable slug).
+    the profile value matches the resolved ID (i.e. it's already a UUID).
     """
-    import re
-
-    uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-
     if not profile_name:
         profile_name_resolved, _ = get_active_profile()
         profile_name = profile_name_resolved
@@ -85,10 +83,8 @@ def _get_profile_slugs(
     if not prof:
         return None, None
 
-    ws = prof["workspace"]
-    env = prof["environment"]
-    ws_slug = None if re.match(uuid_pattern, ws.lower()) else ws
-    env_slug = None if re.match(uuid_pattern, env.lower()) else env
+    ws_slug = prof["workspace"] if prof["workspace"] != workspace_id else None
+    env_slug = prof["environment"] if prof["environment"] != environment_id else None
     return ws_slug, env_slug
 
 
@@ -99,11 +95,11 @@ def _print_stardag_context(
     """Print stardag context info (registry, workspace, environment, target roots)."""
     import json
 
-    ws_slug, env_slug = _get_profile_slugs(profile_name)
-
     registry = env_vars.get("STARDAG_REGISTRY_URL", "none (local mode)")
     ws_id = env_vars.get("STARDAG_WORKSPACE_ID", "N/A")
     env_id = env_vars.get("STARDAG_ENVIRONMENT_ID", "N/A")
+
+    ws_slug, env_slug = _get_profile_slugs(profile_name, ws_id, env_id)
 
     console.print(f"[dim]  Registry: {registry}[/dim]")
 
@@ -300,7 +296,7 @@ def stardag_api_key_create(
         if api_key_name is None:
             api_key_name = f"modal-{modal_env or 'default'}"
 
-        ws_slug, env_slug = _get_profile_slugs(stardag_profile)
+        ws_slug, env_slug = _get_profile_slugs(stardag_profile, ws_id, env_id)
         ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
         env_display = f"{env_id} ({env_slug})" if env_slug else env_id
 

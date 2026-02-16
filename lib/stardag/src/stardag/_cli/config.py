@@ -54,8 +54,23 @@ def show_config() -> None:
         typer.echo("  Profile: (none - using env vars or defaults)")
     typer.echo(f"  Registry: {config.context.registry_name or '(not set)'}")
     typer.echo(f"  API URL: {config.api.url or '(none - local mode)'}")
-    typer.echo(f"  Workspace: {config.context.workspace_id or '(not set)'}")
-    typer.echo(f"  Environment: {config.context.environment_id or '(not set)'}")
+    # Show slugs alongside IDs if the profile stores a slug (not a raw UUID)
+    ws_slug = None
+    env_slug = None
+    if config.context.profile:
+        prof = list_profiles().get(config.context.profile)
+        if prof:
+            if prof["workspace"] != config.context.workspace_id:
+                ws_slug = prof["workspace"]
+            if prof["environment"] != config.context.environment_id:
+                env_slug = prof["environment"]
+
+    ws_id = config.context.workspace_id or "(not set)"
+    env_id = config.context.environment_id or "(not set)"
+    ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
+    env_display = f"{env_id} ({env_slug})" if env_slug else env_id
+    typer.echo(f"  Workspace: {ws_display}")
+    typer.echo(f"  Environment: {env_display}")
 
     typer.echo("")
     typer.echo("Target Roots:")
