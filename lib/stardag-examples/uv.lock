@@ -3522,7 +3522,8 @@ asyncio = [
 
 [[package]]
 name = "stardag"
-source = { editable = "../stardag" }
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "httpx" },
@@ -3533,38 +3534,9 @@ dependencies = [
     { name = "typer" },
     { name = "uuid6" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "aioboto3", marker = "extra == 's3'", specifier = ">=13.0.0" },
-    { name = "aiofiles", specifier = ">=25.1.0" },
-    { name = "asyncpg", marker = "python_full_version >= '3.13' and extra == 'prefect'", specifier = ">=0.30.0" },
-    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
-    { name = "boto3-stubs", extras = ["s3"], marker = "extra == 's3'" },
-    { name = "botocore", marker = "extra == 's3'", specifier = ">=1.36" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "httpx-retries", specifier = ">=0.1.0" },
-    { name = "modal", marker = "extra == 'modal'", specifier = ">=1.0.0" },
-    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.1.0" },
-    { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
-    { name = "pydantic", specifier = ">=2.8.2" },
-    { name = "pydantic-settings", specifier = ">=2.7.1" },
-    { name = "tomli-w", specifier = ">=1.0.0" },
-    { name = "typer", specifier = ">=0.12.0" },
-    { name = "types-aioboto3", extras = ["s3"], marker = "extra == 's3'" },
-    { name = "uuid6", specifier = ">=2024.7.10" },
-]
-provides-extras = ["modal", "pandas", "prefect", "s3"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "ipdb", specifier = ">=0.13.13" },
-    { name = "ipython", specifier = ">=8.25.0" },
-    { name = "pyright", specifier = ">=1.1.359" },
-    { name = "pytest", specifier = ">=8.2.2" },
-    { name = "pytest-asyncio", specifier = ">=0.23.7" },
-    { name = "pytest-markdown-docs", specifier = ">=0.9.0" },
-    { name = "ruff", specifier = ">=0.14.11" },
+sdist = { url = "https://files.pythonhosted.org/packages/d7/13/a3e6908205279e8b708dda9512e8a8938dc3c1bba036ade1887f967d7959/stardag-0.1.2.tar.gz", hash = "sha256:76cb17585bc6d2c828290c086f7f0fcadca09b4f2392163a679defa02b6f7f0b", size = 410620, upload-time = "2026-02-16T08:11:11.534Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/6b/e80f0b1260c2ddbb570604250ef2bcf21082ba8aeab45641cd5f5a6844d7/stardag-0.1.2-py3-none-any.whl", hash = "sha256:5bd0a9a90a32b0b2eb793bfdb547cd8f3e33c1c8d6bd5e9f063294070f433e58", size = 139642, upload-time = "2026-02-16T08:11:09.617Z" },
 ]
 
 [[package]]
@@ -3616,7 +3588,7 @@ requires-dist = [
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "scikit-learn", marker = "extra == 'ml-pipeline'", specifier = ">=1.5.2" },
-    { name = "stardag", editable = "../stardag" },
+    { name = "stardag" },
 ]
 provides-extras = ["prefect", "s3", "modal", "ml-pipeline"]
 

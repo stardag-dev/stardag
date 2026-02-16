@@ -37,8 +37,8 @@ dev = [
 [tool.uv]
 package = true
 
-[tool.uv.sources]
-stardag = { path = "../stardag", editable = true }
+# For local development with editable stardag, run:
+#   uv pip install -e ../stardag
 
 [build-system]
 requires = ["hatchling"]
