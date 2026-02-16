@@ -192,13 +192,13 @@ When running Stardag on Modal, we must use a remote filesystem for our [target r
 
 
         ```sh
-        stardag env create "Modal PoC" --target-root "default=modalvol://stardag-poc/target-roots/default"
+        stardag environment create "Modal PoC" --target-root "default=modalvol://stardag-poc/target-roots/default"
         ```
 
     === "uv run ..."
 
         ```sh
-        uv run stardag env create "Modal PoC" --target-root "default=modalvol://stardag-poc/target-roots/default"
+        uv run stardag environment create "Modal PoC" --target-root "default=modalvol://stardag-poc/target-roots/default"
         ```
 
     Add and activate a new profile for the environment:
