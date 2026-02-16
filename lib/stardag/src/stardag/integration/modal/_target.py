@@ -2,6 +2,7 @@ import logging
 from functools import lru_cache
 from pathlib import Path
 
+import aiofiles
 import modal
 from modal.exception import NotFoundError, ResourceExhaustedError
 from modal.volume import FileEntryType
@@ -116,8 +117,6 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
 
     async def download_aio(self, uri: str, destination: Path) -> None:
         """Asynchronously download a file from the Modal volume."""
-        import aiofiles
-
         volume_name, in_volume_path = get_volume_name_and_path(uri)
         volume = _get_volume(volume_name)
 
