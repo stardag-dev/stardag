@@ -14,6 +14,7 @@ from stardag._cli.credentials import (
     exchange_for_internal_token,
     get_active_profile,
     get_config_path,
+    get_default_profile,
     get_environments,
     get_fresh_oidc_token,
     get_registry_url,
@@ -397,8 +398,11 @@ def profile_remove(
     name: str = typer.Argument(..., help="Profile name to remove"),
 ) -> None:
     """Remove a profile from configuration."""
+    was_default = get_default_profile() == name
     if remove_profile(name):
         typer.echo(f"Profile '{name}' removed.")
+        if was_default:
+            typer.echo("(Default profile has been unset.)")
     else:
         typer.echo(f"Profile '{name}' not found.")
         raise typer.Exit(1)
