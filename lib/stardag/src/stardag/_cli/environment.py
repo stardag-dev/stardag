@@ -198,10 +198,10 @@ def env_create(
     """Create a new environment.
 
     Examples:
-        stardag env create Production --slug production
-        stardag env create Staging -s staging -d "Staging environment"
-        stardag env create Development -s dev -t default=s3://bucket/dev
-        stardag env create CI -s ci -t default=s3://bucket/ci -t s3=s3://other/ci
+        stardag environment create Production --slug production
+        stardag environment create Staging -s staging -d "Staging environment"
+        stardag environment create Development -s dev -t default=s3://bucket/dev
+        stardag environment create CI -s ci -t default=s3://bucket/ci -t s3=s3://other/ci
     """
     # Auto-generate slug from name if not provided
     if not slug:
@@ -277,8 +277,8 @@ def env_delete(
     The last environment in a workspace cannot be deleted.
 
     Examples:
-        stardag env delete staging
-        stardag env delete staging --force
+        stardag environment delete staging
+        stardag environment delete staging --force
     """
     workspace_id = _get_workspace_id()
     client, api_url, _ = get_authenticated_client()
@@ -379,8 +379,8 @@ def target_roots_list(
     Fetches the current target roots from the server.
 
     Examples:
-        stardag env target-roots list
-        stardag env target-roots list --env staging
+        stardag environment target-roots list
+        stardag environment target-roots list --env staging
     """
     workspace_id = _get_workspace_id()
     environment_id = _get_environment_id(env)
@@ -399,7 +399,7 @@ def target_roots_list(
     if not roots:
         typer.echo("No target roots configured for this environment.")
         typer.echo("")
-        typer.echo("Add one with: stardag env target-roots add <name> <uri>")
+        typer.echo("Add one with: stardag environment target-roots add <name> <uri>")
         return
 
     typer.echo("Target Roots:")
@@ -423,8 +423,8 @@ def target_roots_add(
     """Add a new target root to an environment.
 
     Examples:
-        stardag env target-roots add default s3://my-bucket/outputs
-        stardag env target-roots add s3 s3://my-bucket/data --env staging
+        stardag environment target-roots add default s3://my-bucket/outputs
+        stardag environment target-roots add s3 s3://my-bucket/data --env staging
     """
     workspace_id = _get_workspace_id()
     environment_id = _get_environment_id(env)
@@ -465,8 +465,8 @@ def target_roots_remove(
     """Remove a target root by name.
 
     Examples:
-        stardag env target-roots remove s3
-        stardag env target-roots remove default --env staging --force
+        stardag environment target-roots remove s3
+        stardag environment target-roots remove default --env staging --force
     """
     workspace_id = _get_workspace_id()
     environment_id = _get_environment_id(env)
@@ -545,10 +545,10 @@ def target_roots_set(
     via --json. Existing target roots not in the new set will be removed.
 
     Examples:
-        stardag env target-roots set default=s3://bucket/outputs
-        stardag env target-roots set default=s3://bucket s3=s3://other
-        stardag env target-roots set --json '{"default": "s3://bucket/outputs"}'
-        stardag env target-roots set --env staging default=s3://staging/outputs
+        stardag environment target-roots set default=s3://bucket/outputs
+        stardag environment target-roots set default=s3://bucket s3=s3://other
+        stardag environment target-roots set --json '{"default": "s3://bucket/outputs"}'
+        stardag environment target-roots set --env staging default=s3://staging/outputs
     """
     # Parse input
     if json and target_roots:
@@ -668,7 +668,7 @@ def target_roots_set(
 
         if errors > 0:
             typer.echo(
-                f"Completed with {errors} error(s). Run 'stardag env target-roots list' to verify.",
+                f"Completed with {errors} error(s). Run 'stardag environment target-roots list' to verify.",
                 err=True,
             )
             raise typer.Exit(1)
