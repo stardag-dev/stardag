@@ -25,7 +25,7 @@ You can also run Stardag on Modal, completely without the Registry.
 
 === "With Registry"
 
-    Sign up at `app.stardag.com` or follow [the setup guide](../getting-started/registry-ui.md#get-setup) for running it self-hosted.
+    Sign up at [app.stardag.com](https://app.stardag.com) or follow [the setup guide](../getting-started/registry-ui.md#get-setup) for running it self-hosted.
 
 === "Without Registry"
 
