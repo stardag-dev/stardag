@@ -146,3 +146,29 @@ class NotFoundError(APIError):
         detail: str | None = None,
     ):
         super().__init__(message, status_code=404, detail=detail)
+
+
+class RateLimitError(APIError):
+    """Per-minute rate limit exceeded (retryable).
+
+    The SDK will automatically retry with backoff. If you see this error
+    propagated, the retry budget was exhausted.
+    """
+
+    def __init__(self, retry_after: int, detail: str | None = None):
+        self.retry_after = retry_after
+        super().__init__(
+            f"Rate limit exceeded (retry after {retry_after}s)",
+            status_code=429,
+            detail=detail,
+        )
+
+
+class QuotaExceededError(APIError):
+    """24-hour entity creation quota exceeded (not retryable).
+
+    Contact info@stardag.com to request a higher quota.
+    """
+
+    def __init__(self, detail: str | None = None):
+        super().__init__("Quota exceeded", status_code=429, detail=detail)
