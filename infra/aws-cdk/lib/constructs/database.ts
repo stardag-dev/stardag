@@ -33,6 +33,7 @@ export class StardagDatabase extends Construct {
   public readonly cluster: rds.DatabaseCluster;
   public readonly adminSecret: secretsmanager.ISecret;
   public readonly serviceSecret: secretsmanager.ISecret;
+  public readonly readonlySecret: secretsmanager.ISecret;
   public readonly securityGroup: ec2.SecurityGroup;
 
   constructor(scope: Construct, id: string, props: StardagDatabaseProps) {
@@ -65,6 +66,18 @@ export class StardagDatabase extends Construct {
       description: "Stardag database service credentials",
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ username: "stardag_service" }),
+        generateStringKey: "password",
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+    });
+
+    // Create the readonly credentials secret (used for ad-hoc queries)
+    this.readonlySecret = new secretsmanager.Secret(this, "ReadonlySecret", {
+      secretName: "stardag/db/readonly",
+      description: "Stardag database readonly credentials",
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({ username: "stardag_readonly" }),
         generateStringKey: "password",
         excludePunctuation: true,
         passwordLength: 32,
@@ -125,6 +138,11 @@ export class StardagDatabase extends Construct {
     new cdk.CfnOutput(this, "ServiceSecretArn", {
       value: this.serviceSecret.secretArn,
       description: "Service credentials secret ARN (for API runtime)",
+    });
+
+    new cdk.CfnOutput(this, "ReadonlySecretArn", {
+      value: this.readonlySecret.secretArn,
+      description: "Readonly credentials secret ARN (for ad-hoc queries)",
     });
   }
 
