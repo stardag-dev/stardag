@@ -1,4 +1,5 @@
 from stardag.integration.modal._app import (
+    BuildFailedError,
     FinalizeResult,
     FunctionSettings,
     StardagApp,
@@ -18,6 +19,7 @@ from stardag.integration.modal._target import (
 )
 
 __all__ = [
+    "BuildFailedError",
     "StardagApp",
     "FinalizeResult",
     "FunctionSettings",

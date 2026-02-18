@@ -44,7 +44,7 @@ import modal
 from modal.gpu import GPU_T
 
 from stardag import BaseTask, TaskStruct, build
-from stardag.build import TaskExecutorABC
+from stardag.build import BuildExitStatus, TaskExecutorABC
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
@@ -356,6 +356,12 @@ class ModalTaskExecutor(TaskExecutorABC):
 # --- Internal build/run functions ---
 
 
+class BuildFailedError(Exception):
+    """Raised when a build completes with failures or pending tasks."""
+
+    pass
+
+
 def _build(
     task: BaseTask,
     worker_selector: WorkerSelector,
@@ -367,8 +373,14 @@ def _build(
         worker_selector=worker_selector,
     )
     logger.info(f"Building root task: {repr(task)}")
-    build([task], task_executor=modal_executor)
-    logger.info(f"Completed building root task {repr(task)}")
+    summary = build([task], task_executor=modal_executor)
+    logger.info(f"Build summary:\n{repr(summary)}")
+    if summary.status != BuildExitStatus.SUCCESS:
+        raise BuildFailedError(
+            f"Build finished with status {summary.status.value}: "
+            f"{summary.task_count.failed} failed, "
+            f"{summary.task_count.pending} pending"
+        )
 
 
 async def _prefect_build(
