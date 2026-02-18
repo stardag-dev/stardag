@@ -46,7 +46,11 @@ from modal.gpu import GPU_T
 from stardag import BaseTask, TaskStruct, build
 from stardag.build import TaskExecutorABC
 from stardag.config import clear_config_cache, config_provider, load_config
-from stardag.integration.modal._config import modal_config_provider
+from stardag.integration.modal._target import (
+    MODAL_VOLUME_URI_PREFIX,
+    get_default_volume_mount_path,
+    get_volume_name_and_path,
+)
 from stardag.registry._base import get_git_commit_hash
 
 try:
@@ -160,43 +164,57 @@ def get_profile_secret(profile: str | None = None) -> modal.Secret:
     return modal.Secret.from_dict(typing.cast(dict[str, str | None], env_vars))
 
 
+class TargetRootsVolumes(typing.NamedTuple):
+    """Result of get_target_roots_volumes().
+
+    Attributes:
+        by_root_key: Dict of target root key to Modal Volume instance.
+        by_volume_name: Dict of volume name to Modal Volume instance (deduped).
+    """
+
+    by_root_key: dict[str, modal.Volume]
+    by_volume_name: dict[str, modal.Volume]
+
+
 def get_target_roots_volumes(
     target_roots: dict[str, str] | None = None,
     create_if_missing: bool = True,
-) -> dict[str, modal.Volume]:
+) -> TargetRootsVolumes:
     """Get Modal volumes for configured target roots.
 
-    This is a helper to convert stardag target roots into Modal volumes that can
-    be mounted into functions. It assumes that any target root with a "modalvol://"
-    URI corresponds to a Modal volume.
+    Scans target roots for ``modalvol://`` URIs and returns the corresponding
+    Modal Volume objects, both keyed by target root name and deduped by
+    volume name.
 
     Args:
         target_roots: Dict of target root key to URI or None (default from config).
         create_if_missing: Whether to create the Modal volume if it doesn't exist.
+            When True, volumes are eagerly hydrated to trigger creation.
+            When False, volumes are lazy references (hydrated by Modal at deploy time).
 
     Returns:
-        Dict of target root key to modal.Volume instance.
-
-    Example:
-        >>> target_roots = {"default": "modalvol://my-volume"}
-        >>> volumes = get_target_roots_volumes(target_roots)
-        >>> print(volumes)
-        {'default': <modal.Volume object at ...>}
+        TargetRootsVolumes with volumes keyed by root key and by volume name.
     """
     if target_roots is None:
         config = config_provider.get()
         target_roots = config.target.roots
 
-    volumes = {}
+    by_root_key: dict[str, modal.Volume] = {}
+    by_volume_name: dict[str, modal.Volume] = {}
     for key, uri in target_roots.items():
-        if uri.startswith("modalvol://"):
-            volume_name = uri[len("modalvol://") :].split("/")[0]
+        if not uri.startswith(MODAL_VOLUME_URI_PREFIX):
+            continue
+        volume_name, _ = get_volume_name_and_path(uri)
+        if volume_name not in by_volume_name:
             vol = modal.Volume.from_name(
                 volume_name, create_if_missing=create_if_missing
             )
-            vol.hydrate()
-            volumes[key] = vol
-    return volumes
+            if create_if_missing:
+                vol.hydrate()
+            by_volume_name[volume_name] = vol
+        by_root_key[key] = by_volume_name[volume_name]
+
+    return TargetRootsVolumes(by_root_key=by_root_key, by_volume_name=by_volume_name)
 
 
 class FinalizeResult(typing.NamedTuple):
@@ -205,10 +223,14 @@ class FinalizeResult(typing.NamedTuple):
     Attributes:
         volumes: Dict of target root key to Modal Volume instance.
         functions: List of created Modal function names.
+        volume_mounts: Dict of mount_path -> volume_name for auto-mounted volumes.
+        auto_volumes: Dict of mount_path -> Volume for auto-mounted volumes.
     """
 
     volumes: dict[str, modal.Volume]
     functions: list[str]
+    volume_mounts: dict[str, str] = {}
+    auto_volumes: dict[str, modal.Volume] = {}
 
 
 # --- Function settings ---
@@ -228,6 +250,12 @@ class FunctionSettings(typing.TypedDict, total=False):
         timeout: Function timeout in seconds.
         volumes: Dict of mount path to Volume or CloudBucketMount.
         secrets: List of Modal secrets to inject.
+        concurrency_limit: Max number of concurrent containers.
+        allow_concurrent_inputs: Max concurrent inputs per container.
+        container_idle_timeout: Seconds before idle container shuts down.
+        keep_warm: Number of containers to keep warm.
+        ephemeral_disk: Ephemeral disk size in MB.
+        retries: Number of retries on failure.
     """
 
     image: typing.Required[modal.Image]
@@ -240,6 +268,12 @@ class FunctionSettings(typing.TypedDict, total=False):
         typing.Union[modal.Volume, modal.CloudBucketMount],
     ]
     secrets: list[modal.Secret]
+    concurrency_limit: int
+    allow_concurrent_inputs: int
+    container_idle_timeout: int
+    keep_warm: int
+    ephemeral_disk: int
+    retries: int
 
 
 # --- Worker selector ---
@@ -297,7 +331,6 @@ class ModalTaskExecutor(TaskExecutorABC):
     async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
         """Execute task on Modal."""
         try:
-            await self._reload_volumes()
             worker_name = self.worker_selector(task)
             worker_function = modal.Function.from_name(
                 app_name=self.modal_app_name,
@@ -318,13 +351,6 @@ class ModalTaskExecutor(TaskExecutorABC):
     async def teardown(self) -> None:
         """No teardown needed for Modal executor."""
         pass
-
-    async def _reload_volumes(self):
-        # TODO fix this strange inconsistency
-        modal_config = modal_config_provider.get()
-        for volume_name in modal_config.volume_name_to_mount_path.keys():
-            vol = modal.Volume.from_name(volume_name, create_if_missing=True)
-            await vol.reload.aio()
 
 
 # --- Internal build/run functions ---
@@ -491,6 +517,30 @@ class StardagApp:
         assert self.modal_app.name is not None
         return self.modal_app.name
 
+    @staticmethod
+    def _prepare_function_settings(
+        settings: FunctionSettings,
+        *,
+        extra_secrets: list[modal.Secret],
+        auto_volumes: dict[str, modal.Volume],
+    ) -> dict[str, typing.Any]:
+        """Merge extra secrets and auto-volumes into function settings.
+
+        Auto-mounted volumes are merged with user volumes, where user-specified
+        volumes at the same mount path take precedence over auto-mounted ones.
+        """
+        result: dict[str, typing.Any] = dict(settings)
+
+        # Merge secrets: existing + extra
+        existing_secrets: list[modal.Secret] = list(result.get("secrets") or [])
+        result["secrets"] = existing_secrets + extra_secrets
+
+        # Merge volumes: auto-mounted (lower priority) + user (higher priority)
+        user_volumes = dict(result.get("volumes") or {})
+        result["volumes"] = {**auto_volumes, **user_volumes}
+
+        return result
+
     def finalize(
         self,
         *,
@@ -502,6 +552,11 @@ class StardagApp:
         This method creates the builder and worker functions on the Modal app.
         It should be called before deployment, typically by the CLI.
 
+        Discovered Modal volumes from target roots are automatically mounted at
+        /mnt/stardag-volumes/<volume-name> and the STARDAG_MODAL_VOLUME_MOUNTS
+        env var is set so that ModalMountedVolumeTarget (local I/O) is used
+        instead of ModalVolumeRemoteFileSystem (API-based).
+
         Args:
             extra_secrets: Additional secrets to inject into all functions.
                 This is where profile-based environment variables are injected.
@@ -509,7 +564,7 @@ class StardagApp:
                 target roots if they don't exist.
 
         Returns:
-            FinalizeResult with created volumes and function names.
+            FinalizeResult with created volumes, function names, and mount info.
 
         Raises:
             RuntimeError: If finalize() has already been called.
@@ -517,19 +572,37 @@ class StardagApp:
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
 
-        # Ensure volumes for target roots exist before creating functions
-        volumes = get_target_roots_volumes(create_if_missing=create_volumes_if_missing)
-
-        extra_secrets = extra_secrets or []
-
-        # Merge extra secrets into builder settings
-        builder_settings: dict[str, typing.Any] = dict(self._builder_settings)
-        existing_secrets: list[modal.Secret] = list(
-            builder_settings.get("secrets") or []
+        # Discover and create Modal volumes from target roots
+        target_roots_volumes = get_target_roots_volumes(
+            create_if_missing=create_volumes_if_missing
         )
-        builder_settings["secrets"] = existing_secrets + extra_secrets
+
+        # Compute auto-mount mapping from discovered volumes
+        # volume_mounts: mount_path -> volume_name (for env var)
+        # auto_volumes: mount_path -> Volume (for Modal function)
+        volume_mounts: dict[str, str] = {}
+        auto_volumes: dict[str, modal.Volume] = {}
+        for vol_name, vol in target_roots_volumes.by_volume_name.items():
+            mount_path = str(get_default_volume_mount_path(vol_name))
+            volume_mounts[mount_path] = vol_name
+            auto_volumes[mount_path] = vol
+
+        extra_secrets = list(extra_secrets or [])
+
+        # Inject volume mount config as env var so ModalMountedVolumeTarget is used
+        if volume_mounts:
+            extra_secrets.append(
+                modal.Secret.from_dict(
+                    {"STARDAG_MODAL_VOLUME_MOUNTS": json.dumps(volume_mounts)}
+                )
+            )
 
         # Create builder function
+        builder_settings = self._prepare_function_settings(
+            self._builder_settings,
+            extra_secrets=extra_secrets,
+            auto_volumes=auto_volumes,
+        )
         build_function = _prefect_build if self.builder_type == "prefect" else _build
         self.modal_app.function(
             **{
@@ -543,11 +616,11 @@ class StardagApp:
 
         # Create worker functions
         for worker_name, settings in self._worker_settings.items():
-            worker_settings: dict[str, typing.Any] = dict(settings)
-            existing_worker_secrets: list[modal.Secret] = list(
-                worker_settings.get("secrets") or []
+            worker_settings = self._prepare_function_settings(
+                settings,
+                extra_secrets=extra_secrets,
+                auto_volumes=auto_volumes,
             )
-            worker_settings["secrets"] = existing_worker_secrets + extra_secrets
 
             func_name = f"worker_{worker_name}"
             self.modal_app.function(
@@ -561,7 +634,12 @@ class StardagApp:
 
         self._is_finalized = True
 
-        return FinalizeResult(volumes=volumes, functions=function_names)
+        return FinalizeResult(
+            volumes=target_roots_volumes.by_root_key,
+            functions=function_names,
+            volume_mounts=volume_mounts,
+            auto_volumes=auto_volumes,
+        )
 
     def build_spawn(
         self, task: BaseTask, worker_selector: WorkerSelector | None = None

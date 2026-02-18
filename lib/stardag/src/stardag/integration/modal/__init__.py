@@ -10,7 +10,9 @@ from stardag.integration.modal._app import (
 from stardag.integration.modal._config import get_package_deps, with_stardag_on_image
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
+    VOLUME_MOUNT_PATH_PREFIX,
     ModalMountedVolumeTarget,
+    get_default_volume_mount_path,
     get_modal_target,
     get_volume_name_and_path,
 )
@@ -20,7 +22,9 @@ __all__ = [
     "FinalizeResult",
     "FunctionSettings",
     "MODAL_VOLUME_URI_PREFIX",
+    "VOLUME_MOUNT_PATH_PREFIX",
     "ModalMountedVolumeTarget",
+    "get_default_volume_mount_path",
     "get_volume_name_and_path",
     "get_modal_target",
     "WorkerSelector",
