@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
+from stardag_api.config import limits_settings
 from stardag_api.db import get_db
+from stardag_api.limits import LimitExceededError, check_rate_limit
 from stardag_api.schemas import (
     LockAcquireRequest,
     LockAcquireResponse,
@@ -30,6 +32,20 @@ from stardag_api.services import (
 )
 
 router = APIRouter(prefix="/locks", tags=["locks"])
+
+
+def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
+    """Raise HTTP 429 if a limit check returned an error."""
+    if error is None:
+        return
+    headers = {}
+    if error.retry_after is not None:
+        headers["Retry-After"] = str(error.retry_after)
+    raise HTTPException(
+        status_code=429,
+        detail=error.model_dump(exclude_none=True),
+        headers=headers or None,
+    )
 
 
 @router.post("/{lock_name}/acquire", response_model=LockAcquireResponse)
@@ -62,8 +78,10 @@ async def acquire_lock_endpoint(
     HTTP Status Codes:
         200: Lock acquired or already_completed
         423: Lock held by another owner
-        429: Environment concurrency limit reached
+        429: Environment concurrency limit reached or rate limit exceeded
     """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+
     result = await acquire_lock(
         db=db,
         lock_name=lock_name,
@@ -134,7 +152,10 @@ async def renew_lock_endpoint(
     HTTP Status Codes:
         200: Lock renewed successfully or renewal failed
         409: Lock not owned by caller or does not exist
+        429: Rate limit exceeded
     """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+
     # First verify the lock exists and belongs to this environment
     existing = await get_lock(db, lock_name)
     if existing and existing.environment_id != auth.environment_id:
@@ -185,7 +206,10 @@ async def release_lock_endpoint(
     HTTP Status Codes:
         200: Lock released successfully
         409: Lock not owned by caller or does not exist
+        429: Rate limit exceeded
     """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+
     # First verify the lock exists and belongs to this environment
     existing = await get_lock(db, lock_name)
     if existing and existing.environment_id != auth.environment_id:
