@@ -534,11 +534,15 @@ async def build_aio(
         build_id = await registry.build_start_aio(root_tasks=tasks)
         logger.info(f"Started build: {build_id}")
 
-    # Register previously completed tasks so they appear in the build's task list
-    # These will get TASK_REFERENCED events since they already exist
+    # Register previously completed tasks so they appear in the build's task list.
+    # These get TASK_REFERENCED events since they already exist. We also call
+    # task_complete_aio to self-heal tasks that were left in "Started" state from
+    # a previous build that crashed or timed out — their target exists, so they
+    # are complete, but the registry still shows them as running.
     for task in previously_completed_tasks:
         try:
             await registry.task_register_aio(build_id, task)
+            await registry.task_complete_aio(build_id, task)
         except Exception as reg_err:
             logger.warning(f"Failed to register previously completed task: {reg_err}")
 

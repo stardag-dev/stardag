@@ -587,6 +587,11 @@ def deploy(
             for root_key, vol in finalize_result.volumes.items():
                 console.print(f"[dim]  {root_key}: {vol.name}[/dim]")
 
+        if finalize_result.volume_mounts:
+            console.print("[cyan]Modal volumes (auto-mounted):[/cyan]")
+            for mount_path, vol_name in finalize_result.volume_mounts.items():
+                console.print(f"[dim]  {vol_name} -> {mount_path}[/dim]")
+
         console.print("[cyan]Functions:[/cyan]")
         for func_name in finalize_result.functions:
             console.print(f"[dim]  {func_name}[/dim]")
