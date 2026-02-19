@@ -16,11 +16,11 @@ from stardag_api.db import get_db
 from stardag_api.limits import (
     ErrorCode,
     LimitExceededError,
-    _entity_cache,
     check_entity_creation_limit,
     check_payload_size,
     check_rate_limit,
     check_structural_limit,
+    record_entity_created,
 )
 from stardag_api.models import (
     Build,
@@ -150,7 +150,7 @@ async def _create_task_event(
     db.add(event)
     await db.commit()
 
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "events")
 
     status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
 
@@ -211,8 +211,8 @@ async def create_build(
     await db.commit()
     await db.refresh(db_build)
 
-    _entity_cache.increment(f"{auth.workspace_id}:builds")
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "builds")
+    record_entity_created(auth.workspace_id, "events")
 
     # Build response with derived status
     status, started_at, completed_at, triggered_by_id = await get_build_status(
@@ -383,7 +383,7 @@ async def complete_build(
     db.add(event)
     await db.commit()
 
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -453,7 +453,7 @@ async def fail_build(
     db.add(event)
     await db.commit()
 
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -520,7 +520,7 @@ async def cancel_build(
     db.add(event)
     await db.commit()
 
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -578,7 +578,7 @@ async def exit_early(
     db.add(event)
     await db.commit()
 
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -718,9 +718,9 @@ async def register_task(
     await db.commit()
     await db.refresh(db_task)
 
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "events")
     if not task_already_existed:
-        _entity_cache.increment(f"{auth.workspace_id}:tasks")
+        record_entity_created(auth.workspace_id, "tasks")
 
     return TaskResponse(
         id=db_task.id,
@@ -843,7 +843,7 @@ async def task_waiting_for_lock(
     db.add(event)
     await db.commit()
 
-    _entity_cache.increment(f"{auth.workspace_id}:events")
+    record_entity_created(auth.workspace_id, "events")
 
     status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
 
@@ -884,7 +884,7 @@ async def upload_task_registry_assets(
         )
     _raise_if_limit_exceeded(
         await check_entity_creation_limit(
-            db, auth.workspace_id, "assets", limits_settings
+            db, auth.workspace_id, "assets", limits_settings, amount=len(assets)
         )
     )
 
@@ -908,7 +908,8 @@ async def upload_task_registry_assets(
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Check assets-per-task limit
+    # Check assets-per-task limit (conservative: counts all submitted assets as new,
+    # even if some may update existing assets - acceptable for guardrails)
     if limits_settings.max_assets_per_task is not None:
         existing_count_result = await db.execute(
             select(func.count())
@@ -959,7 +960,7 @@ async def upload_task_registry_assets(
     await db.commit()
 
     for _ in range(new_asset_count):
-        _entity_cache.increment(f"{auth.workspace_id}:assets")
+        record_entity_created(auth.workspace_id, "assets")
 
     # Build response
     asset_responses = [

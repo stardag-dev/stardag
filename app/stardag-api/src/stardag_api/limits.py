@@ -7,14 +7,12 @@ Configure via LIMITS_* environment variables in production.
 import json
 import time
 from enum import StrEnum
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from stardag_api.models import Build, Environment, Event, Task, TaskRegistryAsset
 
 
 class LimitsSettings(BaseSettings):
@@ -26,24 +24,24 @@ class LimitsSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LIMITS_")
 
     # Payload size limits (bytes)
-    max_task_data_bytes: int | None = None
-    max_asset_body_bytes: int | None = None
+    max_task_data_bytes: Annotated[int, Field(ge=1)] | None = None
+    max_asset_body_bytes: Annotated[int, Field(ge=1)] | None = None
 
     # Per-workspace rate limit (requests per minute per instance)
-    max_requests_per_minute: int | None = None
+    max_requests_per_minute: Annotated[int, Field(ge=1)] | None = None
 
     # Per-workspace 24h entity creation limits
-    max_builds_per_workspace_24h: int | None = None
-    max_tasks_per_workspace_24h: int | None = None
-    max_events_per_workspace_24h: int | None = None
-    max_assets_per_workspace_24h: int | None = None
+    max_builds_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
+    max_tasks_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
+    max_events_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
+    max_assets_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
 
     # Structural limits
-    max_dependency_ids_per_task: int | None = None
-    max_assets_per_task: int | None = None
+    max_dependency_ids_per_task: Annotated[int, Field(ge=1)] | None = None
+    max_assets_per_task: Annotated[int, Field(ge=1)] | None = None
 
     # Cache TTL for DB count queries (seconds)
-    entity_count_cache_ttl: int = 60
+    entity_count_cache_ttl: Annotated[int, Field(ge=1)] = 60
 
 
 class ErrorCode(StrEnum):
@@ -79,6 +77,9 @@ class InMemoryRateLimiter:
 
     Per-instance approximation: with N ECS tasks, effective limit is Nx configured.
     Acceptable for guardrails.
+
+    Thread safety: check() is fully synchronous (no await points), so it runs
+    atomically on the asyncio event loop without risk of interleaving.
     """
 
     def __init__(self) -> None:
@@ -143,6 +144,7 @@ class EntityCountCache:
         if entry is None:
             return None
         if time.monotonic() - entry.fetched_at > ttl:
+            del self._cache[key]
             return None
         return entry
 
@@ -189,6 +191,10 @@ async def _count_entities_24h(
 ) -> int:
     """Count entities created in the last 24h for a workspace."""
     from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, select
+
+    from stardag_api.models import Build, Environment, Event, Task, TaskRegistryAsset
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
@@ -261,8 +267,13 @@ async def check_entity_creation_limit(
     workspace_id: UUID,
     entity_type: EntityType,
     settings: LimitsSettings,
+    amount: int = 1,
 ) -> LimitExceededError | None:
-    """Check 24h entity creation limit. Returns error or None."""
+    """Check 24h entity creation limit. Returns error or None.
+
+    Args:
+        amount: Number of entities about to be created (for batch operations).
+    """
     setting_attr, error_code = _ENTITY_LIMIT_MAP[entity_type]
     limit_value: int | None = getattr(settings, setting_attr)
     if limit_value is None:
@@ -277,7 +288,7 @@ async def check_entity_creation_limit(
         entry = _entity_cache.put(cache_key, db_count)
 
     current = entry.estimated_count
-    if current >= limit_value:
+    if current + amount - 1 >= limit_value:
         display_name = _ENTITY_DISPLAY_NAMES[entity_type]
         return LimitExceededError(
             error_code=error_code,
@@ -289,6 +300,11 @@ async def check_entity_creation_limit(
             current=current,
         )
     return None
+
+
+def record_entity_created(workspace_id: UUID, entity_type: EntityType) -> None:
+    """Record that an entity was created, incrementing the in-memory count cache."""
+    _entity_cache.increment(f"{workspace_id}:{entity_type}")
 
 
 def check_payload_size(
