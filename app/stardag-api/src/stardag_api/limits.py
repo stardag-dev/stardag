@@ -78,8 +78,11 @@ class InMemoryRateLimiter:
     Per-instance approximation: with N ECS tasks, effective limit is Nx configured.
     Acceptable for guardrails.
 
-    Thread safety: check() is fully synchronous (no await points), so it runs
-    atomically on the asyncio event loop without risk of interleaving.
+    Concurrency: check() is fully synchronous (no await points) and is only
+    called from async def route handlers, so it runs to completion on the
+    event loop thread without interleaving. No lock is needed. This assumption
+    breaks if check() is ever called from sync def handlers (which FastAPI
+    runs in a threadpool) — in that case, add a threading.Lock.
     """
 
     def __init__(self) -> None:
