@@ -127,6 +127,16 @@ export class ApiStack extends cdk.Stack {
         EMAIL_FROM_NAME: "Stardag",
         EMAIL_SES_REGION: this.region,
         EMAIL_APP_URL: `https://${config.uiDomain}`,
+        // SaaS guardrails (rate limits and entity creation limits)
+        LIMITS_MAX_TASK_DATA_BYTES: "102400",
+        LIMITS_MAX_ASSET_BODY_BYTES: "1048576",
+        LIMITS_MAX_REQUESTS_PER_MINUTE: "300",
+        LIMITS_MAX_BUILDS_PER_WORKSPACE_24H: "200",
+        LIMITS_MAX_TASKS_PER_WORKSPACE_24H: "10000",
+        LIMITS_MAX_EVENTS_PER_WORKSPACE_24H: "50000",
+        LIMITS_MAX_ASSETS_PER_WORKSPACE_24H: "1000",
+        LIMITS_MAX_DEPENDENCY_IDS_PER_TASK: "500",
+        LIMITS_MAX_ASSETS_PER_TASK: "10",
       },
       secrets: {
         // Inject database credentials from Secrets Manager

@@ -201,6 +201,18 @@ async def unauthenticated_client(async_engine) -> AsyncGenerator[AsyncClient, No
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def clear_limits_caches():
+    """Clear in-memory caches between tests to prevent cross-test pollution."""
+    from stardag_api.limits import _entity_cache, _rate_limiter
+
+    _rate_limiter.clear()
+    _entity_cache.clear()
+    yield
+    _rate_limiter.clear()
+    _entity_cache.clear()
+
+
 # PostgreSQL test fixtures for integration testing with real migrations
 
 

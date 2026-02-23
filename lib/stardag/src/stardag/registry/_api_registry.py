@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -17,6 +18,8 @@ from stardag.exceptions import (
     InvalidTokenError,
     NotAuthenticatedError,
     NotFoundError,
+    QuotaExceededError,
+    RateLimitError,
     TokenExpiredError,
 )
 from stardag.registry._base import RegistryABC, TaskMetadata, get_git_commit_hash
@@ -35,6 +38,10 @@ _RETRY_CONFIG = Retry(
     # Also retry POST since our API calls are idempotent (task state transitions)
     allowed_methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "TRACE"],
 )
+
+# Rate limit retry configuration
+_MAX_RATE_LIMIT_RETRIES = 5
+_MAX_RETRY_WAIT = 60  # Cap wait time at 60 seconds
 
 
 class APIRegistry(RegistryABC):
@@ -129,6 +136,8 @@ class APIRegistry(RegistryABC):
             EnvironmentAccessError: If environment access denied
             AuthorizationError: If other 403 error
             NotFoundError: If resource not found
+            RateLimitError: If per-minute rate limit exceeded (retryable)
+            QuotaExceededError: If 24h quota exceeded (not retryable)
             APIError: For other HTTP errors
         """
         if response.status_code < 400:
@@ -136,9 +145,15 @@ class APIRegistry(RegistryABC):
 
         # Try to extract detail from response JSON
         detail = None
+        error_code = None
         try:
             data = response.json()
-            detail = data.get("detail", str(data))
+            raw_detail = data.get("detail")
+            if isinstance(raw_detail, dict):
+                error_code = raw_detail.get("error_code")
+                detail = raw_detail.get("message", str(raw_detail))
+            else:
+                detail = raw_detail if raw_detail else str(data)
         except Exception:
             detail = response.text[:200] if response.text else None
 
@@ -168,6 +183,13 @@ class APIRegistry(RegistryABC):
 
         elif status_code == 404:
             raise NotFoundError(f"{operation}: resource not found", detail=detail)
+
+        elif status_code == 429:
+            if error_code == "RATE_LIMIT":
+                retry_after = int(response.headers.get("Retry-After", 1))
+                raise RateLimitError(retry_after=retry_after, detail=detail)
+            else:
+                raise QuotaExceededError(detail=detail)
 
         else:
             raise APIError(
@@ -201,6 +223,92 @@ class APIRegistry(RegistryABC):
         return {}
 
     # -------------------------------------------------------------------------
+    # Request helpers with rate-limit retry
+    # -------------------------------------------------------------------------
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: object = None,
+        params: dict[str, str] | None = None,
+        operation: str = "API call",
+    ) -> httpx.Response:
+        """Make a sync HTTP request with automatic rate-limit retry.
+
+        Rate limit 429s (RATE_LIMIT error_code) are retried with backoff
+        respecting the Retry-After header. Quota 429s (24h limits) are
+        raised immediately as QuotaExceededError.
+        """
+        for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+            response = self.client.request(method, url, json=json, params=params)
+            try:
+                self._handle_response_error(response, operation)
+                return response
+            except RateLimitError as e:
+                if attempt >= _MAX_RATE_LIMIT_RETRIES:
+                    logger.error(
+                        "Rate limit retry budget exhausted for %s after %d attempts",
+                        operation,
+                        attempt + 1,
+                    )
+                    raise
+                wait = min(e.retry_after, _MAX_RETRY_WAIT)
+                logger.warning(
+                    "Rate limited on %s (attempt %d/%d), retrying in %ds...",
+                    operation,
+                    attempt + 1,
+                    _MAX_RATE_LIMIT_RETRIES,
+                    wait,
+                )
+                time.sleep(wait)
+        # Unreachable, but satisfies type checker
+        return response  # type: ignore[possibly-undefined]
+
+    async def _arequest(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: object = None,
+        params: dict[str, str] | None = None,
+        operation: str = "API call",
+    ) -> httpx.Response:
+        """Make an async HTTP request with automatic rate-limit retry.
+
+        Rate limit 429s (RATE_LIMIT error_code) are retried with backoff
+        respecting the Retry-After header. Quota 429s (24h limits) are
+        raised immediately as QuotaExceededError.
+        """
+        for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+            response = await self.async_client.request(
+                method, url, json=json, params=params
+            )
+            try:
+                self._handle_response_error(response, operation)
+                return response
+            except RateLimitError as e:
+                if attempt >= _MAX_RATE_LIMIT_RETRIES:
+                    logger.error(
+                        "Rate limit retry budget exhausted for %s after %d attempts",
+                        operation,
+                        attempt + 1,
+                    )
+                    raise
+                wait = min(e.retry_after, _MAX_RETRY_WAIT)
+                logger.warning(
+                    "Rate limited on %s (attempt %d/%d), retrying in %ds...",
+                    operation,
+                    attempt + 1,
+                    _MAX_RATE_LIMIT_RETRIES,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+        # Unreachable, but satisfies type checker
+        return response  # type: ignore[possibly-undefined]
+
+    # -------------------------------------------------------------------------
     # Sync build methods
     # -------------------------------------------------------------------------
 
@@ -216,12 +324,13 @@ class APIRegistry(RegistryABC):
             "description": description,
         }
 
-        response = self.client.post(
+        response = self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds",
             json=build_data,
             params=self._get_params(),
+            operation="Start build",
         )
-        self._handle_response_error(response, "Start build")
         data = response.json()
         build_id = UUID(data["id"])
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
@@ -229,11 +338,12 @@ class APIRegistry(RegistryABC):
 
     def build_complete(self, build_id: UUID) -> None:
         """Mark a build as completed."""
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/complete",
             params=self._get_params(),
+            operation="Complete build",
         )
-        self._handle_response_error(response, "Complete build")
         logger.info(f"Completed build: {build_id}")
 
     def build_fail(self, build_id: UUID, error_message: str | None = None) -> None:
@@ -241,20 +351,22 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if error_message:
             params["error_message"] = error_message
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/fail",
             params=params,
+            operation="Fail build",
         )
-        self._handle_response_error(response, "Fail build")
         logger.info(f"Marked build as failed: {build_id}")
 
     def build_cancel(self, build_id: UUID) -> None:
         """Cancel a build."""
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/cancel",
             params=self._get_params(),
+            operation="Cancel build",
         )
-        self._handle_response_error(response, "Cancel build")
         logger.info(f"Cancelled build: {build_id}")
 
     def build_exit_early(self, build_id: UUID, reason: str | None = None) -> None:
@@ -262,11 +374,12 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if reason:
             params["reason"] = reason
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/exit-early",
             params=params,
+            operation="Exit early",
         )
-        self._handle_response_error(response, "Exit early")
         logger.info(f"Build exited early: {build_id}")
 
     # -------------------------------------------------------------------------
@@ -275,31 +388,34 @@ class APIRegistry(RegistryABC):
 
     def task_register(self, build_id: UUID, task: "BaseTask") -> None:
         """Register a task within a build."""
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
             json=_get_task_data_for_registration(task),
             params=self._get_params(),
+            operation=f"Register task {task.id}",
         )
-        self._handle_response_error(response, f"Register task {task.id}")
 
     def task_start(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as started."""
         # Ensure task is registered first
         self.task_register(build_id, task)
 
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
             params=self._get_params(),
+            operation=f"Start task {task.id}",
         )
-        self._handle_response_error(response, f"Start task {task.id}")
 
     def task_complete(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as completed."""
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/complete",
             params=self._get_params(),
+            operation=f"Complete task {task.id}",
         )
-        self._handle_response_error(response, f"Complete task {task.id}")
 
     def task_fail(
         self, build_id: UUID, task: "BaseTask", error_message: str | None = None
@@ -308,35 +424,39 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if error_message:
             params["error_message"] = error_message
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/fail",
             params=params,
+            operation=f"Fail task {task.id}",
         )
-        self._handle_response_error(response, f"Fail task {task.id}")
 
     def task_suspend(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as suspended (waiting for dynamic dependencies)."""
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/suspend",
             params=self._get_params(),
+            operation=f"Suspend task {task.id}",
         )
-        self._handle_response_error(response, f"Suspend task {task.id}")
 
     def task_resume(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as resumed (dynamic dependencies completed)."""
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/resume",
             params=self._get_params(),
+            operation=f"Resume task {task.id}",
         )
-        self._handle_response_error(response, f"Resume task {task.id}")
 
     def task_cancel(self, build_id: UUID, task: "BaseTask") -> None:
         """Cancel a task."""
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
             params=self._get_params(),
+            operation=f"Cancel task {task.id}",
         )
-        self._handle_response_error(response, f"Cancel task {task.id}")
 
     def task_waiting_for_lock(
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
@@ -345,11 +465,12 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if lock_owner:
             params["lock_owner"] = lock_owner
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/waiting-for-lock",
             params=params,
+            operation=f"Task {task.id} waiting for lock",
         )
-        self._handle_response_error(response, f"Task {task.id} waiting for lock")
 
     def task_upload_assets(
         self, build_id: UUID, task: "BaseTask", assets: list[RegistryAsset]
@@ -370,12 +491,13 @@ class APIRegistry(RegistryABC):
                 data["body"] = {"content": data["body"]}
             assets_data.append(data)
 
-        response = self.client.post(
+        self._request(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/assets",
             json=assets_data,
             params=self._get_params(),
+            operation=f"Upload assets for task {task.id}",
         )
-        self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
 
     def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
@@ -388,11 +510,12 @@ class APIRegistry(RegistryABC):
             A TaskMetadata object containing task metadata.
         """
 
-        response = self.client.get(
+        response = self._request(
+            "GET",
             f"{self.api_url}/api/v1/tasks/{task_id}/metadata",
             params=self._get_params(),
+            operation=f"Get metadata for task {task_id}",
         )
-        self._handle_response_error(response, f"Get metadata for task {task_id}")
         data = response.json()
 
         return TaskMetadata.model_validate(data)
@@ -493,12 +616,13 @@ class APIRegistry(RegistryABC):
             "description": description,
         }
 
-        response = await self.async_client.post(
+        response = await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds",
             json=build_data,
             params=self._get_params(),
+            operation="Start build",
         )
-        self._handle_response_error(response, "Start build")
         data = response.json()
         build_id = UUID(data["id"])
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
@@ -506,11 +630,12 @@ class APIRegistry(RegistryABC):
 
     async def build_complete_aio(self, build_id: UUID) -> None:
         """Async version - mark a build as completed."""
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/complete",
             params=self._get_params(),
+            operation="Complete build",
         )
-        self._handle_response_error(response, "Complete build")
         logger.info(f"Completed build: {build_id}")
 
     async def build_fail_aio(
@@ -520,20 +645,22 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if error_message:
             params["error_message"] = error_message
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/fail",
             params=params,
+            operation="Fail build",
         )
-        self._handle_response_error(response, "Fail build")
         logger.info(f"Marked build as failed: {build_id}")
 
     async def build_cancel_aio(self, build_id: UUID) -> None:
         """Async version - cancel a build."""
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/cancel",
             params=self._get_params(),
+            operation="Cancel build",
         )
-        self._handle_response_error(response, "Cancel build")
         logger.info(f"Cancelled build: {build_id}")
 
     async def build_exit_early_aio(
@@ -543,39 +670,43 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if reason:
             params["reason"] = reason
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/exit-early",
             params=params,
+            operation="Exit early",
         )
-        self._handle_response_error(response, "Exit early")
         logger.info(f"Build exited early: {build_id}")
 
     async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - register a task within a build."""
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks",
             json=_get_task_data_for_registration(task),
             params=self._get_params(),
+            operation=f"Register task {task.id}",
         )
-        self._handle_response_error(response, f"Register task {task.id}")
 
     async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as started."""
         await self.task_register_aio(build_id, task)
 
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
             params=self._get_params(),
+            operation=f"Start task {task.id}",
         )
-        self._handle_response_error(response, f"Start task {task.id}")
 
     async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as completed."""
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/complete",
             params=self._get_params(),
+            operation=f"Complete task {task.id}",
         )
-        self._handle_response_error(response, f"Complete task {task.id}")
 
     async def task_fail_aio(
         self, build_id: UUID, task: "BaseTask", error_message: str | None = None
@@ -584,35 +715,39 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if error_message:
             params["error_message"] = error_message
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/fail",
             params=params,
+            operation=f"Fail task {task.id}",
         )
-        self._handle_response_error(response, f"Fail task {task.id}")
 
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as suspended."""
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/suspend",
             params=self._get_params(),
+            operation=f"Suspend task {task.id}",
         )
-        self._handle_response_error(response, f"Suspend task {task.id}")
 
     async def task_resume_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as resumed."""
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/resume",
             params=self._get_params(),
+            operation=f"Resume task {task.id}",
         )
-        self._handle_response_error(response, f"Resume task {task.id}")
 
     async def task_cancel_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - cancel a task."""
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
             params=self._get_params(),
+            operation=f"Cancel task {task.id}",
         )
-        self._handle_response_error(response, f"Cancel task {task.id}")
 
     async def task_waiting_for_lock_aio(
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
@@ -621,11 +756,12 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         if lock_owner:
             params["lock_owner"] = lock_owner
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/waiting-for-lock",
             params=params,
+            operation=f"Task {task.id} waiting for lock",
         )
-        self._handle_response_error(response, f"Task {task.id} waiting for lock")
 
     async def task_upload_assets_aio(
         self, build_id: UUID, task: "BaseTask", assets: list[RegistryAsset]
@@ -641,22 +777,24 @@ class APIRegistry(RegistryABC):
                 data["body"] = {"content": data["body"]}
             assets_data.append(data)
 
-        response = await self.async_client.post(
+        await self._arequest(
+            "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/assets",
             json=assets_data,
             params=self._get_params(),
+            operation=f"Upload assets for task {task.id}",
         )
-        self._handle_response_error(response, f"Upload assets for task {task.id}")
         logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
 
     async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
         """Async version of task_get_metadata."""
 
-        response = await self.async_client.get(
+        response = await self._arequest(
+            "GET",
             f"{self.api_url}/api/v1/tasks/{task_id}/metadata",
             params=self._get_params(),
+            operation=f"Get metadata for task {task_id}",
         )
-        self._handle_response_error(response, f"Get metadata for task {task_id}")
         data = response.json()
 
         return TaskMetadata.model_validate(data)

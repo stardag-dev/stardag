@@ -11,7 +11,17 @@ from stardag_api.auth import (
     SdkAuth,
     require_sdk_auth,
 )
+from stardag_api.config import limits_settings
 from stardag_api.db import get_db
+from stardag_api.limits import (
+    ErrorCode,
+    LimitExceededError,
+    check_entity_creation_limit,
+    check_payload_size,
+    check_rate_limit,
+    check_structural_limit,
+    record_entity_created,
+)
 from stardag_api.models import (
     Build,
     Event,
@@ -46,6 +56,20 @@ from stardag_api.services.status import (
 )
 
 router = APIRouter(prefix="/builds", tags=["builds"])
+
+
+def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
+    """Raise HTTP 429 if a limit check returned an error."""
+    if error is None:
+        return
+    headers = {}
+    if error.retry_after is not None:
+        headers["Retry-After"] = str(error.retry_after)
+    raise HTTPException(
+        status_code=429,
+        detail=error.model_dump(exclude_none=True),
+        headers=headers or None,
+    )
 
 
 # --- Helpers ---
@@ -107,6 +131,14 @@ async def _create_task_event(
     error_message: str | None = None,
 ) -> TaskEventResponse:
     """Create a task event and return slim response."""
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     _, db_task = await _get_build_and_task(build_id, task_id, db, auth)
 
     event = Event(
@@ -117,6 +149,8 @@ async def _create_task_event(
     )
     db.add(event)
     await db.commit()
+
+    record_entity_created(auth.workspace_id, "events")
 
     status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
 
@@ -138,6 +172,19 @@ async def create_build(
     Requires API key authentication (recommended) or JWT token with environment_id.
     The environment is determined from the authentication context.
     """
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "builds", limits_settings
+        )
+    )
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     # Generate memorable slug
     name = generate_build_slug()
 
@@ -163,6 +210,9 @@ async def create_build(
 
     await db.commit()
     await db.refresh(db_build)
+
+    record_entity_created(auth.workspace_id, "builds")
+    record_entity_created(auth.workspace_id, "events")
 
     # Build response with derived status
     status, started_at, completed_at, triggered_by_id = await get_build_status(
@@ -301,6 +351,14 @@ async def complete_build(
     Args:
         triggered_by_user_id: Optional user ID if this is a manual override from UI.
     """
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -324,6 +382,8 @@ async def complete_build(
     )
     db.add(event)
     await db.commit()
+
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -360,6 +420,14 @@ async def fail_build(
         error_message: Optional error message.
         triggered_by_user_id: Optional user ID if this is a manual override from UI.
     """
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -384,6 +452,8 @@ async def fail_build(
     )
     db.add(event)
     await db.commit()
+
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -418,6 +488,14 @@ async def cancel_build(
     Args:
         triggered_by_user_id: Optional user ID if this is a manual override from UI.
     """
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -441,6 +519,8 @@ async def cancel_build(
     )
     db.add(event)
     await db.commit()
+
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -471,6 +551,14 @@ async def exit_early(
     reason: str | None = None,
 ):
     """Mark a build as exited early (all remaining tasks running in other builds)."""
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -489,6 +577,8 @@ async def exit_early(
     )
     db.add(event)
     await db.commit()
+
+    record_entity_created(auth.workspace_id, "events")
 
     status, started_at, completed_at, triggered_by_id = await get_build_status(
         db, build.id
@@ -527,6 +617,30 @@ async def register_task(
     TASK_REFERENCED event is created. Otherwise creates the task and a
     TASK_PENDING event.
     """
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        check_payload_size(
+            task.task_data,
+            limits_settings.max_task_data_bytes,
+            ErrorCode.TASK_DATA_SIZE_LIMIT,
+            "task_data",
+        )
+    )
+    _raise_if_limit_exceeded(
+        check_structural_limit(
+            len(task.dependency_task_ids),
+            limits_settings.max_dependency_ids_per_task,
+            ErrorCode.DEPENDENCY_COUNT_LIMIT,
+            "dependency_task_ids",
+        )
+    )
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -547,6 +661,12 @@ async def register_task(
     task_already_existed = db_task is not None
 
     if not db_task:
+        # Check task creation limit only for new tasks
+        _raise_if_limit_exceeded(
+            await check_entity_creation_limit(
+                db, auth.workspace_id, "tasks", limits_settings
+            )
+        )
         # Create new task
         db_task = Task(
             task_id=task.task_id,
@@ -597,6 +717,10 @@ async def register_task(
 
     await db.commit()
     await db.refresh(db_task)
+
+    record_entity_created(auth.workspace_id, "events")
+    if not task_already_existed:
+        record_entity_created(auth.workspace_id, "tasks")
 
     return TaskResponse(
         id=db_task.id,
@@ -697,6 +821,14 @@ async def task_waiting_for_lock(
     lock_owner: str | None = None,
 ):
     """Record that a task is waiting for a global lock held by another build."""
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
     _, db_task = await _get_build_and_task(build_id, task_id, db, auth)
 
     # Store lock owner info in event_metadata if provided
@@ -710,6 +842,8 @@ async def task_waiting_for_lock(
     )
     db.add(event)
     await db.commit()
+
+    record_entity_created(auth.workspace_id, "events")
 
     status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
 
@@ -737,6 +871,23 @@ async def upload_task_registry_assets(
     - For markdown: {"content": "<markdown string>"}
     - For json: the actual JSON data dict
     """
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    for asset in assets:
+        _raise_if_limit_exceeded(
+            check_payload_size(
+                asset.body,
+                limits_settings.max_asset_body_bytes,
+                ErrorCode.ASSET_BODY_SIZE_LIMIT,
+                "asset body",
+            )
+        )
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "assets", limits_settings, amount=len(assets)
+        )
+    )
+
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -757,7 +908,26 @@ async def upload_task_registry_assets(
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    # Check assets-per-task limit (conservative: counts all submitted assets as new,
+    # even if some may update existing assets - acceptable for guardrails)
+    if limits_settings.max_assets_per_task is not None:
+        existing_count_result = await db.execute(
+            select(func.count())
+            .select_from(TaskRegistryAsset)
+            .where(TaskRegistryAsset.task_pk == db_task.id)
+        )
+        existing_count = existing_count_result.scalar() or 0
+        _raise_if_limit_exceeded(
+            check_structural_limit(
+                existing_count + len(assets),
+                limits_settings.max_assets_per_task,
+                ErrorCode.ASSETS_PER_TASK_LIMIT,
+                "assets per task",
+            )
+        )
+
     created_assets = []
+    new_asset_count = 0
     for asset in assets:
         # Check if asset with same type and name already exists
         existing_result = await db.execute(
@@ -782,11 +952,15 @@ async def upload_task_registry_assets(
                 body_json=asset.body,
             )
             db.add(db_asset)
+            new_asset_count += 1
 
         await db.flush()
         created_assets.append(db_asset)
 
     await db.commit()
+
+    for _ in range(new_asset_count):
+        record_entity_created(auth.workspace_id, "assets")
 
     # Build response
     asset_responses = [

@@ -1,5 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from stardag_api.limits import LimitsSettings
+
 
 class Settings(BaseSettings):
     # Database configuration - can use either database_url or individual params
@@ -131,3 +133,4 @@ settings = Settings()
 jwt_settings = JWTSettings()
 oidc_settings = OIDCSettings()
 email_settings = EmailSettings()
+limits_settings = LimitsSettings()
