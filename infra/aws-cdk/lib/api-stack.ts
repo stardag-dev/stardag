@@ -134,9 +134,9 @@ export class ApiStack extends cdk.Stack {
         LIMITS_MAX_BUILDS_PER_WORKSPACE_24H: "200",
         LIMITS_MAX_TASKS_PER_WORKSPACE_24H: "10000",
         LIMITS_MAX_EVENTS_PER_WORKSPACE_24H: "50000",
-        LIMITS_MAX_ASSETS_PER_WORKSPACE_24H: "10000",
+        LIMITS_MAX_ASSETS_PER_WORKSPACE_24H: "1000",
         LIMITS_MAX_DEPENDENCY_IDS_PER_TASK: "500",
-        LIMITS_MAX_ASSETS_PER_TASK: "50",
+        LIMITS_MAX_ASSETS_PER_TASK: "10",
       },
       secrets: {
         // Inject database credentials from Secrets Manager
