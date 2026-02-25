@@ -19,6 +19,8 @@ from typing import cast
 
 import pytest
 
+from stardag.config import config_provider
+
 VOLUME_NAME = "stardag-testing"
 ROOT_DEFAULT = "stardag/root/default"
 
@@ -188,6 +190,16 @@ class TestAutoMountRemote:
 
 class TestUserVolumesOverride:
     """Test that user-specified volumes override auto-mounted volumes."""
+
+    @pytest.fixture(autouse=True)
+    def setup_target_roots_env(self):
+        """Re-set target roots env var (cleared by global autouse fixture) and clear config cache."""
+        os.environ["STARDAG_TARGET_ROOTS__DEFAULT"] = (
+            f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}"
+        )
+        config_provider.clear()
+        yield
+        config_provider.clear()
 
     def test_user_volumes_take_precedence(self):
         """User volumes at the same mount path should override auto volumes."""
