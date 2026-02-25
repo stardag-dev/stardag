@@ -12,7 +12,7 @@ from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
 
 if TYPE_CHECKING:
     from stardag_api.models.event import Event
-    from stardag_api.models.task_asset import TaskRegistryAsset
+    from stardag_api.models.task_artifact import TaskArtifact
     from stardag_api.models.task_dependency import TaskDependency
     from stardag_api.models.environment import Environment
 
@@ -100,9 +100,9 @@ class Task(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
 
-    # Registry assets (rich outputs from completed tasks)
-    registry_assets: Mapped[list[TaskRegistryAsset]] = relationship(
+    # Artifacts (rich outputs from completed tasks)
+    artifacts: Mapped[list[TaskArtifact]] = relationship(
         back_populates="task",
         cascade="all, delete-orphan",
-        order_by="TaskRegistryAsset.created_at",
+        order_by="TaskArtifact.created_at",
     )

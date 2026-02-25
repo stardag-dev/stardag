@@ -28,7 +28,7 @@ from stardag_api.models import (
     EventType,
     Task,
     TaskDependency,
-    TaskRegistryAsset,
+    TaskArtifact,
     TaskStatus,
     User,
 )
@@ -43,9 +43,9 @@ from stardag_api.schemas import (
     TaskEventResponse,
     TaskGraphResponse,
     TaskNode,
-    TaskRegistryAssetCreate,
-    TaskRegistryAssetListResponse,
-    TaskRegistryAssetResponse,
+    TaskArtifactCreate,
+    TaskArtifactListResponse,
+    TaskArtifactResponse,
     TaskResponse,
     TaskWithStatusResponse,
 )
@@ -851,20 +851,20 @@ async def task_waiting_for_lock(
 
 
 @router.post(
-    "/{build_id}/tasks/{task_id}/assets",
-    response_model=TaskRegistryAssetListResponse,
+    "/{build_id}/tasks/{task_id}/artifacts",
+    response_model=TaskArtifactListResponse,
     status_code=201,
 )
-async def upload_task_registry_assets(
+async def upload_task_artifacts(
     build_id: UUID,
     task_id: str,
-    assets: list[TaskRegistryAssetCreate],
+    artifacts: list[TaskArtifactCreate],
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Upload registry assets for a completed task.
+    """Upload artifacts for a completed task.
 
-    Assets are rich outputs like markdown reports or JSON data that
+    Artifacts are rich outputs like markdown reports or JSON data that
     can be viewed in the UI.
 
     Body format:
@@ -873,18 +873,18 @@ async def upload_task_registry_assets(
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    for asset in assets:
+    for artifact in artifacts:
         _raise_if_limit_exceeded(
             check_payload_size(
-                asset.body,
-                limits_settings.max_asset_body_bytes,
-                ErrorCode.ASSET_BODY_SIZE_LIMIT,
-                "asset body",
+                artifact.body,
+                limits_settings.max_artifact_body_bytes,
+                ErrorCode.ARTIFACT_BODY_SIZE_LIMIT,
+                "artifact body",
             )
         )
     _raise_if_limit_exceeded(
         await check_entity_creation_limit(
-            db, auth.workspace_id, "assets", limits_settings, amount=len(assets)
+            db, auth.workspace_id, "artifacts", limits_settings, amount=len(artifacts)
         )
     )
 
@@ -908,74 +908,74 @@ async def upload_task_registry_assets(
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Check assets-per-task limit (conservative: counts all submitted assets as new,
-    # even if some may update existing assets - acceptable for guardrails)
-    if limits_settings.max_assets_per_task is not None:
+    # Check artifacts-per-task limit (conservative: counts all submitted artifacts as new,
+    # even if some may update existing artifacts - acceptable for guardrails)
+    if limits_settings.max_artifacts_per_task is not None:
         existing_count_result = await db.execute(
             select(func.count())
-            .select_from(TaskRegistryAsset)
-            .where(TaskRegistryAsset.task_pk == db_task.id)
+            .select_from(TaskArtifact)
+            .where(TaskArtifact.task_pk == db_task.id)
         )
         existing_count = existing_count_result.scalar() or 0
         _raise_if_limit_exceeded(
             check_structural_limit(
-                existing_count + len(assets),
-                limits_settings.max_assets_per_task,
-                ErrorCode.ASSETS_PER_TASK_LIMIT,
-                "assets per task",
+                existing_count + len(artifacts),
+                limits_settings.max_artifacts_per_task,
+                ErrorCode.ARTIFACTS_PER_TASK_LIMIT,
+                "artifacts per task",
             )
         )
 
-    created_assets = []
-    new_asset_count = 0
-    for asset in assets:
-        # Check if asset with same type and name already exists
+    created_artifacts = []
+    new_artifact_count = 0
+    for artifact in artifacts:
+        # Check if artifact with same type and name already exists
         existing_result = await db.execute(
-            select(TaskRegistryAsset)
-            .where(TaskRegistryAsset.task_pk == db_task.id)
-            .where(TaskRegistryAsset.asset_type == asset.type)
-            .where(TaskRegistryAsset.name == asset.name)
+            select(TaskArtifact)
+            .where(TaskArtifact.task_pk == db_task.id)
+            .where(TaskArtifact.artifact_type == artifact.type)
+            .where(TaskArtifact.name == artifact.name)
         )
-        existing_asset = existing_result.scalar_one_or_none()
+        existing_artifact = existing_result.scalar_one_or_none()
 
-        if existing_asset:
-            # Update existing asset
-            existing_asset.body_json = asset.body
-            db_asset = existing_asset
+        if existing_artifact:
+            # Update existing artifact
+            existing_artifact.body_json = artifact.body
+            db_artifact = existing_artifact
         else:
-            # Create new asset
-            db_asset = TaskRegistryAsset(
+            # Create new artifact
+            db_artifact = TaskArtifact(
                 task_pk=db_task.id,
                 environment_id=build.environment_id,
-                asset_type=asset.type,
-                name=asset.name,
-                body_json=asset.body,
+                artifact_type=artifact.type,
+                name=artifact.name,
+                body_json=artifact.body,
             )
-            db.add(db_asset)
-            new_asset_count += 1
+            db.add(db_artifact)
+            new_artifact_count += 1
 
         await db.flush()
-        created_assets.append(db_asset)
+        created_artifacts.append(db_artifact)
 
     await db.commit()
 
-    for _ in range(new_asset_count):
-        record_entity_created(auth.workspace_id, "assets")
+    for _ in range(new_artifact_count):
+        record_entity_created(auth.workspace_id, "artifacts")
 
     # Build response
-    asset_responses = [
-        TaskRegistryAssetResponse(
-            id=db_asset.id,
+    artifact_responses = [
+        TaskArtifactResponse(
+            id=db_artifact.id,
             task_id=db_task.task_id,
-            asset_type=db_asset.asset_type,
-            name=db_asset.name,
-            body=db_asset.body_json,
-            created_at=db_asset.created_at,
+            artifact_type=db_artifact.artifact_type,
+            name=db_artifact.name,
+            body=db_artifact.body_json,
+            created_at=db_artifact.created_at,
         )
-        for db_asset in created_assets
+        for db_artifact in created_artifacts
     ]
 
-    return TaskRegistryAssetListResponse(assets=asset_responses)
+    return TaskArtifactListResponse(artifacts=artifact_responses)
 
 
 @router.get("/{build_id}/tasks", response_model=list[TaskWithStatusResponse])
@@ -1015,15 +1015,15 @@ async def list_tasks_in_build(
     # Get global statuses (considering events from ALL builds)
     statuses = await get_all_task_global_statuses(db, task_ids)
 
-    # Get asset counts per task
-    asset_counts: dict[UUID, int] = {}
+    # Get artifact counts per task
+    artifact_counts: dict[UUID, int] = {}
     if task_ids:
-        asset_count_result = await db.execute(
-            select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
-            .where(TaskRegistryAsset.task_pk.in_(task_ids))
-            .group_by(TaskRegistryAsset.task_pk)
+        artifact_count_result = await db.execute(
+            select(TaskArtifact.task_pk, func.count(TaskArtifact.id))
+            .where(TaskArtifact.task_pk.in_(task_ids))
+            .group_by(TaskArtifact.task_pk)
         )
-        asset_counts = {row[0]: row[1] for row in asset_count_result.all()}
+        artifact_counts = {row[0]: row[1] for row in artifact_count_result.all()}
 
     responses = []
     for task in tasks:
@@ -1050,7 +1050,7 @@ async def list_tasks_in_build(
                 started_at=started_at,
                 completed_at=completed_at,
                 error_message=error_message,
-                asset_count=asset_counts.get(task.id, 0),
+                artifact_count=artifact_counts.get(task.id, 0),
                 waiting_for_lock=waiting_for_lock,
                 status_build_id=status_build_id,
             )
@@ -1136,15 +1136,15 @@ async def get_build_graph(
     # Get global statuses (considering events from ALL builds)
     statuses = await get_all_task_global_statuses(db, task_ids_list)
 
-    # Get asset counts per task
-    asset_counts: dict[UUID, int] = {}
+    # Get artifact counts per task
+    artifact_counts: dict[UUID, int] = {}
     if task_ids:
-        asset_count_result = await db.execute(
-            select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
-            .where(TaskRegistryAsset.task_pk.in_(task_ids))
-            .group_by(TaskRegistryAsset.task_pk)
+        artifact_count_result = await db.execute(
+            select(TaskArtifact.task_pk, func.count(TaskArtifact.id))
+            .where(TaskArtifact.task_pk.in_(task_ids))
+            .group_by(TaskArtifact.task_pk)
         )
-        asset_counts = {row[0]: row[1] for row in asset_count_result.all()}
+        artifact_counts = {row[0]: row[1] for row in artifact_count_result.all()}
 
     # Build nodes
     nodes = []
@@ -1159,7 +1159,7 @@ async def get_build_graph(
                 task_name=task.task_name,
                 task_namespace=task.task_namespace,
                 status=status,
-                asset_count=asset_counts.get(task.id, 0),
+                artifact_count=artifact_counts.get(task.id, 0),
             )
         )
 

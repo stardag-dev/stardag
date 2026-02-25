@@ -25,7 +25,7 @@ class LimitsSettings(BaseSettings):
 
     # Payload size limits (bytes)
     max_task_data_bytes: Annotated[int, Field(ge=1)] | None = None
-    max_asset_body_bytes: Annotated[int, Field(ge=1)] | None = None
+    max_artifact_body_bytes: Annotated[int, Field(ge=1)] | None = None
 
     # Per-workspace rate limit (requests per minute per instance)
     max_requests_per_minute: Annotated[int, Field(ge=1)] | None = None
@@ -34,11 +34,11 @@ class LimitsSettings(BaseSettings):
     max_builds_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
     max_tasks_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
     max_events_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
-    max_assets_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
+    max_artifacts_per_workspace_24h: Annotated[int, Field(ge=1)] | None = None
 
     # Structural limits
     max_dependency_ids_per_task: Annotated[int, Field(ge=1)] | None = None
-    max_assets_per_task: Annotated[int, Field(ge=1)] | None = None
+    max_artifacts_per_task: Annotated[int, Field(ge=1)] | None = None
 
     # Cache TTL for DB count queries (seconds)
     entity_count_cache_ttl: Annotated[int, Field(ge=1)] = 60
@@ -46,14 +46,14 @@ class LimitsSettings(BaseSettings):
 
 class ErrorCode(StrEnum):
     TASK_DATA_SIZE_LIMIT = "TASK_DATA_SIZE_LIMIT"
-    ASSET_BODY_SIZE_LIMIT = "ASSET_BODY_SIZE_LIMIT"
+    ARTIFACT_BODY_SIZE_LIMIT = "ARTIFACT_BODY_SIZE_LIMIT"
     RATE_LIMIT = "RATE_LIMIT"
     BUILD_CREATION_LIMIT = "BUILD_CREATION_LIMIT"
     TASK_REGISTRATION_LIMIT = "TASK_REGISTRATION_LIMIT"
     EVENT_CREATION_LIMIT = "EVENT_CREATION_LIMIT"
-    ASSET_CREATION_LIMIT = "ASSET_CREATION_LIMIT"
+    ARTIFACT_CREATION_LIMIT = "ARTIFACT_CREATION_LIMIT"
     DEPENDENCY_COUNT_LIMIT = "DEPENDENCY_COUNT_LIMIT"
-    ASSETS_PER_TASK_LIMIT = "ASSETS_PER_TASK_LIMIT"
+    ARTIFACTS_PER_TASK_LIMIT = "ARTIFACTS_PER_TASK_LIMIT"
 
 
 class LimitExceededError(BaseModel):
@@ -178,14 +178,14 @@ _ENTITY_LIMIT_MAP: dict[EntityType, tuple[str, ErrorCode]] = {
     "builds": ("max_builds_per_workspace_24h", ErrorCode.BUILD_CREATION_LIMIT),
     "tasks": ("max_tasks_per_workspace_24h", ErrorCode.TASK_REGISTRATION_LIMIT),
     "events": ("max_events_per_workspace_24h", ErrorCode.EVENT_CREATION_LIMIT),
-    "assets": ("max_assets_per_workspace_24h", ErrorCode.ASSET_CREATION_LIMIT),
+    "artifacts": ("max_artifacts_per_workspace_24h", ErrorCode.ARTIFACT_CREATION_LIMIT),
 }
 
 _ENTITY_DISPLAY_NAMES: dict[EntityType, str] = {
     "builds": "build",
     "tasks": "task registration",
     "events": "event creation",
-    "assets": "asset creation",
+    "artifacts": "artifact creation",
 }
 
 
@@ -197,7 +197,7 @@ async def _count_entities_24h(
 
     from sqlalchemy import func, select
 
-    from stardag_api.models import Build, Environment, Event, Task, TaskRegistryAsset
+    from stardag_api.models import Build, Environment, Event, Task, TaskArtifact
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
@@ -226,13 +226,13 @@ async def _count_entities_24h(
             .where(Environment.workspace_id == workspace_id)
             .where(Event.created_at >= cutoff)
         )
-    elif entity_type == "assets":
+    elif entity_type == "artifacts":
         stmt = (
             select(func.count())
-            .select_from(TaskRegistryAsset)
-            .join(Environment, TaskRegistryAsset.environment_id == Environment.id)
+            .select_from(TaskArtifact)
+            .join(Environment, TaskArtifact.environment_id == Environment.id)
             .where(Environment.workspace_id == workspace_id)
-            .where(TaskRegistryAsset.created_at >= cutoff)
+            .where(TaskArtifact.created_at >= cutoff)
         )
     else:
         raise ValueError(f"Unknown entity type: {entity_type}")

@@ -20,7 +20,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from stardag.registry import RegistryABC
-    from stardag.registry_asset import RegistryAsset
+    from stardag.artifact import Artifact
 
 from pickle import loads as pickle_loads
 from uuid import UUID
@@ -312,8 +312,8 @@ class BaseTask(
     def requires(self) -> TaskStruct | None:
         return None
 
-    def registry_assets(self) -> list["RegistryAsset"]:
-        """Return assets to be stored in the registry after task completion.
+    def artifacts(self) -> list["Artifact"]:
+        """Return artifacts to be stored in the registry after task completion.
 
         Override this method to expose rich outputs (reports, summaries,
         structured data) that will be viewable in the registry UI.
@@ -323,15 +323,15 @@ class BaseTask(
         than relying on in-memory state.
 
         Returns:
-            List of registry assets (MarkdownRegistryAsset, JSONRegistryAsset, etc.)
+            List of artifacts (MarkdownArtifact, JSONArtifact, etc.)
         """
         return []
 
-    def registry_assets_aio(self) -> list["RegistryAsset"]:
-        """Asynchronously return assets to be stored in the registry after task
+    def artifacts_aio(self) -> list["Artifact"]:
+        """Asynchronously return artifacts to be stored in the registry after task
         completion.
         """
-        return self.registry_assets()
+        return self.artifacts()
 
     @classmethod
     def has_dynamic_deps(cls) -> bool:

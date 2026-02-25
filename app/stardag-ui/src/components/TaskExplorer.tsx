@@ -131,8 +131,8 @@ function keyToLabel(key: string): string {
   if (key.startsWith("param.")) {
     return key;
   }
-  // For asset.* keys, keep the full key as label
-  if (key.startsWith("asset.")) {
+  // For artifact.* keys, keep the full key as label
+  if (key.startsWith("artifact.")) {
     return key;
   }
   // For core keys, format nicely (task_name -> Task Name)
@@ -344,20 +344,20 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
             label: key,
             type: "param" as const,
           })),
-          ...data.assets.map((key) => ({
+          ...data.artifacts.map((key) => ({
             key,
             label: key,
-            type: "asset" as const,
+            type: "artifact" as const,
           })),
         ];
         setAvailableColumns(cols);
 
-        // Also add asset keys to availableKeys for search autocomplete
+        // Also add artifact keys to availableKeys for search autocomplete
         // (the /keys endpoint may not return them, but /columns does)
-        if (data.assets.length > 0) {
+        if (data.artifacts.length > 0) {
           setAvailableKeys((prev) => {
             const existingSet = new Set(prev);
-            const newKeys = data.assets.filter((k) => !existingSet.has(k));
+            const newKeys = data.artifacts.filter((k) => !existingSet.has(k));
             return newKeys.length > 0 ? [...prev, ...newKeys] : prev;
           });
         }
@@ -415,18 +415,18 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     }
   }, [resizingColumn, handleResizeMove, handleResizeEnd]);
 
-  // Compute visible asset names for search dependency (only changes when asset column visibility changes)
-  const visibleAssetNames = useMemo(() => {
-    const assetNames = new Set<string>();
+  // Compute visible artifact names for search dependency (only changes when artifact column visibility changes)
+  const visibleArtifactNames = useMemo(() => {
+    const artifactNames = new Set<string>();
     for (const col of columns) {
-      if (col.visible && col.key.startsWith("asset.")) {
-        const parts = col.key.slice(6).split("."); // Remove 'asset.' prefix
+      if (col.visible && col.key.startsWith("artifact.")) {
+        const parts = col.key.slice(9).split("."); // Remove 'artifact.' prefix
         if (parts.length > 0) {
-          assetNames.add(parts[0]);
+          artifactNames.add(parts[0]);
         }
       }
     }
-    return Array.from(assetNames).sort().join(",");
+    return Array.from(artifactNames).sort().join(",");
   }, [columns]);
 
   // Search tasks - uses committedQuery (not live searchText) to avoid searching on every keystroke
@@ -460,9 +460,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         params.set("q", committedQuery.trim());
       }
 
-      // Add include_assets for visible asset columns
-      if (visibleAssetNames) {
-        params.set("include_assets", visibleAssetNames);
+      // Add include_artifacts for visible artifact columns
+      if (visibleArtifactNames) {
+        params.set("include_artifacts", visibleArtifactNames);
       }
 
       const response = await fetchWithAuth(`${API_V1}/tasks/search?${params}`);
@@ -485,7 +485,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     page,
     sortBy,
     sortDir,
-    visibleAssetNames,
+    visibleArtifactNames,
   ]);
 
   useEffect(() => {
@@ -583,7 +583,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         started_at: searchTask?.started_at ?? null,
         completed_at: searchTask?.completed_at ?? null,
         error_message: searchTask?.error_message ?? null,
-        asset_count: node.asset_count,
+        artifact_count: node.artifact_count,
         isFilterMatch: searchTaskIds.has(node.task_id),
       };
     });
@@ -1185,7 +1185,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                       label={col.label}
                                       isNested={
                                         col.key.startsWith("param.") ||
-                                        col.key.startsWith("asset.")
+                                        col.key.startsWith("artifact.")
                                       }
                                     />
                                     {sortBy === col.key && (
@@ -1367,22 +1367,22 @@ function getCellValue(task: TaskSearchResult, key: string): unknown {
     return value;
   }
 
-  // Handle asset.{name}.{path} format
-  if (key.startsWith("asset.")) {
-    const parts = key.slice(6).split(".", 1); // Remove 'asset.' prefix, split at first dot
+  // Handle artifact.{name}.{path} format
+  if (key.startsWith("artifact.")) {
+    const parts = key.slice(9).split(".", 1); // Remove 'artifact.' prefix, split at first dot
     if (parts.length < 1) return undefined;
 
-    const assetName = parts[0];
-    const restOfKey = key.slice(6 + assetName.length + 1); // Get path after asset.{name}.
-    const assetPath = restOfKey ? restOfKey.split(".") : [];
+    const artifactName = parts[0];
+    const restOfKey = key.slice(9 + artifactName.length + 1); // Get path after artifact.{name}.
+    const artifactPath = restOfKey ? restOfKey.split(".") : [];
 
-    // Get asset data from task
-    const assetData = task.asset_data?.[assetName];
-    if (!assetData) return undefined;
+    // Get artifact data from task
+    const artifactData = task.artifact_data?.[artifactName];
+    if (!artifactData) return undefined;
 
     // Navigate the path
-    let value: unknown = assetData;
-    for (const p of assetPath) {
+    let value: unknown = artifactData;
+    for (const p of artifactPath) {
       if (value && typeof value === "object") {
         value = (value as Record<string, unknown>)[p];
       } else {

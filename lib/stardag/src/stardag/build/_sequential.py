@@ -355,10 +355,10 @@ def _run_task_sequential(
     completion_cache.add(task.id)
     registry.task_complete(build_id, task)
 
-    # Upload registry assets if any
-    assets = task.registry_assets()
-    if assets:
-        registry.task_upload_assets(build_id, task, assets)
+    # Upload artifacts if any
+    artifacts = task.artifacts()
+    if artifacts:
+        registry.task_upload_artifacts(build_id, task, artifacts)
 
 
 async def build_sequential_aio(
@@ -678,10 +678,10 @@ async def _run_task_sequential_aio(
     completion_cache.add(task.id)
     await registry.task_complete_aio(build_id, task)
 
-    # Upload registry assets if any
-    assets = task.registry_assets_aio()
-    if assets:
-        await registry.task_upload_assets_aio(build_id, task, assets)
+    # Upload artifacts if any
+    artifacts = task.artifacts_aio()
+    if artifacts:
+        await registry.task_upload_artifacts_aio(build_id, task, artifacts)
 
 
 __all__ = [

@@ -13,7 +13,7 @@ from stardag.utils.resource_provider import resource_provider
 
 if TYPE_CHECKING:
     from stardag import BaseTask
-    from stardag.registry_asset import RegistryAsset
+    from stardag.artifact import Artifact
 
 
 class TaskMetadata(StardagBaseModel):
@@ -215,17 +215,17 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def task_upload_assets(
-        self, build_id: UUID, task: "BaseTask", assets: list["RegistryAsset"]
+    def task_upload_artifacts(
+        self, build_id: UUID, task: "BaseTask", artifacts: list["Artifact"]
     ) -> None:
-        """Upload assets for a completed task.
+        """Upload artifacts for a completed task.
 
-        Called after a task completes successfully if it has registry assets.
+        Called after a task completes successfully if it has artifacts.
 
         Args:
             build_id: The build UUID returned by build_start.
             task: The completed task.
-            assets: List of assets to upload.
+            artifacts: List of artifacts to upload.
         """
         pass
 
@@ -308,11 +308,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of task_waiting_for_lock."""
         self.task_waiting_for_lock(build_id, task, lock_owner)
 
-    async def task_upload_assets_aio(
-        self, build_id: UUID, task: "BaseTask", assets: list["RegistryAsset"]
+    async def task_upload_artifacts_aio(
+        self, build_id: UUID, task: "BaseTask", artifacts: list["Artifact"]
     ) -> None:
-        """Async version of task_upload_assets."""
-        self.task_upload_assets(build_id, task, assets)
+        """Async version of task_upload_artifacts."""
+        self.task_upload_artifacts(build_id, task, artifacts)
 
     async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
         """Async version of task_get_metadata."""

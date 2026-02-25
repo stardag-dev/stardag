@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { cancelTask, fetchTaskAssets, fetchTaskEvents } from "../api/tasks";
-import type { Task, TaskAsset, TaskEvent, EventType } from "../types/task";
-import { AssetList, ExpandButton } from "./AssetViewer";
+import { cancelTask, fetchTaskArtifacts, fetchTaskEvents } from "../api/tasks";
+import type { Task, TaskArtifact, TaskEvent, EventType } from "../types/task";
+import { ArtifactList, ExpandButton } from "./ArtifactViewer";
 import { FullscreenModal } from "./FullscreenModal";
 import { StatusBadge } from "./StatusBadge";
 
@@ -97,8 +97,8 @@ export function TaskDetail({
   onTaskCancelled,
   onStatusBuildClick,
 }: TaskDetailProps) {
-  const [assets, setAssets] = useState<TaskAsset[]>([]);
-  const [assetsLoading, setAssetsLoading] = useState(false);
+  const [artifacts, setArtifacts] = useState<TaskArtifact[]>([]);
+  const [artifactsLoading, setArtifactsLoading] = useState(false);
   const [showParamsModal, setShowParamsModal] = useState(false);
   const [showEventsModal, setShowEventsModal] = useState(false);
   const [events, setEvents] = useState<TaskEvent[]>([]);
@@ -149,26 +149,26 @@ export function TaskDetail({
   useEffect(() => {
     let cancelled = false;
 
-    async function loadAssets() {
-      setAssetsLoading(true);
+    async function loadArtifacts() {
+      setArtifactsLoading(true);
       try {
-        const response = await fetchTaskAssets(task.task_id, task.environment_id);
+        const response = await fetchTaskArtifacts(task.task_id, task.environment_id);
         if (!cancelled) {
-          setAssets(response.assets);
+          setArtifacts(response.artifacts);
         }
       } catch (error) {
-        console.error("Failed to load task assets:", error);
+        console.error("Failed to load task artifacts:", error);
         if (!cancelled) {
-          setAssets([]);
+          setArtifacts([]);
         }
       } finally {
         if (!cancelled) {
-          setAssetsLoading(false);
+          setArtifactsLoading(false);
         }
       }
     }
 
-    loadAssets();
+    loadArtifacts();
 
     return () => {
       cancelled = true;
@@ -354,13 +354,13 @@ export function TaskDetail({
           </div>
         </div>
 
-        {/* Assets */}
-        {assetsLoading ? (
+        {/* Artifacts */}
+        {artifactsLoading ? (
           <div className="text-sm text-gray-500 dark:text-gray-400">
-            Loading assets...
+            Loading artifacts...
           </div>
         ) : (
-          <AssetList assets={assets} />
+          <ArtifactList artifacts={artifacts} />
         )}
       </div>
 

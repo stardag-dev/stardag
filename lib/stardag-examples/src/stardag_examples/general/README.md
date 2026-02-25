@@ -5,7 +5,7 @@ Miscellaneous examples demonstrating Stardag features.
 ## Examples
 
 - **task_api_three_levels.py** - Demonstrates three API levels for defining tasks
-- **registry_assets_demo.py** - Shows how to attach assets (markdown, tables) to tasks
+- **artifacts_demo.py** - Shows how to attach artifacts (markdown, tables) to tasks
 
 ## Running
 

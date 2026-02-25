@@ -151,8 +151,8 @@ export function keyToLabel(key: string): string {
     return key;
   }
 
-  // For asset.* keys, keep the full key as label
-  if (key.startsWith("asset.")) {
+  // For artifact.* keys, keep the full key as label
+  if (key.startsWith("artifact.")) {
     return key;
   }
 

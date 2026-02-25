@@ -1,4 +1,4 @@
-"""Registry asset models for tasks to expose rich outputs."""
+"""Artifact models for tasks to expose rich outputs."""
 
 from typing import Annotated, Any, Literal, Union
 
@@ -11,24 +11,24 @@ from pydantic import BaseModel, Field
 JSONAbleDict = dict[str, Any]
 
 
-class MarkdownRegistryAsset(BaseModel):
-    """A markdown asset for rich text reports and documentation."""
+class MarkdownArtifact(BaseModel):
+    """A markdown artifact for rich text reports and documentation."""
 
     type: Literal["markdown"] = "markdown"
-    name: str = Field(..., description="Asset name/slug for identification")
+    name: str = Field(..., description="Artifact name/slug for identification")
     body: str = Field(..., description="Markdown content")
 
 
-class JSONRegistryAsset(BaseModel):
-    """A JSON asset for structured data."""
+class JSONArtifact(BaseModel):
+    """A JSON artifact for structured data."""
 
     type: Literal["json"] = "json"
-    name: str = Field(..., description="Asset name/slug for identification")
+    name: str = Field(..., description="Artifact name/slug for identification")
     body: JSONAbleDict = Field(..., description="JSON-serializable dict data")
 
 
-# Discriminated union for all asset types
-RegistryAsset = Annotated[
-    Union[MarkdownRegistryAsset, JSONRegistryAsset],
+# Discriminated union for all artifact types
+Artifact = Annotated[
+    Union[MarkdownArtifact, JSONArtifact],
     Field(discriminator="type"),
 ]

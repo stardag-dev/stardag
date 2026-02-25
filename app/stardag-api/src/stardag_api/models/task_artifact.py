@@ -1,4 +1,4 @@
-"""Task registry asset model for storing task registry assets."""
+"""Task artifact model for storing task artifacts."""
 
 from __future__ import annotations
 
@@ -22,27 +22,27 @@ if TYPE_CHECKING:
     from stardag_api.models.environment import Environment
 
 
-class TaskRegistryAsset(Base, TimestampMixin):
-    """Task registry asset - stores rich outputs from completed tasks.
+class TaskArtifact(Base, TimestampMixin):
+    """Task artifact - stores rich outputs from completed tasks.
 
-    Assets are associated with a specific task instance (by task_id hash)
+    Artifacts are associated with a specific task instance (by task_id hash)
     and can be markdown reports, JSON data, or other types.
 
-    All asset bodies are stored as JSON:
+    All artifact bodies are stored as JSON:
     - For markdown: {"content": "<markdown string>"}
     - For json: the actual JSON data dict
     """
 
-    __tablename__ = "task_registry_assets"
+    __tablename__ = "task_artifacts"
     __table_args__ = (
         UniqueConstraint(
             "task_pk",
-            "asset_type",
+            "artifact_type",
             "name",
-            name="uq_task_registry_asset_task_type_name",
+            name="uq_task_artifact_task_type_name",
         ),
-        Index("ix_task_registry_assets_task_pk", "task_pk"),
-        Index("ix_task_registry_assets_environment", "environment_id"),
+        Index("ix_task_artifacts_task_pk", "task_pk"),
+        Index("ix_task_artifacts_environment", "environment_id"),
     )
 
     # UUID7 primary key
@@ -66,13 +66,13 @@ class TaskRegistryAsset(Base, TimestampMixin):
         nullable=False,
     )
 
-    # Asset type discriminator (e.g., "markdown", "json")
-    asset_type: Mapped[str] = mapped_column(
+    # Artifact type discriminator (e.g., "markdown", "json")
+    artifact_type: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
     )
 
-    # Asset name/slug for identification
+    # Artifact name/slug for identification
     name: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -84,5 +84,5 @@ class TaskRegistryAsset(Base, TimestampMixin):
     body_json: Mapped[Any] = mapped_column(JSON, nullable=False)
 
     # Relationships
-    task: Mapped[Task] = relationship(back_populates="registry_assets")
+    task: Mapped[Task] = relationship(back_populates="artifacts")
     environment: Mapped[Environment] = relationship()

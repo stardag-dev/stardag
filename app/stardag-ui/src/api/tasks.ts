@@ -2,7 +2,7 @@ import type {
   Build,
   BuildListResponse,
   Task,
-  TaskAssetListResponse,
+  TaskArtifactListResponse,
   TaskEvent,
   TaskGraphResponse,
   TaskStatus,
@@ -126,17 +126,17 @@ export async function fetchTask(taskId: string): Promise<Task> {
   return response.json();
 }
 
-export async function fetchTaskAssets(
+export async function fetchTaskArtifacts(
   taskId: string,
   environmentId?: string,
-): Promise<TaskAssetListResponse> {
+): Promise<TaskArtifactListResponse> {
   const params = new URLSearchParams();
   if (environmentId) params.set("environment_id", environmentId);
 
-  const url = `${API_BASE}/tasks/${taskId}/assets?${params.toString()}`;
+  const url = `${API_BASE}/tasks/${taskId}/artifacts?${params.toString()}`;
   const response = await fetchWithAuth(url);
   if (!response.ok) {
-    throw new Error(`Failed to fetch task assets: ${response.statusText}`);
+    throw new Error(`Failed to fetch task artifacts: ${response.statusText}`);
   }
   return response.json();
 }
@@ -231,7 +231,7 @@ export async function cancelTask(
 export interface AvailableColumnsResponse {
   core: string[];
   params: string[];
-  assets: string[];
+  artifacts: string[];
 }
 
 export async function fetchAvailableColumns(

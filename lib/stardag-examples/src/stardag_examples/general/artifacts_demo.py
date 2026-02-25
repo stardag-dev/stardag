@@ -1,12 +1,12 @@
-"""Demo script showing how to use registry assets with stardag.
+"""Demo script showing how to use artifacts with stardag.
 
-Registry assets allow tasks to produce rich outputs (markdown reports, JSON data)
+Artifacts allow tasks to produce rich outputs (markdown reports, JSON data)
 that are stored in the registry and viewable in the UI.
 
 To run this demo:
 1. Start the services: docker compose up -d
 2. Set the API URL: export STARDAG_API_REGISTRY_URL=http://localhost:8000
-3. Run this script: python -m stardag_examples.registry_assets_demo
+3. Run this script: python -m stardag_examples.artifacts_demo
 """
 
 import random
@@ -14,12 +14,12 @@ from datetime import datetime
 from typing import TypedDict
 
 import stardag as sd
-from stardag.config import load_config
-from stardag.registry_asset import (
-    JSONRegistryAsset,
-    MarkdownRegistryAsset,
-    RegistryAsset,
+from stardag.artifact import (
+    Artifact,
+    JSONArtifact,
+    MarkdownArtifact,
 )
+from stardag.config import load_config
 
 
 class DataResult(TypedDict):
@@ -31,7 +31,7 @@ class DataResult(TypedDict):
 
 
 class DataCollector(sd.AutoTask[DataResult]):
-    """A task that collects sample data and produces a JSON asset with the results."""
+    """A task that collects sample data and produces a JSON artifact with the results."""
 
     sample_size: int = 100
 
@@ -46,8 +46,8 @@ class DataCollector(sd.AutoTask[DataResult]):
         }
         self.output().save(result)
 
-    def registry_assets(self) -> list[RegistryAsset]:
-        """Produce a JSON asset with data statistics."""
+    def artifacts(self) -> list[Artifact]:
+        """Produce a JSON artifact with data statistics."""
         result = self.output().load()
         samples = result["samples"]
 
@@ -59,7 +59,7 @@ class DataCollector(sd.AutoTask[DataResult]):
         max_val = max(samples)
 
         return [
-            JSONRegistryAsset(
+            JSONArtifact(
                 name="raw-data",
                 body={
                     "sample_size": result["count"],
@@ -67,7 +67,7 @@ class DataCollector(sd.AutoTask[DataResult]):
                     "first_10_samples": samples[:10],
                 },
             ),
-            JSONRegistryAsset(
+            JSONArtifact(
                 name="statistics",
                 body={
                     "mean": round(mean, 4),
@@ -102,8 +102,8 @@ class AnalysisReport(sd.AutoTask[str]):
         result = f"Analysis complete. Mean: {mean:.4f}, StdDev: {std_dev:.4f}"
         self.output().save(result)
 
-    def registry_assets(self) -> list[RegistryAsset]:
-        """Produce a markdown report asset."""
+    def artifacts(self) -> list[Artifact]:
+        """Produce a markdown report artifact."""
         data = self.data_source.output().load()
         samples = data["samples"]
 
@@ -153,7 +153,7 @@ distribution (μ ≈ 0, σ ≈ 1).
 *Report generated automatically by stardag*
 """
         return [
-            MarkdownRegistryAsset(
+            MarkdownArtifact(
                 name="analysis-report",
                 body=report,
             ),
@@ -161,7 +161,7 @@ distribution (μ ≈ 0, σ ≈ 1).
 
 
 def main() -> None:
-    """Run the registry assets demo."""
+    """Run the artifacts demo."""
     # Load configuration
     config = load_config()
     print("Configuration loaded. Running against Registry at:", config.api.url)
@@ -171,9 +171,9 @@ def main() -> None:
     collector = DataCollector(sample_size=50)
     report = AnalysisReport(data_source=collector)
 
-    print("Building DAG with registry assets...")
-    print("  - DataCollector: produces JSON assets (raw-data, statistics)")
-    print("  - AnalysisReport: produces markdown asset (analysis-report)")
+    print("Building DAG with artifacts...")
+    print("  - DataCollector: produces JSON artifacts (raw-data, statistics)")
+    print("  - AnalysisReport: produces markdown artifact (analysis-report)")
 
     # Build the DAG
     sd.build([report])
@@ -189,8 +189,8 @@ def main() -> None:
         ui_url = "https://app.stardag.com"
 
     if ui_url:
-        print(f"\nCheck the UI at {ui_url} to see the registered tasks and assets!")
-        print("Click on a task to view its assets (JSON data and markdown reports).")
+        print(f"\nCheck the UI at {ui_url} to see the registered tasks and artifacts!")
+        print("Click on a task to view its artifacts (JSON data and markdown reports).")
 
 
 if __name__ == "__main__":

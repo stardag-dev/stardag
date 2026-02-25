@@ -599,9 +599,9 @@ async def build_aio(
             await release_lock_for_task(task, completed=True)
             try:
                 await registry.task_complete_aio(build_id, task)
-                assets = task.registry_assets_aio()
-                if assets:
-                    await registry.task_upload_assets_aio(build_id, task, assets)
+                artifacts = task.artifacts_aio()
+                if artifacts:
+                    await registry.task_upload_artifacts_aio(build_id, task, artifacts)
             except Exception as reg_err:
                 logger.warning(
                     f"Failed to notify registry of task completion: {reg_err}"

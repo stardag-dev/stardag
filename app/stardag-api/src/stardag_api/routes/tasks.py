@@ -8,13 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
-from stardag_api.models import Event, Task, TaskRegistryAsset
+from stardag_api.models import Event, Task, TaskArtifact
 from stardag_api.schemas import (
     EventResponse,
     TaskListResponse,
     TaskMetadataResponse,
-    TaskRegistryAssetListResponse,
-    TaskRegistryAssetResponse,
+    TaskArtifactListResponse,
+    TaskArtifactResponse,
     TaskResponse,
 )
 from stardag_api.services.status import get_task_global_status
@@ -114,13 +114,13 @@ async def get_task(
     )
 
 
-@router.get("/{task_id}/assets", response_model=TaskRegistryAssetListResponse)
-async def get_task_assets(
+@router.get("/{task_id}/artifacts", response_model=TaskArtifactListResponse)
+async def get_task_artifacts(
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Get assets for a task by its task_id (hash).
+    """Get artifacts for a task by its task_id (hash).
 
     Requires authentication via API key or JWT token with environment_id.
     The workspace is determined from the authentication context.
@@ -135,25 +135,25 @@ async def get_task_assets(
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    # Get all assets for this task
-    assets_result = await db.execute(
-        select(TaskRegistryAsset)
-        .where(TaskRegistryAsset.task_pk == task.id)
-        .order_by(TaskRegistryAsset.created_at.asc())
+    # Get all artifacts for this task
+    artifacts_result = await db.execute(
+        select(TaskArtifact)
+        .where(TaskArtifact.task_pk == task.id)
+        .order_by(TaskArtifact.created_at.asc())
     )
-    assets = assets_result.scalars().all()
+    artifacts = artifacts_result.scalars().all()
 
-    return TaskRegistryAssetListResponse(
-        assets=[
-            TaskRegistryAssetResponse(
-                id=asset.id,
+    return TaskArtifactListResponse(
+        artifacts=[
+            TaskArtifactResponse(
+                id=artifact.id,
                 task_id=task.task_id,
-                asset_type=asset.asset_type,
-                name=asset.name,
-                body=asset.body_json,
-                created_at=asset.created_at,
+                artifact_type=artifact.artifact_type,
+                name=artifact.name,
+                body=artifact.body_json,
+                created_at=artifact.created_at,
             )
-            for asset in assets
+            for artifact in artifacts
         ]
     )
 
