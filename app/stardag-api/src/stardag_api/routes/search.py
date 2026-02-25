@@ -711,7 +711,7 @@ async def get_key_suggestions(
     return KeySuggestionsResponse(keys=all_keys[:limit])
 
 
-def _extract_keys(data: dict, prefix: str, counter: Counter[str], max_depth: int = 6):
+def _extract_keys(data: dict, prefix: str, counter: Counter[str], max_depth: int = 8):
     """Recursively extract keys from nested dict."""
     if max_depth <= 0:
         return
