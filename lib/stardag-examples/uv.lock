@@ -3522,7 +3522,7 @@ asyncio = [
 
 [[package]]
 name = "stardag"
-version = "0.1.2"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -3530,13 +3530,14 @@ dependencies = [
     { name = "httpx-retries" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "tenacity" },
     { name = "tomli-w" },
     { name = "typer" },
     { name = "uuid6" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d7/13/a3e6908205279e8b708dda9512e8a8938dc3c1bba036ade1887f967d7959/stardag-0.1.2.tar.gz", hash = "sha256:76cb17585bc6d2c828290c086f7f0fcadca09b4f2392163a679defa02b6f7f0b", size = 410620, upload-time = "2026-02-16T08:11:11.534Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/df/1d/a9c5c094cbfe35159f0889e50051591eedd188bdd1288d5f2b95f4aacb80/stardag-0.2.0.tar.gz", hash = "sha256:6ca3ffad2b424fb34d4f7c1f1f0a7c41bb5c9dd87dd452f402482c53a26bbb62", size = 416021, upload-time = "2026-02-25T21:41:27.604Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/6b/e80f0b1260c2ddbb570604250ef2bcf21082ba8aeab45641cd5f5a6844d7/stardag-0.1.2-py3-none-any.whl", hash = "sha256:5bd0a9a90a32b0b2eb793bfdb547cd8f3e33c1c8d6bd5e9f063294070f433e58", size = 139642, upload-time = "2026-02-16T08:11:09.617Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/de/443b690790ebaf7e58bb3d66c65bb346d5e8f2e418acecc3a2547b820446/stardag-0.2.0-py3-none-any.whl", hash = "sha256:780475b62b0eef661e9eeb8d8fc80b35a74739f5c530d1edab46969f704f3812", size = 143458, upload-time = "2026-02-25T21:41:26.008Z" },
 ]
 
 [[package]]
@@ -3634,6 +3635,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f0/8d/e218e0160cc1b692e6e0e5ba34e8865dbb171efeb5fc9a704544b3020605/taskgroup-0.2.2.tar.gz", hash = "sha256:078483ac3e78f2e3f973e2edbf6941374fbea81b9c5d0a96f51d297717f4752d", size = 11504, upload-time = "2025-01-03T09:24:13.761Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/b1/74babcc824a57904e919f3af16d86c08b524c0691504baf038ef2d7f655c/taskgroup-0.2.2-py2.py3-none-any.whl", hash = "sha256:e2c53121609f4ae97303e9ea1524304b4de6faf9eb2c9280c7f87976479a52fb", size = 14237, upload-time = "2025-01-03T09:24:11.41Z" },
+]
+
+[[package]]
+name = "tenacity"
+version = "9.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
 ]
 
 [[package]]
