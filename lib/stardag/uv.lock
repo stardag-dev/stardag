@@ -3619,7 +3619,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", marker = "extra == 's3'", specifier = ">=13.0.0" },
-    { name = "aiofiles", specifier = ">=25.1.0" },
+    { name = "aiofiles", specifier = ">=23.1.0" },
     { name = "asyncpg", marker = "python_full_version >= '3.13' and extra == 'prefect'", specifier = ">=0.30.0" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
     { name = "boto3-stubs", extras = ["s3"], marker = "extra == 's3'" },
@@ -3630,12 +3630,12 @@ requires-dist = [
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.1.0" },
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
-    { name = "pydantic-settings", specifier = ">=2.7.1" },
-    { name = "tenacity", specifier = ">=9.1.4" },
+    { name = "pydantic-settings", specifier = ">=2.1.0" },
+    { name = "tenacity", specifier = ">=8.1.0" },
     { name = "tomli-w", specifier = ">=1.0.0" },
     { name = "typer", specifier = ">=0.12.0" },
     { name = "types-aioboto3", extras = ["s3"], marker = "extra == 's3'" },
-    { name = "uuid6", specifier = ">=2024.7.10" },
+    { name = "uuid6", specifier = ">=2022.6.25" },
 ]
 provides-extras = ["modal", "pandas", "prefect", "s3"]
 
