@@ -87,11 +87,11 @@ export function TaskTable({
                   <td className="px-4 py-3 text-sm font-medium text-gray-900 dark:text-gray-100">
                     <div className="flex items-center gap-2">
                       {task.task_name}
-                      {task.asset_count > 0 && (
+                      {task.artifact_count > 0 && (
                         <span
                           className="flex h-4 w-4 items-center justify-center rounded-full bg-purple-500"
-                          title={`${task.asset_count} asset${
-                            task.asset_count > 1 ? "s" : ""
+                          title={`${task.artifact_count} artifact${
+                            task.artifact_count > 1 ? "s" : ""
                           }`}
                         >
                           <svg

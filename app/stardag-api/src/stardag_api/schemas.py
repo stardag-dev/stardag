@@ -167,7 +167,7 @@ class TaskWithStatusResponse(TaskResponse):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
-    asset_count: int = 0
+    artifact_count: int = 0
     # Global status fields
     waiting_for_lock: bool = False
     # Build where the status-determining event occurred (for cross-build indicators)
@@ -243,7 +243,7 @@ class TaskNode(BaseModel):
     task_name: str
     task_namespace: str
     status: TaskStatus = TaskStatus.PENDING
-    asset_count: int = 0
+    artifact_count: int = 0
 
 
 class TaskEdge(BaseModel):
@@ -295,11 +295,11 @@ class ApiKeyCreateResponse(ApiKeyResponse):
     key: str  # The full key, only returned on creation
 
 
-# --- Task Registry Asset Schemas ---
+# --- Task Artifact Schemas ---
 
 
-class TaskRegistryAssetCreate(BaseModel):
-    """Schema for creating a task registry asset.
+class TaskArtifactCreate(BaseModel):
+    """Schema for creating a task artifact.
 
     Body format:
     - For markdown: {"content": "<markdown string>"}
@@ -311,23 +311,23 @@ class TaskRegistryAssetCreate(BaseModel):
     body: dict  # Always a dict - markdown uses {"content": "..."}, json uses the data
 
 
-class TaskRegistryAssetResponse(BaseModel):
-    """Schema for task registry asset response."""
+class TaskArtifactResponse(BaseModel):
+    """Schema for task artifact response."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
     task_id: str  # The task_id hash (not the internal PK)
-    asset_type: str
+    artifact_type: str
     name: str
     body: dict  # Always a dict from body_json
     created_at: datetime
 
 
-class TaskRegistryAssetListResponse(BaseModel):
-    """Schema for task registry assets list response."""
+class TaskArtifactListResponse(BaseModel):
+    """Schema for task artifacts list response."""
 
-    assets: list[TaskRegistryAssetResponse]
+    artifacts: list[TaskArtifactResponse]
 
 
 # --- Task Search Schemas ---
@@ -353,9 +353,9 @@ class TaskSearchResult(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
-    asset_count: int = 0
-    # Asset data - mapping of asset_name -> body_json (populated when asset columns requested)
-    asset_data: dict[str, dict] = {}
+    artifact_count: int = 0
+    # Artifact data - mapping of artifact_name -> body_json (populated when artifact columns requested)
+    artifact_data: dict[str, dict] = {}
 
 
 class TaskSearchResponse(BaseModel):
@@ -400,7 +400,7 @@ class AvailableColumnsResponse(BaseModel):
 
     core: list[str]
     params: list[str]
-    assets: list[str]
+    artifacts: list[str]
 
 
 # --- Lock Schemas ---

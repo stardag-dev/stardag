@@ -49,7 +49,7 @@ class _PrefectTaskRunWrapper:
     providing:
     - Registry lifecycle calls (task_start, task_complete, task_fail)
     - Before/after execution callbacks for custom logging or artifacts
-    - Asset uploading after task completion
+    - Artifact uploading after task completion
     - Local task execution (async or threaded) when no executor is provided
 
     The wrapper can optionally delegate actual task execution to a TaskExecutorABC
@@ -148,10 +148,12 @@ class _PrefectTaskRunWrapper:
             # Task completed successfully (result is None)
             await self.registry.task_complete_aio(self.build_id, task)
 
-            # Upload registry assets if any
-            assets = task.registry_assets_aio()
-            if assets:
-                await self.registry.task_upload_assets_aio(self.build_id, task, assets)
+            # Upload artifacts if any
+            artifacts = task.artifacts_aio()
+            if artifacts:
+                await self.registry.task_upload_artifacts_aio(
+                    self.build_id, task, artifacts
+                )
 
             if self.on_complete_callback is not None:
                 await self.on_complete_callback(task)

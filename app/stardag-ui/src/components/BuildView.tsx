@@ -254,7 +254,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         started_at: fullTask?.started_at ?? null,
         completed_at: fullTask?.completed_at ?? null,
         error_message: fullTask?.error_message ?? null,
-        asset_count: node.asset_count,
+        artifact_count: node.artifact_count,
         isFilterMatch: noFilter || matchingTaskIds.has(node.task_id),
         // Cross-build status fields
         waiting_for_lock: fullTask?.waiting_for_lock,

@@ -17,7 +17,7 @@ from stardag_api.models.workspace import Workspace
 from stardag_api.models.workspace_member import WorkspaceMember
 from stardag_api.models.target_root import TargetRoot
 from stardag_api.models.task import Task
-from stardag_api.models.task_asset import TaskRegistryAsset
+from stardag_api.models.task_artifact import TaskArtifact
 from stardag_api.models.task_dependency import TaskDependency
 from stardag_api.models.user import User
 from stardag_api.models.environment import Environment
@@ -37,7 +37,7 @@ __all__ = [
     "WorkspaceRole",
     "TargetRoot",
     "Task",
-    "TaskRegistryAsset",
+    "TaskArtifact",
     "TaskDependency",
     "TaskStatus",
     "TimestampMixin",

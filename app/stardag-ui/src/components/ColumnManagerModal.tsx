@@ -29,7 +29,7 @@ export interface ColumnConfig {
 export interface AvailableColumn {
   key: string;
   label: string;
-  type: "core" | "param" | "asset";
+  type: "core" | "param" | "artifact";
 }
 
 interface ColumnManagerModalProps {
@@ -83,7 +83,7 @@ function ParamIcon({ className }: { className?: string }) {
   );
 }
 
-function AssetIcon({ className }: { className?: string }) {
+function ArtifactIcon({ className }: { className?: string }) {
   return (
     <svg
       className={className ?? "h-4 w-4"}
@@ -105,7 +105,7 @@ function ColumnTypeIcon({
   type,
   className,
 }: {
-  type: "core" | "param" | "asset";
+  type: "core" | "param" | "artifact";
   className?: string;
 }) {
   switch (type) {
@@ -113,8 +113,8 @@ function ColumnTypeIcon({
       return <CoreIcon className={className} />;
     case "param":
       return <ParamIcon className={className} />;
-    case "asset":
-      return <AssetIcon className={className} />;
+    case "artifact":
+      return <ArtifactIcon className={className} />;
   }
 }
 
@@ -274,8 +274,8 @@ export function ColumnManagerModal({
         };
       })
       .sort((a, b) => {
-        // Sort: core first, then param, then asset
-        const typeOrder = { core: 0, param: 1, asset: 2 };
+        // Sort: core first, then param, then artifact
+        const typeOrder = { core: 0, param: 1, artifact: 2 };
         if (typeOrder[a.type] !== typeOrder[b.type]) {
           return typeOrder[a.type] - typeOrder[b.type];
         }

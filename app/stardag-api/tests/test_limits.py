@@ -26,14 +26,14 @@ class TestLimitsSettings:
         """All limits disabled by default (OSS-safe)."""
         settings = LimitsSettings()
         assert settings.max_task_data_bytes is None
-        assert settings.max_asset_body_bytes is None
+        assert settings.max_artifact_body_bytes is None
         assert settings.max_requests_per_minute is None
         assert settings.max_builds_per_workspace_24h is None
         assert settings.max_tasks_per_workspace_24h is None
         assert settings.max_events_per_workspace_24h is None
-        assert settings.max_assets_per_workspace_24h is None
+        assert settings.max_artifacts_per_workspace_24h is None
         assert settings.max_dependency_ids_per_task is None
-        assert settings.max_assets_per_task is None
+        assert settings.max_artifacts_per_task is None
         assert settings.entity_count_cache_ttl == 60
 
 
@@ -286,30 +286,30 @@ async def test_dependency_count_limit_429(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_asset_body_size_limit_429(client: AsyncClient):
-    """Oversized asset body returns 429."""
-    settings = _limits_settings(max_asset_body_bytes=10)
+async def test_artifact_body_size_limit_429(client: AsyncClient):
+    """Oversized artifact body returns 429."""
+    settings = _limits_settings(max_artifact_body_bytes=10)
     with patch("stardag_api.routes.builds.limits_settings", settings):
         # Create build and task
         response = await client.post("/api/v1/builds", json={})
         build_id = response.json()["id"]
 
         task_data = {
-            "task_id": "asset-task",
+            "task_id": "artifact-task",
             "task_namespace": "",
-            "task_name": "AssetTask",
+            "task_name": "ArtifactTask",
             "task_data": {},
         }
         await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
 
-        # Try to upload oversized asset
-        assets = [{"type": "json", "name": "big", "body": {"data": "x" * 100}}]
+        # Try to upload oversized artifact
+        artifacts = [{"type": "json", "name": "big", "body": {"data": "x" * 100}}]
         response = await client.post(
-            f"/api/v1/builds/{build_id}/tasks/asset-task/assets", json=assets
+            f"/api/v1/builds/{build_id}/tasks/artifact-task/artifacts", json=artifacts
         )
     assert response.status_code == 429
     detail = response.json()["detail"]
-    assert detail["error_code"] == "ASSET_BODY_SIZE_LIMIT"
+    assert detail["error_code"] == "ARTIFACT_BODY_SIZE_LIMIT"
 
 
 @pytest.mark.asyncio

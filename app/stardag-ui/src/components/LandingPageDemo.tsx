@@ -240,7 +240,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Dump",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 0,
+      artifact_count: 0,
     },
     {
       id: "2",
@@ -248,7 +248,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Dataset",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 0,
+      artifact_count: 0,
     },
     {
       id: "3",
@@ -256,7 +256,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Subset (train)",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 0,
+      artifact_count: 0,
     },
     {
       id: "4",
@@ -264,7 +264,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Subset (test)",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 0,
+      artifact_count: 0,
     },
     {
       id: "5",
@@ -272,7 +272,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "TrainedModel",
       task_namespace: "ml_pipeline",
       status: "completed",
-      asset_count: 0,
+      artifact_count: 0,
     },
     {
       id: "6",
@@ -280,7 +280,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Predictions",
       task_namespace: "ml_pipeline",
       status: "running",
-      asset_count: 0,
+      artifact_count: 0,
     },
     {
       id: "7",
@@ -288,7 +288,7 @@ const MOCK_GRAPH: TaskGraphResponse = {
       task_name: "Metrics",
       task_namespace: "ml_pipeline",
       status: "pending",
-      asset_count: 0,
+      artifact_count: 0,
     },
   ],
   edges: [
@@ -317,7 +317,7 @@ const MOCK_TASKS: TaskWithContext[] = MOCK_GRAPH.nodes.map((node) => ({
   started_at: null,
   completed_at: null,
   error_message: null,
-  asset_count: node.asset_count,
+  artifact_count: node.artifact_count,
   isFilterMatch: true,
 }));
 

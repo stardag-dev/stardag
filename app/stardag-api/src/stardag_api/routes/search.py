@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
-from stardag_api.models import Build, Event, Task, TaskRegistryAsset
+from stardag_api.models import Build, Event, Task, TaskArtifact
 from stardag_api.models.enums import TaskStatus
 from stardag_api.schemas import (
     AvailableColumnsResponse,
@@ -105,12 +105,12 @@ def build_jsonb_condition(
     - Core fields (task_name, task_namespace, etc.)
     - Build fields (build_id, build_name) - requires join
     - param.* fields (task_data JSONB)
-    - asset.* fields (asset body_json JSONB) - uses EXISTS subquery
+    - artifact.* fields (artifact body_json JSONB) - uses EXISTS subquery
     - status (from latest event)
 
     Returns:
-        Tuple of (condition_string, needs_build_join, asset_name_for_filter)
-        asset_name_for_filter is set when filtering on asset.* keys
+        Tuple of (condition_string, needs_build_join, artifact_name_for_filter)
+        artifact_name_for_filter is set when filtering on artifact.* keys
     """
     sql_op = OPERATORS.get(operator)
     if not sql_op:
@@ -185,20 +185,20 @@ def build_jsonb_condition(
         else:
             return f"({jsonb_path}) {sql_op} :{param_name}", False, None
 
-    # Asset fields - EXISTS subquery on task_registry_assets table
-    # Format: asset.{asset_name}.{json_path}
-    if key.startswith("asset."):
-        rest = key[6:]  # Remove 'asset.' prefix
+    # Artifact fields - EXISTS subquery on task_artifacts table
+    # Format: artifact.{artifact_name}.{json_path}
+    if key.startswith("artifact."):
+        rest = key[9:]  # Remove 'artifact.' prefix
         parts = rest.split(".", 1)
         if len(parts) < 2:
             return None, False, None
 
-        asset_name = parts[0]
+        artifact_name = parts[0]
         json_path = parts[1]
         path_parts = json_path.split(".")
 
-        # Build JSONB path access for asset body_json
-        jsonb_path = "asset_filter.body_json"
+        # Build JSONB path access for artifact body_json
+        jsonb_path = "artifact_filter.body_json"
         for i, part in enumerate(path_parts):
             array_match = re.match(r"(\w+)\[(\d+)\]", part)
             if array_match:
@@ -214,7 +214,7 @@ def build_jsonb_condition(
             key.replace(".", "_").replace("[", "_").replace("]", "_").replace("-", "_")
         )
         param_name = f"filter_{safe_key}{param_suffix}"
-        asset_name_param = f"filter_asset_name{param_suffix}"
+        artifact_name_param = f"filter_artifact_name{param_suffix}"
 
         # Build EXISTS subquery condition
         if sql_op == "ILIKE":
@@ -227,14 +227,14 @@ def build_jsonb_condition(
         else:
             value_condition = f"({jsonb_path}) {sql_op} :{param_name}"
 
-        # EXISTS subquery to check for matching asset
+        # EXISTS subquery to check for matching artifact
         condition = (
-            f"EXISTS (SELECT 1 FROM task_registry_assets asset_filter "
-            f"WHERE asset_filter.task_pk = {task_alias}.id "
-            f"AND asset_filter.name = :{asset_name_param} "
+            f"EXISTS (SELECT 1 FROM task_artifacts artifact_filter "
+            f"WHERE artifact_filter.task_pk = {task_alias}.id "
+            f"AND artifact_filter.name = :{artifact_name_param} "
             f"AND {value_condition})"
         )
-        return condition, False, asset_name
+        return condition, False, artifact_name
 
     return None, False, None
 
@@ -248,7 +248,7 @@ async def search_tasks(
     filter: str | None = None,
     q: str | None = None,  # Text search
     sort: str = "created_at:desc",
-    include_assets: str | None = None,  # Comma-separated asset names to include
+    include_artifacts: str | None = None,  # Comma-separated artifact names to include
 ):
     """Search tasks with advanced filtering.
 
@@ -256,7 +256,7 @@ async def search_tasks(
     - filter: Comma-separated filters (e.g., "task_name:~:train,param.lr:>:0.01")
     - q: Text search across task name and namespace
     - sort: Sort field and direction (e.g., "created_at:desc")
-    - include_assets: Comma-separated asset names to include in results (e.g., "report,metrics")
+    - include_artifacts: Comma-separated artifact names to include in results (e.g., "report,metrics")
     """
     environment_id = auth.environment_id
 
@@ -300,9 +300,9 @@ async def search_tasks(
                 filter_params[f"filter_{safe_key}{param_suffix}"] = value
                 if requires_build:
                     needs_build_join = True
-                # Add asset name parameter for asset.* filters
+                # Add artifact name parameter for artifact.* filters
                 if asset_name:
-                    filter_params[f"filter_asset_name{param_suffix}"] = asset_name
+                    filter_params[f"filter_artifact_name{param_suffix}"] = asset_name
 
     # Text search across name and namespace
     if q:
@@ -488,38 +488,38 @@ async def search_tasks(
                 global_status[3],  # error_message
             )
 
-    # Get asset counts
-    asset_counts: dict[UUID, int] = {}
+    # Get artifact counts
+    artifact_counts: dict[UUID, int] = {}
     if task_ids:
-        asset_count_result = await db.execute(
-            select(TaskRegistryAsset.task_pk, func.count(TaskRegistryAsset.id))
-            .where(TaskRegistryAsset.task_pk.in_(task_ids))
-            .group_by(TaskRegistryAsset.task_pk)
+        artifact_count_result = await db.execute(
+            select(TaskArtifact.task_pk, func.count(TaskArtifact.id))
+            .where(TaskArtifact.task_pk.in_(task_ids))
+            .group_by(TaskArtifact.task_pk)
         )
-        asset_counts = {row[0]: row[1] for row in asset_count_result.all()}
+        artifact_counts = {row[0]: row[1] for row in artifact_count_result.all()}
 
-    # Get asset data for requested assets
-    task_asset_data: dict[
+    # Get artifact data for requested artifacts
+    task_artifact_data: dict[
         UUID, dict[str, dict]
-    ] = {}  # task_pk -> asset_name -> body_json
-    if task_ids and include_assets:
-        asset_names = [
-            name.strip() for name in include_assets.split(",") if name.strip()
+    ] = {}  # task_pk -> artifact_name -> body_json
+    if task_ids and include_artifacts:
+        artifact_names = [
+            name.strip() for name in include_artifacts.split(",") if name.strip()
         ]
-        if asset_names:
-            asset_query = select(
-                TaskRegistryAsset.task_pk,
-                TaskRegistryAsset.name,
-                TaskRegistryAsset.body_json,
+        if artifact_names:
+            artifact_query = select(
+                TaskArtifact.task_pk,
+                TaskArtifact.name,
+                TaskArtifact.body_json,
             ).where(
-                TaskRegistryAsset.task_pk.in_(task_ids),
-                TaskRegistryAsset.name.in_(asset_names),
+                TaskArtifact.task_pk.in_(task_ids),
+                TaskArtifact.name.in_(artifact_names),
             )
-            asset_result = await db.execute(asset_query)
-            for task_pk, asset_name, body_json in asset_result.all():
-                if task_pk not in task_asset_data:
-                    task_asset_data[task_pk] = {}
-                task_asset_data[task_pk][asset_name] = body_json or {}
+            artifact_result = await db.execute(artifact_query)
+            for task_pk, artifact_name, body_json in artifact_result.all():
+                if task_pk not in task_artifact_data:
+                    task_artifact_data[task_pk] = {}
+                task_artifact_data[task_pk][artifact_name] = body_json or {}
 
     # Build response
     task_results = []
@@ -541,8 +541,8 @@ async def search_tasks(
                 started_at=status_info[3] if status_info else None,  # type: ignore
                 completed_at=status_info[4] if status_info else None,  # type: ignore
                 error_message=status_info[5] if status_info else None,
-                asset_count=asset_counts.get(task.id, 0),
-                asset_data=task_asset_data.get(task.id, {}),
+                artifact_count=artifact_counts.get(task.id, 0),
+                artifact_data=task_artifact_data.get(task.id, {}),
             )
         )
 
@@ -591,7 +591,11 @@ async def get_key_suggestions(
     ]
 
     # Filter by prefix
-    if prefix and not prefix.startswith("param.") and not prefix.startswith("asset."):
+    if (
+        prefix
+        and not prefix.startswith("param.")
+        and not prefix.startswith("artifact.")
+    ):
         core_keys = [k for k in core_keys if k.key.startswith(prefix)]
 
     # Get param keys from task_data (cached)
@@ -633,46 +637,48 @@ async def get_key_suggestions(
             if len(param_keys) >= limit:
                 break
 
-    # Get asset keys from TaskRegistryAsset.body_json (cached)
-    asset_keys: list[KeySuggestion] = []
+    # Get artifact keys from TaskArtifact.body_json (cached)
+    artifact_keys: list[KeySuggestion] = []
 
-    if not prefix or prefix.startswith("asset"):
-        # Check cache for asset keys (cache is per-workspace)
-        asset_cache_key = f"asset_keys:{environment_id}"
-        cached_asset_keys = _get_cached(asset_cache_key)
+    if not prefix or prefix.startswith("artifact"):
+        # Check cache for artifact keys (cache is per-workspace)
+        artifact_cache_key = f"artifact_keys:{environment_id}"
+        cached_artifact_keys = _get_cached(artifact_cache_key)
 
-        if cached_asset_keys is None:
-            # Get a sample of assets to discover keys
-            asset_query = (
-                select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
-                .where(TaskRegistryAsset.environment_id == environment_id)
-                .order_by(TaskRegistryAsset.created_at.desc())
+        if cached_artifact_keys is None:
+            # Get a sample of artifacts to discover keys
+            artifact_query = (
+                select(TaskArtifact.name, TaskArtifact.body_json)
+                .where(TaskArtifact.environment_id == environment_id)
+                .order_by(TaskArtifact.created_at.desc())
                 .limit(200)
             )
-            asset_result = await db.execute(asset_query)
-            sample_assets = asset_result.all()
+            artifact_result = await db.execute(artifact_query)
+            sample_artifacts = artifact_result.all()
 
             # Extract unique keys from body_json
-            asset_key_counter: Counter[str] = Counter()
-            for asset_name, body_json in sample_assets:
+            artifact_key_counter: Counter[str] = Counter()
+            for artifact_name, body_json in sample_artifacts:
                 if isinstance(body_json, dict):
-                    _extract_keys(body_json, f"asset.{asset_name}", asset_key_counter)
+                    _extract_keys(
+                        body_json, f"artifact.{artifact_name}", artifact_key_counter
+                    )
 
             # Cache all discovered keys (up to 100)
-            cached_asset_keys = [
-                (key, count) for key, count in asset_key_counter.most_common(100)
+            cached_artifact_keys = [
+                (key, count) for key, count in artifact_key_counter.most_common(100)
             ]
-            _set_cached(asset_cache_key, cached_asset_keys)
+            _set_cached(artifact_cache_key, cached_artifact_keys)
 
         # Filter by prefix and convert to suggestions
-        prefix_filter = prefix[6:] if prefix.startswith("asset.") else ""
-        for key, count in cached_asset_keys:
-            if not prefix_filter or key.startswith(f"asset.{prefix_filter}"):
-                asset_keys.append(KeySuggestion(key=key, type="string", count=count))
-            if len(asset_keys) >= limit:
+        prefix_filter = prefix[9:] if prefix.startswith("artifact.") else ""
+        for key, count in cached_artifact_keys:
+            if not prefix_filter or key.startswith(f"artifact.{prefix_filter}"):
+                artifact_keys.append(KeySuggestion(key=key, type="string", count=count))
+            if len(artifact_keys) >= limit:
                 break
 
-    all_keys = core_keys + param_keys + asset_keys
+    all_keys = core_keys + param_keys + artifact_keys
     return KeySuggestionsResponse(keys=all_keys[:limit])
 
 
@@ -814,34 +820,36 @@ async def get_value_suggestions(
         ][:limit]
         return ValueSuggestionsResponse(values=values)
 
-    # For asset.* fields, sample from TaskRegistryAsset.body_json
-    if key.startswith("asset."):
+    # For artifact.* fields, sample from TaskArtifact.body_json
+    if key.startswith("artifact."):
         cache_key = f"values:{environment_id}:{key}"
         cached_values = _get_cached(cache_key)
 
         if cached_values is None:
-            # Parse asset.{name}.{path} format
-            parts = key[6:].split(".", 1)  # Remove 'asset.' prefix, split at first dot
+            # Parse artifact.{name}.{path} format
+            parts = key[9:].split(
+                ".", 1
+            )  # Remove 'artifact.' prefix, split at first dot
             if len(parts) < 2:
                 return ValueSuggestionsResponse(values=[])
 
-            asset_name = parts[0]
+            artifact_name = parts[0]
             json_path = parts[1].split(".")
 
-            # Sample assets with matching name
+            # Sample artifacts with matching name
             sample_query = (
-                select(TaskRegistryAsset.body_json)
-                .where(TaskRegistryAsset.environment_id == environment_id)
-                .where(TaskRegistryAsset.name == asset_name)
-                .order_by(TaskRegistryAsset.created_at.desc())
+                select(TaskArtifact.body_json)
+                .where(TaskArtifact.environment_id == environment_id)
+                .where(TaskArtifact.name == artifact_name)
+                .order_by(TaskArtifact.created_at.desc())
                 .limit(500)
             )
             sample_result = await db.execute(sample_query)
-            sample_assets = sample_result.scalars().all()
+            sample_artifacts = sample_result.scalars().all()
 
             # Extract values for the specified path
             value_counter: Counter[str] = Counter()
-            for body_json in sample_assets:
+            for body_json in sample_artifacts:
                 if isinstance(body_json, dict):
                     value = _get_nested_value(body_json, json_path)
                     if value is not None:
@@ -931,22 +939,22 @@ async def get_available_columns(
 
     params = [k for k, _ in key_counter.most_common(50)]
 
-    # Discover asset keys from TaskRegistryAsset.body_json
-    asset_query = (
-        select(TaskRegistryAsset.name, TaskRegistryAsset.body_json)
-        .where(TaskRegistryAsset.environment_id == environment_id)
-        .order_by(TaskRegistryAsset.created_at.desc())
+    # Discover artifact keys from TaskArtifact.body_json
+    artifact_query = (
+        select(TaskArtifact.name, TaskArtifact.body_json)
+        .where(TaskArtifact.environment_id == environment_id)
+        .order_by(TaskArtifact.created_at.desc())
         .limit(200)
     )
-    asset_result = await db.execute(asset_query)
-    sample_assets = asset_result.all()
+    artifact_result = await db.execute(artifact_query)
+    sample_artifacts = artifact_result.all()
 
-    asset_key_counter: Counter[str] = Counter()
-    for asset_name, body_json in sample_assets:
+    artifact_key_counter: Counter[str] = Counter()
+    for artifact_name, body_json in sample_artifacts:
         if isinstance(body_json, dict):
-            # Use asset.{name} as prefix
-            _extract_keys(body_json, f"asset.{asset_name}", asset_key_counter)
+            # Use artifact.{name} as prefix
+            _extract_keys(body_json, f"artifact.{artifact_name}", artifact_key_counter)
 
-    assets = [k for k, _ in asset_key_counter.most_common(50)]
+    artifacts = [k for k, _ in artifact_key_counter.most_common(50)]
 
-    return AvailableColumnsResponse(core=core, params=params, assets=assets)
+    return AvailableColumnsResponse(core=core, params=params, artifacts=artifacts)

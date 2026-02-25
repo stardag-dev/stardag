@@ -23,7 +23,7 @@ from stardag.exceptions import (
     TokenExpiredError,
 )
 from stardag.registry._base import RegistryABC, TaskMetadata, get_git_commit_hash
-from stardag.registry_asset import RegistryAsset
+from stardag.artifact import Artifact
 
 if TYPE_CHECKING:
     from stardag._core.task import BaseTask
@@ -472,33 +472,33 @@ class APIRegistry(RegistryABC):
             operation=f"Task {task.id} waiting for lock",
         )
 
-    def task_upload_assets(
-        self, build_id: UUID, task: "BaseTask", assets: list[RegistryAsset]
+    def task_upload_artifacts(
+        self, build_id: UUID, task: "BaseTask", artifacts: list[Artifact]
     ) -> None:
-        """Upload assets for a completed task."""
-        if not assets:
+        """Upload artifacts for a completed task."""
+        if not artifacts:
             return
 
-        # Serialize assets to API format
-        # For all asset types, body is stored as a dict in body_json
+        # Serialize artifacts to API format
+        # For all artifact types, body is stored as a dict in body_json
         # - markdown: {"content": "<markdown string>"}
         # - json: the actual JSON data dict
-        assets_data = []
-        for asset in assets:
-            data = asset.model_dump(mode="json")
-            if asset.type == "markdown":
+        artifacts_data = []
+        for artifact in artifacts:
+            data = artifact.model_dump(mode="json")
+            if artifact.type == "markdown":
                 # Wrap markdown body string in {"content": ...} dict
                 data["body"] = {"content": data["body"]}
-            assets_data.append(data)
+            artifacts_data.append(data)
 
         self._request(
             "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/assets",
-            json=assets_data,
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/artifacts",
+            json=artifacts_data,
             params=self._get_params(),
-            operation=f"Upload assets for task {task.id}",
+            operation=f"Upload artifacts for task {task.id}",
         )
-        logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
+        logger.debug(f"Uploaded {len(artifacts)} artifacts for task {task.id}")
 
     def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
         """Get metadata for a registered task.
@@ -763,28 +763,28 @@ class APIRegistry(RegistryABC):
             operation=f"Task {task.id} waiting for lock",
         )
 
-    async def task_upload_assets_aio(
-        self, build_id: UUID, task: "BaseTask", assets: list[RegistryAsset]
+    async def task_upload_artifacts_aio(
+        self, build_id: UUID, task: "BaseTask", artifacts: list[Artifact]
     ) -> None:
-        """Async version - upload assets for a completed task."""
-        if not assets:
+        """Async version - upload artifacts for a completed task."""
+        if not artifacts:
             return
 
-        assets_data = []
-        for asset in assets:
-            data = asset.model_dump(mode="json")
-            if asset.type == "markdown":
+        artifacts_data = []
+        for artifact in artifacts:
+            data = artifact.model_dump(mode="json")
+            if artifact.type == "markdown":
                 data["body"] = {"content": data["body"]}
-            assets_data.append(data)
+            artifacts_data.append(data)
 
         await self._arequest(
             "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/assets",
-            json=assets_data,
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/artifacts",
+            json=artifacts_data,
             params=self._get_params(),
-            operation=f"Upload assets for task {task.id}",
+            operation=f"Upload artifacts for task {task.id}",
         )
-        logger.debug(f"Uploaded {len(assets)} assets for task {task.id}")
+        logger.debug(f"Uploaded {len(artifacts)} artifacts for task {task.id}")
 
     async def task_get_metadata_aio(self, task_id: UUID) -> TaskMetadata:
         """Async version of task_get_metadata."""

@@ -190,7 +190,7 @@ export function DagGraph({
           isSelected: graphNode.task_id === selectedTaskId,
           isFilterMatch: task?.isFilterMatch ?? true,
           direction,
-          hasAssets: graphNode.asset_count > 0,
+          hasArtifacts: graphNode.artifact_count > 0,
           waitingForLock: task?.waiting_for_lock,
           statusBuildId: task?.status_build_id,
           currentBuildId: buildId,

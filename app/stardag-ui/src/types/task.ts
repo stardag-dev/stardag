@@ -60,9 +60,9 @@ export interface Task {
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
-  asset_count: number;
-  // Asset data - mapping of asset_name -> body_json (populated when asset columns requested)
-  asset_data?: Record<string, Record<string, unknown>>;
+  artifact_count: number;
+  // Artifact data - mapping of artifact_name -> body_json (populated when artifact columns requested)
+  artifact_data?: Record<string, Record<string, unknown>>;
   // Lock status - true if task is waiting for a global lock held by another build
   waiting_for_lock?: boolean;
   // Build where the status-determining event occurred (for cross-build indicators)
@@ -83,7 +83,7 @@ export interface TaskNode {
   task_name: string;
   task_namespace: string;
   status: TaskStatus;
-  asset_count: number;
+  artifact_count: number;
 }
 
 export interface TaskEdge {
@@ -96,23 +96,23 @@ export interface TaskGraphResponse {
   edges: TaskEdge[];
 }
 
-// Task assets
-export type TaskAssetType = "markdown" | "json";
+// Task artifacts
+export type TaskArtifactType = "markdown" | "json";
 
 // Body is always a dict stored in body_json
 // - markdown: { content: "<markdown string>" }
 // - json: the actual JSON data dict
-export interface TaskAsset {
+export interface TaskArtifact {
   id: string;
   task_id: string;
-  asset_type: TaskAssetType;
+  artifact_type: TaskArtifactType;
   name: string;
   body: Record<string, unknown>;
   created_at: string;
 }
 
-export interface TaskAssetListResponse {
-  assets: TaskAsset[];
+export interface TaskArtifactListResponse {
+  artifacts: TaskArtifact[];
 }
 
 // Event types

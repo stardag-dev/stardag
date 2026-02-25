@@ -10,7 +10,7 @@ export interface TaskNodeData extends Record<string, unknown> {
   isSelected: boolean;
   isFilterMatch: boolean;
   direction: LayoutDirection;
-  hasAssets: boolean;
+  hasArtifacts: boolean;
   waitingForLock?: boolean;
   statusBuildId?: string;
   currentBuildId?: string;
@@ -62,13 +62,13 @@ export function TaskNode({ data }: TaskNodeProps) {
           : ""
       }`}
     >
-      {/* Asset indicator */}
-      {data.hasAssets && (
+      {/* Artifact indicator */}
+      {data.hasArtifacts && (
         <div
           className={`absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-purple-500 ${
             isMuted ? "opacity-50" : ""
           }`}
-          title="Has assets"
+          title="Has artifacts"
         >
           <svg
             className="h-2.5 w-2.5 text-white"

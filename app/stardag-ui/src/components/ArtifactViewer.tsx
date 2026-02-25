@@ -1,7 +1,7 @@
 import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { TaskAsset } from "../types/task";
+import type { TaskArtifact } from "../types/task";
 import { FullscreenModal } from "./FullscreenModal";
 
 // Expand icon component
@@ -40,16 +40,17 @@ export function ExpandButton({ onClick, title = "Expand" }: ExpandButtonProps) {
   );
 }
 
-interface AssetContentProps {
-  asset: TaskAsset;
+interface ArtifactContentProps {
+  artifact: TaskArtifact;
   fullscreen?: boolean;
 }
 
-function AssetContent({ asset, fullscreen = false }: AssetContentProps) {
+function ArtifactContent({ artifact, fullscreen = false }: ArtifactContentProps) {
   const sizeClass = fullscreen ? "prose-base" : "prose-sm";
 
-  if (asset.asset_type === "markdown") {
-    const content = typeof asset.body?.content === "string" ? asset.body.content : "";
+  if (artifact.artifact_type === "markdown") {
+    const content =
+      typeof artifact.body?.content === "string" ? artifact.body.content : "";
     return (
       <div className="overflow-auto rounded-md bg-gray-50 p-3 dark:bg-gray-900">
         <div
@@ -61,59 +62,61 @@ function AssetContent({ asset, fullscreen = false }: AssetContentProps) {
     );
   }
 
-  // JSON asset
+  // JSON artifact
   return (
     <pre className="overflow-auto rounded-md bg-gray-50 p-3 text-sm text-gray-800 dark:bg-gray-900 dark:text-gray-200">
-      {JSON.stringify(asset.body, null, 2)}
+      {JSON.stringify(artifact.body, null, 2)}
     </pre>
   );
 }
 
-interface AssetViewerProps {
-  asset: TaskAsset;
+interface ArtifactViewerProps {
+  artifact: TaskArtifact;
 }
 
-export function AssetViewer({ asset }: AssetViewerProps) {
-  return <AssetContent asset={asset} />;
+export function ArtifactViewer({ artifact }: ArtifactViewerProps) {
+  return <ArtifactContent artifact={artifact} />;
 }
 
-interface AssetListProps {
-  assets: TaskAsset[];
+interface ArtifactListProps {
+  artifacts: TaskArtifact[];
 }
 
-export function AssetList({ assets }: AssetListProps) {
-  const [expandedAsset, setExpandedAsset] = useState<TaskAsset | null>(null);
+export function ArtifactList({ artifacts }: ArtifactListProps) {
+  const [expandedArtifact, setExpandedArtifact] = useState<TaskArtifact | null>(null);
 
-  if (assets.length === 0) {
+  if (artifacts.length === 0) {
     return null;
   }
 
   return (
     <>
       <div className="space-y-4">
-        <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">Assets</h3>
+        <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">
+          Artifacts
+        </h3>
         <div className="space-y-4">
-          {assets.map((asset) => (
+          {artifacts.map((artifact) => (
             <div
-              key={asset.id}
+              key={artifact.id}
               className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700"
             >
               <div className="flex items-center justify-between border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  {asset.name}
+                  {artifact.name}
                 </span>
                 <div className="flex items-center gap-2">
                   <span className="rounded bg-gray-200 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700 dark:text-gray-400">
-                    {asset.asset_type}
+                    {artifact.artifact_type}
                   </span>
                   <ExpandButton
-                    onClick={() => setExpandedAsset(asset)}
+                    onClick={() => setExpandedArtifact(artifact)}
                     title="View fullscreen"
                   />
                 </div>
               </div>
               <div className="p-3">
-                <AssetViewer asset={asset} />
+                <ArtifactViewer artifact={artifact} />
               </div>
             </div>
           ))}
@@ -122,11 +125,11 @@ export function AssetList({ assets }: AssetListProps) {
 
       {/* Fullscreen modal */}
       <FullscreenModal
-        isOpen={expandedAsset !== null}
-        onClose={() => setExpandedAsset(null)}
-        title={expandedAsset?.name ?? ""}
+        isOpen={expandedArtifact !== null}
+        onClose={() => setExpandedArtifact(null)}
+        title={expandedArtifact?.name ?? ""}
       >
-        {expandedAsset && <AssetContent asset={expandedAsset} fullscreen />}
+        {expandedArtifact && <ArtifactContent artifact={expandedArtifact} fullscreen />}
       </FullscreenModal>
     </>
   );
