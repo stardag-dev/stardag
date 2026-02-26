@@ -358,11 +358,40 @@ async def search_tasks(
         "task_name": Task.task_name,
         "task_namespace": Task.task_namespace,
     }
-    sort_column = sort_columns.get(sort_field, Task.created_at)
-    if sort_dir == "asc":
-        query = query.order_by(sort_column.asc())
+    sort_column = sort_columns.get(sort_field)
+
+    if sort_column is not None:
+        if sort_dir == "asc":
+            query = query.order_by(sort_column.asc())
+        else:
+            query = query.order_by(sort_column.desc())
+    elif sort_field.startswith("param."):
+        # Sort by JSONB field in task_data
+        json_key = sort_field[6:]  # Remove "param." prefix
+        path_parts = json_key.split(".")
+        jsonb_path = "tasks.task_data"
+        for i, part in enumerate(path_parts):
+            if i == len(path_parts) - 1:
+                jsonb_path = f"{jsonb_path}->>'{part}'"
+            else:
+                jsonb_path = f"{jsonb_path}->'{part}'"
+        # Numeric-safe sort: cast to float where possible, fall back to text
+        numeric_expr = (
+            f"CASE WHEN ({jsonb_path}) ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' "
+            f"THEN CAST({jsonb_path} AS DOUBLE PRECISION) ELSE NULL END"
+        )
+        text_expr = f"({jsonb_path})"
+        order_dir = "ASC" if sort_dir == "asc" else "DESC"
+        query = query.order_by(
+            text(f"{numeric_expr} {order_dir} NULLS LAST"),
+            text(f"{text_expr} {order_dir} NULLS LAST"),
+        )
     else:
-        query = query.order_by(sort_column.desc())
+        # Unknown sort field - default to created_at
+        if sort_dir == "asc":
+            query = query.order_by(Task.created_at.asc())
+        else:
+            query = query.order_by(Task.created_at.desc())
 
     # If status filter is present, we need to:
     # 1. Fetch all tasks (no SQL pagination) since status is computed post-query
@@ -682,7 +711,7 @@ async def get_key_suggestions(
     return KeySuggestionsResponse(keys=all_keys[:limit])
 
 
-def _extract_keys(data: dict, prefix: str, counter: Counter[str], max_depth: int = 3):
+def _extract_keys(data: dict, prefix: str, counter: Counter[str], max_depth: int = 8):
     """Recursively extract keys from nested dict."""
     if max_depth <= 0:
         return
