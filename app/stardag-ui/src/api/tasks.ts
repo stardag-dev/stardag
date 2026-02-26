@@ -236,9 +236,13 @@ export interface AvailableColumnsResponse {
 
 export async function fetchAvailableColumns(
   environmentId: string,
+  filter?: string,
+  q?: string,
 ): Promise<AvailableColumnsResponse> {
   const params = new URLSearchParams();
   params.set("environment_id", environmentId);
+  if (filter) params.set("filter", filter);
+  if (q) params.set("q", q);
 
   const url = `${API_BASE}/tasks/search/columns?${params.toString()}`;
   const response = await fetchWithAuth(url);

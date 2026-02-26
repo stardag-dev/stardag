@@ -286,7 +286,14 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   // Reference to input for focus management
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Load available keys for autocomplete
+  // Build filter string from current filters (reused by keys/columns loading)
+  const currentFilterStr = useMemo(() => {
+    if (filters.length === 0) return undefined;
+    return filters.map((f) => `${f.key}:${f.operator}:${f.value}`).join(",");
+  }, [filters]);
+  const currentQ = committedQuery.trim() || undefined;
+
+  // Load available keys for autocomplete (re-fetches when filters change)
   useEffect(() => {
     if (!activeEnvironment?.id) return;
 
@@ -295,6 +302,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         const params = new URLSearchParams({
           environment_id: activeEnvironment.id,
         });
+        if (currentFilterStr) params.set("filter", currentFilterStr);
+        if (currentQ) params.set("q", currentQ);
         const response = await fetchWithAuth(`${API_V1}/tasks/search/keys?${params}`);
         if (response.ok) {
           const data = await response.json();
@@ -307,7 +316,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       }
     };
     loadKeys();
-  }, [activeEnvironment?.id]);
+  }, [activeEnvironment?.id, currentFilterStr, currentQ]);
 
   // Re-compute autocomplete when keys load and there's already search text
   // This fixes a race condition where user types before keys are loaded
@@ -322,7 +331,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     setAutocompleteMode("key");
   }, [availableKeys, searchText]);
 
-  // Load available columns for column manager
+  // Load available columns for column manager (re-fetches when filters change)
   useEffect(() => {
     if (!activeEnvironment?.id) return;
 
@@ -330,6 +339,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       try {
         const data: AvailableColumnsResponse = await fetchAvailableColumns(
           activeEnvironment.id,
+          currentFilterStr,
+          currentQ,
         );
 
         // Convert to AvailableColumn format
@@ -366,7 +377,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
       }
     };
     loadColumns();
-  }, [activeEnvironment?.id]);
+  }, [activeEnvironment?.id, currentFilterStr, currentQ]);
 
   // Column resize handlers
   const handleResizeStart = useCallback(
