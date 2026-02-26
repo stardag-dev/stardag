@@ -215,13 +215,13 @@ When running Stardag on Modal, we must use a remote filesystem for our [target r
 
 
         ```sh
-        stardag config profile add modal-poc --env modal-poc --default
+        stardag config profile add modal-poc -e modal-poc --default
         ```
 
     === "uv run ..."
 
         ```sh
-        uv run stardag config profile add modal-poc --env modal-poc --default
+        uv run stardag config profile add modal-poc -e modal-poc --default
         ```
 
 
