@@ -8,6 +8,7 @@ import typer
 
 from stardag._cli import registry
 from stardag._cli._helpers import get_authenticated_client, validate_active_profile_cli
+from stardag._cli.auth import _sync_target_roots
 from stardag._cli.credentials import (
     add_profile,
     ensure_access_token,
@@ -349,16 +350,16 @@ def profile_add(
     typer.echo(f"Profile '{name}' added.")
     typer.echo(f"  User: {user}")
 
+    # Sync target roots for the new profile's environment
+    token = ensure_access_token(registry, workspace_id, user)
+    if token and environment_id:
+        _sync_target_roots(registry_url, token, workspace_id, environment_id)
+
     if set_default:
         set_default_profile(name)
         typer.echo("Set as default profile.")
 
-        # Auto-refresh access token
-        typer.echo("Refreshing access token...")
-        token = ensure_access_token(registry, workspace_id, user)
-        if token:
-            typer.echo("Access token refreshed successfully.")
-        else:
+        if not token:
             typer.echo(
                 "Warning: Could not refresh access token. "
                 "Run 'stardag auth refresh' to authenticate.",
@@ -465,12 +466,18 @@ def profile_use(
         return
 
     # Also resolve environment to populate cache
-    resolve_environment_slug_to_id(registry, workspace_id, environment_slug, user)
+    environment_id = resolve_environment_slug_to_id(
+        registry, workspace_id, environment_slug, user
+    )
 
     typer.echo("Refreshing access token...")
     token = ensure_access_token(registry, workspace_id, user)
     if token:
         typer.echo("Access token refreshed successfully.")
+        # Sync target roots from registry
+        registry_url = get_registry_url(registry)
+        if registry_url and environment_id:
+            _sync_target_roots(registry_url, token, workspace_id, environment_id)
     else:
         typer.echo(
             "Warning: Could not refresh access token. "

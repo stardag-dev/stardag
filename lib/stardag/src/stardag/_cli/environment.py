@@ -256,6 +256,9 @@ def env_create(
 
             if created > 0:
                 typer.echo(f"Created {created} target root(s).")
+                _sync_target_roots_cache(
+                    client, api_url, workspace_id, env_id, target_roots
+                )
 
     except typer.Exit:
         raise

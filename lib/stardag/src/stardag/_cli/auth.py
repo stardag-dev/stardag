@@ -1291,6 +1291,11 @@ def refresh(
         save_access_token_cache(registry_name, ws_id, access_token, expires_in, user)
         typer.echo("Access token refreshed and cached")
 
+        # Sync target roots from registry
+        environment_id = config.context.environment_id
+        if environment_id:
+            _sync_target_roots(registry_url, access_token, ws_id, environment_id)
+
     except Exception as e:
         typer.echo(f"Error exchanging for internal token: {e}", err=True)
         raise typer.Exit(1)

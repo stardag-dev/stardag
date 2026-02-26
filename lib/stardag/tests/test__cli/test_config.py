@@ -142,31 +142,40 @@ class TestProfileAdd:
                 "stardag._cli.config.resolve_environment_slug_to_id",
                 return_value="env-456",
             ):
-                result = runner.invoke(
-                    app,
-                    [
-                        "profile",
-                        "add",
-                        "test-profile",
-                        "-r",
-                        "test-registry",
-                        "-u",
-                        "test@example.com",
-                        "-w",
-                        "my-workspace",
-                        "-e",
-                        "my-environment",
-                    ],
-                )
-                assert result.exit_code == 0
-                assert "added" in result.output.lower()
+                with mock.patch(
+                    "stardag._cli.config.ensure_access_token",
+                    return_value=None,
+                ):
+                    with mock.patch(
+                        "stardag._cli.config._sync_target_roots",
+                    ):
+                        result = runner.invoke(
+                            app,
+                            [
+                                "profile",
+                                "add",
+                                "test-profile",
+                                "-r",
+                                "test-registry",
+                                "-u",
+                                "test@example.com",
+                                "-w",
+                                "my-workspace",
+                                "-e",
+                                "my-environment",
+                            ],
+                        )
+                        assert result.exit_code == 0
+                        assert "added" in result.output.lower()
 
-                # Verify profile was actually persisted
-                profiles = list_profiles()
-                assert "test-profile" in profiles
-                assert profiles["test-profile"]["registry"] == "test-registry"
-                assert profiles["test-profile"]["workspace"] == "my-workspace"
-                assert profiles["test-profile"]["environment"] == "my-environment"
+                        # Verify profile was actually persisted
+                        profiles = list_profiles()
+                        assert "test-profile" in profiles
+                        assert profiles["test-profile"]["registry"] == "test-registry"
+                        assert profiles["test-profile"]["workspace"] == "my-workspace"
+                        assert (
+                            profiles["test-profile"]["environment"] == "my-environment"
+                        )
 
     def test_profile_add_with_default_flag_refreshes_token(self, temp_config_dir):
         """Test that profile add with --default flag attempts token refresh."""
@@ -186,30 +195,39 @@ class TestProfileAdd:
                     "stardag._cli.config.ensure_access_token",
                     return_value="mock-token",
                 ) as mock_ensure_token:
-                    result = runner.invoke(
-                        app,
-                        [
-                            "profile",
-                            "add",
-                            "default-profile",
-                            "-r",
-                            "test-registry",
-                            "-u",
-                            "test@example.com",
-                            "-w",
-                            "my-workspace",
-                            "-e",
-                            "my-environment",
-                            "--default",
-                        ],
-                    )
-                    assert result.exit_code == 0
-                    assert "default profile" in result.output.lower()
-                    assert "refreshed" in result.output.lower()
-                    # Verify token refresh was attempted
-                    mock_ensure_token.assert_called_once_with(
-                        "test-registry", "workspace-123", "test@example.com"
-                    )
+                    with mock.patch(
+                        "stardag._cli.config._sync_target_roots",
+                    ) as mock_sync_roots:
+                        result = runner.invoke(
+                            app,
+                            [
+                                "profile",
+                                "add",
+                                "default-profile",
+                                "-r",
+                                "test-registry",
+                                "-u",
+                                "test@example.com",
+                                "-w",
+                                "my-workspace",
+                                "-e",
+                                "my-environment",
+                                "--default",
+                            ],
+                        )
+                        assert result.exit_code == 0
+                        assert "default profile" in result.output.lower()
+                        # Verify token refresh was attempted
+                        mock_ensure_token.assert_called_once_with(
+                            "test-registry", "workspace-123", "test@example.com"
+                        )
+                        # Verify target roots sync was attempted
+                        mock_sync_roots.assert_called_once_with(
+                            "http://localhost:8000",
+                            "mock-token",
+                            "workspace-123",
+                            "env-456",
+                        )
 
     def test_profile_add_with_uuid_workspace_and_environment(self, temp_config_dir):
         """Test that profile add works when workspace/environment are already UUIDs."""
@@ -229,24 +247,31 @@ class TestProfileAdd:
                 "stardag._cli.config.resolve_environment_slug_to_id",
                 return_value=env_uuid,
             ):
-                result = runner.invoke(
-                    app,
-                    [
-                        "profile",
-                        "add",
-                        "uuid-profile",
-                        "-r",
-                        "test-registry",
-                        "-u",
-                        "test@example.com",
-                        "-w",
-                        workspace_uuid,
-                        "-e",
-                        env_uuid,
-                    ],
-                )
-                assert result.exit_code == 0
-                assert "added" in result.output.lower()
-                # Should NOT show "Verified" messages when IDs match input
-                assert "verified workspace" not in result.output.lower()
-                assert "verified environment" not in result.output.lower()
+                with mock.patch(
+                    "stardag._cli.config.ensure_access_token",
+                    return_value=None,
+                ):
+                    with mock.patch(
+                        "stardag._cli.config._sync_target_roots",
+                    ):
+                        result = runner.invoke(
+                            app,
+                            [
+                                "profile",
+                                "add",
+                                "uuid-profile",
+                                "-r",
+                                "test-registry",
+                                "-u",
+                                "test@example.com",
+                                "-w",
+                                workspace_uuid,
+                                "-e",
+                                env_uuid,
+                            ],
+                        )
+                        assert result.exit_code == 0
+                        assert "added" in result.output.lower()
+                        # Should NOT show "Verified" messages when IDs match input
+                        assert "verified workspace" not in result.output.lower()
+                        assert "verified environment" not in result.output.lower()
