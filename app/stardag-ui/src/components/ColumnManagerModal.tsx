@@ -140,6 +140,7 @@ function SortableColumnItem({
     <div
       ref={setNodeRef}
       style={style}
+      title={column.label}
       className={`flex items-center gap-2 rounded-md border border-gray-200 bg-white px-3 py-2 dark:border-gray-600 dark:bg-gray-700 ${
         isDragging ? "opacity-50 shadow-lg" : ""
       }`}
@@ -364,7 +365,7 @@ export function ColumnManagerModal({
       />
 
       {/* Modal content */}
-      <div className="relative z-10 flex max-h-[80vh] w-full max-w-3xl flex-col rounded-lg bg-white shadow-xl dark:bg-gray-800 mx-4">
+      <div className="relative z-10 flex max-h-[80vh] w-full max-w-5xl flex-col rounded-lg bg-white shadow-xl dark:bg-gray-800 mx-4">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-700">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
@@ -419,7 +420,7 @@ export function ColumnManagerModal({
         {/* Two-pane layout */}
         <div className="flex flex-1 gap-4 overflow-hidden p-6">
           {/* Hidden columns (left) */}
-          <div className="flex flex-1 flex-col">
+          <div className="flex min-w-0 flex-1 flex-col">
             <h3 className="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">
               Hidden ({filteredHiddenColumns.length})
             </h3>
@@ -435,7 +436,7 @@ export function ColumnManagerModal({
                       key={col.key}
                       onClick={() => handleShowColumn(col.key)}
                       className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
-                      title="Click to show column"
+                      title={col.label}
                     >
                       <ColumnTypeIcon
                         type={col.type}
@@ -450,7 +451,7 @@ export function ColumnManagerModal({
           </div>
 
           {/* Visible columns (right) */}
-          <div className="flex flex-1 flex-col">
+          <div className="flex min-w-0 flex-1 flex-col">
             <h3 className="mb-3 text-sm font-medium text-gray-700 dark:text-gray-300">
               Visible ({filteredVisibleColumns.length})
             </h3>
