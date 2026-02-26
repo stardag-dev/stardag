@@ -10,6 +10,7 @@ from typing import Annotated, Any
 import pandas as pd
 import stardag as sd
 from pydantic import Field
+from stardag.artifact import Artifact, JSONArtifact, MarkdownArtifact
 from stardag.build import GlobalLockConfig
 from stardag.target import LoadedT
 
@@ -153,6 +154,12 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
         metrics = base.get_metrics(dataset, predictions)
         self.output().save(metrics)
 
+    # TODO: artifact format differs from prefect_on_complete_artifacts below
+    # (prefect uses markdown table, native uses JSON key-value)
+    def artifacts(self) -> list[Artifact]:
+        metrics = self.output().load()
+        return [JSONArtifact(name="metrics", body=metrics)]
+
     def prefect_on_complete_artifacts(self):
         from prefect.artifacts import MarkdownArtifact
         from stardag.integration.prefect import format_key
@@ -205,6 +212,17 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
             for metrics, hyper_parameters in zip(metrics_s, self.models)
         ]
         self.output().save(metrics_and_params_s)
+
+    # TODO: artifact format differs from prefect_on_complete_artifacts below
+    # (prefect uses TableArtifact, native uses markdown table)
+    def artifacts(self) -> list[Artifact]:
+        rows = self.output().load()
+        if not rows:
+            return []
+        markdown = "# Benchmark Results\n\n" + pd.DataFrame(rows).to_markdown(
+            index=False
+        )
+        return [MarkdownArtifact(name="benchmark", body=markdown)]
 
     def prefect_on_complete_artifacts(self):
         from prefect.artifacts import TableArtifact
