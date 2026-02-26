@@ -239,6 +239,58 @@ def build_jsonb_condition(
     return None, False, None
 
 
+def _apply_task_filters(
+    query: Any,
+    environment_id: UUID,
+    filter_str: str | None,
+    q: str | None,
+) -> Any:
+    """Apply filter and text search conditions to a task query.
+
+    Only applies conditions that work on the tasks table directly
+    (core fields, param.* fields, text search). Does not handle
+    build joins, status filters, or artifact filters.
+    """
+    conditions: list[str] = []
+    filter_params: dict[str, str] = {}
+
+    if filter_str:
+        parsed_filters = parse_filter_string(filter_str)
+        for i, (key, op, value) in enumerate(parsed_filters):
+            # Skip status/build/artifact filters (need joins)
+            if key in ("status", "build_id", "build_name") or key.startswith(
+                "artifact."
+            ):
+                continue
+            param_suffix = f"_{i}"
+            condition, requires_build, _ = build_jsonb_condition(
+                key, op, value, "tasks", param_suffix
+            )
+            if condition and not requires_build:
+                conditions.append(condition)
+                safe_key = (
+                    key.replace(".", "_")
+                    .replace("[", "_")
+                    .replace("]", "_")
+                    .replace("-", "_")
+                )
+                filter_params[f"filter_{safe_key}{param_suffix}"] = value
+
+    if q:
+        q_lower = f"%{q.lower()}%"
+        conditions.append(
+            "(LOWER(tasks.task_name) LIKE :q_param "
+            "OR LOWER(tasks.task_namespace) LIKE :q_param)"
+        )
+        filter_params["q_param"] = q_lower
+
+    if conditions:
+        combined_condition = " AND ".join(conditions)
+        query = query.where(text(combined_condition).bindparams(**filter_params))
+
+    return query
+
+
 @router.get("", response_model=TaskSearchResponse)
 async def search_tasks(
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -365,23 +417,45 @@ async def search_tasks(
             query = query.order_by(sort_column.asc())
         else:
             query = query.order_by(sort_column.desc())
-    elif sort_field.startswith("param."):
-        # Sort by JSONB field in task_data
-        json_key = sort_field[6:]  # Remove "param." prefix
-        path_parts = json_key.split(".")
-        jsonb_path = "tasks.task_data"
-        for i, part in enumerate(path_parts):
-            if i == len(path_parts) - 1:
-                jsonb_path = f"{jsonb_path}->>'{part}'"
-            else:
-                jsonb_path = f"{jsonb_path}->'{part}'"
+    elif sort_field.startswith("param.") or sort_field.startswith("artifact."):
+        order_dir = "ASC" if sort_dir == "asc" else "DESC"
+
+        if sort_field.startswith("param."):
+            # Sort by JSONB field in task_data
+            json_key = sort_field[6:]  # Remove "param." prefix
+            path_parts = json_key.split(".")
+            jsonb_path = "tasks.task_data"
+            for i, part in enumerate(path_parts):
+                if i == len(path_parts) - 1:
+                    jsonb_path = f"{jsonb_path}->>'{part}'"
+                else:
+                    jsonb_path = f"{jsonb_path}->'{part}'"
+        else:
+            # Sort by JSONB field in artifact body_json
+            # Format: artifact.{name}.{json_path}
+            rest = sort_field[9:]  # Remove "artifact." prefix
+            parts = rest.split(".", 1)
+            artifact_name = parts[0]
+            json_path_parts = parts[1].split(".") if len(parts) > 1 else []
+            # Build subquery to extract value from artifact
+            inner_path = "artifact_sort.body_json"
+            for i, part in enumerate(json_path_parts):
+                if i == len(json_path_parts) - 1:
+                    inner_path = f"{inner_path}->>'{part}'"
+                else:
+                    inner_path = f"{inner_path}->'{part}'"
+            jsonb_path = (
+                f"(SELECT {inner_path} FROM task_artifacts artifact_sort "
+                f"WHERE artifact_sort.task_pk = tasks.id "
+                f"AND artifact_sort.name = '{artifact_name}' LIMIT 1)"
+            )
+
         # Numeric-safe sort: cast to float where possible, fall back to text
         numeric_expr = (
             f"CASE WHEN ({jsonb_path}) ~ '^-?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$' "
             f"THEN CAST({jsonb_path} AS DOUBLE PRECISION) ELSE NULL END"
         )
         text_expr = f"({jsonb_path})"
-        order_dir = "ASC" if sort_dir == "asc" else "DESC"
         query = query.order_by(
             text(f"{numeric_expr} {order_dir} NULLS LAST"),
             text(f"{text_expr} {order_dir} NULLS LAST"),
@@ -599,14 +673,20 @@ async def get_key_suggestions(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     prefix: str = "",
     limit: int = 20,
+    filter: str | None = None,
+    q: str | None = None,
 ):
     """Get key suggestions for autocomplete.
 
     Returns available filter keys including:
     - Core fields (task_name, task_namespace, etc.)
     - Discovered param.* keys from task_data
+    - Discovered artifact.* keys from artifact body_json
+
+    When filter/q are provided, keys are discovered only from matching tasks.
     """
     environment_id = auth.environment_id
+    has_filter = bool(filter or q)
 
     # Core keys always available
     core_keys = [
@@ -627,36 +707,36 @@ async def get_key_suggestions(
     ):
         core_keys = [k for k in core_keys if k.key.startswith(prefix)]
 
-    # Get param keys from task_data (cached)
+    # Get param keys from task_data
     param_keys: list[KeySuggestion] = []
 
     if not prefix or prefix.startswith("param"):
-        # Check cache for param keys (cache is per-workspace, not prefix)
+        # When filtering, bypass cache and query matching tasks directly
         cache_key = f"keys:{environment_id}"
-        cached_param_keys = _get_cached(cache_key)
+        cached_param_keys = None if has_filter else _get_cached(cache_key)
 
         if cached_param_keys is None:
-            # Get a sample of task_data to discover keys
             sample_query = (
                 select(Task.task_data)
                 .where(Task.environment_id == environment_id)
                 .order_by(Task.created_at.desc())
-                .limit(100)
+                .limit(500)
             )
+            if has_filter:
+                sample_query = _apply_task_filters(
+                    sample_query, environment_id, filter, q
+                )
             sample_result = await db.execute(sample_query)
             sample_tasks = sample_result.scalars().all()
 
-            # Extract unique keys from task_data
             key_counter: Counter[str] = Counter()
             for task_data in sample_tasks:
                 if isinstance(task_data, dict):
                     _extract_keys(task_data, "param", key_counter)
 
-            # Cache all discovered keys (up to 100)
-            cached_param_keys = [
-                (key, count) for key, count in key_counter.most_common(100)
-            ]
-            _set_cached(cache_key, cached_param_keys)
+            cached_param_keys = key_counter.most_common()
+            if not has_filter:
+                _set_cached(cache_key, cached_param_keys)
 
         # Filter by prefix and convert to suggestions
         prefix_filter = prefix[6:] if prefix.startswith("param.") else ""
@@ -666,26 +746,38 @@ async def get_key_suggestions(
             if len(param_keys) >= limit:
                 break
 
-    # Get artifact keys from TaskArtifact.body_json (cached)
+    # Get artifact keys from TaskArtifact.body_json
     artifact_keys: list[KeySuggestion] = []
 
     if not prefix or prefix.startswith("artifact"):
-        # Check cache for artifact keys (cache is per-workspace)
         artifact_cache_key = f"artifact_keys:{environment_id}"
-        cached_artifact_keys = _get_cached(artifact_cache_key)
+        cached_artifact_keys = None if has_filter else _get_cached(artifact_cache_key)
 
         if cached_artifact_keys is None:
-            # Get a sample of artifacts to discover keys
+            # When filtering, get artifact keys only from matching tasks
             artifact_query = (
                 select(TaskArtifact.name, TaskArtifact.body_json)
                 .where(TaskArtifact.environment_id == environment_id)
                 .order_by(TaskArtifact.created_at.desc())
-                .limit(200)
+                .limit(500)
             )
+            if has_filter:
+                # Join to tasks table to apply filters
+                matching_task_ids = (
+                    select(Task.id)
+                    .where(Task.environment_id == environment_id)
+                    .limit(500)
+                )
+                matching_task_ids = _apply_task_filters(
+                    matching_task_ids, environment_id, filter, q
+                )
+                artifact_query = artifact_query.where(
+                    TaskArtifact.task_pk.in_(matching_task_ids)
+                )
+
             artifact_result = await db.execute(artifact_query)
             sample_artifacts = artifact_result.all()
 
-            # Extract unique keys from body_json
             artifact_key_counter: Counter[str] = Counter()
             for artifact_name, body_json in sample_artifacts:
                 if isinstance(body_json, dict):
@@ -693,11 +785,9 @@ async def get_key_suggestions(
                         body_json, f"artifact.{artifact_name}", artifact_key_counter
                     )
 
-            # Cache all discovered keys (up to 100)
-            cached_artifact_keys = [
-                (key, count) for key, count in artifact_key_counter.most_common(100)
-            ]
-            _set_cached(artifact_cache_key, cached_artifact_keys)
+            cached_artifact_keys = artifact_key_counter.most_common()
+            if not has_filter:
+                _set_cached(artifact_cache_key, cached_artifact_keys)
 
         # Filter by prefix and convert to suggestions
         prefix_filter = prefix[9:] if prefix.startswith("artifact.") else ""
@@ -929,13 +1019,17 @@ def _get_nested_value(data: dict, path: list[str]) -> str | None:
 async def get_available_columns(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    filter: str | None = None,
+    q: str | None = None,
 ):
     """Get all available columns for the results table.
+
+    When filter/q are provided, columns are discovered only from matching tasks.
 
     Returns:
     - Core columns (always available)
     - Param columns (discovered from task_data)
-    - Asset columns (discovered from assets)
+    - Artifact columns (discovered from artifacts)
     """
     environment_id = auth.environment_id
 
@@ -951,13 +1045,16 @@ async def get_available_columns(
         "completed_at",
     ]
 
-    # Discover param keys
+    # Discover param keys from matching tasks
     sample_query = (
         select(Task.task_data)
         .where(Task.environment_id == environment_id)
         .order_by(Task.created_at.desc())
-        .limit(100)
+        .limit(500)
     )
+    if filter or q:
+        sample_query = _apply_task_filters(sample_query, environment_id, filter, q)
+
     sample_result = await db.execute(sample_query)
     sample_tasks = sample_result.scalars().all()
 
@@ -966,24 +1063,34 @@ async def get_available_columns(
         if isinstance(task_data, dict):
             _extract_keys(task_data, "param", key_counter)
 
-    params = [k for k, _ in key_counter.most_common(50)]
+    params = [k for k, _ in key_counter.most_common()]
 
-    # Discover artifact keys from TaskArtifact.body_json
+    # Discover artifact keys from matching tasks
     artifact_query = (
         select(TaskArtifact.name, TaskArtifact.body_json)
         .where(TaskArtifact.environment_id == environment_id)
         .order_by(TaskArtifact.created_at.desc())
-        .limit(200)
+        .limit(500)
     )
+    if filter or q:
+        matching_task_ids = (
+            select(Task.id).where(Task.environment_id == environment_id).limit(500)
+        )
+        matching_task_ids = _apply_task_filters(
+            matching_task_ids, environment_id, filter, q
+        )
+        artifact_query = artifact_query.where(
+            TaskArtifact.task_pk.in_(matching_task_ids)
+        )
+
     artifact_result = await db.execute(artifact_query)
     sample_artifacts = artifact_result.all()
 
     artifact_key_counter: Counter[str] = Counter()
     for artifact_name, body_json in sample_artifacts:
         if isinstance(body_json, dict):
-            # Use artifact.{name} as prefix
             _extract_keys(body_json, f"artifact.{artifact_name}", artifact_key_counter)
 
-    artifacts = [k for k, _ in artifact_key_counter.most_common(50)]
+    artifacts = [k for k, _ in artifact_key_counter.most_common()]
 
     return AvailableColumnsResponse(core=core, params=params, artifacts=artifacts)
