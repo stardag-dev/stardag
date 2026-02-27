@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 sd.namespace("examples.ml_pipeline.class_api", scope=__name__)
 
 
-class ExamplesMLPipelineBase(sd.AutoTask[LoadedT], abc.ABC, typing.Generic[LoadedT]):
+class ExamplesMLPipelineBase(sd.Task[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "0"
     version: str = __version__
 
@@ -60,7 +60,7 @@ class Dump(ExamplesMLPipelineBase[pd.DataFrame]):
             raise ValueError("Date must be today")
 
         data = base.generate_data()
-        self.output().save(data)
+        self._save(data)
 
 
 class Dataset(ExamplesMLPipelineBase[pd.DataFrame]):
@@ -72,9 +72,9 @@ class Dataset(ExamplesMLPipelineBase[pd.DataFrame]):
 
     def _run(self):
         print("Processing data...")
-        data = self.dump.output().load()
+        data = self.dump.load()
         processed_data = base.process_data(data, params=self.params)
-        self.output().save(processed_data)
+        self._save(processed_data)
 
 
 class Subset(ExamplesMLPipelineBase[pd.DataFrame]):
@@ -86,9 +86,9 @@ class Subset(ExamplesMLPipelineBase[pd.DataFrame]):
 
     def _run(self):
         print("Sub setting data...")
-        data = self.dataset.output().load()  # type: ignore
+        data = self.dataset.load()  # type: ignore
         subset = self.filter(data)
-        self.output().save(subset)
+        self._save(subset)
 
 
 class TrainedModel(ExamplesMLPipelineBase[base.SKLearnClassifierModel]):
@@ -103,7 +103,7 @@ class TrainedModel(ExamplesMLPipelineBase[base.SKLearnClassifierModel]):
 
     def _run(self):
         print("Training model...")
-        dataset = self.dataset.output().load()
+        dataset = self.dataset.load()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -117,7 +117,7 @@ class TrainedModel(ExamplesMLPipelineBase[base.SKLearnClassifierModel]):
                     seed=self.seed,
                 ),
             )
-        self.output().save(model)
+        self._save(model)
 
 
 class Predictions(ExamplesMLPipelineBase[pd.DataFrame]):
@@ -132,10 +132,10 @@ class Predictions(ExamplesMLPipelineBase[pd.DataFrame]):
 
     def _run(self):
         print("Predicting...")
-        model = self.trained_model.output().load()
-        dataset = self.dataset.output().load()
+        model = self.trained_model.load()
+        dataset = self.dataset.load()
         predictions = base.predict_model(model=model, dataset=dataset)
-        self.output().save(predictions)
+        self._save(predictions)
 
 
 class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
@@ -149,22 +149,22 @@ class Metrics(ExamplesMLPipelineBase[dict[str, float]]):
 
     def _run(self):
         print("Calculating metrics...")
-        dataset = self.predictions.dataset.output().load()
-        predictions = self.predictions.output().load()
+        dataset = self.predictions.dataset.load()
+        predictions = self.predictions.load()
         metrics = base.get_metrics(dataset, predictions)
-        self.output().save(metrics)
+        self._save(metrics)
 
     # TODO: artifact format differs from prefect_on_complete_artifacts below
     # (prefect uses markdown table, native uses JSON key-value)
     def artifacts(self) -> list[Artifact]:
-        metrics = self.output().load()
+        metrics = self.load()
         return [JSONArtifact(name="metrics", body=metrics)]
 
     def prefect_on_complete_artifacts(self):
         from prefect.artifacts import MarkdownArtifact
         from stardag.integration.prefect import format_key
 
-        metrics = self.output().load()
+        metrics = self.load()
         markdown = f"""# Metrics Summary
 
 | Metric    | Value |
@@ -206,17 +206,17 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
         ]
 
     def _run(self):
-        metrics_s = [task.output().load() for task in self.requires()]
+        metrics_s = [task.load() for task in self.requires()]
         metrics_and_params_s = [
             {**metrics, **hyper_parameters.model_dump(mode="json")}
             for metrics, hyper_parameters in zip(metrics_s, self.models)
         ]
-        self.output().save(metrics_and_params_s)
+        self._save(metrics_and_params_s)
 
     # TODO: artifact format differs from prefect_on_complete_artifacts below
     # (prefect uses TableArtifact, native uses markdown table)
     def artifacts(self) -> list[Artifact]:
-        rows = self.output().load()
+        rows = self.load()
         if not rows:
             return []
         markdown = "# Benchmark Results\n\n" + pd.DataFrame(rows).to_markdown(
@@ -228,7 +228,7 @@ class Benchmark(ExamplesMLPipelineBase[list[dict[str, Any]]]):
         from prefect.artifacts import TableArtifact
         from stardag.integration.prefect import format_key
 
-        rows = self.output().load()
+        rows = self.load()
 
         return [
             TableArtifact(  # type: ignore
@@ -350,4 +350,4 @@ if __name__ == "__main__":
     metrics = get_metrics_dag()
     print(metrics.model_dump_json(indent=2))
     sd.build([metrics], global_lock_config=GlobalLockConfig(enabled=True))
-    print(json.dumps(metrics.output().load(), indent=2))
+    print(json.dumps(metrics.load(), indent=2))

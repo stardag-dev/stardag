@@ -26,7 +26,7 @@ from stardag.registry._base import RegistryABC, TaskMetadata, get_git_commit_has
 from stardag.artifact import Artifact
 
 if TYPE_CHECKING:
-    from stardag._core.task import BaseTask
+    from stardag._core.base_task import BaseTask
 
 logger = logging.getLogger(__name__)
 
@@ -803,7 +803,7 @@ class APIRegistry(RegistryABC):
 def _get_task_data_for_registration(task: "BaseTask") -> dict:
     """Helper to serialize task data for registration API call."""
     # Avoid circular import:
-    from stardag._core.task import flatten_task_struct  # noqa: F401
+    from stardag._core.base_task import flatten_task_struct  # noqa: F401
 
     # Extract output_uri if the task has a FileSystemTarget output with a uri
     output_uri: str | None = None

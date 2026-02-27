@@ -23,10 +23,10 @@ Stardag is a Python framework for building DAGs (Directed Acyclic Graphs) with:
 lib/
 ├── stardag/                    # Core SDK library
 │   └── src/stardag/
-│       ├── _base.py            # Core Task class
-│       ├── _decorator.py       # @task decorator API
-│       ├── _auto_task.py       # AutoTask with filesystem targets
-│       ├── _task_parameter.py  # Depends, TaskLoads, TaskSet
+│       ├── _core/base_task.py   # BaseTask and TargetBaseTask classes
+│       ├── _core/task.py       # Task class (auto filesystem targets)
+│       ├── _core/decorator.py  # @task decorator API
+│       ├── _core/task_loads.py # Depends, TaskLoads, TaskSet
 │       ├── build/              # Execution/build logic
 │       ├── target/             # Target abstraction (local, S3)
 │       └── integration/        # Prefect, Modal, AWS integrations

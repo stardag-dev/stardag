@@ -3,7 +3,7 @@ import typing
 
 from pydantic import create_model
 
-from stardag._core.auto_task import AutoTask
+from stardag._core.base_task import TargetBaseTask
 from stardag._core.task import Task
 from stardag._core.task_loads import TaskLoads
 
@@ -13,7 +13,7 @@ FuncT = typing.TypeVar("FuncT", bound=typing.Callable)
 _PWrapped = typing.ParamSpec("_PWrapped")
 
 
-class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
+class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     _func: typing.Callable[_PWrapped, LoadedT]
 
     if typing.TYPE_CHECKING:
@@ -32,11 +32,11 @@ class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     def call(cls, *args: _PWrapped.args, **kwargs: _PWrapped.kwargs) -> LoadedT:
         return cls._func(*args, **kwargs)  # type: ignore
 
-    def requires(self) -> typing.Mapping[str, Task] | None:
+    def requires(self) -> typing.Mapping[str, TargetBaseTask] | None:
         requires = {
             name: getattr(self, name)
             for name in self.__class__.model_fields.keys()
-            if isinstance(getattr(self, name), Task)
+            if isinstance(getattr(self, name), TargetBaseTask)
         }
         return requires or None
 
@@ -47,7 +47,7 @@ class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     def _get_inputs(self) -> _PWrapped.kwargs:  # type: ignore
         def get_input(name):
             value = getattr(self, name)
-            if isinstance(value, Task):
+            if isinstance(value, TargetBaseTask):
                 return value.output().load()
             return value
 
@@ -68,7 +68,7 @@ class _TaskWrapper(typing.Protocol):
     ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
 
-_RelpathOverride = str | typing.Callable[[AutoTask[LoadedT]], str]
+_RelpathOverride = str | typing.Callable[[Task[LoadedT]], str]
 
 
 class RelpathSettings(typing.TypedDict):

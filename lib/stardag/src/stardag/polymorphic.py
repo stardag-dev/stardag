@@ -116,7 +116,7 @@ def _check_generic_args_compatibility(
     if not actual_args:
         return True, ""
 
-    # Handle different origins (e.g., Task vs AutoTask) by checking if the actual
+    # Handle different origins (e.g., TargetBaseTask vs Task) by checking if the actual
     # class provides a mapping to translate its generic args to the expected origin
     if expected_origin is not None and actual_origin is not None:
         if expected_origin is not actual_origin:

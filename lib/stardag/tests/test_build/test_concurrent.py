@@ -13,8 +13,8 @@ import typing
 
 import pytest
 
-from stardag import AutoTask, auto_namespace
-from stardag._core.task import _has_custom_run_aio
+from stardag import Task, auto_namespace
+from stardag._core.base_task import _has_custom_run_aio
 from stardag.build import (
     BuildExitStatus,
     DefaultExecutionModeSelector,
@@ -182,7 +182,7 @@ class TestBuildAio:
         execution_log: list[tuple[str, str, float]] = []
         log_lock = threading.Lock()
 
-        class TimedTask(AutoTask[dict]):
+        class TimedTask(Task[dict]):
             name: str
             delay: float = 0.1
             deps: tuple["TimedTask", ...] = ()
@@ -202,7 +202,7 @@ class TestBuildAio:
                 with log_lock:
                     execution_log.append((self.name, "end", end))
 
-                self.output().save({"name": self.name, "start": start, "end": end})
+                self._save({"name": self.name, "start": start, "end": end})
 
         # Create a DAG where A and B can run in parallel, then C depends on both
         #     C
@@ -312,7 +312,7 @@ class TestBuildAio:
     ):
         """Test that task failures are properly propagated."""
 
-        class FailingAsyncTask(AutoTask[str]):
+        class FailingAsyncTask(Task[str]):
             async def run_aio(self):
                 raise ValueError("Intentional failure")
 
@@ -400,17 +400,17 @@ class TestAsyncInterface:
     ):
         """Test that we correctly detect custom run_aio implementations."""
 
-        class SyncOnlyTaskLocal(AutoTask[int]):
+        class SyncOnlyTaskLocal(Task[int]):
             def run(self):
-                self.output().save(42)
+                self._save(42)
 
-        class AsyncTaskLocal(AutoTask[int]):
+        class AsyncTaskLocal(Task[int]):
             def run(self):
-                self.output().save(42)
+                self._save(42)
 
             async def run_aio(self):
                 await asyncio.sleep(0)
-                self.output().save(42)
+                self._save(42)
 
         sync_task = SyncOnlyTaskLocal()
         async_task = AsyncTaskLocal()
@@ -426,7 +426,7 @@ class TestAsyncInterface:
         """Test that tasks with custom run_aio() execute correctly."""
         execution_log: list[tuple[str, str]] = []
 
-        class AsyncIOTask(AutoTask[dict]):
+        class AsyncIOTask(Task[dict]):
             name: str
             delay: float = 0.1
             deps: tuple["AsyncIOTask", ...] = ()
@@ -438,13 +438,13 @@ class TestAsyncInterface:
                 # Sync fallback - should NOT be used
                 execution_log.append((self.name, "sync"))
                 time.sleep(self.delay)
-                self.output().save({"name": self.name, "mode": "sync"})
+                self._save({"name": self.name, "mode": "sync"})
 
             async def run_aio(self):
                 # Async implementation - SHOULD be used
                 execution_log.append((self.name, "async"))
                 await asyncio.sleep(self.delay)
-                self.output().save({"name": self.name, "mode": "async"})
+                self._save({"name": self.name, "mode": "async"})
 
         task_a = AsyncIOTask(name="A", delay=0.1)
         task_b = AsyncIOTask(name="B", delay=0.1)
@@ -472,7 +472,7 @@ class TestAsyncInterface:
         start_times: dict[str, float] = {}
         end_times: dict[str, float] = {}
 
-        class ConcurrentAsyncTask(AutoTask[dict]):
+        class ConcurrentAsyncTask(Task[dict]):
             name: str
             delay: float = 0.15
             deps: tuple["ConcurrentAsyncTask", ...] = ()
@@ -481,13 +481,13 @@ class TestAsyncInterface:
                 return self.deps
 
             def run(self):
-                self.output().save({})
+                self._save({})
 
             async def run_aio(self):
                 start_times[self.name] = time.time()
                 await asyncio.sleep(self.delay)
                 end_times[self.name] = time.time()
-                self.output().save({"name": self.name})
+                self._save({"name": self.name})
 
         # DAG: C depends on A and B (A and B can run in parallel)
         task_a = ConcurrentAsyncTask(name="A")

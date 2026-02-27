@@ -13,11 +13,11 @@ Auto-generated documentation from source code:
 
 ### Core Classes
 
-| Class      | Description                            |
-| ---------- | -------------------------------------- |
-| `Task`     | Base class for all tasks               |
-| `AutoTask` | Task with automatic filesystem targets |
-| `@task`    | Decorator for function-based tasks     |
+| Class            | Description                            |
+| ---------------- | -------------------------------------- |
+| `TargetBaseTask` | Base class for tasks with targets      |
+| `Task`           | Task with automatic filesystem targets |
+| `@task`          | Decorator for function-based tasks     |
 
 ### Dependency Types
 

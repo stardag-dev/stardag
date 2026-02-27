@@ -19,30 +19,30 @@ def decorator_api(limit: int) -> sd.TaskLoads[int]:
     return get_sum(integers=get_range(limit=limit))
 
 
-def auto_task_api(limit: int) -> sd.TaskLoads[int]:
-    class Range(sd.AutoTask[list[int]]):
+def task_api(limit: int) -> sd.TaskLoads[int]:
+    class Range(sd.Task[list[int]]):
         limit: int
 
         def run(self):
-            self.output().save(list(range(self.limit)))
+            self._save(list(range(self.limit)))
 
-    class Sum(sd.AutoTask[int]):
+    class Sum(sd.Task[int]):
         integers: sd.TaskLoads[list[int]]
 
         def requires(self):
             return self.integers
 
         def run(self):
-            self.output().save(sum(self.integers.output().load()))
+            self._save(sum(self.integers.load()))
 
     return Sum(integers=Range(limit=limit))
 
 
-def base_task_api(limit: int) -> sd.TaskLoads[int]:
+def target_base_task_api(limit: int) -> sd.TargetBaseTask:
     from stardag.target import LoadableSaveableFileSystemTarget
     from stardag.target.serialize import JSONSerializer, Serializable
 
-    def default_relpath(task: sd.Task) -> str:
+    def default_relpath(task: sd.TargetBaseTask) -> str:
         task_id = str(task.id)
         return "/".join(
             [
@@ -53,7 +53,7 @@ def base_task_api(limit: int) -> sd.TaskLoads[int]:
             ]
         )
 
-    class Range(sd.Task[LoadableSaveableFileSystemTarget[list[int]]]):
+    class Range(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[list[int]]]):
         limit: int
 
         def output(self) -> LoadableSaveableFileSystemTarget[list[int]]:
@@ -65,8 +65,10 @@ def base_task_api(limit: int) -> sd.TaskLoads[int]:
         def run(self):
             self.output().save(list(range(self.limit)))
 
-    class Sum(sd.Task[LoadableSaveableFileSystemTarget[int]]):
-        integers: sd.TaskLoads[list[int]]
+    class Sum(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[int]]):
+        integers: sd.SubClass[
+            sd.TargetBaseTask[LoadableSaveableFileSystemTarget[list[int]]]
+        ]
 
         def requires(self):
             return self.integers

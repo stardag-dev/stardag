@@ -23,13 +23,13 @@
   - [x] Atomic Writes (copy luigi approach?)
   - [x] S3
   - [ ] GS
-- [x] Serialization -> AutoTask
+- [x] Serialization -> Task
   - [x] Module structure
-    - [x] Rename to just `AutoTask`?
+    - [x] Rename to just `Task`?
   - [ ] ~~Extend Interface of Serializer to have `.init(annotation)` after initialization -> This way you can set additional tuning parameters up front (without partials), and compose serializers (see below: `GZip(JSON())`) and property~~
   - [x] `default_ext: str`
   - [x] Make serializer initialization happen on task declaration for early errors! Use `__pydantic_init_subclass__`
-  - [x] Allow specifying explicit serializer: `AutoTask[Feather[pd.DataFrame]]` = `AutoTask[Annotated[pd.DataFrame, PandasFeatherSerializer()]]`
+  - [x] Allow specifying explicit serializer: `Task[Feather[pd.DataFrame]]` = `Task[Annotated[pd.DataFrame, PandasFeatherSerializer()]]`
   - [ ] Defaults for:
     - [x] anything JSONAble (pydantic)
     - [x] pd.DataFrame

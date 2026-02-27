@@ -13,8 +13,8 @@ Auto-generated API documentation from source code.
       show_source: false
       members:
         - task
+        - TargetBaseTask
         - Task
-        - AutoTask
         - BaseTask
         - Depends
         - TaskLoads

@@ -2,7 +2,6 @@ import pytest
 
 from stardag import Task, auto_namespace
 from stardag._core.decorator import Depends, task
-from stardag.target import LoadableTarget
 
 auto_namespace(__name__)  # Avoid collisions in task registry
 
@@ -82,4 +81,4 @@ def test_Depends():
         return a + b.value
 
     # assert custom_add.model_fields["b"].rebuild_annotation() == TaskLoads[CustomParam]
-    assert custom_add.model_fields["b"].annotation == Task[LoadableTarget[CustomParam]]
+    assert custom_add.model_fields["b"].annotation == Task[CustomParam]

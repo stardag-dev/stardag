@@ -6,8 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validator
 
-from stardag._core.auto_task import AutoTask, LoadedT
-from stardag._core.task import Task
+from stardag._core.base_task import TargetBaseTask
+from stardag._core.task import LoadedT, Task
 from stardag.base_model import StardagField
 from stardag.target import FileSystemTarget
 from stardag.target.serialize import get_serializer
@@ -26,7 +26,7 @@ class AliasedMetadata(BaseModel):
     body: dict[str, Any] | None = None
 
     @classmethod
-    def from_task(cls, task: Task[FileSystemTarget]) -> "AliasedMetadata":
+    def from_task(cls, task: TargetBaseTask[FileSystemTarget]) -> "AliasedMetadata":
         """Create AliasedMetadata from a given task."""
         return cls(
             id=task.id,
@@ -35,7 +35,7 @@ class AliasedMetadata(BaseModel):
         )
 
 
-class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
+class AliasTask(Task[LoadedT], Generic[LoadedT]):
     """A task that acts as an alias to another task's output.
 
     The purpose of `AliasTask` is to reference the output of another task that has been
@@ -57,7 +57,7 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
     ```python fixture:default_in_memory_fs_target
     import stardag as sd
 
-    class OriginalTask(sd.AutoTask[int]):
+    class OriginalTask(sd.Task[int]):
         def run(self):
             self.output().save(42)
 
@@ -69,7 +69,7 @@ class AliasTask(AutoTask[LoadedT], Generic[LoadedT]):
     assert alias_task.complete()
 
 
-    class DownstreamTask(sd.AutoTask[int]):
+    class DownstreamTask(sd.Task[int]):
         loads_int: sd.TaskLoads[int]
         def run(self):
             self.output().save(self.loads_int.output().load() + 1)

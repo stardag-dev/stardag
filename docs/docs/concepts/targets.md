@@ -2,14 +2,14 @@
 
 Targets represent where and how task outputs are stored.
 
-## The Typical `Task` uses a `Target`
+## The Typical `TargetBaseTask` uses a `Target`
 
-In most scenarios, downstream tasks need to load the output from upstream dependencies. For this purpose the class [`Task`](../reference/api.md#stardag.Task), which inherits [`BaseTask`](../reference/api.md#stardag.BaseTask), introduces the concept of `Target`s.
+In most scenarios, downstream tasks need to load the output from upstream dependencies. For this purpose the class [`TargetBaseTask`](../reference/api.md#stardag.TargetBaseTask), which inherits [`BaseTask`](../reference/api.md#stardag.BaseTask), introduces the concept of `Target`s.
 
 Its extension of [`BaseTask`](../reference/api.md#stardag.BaseTask) can be summarized in seven lines of code:
 
 ```{.python notest}
-class Task(BaseTask, Generic[TargetType]):
+class TargetBaseTask(BaseTask, Generic[TargetType]):
     def complete(self) -> bool:
         return self.output().exists()
 
@@ -27,7 +27,7 @@ class Target(Protocol):
         ...
 ```
 
-Note that [`Task`](../reference/api.md#stardag.Task) is implemented with `TargetType` as a _generic_ type variable. This means that when you subclass [`Task`](../reference/api.md#stardag.Task), you need to declare the type of target the `output` returns. This is critical for composability of tasks and allows type checkers to verify that chained tasks are compatible in terms of their I/O.
+Note that [`TargetBaseTask`](../reference/api.md#stardag.TargetBaseTask) is implemented with `TargetType` as a _generic_ type variable. This means that when you subclass [`TargetBaseTask`](../reference/api.md#stardag.TargetBaseTask), you need to declare the type of target the `output` returns. This is critical for composability of tasks and allows type checkers to verify that chained tasks are compatible in terms of their I/O.
 
 ## The Typical `Target` uses a File System
 
@@ -38,7 +38,7 @@ You can, and it is in some cases motivated to, return a target for a certain typ
 ```python
 import stardag as sd
 
-class MyTask(sd.Task[sd.LocalTarget]):
+class MyTask(sd.TargetBaseTask[sd.LocalTarget]):
 
     def run(self):
         with self.output().open("w") as handle:
@@ -53,7 +53,7 @@ However, you are strongly encouraged to instead use the function `sd.get_target`
 ```python
 import stardag as sd
 
-class MyTask(sd.Task[sd.FileSystemTarget]):
+class MyTask(sd.TargetBaseTask[sd.FileSystemTarget]):
 
     def run(self):
         with self.output().open("w") as handle:
@@ -67,7 +67,7 @@ The main benefit here is that you can configure the file system and root directo
 
 ## Target Roots
 
-Target roots define the base location for `FileSystemTargets` obtained by `sd.get_target()` or when using the `sd.AutoTask` or the `@sd.task` decorator API.
+Target roots define the base location for `FileSystemTargets` obtained by `sd.get_target()` or when using `sd.Task` or the `@sd.task` decorator API.
 
 As per the last example above, when implementing `output`, you are advised to use `sd.get_target` which takes the arguments:
 

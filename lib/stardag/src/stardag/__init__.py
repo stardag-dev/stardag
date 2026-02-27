@@ -22,8 +22,8 @@ Basic usage::
 Core components:
 
 - :func:`task` - Decorator for creating tasks from functions
-- :class:`Task` - Base class for all tasks
-- :class:`AutoTask` - Task with automatic filesystem targets
+- :class:`Task` - Task with automatic serialization and filesystem targets
+- :class:`TargetBaseTask` - Base class for tasks with typed target outputs
 - :class:`Depends` - Dependency injection type annotation
 - :func:`build` - Execute task and its dependencies
 
@@ -35,18 +35,18 @@ TODO: Expand docstrings for all public API components.
 from importlib.metadata import PackageNotFoundError, version
 
 from stardag._core.alias_task import AliasedMetadata, AliasTask
-from stardag._core.auto_task import AutoTask
-from stardag._core.decorator import Depends, task
-from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
-from stardag._core.task import (
+from stardag._core.base_task import (
     BaseTask,
-    Task,
+    TargetBaseTask,
     TaskRef,
     TaskStruct,
     auto_namespace,
     flatten_task_struct,
     namespace,
 )
+from stardag._core.decorator import Depends, task
+from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
+from stardag._core.task import Task
 from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.build import build, build_aio, build_sequential, build_sequential_aio
@@ -84,7 +84,7 @@ __all__ = [
     "AuthenticationError",
     "AuthorizationError",
     "auto_namespace",
-    "AutoTask",
+    "TargetBaseTask",
     "BaseTask",
     "build",
     "build_aio",
