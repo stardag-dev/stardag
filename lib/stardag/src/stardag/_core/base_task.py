@@ -526,7 +526,7 @@ def flatten_task_struct(task_struct: TaskStruct | None) -> list[BaseTask]:
             for task in flatten_task_struct(sub_task_struct)
         ]
 
-    ValueError(f"Unsupported task struct type: {task_struct!r}")
+    raise ValueError(f"Unsupported task struct type: {task_struct!r}")
 
 
 @dataclass(frozen=True)
