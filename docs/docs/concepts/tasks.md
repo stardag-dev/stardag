@@ -99,44 +99,56 @@ Use `LoadableTask` when your task produces a typed output but doesn't use a stan
 
 !!! info "Task output should be deterministic given its parameters"
 
-    If your task loads data from a database or API it is important to maky sure that it always produces the same output given the same input parameters. If you are querying something *mutable*, you should instead create an immutable snapshot of the data (referenced byt e.g. a timestamp/date).
+    If your task loads data from a database or API, it is important to make sure that it always produces the same output given the same input parameters. If you are querying something _mutable_, you should instead create an immutable snapshot of the data (referenced by e.g. a timestamp or date).
 
-This can also be used for on-the-fly transformation that is not meaningful to persistently cache, or to generate data in unit testing.
+This can also be used for on-the-fly transformations that are not meaningful to persistently cache, or to generate data in unit testing.
 
 ```{.python notest}
+import pandas as pd
+import pandera.pandas as pa
+from pandera.typing.pandas import DataFrame, Series
 
-MyDatasetType = ... # TODO: use pandera schema example
+
+class MyDataset(pa.DataFrameModel):
+    feature: Series[float]
+    label: Series[int]
 
 
-class MockDataset(sd.LoadableTask[MyDatasetType]):
+class MockDataset(sd.LoadableTask[DataFrame[MyDataset]]):
+    """Generate a synthetic dataset for testing."""
+    n_samples: int = 100
 
-    def complete(self):
+    def complete(self) -> bool:
         return True
 
-    def run(self):
+    def run(self) -> None:
         pass
 
-    def load() -> MyDatasetType:
-        return
+    def load(self) -> DataFrame[MyDataset]:
+        return DataFrame[MyDataset](pd.DataFrame({
+            "feature": range(self.n_samples),
+            "label": [i % 2 for i in range(self.n_samples)],
+        }))
 
 
-class FilteredDataset(sd.LoadableTask[MyDatasetType]):
-    source: sd.TaskLoads[MyDatasetType]
-
-    # TODO add parameter for filtering such as "feature X range": tuple[float, float]
+class FilteredDataset(sd.LoadableTask[DataFrame[MyDataset]]):
+    """Filter a dataset by a feature value range — too cheap to persist."""
+    source: sd.TaskLoads[DataFrame[MyDataset]]
+    feature_min: float
+    feature_max: float
 
     def requires(self):
         return self.source
 
-    def complete(self)
+    def complete(self) -> bool:
         return self.source.complete()
 
-    def run(self):
+    def run(self) -> None:
         pass
 
-    def load(self) -> MyDatasetType:
-        dataset = self.source.load()
-        # TODO filter by "feature X" and return
+    def load(self) -> DataFrame[MyDataset]:
+        df = self.source.load()
+        return df[(df["feature"] >= self.feature_min) & (df["feature"] < self.feature_max)]
 ```
 
 ### `TargetTask[TargetType]` — Typed Target Output
