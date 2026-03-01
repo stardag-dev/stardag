@@ -59,9 +59,6 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
             if name != "version"
         }
 
-    def result(self) -> LoadedT:
-        return self.target().load()
-
 
 class _TaskWrapper(typing.Protocol):
     def __call__(

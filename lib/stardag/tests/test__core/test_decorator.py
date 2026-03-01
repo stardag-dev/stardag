@@ -25,10 +25,10 @@ def test_basic(default_in_memory_fs_target):
         add_task.run()
 
     add_task.b.run()  # type: ignore
-    assert add_task.b.result() == 5  # type: ignore
+    assert add_task.b.load() == 5  # type: ignore
 
     add_task.run()
-    assert add_task.result() == 6
+    assert add_task.load() == 6
 
 
 def test_with_params(default_in_memory_fs_target):
@@ -59,10 +59,10 @@ def test_with_params(default_in_memory_fs_target):
         add_task.run()
 
     add_task.b.run()  # type: ignore
-    assert add_task.b.result() == 5  # type: ignore
+    assert add_task.b.load() == 5  # type: ignore
 
     add_task.run()
-    assert add_task.result() == 6
+    assert add_task.load() == 6
 
     assert add_task._relpath.startswith("add_task/")
     assert add_task.b._relpath.startswith("add_task/")  # type: ignore
