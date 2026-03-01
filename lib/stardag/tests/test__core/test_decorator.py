@@ -83,3 +83,21 @@ def test_Depends():
 
     # assert custom_add.model_fields["b"].rebuild_annotation() == TaskLoads[CustomParam]
     assert custom_add.model_fields["b"].annotation == LoadableTask[CustomParam]
+
+
+def test_target_root_key(default_in_memory_fs_target):
+    from stardag.config import DEFAULT_TARGET_ROOT_KEY
+
+    @task
+    def default_root(a: int) -> int:
+        return a
+
+    @task(target_root_key="custom-root")
+    def custom_root(a: int) -> int:
+        return a
+
+    default_instance = default_root(a=1)
+    custom_instance = custom_root(a=1)
+
+    assert default_instance._target_root_key == DEFAULT_TARGET_ROOT_KEY
+    assert custom_instance._target_root_key == "custom-root"

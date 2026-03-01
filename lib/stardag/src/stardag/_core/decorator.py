@@ -87,6 +87,7 @@ def task(
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
+    target_root_key: str | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
 
@@ -96,6 +97,7 @@ def task(
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
+    target_root_key: str | None = None,
 ) -> _TaskWrapper: ...
 
 
@@ -105,6 +107,7 @@ def task(
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
+    target_root_key: str | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]] | _TaskWrapper:
     def wrapper(
         _func: typing.Callable[_PWrapped, LoadedT],
@@ -153,6 +156,9 @@ def task(
                 task_class._relpath = relpath
             else:
                 raise ValueError("Invalid relpath type")
+
+        if target_root_key is not None:
+            task_class._target_root_key = target_root_key
 
         return task_class
 
