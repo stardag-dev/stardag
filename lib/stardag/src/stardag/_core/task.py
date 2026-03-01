@@ -1,7 +1,7 @@
 import abc
 import typing
 
-from stardag._core.base_task import LoadableTask, TargetBaseTask
+from stardag._core.base_task import LoadableTask, TargetTask
 from stardag.config import DEFAULT_TARGET_ROOT_KEY
 from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
 from stardag.target.serialize import get_serializer
@@ -10,17 +10,17 @@ LoadedT = typing.TypeVar("LoadedT")
 
 
 class Task(
-    TargetBaseTask[LoadableSaveableFileSystemTarget[LoadedT]],
+    TargetTask[LoadableSaveableFileSystemTarget[LoadedT]],
     LoadableTask[LoadedT],
     abc.ABC,
     typing.Generic[LoadedT],
 ):
     """A base class for tasks with automatic serialization and filesystem targets.
 
-    The output of a ``Task`` is a ``LoadableSaveableFileSystemTarget`` that uses a
+    The target of a ``Task`` is a ``LoadableSaveableFileSystemTarget`` that uses a
     serializer inferred from the generic type parameter ``LoadedT``.
 
-    The output file path is automatically constructed based on the task's
+    The target file path is automatically constructed based on the task's
     namespace, name, version, and unique ID and has the following structure:
 
     ```
@@ -28,7 +28,7 @@ class Task(
     <id>[:2]/<id>[2:4]/<id>[/<relpath_filename>].<relpath_extension>
     ```
 
-    You can override the following properties to customize the output path:
+    You can override the following properties to customize the target path:
     ``_relpath_base``, ``_relpath_extra``, ``_relpath_filename``, and
     ``_relpath_extension``.
 
@@ -46,10 +46,10 @@ class Task(
 
     my_task = MyTask()
 
-    print(my_task.output())
+    print(my_task.target())
     # Serializable(../MyTask/03/6f/036f6e71-1b3c-54b8-aec1-182359f1e09a.json)
 
-    print(my_task.output().serializer)
+    print(my_task.target().serializer)
     # <stardag.target.serialize.JSONSerializer at 0x1064e4710>
     ```
     """
@@ -62,7 +62,7 @@ class Task(
 
         This enables type compatibility checking when using Task with
         polymorphic annotations like ``TaskLoads[T]`` and
-        ``SubClass[TargetBaseTask[LoadableTarget[T]]]``.
+        ``SubClass[TargetTask[LoadableTarget[T]]]``.
 
         Args:
             ancestor_origin: The ancestor class to map args to
@@ -71,8 +71,8 @@ class Task(
         Returns:
             The mapped args for the ancestor, or None if mapping is not applicable.
         """
-        if ancestor_origin is TargetBaseTask and len(args) == 1:
-            # Task[T] -> TargetBaseTask[LoadableSaveableFileSystemTarget[T]]
+        if ancestor_origin is TargetTask and len(args) == 1:
+            # Task[T] -> TargetTask[LoadableSaveableFileSystemTarget[T]]
             return (LoadableSaveableFileSystemTarget[args[0]],)
         if ancestor_origin is LoadableTask and len(args) == 1:
             # Task[T] -> LoadableTask[T] (identity mapping)
@@ -95,22 +95,22 @@ class Task(
 
     @property
     def _relpath_base(self) -> str:
-        """Override to customize the base path of the task output."""
+        """Override to customize the base path of the task target."""
         return ""
 
     @property
     def _relpath_extra(self) -> str:
-        """Override to customize the extra path component of the task output."""
+        """Override to customize the extra path component of the task target."""
         return ""
 
     @property
     def _relpath_filename(self) -> str:
-        """Override to customize the filename of the task output."""
+        """Override to customize the filename of the task target."""
         return ""
 
     @property
     def _relpath_extension(self) -> str:
-        """Override to customize the file extension of the task output."""
+        """Override to customize the file extension of the task target."""
         get_default_ext = getattr(
             self.serializer, "get_default_extension", lambda: None
         )
@@ -150,10 +150,10 @@ class Task(
 
     @property
     def _target_root_key(self) -> str:
-        """Override to customize the target root key for this task's output."""
+        """Override to customize the target root key for this task's target."""
         return DEFAULT_TARGET_ROOT_KEY
 
-    def output(self) -> LoadableSaveableFileSystemTarget[LoadedT]:
+    def target(self) -> LoadableSaveableFileSystemTarget[LoadedT]:
         return Serializable(
             wrapped=get_target(self._relpath, target_root_key=self._target_root_key),
             serializer=self.serializer,
@@ -161,13 +161,13 @@ class Task(
 
     @property
     def serializer(self):
-        """The serializer used for this task's output."""
+        """The serializer used for this task's target."""
         return self._serializer
 
     def load(self) -> LoadedT:
-        """Convenience method to load the task output."""
-        return self.output().load()
+        """Convenience method to load the task target."""
+        return self.target().load()
 
     def _save(self, data: LoadedT) -> None:
-        """Convenience method to save data to the task output."""
-        self.output().save(data)
+        """Convenience method to save data to the task target."""
+        self.target().save(data)

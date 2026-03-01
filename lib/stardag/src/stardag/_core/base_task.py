@@ -221,15 +221,15 @@ class BaseTask(
 
             # CONTRACT: When we reach here, ALL deps are complete.
             # We can safely access their outputs.
-            result_a = task_a.output().load()
-            result_b = task_b.output().load()
+            result_a = task_a.target().load()
+            result_b = task_b.target().load()
 
             # Yield more deps if needed
             task_c = TaskC(input=result_a)
             yield task_c
 
             # Again, TaskC is complete when we reach here
-            self.output().save(task_c.output().load() + result_b)
+            self.target().save(task_c.target().load() + result_b)
         ```
 
         This contract is essential for correctness - tasks can depend on
@@ -474,27 +474,27 @@ class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
         ...
 
 
-class TargetBaseTask(BaseTask, Generic[TargetType]):
+class TargetTask(BaseTask, Generic[TargetType]):
     """Base class for tasks that produce a target output.
 
-    Extends BaseTask with a typed ``output()`` method and a default ``complete()``
-    implementation that checks whether the output target exists.
+    Extends BaseTask with a typed ``target()`` method and a default ``complete()``
+    implementation that checks whether the target exists.
 
     Most users should subclass :class:`~stardag.Task` (which extends this class
     with automatic serialization and filesystem target management) rather than
-    using ``TargetBaseTask`` directly.
+    using ``TargetTask`` directly.
     """
 
     def complete(self) -> bool:
         """Check if the task is complete."""
-        return self.output().exists()
+        return self.target().exists()
 
     async def complete_aio(self) -> bool:
         """Asynchronously check if the task is complete."""
-        return await self.output().exists_aio()
+        return await self.target().exists_aio()
 
     @abstractmethod
-    def output(self) -> TargetType:
+    def target(self) -> TargetType:
         """The task output target."""
         ...
 

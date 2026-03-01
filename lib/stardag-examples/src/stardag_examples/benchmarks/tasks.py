@@ -253,7 +253,7 @@ class FileIOTask(BenchmarkTask):
     def _do_work(self) -> None:
         # Write data synchronously
         data = "x" * self.data_size
-        with self.output().open("w") as f:
+        with self.target().open("w") as f:
             f.write(data)
 
     async def run_aio(self) -> None:
@@ -262,7 +262,7 @@ class FileIOTask(BenchmarkTask):
 
         # Write data asynchronously
         data = "x" * self.data_size
-        async with self.output().open_aio("w") as f:
+        async with self.target().open_aio("w") as f:
             await f.write(data)
 
         elapsed = time.perf_counter() - start
@@ -282,9 +282,9 @@ class FileIOReadWriteTask(BenchmarkTask):
     def _do_work(self) -> None:
         data = "y" * self.data_size
         for _ in range(self.iterations):
-            with self.output().open("w") as f:
+            with self.target().open("w") as f:
                 f.write(data)
-            with self.output().open("r") as f:
+            with self.target().open("r") as f:
                 _ = f.read()
 
     async def run_aio(self) -> None:
@@ -293,9 +293,9 @@ class FileIOReadWriteTask(BenchmarkTask):
 
         data = "y" * self.data_size
         for _ in range(self.iterations):
-            async with self.output().open_aio("w") as f:
+            async with self.target().open_aio("w") as f:
                 await f.write(data)
-            async with self.output().open_aio("r") as f:
+            async with self.target().open_aio("r") as f:
                 _ = await f.read()
 
         elapsed = time.perf_counter() - start

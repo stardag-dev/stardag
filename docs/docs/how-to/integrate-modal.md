@@ -317,16 +317,16 @@ The easiest way to get the results is to use an instance of the desired task and
 
     ```sh
     python -c "from stardag_modal.main import root_task; \
-        print(root_task.output().uri); \
-        print(root_task.output().load())"
+        print(root_task.target().uri); \
+        print(root_task.target().load())"
     ```
 
 === "uv run ..."
 
     ```sh
     uv run python -c "from stardag_modal.main import root_task; \
-        print(root_task.output().uri); \
-        print(root_task.output().load())"
+        print(root_task.target().uri); \
+        print(root_task.target().load())"
     ```
 
 Output:
@@ -342,14 +342,14 @@ You can also "tab" your way through the DAG dependencies to access `root_task.in
 
     ```sh
     python -c "from stardag_modal.main import root_task; \
-        print(root_task.integers.output().load())"
+        print(root_task.integers.target().load())"
     ```
 
 === "uv run ..."
 
     ```sh
     uv run python -c "from stardag_modal.main import root_task; \
-        print(root_task.integers.output().load())"
+        print(root_task.integers.target().load())"
     ```
 
 If you connected to the Stardag Registry, you can also click the latest build to inspect the DAG execution.

@@ -1,4 +1,4 @@
-from stardag import TargetBaseTask, Task, auto_namespace
+from stardag import TargetTask, Task, auto_namespace
 from stardag.polymorphic import SubClass
 from stardag.target import LoadableTarget
 
@@ -25,20 +25,20 @@ class ParentTask(Task[ParentTaskLoadedT]):
         return [LeafTask(param_a=a, param_b=b) for a, b in self.param_ab_s]
 
     def run(self):
-        self._save({"leaf_tasks": [task.output().load() for task in self.requires()]})
+        self._save({"leaf_tasks": [task.target().load() for task in self.requires()]})
 
 
 RootTaskLoadedT = dict[str, ParentTaskLoadedT]
 
 
 class RootTask(Task[RootTaskLoadedT]):
-    parent_task: SubClass[TargetBaseTask[LoadableTarget[ParentTaskLoadedT]]]
+    parent_task: SubClass[TargetTask[LoadableTarget[ParentTaskLoadedT]]]
 
     def requires(self):
         return self.parent_task
 
     def run(self):
-        self._save({"parent_task": self.parent_task.output().load()})
+        self._save({"parent_task": self.parent_task.target().load()})
 
 
 def get_simple_dag():

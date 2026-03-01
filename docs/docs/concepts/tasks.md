@@ -72,10 +72,10 @@ Stardag provides four base classes for defining tasks, each adding a layer of fu
 ```
 BaseTask                         # Minimal: complete(), run(), requires()
 ├── LoadableTask[T]              # Adds: abstract load() -> T
-├── TargetBaseTask[TargetType]   # Adds: typed output() target, auto complete()
+├── TargetTask[TargetType]   # Adds: typed target() target, auto complete()
 │
-└── Task[T]                      # Diamond: both TargetBaseTask + LoadableTask
-    (TargetBaseTask[LSFST[T]] + LoadableTask[T])
+└── Task[T]                      # Diamond: both TargetTask + LoadableTask
+    (TargetTask[LSFST[T]] + LoadableTask[T])
 ```
 
 ### `BaseTask` — Minimal Core Interface
@@ -120,24 +120,24 @@ class Analysis(sd.Task[dict]):
 
 Use `LoadableTask` when your task produces a typed output but doesn't use a filesystem target — for example, loading from a database, an API, or an in-memory computation.
 
-### `TargetBaseTask[TargetType]` — Typed Target Output
+### `TargetTask[TargetType]` — Typed Target Output
 
-`TargetBaseTask[TargetType]` extends `BaseTask` with:
+`TargetTask[TargetType]` extends `BaseTask` with:
 
 - `output() -> TargetType` — Returns a typed target (e.g., a file or remote storage).
-- Auto-implements `complete()` as `self.output().exists()`.
+- Auto-implements `complete()` as `self.target().exists()`.
 
 This is useful when you need full control over the target type and path structure, such as writing to a database, a custom file format, or non-standard storage.
 
-Note that `TargetBaseTask` does **not** extend `LoadableTask`, so instances cannot be passed directly to `TaskLoads[T]` parameters. If you need both a custom target and composability via `TaskLoads`, inherit from both `TargetBaseTask` and `LoadableTask` (diamond pattern), or use `Task` instead.
+Note that `TargetTask` does **not** extend `LoadableTask`, so instances cannot be passed directly to `TaskLoads[T]` parameters. If you need both a custom target and composability via `TaskLoads`, inherit from both `TargetTask` and `LoadableTask` (diamond pattern), or use `Task` instead.
 
 ### `Task[T]` — The Recommended Default
 
-`Task[T]` combines `TargetBaseTask` and `LoadableTask` via diamond inheritance:
+`Task[T]` combines `TargetTask` and `LoadableTask` via diamond inheritance:
 
 ```{.python notest}
 class Task(
-    TargetBaseTask[LoadableSaveableFileSystemTarget[T]],
+    TargetTask[LoadableSaveableFileSystemTarget[T]],
     LoadableTask[T],
 ):
     ...
@@ -147,19 +147,20 @@ It provides:
 
 - **Automatic filesystem target** — Output path derived from namespace, name, version, and ID.
 - **Automatic serialization** — Serializer inferred from the type parameter `T`.
-- **`load() -> T`** — Convenience method delegating to `self.output().load()`.
-- **`_save(data: T)`** — Convenience method delegating to `self.output().save(data)`.
+- **`load() -> T`** — Convenience method delegating to `self.target().load()`.
+- **`_save(data: T)`** — Convenience method delegating to `self.target().save(data)`.
+
 - **Composability** — Compatible with `TaskLoads[T]` since it extends `LoadableTask[T]`.
 
 For most tasks, **`Task` is the right choice**. Use the other base classes only when you need to deviate from the default filesystem target behavior.
 
 ### Choosing the Right Base Class
 
-| Base Class               | Use When                                                   |
-| ------------------------ | ---------------------------------------------------------- |
-| `Task[T]`                | Default choice. Filesystem target with auto serialization. |
-| `LoadableTask[T]`        | Custom `load()` without any target (DB, API, in-memory).   |
-| `TargetBaseTask[Target]` | Custom target type (non-filesystem, special path logic).   |
-| `BaseTask`               | Full control. No target or load assumptions.               |
+| Base Class           | Use When                                                   |
+| -------------------- | ---------------------------------------------------------- |
+| `Task[T]`            | Default choice. Filesystem target with auto serialization. |
+| `LoadableTask[T]`    | Custom `load()` without any target (DB, API, in-memory).   |
+| `TargetTask[Target]` | Custom target type (non-filesystem, special path logic).   |
+| `BaseTask`           | Full control. No target or load assumptions.               |
 
 In the following section we will cover the fact that most tasks use `Target`s, and in particular `FileSystemTarget`s, to persistently store their output and for downstream tasks to retrieve it as input.

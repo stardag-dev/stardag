@@ -179,7 +179,7 @@ def main() -> None:
     sd.build([report])
 
     # Read the result
-    result = report.output().load()
+    result = report.target().load()
     print(f"\nResult: {result}")
 
     ui_url = None

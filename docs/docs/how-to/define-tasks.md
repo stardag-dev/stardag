@@ -6,12 +6,12 @@ Stardag provides three APIs for defining tasks, each suited to different use cas
 
 ## Choosing an API
 
-| API                         | Best For                                   | Dependency Declaration |
-| --------------------------- | ------------------------------------------ | ---------------------- |
-| `@task` decorator           | Simple tasks with injected dependencies    | `sd.Depends[T]`        |
-| `Task` class                | Dynamic dependencies, custom behavior      | `sd.TaskLoads[T]`      |
-| `LoadableTask` class        | Custom `load()` without filesystem targets | `sd.TaskLoads[T]`      |
-| Base `TargetBaseTask` class | Full control over target type              | Manual                 |
+| API                     | Best For                                   | Dependency Declaration |
+| ----------------------- | ------------------------------------------ | ---------------------- |
+| `@task` decorator       | Simple tasks with injected dependencies    | `sd.Depends[T]`        |
+| `Task` class            | Dynamic dependencies, custom behavior      | `sd.TaskLoads[T]`      |
+| `LoadableTask` class    | Custom `load()` without filesystem targets | `sd.TaskLoads[T]`      |
+| Base `TargetTask` class | Full control over target type              | Manual                 |
 
 ## The `@task` Decorator
 
@@ -99,7 +99,7 @@ class ProcessBatch(sd.Task[list[int]]):
         self._save(results[:self.batch_size])
 ```
 
-## The Base `TargetBaseTask` Class
+## The Base `TargetTask` Class
 
 For complete control over all aspects:
 
@@ -108,7 +108,7 @@ import stardag as sd
 from stardag.target import LoadableSaveableFileSystemTarget
 from stardag.target.serialize import JSONSerializer, Serializable
 
-class CustomTask(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[dict]]):
+class CustomTask(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
     """Task with custom target configuration."""
 
     input_data: sd.TaskLoads[list[int]]
@@ -117,7 +117,7 @@ class CustomTask(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[dict]]):
     def requires(self):
         return self.input_data
 
-    def output(self) -> LoadableSaveableFileSystemTarget[dict]:
+    def target(self) -> LoadableSaveableFileSystemTarget[dict]:
         # Custom path structure
         path = f"custom/{self.config_key}/{self.task_id[:8]}.json"
         return Serializable(
@@ -128,7 +128,7 @@ class CustomTask(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[dict]]):
     def run(self):
         data = self.input_data.load()
         result = {"sum": sum(data), "config": self.config_key}
-        self.output().save(result)
+        self.target().save(result)
 ```
 
 ### Use Cases
@@ -163,23 +163,23 @@ The same task in all three APIs:
             self._save(sum(self.values.load()))
     ```
 
-=== "Base TargetBaseTask"
+=== "Base TargetTask"
 
     ```python
-    class SumValues(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[int]]):
-        values: sd.SubClass[sd.TargetBaseTask[LoadableSaveableFileSystemTarget[list[int]]]]
+    class SumValues(sd.TargetTask[LoadableSaveableFileSystemTarget[int]]):
+        values: sd.SubClass[sd.TargetTask[LoadableSaveableFileSystemTarget[list[int]]]]
 
         def requires(self):
             return self.values
 
-        def output(self):
+        def target(self):
             return Serializable(
                 wrapped=sd.get_target(f"sum/{self.task_id}.json", task=self),
                 serializer=JSONSerializer(int),
             )
 
         def run(self):
-            self.output().save(sum(self.values.output().load()))
+            self.target().save(sum(self.values.target().load()))
     ```
 
 ## Best Practices

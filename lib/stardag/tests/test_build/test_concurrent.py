@@ -71,7 +71,7 @@ class TestBuildSyncWrapper:
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
-        assert dag.output().load() == expected_output
+        assert dag.target().load() == expected_output
 
     def test_dynamic_deps(
         self,
@@ -128,7 +128,7 @@ class TestBuildAio:
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
-        assert dag.output().load() == expected_output
+        assert dag.target().load() == expected_output
 
     @pytest.mark.asyncio
     async def test_dynamic_deps(
@@ -166,8 +166,8 @@ class TestBuildAio:
         assert elapsed < 0.18, f"Expected concurrent execution, took {elapsed:.2f}s"
 
         # Verify tasks ran (approximately) in parallel
-        a_data = task_a.output().load()
-        b_data = task_b.output().load()
+        a_data = task_a.target().load()
+        b_data = task_b.target().load()
         # Their execution windows should overlap
         assert a_data["start"] < b_data["end"] and b_data["start"] < a_data["end"]
 
@@ -302,7 +302,7 @@ class TestBuildAio:
         summary = await build_aio([task], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert task.output().load()["mode"] == "async"
+        assert task.target().load()["mode"] == "async"
 
     @pytest.mark.asyncio
     async def test_task_failure_propagates(
@@ -458,9 +458,9 @@ class TestAsyncInterface:
         assert len(execution_log) == 3
 
         # Verify outputs
-        assert task_a.output().load()["mode"] == "async"
-        assert task_b.output().load()["mode"] == "async"
-        assert task_c.output().load()["mode"] == "async"
+        assert task_a.target().load()["mode"] == "async"
+        assert task_b.target().load()["mode"] == "async"
+        assert task_c.target().load()["mode"] == "async"
 
     @pytest.mark.asyncio
     async def test_concurrent_async_execution(
@@ -541,7 +541,7 @@ class TestBuildSummary:
         root = SyncOnlyTask(name="root", deps=(leaf,))
 
         # Pre-complete leaf
-        leaf.output().save({"name": "leaf", "mode": "pre"})
+        leaf.target().save({"name": "leaf", "mode": "pre"})
 
         summary = build([root], registry=noop_registry)
 
@@ -921,7 +921,7 @@ class TestGlobalConcurrencyLock:
         task = SyncOnlyTask(name="test_already_completed")
 
         # Pre-complete the task (simulate another process completed it)
-        task.output().save({"name": "test_already_completed", "mode": "external"})
+        task.target().save({"name": "test_already_completed", "mode": "external"})
 
         lock_manager = MockGlobalLockManager()
         lock_manager.set_result(
@@ -981,7 +981,7 @@ class TestGlobalConcurrencyLock:
         # Complete the task after a short delay (simulating external completion)
         async def complete_task_externally():
             await asyncio.sleep(0.1)
-            task.output().save({"name": "test_wait_for_lock", "mode": "external"})
+            task.target().save({"name": "test_wait_for_lock", "mode": "external"})
 
         # Run both concurrently
         async def run_build():

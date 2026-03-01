@@ -20,7 +20,7 @@ task = hello()
 sd.build(task)
 
 # Load the result
-print(task.output().load())  # "Hello, Stardag!"
+print(task.target().load())  # "Hello, Stardag!"
 ```
 
 Let's break down what happened:
@@ -56,7 +56,7 @@ sd.build(task)
 ### 4. Loading Results
 
 ```{.python continuation}
-task.output().load()
+task.target().load()
 ```
 
 Retrieve the persisted result from storage.
@@ -72,7 +72,7 @@ def greet(name: str) -> str:
 
 task = greet(name="World")
 sd.build(task)
-print(task.output().load())  # "Hello, World!"
+print(task.target().load())  # "Hello, World!"
 ```
 
 ## Key Concepts
@@ -97,7 +97,7 @@ print(task.complete())
 # False (before build), True (after build)
 
 # View output path
-print(task.output().uri)
+print(task.target().uri)
 # /path/to/.stardag/target-roots/default/greet/ab/cd/abcd1234....json
 ```
 

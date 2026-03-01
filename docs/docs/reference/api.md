@@ -15,7 +15,7 @@ Auto-generated API documentation from source code.
         - task
         - BaseTask
         - LoadableTask
-        - TargetBaseTask
+        - TargetTask
         - Task
         - Depends
         - TaskLoads

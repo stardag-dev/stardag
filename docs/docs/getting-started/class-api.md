@@ -2,7 +2,7 @@
 
 In the previous section, we used the `@sd.task` _Function Decorator_-API to define tasks. This is suitable if you want the least boilerplate possible to turn basic python functions into stardag tasks and DAGs.
 
-For more control and clarity you can define tasks by subclassing [`sd.BaseTask`](../reference/api.md#stardag.BaseTask), [`sd.LoadableTask`](../reference/api.md#stardag.LoadableTask), [`sd.TargetBaseTask`](../reference/api.md#stardag.TargetBaseTask), or [`sd.Task`](../reference/api.md#stardag.Task).
+For more control and clarity you can define tasks by subclassing [`sd.BaseTask`](../reference/api.md#stardag.BaseTask), [`sd.LoadableTask`](../reference/api.md#stardag.LoadableTask), [`sd.TargetTask`](../reference/api.md#stardag.TargetTask), or [`sd.Task`](../reference/api.md#stardag.Task).
 
 !!! info "Stardag Tasks are Pydantic Models"
 

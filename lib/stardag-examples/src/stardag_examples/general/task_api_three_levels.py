@@ -38,11 +38,11 @@ def task_api(limit: int) -> sd.TaskLoads[int]:
     return Sum(integers=Range(limit=limit))
 
 
-def target_base_task_api(limit: int) -> sd.TargetBaseTask:
+def target_task_api(limit: int) -> sd.TargetTask:
     from stardag.target import LoadableSaveableFileSystemTarget
     from stardag.target.serialize import JSONSerializer, Serializable
 
-    def default_relpath(task: sd.TargetBaseTask) -> str:
+    def default_relpath(task: sd.TargetTask) -> str:
         task_id = str(task.id)
         return "/".join(
             [
@@ -53,33 +53,33 @@ def target_base_task_api(limit: int) -> sd.TargetBaseTask:
             ]
         )
 
-    class Range(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[list[int]]]):
+    class Range(sd.TargetTask[LoadableSaveableFileSystemTarget[list[int]]]):
         limit: int
 
-        def output(self) -> LoadableSaveableFileSystemTarget[list[int]]:
+        def target(self) -> LoadableSaveableFileSystemTarget[list[int]]:
             return Serializable(
                 wrapped=sd.get_target(default_relpath(self)),
                 serializer=JSONSerializer(list[int]),
             )
 
         def run(self):
-            self.output().save(list(range(self.limit)))
+            self.target().save(list(range(self.limit)))
 
-    class Sum(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[int]]):
+    class Sum(sd.TargetTask[LoadableSaveableFileSystemTarget[int]]):
         integers: sd.SubClass[
-            sd.TargetBaseTask[LoadableSaveableFileSystemTarget[list[int]]]
+            sd.TargetTask[LoadableSaveableFileSystemTarget[list[int]]]
         ]
 
         def requires(self):
             return self.integers
 
-        def output(self) -> LoadableSaveableFileSystemTarget[int]:
+        def target(self) -> LoadableSaveableFileSystemTarget[int]:
             return Serializable(
                 wrapped=sd.get_target(default_relpath(self)),
                 serializer=JSONSerializer(int),
             )
 
         def run(self):
-            return self.output().save(sum(self.integers.output().load()))
+            return self.target().save(sum(self.integers.target().load()))
 
     return Sum(integers=Range(limit=limit))

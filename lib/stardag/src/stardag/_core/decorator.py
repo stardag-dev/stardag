@@ -3,7 +3,7 @@ import typing
 
 from pydantic import create_model
 
-from stardag._core.base_task import BaseTask, LoadableTask, TargetBaseTask
+from stardag._core.base_task import BaseTask, LoadableTask, TargetTask
 from stardag._core.task import Task
 from stardag._core.task_loads import TaskLoads
 
@@ -42,15 +42,15 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
 
     def run(self) -> None:
         result = self.call(**self._get_inputs())  # type: ignore
-        self.output().save(result)
+        self.target().save(result)
 
     def _get_inputs(self) -> _PWrapped.kwargs:  # type: ignore
         def get_input(name):
             value = getattr(self, name)
             if isinstance(value, LoadableTask):
                 return value.load()
-            if isinstance(value, TargetBaseTask):
-                return value.output().load()
+            if isinstance(value, TargetTask):
+                return value.target().load()
             return value
 
         return {
@@ -60,7 +60,7 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
         }
 
     def result(self) -> LoadedT:
-        return self.output().load()
+        return self.target().load()
 
 
 class _TaskWrapper(typing.Protocol):

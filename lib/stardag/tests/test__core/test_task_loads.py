@@ -3,7 +3,7 @@ from typing import Annotated
 import pytest
 from pydantic import ValidationError
 
-from stardag import BaseTask, LoadableTask, TargetBaseTask, Task, auto_namespace
+from stardag import BaseTask, LoadableTask, TargetTask, Task, auto_namespace
 from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagField
 from stardag.polymorphic import Polymorphic, SubClass
@@ -13,85 +13,85 @@ from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 auto_namespace(__name__)  # Avoid collisions in task registry
 
 # =============================================================================
-# TargetBaseTask classes for testing SubClass[TargetBaseTask[...]] directly
+# TargetTask classes for testing SubClass[TargetTask[...]] directly
 # =============================================================================
 
 
-class LoadsStrTask(TargetBaseTask[LoadableTarget[str]]):
-    """Basic task that loads str (TargetBaseTask-level)."""
+class LoadsStrTask(TargetTask[LoadableTarget[str]]):
+    """Basic task that loads str (TargetTask-level)."""
 
     data: str = "hello world"
 
     def run(self) -> None:
-        self.output().save(self.data)
+        self.target().save(self.data)
 
-    def output(self) -> InMemoryTarget[str]:
+    def target(self) -> InMemoryTarget[str]:
         return InMemoryTarget(key=self.id)
 
 
 class LoadsStrTaskSubclass(LoadsStrTask):
-    """Subclass of LoadsStrTask - should be compatible with SubClass[TargetBaseTask[...]]."""
+    """Subclass of LoadsStrTask - should be compatible with SubClass[TargetTask[...]]."""
 
     extra_field: str = "extra"
 
 
-class LoadsIntTask(TargetBaseTask[LoadableTarget[int]]):
-    """Basic task that loads int (TargetBaseTask-level)."""
+class LoadsIntTask(TargetTask[LoadableTarget[int]]):
+    """Basic task that loads int (TargetTask-level)."""
 
     number: int = 42
 
     def run(self) -> None:
-        self.output().save(self.number)
+        self.target().save(self.number)
 
-    def output(self) -> InMemoryTarget[int]:
+    def target(self) -> InMemoryTarget[int]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsStrTaskWithAnnotation(TargetBaseTask[LoadableTarget[str]]):
-    """Task with annotated fields - should be compatible with SubClass[TargetBaseTask[...]]."""
+class LoadsStrTaskWithAnnotation(TargetTask[LoadableTarget[str]]):
+    """Task with annotated fields - should be compatible with SubClass[TargetTask[...]]."""
 
     data: Annotated[str, StardagField(hash_exclude=True)] = "annotated"
 
     def run(self) -> None:
-        self.output().save(self.data)
+        self.target().save(self.data)
 
-    def output(self) -> InMemoryTarget[str]:
+    def target(self) -> InMemoryTarget[str]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsSaveableStrTask(TargetBaseTask[LoadableSaveableTarget[str]]):
+class LoadsSaveableStrTask(TargetTask[LoadableSaveableTarget[str]]):
     """Task using LoadableSaveableTarget[str] - subtype of LoadableTarget[str]."""
 
     data: str = "saveable"
 
     def run(self) -> None:
-        self.output().save(self.data)
+        self.target().save(self.data)
 
-    def output(self) -> InMemoryTarget[str]:
+    def target(self) -> InMemoryTarget[str]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsListStrTask(TargetBaseTask[LoadableTarget[list[str]]]):
-    """Task that loads list[str] (TargetBaseTask-level)."""
+class LoadsListStrTask(TargetTask[LoadableTarget[list[str]]]):
+    """Task that loads list[str] (TargetTask-level)."""
 
     items: list[str] = ["a", "b", "c"]
 
     def run(self) -> None:
-        self.output().save(self.items)
+        self.target().save(self.items)
 
-    def output(self) -> InMemoryTarget[list[str]]:
+    def target(self) -> InMemoryTarget[list[str]]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsListIntTask(TargetBaseTask[LoadableTarget[list[int]]]):
-    """Task that loads list[int] (TargetBaseTask-level)."""
+class LoadsListIntTask(TargetTask[LoadableTarget[list[int]]]):
+    """Task that loads list[int] (TargetTask-level)."""
 
     items: list[int] = [1, 2, 3]
 
     def run(self) -> None:
-        self.output().save(self.items)
+        self.target().save(self.items)
 
-    def output(self) -> InMemoryTarget[list[int]]:
+    def target(self) -> InMemoryTarget[list[int]]:
         return InMemoryTarget(key=self.id)
 
 
@@ -231,14 +231,14 @@ class ContainerWithAnnotatedField(BaseTask):
 
 
 # =============================================================================
-# Container tasks with SubClass[TargetBaseTask[...]] (lower-level API)
+# Container tasks with SubClass[TargetTask[...]] (lower-level API)
 # =============================================================================
 
 
 class ContainerWithSubClass(BaseTask):
-    """Container using SubClass[TargetBaseTask[...]] directly."""
+    """Container using SubClass[TargetTask[...]] directly."""
 
-    task: SubClass[TargetBaseTask[LoadableTarget[str]]]
+    task: SubClass[TargetTask[LoadableTarget[str]]]
 
     def complete(self) -> bool:
         return True
@@ -310,7 +310,7 @@ def test_task_loads_rejects_bare_loadable_task_type_mismatch():
 
 
 def test_task_loads_rejects_target_base_task():
-    """TaskLoads[str] should NOT accept raw TargetBaseTask subclasses (not LoadableTask)."""
+    """TaskLoads[str] should NOT accept raw TargetTask subclasses (not LoadableTask)."""
     with pytest.raises(ValidationError):
         ContainerTaskLoadsStr(task=LoadsStrTask())  # pyright: ignore[reportArgumentType]
 
@@ -340,18 +340,18 @@ def test_task_int_compatible_with_task_loads_int():
 
 
 # =============================================================================
-# Tests for SubClass[TargetBaseTask[...]] (lower-level API)
+# Tests for SubClass[TargetTask[...]] (lower-level API)
 # =============================================================================
 
 
 def test_subclass_annotation_compatible():
-    """SubClass[TargetBaseTask[...]] should accept TargetBaseTask subclasses."""
+    """SubClass[TargetTask[...]] should accept TargetTask subclasses."""
     container = ContainerWithSubClass(task=LoadsStrTask())
     assert_serialize_validate_roundtrip(ContainerWithSubClass, container)
 
 
 def test_subclass_annotation_mismatch():
-    """SubClass[TargetBaseTask[...]] should catch type mismatches."""
+    """SubClass[TargetTask[...]] should catch type mismatches."""
     with pytest.raises(ValidationError) as exc_info:
         ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
 
@@ -360,11 +360,11 @@ def test_subclass_annotation_mismatch():
 
 
 def test_task_compatible_with_subclass_target_base_task():
-    """Task[str] should also be compatible with SubClass[TargetBaseTask[LoadableTarget[str]]].
+    """Task[str] should also be compatible with SubClass[TargetTask[LoadableTarget[str]]].
 
     This tests the __map_generic_args_to_ancestor__ hook that maps
-    Task[str] -> TargetBaseTask[LoadableSaveableFileSystemTarget[str]]
-    which is compatible with SubClass[TargetBaseTask[LoadableTarget[str]]]
+    Task[str] -> TargetTask[LoadableSaveableFileSystemTarget[str]]
+    which is compatible with SubClass[TargetTask[LoadableTarget[str]]]
     because LoadableSaveableFileSystemTarget is a subtype of LoadableTarget.
     """
     container = ContainerWithSubClass(task=TaskStr())
@@ -372,7 +372,7 @@ def test_task_compatible_with_subclass_target_base_task():
 
 
 # =============================================================================
-# Tests for on_type_mismatch parameter (uses SubClass[TargetBaseTask[...]])
+# Tests for on_type_mismatch parameter (uses SubClass[TargetTask[...]])
 # =============================================================================
 
 
@@ -380,7 +380,7 @@ class ContainerWithWarnOnMismatch(BaseTask):
     """Container that warns on type mismatch instead of raising."""
 
     task: Annotated[
-        TargetBaseTask[LoadableTarget[str]],
+        TargetTask[LoadableTarget[str]],
         Polymorphic(on_generic_type_mismatch="warn"),
     ]
 
@@ -395,7 +395,7 @@ class ContainerWithIgnoreOnMismatch(BaseTask):
     """Container that ignores type mismatches."""
 
     task: Annotated[
-        TargetBaseTask[LoadableTarget[str]],
+        TargetTask[LoadableTarget[str]],
         Polymorphic(on_generic_type_mismatch="ignore"),
     ]
 
@@ -425,6 +425,6 @@ def test_on_type_mismatch_ignore():
 
 
 def test_on_type_mismatch_raise_is_default():
-    """on_type_mismatch='raise' is the default behavior for SubClass[TargetBaseTask[...]]."""
+    """on_type_mismatch='raise' is the default behavior for SubClass[TargetTask[...]]."""
     with pytest.raises(ValidationError):
         ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]

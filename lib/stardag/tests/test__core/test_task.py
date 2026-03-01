@@ -41,7 +41,7 @@ class TestSerializerInference:
         assert isinstance(DictTask._serializer, JSONSerializer)
 
 
-class TestOutputPath:
+class TestTargetPath:
     """Tests for the automatic output path construction."""
 
     def test_relpath_contains_namespace(self):
@@ -141,25 +141,25 @@ class TestCustomPathComponents:
         assert task._relpath.endswith(".custom")
 
 
-class TestOutput:
-    """Tests for the output() method."""
+class TestTarget:
+    """Tests for the target() method."""
 
-    def test_output_returns_serializable(self):
+    def test_target_returns_serializable(self):
         task = IntTask(value=42)
-        output = task.output()
-        assert isinstance(output, Serializable)
+        target = task.target()
+        assert isinstance(target, Serializable)
 
-    def test_output_has_correct_serializer(self):
+    def test_target_has_correct_serializer(self):
         task = IntTask(value=42)
-        output = task.output()
-        assert isinstance(output, Serializable)
-        assert isinstance(output.serializer, JSONSerializer)
+        target = task.target()
+        assert isinstance(target, Serializable)
+        assert isinstance(target.serializer, JSONSerializer)
 
-    def test_output_uri_matches_relpath(self):
+    def test_target_uri_matches_relpath(self):
         task = IntTask(value=42)
-        output = task.output()
+        target = task.target()
         # The uri includes the target prefix (e.g., "in-memory://")
-        assert output.uri.endswith(task._relpath)
+        assert target.uri.endswith(task._relpath)
 
 
 class TestRunAndSave:
@@ -168,17 +168,17 @@ class TestRunAndSave:
     def test_run_saves_int_value(self, default_in_memory_fs_target):
         task = IntTask(value=42)
         task.run()
-        assert task.output().load() == 42
+        assert task.target().load() == 42
 
     def test_run_saves_str_value(self, default_in_memory_fs_target):
         task = StrTask(value="hello world")
         task.run()
-        assert task.output().load() == "hello world"
+        assert task.target().load() == "hello world"
 
     def test_run_saves_dict_value(self, default_in_memory_fs_target):
         task = DictTask(data={"a": 1, "b": 2})
         task.run()
-        assert task.output().load() == {"a": 1, "b": 2}
+        assert task.target().load() == {"a": 1, "b": 2}
 
     def test_complete_returns_false_before_run(self, default_in_memory_fs_target):
         task = IntTask(value=42)

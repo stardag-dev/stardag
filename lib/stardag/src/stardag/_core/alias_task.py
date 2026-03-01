@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validator
 
-from stardag._core.base_task import TargetBaseTask
+from stardag._core.base_task import TargetTask
 from stardag._core.task import LoadedT, Task
 from stardag.base_model import StardagField
 from stardag.target import FileSystemTarget
@@ -26,11 +26,11 @@ class AliasedMetadata(BaseModel):
     body: dict[str, Any] | None = None
 
     @classmethod
-    def from_task(cls, task: TargetBaseTask[FileSystemTarget]) -> "AliasedMetadata":
+    def from_task(cls, task: TargetTask[FileSystemTarget]) -> "AliasedMetadata":
         """Create AliasedMetadata from a given task."""
         return cls(
             id=task.id,
-            uri=task.output().uri,
+            uri=task.target().uri,
             body=task.model_dump(),  # Optional
         )
 
@@ -59,7 +59,7 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
 
     class OriginalTask(sd.Task[int]):
         def run(self):
-            self.output().save(42)
+            self.target().save(42)
 
     original_task = OriginalTask()
     original_task.run()

@@ -9,10 +9,11 @@ The task class hierarchy has been renamed for clarity and a new `LoadableTask` a
 | Before                                          | After                       | Description                                                 |
 | ----------------------------------------------- | --------------------------- | ----------------------------------------------------------- |
 | `AutoTask`                                      | `Task`                      | Auto filesystem targets + serialization (default)           |
-| `Task`                                          | `TargetBaseTask`            | Base class introducing typed `output()` targets             |
+| `Task`                                          | `TargetTask`                | Base class introducing typed `target()` targets             |
 | `BaseTask`                                      | `BaseTask`                  | Unchanged - minimal core API                                |
 | _(new)_                                         | `LoadableTask`              | Abstract base: `BaseTask` + `load() -> T`                   |
 | `TaskLoads[T]` = `SubClass[Task[LoadableT[T]]]` | `SubClass[LoadableTask[T]]` | Now requires any `LoadableTask` subclass with matching type |
+| `task.output()`                                 | `task.target()`             | Renamed for clarity: the target of a task                   |
 
 ### New: `LoadableTask[T]`
 
@@ -23,13 +24,13 @@ The class hierarchy is now:
 ```
 BaseTask                         # Minimal: complete(), run(), requires()
 ├── LoadableTask[T]              # Adds abstract load() -> T
-├── TargetBaseTask[TargetType]   # Adds typed output() target
+├── TargetTask[TargetType]       # Adds typed target() target
 │
-└── Task[T]                      # Diamond: extends both TargetBaseTask and LoadableTask
-    (TargetBaseTask[LSFST[T]] + LoadableTask[T])
+└── Task[T]                      # Diamond: extends both TargetTask and LoadableTask
+    (TargetTask[LSFST[T]] + LoadableTask[T])
 ```
 
-`Task[T]` uses diamond inheritance to extend both `TargetBaseTask[LoadableSaveableFileSystemTarget[T]]` and `LoadableTask[T]`, so `Task` instances satisfy both interfaces.
+`Task[T]` uses diamond inheritance to extend both `TargetTask[LoadableSaveableFileSystemTarget[T]]` and `LoadableTask[T]`, so `Task` instances satisfy both interfaces.
 
 ### Convenience Methods on `Task`
 
@@ -89,35 +90,45 @@ class Analysis(sd.Task[dict]):
        ...                               ...
    ```
 
-2. **Rename `Task` to `TargetBaseTask`** if you subclass it directly (with custom `output()`):
+2. **Rename `Task` to `TargetTask`** if you subclass it directly (with custom `target()`):
 
    ```python
    # Before                                    # After
-   class MyTask(sd.Task[MyTarget]):             class MyTask(sd.TargetBaseTask[MyTarget]):
-       def output(self) -> MyTarget: ...            def output(self) -> MyTarget: ...
+   class MyTask(sd.Task[MyTarget]):             class MyTask(sd.TargetTask[MyTarget]):
+       def output(self) -> MyTarget: ...            def target(self) -> MyTarget: ...
    ```
 
-3. **`TaskLoads[T]` now requires `LoadableTask[T]`** (not `TargetBaseTask`). Both `Task` and bare `LoadableTask` subclasses work. If you have a `TargetBaseTask` subclass that needs to be passed as a dependency, use the explicit annotation:
+3. **`TaskLoads[T]` now requires `LoadableTask[T]`** (not `TargetTask`). Both `Task` and bare `LoadableTask` subclasses work. If you have a `TargetTask` subclass that needs to be passed as a dependency, use the explicit annotation:
 
    ```python
    # Use TaskLoads for most cases (Task and LoadableTask subclasses)
    dep: sd.TaskLoads[MyType]
 
-   # For TargetBaseTask subclasses (rare), use explicit annotation
-   dep: sd.SubClass[sd.TargetBaseTask[LoadableTarget[MyType]]]
+   # For TargetTask subclasses (rare), use explicit annotation
+   dep: sd.SubClass[sd.TargetTask[LoadableTarget[MyType]]]
    ```
 
-4. **`@task` decorator is unchanged** — it generates `Task` instances.
+4. **Rename `output()` to `target()`** on all task classes:
 
-5. **`BaseTask` is unchanged**.
+   ```python
+   # Before                          # After
+   task.output().load()              task.target().load()
+   task.output().save(data)          task.target().save(data)
+   def output(self) -> Target:       def target(self) -> Target:
+   ```
+
+5. **`@task` decorator is unchanged** — it generates `Task` instances.
+
+6. **`BaseTask` is unchanged**.
 
 ### Quick Find-and-Replace
 
 For most codebases:
 
 ```
-sd.Task[    →  sd.TargetBaseTask[     (only for custom output() subclasses)
+sd.Task[    →  sd.TargetTask[     (only for custom target() subclasses)
 sd.AutoTask →  sd.Task
+.output()   →  .target()
 ```
 
 Run the second replacement after the first to avoid conflicts.

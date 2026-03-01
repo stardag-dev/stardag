@@ -2,23 +2,23 @@
 
 Targets represent where and how task outputs are stored.
 
-## The Typical `TargetBaseTask` uses a `Target`
+## The Typical `TargetTask` uses a `Target`
 
-In most scenarios, downstream tasks need to load the output from upstream dependencies. For this purpose the class [`TargetBaseTask`](../reference/api.md#stardag.TargetBaseTask), which inherits [`BaseTask`](../reference/api.md#stardag.BaseTask), introduces the concept of `Target`s.
+In most scenarios, downstream tasks need to load the output from upstream dependencies. For this purpose the class [`TargetTask`](../reference/api.md#stardag.TargetTask), which inherits [`BaseTask`](../reference/api.md#stardag.BaseTask), introduces the concept of `Target`s.
 
 Its extension of [`BaseTask`](../reference/api.md#stardag.BaseTask) can be summarized in seven lines of code:
 
 ```{.python notest}
-class TargetBaseTask(BaseTask, Generic[TargetType]):
+class TargetTask(BaseTask, Generic[TargetType]):
     def complete(self) -> bool:
-        return self.output().exists()
+        return self.target().exists()
 
     @abstractmethod
-    def output(self) -> TargetType:
+    def target(self) -> TargetType:
         ...
 ```
 
-That is, it adds a default implementation of `complete` which checks if the return value of the new (abstract) method `output` exists. Generally, the _only_ requirement on the `TargetType` returned from output is that it can report its existence. Strictly speaking, that it implements the protocol:
+That is, it adds a default implementation of `complete` which checks if the return value of the new (abstract) method `target` exists. Generally, the _only_ requirement on the `TargetType` returned from target is that it can report its existence. Strictly speaking, that it implements the protocol:
 
 ```{.python notest}
 class Target(Protocol):
@@ -27,7 +27,7 @@ class Target(Protocol):
         ...
 ```
 
-Note that [`TargetBaseTask`](../reference/api.md#stardag.TargetBaseTask) is implemented with `TargetType` as a _generic_ type variable. This means that when you subclass [`TargetBaseTask`](../reference/api.md#stardag.TargetBaseTask), you need to declare the type of target the `output` returns. This is critical for composability of tasks and allows type checkers to verify that chained tasks are compatible in terms of their I/O.
+Note that [`TargetTask`](../reference/api.md#stardag.TargetTask) is implemented with `TargetType` as a _generic_ type variable. This means that when you subclass [`TargetTask`](../reference/api.md#stardag.TargetTask), you need to declare the type of target the `target()` method returns. This is critical for composability of tasks and allows type checkers to verify that chained tasks are compatible in terms of their I/O.
 
 ## The Typical `Target` uses a File System
 
@@ -38,13 +38,13 @@ You can, and it is in some cases motivated to, return a target for a certain typ
 ```python
 import stardag as sd
 
-class MyTask(sd.TargetBaseTask[sd.LocalTarget]):
+class MyTask(sd.TargetTask[sd.LocalTarget]):
 
     def run(self):
-        with self.output().open("w") as handle:
+        with self.target().open("w") as handle:
             handle.write("result")
 
-    def output(self) -> sd.LocalTarget:
+    def target(self) -> sd.LocalTarget:
         return sd.LocalTarget("/absolute/path/to/file.txt")
 ```
 
@@ -53,13 +53,13 @@ However, you are strongly encouraged to instead use the function `sd.get_target`
 ```python
 import stardag as sd
 
-class MyTask(sd.TargetBaseTask[sd.FileSystemTarget]):
+class MyTask(sd.TargetTask[sd.FileSystemTarget]):
 
     def run(self):
-        with self.output().open("w") as handle:
+        with self.target().open("w") as handle:
             handle.write("result")
 
-    def output(self) -> sd.FileSystemTarget:
+    def target(self) -> sd.FileSystemTarget:
         return sd.get_target("path/to/file.txt")
 ```
 
@@ -69,7 +69,7 @@ The main benefit here is that you can configure the file system and root directo
 
 Target roots define the base location for `FileSystemTargets` obtained by `sd.get_target()` or when using `sd.Task` or the `@sd.task` decorator API.
 
-As per the last example above, when implementing `output`, you are advised to use `sd.get_target` which takes the arguments:
+As per the last example above, when implementing `target()`, you are advised to use `sd.get_target` which takes the arguments:
 
 - `relpath: str` (required)
 - `target_root_key: str` (default value `"default"`)

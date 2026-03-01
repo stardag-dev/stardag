@@ -7,7 +7,7 @@ import pytest
 
 from stardag._core.base_task import (
     BaseTask,
-    TargetBaseTask,
+    TargetTask,
     TaskImplementationError,
     TaskStruct,
     _has_custom_run,
@@ -230,13 +230,13 @@ def test__id_hashable_jsonable(
     assert_serialize_validate_roundtrip(task.__class__, task)
 
 
-class TaskWithTarget(TargetBaseTask[InMemoryTarget[str]]):
+class TaskWithTarget(TargetTask[InMemoryTarget[str]]):
     data: str = "hello world"
 
     def run(self) -> None:
-        self.output().save(self.data)
+        self.target().save(self.data)
 
-    def output(self) -> InMemoryTarget[str]:
+    def target(self) -> InMemoryTarget[str]:
         return InMemoryTarget(key=self.id)
 
 
@@ -586,7 +586,7 @@ def test_from_registry(default_in_memory_fs_target):
         name=task.get_name(),
         namespace=task.get_namespace(),
         version=task.version,
-        output_uri=task.output().uri,
+        output_uri=task.target().uri,
         status="completed",
         registered_at=datetime.now(),
         started_at=datetime.now(),

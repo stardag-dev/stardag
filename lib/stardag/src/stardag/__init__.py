@@ -17,14 +17,14 @@ Basic usage::
 
     task = get_sum(integers=get_range(limit=10))
     sd.build(task)
-    print(task.output().load())  # 45
+    print(task.target().load())  # 45
 
 Core components:
 
 - :func:`task` - Decorator for creating tasks from functions
 - :class:`Task` - Task with automatic serialization and filesystem targets
 - :class:`LoadableTask` - Abstract base for tasks with ``load() -> T``
-- :class:`TargetBaseTask` - Base class for tasks with typed target outputs
+- :class:`TargetTask` - Base class for tasks with typed target outputs
 - :class:`Depends` - Dependency injection type annotation
 - :func:`build` - Execute task and its dependencies
 
@@ -39,7 +39,7 @@ from stardag._core.alias_task import AliasedMetadata, AliasTask
 from stardag._core.base_task import (
     BaseTask,
     LoadableTask,
-    TargetBaseTask,
+    TargetTask,
     TaskRef,
     TaskStruct,
     auto_namespace,
@@ -86,7 +86,7 @@ __all__ = [
     "AuthenticationError",
     "AuthorizationError",
     "auto_namespace",
-    "TargetBaseTask",
+    "TargetTask",
     "BaseTask",
     "build",
     "build_aio",

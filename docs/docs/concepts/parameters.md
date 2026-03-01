@@ -89,7 +89,7 @@ The task ID should typically determine the output URI, and does so automatically
 
 ```{.python continuation}
 task = add(a=1, b=2)
-print(task.output().uri)
+print(task.target().uri)
 # /path/to/.stardag/local-target-roots/default/add/fa/9b/fa9b74b1-1cde-5676-8650-dbcf755a2699.json
 ```
 

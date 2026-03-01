@@ -25,7 +25,7 @@ lib/
 │   ├── src/stardag/
 │   │   ├── __init__.py               # Public API exports
 │   │   ├── _core/                    # Core task framework
-│   │   │   ├── base_task.py          # BaseTask, LoadableTask, TargetBaseTask
+│   │   │   ├── base_task.py          # BaseTask, LoadableTask, TargetTask
 │   │   │   ├── task.py               # Task (auto filesystem targets, diamond)
 │   │   │   ├── decorator.py          # @task decorator, Depends
 │   │   │   ├── task_loads.py         # TaskLoads type alias
