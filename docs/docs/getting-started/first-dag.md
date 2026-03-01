@@ -23,7 +23,7 @@ task = get_sum(integers=get_range(limit=10))
 # Build executes both tasks in the correct order
 sd.build(task)
 
-print(task.target().load())  # 45
+print(task.load())  # 45
 ```
 
 ## How Dependencies Work

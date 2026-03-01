@@ -20,7 +20,7 @@ task = hello()
 sd.build(task)
 
 # Load the result
-print(task.target().load())  # "Hello, Stardag!"
+print(task.load())  # "Hello, Stardag!"
 ```
 
 Let's break down what happened:
@@ -56,7 +56,7 @@ sd.build(task)
 ### 4. Loading Results
 
 ```{.python continuation}
-task.target().load()
+task.load()
 ```
 
 Retrieve the persisted result from storage.
@@ -72,7 +72,7 @@ def greet(name: str) -> str:
 
 task = greet(name="World")
 sd.build(task)
-print(task.target().load())  # "Hello, World!"
+print(task.load())  # "Hello, World!"
 ```
 
 ## Key Concepts
