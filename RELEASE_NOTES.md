@@ -1,19 +1,20 @@
 # Release Notes
 
-## Breaking: Task Class Hierarchy Rename + LoadableTask + TaskLoads Update
+## v0.3.0 — Breaking: Task Class Hierarchy Rename + LoadableTask + TaskLoads Update
 
 The task class hierarchy has been renamed for clarity and a new `LoadableTask` abstraction has been introduced for better composability.
 
 ### What Changed
 
-| Before                                          | After                       | Description                                                 |
-| ----------------------------------------------- | --------------------------- | ----------------------------------------------------------- |
-| `AutoTask`                                      | `Task`                      | Auto filesystem targets + serialization (default)           |
-| `Task`                                          | `TargetTask`                | Base class introducing typed `target()` targets             |
-| `BaseTask`                                      | `BaseTask`                  | Unchanged - minimal core API                                |
-| _(new)_                                         | `LoadableTask`              | Abstract base: `BaseTask` + `load() -> T`                   |
-| `TaskLoads[T]` = `SubClass[Task[LoadableT[T]]]` | `SubClass[LoadableTask[T]]` | Now requires any `LoadableTask` subclass with matching type |
-| `task.output()`                                 | `task.target()`             | Renamed for clarity: the target of a task                   |
+| Before                                               | After                       | Description                                                 |
+| ---------------------------------------------------- | --------------------------- | ----------------------------------------------------------- |
+| `AutoTask`                                           | `Task`                      | Auto filesystem targets + serialization (default)           |
+| `Task`                                               | `TargetTask`                | Base class introducing typed `target()` targets             |
+| `BaseTask`                                           | `BaseTask`                  | Unchanged - minimal core API                                |
+| _(new)_                                              | `LoadableTask`              | Abstract base: `BaseTask` + `load() -> T`                   |
+| `TaskLoads[T]` = `SubClass[Task[LoadableTarget[T]]]` | `SubClass[LoadableTask[T]]` | Now requires any `LoadableTask` subclass with matching type |
+| `task.output()`                                      | `task.target()`             | Renamed for clarity: the target of a task                   |
+| `_FunctionTask.result()`                             | _(removed)_                 | Use inherited `load()` instead                              |
 
 ### New: `LoadableTask[T]`
 
@@ -22,12 +23,11 @@ The task class hierarchy has been renamed for clarity and a new `LoadableTask` a
 The class hierarchy is now:
 
 ```
-BaseTask                         # Minimal: complete(), run(), requires()
-├── LoadableTask[T]              # Adds abstract load() -> T
-├── TargetTask[TargetType]       # Adds typed target() target
-│
-└── Task[T]                      # Diamond: extends both TargetTask and LoadableTask
-    (TargetTask[LSFST[T]] + LoadableTask[T])
+          BaseTask                    # complete(), run(), requires()
+         /        \
+LoadableTask[T]    TargetTask[TT]    # load() -> T  /  target() -> TT
+         \        /
+          Task[T]                    # Combines both (TT = LSFST[T])
 ```
 
 `Task[T]` uses diamond inheritance to extend both `TargetTask[LoadableSaveableFileSystemTarget[T]]` and `LoadableTask[T]`, so `Task` instances satisfy both interfaces.
@@ -54,30 +54,14 @@ class MyTask(sd.Task[dict]):
         self._save({"sum": sum(data)})
 ```
 
-### Bare `LoadableTask` for Custom Composability
+### `@task` Decorator: New `target_root_key` Parameter
 
-You can now create tasks that are composable via `TaskLoads` without requiring a filesystem target:
+The `@task` decorator gained a `target_root_key` parameter to control which target root from config is used for output:
 
 ```python
-class MyCustomLoader(sd.LoadableTask[pd.DataFrame]):
-    query: str
-
-    def complete(self) -> bool:
-        return True  # Always "complete" - loads from external source
-
-    def run(self) -> None:
-        pass  # No-op: data is loaded on demand
-
-    def load(self) -> pd.DataFrame:
-        return pd.read_sql(self.query, engine)
-
-# Works with TaskLoads:
-class Analysis(sd.Task[dict]):
-    data: sd.TaskLoads[pd.DataFrame]  # Accepts MyCustomLoader or any Task[pd.DataFrame]
-
-    def run(self):
-        df = self.data.load()
-        self._save({"rows": len(df)})
+@sd.task(target_root_key="s3")
+def my_task(data: sd.Depends[list[int]]) -> int:
+    return sum(data)
 ```
 
 ### Migration Guide
@@ -117,7 +101,12 @@ class Analysis(sd.Task[dict]):
    def output(self) -> Target:       def target(self) -> Target:
    ```
 
-5. **`@task` decorator is unchanged** — it generates `Task` instances.
+5. **Replace `.result()` with `.load()`** on `@task`-created instances:
+
+   ```python
+   # Before                          # After
+   my_task.result()                  my_task.load()
+   ```
 
 6. **`BaseTask` is unchanged**.
 
@@ -129,6 +118,7 @@ For most codebases:
 sd.Task[    →  sd.TargetTask[     (only for custom target() subclasses)
 sd.AutoTask →  sd.Task
 .output()   →  .target()
+.result()   →  .load()
 ```
 
-Run the second replacement after the first to avoid conflicts.
+Run the first replacement before the second to avoid conflicts.
