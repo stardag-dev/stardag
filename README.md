@@ -31,8 +31,8 @@ sum_task = get_sum(integers=get_range(limit=4))
 sd.build(sum_task)
 
 # Load results
-assert sum_task.target().load() == 6
-assert sum_task.integers.target().load() == [0, 1, 2, 3]
+assert sum_task.load() == 6
+assert sum_task.integers.load() == [0, 1, 2, 3]
 ```
 
 ## Installation
