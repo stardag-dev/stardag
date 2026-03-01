@@ -2,7 +2,7 @@
 
 Targets represent where and how task outputs are stored.
 
-## The Typical `TargetTask` uses a `Target`
+## The Typical Task uses a `Target`
 
 In most scenarios, downstream tasks need to load the output from upstream dependencies. For this purpose the class [`TargetTask`](../reference/api.md#stardag.TargetTask), which inherits [`BaseTask`](../reference/api.md#stardag.BaseTask), introduces the concept of `Target`s.
 

@@ -70,12 +70,11 @@ assert world_state == {"hello": 5}
 Stardag provides four base classes for defining tasks, each adding a layer of functionality. Understanding their roles helps you choose the right base class for your task.
 
 ```
-BaseTask                         # Minimal: complete(), run(), requires()
-├── LoadableTask[T]              # Adds: abstract load() -> T
-├── TargetTask[TargetType]   # Adds: typed target() target, auto complete()
-│
-└── Task[T]                      # Diamond: both TargetTask + LoadableTask
-    (TargetTask[LSFST[T]] + LoadableTask[T])
+            BaseTask               # complete(), run(), requires()
+           /        \
+LoadableTask[T]    TargetTask[TT]  # load() -> T  /  target() -> TT
+           \        /
+             Task[T]               # Combines both (TT = LoadableSaveableFileSystemTarget[T])
 ```
 
 ### `BaseTask` — Minimal Core Interface
@@ -96,38 +95,58 @@ Use `BaseTask` directly only when you need full control and none of the higher-l
 
 This is the **minimal interface required for composability**. Any task that inherits `LoadableTask[T]` can be passed as a parameter annotated with `sd.TaskLoads[T]`:
 
+Use `LoadableTask` when your task produces a typed output but doesn't use a standard filesystem target — for example, loading from a database or API.
+
+!!! info "Task output should be deterministic given its parameters"
+
+    If your task loads data from a database or API it is important to maky sure that it always produces the same output given the same input parameters. If you are querying something *mutable*, you should instead create an immutable snapshot of the data (referenced byt e.g. a timestamp/date).
+
+This can also be used for on-the-fly transformation that is not meaningful to persistently cache, or to generate data in unit testing.
+
 ```{.python notest}
-class MyCustomLoader(sd.LoadableTask[pd.DataFrame]):
-    query: str
 
-    def complete(self) -> bool:
-        return True  # Always available
-
-    def run(self) -> None:
-        pass  # No-op: data is loaded on demand
-
-    def load(self) -> pd.DataFrame:
-        return pd.read_sql(self.query, engine)
+MyDatasetType = ... # TODO: use pandera schema example
 
 
-class Analysis(sd.Task[dict]):
-    data: sd.TaskLoads[pd.DataFrame]  # Accepts MyCustomLoader or Task[pd.DataFrame]
+class MockDataset(sd.LoadableTask[MyDatasetType]):
+
+    def complete(self):
+        return True
 
     def run(self):
-        df = self.data.load()  # Works regardless of the source
-        self._save({"rows": len(df)})
-```
+        pass
 
-Use `LoadableTask` when your task produces a typed output but doesn't use a filesystem target — for example, loading from a database, an API, or an in-memory computation.
+    def load() -> MyDatasetType:
+        return
+
+
+class FilteredDataset(sd.LoadableTask[MyDatasetType]):
+    source: sd.TaskLoads[MyDatasetType]
+
+    # TODO add parameter for filtering such as "feature X range": tuple[float, float]
+
+    def requires(self):
+        return self.source
+
+    def complete(self)
+        return self.source.complete()
+
+    def run(self):
+        pass
+
+    def load(self) -> MyDatasetType:
+        dataset = self.source.load()
+        # TODO filter by "feature X" and return
+```
 
 ### `TargetTask[TargetType]` — Typed Target Output
 
 `TargetTask[TargetType]` extends `BaseTask` with:
 
-- `output() -> TargetType` — Returns a typed target (e.g., a file or remote storage).
+- `target() -> TargetType` — Returns a typed target (e.g., a file or remote storage).
 - Auto-implements `complete()` as `self.target().exists()`.
 
-This is useful when you need full control over the target type and path structure, such as writing to a database, a custom file format, or non-standard storage.
+This is useful when you need full control over the target type and path structure or using non-standard storage.
 
 Note that `TargetTask` does **not** extend `LoadableTask`, so instances cannot be passed directly to `TaskLoads[T]` parameters. If you need both a custom target and composability via `TaskLoads`, inherit from both `TargetTask` and `LoadableTask` (diamond pattern), or use `Task` instead.
 
