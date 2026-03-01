@@ -2,13 +2,13 @@
 
 In the previous section, we used the `@sd.task` _Function Decorator_-API to define tasks. This is suitable if you want the least boilerplate possible to turn basic python functions into stardag tasks and DAGs.
 
-For more control and clarity you can define tasks by subclassing [`sd.BaseTask`](../reference/api.md#stardag.BaseTask), [`sd.LoadableTask`](../reference/api.md#stardag.LoadableTask), [`sd.TargetTask`](../reference/api.md#stardag.TargetTask), or [`sd.Task`](../reference/api.md#stardag.Task).
+For more control and clarity you can define tasks by subclassing [`sd.Task`](../reference/api.md#stardag.Task) (or, for special cases, one of the [other available base classes](../concepts/tasks.md#the-task-class-hierarchy)).
+
+For most scenarios, _the Class-API is the recommended way to define tasks_.
 
 !!! info "Stardag Tasks are Pydantic Models"
 
     Note that all of these base classes (and all stardag tasks) _are_ pydantic [`BaseModel`](https://docs.pydantic.dev/latest/api/base_model/)s. Anything that you can do with a pydantic model, you can also do with tasks, including serialization, validation, field annotations and etc.
-
-For most scenarios, _the Class-API is the recommended way to define tasks_.
 
 ## Subclassing [`sd.Task`](../reference/api.md#stardag.Task)
 
@@ -180,3 +180,4 @@ So with the class-API we are responsible for loading output from dependencies an
 
 - Understand Stardag's core [Concepts](../concepts/index.md)
 - Learn about [Tasks](../concepts/tasks.md) in depth
+- Understand [when to use other task base classes](../concepts/tasks.md#the-task-class-hierarchy) ([`sd.BaseTask`](../reference/api.md#stardag.BaseTask), [`sd.LoadableTask`](../reference/api.md#stardag.LoadableTask), [`sd.TargetTask`](../reference/api.md#stardag.TargetTask))
