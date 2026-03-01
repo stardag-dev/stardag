@@ -32,6 +32,7 @@ from stardag._core.target_base import TargetType
 from stardag._core.task_id import _get_task_id_from_jsonable
 from stardag.base_model import CONTEXT_MODE_KEY
 from stardag.polymorphic import PolymorphicRoot
+from stardag.target._base import LoadedT_co
 
 logger = logging.getLogger(__name__)
 
@@ -454,6 +455,23 @@ def namespace(namespace: str, scope: str):
     assert MyNamespacedTask.get_namespace() == "my_custom_namespace"
     """
     BaseTask._registry().add_namespace(scope, namespace)
+
+
+class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
+    """A task that can load its output as a typed value.
+
+    This is the minimal interface required by :class:`~stardag.TaskLoads`: any
+    ``BaseTask`` subclass that implements ``load() -> T`` is compatible with
+    ``TaskLoads[T]``.
+
+    Both :class:`~stardag.Task` (via diamond inheritance) and bare subclasses
+    of ``LoadableTask`` satisfy ``TaskLoads[T]``.
+    """
+
+    @abc.abstractmethod
+    def load(self) -> LoadedT_co:
+        """Load the output of this task."""
+        ...
 
 
 class TargetBaseTask(BaseTask, Generic[TargetType]):

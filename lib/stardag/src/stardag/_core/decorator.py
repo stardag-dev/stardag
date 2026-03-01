@@ -3,7 +3,7 @@ import typing
 
 from pydantic import create_model
 
-from stardag._core.base_task import TargetBaseTask
+from stardag._core.base_task import BaseTask, LoadableTask, TargetBaseTask
 from stardag._core.task import Task
 from stardag._core.task_loads import TaskLoads
 
@@ -32,11 +32,11 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     def call(cls, *args: _PWrapped.args, **kwargs: _PWrapped.kwargs) -> LoadedT:
         return cls._func(*args, **kwargs)  # type: ignore
 
-    def requires(self) -> typing.Mapping[str, TargetBaseTask] | None:
+    def requires(self) -> typing.Mapping[str, BaseTask] | None:
         requires = {
             name: getattr(self, name)
             for name in self.__class__.model_fields.keys()
-            if isinstance(getattr(self, name), TargetBaseTask)
+            if isinstance(getattr(self, name), BaseTask)
         }
         return requires or None
 
@@ -47,6 +47,8 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     def _get_inputs(self) -> _PWrapped.kwargs:  # type: ignore
         def get_input(name):
             value = getattr(self, name)
+            if isinstance(value, LoadableTask):
+                return value.load()
             if isinstance(value, TargetBaseTask):
                 return value.output().load()
             return value

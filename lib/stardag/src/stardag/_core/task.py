@@ -1,7 +1,7 @@
 import abc
 import typing
 
-from stardag._core.base_task import TargetBaseTask
+from stardag._core.base_task import LoadableTask, TargetBaseTask
 from stardag.config import DEFAULT_TARGET_ROOT_KEY
 from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
 from stardag.target.serialize import get_serializer
@@ -11,6 +11,7 @@ LoadedT = typing.TypeVar("LoadedT")
 
 class Task(
     TargetBaseTask[LoadableSaveableFileSystemTarget[LoadedT]],
+    LoadableTask[LoadedT],
     abc.ABC,
     typing.Generic[LoadedT],
 ):
@@ -59,14 +60,12 @@ class Task(
     ) -> tuple | None:
         """Map generic args from Task to how they appear on an ancestor class.
 
-        This enables type compatibility checking when using Task with TaskLoads.
-        For example, Task[str] maps to TargetBaseTask[LoadableSaveableFileSystemTarget[str]],
-        which is compatible with TaskLoads[str]
-        (= TargetBaseTask[LoadableTarget[str]]) because
-        LoadableSaveableFileSystemTarget is a subtype of LoadableTarget.
+        This enables type compatibility checking when using Task with
+        polymorphic annotations like ``TaskLoads[T]`` and
+        ``SubClass[TargetBaseTask[LoadableTarget[T]]]``.
 
         Args:
-            ancestor_origin: The ancestor class to map args to (e.g., TargetBaseTask)
+            ancestor_origin: The ancestor class to map args to
             args: The generic args of this class (e.g., (str,) for Task[str])
 
         Returns:
@@ -75,6 +74,9 @@ class Task(
         if ancestor_origin is TargetBaseTask and len(args) == 1:
             # Task[T] -> TargetBaseTask[LoadableSaveableFileSystemTarget[T]]
             return (LoadableSaveableFileSystemTarget[args[0]],)
+        if ancestor_origin is LoadableTask and len(args) == 1:
+            # Task[T] -> LoadableTask[T] (identity mapping)
+            return args
         return None
 
     @classmethod

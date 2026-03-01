@@ -93,12 +93,12 @@ class Add(sd.Task[Number]):
     values: list[sd.TaskLoads[Number] | Number]
 
     def requires(self):
-        return [value for value in self.values if isinstance(value, sd.BaseTask)]
+        return [value for value in self.values if isinstance(value, sd.LoadableTask)]
 
     def run(self):
         result = sum(
             [
-                value.load() if isinstance(value, sd.BaseTask)
+                value.load() if isinstance(value, sd.LoadableTask)
                 else value
                 for value in self.values
             ]

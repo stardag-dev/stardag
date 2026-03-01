@@ -6,11 +6,12 @@ Stardag provides three APIs for defining tasks, each suited to different use cas
 
 ## Choosing an API
 
-| API                         | Best For                                | Dependency Declaration |
-| --------------------------- | --------------------------------------- | ---------------------- |
-| `@task` decorator           | Simple tasks with injected dependencies | `sd.Depends[T]`        |
-| `Task` class                | Dynamic dependencies, custom behavior   | `sd.TaskLoads[T]`      |
-| Base `TargetBaseTask` class | Full control, non-filesystem targets    | Manual                 |
+| API                         | Best For                                   | Dependency Declaration |
+| --------------------------- | ------------------------------------------ | ---------------------- |
+| `@task` decorator           | Simple tasks with injected dependencies    | `sd.Depends[T]`        |
+| `Task` class                | Dynamic dependencies, custom behavior      | `sd.TaskLoads[T]`      |
+| `LoadableTask` class        | Custom `load()` without filesystem targets | `sd.TaskLoads[T]`      |
+| Base `TargetBaseTask` class | Full control over target type              | Manual                 |
 
 ## The `@task` Decorator
 
@@ -125,7 +126,7 @@ class CustomTask(sd.TargetBaseTask[LoadableSaveableFileSystemTarget[dict]]):
         )
 
     def run(self):
-        data = self.input_data.output().load()
+        data = self.input_data.load()
         result = {"sum": sum(data), "config": self.config_key}
         self.output().save(result)
 ```

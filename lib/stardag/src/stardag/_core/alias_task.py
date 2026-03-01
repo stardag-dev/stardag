@@ -72,7 +72,7 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
     class DownstreamTask(sd.Task[int]):
         loads_int: sd.TaskLoads[int]
         def run(self):
-            self.output().save(self.loads_int.output().load() + 1)
+            self._save(self.loads_int.load() + 1)
 
 
     downstream_task = DownstreamTask(loads_int=original_task)

@@ -13,11 +13,13 @@ Auto-generated documentation from source code:
 
 ### Core Classes
 
-| Class            | Description                            |
-| ---------------- | -------------------------------------- |
-| `TargetBaseTask` | Base class for tasks with targets      |
-| `Task`           | Task with automatic filesystem targets |
-| `@task`          | Decorator for function-based tasks     |
+| Class            | Description                                |
+| ---------------- | ------------------------------------------ |
+| `BaseTask`       | Minimal core API for all tasks             |
+| `LoadableTask`   | Abstract base with `load() -> T`           |
+| `TargetBaseTask` | Base class for tasks with typed targets    |
+| `Task`           | Default: auto filesystem targets (diamond) |
+| `@task`          | Decorator for function-based tasks         |
 
 ### Dependency Types
 

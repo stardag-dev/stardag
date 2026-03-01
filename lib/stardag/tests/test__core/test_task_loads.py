@@ -3,7 +3,7 @@ from typing import Annotated
 import pytest
 from pydantic import ValidationError
 
-from stardag import BaseTask, TargetBaseTask, Task, auto_namespace
+from stardag import BaseTask, LoadableTask, TargetBaseTask, Task, auto_namespace
 from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagField
 from stardag.polymorphic import Polymorphic, SubClass
@@ -143,6 +143,41 @@ class TaskListInt(Task[list[int]]):
 
 
 # =============================================================================
+# Bare LoadableTask classes (no target, just load())
+# =============================================================================
+
+
+class BareLoadableStr(LoadableTask[str]):
+    """Bare LoadableTask that loads str - compatible with TaskLoads[str]."""
+
+    data: str = "bare loadable"
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+    def load(self) -> str:
+        return self.data
+
+
+class BareLoadableInt(LoadableTask[int]):
+    """Bare LoadableTask that loads int - not compatible with TaskLoads[str]."""
+
+    number: int = 99
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+    def load(self) -> int:
+        return self.number
+
+
+# =============================================================================
 # Container tasks with TaskLoads fields
 # =============================================================================
 
@@ -262,8 +297,20 @@ def test_task_loads_type_mismatch(container_cls, task_instance, description):
         container_cls(task=task_instance)  # pyright: ignore[reportArgumentType]
 
 
+def test_task_loads_accepts_bare_loadable_task():
+    """TaskLoads[str] should accept bare LoadableTask[str] subclasses."""
+    container = ContainerTaskLoadsStr(task=BareLoadableStr())
+    assert_serialize_validate_roundtrip(ContainerTaskLoadsStr, container)
+
+
+def test_task_loads_rejects_bare_loadable_task_type_mismatch():
+    """TaskLoads[str] should reject LoadableTask[int] (type mismatch)."""
+    with pytest.raises(ValidationError):
+        ContainerTaskLoadsStr(task=BareLoadableInt())  # pyright: ignore[reportArgumentType]
+
+
 def test_task_loads_rejects_target_base_task():
-    """TaskLoads[str] should NOT accept raw TargetBaseTask subclasses."""
+    """TaskLoads[str] should NOT accept raw TargetBaseTask subclasses (not LoadableTask)."""
     with pytest.raises(ValidationError):
         ContainerTaskLoadsStr(task=LoadsStrTask())  # pyright: ignore[reportArgumentType]
 

@@ -23,6 +23,7 @@ Core components:
 
 - :func:`task` - Decorator for creating tasks from functions
 - :class:`Task` - Task with automatic serialization and filesystem targets
+- :class:`LoadableTask` - Abstract base for tasks with ``load() -> T``
 - :class:`TargetBaseTask` - Base class for tasks with typed target outputs
 - :class:`Depends` - Dependency injection type annotation
 - :func:`build` - Execute task and its dependencies
@@ -37,6 +38,7 @@ from importlib.metadata import PackageNotFoundError, version
 from stardag._core.alias_task import AliasedMetadata, AliasTask
 from stardag._core.base_task import (
     BaseTask,
+    LoadableTask,
     TargetBaseTask,
     TaskRef,
     TaskStruct,
@@ -98,6 +100,7 @@ __all__ = [
     "get_target",
     "HashableSet",
     "HashSafeSetSerializer",
+    "LoadableTask",
     "LocalTarget",
     "namespace",
     "Polymorphic",
