@@ -1,14 +1,12 @@
 import stardag as sd
 
-
-class GetRange(sd.Task[list[int]]):
+class Range(sd.Task[list[int]]):
     limit: int
 
     def run(self):
         self._save(list(range(self.limit)))
 
-
-class GetSum(sd.Task[int]):
+class Sum(sd.Task[int]):
     integers: sd.TaskLoads[list[int]]
 
     def requires(self):
@@ -17,13 +15,10 @@ class GetSum(sd.Task[int]):
     def run(self):
         self._save(sum(self.integers.load()))
 
-
 # Declarative DAG specification - no computation yet
-sum_task = GetSum(integers=GetRange(limit=4))
+sum_task = Sum(integers=Range(limit=4))
 
-# Materialize all tasks' targets
-sd.build(sum_task)
+sd.build(sum_task) # Materialize all tasks' targets
 
-# Load results
-assert sum_task.load() == 6
-assert sum_task.integers.load() == [0, 1, 2, 3]
+assert sum_task.load() == 6 # Load results
+assert sum_task.integers.load() == [0, 1, 2, 3] # access dependencies
