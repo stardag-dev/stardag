@@ -57,4 +57,4 @@ async def build_dag(task: sd.Task):
 if __name__ == "__main__":
     metrics = get_metrics_dag()
     asyncio.run(build_dag(metrics))  # type: ignore
-    print(metrics.output().load())
+    print(metrics.load())

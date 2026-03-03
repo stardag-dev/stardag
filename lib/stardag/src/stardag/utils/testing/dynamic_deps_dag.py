@@ -1,9 +1,9 @@
-from stardag import AutoTask, TaskLoads, auto_namespace
+from stardag import Task, TaskLoads, auto_namespace
 
 auto_namespace(__name__)
 
 
-class DynamicDepsTask(AutoTask[str]):
+class DynamicDepsTask(Task[str]):
     """Task with dynamic dependencies for testing.
 
     This task enforces the dynamic deps contract: after yielding deps,
@@ -32,7 +32,7 @@ class DynamicDepsTask(AutoTask[str]):
                         f"are complete before resuming the generator."
                     )
 
-        self.output().save(self.value)
+        self._save(self.value)
 
 
 def get_dynamic_deps_dag():

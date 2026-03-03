@@ -27,7 +27,7 @@ from stardag import (
     TaskRef,
     TaskStruct,
 )
-from stardag._core.task import (
+from stardag._core.base_task import (
     _has_custom_run,
     _has_custom_run_aio,
     flatten_task_struct,

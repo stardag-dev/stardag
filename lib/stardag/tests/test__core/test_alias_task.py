@@ -9,16 +9,16 @@ from stardag._core.alias_task import AliasedMetadata, AliasTask
 sd.auto_namespace(__name__)
 
 
-class LoadsIntTask(sd.AutoTask[int]):
+class LoadsIntTask(sd.Task[int]):
     def run(self):
-        self.output().save(42)
+        self._save(42)
 
 
-class DownstreamTask(sd.AutoTask[int]):
+class DownstreamTask(sd.Task[int]):
     loads_int: sd.TaskLoads[int]
 
     def run(self):
-        self.output().save(self.loads_int.output().load() + 1)
+        self._save(self.loads_int.load() + 1)
 
 
 def test_alias_task(default_in_memory_fs_target):
@@ -29,7 +29,7 @@ def test_alias_task(default_in_memory_fs_target):
     alias_task = AliasTask[int](
         aliased=AliasedMetadata(
             id=loads_int_task.id,
-            uri=loads_int_task.output().uri,
+            uri=loads_int_task.target().uri,
             body=loads_int_task.model_dump(),
         )
     )
@@ -59,7 +59,7 @@ def test_alias_task(default_in_memory_fs_target):
         "loads_int": {
             "__aliased": {
                 "id": str(loads_int_task.id),
-                "uri": loads_int_task.output().uri,
+                "uri": loads_int_task.target().uri,
                 "loads_type": base64.b64encode(pickle_dumps(int)).decode("ascii"),
             },
             "__namespace": __name__,

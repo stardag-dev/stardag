@@ -32,7 +32,7 @@ sd.auto_namespace(__name__)
 # =============================================================================
 
 
-class BenchmarkTask(sd.AutoTask[dict]):
+class BenchmarkTask(sd.Task[dict]):
     """Base class for benchmark tasks with timing."""
 
     key: str  # User-provided label for this task instance (not the actual task.id)
@@ -45,7 +45,7 @@ class BenchmarkTask(sd.AutoTask[dict]):
         start = time.perf_counter()
         self._do_work()
         elapsed = time.perf_counter() - start
-        self.output().save({"key": self.key, "elapsed": elapsed})
+        self._save({"key": self.key, "elapsed": elapsed})
 
     def _do_work(self) -> None:
         """Override in subclasses to do actual work."""
@@ -78,7 +78,7 @@ class IOBoundTask(BenchmarkTask):
         start = time.perf_counter()
         await asyncio.sleep(self.sleep_duration)
         elapsed = time.perf_counter() - start
-        self.output().save({"key": self.key, "elapsed": elapsed})
+        self._save({"key": self.key, "elapsed": elapsed})
 
 
 # =============================================================================
@@ -146,7 +146,7 @@ class LightTask(BenchmarkTask):
 # =============================================================================
 
 
-class IOBoundDynamicTask(sd.AutoTask[dict]):
+class IOBoundDynamicTask(sd.Task[dict]):
     """IO-bound task with dynamic dependencies.
 
     Note: Dynamic tasks with yield cannot easily implement run_aio() because
@@ -175,10 +175,10 @@ class IOBoundDynamicTask(sd.AutoTask[dict]):
         start = time.perf_counter()
         time.sleep(self.sleep_duration)
         elapsed = time.perf_counter() - start
-        self.output().save({"key": self.key, "elapsed": elapsed})
+        self._save({"key": self.key, "elapsed": elapsed})
 
 
-class CPUBoundDynamicTask(sd.AutoTask[dict]):
+class CPUBoundDynamicTask(sd.Task[dict]):
     """CPU-bound task with dynamic dependencies."""
 
     key: str  # User-provided label for this task instance (not the actual task.id)
@@ -204,10 +204,10 @@ class CPUBoundDynamicTask(sd.AutoTask[dict]):
         for _ in range(self.iterations):
             data = hashlib.sha256(data).digest()
         elapsed = time.perf_counter() - start
-        self.output().save({"key": self.key, "elapsed": elapsed})
+        self._save({"key": self.key, "elapsed": elapsed})
 
 
-class LightDynamicTask(sd.AutoTask[dict]):
+class LightDynamicTask(sd.Task[dict]):
     """Light task with dynamic dependencies."""
 
     key: str  # User-provided label for this task instance (not the actual task.id)
@@ -229,7 +229,7 @@ class LightDynamicTask(sd.AutoTask[dict]):
         start = time.perf_counter()
         _ = sum(range(100))
         elapsed = time.perf_counter() - start
-        self.output().save({"key": self.key, "elapsed": elapsed})
+        self._save({"key": self.key, "elapsed": elapsed})
 
 
 # =============================================================================
@@ -253,7 +253,7 @@ class FileIOTask(BenchmarkTask):
     def _do_work(self) -> None:
         # Write data synchronously
         data = "x" * self.data_size
-        with self.output().open("w") as f:
+        with self.target().open("w") as f:
             f.write(data)
 
     async def run_aio(self) -> None:
@@ -262,12 +262,12 @@ class FileIOTask(BenchmarkTask):
 
         # Write data asynchronously
         data = "x" * self.data_size
-        async with self.output().open_aio("w") as f:
+        async with self.target().open_aio("w") as f:
             await f.write(data)
 
         elapsed = time.perf_counter() - start
         # Re-save with timing info (overwrites the x's)
-        self.output().save({"key": self.key, "elapsed": elapsed})
+        self._save({"key": self.key, "elapsed": elapsed})
 
 
 class FileIOReadWriteTask(BenchmarkTask):
@@ -282,9 +282,9 @@ class FileIOReadWriteTask(BenchmarkTask):
     def _do_work(self) -> None:
         data = "y" * self.data_size
         for _ in range(self.iterations):
-            with self.output().open("w") as f:
+            with self.target().open("w") as f:
                 f.write(data)
-            with self.output().open("r") as f:
+            with self.target().open("r") as f:
                 _ = f.read()
 
     async def run_aio(self) -> None:
@@ -293,10 +293,10 @@ class FileIOReadWriteTask(BenchmarkTask):
 
         data = "y" * self.data_size
         for _ in range(self.iterations):
-            async with self.output().open_aio("w") as f:
+            async with self.target().open_aio("w") as f:
                 await f.write(data)
-            async with self.output().open_aio("r") as f:
+            async with self.target().open_aio("r") as f:
                 _ = await f.read()
 
         elapsed = time.perf_counter() - start
-        self.output().save({"key": self.key, "elapsed": elapsed})
+        self._save({"key": self.key, "elapsed": elapsed})

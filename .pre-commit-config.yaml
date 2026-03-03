@@ -27,9 +27,9 @@ repos:
         verbose: true
       - id: pyright-stardag-examples
         name: pyright (lib/stardag-examples)
-        # To test against local (unpublished) stardag, use instead:
-        #   entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv pip install -e ../stardag && uv run --no-sync pyright src tests'
-        entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv run pyright src tests'
+        # TODO: revert to published stardag after next release:
+        #   entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv run pyright src tests'
+        entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv pip install -e ../stardag && uv run --no-sync pyright src tests'
         language: system
         files: ^lib/stardag-examples/
         types: [python]

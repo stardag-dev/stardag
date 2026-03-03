@@ -1,8 +1,8 @@
 import pytest
 
 from stardag import Task, auto_namespace
+from stardag._core.base_task import LoadableTask
 from stardag._core.decorator import Depends, task
-from stardag.target import LoadableTarget
 
 auto_namespace(__name__)  # Avoid collisions in task registry
 
@@ -25,10 +25,10 @@ def test_basic(default_in_memory_fs_target):
         add_task.run()
 
     add_task.b.run()  # type: ignore
-    assert add_task.b.result() == 5  # type: ignore
+    assert add_task.b.load() == 5  # type: ignore
 
     add_task.run()
-    assert add_task.result() == 6
+    assert add_task.load() == 6
 
 
 def test_with_params(default_in_memory_fs_target):
@@ -59,15 +59,15 @@ def test_with_params(default_in_memory_fs_target):
         add_task.run()
 
     add_task.b.run()  # type: ignore
-    assert add_task.b.result() == 5  # type: ignore
+    assert add_task.b.load() == 5  # type: ignore
 
     add_task.run()
-    assert add_task.result() == 6
+    assert add_task.load() == 6
 
     assert add_task._relpath.startswith("add_task/")
     assert add_task.b._relpath.startswith("add_task/")  # type: ignore
     assert (
-        add_task.output().uri
+        add_task.target().uri
         == f"in-memory://add_task/add2/v1/1_{add_b_task.id}/result.txt"
     )
 
@@ -82,4 +82,22 @@ def test_Depends():
         return a + b.value
 
     # assert custom_add.model_fields["b"].rebuild_annotation() == TaskLoads[CustomParam]
-    assert custom_add.model_fields["b"].annotation == Task[LoadableTarget[CustomParam]]
+    assert custom_add.model_fields["b"].annotation == LoadableTask[CustomParam]
+
+
+def test_target_root_key(default_in_memory_fs_target):
+    from stardag.config import DEFAULT_TARGET_ROOT_KEY
+
+    @task
+    def default_root(a: int) -> int:
+        return a
+
+    @task(target_root_key="custom-root")
+    def custom_root(a: int) -> int:
+        return a
+
+    default_instance = default_root(a=1)
+    custom_instance = custom_root(a=1)
+
+    assert default_instance._target_root_key == DEFAULT_TARGET_ROOT_KEY
+    assert custom_instance._target_root_key == "custom-root"

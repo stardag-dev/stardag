@@ -6,11 +6,12 @@ Stardag provides three APIs for defining tasks, each suited to different use cas
 
 ## Choosing an API
 
-| API               | Best For                                | Dependency Declaration |
-| ----------------- | --------------------------------------- | ---------------------- |
-| `@task` decorator | Simple tasks with injected dependencies | `sd.Depends[T]`        |
-| `AutoTask` class  | Dynamic dependencies, custom behavior   | `sd.TaskLoads[T]`      |
-| Base `Task` class | Full control, non-filesystem targets    | Manual                 |
+| API                     | Best For                                   | Dependency Declaration |
+| ----------------------- | ------------------------------------------ | ---------------------- |
+| `@task` decorator       | Simple tasks with injected dependencies    | `sd.Depends[T]`        |
+| `Task` class            | Dynamic dependencies, custom behavior      | `sd.TaskLoads[T]`      |
+| `LoadableTask` class    | Custom `load()` without filesystem targets | `sd.TaskLoads[T]`      |
+| Base `TargetTask` class | Full control over target type              | Manual                 |
 
 ## The `@task` Decorator
 
@@ -47,14 +48,14 @@ def clean_data(raw: sd.Depends[str]) -> str:
     return raw.strip()
 ```
 
-## The `AutoTask` Class
+## The `Task` Class
 
 Use when dependencies need computation or you need more control:
 
 ```python
 import stardag as sd
 
-class CleanData(sd.AutoTask[str]):
+class CleanData(sd.Task[str]):
     """Clean raw text data."""
 
     raw_data: sd.TaskLoads[str]
@@ -64,15 +65,15 @@ class CleanData(sd.AutoTask[str]):
         return self.raw_data
 
     def run(self):
-        text = self.raw_data.output().load()
+        text = self.raw_data.load()
         if self.lowercase:
             text = text.lower()
-        self.output().save(text.strip())
+        self._save(text.strip())
 ```
 
 ### Key Features
 
-- `AutoTask[T]` - type parameter defines output type
+- `Task[T]` - type parameter defines output type
 - `requires()` - return dependencies
 - `run()` - implement execution logic
 - Automatic target creation
@@ -80,7 +81,7 @@ class CleanData(sd.AutoTask[str]):
 ### Dynamic Dependencies
 
 ```python
-class ProcessBatch(sd.AutoTask[list[int]]):
+class ProcessBatch(sd.Task[list[int]]):
     batch_size: int
     data_sources: list[str]
 
@@ -94,11 +95,11 @@ class ProcessBatch(sd.AutoTask[list[int]]):
     def run(self):
         results = []
         for dep in self.requires():
-            results.extend(dep.output().load())
-        self.output().save(results[:self.batch_size])
+            results.extend(dep.load())
+        self._save(results[:self.batch_size])
 ```
 
-## The Base `Task` Class
+## The Base `TargetTask` Class
 
 For complete control over all aspects:
 
@@ -107,7 +108,7 @@ import stardag as sd
 from stardag.target import LoadableSaveableFileSystemTarget
 from stardag.target.serialize import JSONSerializer, Serializable
 
-class CustomTask(sd.Task[LoadableSaveableFileSystemTarget[dict]]):
+class CustomTask(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
     """Task with custom target configuration."""
 
     input_data: sd.TaskLoads[list[int]]
@@ -116,7 +117,7 @@ class CustomTask(sd.Task[LoadableSaveableFileSystemTarget[dict]]):
     def requires(self):
         return self.input_data
 
-    def output(self) -> LoadableSaveableFileSystemTarget[dict]:
+    def target(self) -> LoadableSaveableFileSystemTarget[dict]:
         # Custom path structure
         path = f"custom/{self.config_key}/{self.task_id[:8]}.json"
         return Serializable(
@@ -125,9 +126,9 @@ class CustomTask(sd.Task[LoadableSaveableFileSystemTarget[dict]]):
         )
 
     def run(self):
-        data = self.input_data.output().load()
+        data = self.input_data.load()
         result = {"sum": sum(data), "config": self.config_key}
-        self.output().save(result)
+        self.target().save(result)
 ```
 
 ### Use Cases
@@ -149,41 +150,41 @@ The same task in all three APIs:
         return sum(values)
     ```
 
-=== "AutoTask"
+=== "Task"
 
     ```python
-    class SumValues(sd.AutoTask[int]):
+    class SumValues(sd.Task[int]):
         values: sd.TaskLoads[list[int]]
 
         def requires(self):
             return self.values
 
         def run(self):
-            self.output().save(sum(self.values.output().load()))
+            self._save(sum(self.values.load()))
     ```
 
-=== "Base Task"
+=== "Base TargetTask"
 
     ```python
-    class SumValues(sd.Task[LoadableSaveableFileSystemTarget[int]]):
-        values: sd.TaskLoads[list[int]]
+    class SumValues(sd.TargetTask[LoadableSaveableFileSystemTarget[int]]):
+        values: sd.SubClass[sd.TargetTask[LoadableSaveableFileSystemTarget[list[int]]]]
 
         def requires(self):
             return self.values
 
-        def output(self):
+        def target(self):
             return Serializable(
                 wrapped=sd.get_target(f"sum/{self.task_id}.json", task=self),
                 serializer=JSONSerializer(int),
             )
 
         def run(self):
-            self.output().save(sum(self.values.output().load()))
+            self.target().save(sum(self.values.target().load()))
     ```
 
 ## Best Practices
 
-1. **Start with `@task`** - Use the decorator unless you need more control
+1. **Start with `@task`** - Use the decorator for simple tasks, or `Task` for more control
 2. **Use type hints** - They enable automatic serialization
 3. **Keep tasks focused** - Each task should do one thing
 4. **Make tasks pure** - Avoid side effects; same inputs = same outputs

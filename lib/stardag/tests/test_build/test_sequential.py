@@ -57,7 +57,7 @@ class TestBuildSequential:
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
-        assert dag.output().load() == expected_output
+        assert dag.target().load() == expected_output
 
     def test_simple_dag_output_serialization(
         self,
@@ -67,7 +67,7 @@ class TestBuildSequential:
     ):
         """Test that build output is correctly serialized."""
         build_sequential([simple_dag], registry=NoOpRegistry())
-        assert simple_dag.output().load() == simple_dag_expected_root_output
+        assert simple_dag.target().load() == simple_dag_expected_root_output
         expected_root_path = f"in-memory://{simple_dag._relpath}"
         assert (
             InMemoryFileSystemTarget.uri_to_bytes[expected_root_path]
@@ -87,7 +87,7 @@ class TestBuildSequential:
         summary = build_sequential([task], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert task.output().load()["mode"] == "sync"
+        assert task.target().load()["mode"] == "sync"
 
     def test_dual_task_uses_sync_by_default(
         self,
@@ -100,7 +100,7 @@ class TestBuildSequential:
         summary = build_sequential([task], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert task.output().load()["mode"] == "sync"
+        assert task.target().load()["mode"] == "sync"
 
     def test_dual_task_uses_async_when_configured(
         self,
@@ -115,7 +115,7 @@ class TestBuildSequential:
         )
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert task.output().load()["mode"] == "async"
+        assert task.target().load()["mode"] == "async"
 
     def test_fail_fast_mode(
         self,
@@ -166,7 +166,7 @@ class TestBuildSequential:
         """Test that already complete tasks are not re-executed."""
         task = SyncOnlyTask(name="test")
         # Pre-complete the task
-        task.output().save({"name": "test", "mode": "pre-existing"})
+        task.target().save({"name": "test", "mode": "pre-existing"})
 
         summary = build_sequential([task], registry=noop_registry)
 
@@ -174,7 +174,7 @@ class TestBuildSequential:
         assert summary.task_count.previously_completed == 1
         assert summary.task_count.succeeded == 0
         # Output should be unchanged
-        assert task.output().load()["mode"] == "pre-existing"
+        assert task.target().load()["mode"] == "pre-existing"
 
     def test_multiple_root_tasks(
         self,
@@ -217,7 +217,7 @@ class TestBuildSequentialAio:
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
-        assert dag.output().load() == expected_output
+        assert dag.target().load() == expected_output
 
     @pytest.mark.asyncio
     async def test_async_only_task(
@@ -231,7 +231,7 @@ class TestBuildSequentialAio:
         summary = await build_sequential_aio([task], registry=noop_registry)
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert task.output().load()["mode"] == "async"
+        assert task.target().load()["mode"] == "async"
 
     @pytest.mark.asyncio
     async def test_sync_task_in_thread_by_default(
@@ -248,7 +248,7 @@ class TestBuildSequentialAio:
         )
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert task.output().load()["mode"] == "sync"
+        assert task.target().load()["mode"] == "sync"
 
     @pytest.mark.asyncio
     async def test_fail_fast_mode(

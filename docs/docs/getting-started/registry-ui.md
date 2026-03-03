@@ -169,7 +169,7 @@ task = get_sum(integers=get_range(limit=4))  # <-- SET SOME OTHER NUMBER
 # Build executes both tasks in the correct order
 sd.build(task)
 
-print(task.output().load())  # 10
+print(task.load())  # 10
 ```
 
 Now refresh the home page and click the started build.

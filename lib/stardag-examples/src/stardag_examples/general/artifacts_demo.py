@@ -30,7 +30,7 @@ class DataResult(TypedDict):
     collected_at: str
 
 
-class DataCollector(sd.AutoTask[DataResult]):
+class DataCollector(sd.Task[DataResult]):
     """A task that collects sample data and produces a JSON artifact with the results."""
 
     sample_size: int = 100
@@ -44,11 +44,11 @@ class DataCollector(sd.AutoTask[DataResult]):
             "count": len(data),
             "collected_at": datetime.now().isoformat(),
         }
-        self.output().save(result)
+        self._save(result)
 
     def artifacts(self) -> list[Artifact]:
         """Produce a JSON artifact with data statistics."""
-        result = self.output().load()
+        result = self.load()
         samples = result["samples"]
 
         # Calculate basic statistics
@@ -80,7 +80,7 @@ class DataCollector(sd.AutoTask[DataResult]):
         ]
 
 
-class AnalysisReport(sd.AutoTask[str]):
+class AnalysisReport(sd.Task[str]):
     """A task that generates a markdown analysis report from collected data."""
 
     data_source: sd.TaskLoads[DataResult]
@@ -91,7 +91,7 @@ class AnalysisReport(sd.AutoTask[str]):
 
     def run(self) -> None:
         """Generate analysis report content."""
-        data = self.data_source.output().load()
+        data = self.data_source.load()
         samples = data["samples"]
 
         # Calculate statistics
@@ -100,11 +100,11 @@ class AnalysisReport(sd.AutoTask[str]):
         std_dev = variance**0.5
 
         result = f"Analysis complete. Mean: {mean:.4f}, StdDev: {std_dev:.4f}"
-        self.output().save(result)
+        self._save(result)
 
     def artifacts(self) -> list[Artifact]:
         """Produce a markdown report artifact."""
-        data = self.data_source.output().load()
+        data = self.data_source.load()
         samples = data["samples"]
 
         # Calculate statistics
@@ -179,7 +179,7 @@ def main() -> None:
     sd.build([report])
 
     # Read the result
-    result = report.output().load()
+    result = report.target().load()
     print(f"\nResult: {result}")
 
     ui_url = None

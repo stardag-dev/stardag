@@ -9,7 +9,7 @@ As covered in previous sections, we can also pass other (arbitrarily nested) tas
 A central feature that Stardag adds on top of standard pydantic is support for generalized _polymorphism_. Consider the example below:
 
 ```{.python notest}
-class TrainedModel(sd.AutoTask[MyModel]):
+class TrainedModel(sd.Task[MyModel]):
     config: MyModelConfig  # A regular pydantic model
     dataset: Dataset  # A specific Stardag Task
 
@@ -17,10 +17,10 @@ class TrainedModel(sd.AutoTask[MyModel]):
         return self.dataset
 
     def run(self):
-        training_data = self.dataset.output().load()
+        training_data = self.dataset.load()
         model = MyModel(config)
         model.fit(training_data)
-        self.output().save(model)
+        self._save(model)
         # ...
 ```
 
@@ -29,7 +29,7 @@ Here, we have declared that the `dataset` must be a specific task of type `Datas
 Looking closer at the `run` method, we actually only care about the data type of `training_data` in:
 
 ```{.python notest}
-training_data = self.dataset.output().load()
+training_data = self.dataset.load()
 ```
 
 We can express this by instead using:
@@ -37,13 +37,13 @@ We can express this by instead using:
 ```{.python notest}
 MyDataType = ...  # For example a pandas DataFrame with a pandera schema
 
-class TrainedModel(sd.AutoTask[MyModel]):
+class TrainedModel(sd.Task[MyModel]):
     config: MyModelConfig  # A regular pydantic model
-    dataset: sd.TaskLoads[MyDataType]  # *Any* task, which output().load() -> MyDataType.
+    dataset: sd.TaskLoads[MyDataType]  # *Any* task, which .load() -> MyDataType.
 
 ```
 
-`TaskLoads[<Type>]` is short for _any Stardag task for which the return type of `output().load()` is `<Type>`_.
+`TaskLoads[<Type>]` is short for _any Stardag task for which the return type of `.load()` is `<Type>`_.
 
 ## Parameter Hashing
 
@@ -85,11 +85,11 @@ This recursive hashing ensures that:
 
 ## Output URIs
 
-The task ID should typically determine the output URI, and does so automatically when using the Decorator API or `AutoTask`:
+The task ID should typically determine the output URI, and does so automatically when using the Decorator API or `Task`:
 
 ```{.python continuation}
 task = add(a=1, b=2)
-print(task.output().uri)
+print(task.target().uri)
 # /path/to/.stardag/local-target-roots/default/add/fa/9b/fa9b74b1-1cde-5676-8650-dbcf755a2699.json
 ```
 

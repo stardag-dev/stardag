@@ -26,7 +26,7 @@ from stardag.registry._base import RegistryABC, TaskMetadata, get_git_commit_has
 from stardag.artifact import Artifact
 
 if TYPE_CHECKING:
-    from stardag._core.task import BaseTask
+    from stardag._core.base_task import BaseTask
 
 logger = logging.getLogger(__name__)
 
@@ -803,18 +803,18 @@ class APIRegistry(RegistryABC):
 def _get_task_data_for_registration(task: "BaseTask") -> dict:
     """Helper to serialize task data for registration API call."""
     # Avoid circular import:
-    from stardag._core.task import flatten_task_struct  # noqa: F401
+    from stardag._core.base_task import flatten_task_struct  # noqa: F401
 
-    # Extract output_uri if the task has a FileSystemTarget output with a uri
+    # Extract output_uri if the task has a FileSystemTarget target with a uri
     output_uri: str | None = None
     try:
-        output_method = getattr(task, "output", None)
-        if output_method is not None:
-            output = output_method()
-            if hasattr(output, "uri"):
-                output_uri = output.uri
+        target_method = getattr(task, "target", None)
+        if target_method is not None:
+            target = target_method()
+            if hasattr(target, "uri"):
+                output_uri = target.uri
     except Exception as e:
-        # Log but don't fail - task may not have output() or it may fail
+        # Log but don't fail - task may not have target() or it may fail
         logger.debug(f"Could not extract output_uri for task {task.id}: {e}")
 
     return {

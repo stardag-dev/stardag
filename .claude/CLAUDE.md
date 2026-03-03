@@ -21,20 +21,85 @@ Stardag is a Python framework for building DAGs (Directed Acyclic Graphs) with:
 
 ```
 lib/
-├── stardag/                    # Core SDK library
-│   └── src/stardag/
-│       ├── _base.py            # Core Task class
-│       ├── _decorator.py       # @task decorator API
-│       ├── _auto_task.py       # AutoTask with filesystem targets
-│       ├── _task_parameter.py  # Depends, TaskLoads, TaskSet
-│       ├── build/              # Execution/build logic
-│       ├── target/             # Target abstraction (local, S3)
-│       └── integration/        # Prefect, Modal, AWS integrations
-└── stardag-examples/           # Example DAGs and demos
+├── stardag/                          # Core SDK library (PyPI: stardag)
+│   ├── src/stardag/
+│   │   ├── __init__.py               # Public API exports
+│   │   ├── _core/                    # Core task framework
+│   │   │   ├── base_task.py          # BaseTask, LoadableTask, TargetTask
+│   │   │   ├── task.py               # Task (auto filesystem targets, diamond)
+│   │   │   ├── decorator.py          # @task decorator, Depends
+│   │   │   ├── task_loads.py         # TaskLoads type alias
+│   │   │   ├── alias_task.py         # AliasTask for referencing remote outputs
+│   │   │   ├── hashable_set.py       # HashableSet for set-valued parameters
+│   │   │   ├── target_base.py        # Target/TargetType base protocol
+│   │   │   └── task_id.py            # Deterministic UUID-5 task ID logic
+│   │   ├── build/                    # Build/execution engine
+│   │   │   ├── _base.py              # BuildSummary, TaskExecutorABC
+│   │   │   ├── _concurrent.py        # Concurrent executor (asyncio)
+│   │   │   └── _sequential.py        # Sequential executor
+│   │   ├── target/                   # Target abstraction (persistence layer)
+│   │   │   ├── _base.py              # FileSystemTarget, LoadableTarget, etc.
+│   │   │   ├── _factory.py           # Target factory + provider
+│   │   │   ├── _in_memory.py         # InMemoryTarget (for testing)
+│   │   │   └── serialize.py          # Serializers (JSON, pickle, pandas, etc.)
+│   │   ├── registry/                 # Stardag API registry client
+│   │   │   ├── _api_registry.py      # APIRegistry (HTTP client)
+│   │   │   ├── _base.py              # RegistryABC, NoOpRegistry
+│   │   │   ├── _http_client.py       # Authenticated HTTP client
+│   │   │   └── _lock.py              # Distributed lock via registry
+│   │   ├── integration/              # Optional third-party integrations
+│   │   │   ├── aws/s3.py             # S3 target factory
+│   │   │   ├── modal/                # Modal.com executor
+│   │   │   └── prefect/              # Prefect orchestrator
+│   │   ├── _cli/                     # CLI commands (stardag auth, config, etc.)
+│   │   ├── polymorphic.py            # Polymorphic validation (SubClass, Polymorphic)
+│   │   ├── base_model.py             # StardagBaseModel, StardagField
+│   │   ├── config.py                 # Configuration (profiles, target roots)
+│   │   ├── artifact.py               # Artifact types (Markdown, JSON)
+│   │   └── exceptions.py             # StardagError hierarchy
+│   └── tests/
+│       ├── test__core/               # Core framework tests
+│       ├── test_build/               # Build engine tests
+│       ├── test_target/              # Target/serialization tests
+│       └── test_integration/         # Integration tests (Modal, Prefect)
+│
+└── stardag-examples/                 # Example DAGs and demos
+    └── src/stardag_examples/
+        ├── general/                  # General examples (three API levels, artifacts)
+        ├── ml_pipeline/              # ML pipeline (class API + decorator API)
+        ├── modal/                    # Modal.com examples
+        └── prefect/                  # Prefect orchestrator example
 
 app/
-├── stardag-api/                # FastAPI backend for task tracking
-└── stardag-ui/                 # React frontend for monitoring
+├── stardag-api/                      # FastAPI backend (task registry service)
+│   ├── src/stardag_api/
+│   │   ├── main.py                   # FastAPI app entrypoint
+│   │   ├── routes/                   # API endpoints (tasks, builds, locks, auth)
+│   │   ├── models/                   # SQLAlchemy models
+│   │   ├── services/                 # Business logic (locks, API keys, email)
+│   │   ├── auth/                     # JWT/token auth (Keycloak OIDC)
+│   │   ├── schemas.py                # Pydantic request/response schemas
+│   │   └── config.py                 # API configuration
+│   ├── migrations/                   # Alembic DB migrations
+│   └── tests/
+│
+└── stardag-ui/                       # React frontend (task explorer/monitoring)
+    └── src/
+        ├── components/               # UI components (TaskExplorer, DagGraph, etc.)
+        ├── api/                      # API client (tasks, auth, workspaces)
+        ├── context/                  # React contexts (Auth, Theme, Environment)
+        └── hooks/                    # Custom hooks (useTasks)
+
+docs/                                 # MkDocs documentation site
+    └── docs/
+        ├── getting-started/          # Installation, quickstart, tutorials
+        ├── concepts/                 # Tasks, dependencies, parameters, build
+        ├── how-to/                   # Guides (storage, integrations, ML pipeline)
+        ├── platform/                 # Registry API & UI docs
+        └── reference/                # Auto-generated API reference
+
+infra/aws-cdk/                        # Generic AWS CDK infrastructure templates
+integration-tests/                    # End-to-end tests (API + UI + docker-compose)
 ```
 
 ## Development

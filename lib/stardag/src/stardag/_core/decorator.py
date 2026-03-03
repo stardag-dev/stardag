@@ -3,7 +3,7 @@ import typing
 
 from pydantic import create_model
 
-from stardag._core.auto_task import AutoTask
+from stardag._core.base_task import BaseTask, LoadableTask, TargetTask
 from stardag._core.task import Task
 from stardag._core.task_loads import TaskLoads
 
@@ -13,7 +13,7 @@ FuncT = typing.TypeVar("FuncT", bound=typing.Callable)
 _PWrapped = typing.ParamSpec("_PWrapped")
 
 
-class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
+class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     _func: typing.Callable[_PWrapped, LoadedT]
 
     if typing.TYPE_CHECKING:
@@ -32,23 +32,25 @@ class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
     def call(cls, *args: _PWrapped.args, **kwargs: _PWrapped.kwargs) -> LoadedT:
         return cls._func(*args, **kwargs)  # type: ignore
 
-    def requires(self) -> typing.Mapping[str, Task] | None:
+    def requires(self) -> typing.Mapping[str, BaseTask] | None:
         requires = {
             name: getattr(self, name)
             for name in self.__class__.model_fields.keys()
-            if isinstance(getattr(self, name), Task)
+            if isinstance(getattr(self, name), BaseTask)
         }
         return requires or None
 
     def run(self) -> None:
         result = self.call(**self._get_inputs())  # type: ignore
-        self.output().save(result)
+        self.target().save(result)
 
     def _get_inputs(self) -> _PWrapped.kwargs:  # type: ignore
         def get_input(name):
             value = getattr(self, name)
-            if isinstance(value, Task):
-                return value.output().load()
+            if isinstance(value, LoadableTask):
+                return value.load()
+            if isinstance(value, TargetTask):
+                return value.target().load()
             return value
 
         return {
@@ -56,9 +58,6 @@ class _FunctionTask(AutoTask[LoadedT], typing.Generic[LoadedT, _PWrapped]):
             for name in self.__class__.model_fields.keys()
             if name != "version"
         }
-
-    def result(self) -> LoadedT:
-        return self.output().load()
 
 
 class _TaskWrapper(typing.Protocol):
@@ -68,7 +67,7 @@ class _TaskWrapper(typing.Protocol):
     ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
 
-_RelpathOverride = str | typing.Callable[[AutoTask[LoadedT]], str]
+_RelpathOverride = str | typing.Callable[[Task[LoadedT]], str]
 
 
 class RelpathSettings(typing.TypedDict):
@@ -85,6 +84,7 @@ def task(
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
+    target_root_key: str | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
 
 
@@ -94,6 +94,7 @@ def task(
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
+    target_root_key: str | None = None,
 ) -> _TaskWrapper: ...
 
 
@@ -103,6 +104,7 @@ def task(
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
+    target_root_key: str | None = None,
 ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]] | _TaskWrapper:
     def wrapper(
         _func: typing.Callable[_PWrapped, LoadedT],
@@ -151,6 +153,9 @@ def task(
                 task_class._relpath = relpath
             else:
                 raise ValueError("Invalid relpath type")
+
+        if target_root_key is not None:
+            task_class._target_root_key = target_root_key
 
         return task_class
 

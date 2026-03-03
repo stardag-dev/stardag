@@ -3,7 +3,7 @@ from typing import Annotated
 import pytest
 from pydantic import ValidationError
 
-from stardag import AutoTask, BaseTask, Task, auto_namespace
+from stardag import BaseTask, LoadableTask, TargetTask, Task, auto_namespace
 from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagField
 from stardag.polymorphic import Polymorphic, SubClass
@@ -13,90 +13,172 @@ from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 auto_namespace(__name__)  # Avoid collisions in task registry
 
 # =============================================================================
-# Task classes for testing various generic type scenarios
+# TargetTask classes for testing SubClass[TargetTask[...]] directly
 # =============================================================================
 
 
-class LoadsStrTask(Task[LoadableTarget[str]]):
-    """Basic task that loads str."""
+class LoadsStrTask(TargetTask[LoadableTarget[str]]):
+    """Basic task that loads str (TargetTask-level)."""
 
     data: str = "hello world"
 
     def run(self) -> None:
-        self.output().save(self.data)
+        self.target().save(self.data)
 
-    def output(self) -> InMemoryTarget[str]:
+    def target(self) -> InMemoryTarget[str]:
         return InMemoryTarget(key=self.id)
 
 
 class LoadsStrTaskSubclass(LoadsStrTask):
-    """Subclass of LoadsStrTask - should be compatible with TaskLoads[str]."""
+    """Subclass of LoadsStrTask - should be compatible with SubClass[TargetTask[...]]."""
 
     extra_field: str = "extra"
 
 
-class LoadsIntTask(Task[LoadableTarget[int]]):
-    """Basic task that loads int."""
+class LoadsIntTask(TargetTask[LoadableTarget[int]]):
+    """Basic task that loads int (TargetTask-level)."""
 
     number: int = 42
 
     def run(self) -> None:
-        self.output().save(self.number)
+        self.target().save(self.number)
 
-    def output(self) -> InMemoryTarget[int]:
+    def target(self) -> InMemoryTarget[int]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsStrTaskWithAnnotation(Task[LoadableTarget[str]]):
-    """Task with annotated fields - should be compatible with TaskLoads[str]."""
+class LoadsStrTaskWithAnnotation(TargetTask[LoadableTarget[str]]):
+    """Task with annotated fields - should be compatible with SubClass[TargetTask[...]]."""
 
     data: Annotated[str, StardagField(hash_exclude=True)] = "annotated"
 
     def run(self) -> None:
-        self.output().save(self.data)
+        self.target().save(self.data)
 
-    def output(self) -> InMemoryTarget[str]:
+    def target(self) -> InMemoryTarget[str]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsSaveableStrTask(Task[LoadableSaveableTarget[str]]):
+class LoadsSaveableStrTask(TargetTask[LoadableSaveableTarget[str]]):
     """Task using LoadableSaveableTarget[str] - subtype of LoadableTarget[str]."""
 
     data: str = "saveable"
 
     def run(self) -> None:
-        self.output().save(self.data)
+        self.target().save(self.data)
 
-    def output(self) -> InMemoryTarget[str]:
+    def target(self) -> InMemoryTarget[str]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsListStrTask(Task[LoadableTarget[list[str]]]):
-    """Task that loads list[str] - tests nested generics."""
+class LoadsListStrTask(TargetTask[LoadableTarget[list[str]]]):
+    """Task that loads list[str] (TargetTask-level)."""
 
     items: list[str] = ["a", "b", "c"]
 
     def run(self) -> None:
-        self.output().save(self.items)
+        self.target().save(self.items)
 
-    def output(self) -> InMemoryTarget[list[str]]:
+    def target(self) -> InMemoryTarget[list[str]]:
         return InMemoryTarget(key=self.id)
 
 
-class LoadsListIntTask(Task[LoadableTarget[list[int]]]):
-    """Task that loads list[int] - tests nested generics mismatch."""
+class LoadsListIntTask(TargetTask[LoadableTarget[list[int]]]):
+    """Task that loads list[int] (TargetTask-level)."""
 
     items: list[int] = [1, 2, 3]
 
     def run(self) -> None:
-        self.output().save(self.items)
+        self.target().save(self.items)
 
-    def output(self) -> InMemoryTarget[list[int]]:
+    def target(self) -> InMemoryTarget[list[int]]:
         return InMemoryTarget(key=self.id)
 
 
 # =============================================================================
-# Container tasks with various field types
+# Task classes for testing TaskLoads
+# =============================================================================
+
+
+class TaskStr(Task[str]):
+    """Task that produces str - compatible with TaskLoads[str]."""
+
+    data: str = "auto task string"
+
+    def run(self) -> None:
+        self._save(self.data)
+
+
+class TaskStrSubclass(TaskStr):
+    """Subclass of TaskStr - should be compatible with TaskLoads[str]."""
+
+    extra_field: str = "extra"
+
+
+class TaskInt(Task[int]):
+    """Task that produces int - not compatible with TaskLoads[str]."""
+
+    number: int = 42
+
+    def run(self) -> None:
+        self._save(self.number)
+
+
+class TaskListStr(Task[list[str]]):
+    """Task that produces list[str] - not compatible with TaskLoads[str]."""
+
+    items: list[str] = ["a", "b", "c"]
+
+    def run(self) -> None:
+        self._save(self.items)
+
+
+class TaskListInt(Task[list[int]]):
+    """Task that produces list[int]."""
+
+    items: list[int] = [1, 2, 3]
+
+    def run(self) -> None:
+        self._save(self.items)
+
+
+# =============================================================================
+# Bare LoadableTask classes (no target, just load())
+# =============================================================================
+
+
+class BareLoadableStr(LoadableTask[str]):
+    """Bare LoadableTask that loads str - compatible with TaskLoads[str]."""
+
+    data: str = "bare loadable"
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+    def load(self) -> str:
+        return self.data
+
+
+class BareLoadableInt(LoadableTask[int]):
+    """Bare LoadableTask that loads int - not compatible with TaskLoads[str]."""
+
+    number: int = 99
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+    def load(self) -> int:
+        return self.number
+
+
+# =============================================================================
+# Container tasks with TaskLoads fields
 # =============================================================================
 
 
@@ -124,10 +206,10 @@ class ContainerTaskLoadsListStr(BaseTask):
         pass
 
 
-class ContainerWithSubClass(BaseTask):
-    """Container using SubClass directly instead of TaskLoads."""
+class ContainerTaskLoadsInt(BaseTask):
+    """Container expecting TaskLoads[int]."""
 
-    task: SubClass[Task[LoadableTarget[str]]]
+    task: TaskLoads[int]
 
     def complete(self) -> bool:
         return True
@@ -149,82 +231,127 @@ class ContainerWithAnnotatedField(BaseTask):
 
 
 # =============================================================================
-# Tests
+# Container tasks with SubClass[TargetTask[...]] (lower-level API)
+# =============================================================================
+
+
+class ContainerWithSubClass(BaseTask):
+    """Container using SubClass[TargetTask[...]] directly."""
+
+    task: SubClass[TargetTask[LoadableTarget[str]]]
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+# =============================================================================
+# Tests for TaskLoads with Task subclasses
 # =============================================================================
 
 
 def test_task_loads_basic():
-    """Basic test: compatible type should work."""
-    container = ContainerTaskLoadsStr(task=LoadsStrTask())
+    """Basic test: Task[str] should work with TaskLoads[str]."""
+    container = ContainerTaskLoadsStr(task=TaskStr())
     assert_serialize_validate_roundtrip(ContainerTaskLoadsStr, container)
 
 
 @pytest.mark.parametrize(
     "task_instance,description",
     [
-        (LoadsStrTask(), "exact match: Task[LoadableTarget[str]]"),
-        (LoadsStrTaskSubclass(), "subclass of compatible task"),
-        (LoadsStrTaskWithAnnotation(), "task with annotated fields"),
-        # NOTE: LoadableSaveableTarget[str] is a subtype of LoadableTarget[str]
-        # but our best-effort check doesn't handle protocol subtyping,
-        # so this would fail. If we want to support it, we'd need more
-        # sophisticated type checking.
-        # (LoadsSaveableStrTask(), "task with LoadableSaveableTarget subtype"),
+        (TaskStr(), "exact match: Task[str]"),
+        (TaskStrSubclass(), "subclass of compatible Task"),
     ],
 )
 def test_task_loads_compatible_types(task_instance, description):
-    """Test that compatible task types are accepted."""
+    """Test that compatible Task types are accepted by TaskLoads."""
     container = ContainerTaskLoadsStr(task=task_instance)
     assert_serialize_validate_roundtrip(ContainerTaskLoadsStr, container)
 
 
 @pytest.mark.parametrize(
-    "container_cls,task_instance,expected_type,actual_type,description",
+    "container_cls,task_instance,description",
     [
         (
             ContainerTaskLoadsStr,
-            LoadsIntTask(),
-            "LoadableTarget[str]",
-            "LoadableTarget[int]",
+            TaskInt(),
             "str vs int mismatch",
         ),
         (
             ContainerTaskLoadsListStr,
-            LoadsListIntTask(),
-            "LoadableTarget[list[str]]",
-            "LoadableTarget[list[int]]",
+            TaskListInt(),
             "list[str] vs list[int] - nested generic mismatch",
         ),
         (
             ContainerTaskLoadsStr,
-            LoadsListStrTask(),
-            "LoadableTarget[str]",
-            "LoadableTarget[list[str]]",
+            TaskListStr(),
             "str vs list[str] - different structure",
         ),
     ],
 )
-def test_task_loads_type_mismatch(
-    container_cls, task_instance, expected_type, actual_type, description
-):
-    """Test that incompatible task types are rejected with clear error messages."""
-    with pytest.raises(ValidationError) as exc_info:
+def test_task_loads_type_mismatch(container_cls, task_instance, description):
+    """Test that incompatible Task types are rejected by TaskLoads."""
+    with pytest.raises(ValidationError):
         container_cls(task=task_instance)  # pyright: ignore[reportArgumentType]
 
-    error_str = str(exc_info.value)
-    assert type(task_instance).__name__ in error_str, f"Failed: {description}"
-    assert expected_type in error_str, f"Expected type not in error: {description}"
-    assert actual_type in error_str, f"Actual type not in error: {description}"
+
+def test_task_loads_accepts_bare_loadable_task():
+    """TaskLoads[str] should accept bare LoadableTask[str] subclasses."""
+    container = ContainerTaskLoadsStr(task=BareLoadableStr())
+    assert_serialize_validate_roundtrip(ContainerTaskLoadsStr, container)
+
+
+def test_task_loads_rejects_bare_loadable_task_type_mismatch():
+    """TaskLoads[str] should reject LoadableTask[int] (type mismatch)."""
+    with pytest.raises(ValidationError):
+        ContainerTaskLoadsStr(task=BareLoadableInt())  # pyright: ignore[reportArgumentType]
+
+
+def test_task_loads_rejects_target_base_task():
+    """TaskLoads[str] should NOT accept raw TargetTask subclasses (not LoadableTask)."""
+    with pytest.raises(ValidationError):
+        ContainerTaskLoadsStr(task=LoadsStrTask())  # pyright: ignore[reportArgumentType]
+
+
+def test_annotated_field_compatible():
+    """Annotated[TaskLoads[...], ...] should work correctly."""
+    container = ContainerWithAnnotatedField(task=TaskStr())
+    assert_serialize_validate_roundtrip(ContainerWithAnnotatedField, container)
+
+
+def test_annotated_field_mismatch():
+    """Annotated[TaskLoads[...], ...] should also catch type mismatches."""
+    with pytest.raises(ValidationError):
+        ContainerWithAnnotatedField(task=TaskInt())  # pyright: ignore[reportArgumentType]
+
+
+def test_nested_generic_compatible():
+    """Tasks with nested generics should work when types match."""
+    container = ContainerTaskLoadsListStr(task=TaskListStr())
+    assert_serialize_validate_roundtrip(ContainerTaskLoadsListStr, container)
+
+
+def test_task_int_compatible_with_task_loads_int():
+    """Task[int] should be compatible with TaskLoads[int]."""
+    container = ContainerTaskLoadsInt(task=TaskInt())
+    assert_serialize_validate_roundtrip(ContainerTaskLoadsInt, container)
+
+
+# =============================================================================
+# Tests for SubClass[TargetTask[...]] (lower-level API)
+# =============================================================================
 
 
 def test_subclass_annotation_compatible():
-    """SubClass[Task[...]] should work the same as TaskLoads[...]."""
+    """SubClass[TargetTask[...]] should accept TargetTask subclasses."""
     container = ContainerWithSubClass(task=LoadsStrTask())
     assert_serialize_validate_roundtrip(ContainerWithSubClass, container)
 
 
 def test_subclass_annotation_mismatch():
-    """SubClass[Task[...]] should also catch type mismatches."""
+    """SubClass[TargetTask[...]] should catch type mismatches."""
     with pytest.raises(ValidationError) as exc_info:
         ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
 
@@ -232,31 +359,20 @@ def test_subclass_annotation_mismatch():
     assert "LoadsIntTask" in error_str
 
 
-def test_annotated_field_compatible():
-    """Annotated[TaskLoads[...], ...] should work correctly."""
-    container = ContainerWithAnnotatedField(task=LoadsStrTask())
-    assert_serialize_validate_roundtrip(ContainerWithAnnotatedField, container)
+def test_task_compatible_with_subclass_target_base_task():
+    """Task[str] should also be compatible with SubClass[TargetTask[LoadableTarget[str]]].
 
-
-def test_annotated_field_mismatch():
-    """Annotated[TaskLoads[...], ...] should also catch type mismatches."""
-    with pytest.raises(ValidationError) as exc_info:
-        ContainerWithAnnotatedField(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
-
-    error_str = str(exc_info.value)
-    assert "LoadsIntTask" in error_str
-    assert "LoadableTarget[str]" in error_str
-    assert "LoadableTarget[int]" in error_str
-
-
-def test_nested_generic_compatible():
-    """Tasks with nested generics should work when types match."""
-    container = ContainerTaskLoadsListStr(task=LoadsListStrTask())
-    assert_serialize_validate_roundtrip(ContainerTaskLoadsListStr, container)
+    This tests the __map_generic_args_to_ancestor__ hook that maps
+    Task[str] -> TargetTask[LoadableSaveableFileSystemTarget[str]]
+    which is compatible with SubClass[TargetTask[LoadableTarget[str]]]
+    because LoadableSaveableFileSystemTarget is a subtype of LoadableTarget.
+    """
+    container = ContainerWithSubClass(task=TaskStr())
+    assert_serialize_validate_roundtrip(ContainerWithSubClass, container)
 
 
 # =============================================================================
-# Tests for on_type_mismatch parameter
+# Tests for on_type_mismatch parameter (uses SubClass[TargetTask[...]])
 # =============================================================================
 
 
@@ -264,7 +380,8 @@ class ContainerWithWarnOnMismatch(BaseTask):
     """Container that warns on type mismatch instead of raising."""
 
     task: Annotated[
-        Task[LoadableTarget[str]], Polymorphic(on_generic_type_mismatch="warn")
+        TargetTask[LoadableTarget[str]],
+        Polymorphic(on_generic_type_mismatch="warn"),
     ]
 
     def complete(self) -> bool:
@@ -278,7 +395,8 @@ class ContainerWithIgnoreOnMismatch(BaseTask):
     """Container that ignores type mismatches."""
 
     task: Annotated[
-        Task[LoadableTarget[str]], Polymorphic(on_generic_type_mismatch="ignore")
+        TargetTask[LoadableTarget[str]],
+        Polymorphic(on_generic_type_mismatch="ignore"),
     ]
 
     def complete(self) -> bool:
@@ -307,91 +425,6 @@ def test_on_type_mismatch_ignore():
 
 
 def test_on_type_mismatch_raise_is_default():
-    """on_type_mismatch='raise' is the default behavior."""
-    # ContainerTaskLoadsStr uses TaskLoads which uses Polymorphic() with default
+    """on_type_mismatch='raise' is the default behavior for SubClass[TargetTask[...]]."""
     with pytest.raises(ValidationError):
-        ContainerTaskLoadsStr(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
-
-
-# =============================================================================
-# Tests for AutoTask compatibility with TaskLoads
-# =============================================================================
-
-
-class AutoTaskStr(AutoTask[str]):
-    """AutoTask that produces str - should be compatible with TaskLoads[str]."""
-
-    data: str = "auto task string"
-
-    def run(self) -> None:
-        self.output().save(self.data)
-
-
-class AutoTaskInt(AutoTask[int]):
-    """AutoTask that produces int - not compatible with TaskLoads[str]."""
-
-    number: int = 42
-
-    def run(self) -> None:
-        self.output().save(self.number)
-
-
-class AutoTaskListStr(AutoTask[list[str]]):
-    """AutoTask that produces list[str] - not compatible with TaskLoads[str]."""
-
-    items: list[str] = ["a", "b", "c"]
-
-    def run(self) -> None:
-        self.output().save(self.items)
-
-
-def test_autotask_compatible_with_task_loads():
-    """AutoTask[str] should be compatible with TaskLoads[str].
-
-    This tests the __map_generic_args_to_ancestor__ hook that maps
-    AutoTask[str] -> Task[LoadableSaveableFileSystemTarget[str]]
-    which is compatible with TaskLoads[str] (= Task[LoadableTarget[str]])
-    because LoadableSaveableFileSystemTarget is a subtype of LoadableTarget.
-    """
-    container = ContainerTaskLoadsStr(task=AutoTaskStr())
-    assert_serialize_validate_roundtrip(ContainerTaskLoadsStr, container)
-
-
-def test_autotask_type_mismatch_detected():
-    """AutoTask[int] should NOT be compatible with TaskLoads[str].
-
-    The __map_generic_args_to_ancestor__ hook should enable proper type checking
-    even when origins differ (AutoTask vs Task).
-    """
-    with pytest.raises(ValidationError) as exc_info:
-        ContainerTaskLoadsStr(task=AutoTaskInt())  # pyright: ignore[reportArgumentType]
-
-    error_str = str(exc_info.value)
-    assert "AutoTaskInt" in error_str
-
-
-def test_autotask_nested_generic_mismatch():
-    """AutoTask[list[str]] should NOT be compatible with TaskLoads[str]."""
-    with pytest.raises(ValidationError) as exc_info:
-        ContainerTaskLoadsStr(task=AutoTaskListStr())  # pyright: ignore[reportArgumentType]
-
-    error_str = str(exc_info.value)
-    assert "AutoTaskListStr" in error_str
-
-
-class ContainerTaskLoadsInt(BaseTask):
-    """Container expecting TaskLoads[int]."""
-
-    task: TaskLoads[int]
-
-    def complete(self) -> bool:
-        return True
-
-    def run(self) -> None:
-        pass
-
-
-def test_autotask_int_compatible_with_task_loads_int():
-    """AutoTask[int] should be compatible with TaskLoads[int]."""
-    container = ContainerTaskLoadsInt(task=AutoTaskInt())
-    assert_serialize_validate_roundtrip(ContainerTaskLoadsInt, container)
+        ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
