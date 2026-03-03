@@ -4,6 +4,7 @@ import { AuthCallback } from "./components/AuthCallback";
 import { BuildsList } from "./components/BuildsList";
 import { BuildView } from "./components/BuildView";
 import { CreateWorkspace } from "./components/CreateWorkspace";
+import { CodeExampleTabs } from "./components/CodeExampleTabs";
 import { LandingPageDemo } from "./components/LandingPageDemo";
 import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
@@ -430,6 +431,9 @@ function LandingPage() {
             asset management. Track provenance, ensure reproducibility, and iterate
             faster on data science and ML workflows.
           </p>
+
+          <CodeExampleTabs />
+
           <div className="flex flex-col items-center gap-3 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-4 mb-4">
             <button
               onClick={login}

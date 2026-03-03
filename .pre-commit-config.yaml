@@ -11,9 +11,9 @@ repos:
       - id: ruff
         args:
           - --fix
-        exclude: ^docs/site/
+        exclude: ^docs/site/|/code-examples/
       - id: ruff-format
-        exclude: ^docs/site/
+        exclude: ^docs/site/|/code-examples/
   # Pyright hooks - one per Python package, each using its own .venv
   - repo: local
     hooks:

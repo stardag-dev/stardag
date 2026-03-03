@@ -1,7 +1,9 @@
 import { useState, useEffect } from "react";
 import { DagGraph, type LayoutDirection } from "./DagGraph";
+import { PythonCodeBlock } from "./PythonCodeBlock";
 import type { TaskWithContext } from "../hooks/useTasks";
 import type { TaskGraphResponse } from "../types/task";
+import mlPipelineCode from "../code-examples/ml-pipeline.py?raw";
 
 // Hook to detect if screen is wide (for responsive DAG direction)
 function useIsWideScreen(breakpoint = 1024) {
@@ -18,138 +20,7 @@ function useIsWideScreen(breakpoint = 1024) {
   return isWide;
 }
 
-// Python code snippet
-const PYTHON_CODE = `dataset = Dataset(
-    dump=Dump(),
-    params=preprocess_params
-)
-train_dataset = Subset(dataset, filter=train_partition)
-test_dataset = Subset(dataset, filter=test_partition)
-trained_model=TrainedModel(
-    model=LogisticRegression(),
-    dataset=train_dataset,
-)
-predictions=Predictions(
-    trained_model=trained_model,
-    dataset=test_dataset,
-)
-metrics = Metrics(predictions=predictions)
-print(metrics.model_dump_json(indent=2))
-sd.build(metrics)`;
-
-// Simple Python syntax highlighter with VS Code-like colors
-function PythonHighlight({ code }: { code: string }) {
-  const highlightCode = (text: string) => {
-    // Order matters - more specific patterns first
-    const patterns: [RegExp, string][] = [
-      // Strings (single and double quoted)
-      [/"[^"]*"|'[^']*'/g, "text-[#ce9178]"],
-      // Comments
-      [/#.*/g, "text-[#6a9955]"],
-      // Numbers
-      [/\b\d+\b/g, "text-[#b5cea8]"],
-      // Keywords
-      [
-        /\b(import|from|as|def|class|return|if|else|elif|for|while|in|and|or|not|True|False|None)\b/g,
-        "text-[#c586c0]",
-      ],
-      // Built-in functions
-      [/\b(print|len|range|str|int|float|list|dict|set)\b/g, "text-[#dcdcaa]"],
-      // Class names (capitalized words followed by opening paren)
-      [/\b([A-Z][a-zA-Z0-9]*)\s*\(/g, "text-[#4ec9b0]"],
-      // Function/method calls
-      [/\.([a-z_][a-z0-9_]*)\s*\(/gi, "text-[#dcdcaa]"],
-      // Variables/identifiers (handled by default color)
-    ];
-
-    // Simple tokenizer - process line by line for better control
-    const lines = text.split("\n");
-    return lines.map((line, lineIndex) => {
-      // Find all matches for all patterns
-      const allMatches: {
-        match: string;
-        index: number;
-        className: string;
-      }[] = [];
-
-      patterns.forEach(([pattern, className]) => {
-        const regex = new RegExp(pattern.source, pattern.flags);
-        let match;
-        while ((match = regex.exec(line)) !== null) {
-          // For class names pattern, we want to highlight only the class name, not the paren
-          if (pattern.source.includes("([A-Z]")) {
-            allMatches.push({
-              match: match[1],
-              index: match.index,
-              className,
-            });
-          } else if (pattern.source.includes("\\.([a-z_]")) {
-            // For method calls, include the dot
-            allMatches.push({
-              match: "." + match[1],
-              index: match.index,
-              className,
-            });
-          } else {
-            allMatches.push({
-              match: match[0],
-              index: match.index,
-              className,
-            });
-          }
-        }
-      });
-
-      // Sort by index
-      allMatches.sort((a, b) => a.index - b.index);
-
-      // Build tokens, avoiding overlaps
-      let lastEnd = 0;
-      const finalTokens: React.ReactNode[] = [];
-
-      allMatches.forEach((m, i) => {
-        if (m.index >= lastEnd) {
-          // Add plain text before this match
-          if (m.index > lastEnd) {
-            finalTokens.push(
-              <span key={`${lineIndex}-plain-${i}`} className="text-[#9cdcfe]">
-                {line.slice(lastEnd, m.index)}
-              </span>,
-            );
-          }
-          // Add the highlighted match
-          finalTokens.push(
-            <span key={`${lineIndex}-match-${i}`} className={m.className}>
-              {m.match}
-            </span>,
-          );
-          lastEnd = m.index + m.match.length;
-        }
-      });
-
-      // Add remaining plain text
-      if (lastEnd < line.length) {
-        finalTokens.push(
-          <span key={`${lineIndex}-end`} className="text-[#9cdcfe]">
-            {line.slice(lastEnd)}
-          </span>,
-        );
-      }
-
-      return (
-        <div key={lineIndex}>
-          {finalTokens.length > 0 ? finalTokens : <span>&nbsp;</span>}
-        </div>
-      );
-    });
-  };
-
-  return (
-    <pre className="m-0 bg-transparent p-4 font-mono text-[0.8rem] leading-relaxed text-left">
-      <code>{highlightCode(code)}</code>
-    </pre>
-  );
-}
+const PYTHON_CODE = mlPipelineCode.trimEnd();
 
 // JSON representation (cleaned up per user request)
 const JSON_DATA = {
@@ -470,7 +341,7 @@ export function LandingPageDemo() {
           }
         >
           <div className="h-72 overflow-auto">
-            <PythonHighlight code={PYTHON_CODE} />
+            <PythonCodeBlock code={PYTHON_CODE} />
           </div>
         </DemoCard>
 

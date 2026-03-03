@@ -23,7 +23,8 @@
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^3.0.6",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
