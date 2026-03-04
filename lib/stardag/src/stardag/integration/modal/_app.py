@@ -34,6 +34,8 @@ Example usage:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import os
@@ -44,6 +46,7 @@ import modal
 from modal.gpu import GPU_T
 
 from stardag import BaseTask, TaskStruct, build, flatten_task_struct
+from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
 from stardag.build import BuildExitStatus, TaskExecutorABC
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
@@ -436,11 +439,6 @@ def _run(task: BaseTask) -> TaskStruct | None:
     Returns:
         None if task completed, or TaskStruct of incomplete dynamic deps.
     """
-    import asyncio
-    import inspect
-
-    from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
-
     _setup_logging()
     logger.info(f"Running task: {repr(task)}")
     try:
