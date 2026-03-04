@@ -129,6 +129,15 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
         result = await self.call_aio(**await self._get_inputs_aio())  # type: ignore
         await self._save_aio(result)
 
+    async def run_aio(self) -> None:
+        """Async execution path — used when the decorated function is async."""
+        if not self._is_async:
+            # Sync function: just run synchronously
+            self.run()
+            return
+        result = await self.call_aio(**await self._get_inputs_aio())  # type: ignore
+        await self.target().save_aio(result)
+
     def _get_inputs(self) -> _PWrapped.kwargs:  # type: ignore
         """Resolve dependency inputs synchronously.
 
