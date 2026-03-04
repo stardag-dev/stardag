@@ -7,8 +7,10 @@ Intended for debugging and testing, not production use.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
+import typing
 from typing import Literal
 from uuid import UUID
 
@@ -634,7 +636,12 @@ async def _run_task_sequential_aio(
     # Determine how to run
     if has_run_aio:
         # Async-only or Dual - use async
-        result = await task.run_aio()
+        # Check if run_aio is an async generator function (dynamic deps).
+        # Async generators can't be awaited — call without await to get the generator.
+        if inspect.isasyncgenfunction(type(task).run_aio):
+            result = task.run_aio()  # type: ignore[assignment]
+        else:
+            result = await task.run_aio()
     elif has_run:
         # Sync-only
         if sync_run_default == "thread":
@@ -645,9 +652,9 @@ async def _run_task_sequential_aio(
     else:
         raise ValueError(f"Task {task} has no run method")
 
-    # Handle generator (dynamic deps)
+    # Handle generator (dynamic deps) — sync or async
     if result is not None and hasattr(result, "__next__"):
-        gen = result
+        gen: typing.Generator = result  # type: ignore[assignment]
         while True:
             try:
                 yielded = next(gen)
@@ -674,6 +681,29 @@ async def _run_task_sequential_aio(
 
             except StopIteration:
                 break
+
+    elif result is not None and hasattr(result, "__anext__"):
+        agen = typing.cast(typing.AsyncGenerator, result)
+        async for yielded in agen:
+            dynamic_deps = flatten_task_struct(yielded)
+
+            # Discover and build dynamic deps
+            for dep in dynamic_deps:
+                if dep.id not in all_tasks:
+                    all_tasks[dep.id] = dep
+                    for sub_dep in flatten_task_struct(dep.requires()):
+                        if sub_dep.id not in all_tasks:
+                            all_tasks[sub_dep.id] = sub_dep
+
+                if dep.id not in completion_cache:
+                    await _run_task_sequential_aio(
+                        dep,
+                        completion_cache,
+                        all_tasks,
+                        build_id,
+                        registry,
+                        sync_run_default,
+                    )
 
     completion_cache.add(task.id)
     await registry.task_complete_aio(build_id, task)

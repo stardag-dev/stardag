@@ -33,6 +33,7 @@ from stardag.utils.testing.dynamic_deps_dag import (
     get_dynamic_deps_dag,
 )
 from stardag.utils.testing.helper_tasks import (
+    AsyncDynamicDiamondTask,
     AsyncOnlyTask,
     DiamondTask,
     DynamicDiamondTask,
@@ -660,6 +661,86 @@ class TestDiamondPatternsConcurrent:
         assert get_execution_count("complex_conc", "21") == 1
         assert get_execution_count("complex_conc", "1") == 1
         assert get_execution_count("complex_conc", "0") == 1
+
+
+# ============================================================================
+# Test: Async Dynamic Dependencies (Concurrent)
+# ============================================================================
+
+
+class TestAsyncDynamicDepsConcurrent:
+    """Tests for async dynamic dependencies with concurrent build."""
+
+    @pytest.mark.asyncio
+    async def test_async_dynamic_diamond(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Async dynamic diamond pattern with build_aio.
+
+        parent (static: [dyn_task, shared])
+           |
+        dyn_task (dynamic: [shared])
+           |
+        shared (appears in both paths)
+        """
+        reset_execution_counts()
+
+        shared = AsyncDynamicDiamondTask(name="shared", test_id="async_conc1")
+        dyn_task = AsyncDynamicDiamondTask(
+            name="dyn_task",
+            test_id="async_conc1",
+            dynamic_task_deps=(shared,),
+        )
+        parent = AsyncDynamicDiamondTask(
+            name="parent",
+            test_id="async_conc1",
+            static_task_deps=(dyn_task, shared),
+        )
+
+        summary = await build_aio([parent], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert get_execution_count("async_conc1", "shared") == 1
+        assert get_execution_count("async_conc1", "dyn_task") == 1
+        assert get_execution_count("async_conc1", "parent") == 1
+
+    @pytest.mark.asyncio
+    async def test_async_complex_dynamic_diamond(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        noop_registry,
+    ):
+        """Complex async dynamic pattern with concurrent build."""
+        reset_execution_counts()
+
+        t20 = AsyncDynamicDiamondTask(name="20", test_id="async_complex_conc")
+        t21 = AsyncDynamicDiamondTask(name="21", test_id="async_complex_conc")
+        t30 = AsyncDynamicDiamondTask(name="30", test_id="async_complex_conc")
+        shared_31 = AsyncDynamicDiamondTask(name="31", test_id="async_complex_conc")
+
+        dyn_and_static = AsyncDynamicDiamondTask(
+            name="1",
+            test_id="async_complex_conc",
+            static_task_deps=(t20, t21),
+            dynamic_task_deps=(t30, shared_31),
+        )
+        parent = AsyncDynamicDiamondTask(
+            name="0",
+            test_id="async_complex_conc",
+            static_task_deps=(dyn_and_static, shared_31),
+        )
+
+        summary = await build_aio([parent], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert get_execution_count("async_complex_conc", "31") == 1
+        assert get_execution_count("async_complex_conc", "30") == 1
+        assert get_execution_count("async_complex_conc", "20") == 1
+        assert get_execution_count("async_complex_conc", "21") == 1
+        assert get_execution_count("async_complex_conc", "1") == 1
+        assert get_execution_count("async_complex_conc", "0") == 1
 
 
 # ============================================================================

@@ -236,3 +236,25 @@ async def test_call_aio_raises_on_sync_func():
 
     with pytest.raises(TypeError, match="cannot be used with a sync function"):
         await sync_add.call_aio(a=1, b=2)
+
+
+# --- Generator rejection tests ---
+
+
+def test_sync_generator_rejected():
+    """Sync generator functions should be rejected by @task."""
+    with pytest.raises(TypeError, match="does not support generator functions"):
+
+        @task
+        def gen_func(a: int) -> int:  # type: ignore[reportInvalidTypeForm]
+            yield a  # type: ignore[misc]
+            return a
+
+
+def test_async_generator_rejected():
+    """Async generator functions should be rejected by @task."""
+    with pytest.raises(TypeError, match="does not support generator functions"):
+
+        @task
+        async def async_gen_func(a: int) -> int:  # type: ignore[reportInvalidTypeForm]
+            yield a  # type: ignore[misc]

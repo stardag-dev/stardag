@@ -155,3 +155,29 @@ class DynamicDiamondTask(Task[str]):
             yield dep
 
         self._save(f"{self.name}:{_execution_counts[key]}")
+
+
+class AsyncDynamicDiamondTask(Task[str]):
+    """Async task with dynamic deps that tracks execution for diamond tests.
+
+    Uses async generator run_aio() to yield dynamic dependencies.
+    """
+
+    name: str
+    test_id: str
+    static_task_deps: tuple["AsyncDynamicDiamondTask", ...] = ()
+    dynamic_task_deps: tuple["AsyncDynamicDiamondTask", ...] = ()
+
+    def requires(self):
+        return self.static_task_deps
+
+    async def run_aio(self):  # type: ignore[override]
+        global _execution_counts
+        key = f"{self.test_id}:{self.name}"
+        _execution_counts[key] = _execution_counts.get(key, 0) + 1
+
+        # Yield dynamic deps (async generator)
+        for dep in self.dynamic_task_deps:
+            yield dep
+
+        await self._save_aio(f"{self.name}:{_execution_counts[key]}")

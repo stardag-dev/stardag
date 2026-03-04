@@ -9,10 +9,11 @@ This module contains:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
-from typing import Generator, Literal, Protocol, Sequence
+from typing import AsyncGenerator, Generator, Literal, Protocol, Sequence, Union
 from uuid import UUID
 
 from stardag import (
@@ -225,9 +226,15 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         self._thread_pool: ThreadPoolExecutor | None = None
         self._process_pool: ProcessPoolExecutor | None = None
 
-        # Track suspended generators (task_id -> generator)
+        # Track suspended generators (task_id -> sync or async generator)
         # For in-process execution where we can suspend and resume
-        self._suspended_generators: dict[UUID, Generator[TaskStruct, None, None]] = {}
+        self._suspended_generators: dict[
+            UUID,
+            Union[
+                Generator[TaskStruct, None, None],
+                AsyncGenerator[TaskStruct, None],
+            ],
+        ] = {}
 
         # Track tasks pending re-execution (task_id -> True)
         # For cross-process/remote execution: when task yields incomplete deps,
@@ -270,6 +277,9 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         """
         # Check if we're resuming a suspended generator (in-process dynamic deps)
         if task.id in self._suspended_generators:
+            gen = self._suspended_generators[task.id]
+            if hasattr(gen, "__anext__"):
+                return await self._resume_generator_aio(task)
             return self._resume_generator(task)
 
         # Check if task is pending re-execution (cross-process dynamic deps)
@@ -281,13 +291,18 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
 
         try:
             result = await self._execute_task(task, mode)
-            return self._handle_result(task, result)
+            return await self._handle_result(task, result)
         except Exception as e:
             return e
 
     async def _execute_task(
         self, task: BaseTask, mode: ExecutionMode
-    ) -> Generator[TaskStruct, None, None] | TaskStruct | None:
+    ) -> (
+        Generator[TaskStruct, None, None]
+        | AsyncGenerator[TaskStruct, None]
+        | TaskStruct
+        | None
+    ):
         """Execute task in appropriate context.
 
         Returns:
@@ -299,6 +314,10 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         if mode == ExecutionMode.ASYNC_MAIN_LOOP:
             assert self._async_semaphore is not None
             async with self._async_semaphore:
+                # Async generator functions (dynamic deps) can't be awaited —
+                # call without await to get the async generator object.
+                if inspect.isasyncgenfunction(type(task).run_aio):
+                    return task.run_aio()  # type: ignore[return-value]
                 return await task.run_aio()
 
         elif mode == ExecutionMode.SYNC_THREAD:
@@ -322,18 +341,23 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         else:
             raise ValueError(f"Unsupported execution mode: {mode}")
 
-    def _handle_result(
+    async def _handle_result(
         self,
         task: BaseTask,
-        result: Generator[TaskStruct, None, None] | TaskStruct | None,
+        result: Generator[TaskStruct, None, None]
+        | AsyncGenerator[TaskStruct, None]
+        | TaskStruct
+        | None,
     ) -> None | TaskStruct:
         """Handle task execution result.
 
-        Handles three cases:
+        Handles four cases:
         1. None: Task completed normally.
-        2. Generator: Task has dynamic deps and is suspended (in-process execution).
+        2. Generator: Task has sync dynamic deps and is suspended (in-process).
            Store generator and return first yielded deps.
-        3. TaskStruct: Task has dynamic deps but cannot be suspended (cross-process
+        3. AsyncGenerator: Task has async dynamic deps and is suspended (in-process).
+           Store generator and return first yielded deps.
+        4. TaskStruct: Task has dynamic deps but cannot be suspended (cross-process
            or remote execution). Return deps directly; task will be re-executed
            when deps complete (idempotent re-execution).
 
@@ -343,28 +367,25 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
             # Task completed normally
             return None
 
-        # Check if result is a generator (dynamic deps, in-process)
-        # Use hasattr to check for generator protocol
+        # Check if result is an async generator (dynamic deps from run_aio)
+        if hasattr(result, "__anext__"):
+            agen: AsyncGenerator[TaskStruct, None] = result  # type: ignore[assignment]
+            return await self._handle_generator_aio(task, agen)
+
+        # Check if result is a sync generator (dynamic deps, in-process)
         if hasattr(result, "__next__"):
-            # Cast to Generator for type checker - we've verified it has __next__
             gen: Generator[TaskStruct, None, None] = result  # type: ignore[assignment]
             return self._handle_generator(task, gen)
 
         # Result is TaskStruct (dynamic deps from process/remote execution)
-        # Task yielded these deps but they weren't complete, so the task
-        # returned early (idempotent re-execution pattern). Mark task as pending
-        # re-execution - it will be re-executed from scratch after deps complete.
-        # On re-execution, the generator will drive forward past the yield
-        # because the deps are now complete.
         self._pending_reexecution.add(task.id)
-        # Cast to TaskStruct for type checker - we've verified it's not a generator
         task_struct: TaskStruct = result  # type: ignore[assignment]
         return task_struct
 
     def _handle_generator(
         self, task: BaseTask, gen: Generator[TaskStruct, None, None]
     ) -> None | TaskStruct:
-        """Handle a generator from task execution."""
+        """Handle a sync generator from task execution."""
         try:
             yielded = next(gen)
             # Store generator for resumption
@@ -374,16 +395,47 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
             # Generator completed without yielding
             return None
 
+    async def _handle_generator_aio(
+        self, task: BaseTask, agen: AsyncGenerator[TaskStruct, None]
+    ) -> None | TaskStruct:
+        """Handle an async generator from task execution."""
+        try:
+            yielded = await anext(agen)
+            # Store async generator for resumption
+            self._suspended_generators[task.id] = agen
+            return yielded
+        except StopAsyncIteration:
+            # Async generator completed without yielding
+            return None
+
     def _resume_generator(self, task: BaseTask) -> None | TaskStruct | Exception:
-        """Resume a suspended generator."""
+        """Resume a suspended sync generator."""
         gen = self._suspended_generators[task.id]
 
         try:
-            yielded = next(gen)
+            yielded = next(gen)  # type: ignore[arg-type]
             # Still more dynamic deps
             return yielded
         except StopIteration:
             # Generator completed
+            del self._suspended_generators[task.id]
+            return None
+        except Exception as e:
+            del self._suspended_generators[task.id]
+            return e
+
+    async def _resume_generator_aio(
+        self, task: BaseTask
+    ) -> None | TaskStruct | Exception:
+        """Resume a suspended async generator."""
+        agen = self._suspended_generators[task.id]
+
+        try:
+            yielded = await anext(agen)  # type: ignore[arg-type]
+            # Still more dynamic deps
+            return yielded
+        except StopAsyncIteration:
+            # Async generator completed
             del self._suspended_generators[task.id]
             return None
         except Exception as e:

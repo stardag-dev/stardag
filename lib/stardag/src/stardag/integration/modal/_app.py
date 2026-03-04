@@ -424,7 +424,18 @@ def _run(task: BaseTask):
     _setup_logging()
     logger.info(f"Running task: {repr(task)}")
     try:
-        task.run()
+        # Use run_aio for async tasks (those with custom run_aio but no custom run).
+        # BaseTask.run() already falls back to asyncio.run(run_aio()) for async-only
+        # tasks, so task.run() would work too, but calling run_aio explicitly is
+        # cleaner and avoids the overhead of the fallback detection.
+        from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
+
+        if _has_custom_run_aio(task) and not _has_custom_run(task):
+            import asyncio
+
+            asyncio.run(task.run_aio())
+        else:
+            task.run()
     except Exception as e:
         logger.exception(f"Error running task: {repr(task)} - {e}")
         raise
