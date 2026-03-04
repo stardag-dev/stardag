@@ -457,6 +457,16 @@ def namespace(namespace: str, scope: str):
     BaseTask._registry().add_namespace(scope, namespace)
 
 
+def _has_custom_load(task: "LoadableTask") -> bool:  # type: ignore[type-arg]
+    """Check if task has overridden load() (not using default delegation)."""
+    return type(task).load is not LoadableTask.load
+
+
+def _has_custom_load_aio(task: "LoadableTask") -> bool:  # type: ignore[type-arg]
+    """Check if task has overridden load_aio() (not using default delegation)."""
+    return type(task).load_aio is not LoadableTask.load_aio
+
+
 class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
     """A task that can load its output as a typed value.
 
@@ -466,12 +476,44 @@ class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
 
     Both :class:`~stardag.Task` (via diamond inheritance) and bare subclasses
     of ``LoadableTask`` satisfy ``TaskLoads[T]``.
+
+    Subclasses must implement at least one of ``load()`` or ``load_aio()``.
+    The missing method will delegate to the other automatically (mirroring
+    the ``run``/``run_aio`` pattern on ``BaseTask``).
     """
 
-    @abc.abstractmethod
     def load(self) -> LoadedT_co:
-        """Load the output of this task."""
-        ...
+        """Load the output of this task (sync).
+
+        If only ``load_aio()`` is implemented, this delegates via
+        ``asyncio.run()``. Raises ``RuntimeError`` if called from within
+        an existing event loop.
+        """
+        if _has_custom_load_aio(self) and not _has_custom_load(self):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.load_aio())
+            else:
+                raise RuntimeError(
+                    f"Cannot call {type(self).__name__}.load() from within an async "
+                    f"context when only load_aio() is implemented. "
+                    f"Use 'await task.load_aio()' instead."
+                )
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement either load() or load_aio()"
+        )
+
+    async def load_aio(self) -> LoadedT_co:
+        """Asynchronously load the output of this task.
+
+        If only ``load()`` is implemented, this delegates to it.
+        """
+        if _has_custom_load(self) and not _has_custom_load_aio(self):
+            return self.load()
+        raise NotImplementedError(
+            f"{type(self).__name__} must implement either load() or load_aio()"
+        )
 
 
 class TargetTask(BaseTask, Generic[TargetType]):
