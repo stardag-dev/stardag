@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from io import BytesIO, StringIO
 
 from stardag.target._base import (
+    AIOFileSystemTargetHandle,
     FileSystemTarget,
     FileSystemTargetHandle,
     LoadableSaveableTarget,
@@ -101,11 +102,34 @@ class InMemoryFileSystemTarget(FileSystemTarget):
 
         raise ValueError(f"Invalid mode {mode}")
 
-    # Async implementations (trivial since in-memory is fast)
-
     async def exists_aio(self) -> bool:
-        """Async check - trivial for in-memory."""
         return self.exists()
+
+    def _open_aio(self, mode: OpenMode) -> AIOFileSystemTargetHandle:  # type: ignore
+        """Wraps the sync handle as an async context manager."""
+        return _AIOInMemoryHandle(self._open(mode))
+
+
+class _AIOInMemoryHandle:
+    """Adapts a sync in-memory handle to the async handle protocol."""
+
+    def __init__(self, handle: FileSystemTargetHandle) -> None:
+        self._handle = handle
+
+    async def read(self, size: int = -1):
+        return self._handle.read(size)  # type: ignore[union-attr]
+
+    async def write(self, data):
+        self._handle.write(data)  # type: ignore[union-attr]
+
+    async def close(self) -> None:
+        self._handle.close()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args) -> None:
+        await self.close()
 
 
 class _InMemoryBytesWritableFileSystemTargetHandle(

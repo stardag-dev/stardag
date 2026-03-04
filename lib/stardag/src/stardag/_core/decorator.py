@@ -1,20 +1,59 @@
+"""Decorator API for defining tasks as functions.
+
+Provides a subset of the functionality of the class-based ``Task`` API, allowing
+simple tasks to be defined with ``@task`` instead of writing a full class.
+
+Sync functions use ``run()``; async functions use ``run_aio()``, mirroring the
+class API's ``Task.run`` / ``Task.run_aio`` split.
+
+Example (sync)::
+
+    @task
+    def add(a: int, b: int) -> int:
+        return a + b
+
+Example (async)::
+
+    @task
+    async def fetch(url: str) -> str:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                return await resp.text()
+"""
+
+import asyncio
 import inspect
 import typing
 
 from pydantic import create_model
 
-from stardag._core.base_task import BaseTask, LoadableTask, TargetTask
+from stardag._core.base_task import BaseTask, LoadableTask
 from stardag._core.task import Task
 from stardag._core.task_loads import TaskLoads
 
 LoadedT = typing.TypeVar("LoadedT")
+# The return type of the decorated function — may be ``LoadedT`` (sync) or
+# ``Coroutine[Any, Any, LoadedT]`` (async). At runtime we always extract the
+# unwrapped return annotation via ``inspect.signature``, so the ``_FunctionTask``
+# is always parameterized with the actual ``LoadedT``. This TypeVar exists to
+# make explicit that the decorator signatures accept both sync and async callables.
+_FuncReturnT = typing.TypeVar("_FuncReturnT")
 FuncT = typing.TypeVar("FuncT", bound=typing.Callable)
 
 _PWrapped = typing.ParamSpec("_PWrapped")
 
 
 class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
+    """Base class for tasks created by the ``@task`` decorator.
+
+    Wraps a plain function (sync or async) as a ``Task`` subclass.
+    The decorated function's parameters become Pydantic model fields,
+    and dependencies are resolved automatically before calling the function.
+    """
+
     _func: typing.Callable[_PWrapped, LoadedT]
+    # Set to True when ``_func`` is a coroutine function (async def).
+    _is_async: bool = False
 
     if typing.TYPE_CHECKING:
 
@@ -30,7 +69,31 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
 
     @classmethod
     def call(cls, *args: _PWrapped.args, **kwargs: _PWrapped.kwargs) -> LoadedT:
+        """Call the underlying sync function directly.
+
+        Raises TypeError if the decorated function is async — use ``call_aio`` instead.
+        """
+        if cls._is_async:
+            raise TypeError(
+                f"{cls.__name__}.call() cannot be used with an async function. "
+                f"Use 'await {cls.__name__}.call_aio(...)' instead."
+            )
         return cls._func(*args, **kwargs)  # type: ignore
+
+    @classmethod
+    async def call_aio(
+        cls, *args: _PWrapped.args, **kwargs: _PWrapped.kwargs
+    ) -> LoadedT:
+        """Call the underlying async function directly.
+
+        Raises TypeError if the decorated function is sync — use ``call`` instead.
+        """
+        if not cls._is_async:
+            raise TypeError(
+                f"{cls.__name__}.call_aio() cannot be used with a sync function. "
+                f"Use '{cls.__name__}.call(...)' instead."
+            )
+        return await cls._func(*args, **kwargs)  # type: ignore
 
     def requires(self) -> typing.Mapping[str, BaseTask] | None:
         requires = {
@@ -41,16 +104,42 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
         return requires or None
 
     def run(self) -> None:
+        if self._is_async:
+            # Async function: delegate to run_aio(). Mirrors BaseTask.run()'s
+            # fallback for async-only tasks, but we handle it here explicitly
+            # since _FunctionTask defines both run() and run_aio().
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self.run_aio())
+                return
+            raise RuntimeError(
+                f"Cannot call {type(self).__name__}.run() from within an async "
+                f"context. Use 'await task.run_aio()' instead."
+            )
         result = self.call(**self._get_inputs())  # type: ignore
-        self.target().save(result)
+        self._save(result)
+
+    async def run_aio(self) -> None:
+        """Async execution path — used when the decorated function is async."""
+        if not self._is_async:
+            # Sync function: just run synchronously
+            self.run()
+            return
+        result = await self.call_aio(**await self._get_inputs_aio())  # type: ignore
+        await self._save_aio(result)
 
     def _get_inputs(self) -> _PWrapped.kwargs:  # type: ignore
+        """Resolve dependency inputs synchronously.
+
+        Task parameters that are ``LoadableTask`` instances (validated by pydantic
+        via ``TaskLoads[T]``) are loaded; plain values are passed through as-is.
+        """
+
         def get_input(name):
             value = getattr(self, name)
             if isinstance(value, LoadableTask):
                 return value.load()
-            if isinstance(value, TargetTask):
-                return value.target().load()
             return value
 
         return {
@@ -59,12 +148,27 @@ class _FunctionTask(Task[LoadedT], typing.Generic[LoadedT, _PWrapped]):
             if name != "version"
         }
 
+    async def _get_inputs_aio(self) -> _PWrapped.kwargs:  # type: ignore
+        """Resolve dependency inputs asynchronously via ``load_aio``."""
+
+        async def get_input(name):
+            value = getattr(self, name)
+            if isinstance(value, LoadableTask):
+                return await value.load_aio()
+            return value
+
+        return {
+            name: await get_input(name)
+            for name in self.__class__.model_fields.keys()
+            if name != "version"
+        }
+
 
 class _TaskWrapper(typing.Protocol):
     def __call__(
         self,
-        _func: typing.Callable[_PWrapped, LoadedT],
-    ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
+        _func: typing.Callable[_PWrapped, _FuncReturnT],
+    ) -> typing.Type[_FunctionTask[_FuncReturnT, _PWrapped]]: ...
 
 
 _RelpathOverride = str | typing.Callable[[Task[LoadedT]], str]
@@ -79,13 +183,13 @@ class RelpathSettings(typing.TypedDict):
 
 @typing.overload
 def task(
-    _func: typing.Callable[_PWrapped, LoadedT],
+    _func: typing.Callable[_PWrapped, _FuncReturnT],
     *,
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
     target_root_key: str | None = None,
-) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]: ...
+) -> typing.Type[_FunctionTask[_FuncReturnT, _PWrapped]]: ...
 
 
 @typing.overload
@@ -99,17 +203,23 @@ def task(
 
 
 def task(
-    _func: typing.Callable[_PWrapped, LoadedT] | None = None,
+    _func: typing.Callable[_PWrapped, _FuncReturnT] | None = None,
     *,
     name: str | None = None,
     version: str = "",
     relpath: RelpathSettings | _RelpathOverride | None = None,
     target_root_key: str | None = None,
-) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]] | _TaskWrapper:
+) -> typing.Type[_FunctionTask[_FuncReturnT, _PWrapped]] | _TaskWrapper:
     def wrapper(
-        _func: typing.Callable[_PWrapped, LoadedT],
-    ) -> typing.Type[_FunctionTask[LoadedT, _PWrapped]]:
-        """Decorator to turn a function into a task."""
+        _func: typing.Callable[_PWrapped, _FuncReturnT],
+    ) -> typing.Type[_FunctionTask[_FuncReturnT, _PWrapped]]:
+        """Decorator to turn a function into a task.
+
+        Supports both sync and async functions. Async functions (``async def``)
+        will use ``run_aio()`` for execution; sync functions use ``run()``.
+        """
+
+        is_async = inspect.iscoroutinefunction(_func)
 
         signature = inspect.signature(_func)
         return_type = signature.return_annotation
@@ -133,6 +243,7 @@ def task(
             },
         )
         task_class._func = _func
+        task_class._is_async = is_async
         task_class.__version__ = version
 
         # extra properties

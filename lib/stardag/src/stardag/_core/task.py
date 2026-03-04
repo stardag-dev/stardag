@@ -168,6 +168,14 @@ class Task(
         """Convenience method to load the task target."""
         return self.target().load()
 
+    async def load_aio(self) -> LoadedT:
+        """Async load — delegates to the target's ``load_aio``."""
+        return await self.target().load_aio()
+
     def _save(self, data: LoadedT) -> None:
         """Convenience method to save data to the task target."""
         self.target().save(data)
+
+    async def _save_aio(self, data: LoadedT) -> None:
+        """Async save — delegates to the target's ``save_aio``."""
+        await self.target().save_aio(data)
