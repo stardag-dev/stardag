@@ -43,7 +43,7 @@ import typing
 import modal
 from modal.gpu import GPU_T
 
-from stardag import BaseTask, TaskStruct, build
+from stardag import BaseTask, TaskStruct, build, flatten_task_struct
 from stardag.build import BuildExitStatus, TaskExecutorABC
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
@@ -420,27 +420,79 @@ async def _prefect_build(
     logger.info(f"Completed building root task {repr(task)}")
 
 
-def _run(task: BaseTask):
+def _run(task: BaseTask) -> TaskStruct | None:
+    """Execute a task on a Modal worker, handling dynamic dependencies.
+
+    Like ``_run_task_in_process`` in the concurrent executor, generators cannot
+    be persisted across remote calls. We use idempotent re-execution:
+
+    1. Run the task (sync or async) to get the result
+    2. If it's a generator, drive it forward while yielded deps are complete
+    3. If yielded deps are NOT complete, return them as TaskStruct
+    4. The ModalTaskExecutor marks the task for re-execution after deps are built
+    5. On re-execution, previously incomplete deps are now complete, so the
+       generator advances past those yields
+
+    Returns:
+        None if task completed, or TaskStruct of incomplete dynamic deps.
+    """
+    import asyncio
+    import inspect
+
+    from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
+
     _setup_logging()
     logger.info(f"Running task: {repr(task)}")
     try:
-        # Use run_aio for async tasks (those with custom run_aio but no custom run).
-        # BaseTask.run() already falls back to asyncio.run(run_aio()) for async-only
-        # tasks, so task.run() would work too, but calling run_aio explicitly is
-        # cleaner and avoids the overhead of the fallback detection.
-        from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
+        has_run = _has_custom_run(task)
+        has_run_aio = _has_custom_run_aio(task)
 
-        if _has_custom_run_aio(task) and not _has_custom_run(task):
-            import asyncio
-
+        if has_run_aio and not has_run:
+            # Async-only task — handle async generators in the event loop
+            if inspect.isasyncgenfunction(type(task).run_aio):
+                return asyncio.run(_drive_async_generator(task))
             asyncio.run(task.run_aio())
-        else:
-            task.run()
+            return None
+
+        # Sync task — run and drive sync generator if returned
+        result = task.run()
+        return _drive_sync_generator(result)
     except Exception as e:
         logger.exception(f"Error running task: {repr(task)} - {e}")
         raise
 
-    logger.info(f"Completed running task: {repr(task)}")
+
+def _drive_sync_generator(result: typing.Any) -> TaskStruct | None:
+    """Drive a sync generator result, returning incomplete deps as TaskStruct."""
+    if result is None:
+        return None
+
+    if not hasattr(result, "__next__"):
+        return result  # type: ignore[return-value]
+
+    try:
+        while True:
+            yielded = next(result)  # type: ignore[arg-type]
+            deps = flatten_task_struct(yielded)
+            incomplete = [dep for dep in deps if not dep.complete()]
+            if incomplete:
+                return tuple(deps)  # type: ignore[return-value]
+    except StopIteration:
+        return None
+
+
+async def _drive_async_generator(task: BaseTask) -> TaskStruct | None:
+    """Drive an async generator run_aio, returning incomplete deps as TaskStruct."""
+    agen = task.run_aio()
+    try:
+        async for yielded in agen:  # type: ignore[union-attr]
+            deps = flatten_task_struct(yielded)
+            incomplete = [dep for dep in deps if not dep.complete()]
+            if incomplete:
+                return tuple(deps)  # type: ignore[return-value]
+    except StopAsyncIteration:
+        pass
+    return None
 
 
 def _setup_logging():

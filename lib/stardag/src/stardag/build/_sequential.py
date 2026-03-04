@@ -619,6 +619,27 @@ async def build_sequential_aio(
         )
 
 
+async def _iter_dynamic_deps(
+    result: typing.Any,
+) -> typing.AsyncGenerator[typing.Any, None]:
+    """Iterate dynamic deps from a task run result (sync generator, async generator, or None).
+
+    Normalizes the three cases into a single async iteration:
+    - Sync generator (__next__): wraps with next() calls
+    - Async generator (__anext__): iterates with async for
+    - None / non-generator: yields nothing
+    """
+    if result is not None and hasattr(result, "__anext__"):
+        async for value in result:
+            yield value
+    elif result is not None and hasattr(result, "__next__"):
+        while True:
+            try:
+                yield next(result)  # type: ignore[arg-type]
+            except StopIteration:
+                break
+
+
 async def _run_task_sequential_aio(
     task: BaseTask,
     completion_cache: set[UUID],
@@ -653,57 +674,26 @@ async def _run_task_sequential_aio(
         raise ValueError(f"Task {task} has no run method")
 
     # Handle generator (dynamic deps) — sync or async
-    if result is not None and hasattr(result, "__next__"):
-        gen: typing.Generator = result  # type: ignore[assignment]
-        while True:
-            try:
-                yielded = next(gen)
-                dynamic_deps = flatten_task_struct(yielded)
+    async for yielded in _iter_dynamic_deps(result):
+        dynamic_deps = flatten_task_struct(yielded)
 
-                # Discover and build dynamic deps
-                for dep in dynamic_deps:
-                    if dep.id not in all_tasks:
-                        all_tasks[dep.id] = dep
-                        # Recursively discover
-                        for sub_dep in flatten_task_struct(dep.requires()):
-                            if sub_dep.id not in all_tasks:
-                                all_tasks[sub_dep.id] = sub_dep
+        # Discover and build dynamic deps
+        for dep in dynamic_deps:
+            if dep.id not in all_tasks:
+                all_tasks[dep.id] = dep
+                for sub_dep in flatten_task_struct(dep.requires()):
+                    if sub_dep.id not in all_tasks:
+                        all_tasks[sub_dep.id] = sub_dep
 
-                    if dep.id not in completion_cache:
-                        await _run_task_sequential_aio(
-                            dep,
-                            completion_cache,
-                            all_tasks,
-                            build_id,
-                            registry,
-                            sync_run_default,
-                        )
-
-            except StopIteration:
-                break
-
-    elif result is not None and hasattr(result, "__anext__"):
-        agen = typing.cast(typing.AsyncGenerator, result)
-        async for yielded in agen:
-            dynamic_deps = flatten_task_struct(yielded)
-
-            # Discover and build dynamic deps
-            for dep in dynamic_deps:
-                if dep.id not in all_tasks:
-                    all_tasks[dep.id] = dep
-                    for sub_dep in flatten_task_struct(dep.requires()):
-                        if sub_dep.id not in all_tasks:
-                            all_tasks[sub_dep.id] = sub_dep
-
-                if dep.id not in completion_cache:
-                    await _run_task_sequential_aio(
-                        dep,
-                        completion_cache,
-                        all_tasks,
-                        build_id,
-                        registry,
-                        sync_run_default,
-                    )
+            if dep.id not in completion_cache:
+                await _run_task_sequential_aio(
+                    dep,
+                    completion_cache,
+                    all_tasks,
+                    build_id,
+                    registry,
+                    sync_run_default,
+                )
 
     completion_cache.add(task.id)
     await registry.task_complete_aio(build_id, task)
