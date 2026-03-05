@@ -1,26 +1,21 @@
+"""Since tasks and serialization is decoupled, we can reference and load tasks
+from the registry, even when the task source code is not available."""
+from uuid import UUID
+
 import stardag as sd
+import pandas as pd
 
 @sd.task
-def get_range(limit: int) -> list[int]:
-    return list(range(limit))
+def get_num_rows(df: sd.Depends[pd.DataFrame]) -> int:
+    return len(df)
 
-@sd.task
-def get_sum(values: sd.Depends[list[int]]) -> int:
-    return sum(values)
+# Get task id from registry UI
+df_task_id = UUID("359d8374-de0e-521b-84c1-1e9fd3b8b112")
 
-# Serialize a task DAG to JSON
-task = get_sum(values=get_range(limit=4))
-spec = task.model_dump_json(indent=2)
-print(spec)
+# We must (only) know data type used for serialization
+df_task = sd.AliasTask[pd.DataFrame].from_registry(id=df_task_id)
 
-# Reconstruct the exact task from JSON
-restored = type(task).model_validate_json(spec)
-sd.build(restored)
+# AliasTask maintins the original task's ID, and can be composed as usual
+num_rows_task = get_num_rows(df=df_task)
 
-assert restored.load() == 6
-
-# -- hidden --
-import json
-
-data = json.loads(spec)
-assert data["values"]["limit"] == 4
+sd.build(num_rows_task)
