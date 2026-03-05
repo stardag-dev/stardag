@@ -102,13 +102,16 @@ export function CodeExampleTabs() {
 
   return (
     <div className="mx-auto mb-10 w-full max-w-2xl overflow-hidden rounded-xl border border-gray-700/50 bg-gray-800/50 text-left">
-      {/* Feature pills — desktop */}
-      <div className="hidden flex-wrap gap-1 border-b border-gray-700/50 px-2 py-2 sm:flex">
+      {/* Feature pills — horizontally scrollable */}
+      <div
+        className="flex gap-1 overflow-x-auto border-b border-gray-700/50 px-2 py-2"
+        style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
+      >
         {FEATURES.map((f, i) => (
           <button
             key={f.key}
             onClick={() => handleFeatureChange(i)}
-            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+            className={`shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
               i === featureIdx
                 ? "bg-blue-600 text-white"
                 : "text-gray-400 hover:bg-gray-700/50 hover:text-gray-200"
@@ -117,21 +120,6 @@ export function CodeExampleTabs() {
             {f.label}
           </button>
         ))}
-      </div>
-
-      {/* Feature select — mobile */}
-      <div className="border-b border-gray-700/50 px-3 py-2 sm:hidden">
-        <select
-          value={featureIdx}
-          onChange={(e) => handleFeatureChange(Number(e.target.value))}
-          className="w-full rounded-md border border-gray-600 bg-gray-800 px-3 py-1.5 text-sm text-white"
-        >
-          {FEATURES.map((f, i) => (
-            <option key={f.key} value={i}>
-              {f.label}
-            </option>
-          ))}
-        </select>
       </div>
 
       {/* Sub-tabs (underline style) */}
