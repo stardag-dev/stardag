@@ -1,26 +1,25 @@
 from typing import Annotated
 import stardag as sd
 
-class GetDataset(sd.Task[list[dict]]):
-    def run(self):
-        self._save([{"x": 1}, {"x": 2}])
+# Initial implementation
+# class Range(sd.Task[list[int]]):
+#     limit: int
+#
+#     def run(self):
+#         self._save(list(range(self.limit)))
 
-class TrainModel(sd.Task[dict]):
-    dataset: sd.TaskLoads[list[dict]]
-    learning_rate: float = 0.01
-    epochs: int = 10
-    # Exclude verbose from the hash — doesn't affect output
+# Extended implementation
+class Range(sd.Task[list[int]]):
+    limit: int
+    # Previously implicit defaults can be exposed with backwards 
+    # compatability in terms of task ID/hash and deserialization
+    start: Annotated[int, sd.StardagField(compat_default=0)]
+    step: Annotated[int, sd.StardagField(compat_default=1)]
+
+    # Parameters with no effect on output can be excluded from the hash
     verbose: Annotated[bool, sd.StardagField(hash_exclude=True)] = False
 
-    def requires(self):
-        return self.dataset
-
     def run(self):
-        self._save({"lr": self.learning_rate, "epochs": self.epochs})
-
-data = GetDataset()
-
-# These two produce the same output path (verbose is excluded)
-task_a = TrainModel(dataset=data, learning_rate=0.01, verbose=True)
-task_b = TrainModel(dataset=data, learning_rate=0.01, verbose=False)
-assert task_a.id == task_b.id
+        if self.verbose:
+            print("Generating range")
+        self._save(list(range(self.start, self.limit, self.step)))

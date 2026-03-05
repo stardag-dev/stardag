@@ -33,6 +33,7 @@ ml-pipeline = [
 dev = [
     "pytest>=8.2.2",
     "pyright>=1.1.359",
+    "ipython>=8.38.0",
 ]
 
 [tool.uv]

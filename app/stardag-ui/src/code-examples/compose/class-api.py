@@ -18,7 +18,10 @@ class Sum(sd.Task[int]):
 # Declarative DAG specification - no computation yet
 sum_task = Sum(values=Range(limit=4))
 
-sd.build(sum_task)  # Materialize all tasks' targets
+# Materialize all tasks' targets
+sd.build(sum_task)
 
-assert sum_task.load() == 6  # Load results
-assert sum_task.values.load() == [0, 1, 2, 3]  # access dependencies
+# Load results
+assert sum_task.load() == 6
+# Natural access to upstream dependencies
+assert sum_task.values.load() == [0, 1, 2, 3]

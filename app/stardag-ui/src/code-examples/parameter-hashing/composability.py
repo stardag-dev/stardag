@@ -1,3 +1,5 @@
+"""Task target uris are (by default) constructed by a recursive hash 
+of input parameters."""
 import stardag as sd
 
 @sd.task
@@ -13,11 +15,17 @@ def report(data: sd.Depends[list[dict]]) -> str:
     return f"Processed {len(data)} rows"
 
 # Same building blocks, different parameters → different output paths
-for source in ["users", "events"]:
-    pipeline = report(
-        data=transform(data=fetch_data(source=source), threshold=0.5)
-    )
-    sd.build(pipeline)
+users_report, events_report = [
+    report(
+        data=transform(
+            data=fetch_data(source=source),
+            threshold=0.5
+        )
+    ) for source in ["users", "events"]
+]
+assert users_report.target().uri != events_report.target().uri
+
+sd.build([users_report, events_report])
 
 # -- hidden --
 pipeline = report(

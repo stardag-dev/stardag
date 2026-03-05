@@ -53,11 +53,12 @@ const FEATURES: Feature[] = [
   },
   {
     key: "configure-env",
-    label: "Configure Env",
+    label: "Configure Storage",
     subtabs: [
       { key: "env-vars", label: "Env Vars" },
       { key: "profile", label: "Profile" },
-      { key: "customize", label: "Customize" },
+      // Later show example of implementing your own Remote Filesystem
+      // { key: "customize", label: "Customize" },
     ],
   },
   {
