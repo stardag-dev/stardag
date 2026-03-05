@@ -432,6 +432,10 @@ function LandingPage() {
             faster on data science and ML workflows.
           </p>
 
+          <h3 className="mb-4 text-lg font-semibold text-gray-300">
+            The SDK at a glance
+          </h3>
+
           <CodeExampleTabs />
 
           <div className="flex flex-col items-center gap-3 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-4 mb-4">

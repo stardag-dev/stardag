@@ -20,13 +20,9 @@ sum_task = Sum(values=Range(limit=4))
 
 print(sum_task.model_dump_json(indent=2))
 # {
-#   "__namespace": "",
 #   "__name": "Sum",
-#   "version": "",
 #   "values": {
-#     "__namespace": "",
 #     "__name": "Range",
-#     "version": "",
 #     "limit": 4
 #   }
 # }

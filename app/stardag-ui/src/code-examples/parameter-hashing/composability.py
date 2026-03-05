@@ -12,7 +12,9 @@ def transform(data: sd.Depends[list[dict]], threshold: float) -> list[dict]:
 def report(data: sd.Depends[list[dict]]) -> str:
     return f"Processed {len(data.load())} rows"
 
-# Compose different pipelines from the same building blocks
+# Same building blocks, different parameters → different output paths
 for source in ["users", "events"]:
-    pipeline = report(data=transform(data=fetch_data(source=source), threshold=0.5))
+    pipeline = report(
+        data=transform(data=fetch_data(source=source), threshold=0.5)
+    )
     sd.build(pipeline)

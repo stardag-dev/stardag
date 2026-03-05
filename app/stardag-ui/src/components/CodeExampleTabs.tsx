@@ -1,84 +1,153 @@
 import { useState } from "react";
 import { PythonCodeBlock } from "./PythonCodeBlock";
-import decoratorApiCode from "../code-examples/decorator-api.py?raw";
-import classApiCode from "../code-examples/class-api.py?raw";
-import s3StorageCode from "../code-examples/s3-storage.py?raw";
-import taskCompositionCode from "../code-examples/task-composition.py?raw";
-import asyncIOCode from "../code-examples/async-io.py?raw";
-import taskArePydanticCode from "../code-examples/task-are-pydantic.py?raw";
 
-type MainTab = "decorator" | "class" | "explore";
-type ExploreTab = "async-io" | "task-are-pydantic" | "s3-storage" | "composition";
+const codeFiles = import.meta.glob("../code-examples/**/*.py", {
+  eager: true,
+  query: "?raw",
+  import: "default",
+}) as Record<string, string>;
 
-const MAIN_TABS: { key: MainTab; label: string }[] = [
-  { key: "decorator", label: "Decorator API" },
-  { key: "class", label: "Class API" },
-  { key: "explore", label: "Explore features..." },
+interface Subtab {
+  key: string;
+  label: string;
+}
+
+interface Feature {
+  key: string;
+  label: string;
+  subtabs?: Subtab[];
+}
+
+const FEATURES: Feature[] = [
+  {
+    key: "compose",
+    label: "Compose",
+    subtabs: [
+      { key: "decorator-api", label: "Decorator API" },
+      { key: "class-api", label: "Class API" },
+    ],
+  },
+  {
+    key: "pydantic",
+    label: "Pydantic",
+    subtabs: [
+      { key: "decorator-api", label: "Decorator API" },
+      { key: "class-api", label: "Class API" },
+    ],
+  },
+  {
+    key: "async-io",
+    label: "Async IO",
+    subtabs: [
+      { key: "decorator-api", label: "Decorator API" },
+      { key: "class-api", label: "Class API" },
+    ],
+  },
+  {
+    key: "parameter-hashing",
+    label: "Parameter Hashing",
+    subtabs: [
+      { key: "composability", label: "Composability" },
+      { key: "control", label: "Control" },
+    ],
+  },
+  {
+    key: "configure-env",
+    label: "Configure Env",
+    subtabs: [
+      { key: "env-vars", label: "Env Vars" },
+      { key: "profile", label: "Profile" },
+      { key: "customize", label: "Customize" },
+    ],
+  },
+  {
+    key: "serialization",
+    label: "Serialization",
+    subtabs: [
+      { key: "customize", label: "Customize" },
+      { key: "load-from-registry", label: "Load from Registry" },
+    ],
+  },
+  { key: "modal", label: "Execute on Modal" },
+  { key: "prefect", label: "Embed in Prefect" },
 ];
 
-const MAIN_CODE: Record<Exclude<MainTab, "explore">, string> = {
-  decorator: decoratorApiCode.trimEnd(),
-  class: classApiCode.trimEnd(),
-};
+function getCode(feature: Feature, subtab?: Subtab): string {
+  const path = subtab
+    ? `../code-examples/${feature.key}/${subtab.key}.py`
+    : `../code-examples/${feature.key}.py`;
+  return (codeFiles[path] ?? "# Example coming soon...").trimEnd();
+}
 
-const EXPLORE_TABS: { key: ExploreTab; label: string }[] = [
-  { key: "task-are-pydantic", label: "Task are Pydantic" },
-  { key: "async-io", label: "Async I/O" },
-  { key: "s3-storage", label: "S3 Storage" },
-  { key: "composition", label: "Task Composition" },
-];
-
-const EXPLORE_CODE: Record<ExploreTab, string> = {
-  "task-are-pydantic": taskArePydanticCode.trimEnd(),
-  "async-io": asyncIOCode.trimEnd(),
-  "s3-storage": s3StorageCode.trimEnd(),
-  composition: taskCompositionCode.trimEnd(),
-};
+function resolveSubtab(feature: Feature, preferredLabel: string): Subtab | undefined {
+  if (!feature.subtabs) return undefined;
+  return feature.subtabs.find((s) => s.label === preferredLabel) ?? feature.subtabs[0];
+}
 
 export function CodeExampleTabs() {
-  const [mainTab, setMainTab] = useState<MainTab>("decorator");
-  const [exploreTab, setExploreTab] = useState<ExploreTab>("task-are-pydantic");
+  const [featureIdx, setFeatureIdx] = useState(0);
+  const [preferredSubtab, setPreferredSubtab] = useState("Decorator API");
 
-  const isExploring = mainTab === "explore";
-  const code = isExploring ? EXPLORE_CODE[exploreTab] : MAIN_CODE[mainTab];
+  const feature = FEATURES[featureIdx];
+  const subtab = resolveSubtab(feature, preferredSubtab);
+  const code = getCode(feature, subtab);
+
+  const handleFeatureChange = (idx: number) => {
+    setFeatureIdx(idx);
+  };
+
+  const handleSubtabChange = (s: Subtab) => {
+    setPreferredSubtab(s.label);
+  };
 
   return (
     <div className="mx-auto mb-10 w-full max-w-2xl overflow-hidden rounded-xl border border-gray-700/50 bg-gray-800/50 text-left">
-      {/* Main tab bar */}
-      <div className="flex items-center border-b border-gray-700/50 px-1">
-        {MAIN_TABS.map((tab, i) => (
-          <div key={tab.key} className="flex items-center">
-            {i === MAIN_TABS.length - 1 && (
-              <div className="mx-1 h-4 w-px bg-gray-600/50" />
-            )}
+      {/* Feature pills — desktop */}
+      <div className="hidden flex-wrap gap-1 border-b border-gray-700/50 px-2 py-2 sm:flex">
+        {FEATURES.map((f, i) => (
+          <button
+            key={f.key}
+            onClick={() => handleFeatureChange(i)}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+              i === featureIdx
+                ? "bg-blue-600 text-white"
+                : "text-gray-400 hover:bg-gray-700/50 hover:text-gray-200"
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Feature select — mobile */}
+      <div className="border-b border-gray-700/50 px-3 py-2 sm:hidden">
+        <select
+          value={featureIdx}
+          onChange={(e) => handleFeatureChange(Number(e.target.value))}
+          className="w-full rounded-md border border-gray-600 bg-gray-800 px-3 py-1.5 text-sm text-white"
+        >
+          {FEATURES.map((f, i) => (
+            <option key={f.key} value={i}>
+              {f.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* Sub-tabs (underline style) */}
+      {feature.subtabs && (
+        <div className="flex gap-1 overflow-x-auto border-b border-gray-700/50 px-3">
+          {feature.subtabs.map((s) => (
             <button
-              onClick={() => setMainTab(tab.key)}
-              className={`px-4 py-2.5 text-sm font-medium transition-colors ${
-                mainTab === tab.key
+              key={s.key}
+              onClick={() => handleSubtabChange(s)}
+              className={`whitespace-nowrap px-3 py-2 text-xs font-medium transition-colors ${
+                subtab?.key === s.key
                   ? "border-b-2 border-blue-500 text-white"
                   : "text-gray-400 hover:text-gray-200"
               }`}
             >
-              {tab.label}
-            </button>
-          </div>
-        ))}
-      </div>
-
-      {/* Explore sub-tabs */}
-      {isExploring && (
-        <div className="flex gap-1 border-b border-gray-700/50 px-2">
-          {EXPLORE_TABS.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => setExploreTab(tab.key)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                exploreTab === tab.key
-                  ? "bg-gray-700/60 text-white"
-                  : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              {tab.label}
+              {s.label}
             </button>
           ))}
         </div>
