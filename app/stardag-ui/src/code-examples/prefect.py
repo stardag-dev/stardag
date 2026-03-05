@@ -1,5 +1,5 @@
-"""Prefect lacks Makefile-style bottom up execution, but we can easilly 
-build stardag DAGs as part of any prefect flow or task."""
+"""Prefect lacks Makefile-style bottom-up execution, but we can easily
+build stardag DAGs as part of any Prefect flow or task."""
 from prefect import flow
 import stardag as sd
 from stardag.integration import prefect as sd_prefect
@@ -13,7 +13,7 @@ def transform(data: sd.Depends[list[dict]]) -> list[dict]:
     return [row for row in data if row["value"] > 0]
 
 @flow
-async def build_flow(pipeline: sd.Task):
+async def my_flow():
     # Run any other prefect code ...
     dag = transform(data=extract(source="events"))
     await sd_prefect.build_aio(dag)

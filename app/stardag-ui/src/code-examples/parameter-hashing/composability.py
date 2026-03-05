@@ -1,4 +1,4 @@
-"""Task target uris are (by default) constructed by a recursive hash 
+"""Task target URIs are (by default) constructed by a recursive hash
 of input parameters."""
 import stardag as sd
 

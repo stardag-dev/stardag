@@ -5,7 +5,7 @@ from pydantic import Field
 import stardag as sd
 
 class Range(sd.Task[list[int]]):
-    # All Pydantic primitives such validation out of the box
+    # All Pydantic primitives such as validation out of the box
     limit: Annotated[int, Field(gt=0)]
 
     def run(self):

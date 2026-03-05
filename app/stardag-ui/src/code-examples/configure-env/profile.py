@@ -1,4 +1,4 @@
-"""Configure storage centrally. Easilly swap between local/dev and 
+"""Configure storage centrally. Easily swap between local/dev and
 remote/production storage.
 
 Use configured profiles -> target roots stored centrally in the registry:

@@ -46,7 +46,7 @@ app = sd_modal.StardagApp(
 
 # Flexibly route tasks to different workers based on any task properties
 def worker_selector(task: sd.BaseTask) -> str:
-    if task.get_name() == "TrainedModel":
+    if task.get_name() == "train_model":
         return "gpu-large"
     return "default"
 

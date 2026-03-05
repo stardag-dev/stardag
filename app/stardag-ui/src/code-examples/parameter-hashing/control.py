@@ -11,8 +11,8 @@ import stardag as sd
 # Extended implementation
 class Range(sd.Task[list[int]]):
     limit: int
-    # Previously implicit defaults can be exposed with backwards 
-    # compatability in terms of task ID/hash and deserialization
+    # Previously implicit defaults can be exposed with backwards
+    # compatibility in terms of task ID/hash and deserialization
     start: Annotated[int, sd.StardagField(compat_default=0)]
     step: Annotated[int, sd.StardagField(compat_default=1)]
 

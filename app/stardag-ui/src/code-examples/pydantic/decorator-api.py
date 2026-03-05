@@ -6,7 +6,7 @@ import stardag as sd
 
 @sd.task
 def get_range(
-    # All Pydantic primitives such validation out of the box
+    # All Pydantic primitives such as validation out of the box
     limit: Annotated[int, Field(gt=0)]
 ) -> list[int]:
     return list(range(limit))

@@ -1,4 +1,4 @@
-"""Configure storage centrally. Easilly swap between local/dev and 
+"""Configure storage centrally. Easily swap between local/dev and
 remote/production storage.
 
 Configure via environment variables:

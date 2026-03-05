@@ -16,9 +16,13 @@ CODE_EXAMPLES_DIR = (
 SKIP_FILES: dict[str, str] = {
     "ml-pipeline.py": "display-only snippet (no imports)",
     "configure-env/profile.py": "display-only TOML documentation",
-    "configure-env/customize.py": "overrides target factory (display-only)",
+    "configure-env/customize.py": "not shown in UI",
+    "configure-env/env-vars.py": "requires multiple target roots",
     "async-io/decorator-api.py": "makes real HTTP calls",
     "async-io/class-api.py": "makes real HTTP calls",
+    "modal.py": "Modal deprecation warning crashes in exec without __name__",
+    "serialization/customize.py": "custom Serializer uses proxy_path (not supported by InMemoryTarget)",
+    "serialization/load-from-registry.py": "AliasTask.from_registry requires registry",
 }
 
 
@@ -44,5 +48,5 @@ def test_landing_page_example(example_file: Path, default_in_memory_fs_target):
     full_path = CODE_EXAMPLES_DIR / example_file
     code = full_path.read_text()
     compiled = compile(code, str(full_path), "exec")
-    namespace: dict = {}
+    namespace: dict = {"__name__": "__main__"}
     exec(compiled, namespace)
