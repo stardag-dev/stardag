@@ -11,6 +11,6 @@ class Download(sd.Task[str]):
             self._save(response.text)
 
 urls = [f"https://www.example.com/{i}" for i in range(5)]
+tasks = [Download(url=url) for url in urls]
 
-# All async tasks run concurrently via asyncio
-sd.build([Download(url=url) for url in urls])
+sd.build(tasks)  # All async tasks run concurrently via asyncio

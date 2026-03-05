@@ -9,6 +9,6 @@ async def download(url: str) -> str:
         return response.text
 
 urls = [f"https://www.example.com/{i}" for i in range(5)]
+tasks = [download(url=url) for url in urls]
 
-# All async tasks run concurrently via asyncio
-sd.build([download(url=url) for url in urls])
+sd.build(tasks)  # All async tasks run concurrently via asyncio

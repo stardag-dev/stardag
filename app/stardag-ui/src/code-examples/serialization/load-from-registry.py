@@ -1,12 +1,26 @@
 import stardag as sd
 
-# Load a task specification from the registry by ID
-task = sd.registry.get_task("ab12cd34-...")
+@sd.task
+def get_range(limit: int) -> list[int]:
+    return list(range(limit))
 
-# The task knows how to deserialize its own output
-result = task.load()
+@sd.task
+def get_sum(values: sd.Depends[list[int]]) -> int:
+    return sum(values)
 
-# Or load from a JSON specification
-spec = '{"__name": "Sum", "values": {"__name": "Range", "limit": 4}}'
-task = sd.Task.model_validate_json(spec)
-sd.build(task)
+# Serialize a task DAG to JSON
+task = get_sum(values=get_range(limit=4))
+spec = task.model_dump_json(indent=2)
+print(spec)
+
+# Reconstruct the exact task from JSON
+restored = type(task).model_validate_json(spec)
+sd.build(restored)
+
+assert restored.load() == 6
+
+# -- hidden --
+import json
+
+data = json.loads(spec)
+assert data["values"]["limit"] == 4

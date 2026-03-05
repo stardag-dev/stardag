@@ -76,7 +76,9 @@ function getCode(feature: Feature, subtab?: Subtab): string {
   const path = subtab
     ? `../code-examples/${feature.key}/${subtab.key}.py`
     : `../code-examples/${feature.key}.py`;
-  return (codeFiles[path] ?? "# Example coming soon...").trimEnd();
+  const raw = codeFiles[path] ?? "# Example coming soon...";
+  const hiddenIdx = raw.indexOf("# -- hidden --");
+  return hiddenIdx >= 0 ? raw.slice(0, hiddenIdx).trimEnd() : raw.trimEnd();
 }
 
 function resolveSubtab(feature: Feature, preferredLabel: string): Subtab | undefined {

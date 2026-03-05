@@ -11,7 +11,6 @@ def get_sum(values: sd.Depends[list[int]]) -> int:
 # Declarative DAG specification - no computation yet
 sum_task = get_sum(values=get_range(limit=4))
 
-# Materialize all tasks' targets
 sd.build(sum_task)  # Materialize all tasks' targets
 
 assert sum_task.load() == 6  # Load results

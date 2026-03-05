@@ -1,11 +1,25 @@
-import stardag as sd
-from stardag.integration.modal import ModalExecutor
+import modal
+from stardag.integration.modal import StardagApp, FunctionSettings
 
-@sd.task
-def train_model(epochs: int, lr: float) -> dict:
-    # This runs on Modal's cloud infrastructure
-    ...
+# User defines their image with full control
+image = (
+    modal.Image.debian_slim()
+    .pip_install("stardag", "scikit-learn")
+)
 
-# Execute on Modal with a GPU
-executor = ModalExecutor(gpu="A10G", timeout=3600)
-sd.build(train_model(epochs=100, lr=0.001), executor=executor)
+# Create app with builder and worker settings
+stardag_app = StardagApp(
+    "ml-training",
+    builder_settings=FunctionSettings(image=image),
+    worker_settings={
+        "default": FunctionSettings(image=image),
+        "gpu": FunctionSettings(image=image, gpu="A10G"),
+    },
+)
+
+# After deployment, build tasks remotely:
+# stardag_app.build_spawn(train_model(epochs=100, lr=0.001))
+
+# -- hidden --
+# Verify imports and construction work
+assert stardag_app is not None

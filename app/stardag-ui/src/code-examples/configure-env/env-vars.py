@@ -1,8 +1,7 @@
 import stardag as sd
 
 # Configure via environment variables
-# STARDAG_TARGET_ROOT=s3://my-bucket/stardag
-# STARDAG_TARGET_ROOT_KEY=production
+# STARDAG_TARGET_ROOTS__DEFAULT=s3://my-bucket/stardag
 
 @sd.task
 def my_task() -> dict:
@@ -10,3 +9,6 @@ def my_task() -> dict:
 
 # Targets are stored based on the configured root
 sd.build(my_task())
+
+# -- hidden --
+assert my_task().load() == {"result": 42}

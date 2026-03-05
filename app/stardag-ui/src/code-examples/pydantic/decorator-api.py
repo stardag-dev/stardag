@@ -18,3 +18,10 @@ print(sum_task.model_dump_json(indent=2))
 #     "limit": 4
 #   }
 # }
+
+# -- hidden --
+import json
+
+data = json.loads(sum_task.model_dump_json())
+assert "values" in data
+assert data["values"]["limit"] == 4

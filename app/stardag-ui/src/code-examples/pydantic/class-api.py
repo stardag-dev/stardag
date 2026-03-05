@@ -15,7 +15,6 @@ class Sum(sd.Task[int]):
     def run(self):
         self._save(sum(self.values.load()))
 
-# Declarative DAG specification - no computation yet
 sum_task = Sum(values=Range(limit=4))
 
 print(sum_task.model_dump_json(indent=2))
@@ -26,3 +25,9 @@ print(sum_task.model_dump_json(indent=2))
 #     "limit": 4
 #   }
 # }
+
+# -- hidden --
+import json
+
+data = json.loads(sum_task.model_dump_json())
+assert data["values"]["limit"] == 4
