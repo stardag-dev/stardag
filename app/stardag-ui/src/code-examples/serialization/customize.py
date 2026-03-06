@@ -2,9 +2,9 @@
 from typing import Annotated
 import pandas as pd
 import stardag as sd
-from stardag.target.serialize import Serializer
+from stardag.target.serialize import FileSerializer
 
-class DataFrameParquetSerializer(Serializer[pd.DataFrame, sd.FileTarget]):
+class DataFrameParquetSerializer(FileSerializer[pd.DataFrame]):
     def dump(self, obj: pd.DataFrame, target: sd.FileTarget):
         with target.proxy_path("w") as proxy_path:
             obj.to_parquet(proxy_path)

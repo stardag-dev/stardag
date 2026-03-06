@@ -139,8 +139,8 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
     def _relpath(self) -> str:
         """Override to customize the relative path of the task output.
 
-        When a fully qualified URI is provided, the `get_file_target` function ignores
-        target roots.
+        When a fully qualified URI is provided, the `get_file_target` or
+        `get_directory_target` functions ignores target roots.
         """
         return self.aliased.uri
 
