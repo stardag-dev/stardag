@@ -147,11 +147,22 @@ class WritableAIOFileSystemTargetHandle(
 BytesT = typing.TypeVar("BytesT", bound=bytes)
 
 
-class _FileSystemTargetGeneric(
+class _FileTargetGeneric(
     Target,
     typing.Generic[BytesT],
     typing.Protocol,
 ):
+    """Internal generic base for file-oriented targets.
+
+    Provides the full file I/O interface: ``open()``, ``proxy_path()``,
+    ``exists()``, and their async counterparts. Parametrized by byte type
+    for the open overloads. ``FileTarget`` is the concrete public protocol
+    that fixes ``BytesT = bytes``.
+
+    Not to be confused with ``FileSystemTarget`` which is the minimal base
+    protocol for both file and directory targets.
+    """
+
     uri: str
 
     def __init__(self, uri: str) -> None:
@@ -293,22 +304,49 @@ class _FileSystemTargetGeneric(
         return f"{self.__class__.__name__}({self.uri})"
 
 
-class FileSystemTarget(_FileSystemTargetGeneric[bytes], typing.Protocol):
+@typing.runtime_checkable
+class FileSystemTarget(Target, typing.Protocol):
+    """Minimal base protocol for filesystem-backed targets.
+
+    Both FileTarget (file-oriented) and DirectoryTarget (directory-oriented)
+    implement this protocol.
+    """
+
+    uri: str
+
+
+class FileTarget(_FileTargetGeneric[bytes], typing.Protocol):
+    """A file-oriented filesystem target with open/read/write capabilities.
+
+    Inherits all file I/O methods from ``_FileTargetGeneric``:
+    ``open()``, ``proxy_path()``, ``exists()``, and their async variants.
+    Concrete implementations: ``LocalFileTarget``, ``RemoteFileTarget``,
+    ``InMemoryFileTarget``.
+    """
+
     pass
 
 
 class LoadableSaveableFileSystemTarget(
     LoadableSaveableTarget[LoadedT],
-    _FileSystemTargetGeneric[bytes],
+    FileSystemTarget,
     typing.Generic[LoadedT],
     typing.Protocol,
-): ...
+):
+    """A filesystem target (file or directory) that supports load/save.
+
+    This is the return type of ``Task.target()``. It provides:
+    - ``load() -> LoadedT`` and ``save(obj: LoadedT)`` (from LoadableSaveableTarget)
+    - ``uri: str`` and ``exists() -> bool`` (from FileSystemTarget)
+    """
+
+    ...
 
 
 LSFST = LoadableSaveableFileSystemTarget
 
 
-class LocalTarget(FileSystemTarget):
+class LocalFileTarget(FileTarget):
     """TODO use luigi-style atomic writes."""
 
     def __init__(self, uri: str) -> None:
@@ -620,7 +658,7 @@ class RemoteFileSystemABC(metaclass=abc.ABCMeta):
             await aiofiles.os.rmdir(local_path.parent)
 
 
-class RemoteFileSystemTarget(FileSystemTarget):
+class RemoteFileTarget(FileTarget):
     def __init__(self, uri: str, rfs: RemoteFileSystemABC) -> None:
         if not uri.startswith(rfs.URI_PREFIX):
             raise ValueError(
@@ -1077,16 +1115,22 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
                 await aiofiles.os.remove(tmp_cache_path)
 
 
-_FSTargetType = typing.TypeVar("_FSTargetType", bound=FileSystemTarget)
+_FileTargetType = typing.TypeVar("_FileTargetType", bound=FileTarget)
 
 
-class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
-    """A target representing a directory."""
+class DirectoryTarget(FileSystemTarget, typing.Generic[_FileTargetType]):
+    """A target representing a directory of file targets.
+
+    Manages a collection of sub-targets (files) under a common URI prefix,
+    with a flag file to track completion. Sub-targets are created via
+    ``get_sub_target()`` or the ``/`` operator.
+    """
 
     def __init__(
         self,
         uri: str,
-        prototype: typing.Type[_FSTargetType] | typing.Callable[[str], _FSTargetType],
+        prototype: typing.Type[_FileTargetType]
+        | typing.Callable[[str], _FileTargetType],
     ) -> None:
         self.uri = uri.removesuffix("/") + "/"
         self.prototype = prototype
@@ -1102,7 +1146,7 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
         with self._flag_target.open("w") as f:
             f.write("")  # empty file
 
-    def get_sub_target(self, relpath: str) -> _FSTargetType:
+    def get_sub_target(self, relpath: str) -> _FileTargetType:
         if relpath.startswith("/"):
             raise ValueError(
                 f"Invalid relpath {relpath}, not allowed to start with '/'"
@@ -1110,10 +1154,10 @@ class DirectoryTarget(Target, typing.Generic[_FSTargetType]):
         self._sub_keys.add(relpath)
         return self.prototype(self.uri + relpath)
 
-    def __truediv__(self, relpath: str) -> _FSTargetType:
+    def __truediv__(self, relpath: str) -> _FileTargetType:
         return self.get_sub_target(relpath)
 
-    def sub_keys_target(self) -> _FSTargetType:
+    def sub_keys_target(self) -> _FileTargetType:
         return self.prototype(self.uri[:-1] + "._SUB_KEYS")
 
     def __repr__(self):

@@ -78,8 +78,8 @@ This lets `Task` automatically implement the `output()` with the appropriate Ser
     ```{.python notest}
         # ...
         def output(self) -> LoadableSaveableFileSystemTarget[int]:
-            return Serializable(
-                wrapped=sd.get_target(default_relpath(self)),
+            return FileSerializable(
+                wrapped=sd.get_file_target(default_relpath(self)),
                 serializer=JSONSerializer(int),
             )
     ```

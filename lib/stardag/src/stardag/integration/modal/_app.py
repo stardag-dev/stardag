@@ -566,7 +566,7 @@ class StardagApp:
 
         Discovered Modal volumes from target roots are automatically mounted at
         /mnt/stardag-volumes/<volume-name> and the STARDAG_MODAL_VOLUME_MOUNTS
-        env var is set so that ModalMountedVolumeTarget (local I/O) is used
+        env var is set so that ModalMountedVolumeFileTarget (local I/O) is used
         instead of ModalVolumeRemoteFileSystem (API-based).
 
         Args:
@@ -601,7 +601,7 @@ class StardagApp:
 
         extra_secrets = list(extra_secrets or [])
 
-        # Inject volume mount config as env var so ModalMountedVolumeTarget is used
+        # Inject volume mount config as env var so ModalMountedVolumeFileTarget is used
         if volume_mounts:
             extra_secrets.append(
                 modal.Secret.from_dict(

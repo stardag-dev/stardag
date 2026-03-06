@@ -8,7 +8,6 @@ from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validat
 
 from stardag._core.task import LoadedT, Task
 from stardag.base_model import StardagField
-from stardag.target import FileSystemTarget
 from stardag.target.serialize import get_serializer
 
 if TYPE_CHECKING:
@@ -25,7 +24,7 @@ class AliasedMetadata(BaseModel):
     body: dict[str, Any] | None = None
 
     @classmethod
-    def from_task(cls, task: Task[FileSystemTarget]) -> "AliasedMetadata":
+    def from_task(cls, task: Task[Any]) -> "AliasedMetadata":
         """Create AliasedMetadata from a given task."""
         return cls(
             id=task.id,
@@ -140,8 +139,8 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
     def _relpath(self) -> str:
         """Override to customize the relative path of the task output.
 
-        When a fully qualified URI is provided, the `get_target` function ignores
-        target roots.
+        When a fully qualified URI is provided, the `get_file_target` or
+        `get_directory_target` functions ignores target roots.
         """
         return self.aliased.uri
 

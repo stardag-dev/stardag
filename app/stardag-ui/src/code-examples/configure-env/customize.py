@@ -20,7 +20,7 @@ with target_factory_provider.override(
     sd.build(my_task())
 
 # -- hidden --
-from stardag.target import InMemoryFileSystemTarget, target_factory_provider, TargetFactory
+from stardag.target import InMemoryFileTarget, target_factory_provider, TargetFactory
 from stardag.target._factory import TargetFactory as TF
 
 # Verify config_provider works

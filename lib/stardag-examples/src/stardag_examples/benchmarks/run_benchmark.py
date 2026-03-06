@@ -48,7 +48,7 @@ from stardag.registry import (
     RegistryGlobalConcurrencyLockManager,
     init_registry,
 )
-from stardag.target import InMemoryFileSystemTarget
+from stardag.target import InMemoryFileTarget
 from stardag.target._factory import TargetFactory, target_factory_provider
 
 # Registry mode type
@@ -356,7 +356,7 @@ def main():
     with target_factory_provider.override(
         TargetFactory(
             target_roots={"default": target_root},
-            prefix_to_target_prototype={"/": InMemoryFileSystemTarget},
+            prefix_to_target_prototype={"/": InMemoryFileTarget},
         )
     ):
         all_results: list[BenchmarkResult] = []

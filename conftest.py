@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 from stardag.target import (
-    InMemoryFileSystemTarget,
-    LocalTarget,
+    InMemoryFileTarget,
+    LocalFileTarget,
     target_factory_provider,
 )
 from stardag.target._factory import TargetFactory
@@ -29,7 +29,7 @@ def default_local_target_tmp_path(
         with target_factory_provider.override(
             TargetFactory(
                 target_roots=target_roots,
-                prefix_to_target_prototype={"/": LocalTarget},
+                prefix_to_target_prototype={"/": LocalFileTarget},
             )
         ):
             yield default_root
@@ -48,19 +48,19 @@ def _default_in_memory_fs_target_factory(
         TargetFactory(
             target_roots={"default": default_in_memory_fs_target_prefix},
             prefix_to_target_prototype={
-                default_in_memory_fs_target_prefix: InMemoryFileSystemTarget
+                default_in_memory_fs_target_prefix: InMemoryFileTarget
             },
         )
     ) as target_factory:
-        with InMemoryFileSystemTarget.cleared():
+        with InMemoryFileTarget.cleared():
             yield target_factory
 
 
 @pytest.fixture(scope="function")
 def default_in_memory_fs_target(
     _default_in_memory_fs_target_factory,
-) -> typing.Type[InMemoryFileSystemTarget]:
-    return InMemoryFileSystemTarget
+) -> typing.Type[InMemoryFileTarget]:
+    return InMemoryFileTarget
 
 
 @pytest.fixture(scope="function", autouse=True)

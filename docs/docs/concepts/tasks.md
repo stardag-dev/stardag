@@ -194,4 +194,4 @@ For most tasks, **`Task` is the right choice**. Use the other base classes only 
 | `TargetTask[Target]` | Custom target type (non-filesystem, special path logic).   |
 | `BaseTask`           | Full control. No target or load assumptions.               |
 
-In the following section we will cover the fact that most tasks use `Target`s, and in particular `FileSystemTarget`s, to persistently store their output and for downstream tasks to retrieve it as input.
+In the following section we will cover the fact that most tasks use `Target`s, and in particular `FileTarget`s and `DirectoryTarget`s, to persistently store their output and for downstream tasks to retrieve it as input.

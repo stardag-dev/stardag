@@ -15,8 +15,10 @@ from pydantic import PydanticSchemaGenerationError, TypeAdapter
 
 from stardag.target._base import (
     AIOFileSystemTargetHandle,
+    DirectoryTarget,
     FileSystemTarget,
     FileSystemTargetHandle,
+    FileTarget,
     LoadableSaveableFileSystemTarget,
     LoadedT,
     OpenMode,
@@ -25,7 +27,10 @@ from stardag.target._base import (
     WritableAIOFileSystemTargetHandle,
     WritableFileSystemTargetHandle,
 )
+
 from stardag.utils.resource_provider import resource_provider
+
+TargetT = typing.TypeVar("TargetT", bound=FileSystemTarget)
 
 try:
     from pandas import DataFrame as DataFrame  # type: ignore
@@ -38,30 +43,49 @@ except ImportError:
 
 
 @typing.runtime_checkable
-class Serializer(typing.Generic[LoadedT], typing.Protocol):
-    """Protocol for serializers that can dump/load objects to/from targets."""
+class Serializer(typing.Generic[LoadedT, TargetT], typing.Protocol):  # pyright: ignore[reportInvalidTypeVarUse]
+    """Protocol for serializers that dump/load objects to/from targets.
+
+    Parameterized by:
+        LoadedT: The Python type that is serialized/deserialized.
+        TargetT: The target type (``FileTarget`` or ``DirectoryTarget``).
+
+    Concrete serializer base classes:
+        - ``FileSerializer[LoadedT]``: For file-backed serialization (most common).
+        - ``DirectorySerializer[LoadedT]``: For directory-backed serialization
+          (e.g. zarr datasets, ML model checkpoints).
+    """
 
     def dump(
         self,
         obj: LoadedT,
-        target: FileSystemTarget,
+        target: TargetT,
     ) -> None: ...
 
     def load(
         self,
-        target: FileSystemTarget,
+        target: TargetT,
     ) -> LoadedT: ...
 
     async def dump_aio(
         self,
         obj: LoadedT,
-        target: FileSystemTarget,
+        target: TargetT,
     ) -> None: ...
 
     async def load_aio(
         self,
-        target: FileSystemTarget,
+        target: TargetT,
     ) -> LoadedT: ...
+
+
+# Convenience aliases for the two target-specialized serializer protocols.
+
+FileSerializer = Serializer[LoadedT, FileTarget]
+"""Serializer that operates on file targets (the common case)."""
+
+DirectorySerializer = Serializer[LoadedT, DirectoryTarget]
+"""Serializer that operates on directory targets (e.g. zarr, ML checkpoints)."""
 
 
 # Type variable for stream type (str or bytes)
@@ -69,10 +93,12 @@ StreamT = typing.TypeVar("StreamT", str, bytes)
 
 
 class _DumpsLoadsSerializer(typing.Generic[LoadedT, StreamT], abc.ABC):
-    """Base class for serializers that use dumps/loads pattern.
+    """Base class for file serializers that use a dumps/loads pattern.
 
-    Provides default implementations of dump/load and dump_aio/load_aio
-    using abstract dumps/loads methods.
+    Subclasses implement ``dumps()`` and ``loads()`` to convert between
+    ``LoadedT`` and a stream type (``str`` or ``bytes``). The base class
+    provides ``dump``/``load`` (and async variants) that open the
+    ``FileTarget`` in the appropriate mode.
     """
 
     stream_type: type[StreamT]
@@ -102,36 +128,38 @@ class _DumpsLoadsSerializer(typing.Generic[LoadedT, StreamT], abc.ABC):
     def dump(
         self,
         obj: LoadedT,
-        target: FileSystemTarget,
+        target: FileTarget,
     ) -> None:
         with target.open(self.write_mode) as handle:
             handle.write(self.dumps(obj))  # type: ignore[arg-type]
 
-    def load(self, target: FileSystemTarget) -> LoadedT:
+    def load(self, target: FileTarget) -> LoadedT:
         with target.open(self.read_mode) as handle:
             return self.loads(handle.read())  # type: ignore[arg-type]
 
     async def dump_aio(
         self,
         obj: LoadedT,
-        target: FileSystemTarget,
+        target: FileTarget,
     ) -> None:
         async with target.open_aio(self.write_mode) as handle:
             await handle.write(self.dumps(obj))  # type: ignore[arg-type]
 
-    async def load_aio(self, target: FileSystemTarget) -> LoadedT:
+    async def load_aio(self, target: FileTarget) -> LoadedT:
         async with target.open_aio(self.read_mode) as handle:
             return self.loads(await handle.read())  # type: ignore[arg-type]
 
 
-class Serializable(
+class FileSerializable(
     LoadableSaveableFileSystemTarget[LoadedT],
     typing.Generic[LoadedT],
 ):
+    """A file target wrapped with a serializer, providing ``load()``/``save()``."""
+
     def __init__(
         self,
-        wrapped: FileSystemTarget,
-        serializer: Serializer[LoadedT],
+        wrapped: FileTarget,
+        serializer: Serializer[LoadedT, FileTarget],
     ) -> None:
         self.serializer = serializer
         self.wrapped = wrapped
@@ -230,6 +258,91 @@ class Serializable(
         """Async writable proxy path - delegates to wrapped target."""
         async with self.wrapped._writable_proxy_path_aio() as path:
             yield path
+
+
+class DirectorySerializable(
+    LoadableSaveableFileSystemTarget[LoadedT],
+    typing.Generic[LoadedT],
+):
+    """A directory target wrapped with a directory serializer, providing ``load()``/``save()``.
+
+    The serializer's ``dump()`` is responsible for writing sub-targets and
+    calling ``target.mark_done()`` when complete.
+    """
+
+    def __init__(
+        self,
+        wrapped: DirectoryTarget,
+        serializer: Serializer[LoadedT, DirectoryTarget],
+    ) -> None:
+        self.serializer = serializer
+        self.wrapped = wrapped
+
+    @property
+    def uri(self) -> str:  # type: ignore
+        return self.wrapped.uri
+
+    def load(self) -> LoadedT:
+        return self.serializer.load(self.wrapped)
+
+    def save(self, obj: LoadedT) -> None:
+        self.serializer.dump(obj, self.wrapped)
+        if not self.wrapped.exists():
+            raise RuntimeError(
+                f"Directory serializer {type(self.serializer).__name__}.dump() "
+                f"did not call target.mark_done(). A directory serializer's "
+                f"dump() must call target.mark_done() after writing all "
+                f"sub-targets to signal completion."
+            )
+
+    def exists(self) -> bool:
+        return self.wrapped.exists()
+
+    async def exists_aio(self) -> bool:
+        return await self.wrapped.exists_aio()
+
+    async def load_aio(self) -> LoadedT:
+        return await self.serializer.load_aio(self.wrapped)
+
+    async def save_aio(self, obj: LoadedT) -> None:
+        await self.serializer.dump_aio(obj, self.wrapped)
+        if not await self.wrapped.exists_aio():
+            raise RuntimeError(
+                f"Directory serializer {type(self.serializer).__name__}.dump_aio() "
+                f"did not call target.mark_done_aio(). A directory serializer's "
+                f"dump_aio() must call target.mark_done_aio() (or target.mark_done()) "
+                f"after writing all sub-targets to signal completion."
+            )
+
+
+def is_directory_serializer(
+    serializer: Serializer,  # type: ignore[type-arg]
+) -> bool:
+    """Check if a serializer operates on directory targets.
+
+    Uses the ``target_type`` attribute if present (preferred), otherwise
+    inspects the ``dump`` method's ``target`` parameter type hint.
+    """
+    # Explicit attribute check (preferred)
+    target_type = getattr(serializer, "target_type", None)
+    if target_type is not None:
+        return target_type is DirectoryTarget or (
+            isinstance(target_type, type) and issubclass(target_type, DirectoryTarget)
+        )
+
+    # Fallback: inspect type hints on dump method
+    try:
+        hints = typing.get_type_hints(type(serializer).dump)
+    except Exception:
+        return False
+
+    target_hint = hints.get("target")
+    if target_hint is not None:
+        origin = typing.get_origin(target_hint)
+        if origin is None and isinstance(target_hint, type):
+            return issubclass(target_hint, DirectoryTarget)
+
+    return False
 
 
 class PlainTextSerializer(_DumpsLoadsSerializer[str, str]):
@@ -337,49 +450,62 @@ class PandasDataFrameCSVSerializer(_DumpsLoadsSerializer[DataFrame, str]):
 
 
 @typing.runtime_checkable
-class SelfSerializing(typing.Protocol):
-    def dump(self, target: FileSystemTarget) -> None: ...
+class SelfFileSerializing(typing.Protocol):
+    """Protocol for objects that know how to serialize/deserialize themselves to a file."""
+
+    def dump(self, target: FileTarget) -> None: ...
     @classmethod
-    def load(cls, target: FileSystemTarget) -> Self: ...
+    def load(cls, target: FileTarget) -> Self: ...
 
 
-class SelfSerializer(Serializer[SelfSerializing]):
-    """Serializer for objects that themselves implement the SelfSerializing protocol."""
+@typing.runtime_checkable
+class SelfDirectorySerializing(typing.Protocol):
+    """Protocol for objects that serialize/deserialize themselves to a directory."""
+
+    def dump(self, target: DirectoryTarget) -> None: ...
+    @classmethod
+    def load(cls, target: DirectoryTarget) -> Self: ...
+
+
+class SelfFileSerializer(Serializer[SelfFileSerializing, FileTarget]):
+    """Serializer for objects that implement ``SelfFileSerializing``."""
+
+    target_type = FileTarget
 
     @classmethod
-    def type_checked_init(cls, annotation: typing.Type[SelfSerializing]) -> Self:
+    def type_checked_init(cls, annotation: typing.Type[SelfFileSerializing]) -> Self:
         return cls(strip_annotation(annotation))
 
     def __init__(self, class_) -> None:
         try:
-            is_subclass_ = issubclass(class_, SelfSerializing)
+            is_subclass_ = issubclass(class_, SelfFileSerializing)
         except TypeError:
             raise ValueError(f"{class_} must be a class.")
 
         if not is_subclass_:
-            raise ValueError(f"{class_} must comply with the SelfSerializing protocol.")
+            raise ValueError(
+                f"{class_} must comply with the SelfFileSerializing protocol."
+            )
         self.class_ = class_
 
     def dump(
         self,
-        obj: SelfSerializing,
-        target: FileSystemTarget,
+        obj: SelfFileSerializing,
+        target: FileTarget,
     ) -> None:
         obj.dump(target)
 
-    def load(self, target: FileSystemTarget) -> SelfSerializing:
+    def load(self, target: FileTarget) -> SelfFileSerializing:
         return self.class_.load(target)
 
     async def dump_aio(
         self,
-        obj: SelfSerializing,
-        target: FileSystemTarget,
+        obj: SelfFileSerializing,
+        target: FileTarget,
     ) -> None:
-        # Delegate to sync - SelfSerializing doesn't define async methods
         obj.dump(target)
 
-    async def load_aio(self, target: FileSystemTarget) -> SelfSerializing:
-        # Delegate to sync - SelfSerializing doesn't define async methods
+    async def load_aio(self, target: FileTarget) -> SelfFileSerializing:
         return self.class_.load(target)
 
     def get_default_extension(self) -> str | None:
@@ -388,7 +514,82 @@ class SelfSerializer(Serializer[SelfSerializing]):
     def __eq__(self, value: object) -> bool:
         return (
             type(self) == type(value)  # noqa: E721
-            and isinstance(value, SelfSerializer)
+            and isinstance(value, SelfFileSerializer)
+            and self.class_ == value.class_
+        )
+
+
+class SelfDirectorySerializer(Serializer[SelfDirectorySerializing, DirectoryTarget]):
+    """Serializer for objects that implement ``SelfDirectorySerializing``."""
+
+    target_type = DirectoryTarget
+
+    @classmethod
+    def type_checked_init(
+        cls, annotation: typing.Type[SelfDirectorySerializing]
+    ) -> Self:
+        stripped = strip_annotation(annotation)
+        # Runtime protocol check + verify that dump() actually expects DirectoryTarget
+        # (not just any target), to distinguish from SelfFileSerializing.
+        try:
+            is_subclass_ = issubclass(stripped, SelfDirectorySerializing)
+        except TypeError:
+            raise ValueError(f"{stripped} must be a class.")
+        if not is_subclass_:
+            raise ValueError(
+                f"{stripped} must comply with the SelfDirectorySerializing protocol."
+            )
+        # Check type hints to disambiguate from SelfFileSerializing
+        try:
+            hints = typing.get_type_hints(stripped.dump)
+        except Exception as e:
+            raise ValueError(
+                f"Cannot inspect type hints on {stripped}.dump(). "
+                f"Ensure the `target` parameter is annotated as `DirectoryTarget`: {e}"
+            ) from e
+        target_hint = hints.get("target")
+        if target_hint is None or not (
+            target_hint is DirectoryTarget
+            or (
+                isinstance(target_hint, type)
+                and issubclass(target_hint, DirectoryTarget)
+            )
+        ):
+            raise ValueError(
+                f"{stripped}.dump() target parameter must be DirectoryTarget."
+            )
+        return cls(stripped)
+
+    def __init__(self, class_) -> None:
+        self.class_ = class_
+
+    def dump(
+        self,
+        obj: SelfDirectorySerializing,
+        target: DirectoryTarget,
+    ) -> None:
+        obj.dump(target)
+
+    def load(self, target: DirectoryTarget) -> SelfDirectorySerializing:
+        return self.class_.load(target)
+
+    async def dump_aio(
+        self,
+        obj: SelfDirectorySerializing,
+        target: DirectoryTarget,
+    ) -> None:
+        obj.dump(target)
+
+    async def load_aio(self, target: DirectoryTarget) -> SelfDirectorySerializing:
+        return self.class_.load(target)
+
+    def get_default_extension(self) -> str | None:
+        return None
+
+    def __eq__(self, value: object) -> bool:
+        return (
+            type(self) == type(value)  # noqa: E721
+            and isinstance(value, SelfDirectorySerializer)
             and self.class_ == value.class_
         )
 
@@ -407,12 +608,14 @@ def strip_annotation(annotation: typing.Type[LoadedT]) -> typing.Type[LoadedT]:
 
 class SerializerFactoryProtocol(typing.Protocol):
     @abc.abstractmethod
-    def __call__(self, annotation: typing.Type[LoadedT]) -> Serializer[LoadedT]: ...
+    def __call__(
+        self, annotation: typing.Type[LoadedT]
+    ) -> Serializer[LoadedT, typing.Any]: ...
 
 
 def get_explicitly_annotated_serializer(
     annotation: typing.Type[LoadedT],
-) -> Serializer[LoadedT]:
+) -> Serializer[LoadedT, typing.Any]:
     origin = typing.get_origin(annotation)
     if origin == typing.Annotated:
         args = typing.get_args(annotation)
@@ -423,9 +626,10 @@ def get_explicitly_annotated_serializer(
     raise ValueError(f"No explicit serializer found for {annotation}")
 
 
-_DEFAULT_SERIALIZER_CANDIDATES: tuple[SerializerFactoryProtocol] = (
+_DEFAULT_SERIALIZER_CANDIDATES: tuple[SerializerFactoryProtocol, ...] = (
     get_explicitly_annotated_serializer,
-    SelfSerializer.type_checked_init,  # type: ignore
+    SelfDirectorySerializer.type_checked_init,  # type: ignore
+    SelfFileSerializer.type_checked_init,  # type: ignore
     # specific type serializers
     PandasDataFrameCSVSerializer.type_checked_init,
     PlainTextSerializer.type_checked_init,
@@ -445,7 +649,9 @@ class SerializerFactory(SerializerFactoryProtocol):
     ) -> None:
         self.candidates = candidates
 
-    def __call__(self, annotation: typing.Type[LoadedT]) -> Serializer[LoadedT]:
+    def __call__(
+        self, annotation: typing.Type[LoadedT]
+    ) -> Serializer[LoadedT, typing.Any]:
         for candidate in self.candidates:
             try:
                 return candidate(annotation)
@@ -461,5 +667,13 @@ serializer_factory_provider = resource_provider(
 )
 
 
-def get_serializer(annotation: typing.Type[LoadedT]) -> Serializer[LoadedT]:
+def get_serializer(
+    annotation: typing.Type[LoadedT],
+) -> Serializer[LoadedT, typing.Any]:
+    """Get a serializer for the given type annotation.
+
+    Returns a ``Serializer[LoadedT, FileTarget]`` for most types, or a
+    ``Serializer[LoadedT, DirectoryTarget]`` when the annotation specifies
+    a directory-based serializer (via ``typing.Annotated``).
+    """
     return serializer_factory_provider.get()(annotation)

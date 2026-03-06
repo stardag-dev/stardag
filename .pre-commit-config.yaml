@@ -28,10 +28,10 @@ repos:
       - id: pyright-stardag-examples
         name: pyright (lib/stardag-examples)
         # Uses published stardag from PyPI. When making breaking changes to
-        # lib/stardag that aren't yet released, temporarily replace with:
-        #   entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv pip install -e ../stardag && uv run --no-sync pyright src tests'
+        # lib/stardag that aren't yet released, temporarily replace with the line below.
         # Revert after publishing the new stardag version.
-        entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv run pyright src tests'
+        # entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv run pyright src tests'
+        entry: bash -c 'cd lib/stardag-examples && uv sync --all-extras && uv pip install -e ../stardag && uv run --no-sync pyright src tests'
         language: system
         files: ^lib/stardag-examples/
         types: [python]

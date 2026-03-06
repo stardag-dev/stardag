@@ -21,6 +21,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
+import typing
+
+import stardag.target
 
 import stardag as sd
 
@@ -253,7 +256,8 @@ class FileIOTask(BenchmarkTask):
     def _do_work(self) -> None:
         # Write data synchronously
         data = "x" * self.data_size
-        with self.target().open("w") as f:
+        target = typing.cast(stardag.target.FileSerializable, self.target())
+        with target.open("w") as f:
             f.write(data)
 
     async def run_aio(self) -> None:
@@ -262,7 +266,8 @@ class FileIOTask(BenchmarkTask):
 
         # Write data asynchronously
         data = "x" * self.data_size
-        async with self.target().open_aio("w") as f:
+        target = typing.cast(stardag.target.FileSerializable, self.target())
+        async with target.open_aio("w") as f:
             await f.write(data)
 
         elapsed = time.perf_counter() - start
@@ -281,10 +286,11 @@ class FileIOReadWriteTask(BenchmarkTask):
 
     def _do_work(self) -> None:
         data = "y" * self.data_size
+        target = typing.cast(stardag.target.FileSerializable, self.target())
         for _ in range(self.iterations):
-            with self.target().open("w") as f:
+            with target.open("w") as f:
                 f.write(data)
-            with self.target().open("r") as f:
+            with target.open("r") as f:
                 _ = f.read()
 
     async def run_aio(self) -> None:
@@ -292,10 +298,11 @@ class FileIOReadWriteTask(BenchmarkTask):
         start = time.perf_counter()
 
         data = "y" * self.data_size
+        target = typing.cast(stardag.target.FileSerializable, self.target())
         for _ in range(self.iterations):
-            async with self.target().open_aio("w") as f:
+            async with target.open_aio("w") as f:
                 await f.write(data)
-            async with self.target().open_aio("r") as f:
+            async with target.open_aio("r") as f:
                 _ = await f.read()
 
         elapsed = time.perf_counter() - start

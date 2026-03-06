@@ -3,30 +3,28 @@ import typing
 from contextlib import contextmanager
 
 from stardag.config import DEFAULT_TARGET_ROOT_KEY, config_provider
-from stardag.target import DirectoryTarget, FileSystemTarget, LocalTarget
-from stardag.target._base import RemoteFileSystemTarget
+from stardag.target import DirectoryTarget, FileTarget, LocalFileTarget
+from stardag.target._base import RemoteFileTarget
 from stardag.utils.resource_provider import resource_provider
 
 # A class or callable that takes a (fully qualifed/"absolute") path (/uri) and returns
-# a FileSystemTarget.
-TargetPrototype = (
-    typing.Type[FileSystemTarget] | typing.Callable[[str], FileSystemTarget]
-)
+# a FileTarget.
+FileTargetPrototype = typing.Type[FileTarget] | typing.Callable[[str], FileTarget]
 
 
-PrefixToTargetPrototype = typing.Mapping[str, TargetPrototype]
+PrefixToFileTargetPrototype = typing.Mapping[str, FileTargetPrototype]
 
 
-def get_default_prefix_to_target_prototype() -> dict[str, TargetPrototype]:
-    prefix_to_target_prototype: dict[str, TargetPrototype] = {
-        "/": LocalTarget,
+def get_default_prefix_to_target_prototype() -> dict[str, FileTargetPrototype]:
+    prefix_to_target_prototype: dict[str, FileTargetPrototype] = {
+        "/": LocalFileTarget,
     }
     # S3 integration
     try:
         from stardag.integration.aws.s3 import s3_rfs_provider
 
-        def s3_target_from_path(uri: str) -> FileSystemTarget:
-            return RemoteFileSystemTarget(uri=uri, rfs=s3_rfs_provider.get())
+        def s3_target_from_path(uri: str) -> FileTarget:
+            return RemoteFileTarget(uri=uri, rfs=s3_rfs_provider.get())
 
         prefix_to_target_prototype["s3://"] = s3_target_from_path
     except ImportError:
@@ -47,7 +45,7 @@ class TargetFactory:
     def __init__(
         self,
         target_roots: dict[str, str] | None = None,
-        prefix_to_target_prototype: PrefixToTargetPrototype | None = None,
+        prefix_to_target_prototype: PrefixToFileTargetPrototype | None = None,
     ) -> None:
         # If no target_roots provided, get from central config
         if target_roots is None:
@@ -60,12 +58,12 @@ class TargetFactory:
             prefix_to_target_prototype or get_default_prefix_to_target_prototype()
         )
 
-    def get_target(
+    def get_file_target(
         self,
         relpath: str,
         target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
-    ) -> FileSystemTarget:
-        """Get a file system target.
+    ) -> FileTarget:
+        """Get a file target.
 
         Args:
             relpath: The path to the target, relative to the configured root path for
@@ -73,7 +71,7 @@ class TargetFactory:
             target_root_key: The key to the target root to use.
 
         Returns:
-            A file system target.
+            A file target.
         """
         if self._is_full_path(relpath):
             path = relpath
@@ -120,7 +118,7 @@ class TargetFactory:
 
         return f"{target_root}{relpath}"
 
-    def _get_target_prototype(self, path: str) -> TargetPrototype:
+    def _get_target_prototype(self, path: str) -> FileTargetPrototype:
         for prefix, target_prototype in self.prefix_to_target_prototype.items():
             if path.startswith(prefix):
                 return target_prototype
@@ -143,11 +141,12 @@ target_factory_provider = resource_provider(
 )
 
 
-def get_target(
+def get_file_target(
     relpath: str,
     target_root_key: str = DEFAULT_TARGET_ROOT_KEY,
-) -> FileSystemTarget:
-    return target_factory_provider.get().get_target(
+) -> FileTarget:
+    """Get a file target for the given relative path."""
+    return target_factory_provider.get().get_file_target(
         relpath=relpath,
         target_root_key=target_root_key,
     )

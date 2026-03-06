@@ -106,7 +106,7 @@ For complete control over all aspects:
 ```python
 import stardag as sd
 from stardag.target import LoadableSaveableFileSystemTarget
-from stardag.target.serialize import JSONSerializer, Serializable
+from stardag.target.serialize import JSONSerializer, FileSerializable
 
 class CustomTask(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
     """Task with custom target configuration."""
@@ -120,8 +120,8 @@ class CustomTask(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
     def target(self) -> LoadableSaveableFileSystemTarget[dict]:
         # Custom path structure
         path = f"custom/{self.config_key}/{self.task_id[:8]}.json"
-        return Serializable(
-            wrapped=sd.get_target(path, task=self),
+        return FileSerializable(
+            wrapped=sd.get_file_target(path),
             serializer=JSONSerializer(dict),
         )
 
@@ -173,8 +173,8 @@ The same task in all three APIs:
             return self.values
 
         def target(self):
-            return Serializable(
-                wrapped=sd.get_target(f"sum/{self.task_id}.json", task=self),
+            return FileSerializable(
+                wrapped=sd.get_file_target(f"sum/{self.task_id}.json"),
                 serializer=JSONSerializer(int),
             )
 

@@ -12,7 +12,7 @@ from stardag.integration.modal._config import get_package_deps, with_stardag_on_
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
     VOLUME_MOUNT_PATH_PREFIX,
-    ModalMountedVolumeTarget,
+    ModalMountedVolumeFileTarget,
     get_default_volume_mount_path,
     get_modal_target,
     get_volume_name_and_path,
@@ -25,7 +25,7 @@ __all__ = [
     "FunctionSettings",
     "MODAL_VOLUME_URI_PREFIX",
     "VOLUME_MOUNT_PATH_PREFIX",
-    "ModalMountedVolumeTarget",
+    "ModalMountedVolumeFileTarget",
     "get_default_volume_mount_path",
     "get_volume_name_and_path",
     "get_modal_target",

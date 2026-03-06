@@ -1,9 +1,9 @@
 from pathlib import Path
 
 from stardag.target import (
-    InMemoryFileSystemTarget,
-    LocalTarget,
-    get_target,
+    InMemoryFileTarget,
+    LocalFileTarget,
+    get_file_target,
     target_factory_provider,
 )
 
@@ -12,11 +12,11 @@ def test_default_local_target_tmp_path(default_local_target_tmp_path: Path):
     tmp_path = default_local_target_tmp_path
     assert isinstance(tmp_path, Path)
     target_factory = target_factory_provider.get()
-    assert target_factory.prefix_to_target_prototype["/"] == LocalTarget
+    assert target_factory.prefix_to_target_prototype["/"] == LocalFileTarget
     assert target_factory.target_roots["default"] == str(tmp_path) + "/"
     key = "mock/target.txt"
-    target = get_target(key)
-    assert isinstance(target, LocalTarget)
+    target = get_file_target(key)
+    assert isinstance(target, LocalFileTarget)
     assert target.uri == str(tmp_path / key)
 
 
@@ -31,21 +31,21 @@ def test_default_in_memory_target(
     default_in_memory_fs_target,
     default_in_memory_fs_target_prefix,
 ):
-    assert default_in_memory_fs_target == InMemoryFileSystemTarget
+    assert default_in_memory_fs_target == InMemoryFileTarget
     target_factory = target_factory_provider.get()
     assert (
         target_factory.prefix_to_target_prototype[default_in_memory_fs_target_prefix]
-        == InMemoryFileSystemTarget
+        == InMemoryFileTarget
     )
     assert target_factory.target_roots["default"] == default_in_memory_fs_target_prefix
     key = "mock/target.txt"
-    target = get_target(key)
-    assert isinstance(target, InMemoryFileSystemTarget)
+    target = get_file_target(key)
+    assert isinstance(target, InMemoryFileTarget)
     assert target.uri == default_in_memory_fs_target_prefix + key
 
-    assert InMemoryFileSystemTarget.uri_to_bytes == {}
+    assert InMemoryFileTarget.uri_to_bytes == {}
     test_data = b"test-test"
     with target.open("wb") as handle:
         handle.write(test_data)
 
-    assert InMemoryFileSystemTarget.uri_to_bytes == {target.uri: test_data}
+    assert InMemoryFileTarget.uri_to_bytes == {target.uri: test_data}

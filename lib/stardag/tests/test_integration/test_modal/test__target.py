@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 import tomllib
 
-from stardag import FileSystemTarget, get_target
-from stardag.target import RemoteFileSystemTarget
+from stardag import FileTarget, get_file_target
+from stardag.target import RemoteFileTarget
 
 VOLUME_NAME = "stardag-testing"
 
@@ -92,9 +92,9 @@ def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
     target = sd_modal.get_modal_target(uri)
     assert target.uri == uri
     if mount_expected:
-        assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
+        assert isinstance(target, sd_modal.ModalMountedVolumeFileTarget)
     else:
-        assert isinstance(target, RemoteFileSystemTarget)
+        assert isinstance(target, RemoteFileTarget)
 
     _write_read_(target)
 
@@ -143,15 +143,15 @@ def test_modal_mounted_volume_target_full_uri(use_mount: bool):
 
 
 def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
-    target = get_target(f"{temp_test_dir}/test.txt")
+    target = get_file_target(f"{temp_test_dir}/test.txt")
     assert (
         target.uri
         == f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}/{temp_test_dir}/test.txt"
     )
     if mount_expected:
-        assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
+        assert isinstance(target, sd_modal.ModalMountedVolumeFileTarget)
     else:
-        assert isinstance(target, RemoteFileSystemTarget)
+        assert isinstance(target, RemoteFileTarget)
     _write_read_(target)
 
 
@@ -211,7 +211,7 @@ def test_modal_mounted_volume_target_default_root(use_mount: bool):
             pass  # File might not exist if test failed early
 
 
-def _write_read_(target: FileSystemTarget):
+def _write_read_(target: FileTarget):
     assert not target.exists()
 
     with target.open("w") as f:
@@ -239,7 +239,7 @@ def read_file(in_volume_path: str) -> bytes:
 # =============================================================================
 
 
-async def _write_read_aio_(target: FileSystemTarget):
+async def _write_read_aio_(target: FileTarget):
     """Async version of _write_read_ using async methods."""
     assert not await target.exists_aio()
 
@@ -263,9 +263,9 @@ def _write_read_aio_full_uri(temp_test_dir: str, mount_expected: bool):
     target = sd_modal.get_modal_target(uri)
     assert target.uri == uri
     if mount_expected:
-        assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
+        assert isinstance(target, sd_modal.ModalMountedVolumeFileTarget)
     else:
-        assert isinstance(target, RemoteFileSystemTarget)
+        assert isinstance(target, RemoteFileTarget)
 
     asyncio.run(_write_read_aio_(target))
 
