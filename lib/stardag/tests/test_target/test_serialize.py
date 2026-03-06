@@ -159,3 +159,26 @@ class TestDirectorySerializable:
         serializer = SelfDirectorySerializer(_SelfDirSerializing)
         ds = DirectorySerializable(wrapped=dt, serializer=serializer)
         assert ds.uri == dt.uri
+
+    def test_save_raises_if_mark_done_not_called(self, default_in_memory_fs_target):
+        from stardag.target import get_directory_target
+
+        class BadSerializer:
+            target_type = DirectoryTarget
+
+            def dump(self, obj, target: DirectoryTarget) -> None:
+                pass  # does NOT call target.mark_done()
+
+            def load(self, target: DirectoryTarget):
+                return None
+
+            async def dump_aio(self, obj, target: DirectoryTarget) -> None:
+                pass
+
+            async def load_aio(self, target: DirectoryTarget):
+                return None
+
+        dt = get_directory_target("test-dir-no-mark-done/")
+        ds = DirectorySerializable(wrapped=dt, serializer=BadSerializer())  # type: ignore[type-var]
+        with pytest.raises(RuntimeError, match="did not call target.mark_done"):
+            ds.save({"data": 1})  # type: ignore[arg-type]

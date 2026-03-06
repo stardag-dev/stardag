@@ -287,6 +287,13 @@ class DirectorySerializable(
 
     def save(self, obj: LoadedT) -> None:
         self.serializer.dump(obj, self.wrapped)
+        if not self.wrapped.exists():
+            raise RuntimeError(
+                f"Directory serializer {type(self.serializer).__name__}.dump() "
+                f"did not call target.mark_done(). A directory serializer's "
+                f"dump() must call target.mark_done() after writing all "
+                f"sub-targets to signal completion."
+            )
 
     def exists(self) -> bool:
         return self.wrapped.exists()
@@ -299,6 +306,13 @@ class DirectorySerializable(
 
     async def save_aio(self, obj: LoadedT) -> None:
         await self.serializer.dump_aio(obj, self.wrapped)
+        if not await self.wrapped.exists_aio():
+            raise RuntimeError(
+                f"Directory serializer {type(self.serializer).__name__}.dump_aio() "
+                f"did not call target.mark_done_aio(). A directory serializer's "
+                f"dump_aio() must call target.mark_done_aio() (or target.mark_done()) "
+                f"after writing all sub-targets to signal completion."
+            )
 
 
 def is_directory_serializer(
