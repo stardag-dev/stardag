@@ -1,8 +1,14 @@
+import json
 import typing
 
 from stardag import Task, auto_namespace
-from stardag.target import FileSerializable
-from stardag.target.serialize import JSONSerializer, PlainTextSerializer
+from stardag.target import DirectorySerializable, FileSerializable
+from stardag.target._base import DirectoryTarget
+from stardag.target.serialize import (
+    JSONSerializer,
+    PlainTextSerializer,
+    SelfDirectorySerializing,
+)
 
 auto_namespace(__name__)
 
@@ -211,3 +217,39 @@ class TestGenericTypeVar:
 
         assert isinstance(ConcreteIntTask._serializer, JSONSerializer)
         assert isinstance(ConcreteStrTask._serializer, PlainTextSerializer)
+
+
+class _DirData(SelfDirectorySerializing):
+    def __init__(self, data: dict) -> None:
+        self.data = data
+
+    def dump(self, target: DirectoryTarget) -> None:
+        with (target / "data.json").open("w") as f:
+            f.write(json.dumps(self.data))
+
+    @classmethod
+    def load(cls, target: DirectoryTarget) -> typing.Self:
+        with (target / "data.json").open("r") as f:
+            return cls(json.loads(f.read()))
+
+
+class DirTask(Task[_DirData]):
+    def run(self):
+        self._save(_DirData({"result": 1}))
+
+
+class TestDirectoryTarget:
+    """Tests that Task with a directory serializer returns DirectorySerializable."""
+
+    def test_target_returns_directory_serializable(self):
+        task = DirTask()
+        target = task.target()
+        assert isinstance(target, DirectorySerializable)
+
+    def test_run_saves_and_loads(self, default_in_memory_fs_target):
+        task = DirTask()
+        task.run()
+        assert task.complete()
+        loaded = task.load()
+        assert isinstance(loaded, _DirData)
+        assert loaded.data == {"result": 1}

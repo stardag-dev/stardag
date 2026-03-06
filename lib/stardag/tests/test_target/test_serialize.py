@@ -2,17 +2,21 @@ import typing
 
 import pytest
 
-from stardag.target._base import FileTarget
+from stardag.target._base import DirectoryTarget, FileTarget
 from stardag.target.serialize import (
     DataFrame,
+    DirectorySerializable,
     JSONSerializer,
     PandasDataFrameCSVSerializer,
     PickleSerializer,
     PlainTextSerializer,
+    SelfDirectorySerializer,
+    SelfDirectorySerializing,
     SelfFileSerializer,
     SelfFileSerializing,
     Serializer,
     get_serializer,
+    is_directory_serializer,
 )
 
 
@@ -28,6 +32,24 @@ class _SelfSerializing(SelfFileSerializing):
     def load(cls, target: FileTarget) -> typing.Self:
         with target.open("r") as f:
             return cls(f.read())
+
+
+class _SelfDirSerializing(SelfDirectorySerializing):
+    def __init__(self, data: dict) -> None:
+        self.data = data
+
+    def dump(self, target: DirectoryTarget) -> None:
+        with (target / "data.json").open("w") as f:
+            import json
+
+            f.write(json.dumps(self.data))
+
+    @classmethod
+    def load(cls, target: DirectoryTarget) -> typing.Self:
+        with (target / "data.json").open("r") as f:
+            import json
+
+            return cls(json.loads(f.read()))
 
 
 class _NoDefaultSerializerType:
@@ -66,6 +88,7 @@ class CustomMockSerializer(Serializer[str, FileTarget]):
         (dict[str, str], JSONSerializer(dict[str, str])),
         (DataFrame, PandasDataFrameCSVSerializer()),
         (_SelfSerializing, SelfFileSerializer(_SelfSerializing)),
+        (_SelfDirSerializing, SelfDirectorySerializer(_SelfDirSerializing)),
         (_NoDefaultSerializerType, PickleSerializer()),
         (typing.Annotated[str, CustomMockSerializer()], CustomMockSerializer()),
     ],
@@ -77,3 +100,61 @@ def test_get_serializer(annotation, expected_serializer):
     extra_annotation = typing.Annotated[annotation, "extra"]
     serializer_from_extra_annotated = get_serializer(extra_annotation)  # type: ignore
     assert serializer_from_extra_annotated == expected_serializer
+
+
+class TestIsDirectorySerializer:
+    def test_file_serializer_returns_false(self):
+        assert is_directory_serializer(JSONSerializer(int)) is False
+
+    def test_serializer_with_target_type_attribute(self):
+        s = SelfDirectorySerializer(_SelfDirSerializing)
+        assert is_directory_serializer(s) is True
+
+    def test_serializer_with_file_target_type_attribute(self):
+        s = SelfFileSerializer(_SelfSerializing)
+        assert is_directory_serializer(s) is False
+
+    def test_serializer_with_dump_type_hint(self):
+        class HintedDirSerializer:
+            def dump(self, obj: dict, target: DirectoryTarget) -> None: ...
+            def load(self, target: DirectoryTarget) -> dict: ...
+            async def dump_aio(self, obj: dict, target: DirectoryTarget) -> None: ...
+            async def load_aio(self, target: DirectoryTarget) -> dict: ...
+
+        assert is_directory_serializer(HintedDirSerializer()) is True
+
+    def test_unresolvable_type_hints_returns_false(self):
+        """get_type_hints() failure should return False, not crash."""
+
+        class BadSerializer:
+            def dump(self, obj, target: "NonExistentType") -> None: ...  # type: ignore  # noqa: F821
+            def load(self, target) -> None: ...
+            async def dump_aio(self, obj, target) -> None: ...
+            async def load_aio(self, target) -> None: ...
+
+        assert is_directory_serializer(BadSerializer()) is False
+
+
+class TestDirectorySerializable:
+    def test_save_and_load(self, default_in_memory_fs_target):
+        from stardag.target import get_directory_target
+
+        dt = get_directory_target("test-dir-serializable/")
+        serializer = SelfDirectorySerializer(_SelfDirSerializing)
+        ds = DirectorySerializable(wrapped=dt, serializer=serializer)
+
+        obj = _SelfDirSerializing({"key": "value"})
+        ds.save(obj)
+        assert ds.exists()
+
+        loaded = ds.load()
+        assert isinstance(loaded, _SelfDirSerializing)
+        assert loaded.data == {"key": "value"}
+
+    def test_uri_delegates_to_wrapped(self, default_in_memory_fs_target):
+        from stardag.target import get_directory_target
+
+        dt = get_directory_target("test-dir-uri/")
+        serializer = SelfDirectorySerializer(_SelfDirSerializing)
+        ds = DirectorySerializable(wrapped=dt, serializer=serializer)
+        assert ds.uri == dt.uri
