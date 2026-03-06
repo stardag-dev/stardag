@@ -3883,7 +3883,7 @@ wheels = [
 
 [[package]]
 name = "stardag"
-version = "0.3.0"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -3896,9 +3896,9 @@ dependencies = [
     { name = "typer" },
     { name = "uuid6" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/73/ef/a2433e6385bfc53de6008e8f9520f81cfc1c23319c09800587d7c3aa41ef/stardag-0.3.0.tar.gz", hash = "sha256:36695fa5de960ae30a04614f057fea7074d53964d6fe9b3c4ec288125a90a6a4", size = 416552, upload-time = "2026-03-03T07:34:57.581Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/a1/23a0dc05b2f18a4e6a8e3e2067f7950c46efde7651c16ae36fafd3dd7f0e/stardag-0.4.0.tar.gz", hash = "sha256:da93c11d8a16185f40ed44d615d7a6f34f640907bf85548a387855c571bbb172", size = 421744, upload-time = "2026-03-06T09:27:53.794Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/3f/63cf98538e818ee3927f7e776bdcf688c653a7b15352adf9e4c5e6559543/stardag-0.3.0-py3-none-any.whl", hash = "sha256:76f85b78caf1289f76fb55c7c298b260e31f833dcbeab4fc8b95dadfafd3dc47", size = 144071, upload-time = "2026-03-03T07:34:56.303Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/d1/c5362080dfe5b61d84ee54eb25560ee566c856f23271a285bec30ac20154/stardag-0.4.0-py3-none-any.whl", hash = "sha256:2e0cc62761568654ce02cb8dd40193b8d4f303e770c0a4182acb489686a5f5dd", size = 147983, upload-time = "2026-03-06T09:27:52.213Z" },
 ]
 
 [[package]]
@@ -3956,7 +3956,7 @@ requires-dist = [
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
     { name = "scikit-learn", marker = "extra == 'ml-pipeline'", specifier = ">=1.5.2" },
-    { name = "stardag" },
+    { name = "stardag", specifier = ">=0.4.0" },
     { name = "tabulate", marker = "extra == 'ml-pipeline'", specifier = ">=0.9" },
 ]
 provides-extras = ["prefect", "s3", "modal", "ml-pipeline"]
