@@ -60,6 +60,7 @@ class MyDirectorySerializer:
     def dump(self, obj, target: DirectoryTarget) -> None:
         with (target / "data.json").open("w") as f:
             f.write(json.dumps(obj))
+        target.mark_done()
 
     def load(self, target: DirectoryTarget):
         with (target / "data.json").open("r") as f:
@@ -76,27 +77,37 @@ class MyTask(sd.Task[Annotated[dict, MyDirectorySerializer()]]):
 1. **`FileSystemTarget` → `FileTarget`** in type annotations for file-oriented targets:
 
    ```python
-   # Before                                    # After
+   # Before
    class MyTask(sd.TargetTask[sd.FileSystemTarget]):
-       def target(self) -> sd.FileSystemTarget:     class MyTask(sd.TargetTask[sd.FileTarget]):
-           return sd.get_target("path.txt")             def target(self) -> sd.FileTarget:
-                                                            return sd.get_file_target("path.txt")
+       def target(self) -> sd.FileSystemTarget:
+           return sd.get_target("path.txt")
+
+   # After
+   class MyTask(sd.TargetTask[sd.FileTarget]):
+       def target(self) -> sd.FileTarget:
+           return sd.get_file_target("path.txt")
    ```
 
 2. **`get_target()` → `get_file_target()`**:
 
    ```python
-   # Before                          # After
-   sd.get_target("path/file.json")   sd.get_file_target("path/file.json")
+   # Before
+   sd.get_target("path/file.json")
+
+   # After
+   sd.get_file_target("path/file.json")
    ```
 
 3. **`Serializable` → `FileSerializable`**:
 
    ```python
-   # Before                                    # After
+   # Before
    from stardag.target.serialize import Serializable
-   Serializable(wrapped=target, serializer=s)   from stardag.target.serialize import FileSerializable
-                                                FileSerializable(wrapped=target, serializer=s)
+   Serializable(wrapped=target, serializer=s)
+
+   # After
+   from stardag.target.serialize import FileSerializable
+   FileSerializable(wrapped=target, serializer=s)
    ```
 
 4. **`SelfSerializing` → `SelfFileSerializing`**, **`SelfSerializer` → `SelfFileSerializer`**
