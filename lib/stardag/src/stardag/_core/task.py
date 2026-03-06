@@ -3,8 +3,17 @@ import typing
 
 from stardag._core.base_task import LoadableTask, TargetTask
 from stardag.config import DEFAULT_TARGET_ROOT_KEY
-from stardag.target import LoadableSaveableFileSystemTarget, Serializable, get_target
-from stardag.target.serialize import get_serializer
+from stardag.target import (
+    FileSerializable,
+    LoadableSaveableFileSystemTarget,
+    get_directory_target,
+    get_file_target,
+)
+from stardag.target.serialize import (
+    DirectorySerializable,
+    get_serializer,
+    is_directory_serializer,
+)
 
 LoadedT = typing.TypeVar("LoadedT")
 
@@ -47,7 +56,7 @@ class Task(
     my_task = MyTask()
 
     print(my_task.target())
-    # Serializable(../MyTask/03/6f/036f6e71-1b3c-54b8-aec1-182359f1e09a.json)
+    # FileSerializable(../MyTask/03/6f/036f6e71-1b3c-54b8-aec1-182359f1e09a.json)
 
     print(my_task.target().serializer)
     # <stardag.target.serialize.JSONSerializer at 0x1064e4710>
@@ -154,8 +163,17 @@ class Task(
         return DEFAULT_TARGET_ROOT_KEY
 
     def target(self) -> LoadableSaveableFileSystemTarget[LoadedT]:
-        return Serializable(
-            wrapped=get_target(self._relpath, target_root_key=self._target_root_key),
+        if is_directory_serializer(self.serializer):
+            return DirectorySerializable(
+                wrapped=get_directory_target(
+                    self._relpath, target_root_key=self._target_root_key
+                ),
+                serializer=self.serializer,
+            )
+        return FileSerializable(
+            wrapped=get_file_target(
+                self._relpath, target_root_key=self._target_root_key
+            ),
             serializer=self.serializer,
         )
 

@@ -65,9 +65,10 @@ from stardag.registry import registry_provider
 from stardag.target import (
     DirectoryTarget,
     FileSystemTarget,
+    FileTarget,
     LocalTarget,
     get_directory_target,
-    get_target,
+    get_file_target,
     target_factory_provider,
 )
 
@@ -96,8 +97,9 @@ __all__ = [
     "Depends",
     "DirectoryTarget",
     "FileSystemTarget",
+    "FileTarget",
     "get_directory_target",
-    "get_target",
+    "get_file_target",
     "HashableSet",
     "HashSafeSetSerializer",
     "LoadableTask",

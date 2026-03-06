@@ -17,7 +17,7 @@ from tenacity import (
 )
 
 from stardag.integration.modal._config import modal_config_provider
-from stardag.target import LocalTarget, RemoteFileSystemABC, RemoteFileSystemTarget
+from stardag.target import LocalTarget, RemoteFileSystemABC, RemoteFileTarget
 from stardag.utils.resource_provider import resource_provider
 
 logger = logging.getLogger(__name__)
@@ -262,16 +262,16 @@ modal_volume_rfs_provider = resource_provider(
 )
 
 
-def get_modal_target(uri: str) -> ModalMountedVolumeTarget | RemoteFileSystemTarget:
+def get_modal_target(uri: str) -> ModalMountedVolumeTarget | RemoteFileTarget:
     """Get the appropriate target for a Modal volume URI.
 
     Returns ModalMountedVolumeTarget (local I/O) if the volume is mounted,
-    otherwise falls back to RemoteFileSystemTarget (API-based).
+    otherwise falls back to RemoteFileTarget (API-based).
 
     Mount detection order:
     1. Explicit mount from STARDAG_MODAL_VOLUME_MOUNTS config
     2. Predefined auto-mount path /mnt/stardag-volumes/<volume-name> (if it exists)
-    3. Fallback to API-based RemoteFileSystemTarget
+    3. Fallback to API-based RemoteFileTarget
     """
     volume_name, in_volume_path = get_volume_name_and_path(uri=uri)
     mount_path = modal_config_provider.get().volume_name_to_mount_path.get(volume_name)
@@ -282,4 +282,4 @@ def get_modal_target(uri: str) -> ModalMountedVolumeTarget | RemoteFileSystemTar
     if mount_path is not None:
         return ModalMountedVolumeTarget(uri)
     else:
-        return RemoteFileSystemTarget(uri, rfs=modal_volume_rfs_provider.get())
+        return RemoteFileTarget(uri, rfs=modal_volume_rfs_provider.get())

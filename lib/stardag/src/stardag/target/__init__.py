@@ -4,6 +4,7 @@ from stardag.target._base import (
     CachedRemoteFileSystemConfig,
     DirectoryTarget,
     FileSystemTarget,
+    FileTarget,
     InMemoryRemoteFileSystem,
     LoadableSaveableFileSystemTarget,
     LoadableSaveableTarget,
@@ -11,26 +12,27 @@ from stardag.target._base import (
     LoadedT,
     LocalTarget,
     RemoteFileSystemABC,
-    RemoteFileSystemTarget,
+    RemoteFileTarget,
     SaveableTarget,
 )
 from stardag.target._factory import (
     TargetFactory,
     get_directory_target,
-    get_target,
+    get_file_target,
     target_factory_provider,
 )
-from stardag.target._in_memory import InMemoryFileSystemTarget, InMemoryTarget
-from stardag.target.serialize import Serializable
+from stardag.target._in_memory import InMemoryFileTarget, InMemoryTarget
+from stardag.target.serialize import DirectorySerializable, FileSerializable
 
 __all__ = [
     "CachedRemoteFileSystem",
     "CachedRemoteFileSystemConfig",
     "DirectoryTarget",
     "FileSystemTarget",
-    "get_target",
+    "FileTarget",
+    "get_file_target",
     "get_directory_target",
-    "InMemoryFileSystemTarget",
+    "InMemoryFileTarget",
     "InMemoryRemoteFileSystem",
     "InMemoryTarget",
     "LoadableSaveableTarget",
@@ -39,9 +41,10 @@ __all__ = [
     "LoadedT",
     "LocalTarget",
     "RemoteFileSystemABC",
-    "RemoteFileSystemTarget",
+    "RemoteFileTarget",
     "SaveableTarget",
-    "Serializable",
+    "DirectorySerializable",
+    "FileSerializable",
     "Target",
     "TargetFactory",
     "target_factory_provider",

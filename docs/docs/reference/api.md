@@ -27,7 +27,7 @@ Auto-generated API documentation from source code.
         - build_sequential_aio
         - namespace
         - auto_namespace
-        - get_target
+        - get_file_target
         - get_directory_target
         - target_factory_provider
 
@@ -54,6 +54,8 @@ Auto-generated API documentation from source code.
       show_root_heading: true
       members:
         - FileSystemTarget
+        - FileTarget
+        - DirectoryTarget
         - LoadableSaveableFileSystemTarget
         - LocalTarget
         - TargetFactory

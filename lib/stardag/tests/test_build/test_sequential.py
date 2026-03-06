@@ -17,7 +17,7 @@ from stardag.build import (
     build_sequential_aio,
 )
 from stardag.registry import NoOpRegistry
-from stardag.target import InMemoryFileSystemTarget
+from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import (
     AsyncOnlyTask,
     DiamondTask,
@@ -46,7 +46,7 @@ class TestBuildSequential:
 
     def test_simple_dag(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test building a simple DAG sequentially."""
@@ -61,7 +61,7 @@ class TestBuildSequential:
 
     def test_simple_dag_output_serialization(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         simple_dag: RootTask,
         simple_dag_expected_root_output: RootTaskLoadedT,
     ):
@@ -70,7 +70,7 @@ class TestBuildSequential:
         assert simple_dag.target().load() == simple_dag_expected_root_output
         expected_root_path = f"in-memory://{simple_dag._relpath}"
         assert (
-            InMemoryFileSystemTarget.uri_to_bytes[expected_root_path]
+            InMemoryFileTarget.uri_to_bytes[expected_root_path]
             == json.dumps(
                 simple_dag_expected_root_output, separators=(",", ":")
             ).encode()
@@ -78,7 +78,7 @@ class TestBuildSequential:
 
     def test_sync_only_task(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test sync-only tasks execute via run()."""
@@ -91,7 +91,7 @@ class TestBuildSequential:
 
     def test_dual_task_uses_sync_by_default(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test dual tasks use sync by default in build_sequential."""
@@ -104,7 +104,7 @@ class TestBuildSequential:
 
     def test_dual_task_uses_async_when_configured(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test dual tasks can use async when configured."""
@@ -119,7 +119,7 @@ class TestBuildSequential:
 
     def test_fail_fast_mode(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test FAIL_FAST mode stops at first failure."""
@@ -139,7 +139,7 @@ class TestBuildSequential:
 
     def test_continue_mode(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test CONTINUE mode runs all possible tasks."""
@@ -160,7 +160,7 @@ class TestBuildSequential:
 
     def test_already_complete_tasks_skipped(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that already complete tasks are not re-executed."""
@@ -178,7 +178,7 @@ class TestBuildSequential:
 
     def test_multiple_root_tasks(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test building multiple independent root tasks."""
@@ -206,7 +206,7 @@ class TestBuildSequentialAio:
     @pytest.mark.asyncio
     async def test_simple_dag(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test building a simple DAG sequentially async."""
@@ -222,7 +222,7 @@ class TestBuildSequentialAio:
     @pytest.mark.asyncio
     async def test_async_only_task(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test async-only tasks execute via run_aio()."""
@@ -236,7 +236,7 @@ class TestBuildSequentialAio:
     @pytest.mark.asyncio
     async def test_sync_task_in_thread_by_default(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test sync tasks run in thread by default in async sequential."""
@@ -253,7 +253,7 @@ class TestBuildSequentialAio:
     @pytest.mark.asyncio
     async def test_fail_fast_mode(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test FAIL_FAST mode in async build."""
@@ -279,7 +279,7 @@ class TestDiamondPatternsSequential:
 
     def test_static_diamond(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """
@@ -312,7 +312,7 @@ class TestDiamondPatternsSequential:
 
     def test_dynamic_diamond(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """
@@ -350,7 +350,7 @@ class TestDiamondPatternsSequential:
 
     def test_complex_dynamic_diamond(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """

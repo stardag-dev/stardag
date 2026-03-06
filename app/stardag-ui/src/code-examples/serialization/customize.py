@@ -4,12 +4,12 @@ import pandas as pd
 import stardag as sd
 from stardag.target.serialize import Serializer
 
-class DataFrameParquetSerializer(Serializer[pd.DataFrame]):
-    def dump(self, obj: pd.DataFrame, target: sd.FileSystemTarget):
+class DataFrameParquetSerializer(Serializer[pd.DataFrame, sd.FileTarget]):
+    def dump(self, obj: pd.DataFrame, target: sd.FileTarget):
         with target.proxy_path("w") as proxy_path:
             obj.to_parquet(proxy_path)
 
-    def load(self, target: sd.FileSystemTarget) -> pd.DataFrame:
+    def load(self, target: sd.FileTarget) -> pd.DataFrame:
         with target.proxy_path("r") as proxy_path:
             return pd.read_parquet(proxy_path)
 

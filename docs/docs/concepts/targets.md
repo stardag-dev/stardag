@@ -31,7 +31,7 @@ Note that [`TargetTask`](../reference/api.md#stardag.TargetTask) is implemented 
 
 ## The Typical `Target` uses a File System
 
-Moreover, the most commonly used `Target` persists, retrieves and checks existence of one or many files/objects in a file system. To this end Stardag implements the [`FileSystemTarget`](../reference/api.md#stardag.FileSystemTarget).
+Moreover, the most commonly used `Target` persists, retrieves and checks existence of one or many files/objects in a file system. To this end Stardag implements the [`FileSystemTarget`](../reference/api.md#stardag.FileSystemTarget) hierarchy: `FileSystemTarget` is the minimal base protocol (providing `uri` and `exists()`), with [`FileTarget`](../reference/api.md#stardag.FileTarget) for file-oriented targets and [`DirectoryTarget`](../reference/api.md#stardag.DirectoryTarget) for directory-oriented targets.
 
 You can, and it is in some cases motivated to, return a target for a certain type of file system with an absolute path/URI
 
@@ -48,28 +48,28 @@ class MyTask(sd.TargetTask[sd.LocalTarget]):
         return sd.LocalTarget("/absolute/path/to/file.txt")
 ```
 
-However, you are strongly encouraged to instead use the function `sd.get_target`:
+However, you are strongly encouraged to instead use the function `sd.get_file_target`:
 
 ```python
 import stardag as sd
 
-class MyTask(sd.TargetTask[sd.FileSystemTarget]):
+class MyTask(sd.TargetTask[sd.FileTarget]):
 
     def run(self):
         with self.target().open("w") as handle:
             handle.write("result")
 
-    def target(self) -> sd.FileSystemTarget:
-        return sd.get_target("path/to/file.txt")
+    def target(self) -> sd.FileTarget:
+        return sd.get_file_target("path/to/file.txt")
 ```
 
 The main benefit here is that you can configure the file system and root directory/URI-prefix _centrally and decoupled_ from your tasks. This means for example that you can trivially jump between experimenting fully locally and running pipelines in production (or staging etc.).
 
 ## Target Roots
 
-Target roots define the base location for `FileSystemTargets` obtained by `sd.get_target()` or when using `sd.Task` or the `@sd.task` decorator API.
+Target roots define the base location for `FileSystemTargets` obtained by `sd.get_file_target()` or when using `sd.Task` or the `@sd.task` decorator API.
 
-As per the last example above, when implementing `target()`, you are advised to use `sd.get_target` which takes the arguments:
+As per the last example above, when implementing `target()`, you are advised to use `sd.get_file_target` which takes the arguments:
 
 - `relpath: str` (required)
 - `target_root_key: str` (default value `"default"`)

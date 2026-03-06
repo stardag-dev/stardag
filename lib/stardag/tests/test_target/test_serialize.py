@@ -2,30 +2,30 @@ import typing
 
 import pytest
 
-from stardag.target._base import FileSystemTarget
+from stardag.target._base import FileTarget
 from stardag.target.serialize import (
     DataFrame,
     JSONSerializer,
     PandasDataFrameCSVSerializer,
     PickleSerializer,
     PlainTextSerializer,
-    SelfSerializer,
-    SelfSerializing,
+    SelfFileSerializer,
+    SelfFileSerializing,
     Serializer,
     get_serializer,
 )
 
 
-class _SelfSerializing(SelfSerializing):
+class _SelfSerializing(SelfFileSerializing):
     def __init__(self, value: str) -> None:
         self.value = value
 
-    def dump(self, target: FileSystemTarget) -> None:
+    def dump(self, target: FileTarget) -> None:
         with target.open("w") as f:
             f.write(str(self.value))
 
     @classmethod
-    def load(cls, target: FileSystemTarget) -> typing.Self:
+    def load(cls, target: FileTarget) -> typing.Self:
         with target.open("r") as f:
             return cls(f.read())
 
@@ -35,20 +35,20 @@ class _NoDefaultSerializerType:
         self.value = value
 
 
-class CustomMockSerializer(Serializer[str]):
-    def dump(self, obj: str, target: FileSystemTarget) -> None:
+class CustomMockSerializer(Serializer[str, FileTarget]):
+    def dump(self, obj: str, target: FileTarget) -> None:
         with target.open("w") as f:
             f.write(obj)
 
-    def load(self, target: FileSystemTarget) -> str:
+    def load(self, target: FileTarget) -> str:
         with target.open("r") as f:
             return f.read()
 
-    async def dump_aio(self, obj: str, target: FileSystemTarget) -> None:
+    async def dump_aio(self, obj: str, target: FileTarget) -> None:
         async with target.open_aio("w") as f:
             await f.write(obj)
 
-    async def load_aio(self, target: FileSystemTarget) -> str:
+    async def load_aio(self, target: FileTarget) -> str:
         async with target.open_aio("r") as f:
             return await f.read()
 
@@ -65,7 +65,7 @@ class CustomMockSerializer(Serializer[str]):
         (dict[str, int], JSONSerializer(dict[str, int])),
         (dict[str, str], JSONSerializer(dict[str, str])),
         (DataFrame, PandasDataFrameCSVSerializer()),
-        (_SelfSerializing, SelfSerializer(_SelfSerializing)),
+        (_SelfSerializing, SelfFileSerializer(_SelfSerializing)),
         (_NoDefaultSerializerType, PickleSerializer()),
         (typing.Annotated[str, CustomMockSerializer()], CustomMockSerializer()),
     ],

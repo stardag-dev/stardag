@@ -40,7 +40,7 @@ def task_api(limit: int) -> sd.TaskLoads[int]:
 
 def target_task_api(limit: int) -> sd.TargetTask:
     from stardag.target import LoadableSaveableFileSystemTarget
-    from stardag.target.serialize import JSONSerializer, Serializable
+    from stardag.target.serialize import FileSerializable, JSONSerializer
 
     def default_relpath(task: sd.TargetTask) -> str:
         task_id = str(task.id)
@@ -57,8 +57,8 @@ def target_task_api(limit: int) -> sd.TargetTask:
         limit: int
 
         def target(self) -> LoadableSaveableFileSystemTarget[list[int]]:
-            return Serializable(
-                wrapped=sd.get_target(default_relpath(self)),
+            return FileSerializable(
+                wrapped=sd.get_file_target(default_relpath(self)),
                 serializer=JSONSerializer(list[int]),
             )
 
@@ -74,8 +74,8 @@ def target_task_api(limit: int) -> sd.TargetTask:
             return self.integers
 
         def target(self) -> LoadableSaveableFileSystemTarget[int]:
-            return Serializable(
-                wrapped=sd.get_target(default_relpath(self)),
+            return FileSerializable(
+                wrapped=sd.get_file_target(default_relpath(self)),
                 serializer=JSONSerializer(int),
             )
 

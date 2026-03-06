@@ -37,17 +37,20 @@ Auto-generated documentation from source code:
 
 ### Target Types
 
-| Class                    | Description               |
-| ------------------------ | ------------------------- |
-| `FileSystemTarget`       | Base filesystem target    |
-| `LoadableSaveableTarget` | Target with serialization |
+| Class                    | Description                                           |
+| ------------------------ | ----------------------------------------------------- |
+| `FileSystemTarget`       | Base filesystem target (minimal: `uri` + `exists()`)  |
+| `FileTarget`             | File-oriented target (`open()`, `proxy_path()`, etc.) |
+| `DirectoryTarget`        | Directory-oriented target (sub-targets + done flag)   |
+| `LoadableSaveableTarget` | Target with serialization                             |
 
 ### Configuration
 
-| Function                  | Description                      |
-| ------------------------- | -------------------------------- |
-| `get_target()`            | Create target from relative path |
-| `target_factory_provider` | Manage target factory            |
+| Function                  | Description                                |
+| ------------------------- | ------------------------------------------ |
+| `get_file_target()`       | Create file target from relative path      |
+| `get_directory_target()`  | Create directory target from relative path |
+| `target_factory_provider` | Manage target factory                      |
 
 ## External Resources
 

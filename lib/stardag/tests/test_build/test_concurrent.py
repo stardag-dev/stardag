@@ -27,7 +27,7 @@ from stardag.build import (
     build_aio,
 )
 from stardag.registry import NoOpRegistry
-from stardag.target import InMemoryFileSystemTarget
+from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
     get_dynamic_deps_dag,
@@ -60,7 +60,7 @@ class TestBuildSyncWrapper:
 
     def test_simple_dag(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test build with simple DAG."""
@@ -75,7 +75,7 @@ class TestBuildSyncWrapper:
 
     def test_dynamic_deps(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test build with dynamic dependencies."""
@@ -89,7 +89,7 @@ class TestBuildSyncWrapper:
 
     def test_with_completion_cache(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that previously completed tasks are not re-executed."""
@@ -117,7 +117,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_simple_dag(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test building a simple DAG concurrently."""
@@ -133,7 +133,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_dynamic_deps(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test building DAG with dynamic dependencies."""
@@ -148,7 +148,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_concurrent_execution(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that independent tasks execute concurrently."""
@@ -174,7 +174,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_concurrent_execution_timing(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that independent tasks execute concurrently with detailed timing."""
@@ -237,7 +237,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_fail_fast_mode(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test FAIL_FAST mode stops build on first failure."""
@@ -254,7 +254,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_continue_mode(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test CONTINUE mode runs all possible tasks despite failures."""
@@ -275,7 +275,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_multiple_root_tasks(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test building multiple independent root tasks."""
@@ -293,7 +293,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_async_tasks_use_main_loop(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test async-only tasks execute in main event loop."""
@@ -307,7 +307,7 @@ class TestBuildAio:
     @pytest.mark.asyncio
     async def test_task_failure_propagates(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that task failures are properly propagated."""
@@ -334,7 +334,7 @@ class TestHybridConcurrentTaskExecutor:
     @pytest.mark.asyncio
     async def test_sync_task_runs_in_thread(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test sync tasks run in thread pool."""
@@ -352,7 +352,7 @@ class TestHybridConcurrentTaskExecutor:
     @pytest.mark.asyncio
     async def test_async_task_runs_in_loop(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test async tasks run in main event loop."""
@@ -370,7 +370,7 @@ class TestHybridConcurrentTaskExecutor:
     @pytest.mark.asyncio
     async def test_failing_task_returns_exception(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test failing tasks return exception."""
@@ -396,7 +396,7 @@ class TestAsyncInterface:
 
     def test_has_custom_run_aio_detection(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
         """Test that we correctly detect custom run_aio implementations."""
 
@@ -421,7 +421,7 @@ class TestAsyncInterface:
     @pytest.mark.asyncio
     async def test_async_task_execution(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
         """Test that tasks with custom run_aio() execute correctly."""
         execution_log: list[tuple[str, str]] = []
@@ -465,7 +465,7 @@ class TestAsyncInterface:
     @pytest.mark.asyncio
     async def test_concurrent_async_execution(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
         """Test that async tasks execute concurrently."""
 
@@ -516,7 +516,7 @@ class TestBuildSummary:
 
     def test_task_count_pending(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test TaskCount.pending property."""
@@ -533,7 +533,7 @@ class TestBuildSummary:
 
     def test_summary_with_partial_completion(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test summary with previously completed tasks."""
@@ -562,7 +562,7 @@ class TestDiamondPatternsConcurrent:
     @pytest.mark.asyncio
     async def test_static_diamond(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """
@@ -591,7 +591,7 @@ class TestDiamondPatternsConcurrent:
     @pytest.mark.asyncio
     async def test_dynamic_diamond(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """
@@ -624,7 +624,7 @@ class TestDiamondPatternsConcurrent:
     @pytest.mark.asyncio
     async def test_complex_dynamic_diamond(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """
@@ -682,7 +682,7 @@ class TestProcessPoolDynamicDeps:
     5. Generator is driven again - since deps are now complete, it continues past yield
 
     Note: These tests use local file system targets (via default_local_target_tmp_path)
-    because InMemoryFileSystemTarget doesn't work with multiprocessing (each process
+    because InMemoryFileTarget doesn't work with multiprocessing (each process
     has its own memory space).
     """
 
@@ -886,7 +886,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_acquired_executes_task(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that task executes normally when lock is acquired."""
@@ -914,7 +914,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_already_completed_skips_task(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that task is skipped when lock reports already completed."""
@@ -953,7 +953,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_held_by_other_waits_and_succeeds(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test waiting when lock held by other, then succeeding when task completes."""
@@ -1002,7 +1002,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_held_by_other_timeout(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test timeout when lock remains held by other."""
@@ -1036,7 +1036,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_error_fails_task(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that lock error causes task failure."""
@@ -1065,7 +1065,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_selective_locking(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test selective locking based on GlobalLockConfig.enabled callable."""
@@ -1095,7 +1095,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_without_lock_config(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that lock is not used when global_lock_config.enabled=False."""
@@ -1119,7 +1119,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_released_on_task_failure(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that lock is released with task_completed=False when task fails."""
@@ -1148,7 +1148,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_concurrency_limit_reached(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that CONCURRENCY_LIMIT_REACHED status is handled correctly."""
@@ -1183,7 +1183,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_lock_with_dynamic_deps(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that lock is held across dynamic dependency suspension.
@@ -1244,7 +1244,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_multiple_tasks_concurrent_lock_acquisition(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test multiple independent tasks acquiring locks concurrently."""
@@ -1280,7 +1280,7 @@ class TestGlobalConcurrencyLock:
     @pytest.mark.asyncio
     async def test_no_lock_manager_provided(
         self,
-        default_in_memory_fs_target: typing.Type[InMemoryFileSystemTarget],
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
         """Test that build works normally when no lock manager is provided."""

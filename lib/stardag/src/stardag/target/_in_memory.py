@@ -3,8 +3,8 @@ from io import BytesIO, StringIO
 
 from stardag.target._base import (
     AIOFileSystemTargetHandle,
-    FileSystemTarget,
     FileSystemTargetHandle,
+    FileTarget,
     LoadableSaveableTarget,
     LoadedT,
     OpenMode,
@@ -58,7 +58,7 @@ class InMemoryTarget(LoadableSaveableTarget[LoadedT]):
         return self.load()
 
 
-class InMemoryFileSystemTarget(FileSystemTarget):
+class InMemoryFileTarget(FileTarget):
     """Useful in testing"""
 
     uri_to_bytes: dict[str, bytes] = {}  # Note class variable!
@@ -139,7 +139,7 @@ class _InMemoryBytesWritableFileSystemTargetHandle(
         self.uri = uri
 
     def write(self, data: bytes) -> None:
-        uri_to_bytes = InMemoryFileSystemTarget.uri_to_bytes
+        uri_to_bytes = InMemoryFileTarget.uri_to_bytes
         uri_to_bytes[self.uri] = uri_to_bytes.setdefault(self.uri, b"") + data
 
     def close(self) -> None:
@@ -157,7 +157,7 @@ class _InMemoryStrWritableFileSystemTargetHandle(WritableFileSystemTargetHandle[
         self.uri = uri
 
     def write(self, data: str) -> None:
-        uri_to_bytes = InMemoryFileSystemTarget.uri_to_bytes
+        uri_to_bytes = InMemoryFileTarget.uri_to_bytes
         uri_to_bytes[self.uri] = uri_to_bytes.setdefault(self.uri, b"") + data.encode()
 
     def close(self) -> None:

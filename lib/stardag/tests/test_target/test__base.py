@@ -7,7 +7,7 @@ from stardag.target import (
     DirectoryTarget,
     InMemoryRemoteFileSystem,
     LocalTarget,
-    RemoteFileSystemTarget,
+    RemoteFileTarget,
 )
 from stardag.target._base import CachedRemoteFileSystem
 
@@ -100,7 +100,7 @@ def test_local_target_proxy_path(tmp_path: Path):
 def test_remote_filesystem_target():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.open("w") as f:
@@ -122,7 +122,7 @@ def test_remote_filesystem_target():
 def test_remote_filesystem_target_binary():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.open("wb") as f:
@@ -142,7 +142,7 @@ def test_remote_filesystem_target_binary():
 def test_remote_filesystem_target_proxy_path():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.proxy_path("w") as proxy_path:
@@ -168,7 +168,7 @@ def test_cached_remote_filesystem_target(tmp_path: Path):
         root=str(tmp_path / "cache"),
     )
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     with target.open("w") as f:
@@ -262,7 +262,7 @@ async def test_local_target_open_aio_binary(tmp_path: Path):
 async def test_remote_filesystem_target_open_aio():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     async with target.open_aio("w") as f:
@@ -281,7 +281,7 @@ async def test_remote_filesystem_target_open_aio():
 async def test_remote_filesystem_target_open_aio_binary():
     rfs = InMemoryRemoteFileSystem()
     uri = "in-memory://bucket/key"
-    target = RemoteFileSystemTarget(uri=uri, rfs=rfs)
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
     assert not target.exists()
 
     async with target.open_aio("wb") as f:

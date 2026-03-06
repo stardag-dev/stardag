@@ -93,10 +93,10 @@ with target_roots_override(
     {"default": "/default", "archive": "/archive"}
 ):
     # Default root
-    sd.get_target("path/file.json")
+    sd.get_file_target("path/file.json")
 
     # Specific root
-    sd.get_target("path/file.json", target_root_key="archive")
+    sd.get_file_target("path/file.json", target_root_key="archive")
 ```
 
 <!-- TODO: Verify root selection syntax -->

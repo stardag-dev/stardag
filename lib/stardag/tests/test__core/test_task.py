@@ -1,7 +1,7 @@
 import typing
 
 from stardag import Task, auto_namespace
-from stardag.target import Serializable
+from stardag.target import FileSerializable
 from stardag.target.serialize import JSONSerializer, PlainTextSerializer
 
 auto_namespace(__name__)
@@ -147,12 +147,12 @@ class TestTarget:
     def test_target_returns_serializable(self):
         task = IntTask(value=42)
         target = task.target()
-        assert isinstance(target, Serializable)
+        assert isinstance(target, FileSerializable)
 
     def test_target_has_correct_serializer(self):
         task = IntTask(value=42)
         target = task.target()
-        assert isinstance(target, Serializable)
+        assert isinstance(target, FileSerializable)
         assert isinstance(target.serializer, JSONSerializer)
 
     def test_target_uri_matches_relpath(self):
