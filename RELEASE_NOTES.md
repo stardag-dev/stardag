@@ -58,7 +58,6 @@ class MyDirectorySerializer:
     def dump(self, obj, target: DirectoryTarget) -> None:
         with (target / "data.json").open("w") as f:
             f.write(json.dumps(obj))
-        target.mark_done()
 
     def load(self, target: DirectoryTarget):
         with (target / "data.json").open("r") as f:

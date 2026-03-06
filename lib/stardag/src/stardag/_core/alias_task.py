@@ -8,7 +8,6 @@ from pydantic import BaseModel, SerializationInfo, ValidationInfo, model_validat
 
 from stardag._core.task import LoadedT, Task
 from stardag.base_model import StardagField
-from stardag.target import FileTarget
 from stardag.target.serialize import get_serializer
 
 if TYPE_CHECKING:
@@ -25,7 +24,7 @@ class AliasedMetadata(BaseModel):
     body: dict[str, Any] | None = None
 
     @classmethod
-    def from_task(cls, task: Task[FileTarget]) -> "AliasedMetadata":
+    def from_task(cls, task: Task[Any]) -> "AliasedMetadata":
         """Create AliasedMetadata from a given task."""
         return cls(
             id=task.id,

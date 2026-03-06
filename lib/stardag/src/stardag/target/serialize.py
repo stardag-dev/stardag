@@ -320,8 +320,11 @@ def is_directory_serializer(
         )
 
     # Fallback: inspect type hints on dump method
+    try:
+        hints = typing.get_type_hints(type(serializer).dump)
+    except Exception:
+        return False
 
-    hints = typing.get_type_hints(type(serializer).dump)
     target_hint = hints.get("target")
     if target_hint is not None:
         origin = typing.get_origin(target_hint)
@@ -526,7 +529,13 @@ class SelfDirectorySerializer(Serializer[SelfDirectorySerializing, DirectoryTarg
                 f"{stripped} must comply with the SelfDirectorySerializing protocol."
             )
         # Check type hints to disambiguate from SelfFileSerializing
-        hints = typing.get_type_hints(stripped.dump)
+        try:
+            hints = typing.get_type_hints(stripped.dump)
+        except Exception as e:
+            raise ValueError(
+                f"Cannot inspect type hints on {stripped}.dump(). "
+                f"Ensure the `target` parameter is annotated as `DirectoryTarget`: {e}"
+            ) from e
         target_hint = hints.get("target")
         if target_hint is None or not (
             target_hint is DirectoryTarget

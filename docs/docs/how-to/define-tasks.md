@@ -121,7 +121,7 @@ class CustomTask(sd.TargetTask[LoadableSaveableFileSystemTarget[dict]]):
         # Custom path structure
         path = f"custom/{self.config_key}/{self.task_id[:8]}.json"
         return FileSerializable(
-            wrapped=sd.get_file_target(path, task=self),
+            wrapped=sd.get_file_target(path),
             serializer=JSONSerializer(dict),
         )
 
@@ -174,7 +174,7 @@ The same task in all three APIs:
 
         def target(self):
             return FileSerializable(
-                wrapped=sd.get_file_target(f"sum/{self.task_id}.json", task=self),
+                wrapped=sd.get_file_target(f"sum/{self.task_id}.json"),
                 serializer=JSONSerializer(int),
             )
 
