@@ -38,14 +38,14 @@ You can, and it is in some cases motivated to, return a target for a certain typ
 ```python
 import stardag as sd
 
-class MyTask(sd.TargetTask[sd.LocalTarget]):
+class MyTask(sd.TargetTask[sd.LocalFileTarget]):
 
     def run(self):
         with self.target().open("w") as handle:
             handle.write("result")
 
-    def target(self) -> sd.LocalTarget:
-        return sd.LocalTarget("/absolute/path/to/file.txt")
+    def target(self) -> sd.LocalFileTarget:
+        return sd.LocalFileTarget("/absolute/path/to/file.txt")
 ```
 
 However, you are strongly encouraged to instead use the function `sd.get_file_target`:

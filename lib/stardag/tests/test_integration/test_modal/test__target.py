@@ -92,7 +92,7 @@ def _write_read_full_uri(temp_test_dir: str, mount_expected: bool):
     target = sd_modal.get_modal_target(uri)
     assert target.uri == uri
     if mount_expected:
-        assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
+        assert isinstance(target, sd_modal.ModalMountedVolumeFileTarget)
     else:
         assert isinstance(target, RemoteFileTarget)
 
@@ -149,7 +149,7 @@ def _write_read_default_root(temp_test_dir: str, mount_expected: bool):
         == f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}/{temp_test_dir}/test.txt"
     )
     if mount_expected:
-        assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
+        assert isinstance(target, sd_modal.ModalMountedVolumeFileTarget)
     else:
         assert isinstance(target, RemoteFileTarget)
     _write_read_(target)
@@ -263,7 +263,7 @@ def _write_read_aio_full_uri(temp_test_dir: str, mount_expected: bool):
     target = sd_modal.get_modal_target(uri)
     assert target.uri == uri
     if mount_expected:
-        assert isinstance(target, sd_modal.ModalMountedVolumeTarget)
+        assert isinstance(target, sd_modal.ModalMountedVolumeFileTarget)
     else:
         assert isinstance(target, RemoteFileTarget)
 

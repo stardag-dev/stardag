@@ -39,16 +39,17 @@ class _SelfDirSerializing(SelfDirectorySerializing):
         self.data = data
 
     def dump(self, target: DirectoryTarget) -> None:
-        with (target / "data.json").open("w") as f:
-            import json
+        import json
 
+        with (target / "data.json").open("w") as f:
             f.write(json.dumps(self.data))
+        target.mark_done()
 
     @classmethod
     def load(cls, target: DirectoryTarget) -> typing.Self:
-        with (target / "data.json").open("r") as f:
-            import json
+        import json
 
+        with (target / "data.json").open("r") as f:
             return cls(json.loads(f.read()))
 
 

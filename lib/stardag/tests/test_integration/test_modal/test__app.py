@@ -1,7 +1,7 @@
 """StardagApp.finalize() auto-mount integration tests.
 
 These tests verify that finalize() auto-discovers Modal volumes from target
-roots and mounts them at predefined paths, so that ModalMountedVolumeTarget
+roots and mounts them at predefined paths, so that ModalMountedVolumeFileTarget
 (local I/O) is used instead of ModalVolumeRemoteFileSystem (API-based).
 
 The remote tests require a deployed Modal app. The app is automatically
@@ -170,13 +170,13 @@ class TestAutoMountRemote:
     """Test that auto-mounted volumes work correctly inside Modal containers."""
 
     def test_auto_mount_target_type(self):
-        """Inside Modal, get_modal_target should return ModalMountedVolumeTarget."""
+        """Inside Modal, get_modal_target should return ModalMountedVolumeFileTarget."""
         probe_fn = modal.Function.from_name(
             app_name=TEST_APP_NAME,
             name="probe_auto_mount",
         )
         result = probe_fn.remote()
-        assert result["target_type"] == "ModalMountedVolumeTarget"
+        assert result["target_type"] == "ModalMountedVolumeFileTarget"
 
     def test_auto_mount_path_exists(self):
         """Inside Modal, the predefined mount path should exist as a directory."""

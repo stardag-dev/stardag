@@ -320,7 +320,7 @@ class FileTarget(_FileTargetGeneric[bytes], typing.Protocol):
 
     Inherits all file I/O methods from ``_FileTargetGeneric``:
     ``open()``, ``proxy_path()``, ``exists()``, and their async variants.
-    Concrete implementations: ``LocalTarget``, ``RemoteFileTarget``,
+    Concrete implementations: ``LocalFileTarget``, ``RemoteFileTarget``,
     ``InMemoryFileTarget``.
     """
 
@@ -346,7 +346,7 @@ class LoadableSaveableFileSystemTarget(
 LSFST = LoadableSaveableFileSystemTarget
 
 
-class LocalTarget(FileTarget):
+class LocalFileTarget(FileTarget):
     """TODO use luigi-style atomic writes."""
 
     def __init__(self, uri: str) -> None:

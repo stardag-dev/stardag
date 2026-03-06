@@ -2,7 +2,7 @@ from pathlib import Path
 
 from stardag.target import (
     InMemoryFileTarget,
-    LocalTarget,
+    LocalFileTarget,
     get_file_target,
     target_factory_provider,
 )
@@ -12,11 +12,11 @@ def test_default_local_target_tmp_path(default_local_target_tmp_path: Path):
     tmp_path = default_local_target_tmp_path
     assert isinstance(tmp_path, Path)
     target_factory = target_factory_provider.get()
-    assert target_factory.prefix_to_target_prototype["/"] == LocalTarget
+    assert target_factory.prefix_to_target_prototype["/"] == LocalFileTarget
     assert target_factory.target_roots["default"] == str(tmp_path) + "/"
     key = "mock/target.txt"
     target = get_file_target(key)
-    assert isinstance(target, LocalTarget)
+    assert isinstance(target, LocalFileTarget)
     assert target.uri == str(tmp_path / key)
 
 

@@ -6,15 +6,15 @@ import pytest
 from stardag.target import (
     DirectoryTarget,
     InMemoryRemoteFileSystem,
-    LocalTarget,
+    LocalFileTarget,
     RemoteFileTarget,
 )
 from stardag.target._base import CachedRemoteFileSystem
 
 
 def test_local_target_expands_tilde():
-    """Test that LocalTarget expands ~ to user home directory."""
-    target = LocalTarget("~/test/path.txt")
+    """Test that LocalFileTarget expands ~ to user home directory."""
+    target = LocalFileTarget("~/test/path.txt")
     expected = os.path.expanduser("~/test/path.txt")
     assert target.uri == expected
     assert target.uri.startswith(str(Path.home()))
@@ -46,7 +46,7 @@ def test_target_config_expands_tilde():
 
 
 def test_local_target(tmp_path: Path):
-    target = LocalTarget(str(tmp_path / "test.txt"))
+    target = LocalFileTarget(str(tmp_path / "test.txt"))
     assert not target.exists()
 
     with target.open("w") as f:
@@ -64,7 +64,7 @@ def test_local_target(tmp_path: Path):
 # NOTE we are intentionally not parameterizing this test with binary=True/False
 # to also check type checking based in the mode parameter.
 def test_local_target_binary(tmp_path: Path):
-    target = LocalTarget(str(tmp_path / "test.txt"))
+    target = LocalFileTarget(str(tmp_path / "test.txt"))
     assert not target.exists()
 
     with target.open("wb") as f:
@@ -80,7 +80,7 @@ def test_local_target_binary(tmp_path: Path):
 
 
 def test_local_target_proxy_path(tmp_path: Path):
-    target = LocalTarget(str(tmp_path / "test.txt"))
+    target = LocalFileTarget(str(tmp_path / "test.txt"))
     assert not target.exists()
 
     with target.proxy_path("w") as proxy_path:
@@ -193,10 +193,10 @@ def test_cached_remote_filesystem_target(tmp_path: Path):
 
 
 def test_directory_target(tmp_path: Path):
-    dir_target = DirectoryTarget(uri=str(tmp_path / "test"), prototype=LocalTarget)
+    dir_target = DirectoryTarget(uri=str(tmp_path / "test"), prototype=LocalFileTarget)
     assert not dir_target.exists()
 
-    sub_a: LocalTarget = dir_target.get_sub_target("a")
+    sub_a: LocalFileTarget = dir_target.get_sub_target("a")
     assert not sub_a.exists()
     assert sub_a.uri == str(tmp_path / "test" / "a")
     with sub_a.proxy_path("w") as sub_a_path:
@@ -206,7 +206,7 @@ def test_directory_target(tmp_path: Path):
     assert not dir_target.exists()
     assert dir_target._sub_keys == {"a"}  # noqa
 
-    sub_b: LocalTarget = dir_target / "b"
+    sub_b: LocalFileTarget = dir_target / "b"
     assert not sub_b.exists()
     assert sub_b.uri == str(tmp_path / "test" / "b")
     with sub_b.proxy_path("w") as sub_b_path:
@@ -230,7 +230,7 @@ def test_directory_target(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_local_target_open_aio(tmp_path: Path):
-    target = LocalTarget(str(tmp_path / "test.txt"))
+    target = LocalFileTarget(str(tmp_path / "test.txt"))
     assert not target.exists()
 
     async with target.open_aio("w") as f:
@@ -245,7 +245,7 @@ async def test_local_target_open_aio(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_local_target_open_aio_binary(tmp_path: Path):
-    target = LocalTarget(str(tmp_path / "test.txt"))
+    target = LocalFileTarget(str(tmp_path / "test.txt"))
     assert not target.exists()
 
     async with target.open_aio("wb") as f:

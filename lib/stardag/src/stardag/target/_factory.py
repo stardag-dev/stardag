@@ -3,7 +3,7 @@ import typing
 from contextlib import contextmanager
 
 from stardag.config import DEFAULT_TARGET_ROOT_KEY, config_provider
-from stardag.target import DirectoryTarget, FileTarget, LocalTarget
+from stardag.target import DirectoryTarget, FileTarget, LocalFileTarget
 from stardag.target._base import RemoteFileTarget
 from stardag.utils.resource_provider import resource_provider
 
@@ -17,7 +17,7 @@ PrefixToFileTargetPrototype = typing.Mapping[str, FileTargetPrototype]
 
 def get_default_prefix_to_target_prototype() -> dict[str, FileTargetPrototype]:
     prefix_to_target_prototype: dict[str, FileTargetPrototype] = {
-        "/": LocalTarget,
+        "/": LocalFileTarget,
     }
     # S3 integration
     try:

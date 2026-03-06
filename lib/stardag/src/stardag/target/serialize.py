@@ -266,9 +266,8 @@ class DirectorySerializable(
 ):
     """A directory target wrapped with a directory serializer, providing ``load()``/``save()``.
 
-    The directory serializer is responsible for reading/writing the object
-    to/from the directory's sub-targets. After ``save()``, the directory
-    is automatically marked as done.
+    The serializer's ``dump()`` is responsible for writing sub-targets and
+    calling ``target.mark_done()`` when complete.
     """
 
     def __init__(
@@ -288,7 +287,6 @@ class DirectorySerializable(
 
     def save(self, obj: LoadedT) -> None:
         self.serializer.dump(obj, self.wrapped)
-        self.wrapped.mark_done()
 
     def exists(self) -> bool:
         return self.wrapped.exists()
@@ -301,7 +299,6 @@ class DirectorySerializable(
 
     async def save_aio(self, obj: LoadedT) -> None:
         await self.serializer.dump_aio(obj, self.wrapped)
-        await self.wrapped.mark_done_aio()
 
 
 def is_directory_serializer(

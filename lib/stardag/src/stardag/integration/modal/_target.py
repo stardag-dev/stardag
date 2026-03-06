@@ -17,7 +17,7 @@ from tenacity import (
 )
 
 from stardag.integration.modal._config import modal_config_provider
-from stardag.target import LocalTarget, RemoteFileSystemABC, RemoteFileTarget
+from stardag.target import LocalFileTarget, RemoteFileSystemABC, RemoteFileTarget
 from stardag.utils.resource_provider import resource_provider
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ def get_default_volume_mount_path(volume_name: str) -> Path:
 
     Returns /mnt/stardag-volumes/<volume-name>. This path is used by
     StardagApp.finalize() to auto-mount discovered volumes, so that
-    ModalMountedVolumeTarget (local I/O) is used instead of
+    ModalMountedVolumeFileTarget (local I/O) is used instead of
     ModalVolumeRemoteFileSystem (API-based, rate-limit-prone).
     """
     return Path(VOLUME_MOUNT_PATH_PREFIX) / volume_name
@@ -117,7 +117,7 @@ async def _maybe_reload_volume_aio(volume_name: str) -> bool:
         return True
 
 
-class ModalMountedVolumeTarget(LocalTarget):
+class ModalMountedVolumeFileTarget(LocalFileTarget):
     """Target backed by a Modal volume mounted to the local filesystem.
 
     Uses local file I/O for reads/writes, which is much faster than the
@@ -187,7 +187,7 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
 
     Uses Modal's Python API for all operations. This works without mounting
     the volume, but is subject to rate limits under heavy load. Prefer
-    ModalMountedVolumeTarget when the volume is mounted locally.
+    ModalMountedVolumeFileTarget when the volume is mounted locally.
     """
 
     URI_PREFIX = MODAL_VOLUME_URI_PREFIX
@@ -262,10 +262,10 @@ modal_volume_rfs_provider = resource_provider(
 )
 
 
-def get_modal_target(uri: str) -> ModalMountedVolumeTarget | RemoteFileTarget:
+def get_modal_target(uri: str) -> ModalMountedVolumeFileTarget | RemoteFileTarget:
     """Get the appropriate target for a Modal volume URI.
 
-    Returns ModalMountedVolumeTarget (local I/O) if the volume is mounted,
+    Returns ModalMountedVolumeFileTarget (local I/O) if the volume is mounted,
     otherwise falls back to RemoteFileTarget (API-based).
 
     Mount detection order:
@@ -280,6 +280,6 @@ def get_modal_target(uri: str) -> ModalMountedVolumeTarget | RemoteFileTarget:
         if default.is_dir():
             mount_path = default
     if mount_path is not None:
-        return ModalMountedVolumeTarget(uri)
+        return ModalMountedVolumeFileTarget(uri)
     else:
         return RemoteFileTarget(uri, rfs=modal_volume_rfs_provider.get())

@@ -12,14 +12,16 @@ The previous hierarchy had `FileSystemTarget` serving double duty — it was bot
 
 #### Target Renames
 
-| Before                         | After                | Description                                                                                           |
-| ------------------------------ | -------------------- | ----------------------------------------------------------------------------------------------------- |
-| `FileSystemTarget` (old, full) | `FileTarget`         | File-oriented target with `open()`, `proxy_path()`, etc.                                              |
-| _(new)_                        | `FileSystemTarget`   | Minimal base protocol: `uri` + `exists()`. Both `FileTarget` and `DirectoryTarget` inherit from this. |
-| `RemoteFileSystemTarget`       | `RemoteFileTarget`   | Remote file target (S3, Modal volumes, etc.)                                                          |
-| `InMemoryFileSystemTarget`     | `InMemoryFileTarget` | In-memory file target for testing                                                                     |
-| `_FileSystemTargetGeneric`     | `_FileTargetGeneric` | Internal generic base for file targets                                                                |
-| `_FSTargetType`                | `_FileTargetType`    | Internal TypeVar for file target types                                                                |
+| Before                         | After                          | Description                                                                                           |
+| ------------------------------ | ------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `FileSystemTarget` (old, full) | `FileTarget`                   | File-oriented target with `open()`, `proxy_path()`, etc.                                              |
+| _(new)_                        | `FileSystemTarget`             | Minimal base protocol: `uri` + `exists()`. Both `FileTarget` and `DirectoryTarget` inherit from this. |
+| `RemoteFileSystemTarget`       | `RemoteFileTarget`             | Remote file target (S3, Modal volumes, etc.)                                                          |
+| `InMemoryFileSystemTarget`     | `InMemoryFileTarget`           | In-memory file target for testing                                                                     |
+| `LocalTarget`                  | `LocalFileTarget`              | Local filesystem file target                                                                          |
+| `ModalMountedVolumeTarget`     | `ModalMountedVolumeFileTarget` | Modal mounted volume file target                                                                      |
+| `_FileSystemTargetGeneric`     | `_FileTargetGeneric`           | Internal generic base for file targets                                                                |
+| `_FSTargetType`                | `_FileTargetType`              | Internal TypeVar for file target types                                                                |
 
 #### Serializer Changes
 
@@ -101,6 +103,8 @@ class MyTask(sd.Task[Annotated[dict, MyDirectorySerializer()]]):
 
 5. **`RemoteFileSystemTarget` → `RemoteFileTarget`**, **`InMemoryFileSystemTarget` → `InMemoryFileTarget`**
 
+6. **`LocalTarget` → `LocalFileTarget`**, **`ModalMountedVolumeTarget` → `ModalMountedVolumeFileTarget`**
+
 ### Quick Find-and-Replace
 
 ```
@@ -111,6 +115,8 @@ SelfSerializing      →  SelfFileSerializing
 SelfSerializer       →  SelfFileSerializer
 RemoteFileSystemTarget  →  RemoteFileTarget
 InMemoryFileSystemTarget  →  InMemoryFileTarget
+LocalTarget          →  LocalFileTarget
+ModalMountedVolumeTarget  →  ModalMountedVolumeFileTarget
 ```
 
 ---

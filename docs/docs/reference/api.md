@@ -57,7 +57,7 @@ Auto-generated API documentation from source code.
         - FileTarget
         - DirectoryTarget
         - LoadableSaveableFileSystemTarget
-        - LocalTarget
+        - LocalFileTarget
         - TargetFactory
         - target_factory_provider
 

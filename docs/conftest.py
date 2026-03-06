@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from stardag.target import (
     InMemoryFileTarget,
-    LocalTarget,
+    LocalFileTarget,
     target_factory_provider,
 )
 from stardag.target._factory import TargetFactory
@@ -43,7 +43,7 @@ def default_local_target_tmp_path(
             TargetFactory(
                 target_roots=target_roots,
                 prefix_to_target_prototype={
-                    "/": LocalTarget,
+                    "/": LocalFileTarget,
                     default_in_memory_fs_target_prefix: InMemoryFileTarget,
                 },
             )
@@ -59,7 +59,7 @@ def _default_in_memory_fs_target_factory(
         TargetFactory(
             target_roots={"default": default_in_memory_fs_target_prefix},
             prefix_to_target_prototype={
-                "/": LocalTarget,
+                "/": LocalFileTarget,
                 default_in_memory_fs_target_prefix: InMemoryFileTarget,
             },
         )

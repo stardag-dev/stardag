@@ -226,6 +226,7 @@ class _DirData(SelfDirectorySerializing):
     def dump(self, target: DirectoryTarget) -> None:
         with (target / "data.json").open("w") as f:
             f.write(json.dumps(self.data))
+        target.mark_done()
 
     @classmethod
     def load(cls, target: DirectoryTarget) -> typing.Self:
