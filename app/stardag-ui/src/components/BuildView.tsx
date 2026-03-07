@@ -14,6 +14,7 @@ import {
   fetchTasksInBuild,
 } from "../api/tasks";
 import { useAuth } from "../context/AuthContext";
+import { useBreadcrumb, type BreadcrumbItem } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import type {
   Build,
@@ -22,6 +23,7 @@ import type {
   TaskGraphResponse,
   TaskStatus,
 } from "../types/task";
+import { BuildStatusBadge } from "./BuildStatusBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import { TaskDetail } from "./TaskDetail";
@@ -41,6 +43,7 @@ interface BuildViewProps {
 export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps) {
   const { activeEnvironment } = useEnvironment();
   const { user } = useAuth();
+  const { setItems: setBreadcrumb } = useBreadcrumb();
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   // Data state
@@ -253,6 +256,22 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     build?.status === "pending" ||
     build?.status === "exit_early";
 
+  // Update breadcrumb navigation
+  useEffect(() => {
+    const items: BreadcrumbItem[] = [
+      { label: "Builds", onClick: onBack },
+      {
+        label: build?.name ?? buildId.slice(0, 8),
+        detail: build ? <BuildStatusBadge status={build.status} /> : undefined,
+      },
+    ];
+    if (selectedTask) {
+      items.push({ label: selectedTask.task_id });
+    }
+    setBreadcrumb(items);
+    return () => setBreadcrumb([]);
+  }, [build, buildId, selectedTask, onBack, setBreadcrumb]);
+
   // Client-side filtering
   const filteredTasks = allTasks.filter((task) => {
     if (
@@ -367,189 +386,116 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
 
   return (
     <div className="flex h-full flex-col">
-      {/* Build header */}
-      <div className="flex items-center gap-4 border-b border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
-        <button
-          onClick={onBack}
-          className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-          title="Back to builds"
-        >
-          <svg
-            className="h-5 w-5"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M15 19l-7-7 7-7"
-            />
-          </svg>
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-              {build.name}
-            </h1>
-            <span
-              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
-                build.status === "completed"
-                  ? "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-400"
-                  : build.status === "failed"
-                    ? "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-400"
-                    : build.status === "running"
-                      ? "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-400"
-                      : build.status === "cancelled"
-                        ? "bg-gray-100 text-gray-700 dark:bg-gray-900/50 dark:text-gray-400"
-                        : build.status === "exit_early"
-                          ? "bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-400"
-                          : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400"
-              }`}
-              title={
-                build.status_triggered_by_user
-                  ? `Manually set by ${
-                      build.status_triggered_by_user.display_name ||
-                      build.status_triggered_by_user.email
-                    }`
-                  : undefined
-              }
-            >
-              {build.status_triggered_by_user && (
-                <svg
-                  className="h-3 w-3"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"
-                  />
-                </svg>
-              )}
-              {build.status === "exit_early" ? "exited early" : build.status}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              {allTasks.length} tasks &middot; Created{" "}
-              {new Date(build.created_at).toLocaleString()}
-            </p>
-            {overrideError && (
-              <span className="text-xs text-red-600 dark:text-red-400">
-                {overrideError}
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Action buttons */}
-        <div className="flex items-center gap-2">
-          {/* Refresh button with double-click for auto-refresh */}
-          <button
-            onClick={handleRefreshClick}
-            disabled={refreshing && !autoRefresh}
-            className={`rounded-md p-1.5 transition-colors ${
-              autoRefresh
-                ? "bg-blue-100 text-blue-700 ring-2 ring-blue-400 dark:bg-blue-900/30 dark:text-blue-400"
-                : "text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-            } disabled:opacity-50`}
-            title={
-              autoRefresh
-                ? "Auto-refreshing (click to stop)"
-                : "Click to refresh, double-click for auto-refresh"
-            }
-          >
-            <svg
-              className={`h-5 w-5 ${refreshing || autoRefresh ? "animate-spin" : ""}`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-              />
-            </svg>
-          </button>
-
-          {/* Override state dropdown */}
-          {canOverride && (
-            <div className="relative" ref={overrideMenuRef}>
-              <button
-                onClick={() => setShowOverrideMenu(!showOverrideMenu)}
-                disabled={overriding}
-                className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
-              >
-                {overriding ? "Updating..." : "Override State"}
-                <svg
-                  className={`h-4 w-4 transition-transform ${
-                    showOverrideMenu ? "rotate-180" : ""
-                  }`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M19 9l-7 7-7-7"
-                  />
-                </svg>
-              </button>
-
-              {showOverrideMenu && (
-                <div className="absolute right-0 z-10 mt-1 w-40 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 dark:bg-gray-800 dark:ring-gray-700">
-                  <div className="py-1">
-                    <button
-                      onClick={() => handleOverride("complete")}
-                      className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                    >
-                      <span className="h-2 w-2 rounded-full bg-green-500" />
-                      Mark Completed
-                    </button>
-                    <button
-                      onClick={() => handleOverride("fail")}
-                      className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                    >
-                      <span className="h-2 w-2 rounded-full bg-red-500" />
-                      Mark Failed
-                    </button>
-                    <button
-                      onClick={() => handleOverride("cancel")}
-                      className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
-                    >
-                      <span className="h-2 w-2 rounded-full bg-gray-500" />
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
       {/* Main content */}
       <div className="flex-1 overflow-hidden">
         <PanelGroup direction="horizontal">
           {/* Left column: Filters + DAG + List */}
           <Panel defaultSize={selectedTask ? 70 : 100} minSize={40}>
             <div className="flex h-full flex-col">
-              {/* Filters */}
-              <TaskFilters
-                nameFilter={nameFilter}
-                onNameFilterChange={handleSetNameFilter}
-                statusFilter={statusFilter}
-                onStatusFilterChange={handleSetStatusFilter}
-              />
+              {/* Filters + build actions */}
+              <div className="flex items-center gap-2 border-b border-gray-200 bg-white px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
+                <div className="flex flex-1 gap-3">
+                  <TaskFilters
+                    nameFilter={nameFilter}
+                    onNameFilterChange={handleSetNameFilter}
+                    statusFilter={statusFilter}
+                    onStatusFilterChange={handleSetStatusFilter}
+                  />
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                    {allTasks.length} tasks
+                  </span>
+                  <button
+                    onClick={handleRefreshClick}
+                    disabled={refreshing && !autoRefresh}
+                    className={`rounded-md p-1 transition-colors ${
+                      autoRefresh
+                        ? "bg-blue-100 text-blue-700 ring-2 ring-blue-400 dark:bg-blue-900/30 dark:text-blue-400"
+                        : "text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                    } disabled:opacity-50`}
+                    title={
+                      autoRefresh
+                        ? "Auto-refreshing (click to stop)"
+                        : "Click to refresh, double-click for auto-refresh"
+                    }
+                  >
+                    <svg
+                      className={`h-4 w-4 ${
+                        refreshing || autoRefresh ? "animate-spin" : ""
+                      }`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                      />
+                    </svg>
+                  </button>
+                  {canOverride && (
+                    <div className="relative" ref={overrideMenuRef}>
+                      <button
+                        onClick={() => setShowOverrideMenu(!showOverrideMenu)}
+                        disabled={overriding}
+                        className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
+                      >
+                        {overriding ? "..." : "Override"}
+                        <svg
+                          className={`h-3 w-3 transition-transform ${
+                            showOverrideMenu ? "rotate-180" : ""
+                          }`}
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M19 9l-7 7-7-7"
+                          />
+                        </svg>
+                      </button>
+                      {showOverrideMenu && (
+                        <div className="absolute right-0 z-10 mt-1 w-40 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 dark:bg-gray-800 dark:ring-gray-700">
+                          <div className="py-1">
+                            <button
+                              onClick={() => handleOverride("complete")}
+                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                            >
+                              <span className="h-2 w-2 rounded-full bg-green-500" />
+                              Mark Completed
+                            </button>
+                            <button
+                              onClick={() => handleOverride("fail")}
+                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                            >
+                              <span className="h-2 w-2 rounded-full bg-red-500" />
+                              Mark Failed
+                            </button>
+                            <button
+                              onClick={() => handleOverride("cancel")}
+                              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                            >
+                              <span className="h-2 w-2 rounded-full bg-gray-500" />
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {overrideError && (
+                    <span className="text-xs text-red-600 dark:text-red-400">
+                      {overrideError}
+                    </span>
+                  )}
+                </div>
+              </div>
 
               {/* DAG header - always visible */}
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchBuilds } from "../api/tasks";
+import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import type { Build, BuildStatus } from "../types/task";
 
@@ -58,12 +59,19 @@ function formatDuration(startedAt: string | null, completedAt: string | null): s
 
 export function BuildsList({ onSelectBuild }: BuildsListProps) {
   const { activeEnvironment } = useEnvironment();
+  const { setItems: setBreadcrumb } = useBreadcrumb();
   const [builds, setBuilds] = useState<BuildWithStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const pageSize = 20;
+
+  // Set breadcrumb for builds list
+  useEffect(() => {
+    setBreadcrumb([{ label: "Builds" }]);
+    return () => setBreadcrumb([]);
+  }, [setBreadcrumb]);
 
   const loadBuilds = useCallback(async () => {
     if (!activeEnvironment?.id) {
@@ -143,16 +151,6 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header */}
-      <div className="border-b border-gray-200 bg-white px-6 py-4 dark:border-gray-700 dark:bg-gray-800">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-          Recent Builds
-        </h1>
-        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          {total} build{total !== 1 ? "s" : ""} in this environment
-        </p>
-      </div>
-
       {/* Build list */}
       <div className="flex-1 overflow-auto">
         <div className="divide-y divide-gray-200 dark:divide-gray-700">

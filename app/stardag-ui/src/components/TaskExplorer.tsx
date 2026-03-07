@@ -12,6 +12,7 @@ import {
   fetchTaskGraph,
   type AvailableColumnsResponse,
 } from "../api/tasks";
+import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
 import type {
   Task,
@@ -230,6 +231,7 @@ function formatFilterForInput(filter: FilterCondition): string {
 
 export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const { activeEnvironment } = useEnvironment();
+  const { setItems: setBreadcrumb } = useBreadcrumb();
 
   // Search state
   const [filters, setFilters] = useState<FilterCondition[]>([]);
@@ -248,6 +250,18 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Selected task for detail view
   const [selectedTask, setSelectedTask] = useState<TaskSearchResult | null>(null);
+
+  // Update breadcrumb navigation
+  useEffect(() => {
+    const items: { label: string; onClick?: () => void }[] = [
+      { label: "Task Explorer" },
+    ];
+    if (selectedTask) {
+      items.push({ label: selectedTask.task_id });
+    }
+    setBreadcrumb(items);
+    return () => setBreadcrumb([]);
+  }, [selectedTask, setBreadcrumb]);
 
   // DAG view state
   // userPrefersShowDag: what the user wants (persists across canShowDag changes)
@@ -915,16 +929,6 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   return (
     <div className="flex h-full flex-col bg-gray-50 dark:bg-gray-900">
-      {/* Header */}
-      <div className="border-b border-gray-200 bg-white px-6 py-4 dark:border-gray-700 dark:bg-gray-800">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-          Task Explorer
-        </h1>
-        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          Search and filter tasks across all builds
-        </p>
-      </div>
-
       {/* Main content area with horizontal panels */}
       <div className="flex-1 overflow-hidden">
         <PanelGroup direction="horizontal">
