@@ -171,6 +171,16 @@ async def complete_task(
     resp.raise_for_status()
 
 
+async def fail_task(
+    client: httpx.AsyncClient, build_id: str, task_id: str, env_id: str
+):
+    resp = await client.post(
+        f"{API_BASE}/builds/{build_id}/tasks/{task_id}/fail",
+        params={"environment_id": env_id},
+    )
+    resp.raise_for_status()
+
+
 async def complete_build(client: httpx.AsyncClient, build_id: str, env_id: str):
     resp = await client.post(
         f"{API_BASE}/builds/{build_id}/complete",
@@ -370,8 +380,53 @@ async def seed_cross_build_deps(client: httpx.AsyncClient, env_id: str):
 
 
 async def seed_wide_fan_in(client: httpx.AsyncClient, env_id: str):
-    """Wide fan-in: 20 DataLoaders -> Aggregate -> Summary (grouping test)."""
+    """Wide fan-in: upstream deps -> 20 DataLoaders -> Aggregate -> Summary."""
     print("\n=== Scenario 4: Wide Fan-In (for batch grouping) ===")
+
+    # Build 0: shared upstream dependencies for the loaders
+    b0 = await create_build(client, env_id, "Data Sources (upstream)")
+
+    # Shared by ALL loaders
+    await register_task(
+        client,
+        b0,
+        env_id,
+        "schema-registry",
+        "SchemaRegistry",
+        task_namespace="data",
+    )
+    await start_task(client, b0, "schema-registry", env_id)
+    await complete_task(client, b0, "schema-registry", env_id)
+
+    # Shared by loaders 0-9 (first half)
+    await register_task(
+        client,
+        b0,
+        env_id,
+        "source-db-a",
+        "ConnectSourceDB",
+        dependency_task_ids=["schema-registry"],
+        task_namespace="data",
+        task_data={"database": "db-alpha"},
+    )
+    await start_task(client, b0, "source-db-a", env_id)
+    await complete_task(client, b0, "source-db-a", env_id)
+
+    # Shared by loaders 10-19 (second half)
+    await register_task(
+        client,
+        b0,
+        env_id,
+        "source-db-b",
+        "ConnectSourceDB",
+        dependency_task_ids=["schema-registry"],
+        task_namespace="data",
+        task_data={"database": "db-beta"},
+    )
+    await start_task(client, b0, "source-db-b", env_id)
+    await complete_task(client, b0, "source-db-b", env_id)
+    await complete_build(client, b0, env_id)
+    print("  Build 0: SchemaRegistry + 2x ConnectSourceDB (all completed)")
 
     b1 = await create_build(client, env_id, "Data Loading (20 loaders)")
 
@@ -379,20 +434,30 @@ async def seed_wide_fan_in(client: httpx.AsyncClient, env_id: str):
     for i in range(20):
         tid = f"load-partition-{i:02d}"
         loader_ids.append(tid)
+        # First half depends on source-db-a, second half on source-db-b
+        source_dep = "source-db-a" if i < 10 else "source-db-b"
         await register_task(
             client,
             b1,
             env_id,
             tid,
             "LoadPartition",
+            dependency_task_ids=[source_dep],
             task_namespace="data",
             task_data={"partition": i, "source": f"s3://data/part-{i:02d}.parquet"},
         )
-        await start_task(client, b1, tid, env_id)
-        await complete_task(client, b1, tid, env_id)
 
-    await complete_build(client, b1, env_id)
-    print("  Build 1: 20 LoadPartition tasks, all completed")
+    # Varied statuses: 12 completed, 5 running, 3 failed
+    for i in range(12):
+        await start_task(client, b1, f"load-partition-{i:02d}", env_id)
+        await complete_task(client, b1, f"load-partition-{i:02d}", env_id)
+    for i in range(12, 17):
+        await start_task(client, b1, f"load-partition-{i:02d}", env_id)
+    for i in range(17, 20):
+        await start_task(client, b1, f"load-partition-{i:02d}", env_id)
+        await fail_task(client, b1, f"load-partition-{i:02d}", env_id)
+
+    print("  Build 1: 20 LoadPartition (12 completed, 5 running, 3 failed)")
 
     b2 = await create_build(client, env_id, "Aggregation Pipeline")
 
@@ -418,8 +483,8 @@ async def seed_wide_fan_in(client: httpx.AsyncClient, env_id: str):
     await start_task(client, b2, "aggregate-all", env_id)
 
     print("  Build 2: Aggregate + Summary")
-    print("  -> upstream_depth=1: shows all 20 loaders")
-    print("  -> upstream_depth=1&max_per_type_per_level=5: groups 15 into batch node")
+    print("  -> upstream_depth=1: shows grouped loaders by status")
+    print("  -> upstream_depth=2: also shows ConnectSourceDB + SchemaRegistry")
 
 
 async def seed_deep_chain(client: httpx.AsyncClient, env_id: str):

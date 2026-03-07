@@ -158,7 +158,7 @@ async def test_build_graph_grouping(client: AsyncClient):
         dependency_task_ids=[f"data-{i}" for i in range(5)],
     )
 
-    # With max_per_type=2, the 5 LoadData tasks should be grouped
+    # With max_per_type=2, all 5 LoadData tasks should be grouped (all-or-nothing)
     response = await client.get(
         f"/api/v1/builds/{build2_id}/graph?upstream_depth=1&max_per_type_per_level=2"
     )
@@ -169,7 +169,13 @@ async def test_build_graph_grouping(client: AsyncClient):
     assert group["task_name"] == "LoadData"
     assert group["count"] == 5
     assert group["depth"] == 1
+    assert group["status"] == "pending"  # no events = pending
     assert len(group["sample_task_ids"]) == 5  # up to 5 samples
+
+    # No individual LoadData nodes should exist (all-or-nothing)
+    node_names = {n["task_name"] for n in data["nodes"]}
+    assert "LoadData" not in node_names
+    assert "Aggregate" in node_names
 
 
 @pytest.mark.asyncio

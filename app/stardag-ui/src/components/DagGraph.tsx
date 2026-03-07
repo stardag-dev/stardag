@@ -268,6 +268,7 @@ export function DagGraph({
           count: group.count,
           taskNamespace: group.task_namespace,
           depth: group.depth,
+          status: group.status,
           direction,
         },
       } satisfies BatchNodeType);

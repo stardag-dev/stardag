@@ -55,6 +55,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // Upstream traversal controls
   const [dagControls, setDagControls] = useState<DagControlsState>({
     upstreamDepth: 0,
+    downstreamDepth: 0,
     maxPerType: 5,
   });
 
@@ -109,6 +110,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         fetchTasksInBuild(buildId, { environment_id: activeEnvironment.id }),
         fetchBuildGraph(buildId, activeEnvironment.id, {
           upstream_depth: dagControls.upstreamDepth,
+          downstream_depth: dagControls.downstreamDepth,
           max_per_type_per_level: dagControls.maxPerType,
         }),
       ]);
@@ -124,6 +126,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     activeEnvironment?.id,
     buildId,
     dagControls.upstreamDepth,
+    dagControls.downstreamDepth,
     dagControls.maxPerType,
   ]);
 
@@ -578,6 +581,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                       onChange={setDagControls}
                       primaryCount={allTasks.length}
                       upstreamCount={extendedGraph?.total_upstream_count ?? 0}
+                      downstreamCount={extendedGraph?.total_downstream_count ?? 0}
                       groupCount={extendedGraph?.groups.length ?? 0}
                       truncated={extendedGraph?.truncated ?? false}
                     />
@@ -685,6 +689,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                 onChange={setDagControls}
                 primaryCount={allTasks.length}
                 upstreamCount={extendedGraph?.total_upstream_count ?? 0}
+                downstreamCount={extendedGraph?.total_downstream_count ?? 0}
                 groupCount={extendedGraph?.groups.length ?? 0}
                 truncated={extendedGraph?.truncated ?? false}
               />

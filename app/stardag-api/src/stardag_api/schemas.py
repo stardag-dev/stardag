@@ -276,6 +276,7 @@ class GroupSummary(BaseModel):
     count: int
     sample_task_ids: list[str]
     depth: int
+    status: TaskStatus = TaskStatus.PENDING
     downstream_task_pks: list[str]
 
 
@@ -294,6 +295,7 @@ class TaskGraphExtendedResponse(BaseModel):
     groups: list[GroupSummary] = []
     truncated: bool = False
     total_upstream_count: int = 0
+    total_downstream_count: int = 0
 
 
 # --- API Key Schemas ---

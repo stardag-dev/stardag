@@ -1,4 +1,4 @@
-"""Recursive upstream traversal for DAG visualization."""
+"""Recursive upstream/downstream traversal for DAG visualization."""
 
 from uuid import UUID
 
@@ -40,9 +40,10 @@ async def _traverse_bfs(
     db: AsyncSession,
     environment_id: UUID,
     primary_task_pks: list[UUID],
-    max_depth: int,
+    max_upstream_depth: int,
+    max_downstream_depth: int,
 ) -> list[_TraversedTask]:
-    """BFS upstream traversal using iterative queries (database-agnostic)."""
+    """BFS traversal in both directions using iterative queries."""
     # Fetch primary tasks
     result = await db.execute(
         select(Task.id, Task.task_id, Task.task_name, Task.task_namespace).where(
@@ -61,13 +62,12 @@ async def _traverse_bfs(
             depth=0,
         )
 
-    # Iterative BFS: expand upstream level by level
+    # Upstream BFS (positive depth values)
     current_frontier = set(visited.keys())
-    for depth in range(1, max_depth + 1):
+    for depth in range(1, max_upstream_depth + 1):
         if not current_frontier:
             break
 
-        # Find upstream tasks for current frontier
         result = await db.execute(
             select(
                 Task.id,
@@ -95,7 +95,42 @@ async def _traverse_bfs(
                     depth=depth,
                 )
                 next_frontier.add(row.id)
-            # Keep the minimum depth (already visited at shallower level = keep that)
+
+        current_frontier = next_frontier
+
+    # Downstream BFS (negative depth values)
+    current_frontier = {pk for pk in primary_task_pks if pk in visited}
+    for depth_idx in range(1, max_downstream_depth + 1):
+        if not current_frontier:
+            break
+
+        result = await db.execute(
+            select(
+                Task.id,
+                Task.task_id,
+                Task.task_name,
+                Task.task_namespace,
+                TaskDependency.upstream_task_id,
+            )
+            .join(TaskDependency, TaskDependency.downstream_task_id == Task.id)
+            .where(
+                TaskDependency.upstream_task_id.in_(current_frontier),
+                Task.environment_id == environment_id,
+            )
+        )
+        downstream_rows = result.all()
+
+        next_frontier: set[UUID] = set()
+        for row in downstream_rows:
+            if row.id not in visited:
+                visited[row.id] = _TraversedTask(
+                    id=row.id,
+                    task_id=row.task_id,
+                    task_name=row.task_name,
+                    task_namespace=row.task_namespace,
+                    depth=-depth_idx,
+                )
+                next_frontier.add(row.id)
 
         current_frontier = next_frontier
 
@@ -107,58 +142,77 @@ async def traverse_upstream(
     environment_id: UUID,
     primary_task_pks: list[UUID],
     upstream_depth: int = 0,
-    max_per_type_per_level: int = 50,
+    downstream_depth: int = 0,
+    max_per_type_per_level: int = 5,
     max_total_nodes: int = 500,
 ) -> TaskGraphExtendedResponse:
-    """Traverse upstream dependencies recursively and return extended graph data.
+    """Traverse dependencies recursively and return extended graph data.
 
     Args:
         db: Database session
         environment_id: Environment to scope queries to
         primary_task_pks: Internal DB PKs of the primary tasks (depth 0)
-        upstream_depth: How many levels upstream to traverse (0 = primary only)
-        max_per_type_per_level: Max tasks per task_name per depth level before grouping
+        upstream_depth: How many levels upstream to traverse (0 = none)
+        downstream_depth: How many levels downstream to traverse (0 = none)
+        max_per_type_per_level: Max tasks per (task_name, depth, status) before
+            ALL tasks in that group collapse into a single batch node
         max_total_nodes: Hard cap on total nodes returned
     """
     if not primary_task_pks:
         return TaskGraphExtendedResponse(
-            nodes=[], edges=[], groups=[], truncated=False, total_upstream_count=0
+            nodes=[],
+            edges=[],
+            groups=[],
+            truncated=False,
+            total_upstream_count=0,
+            total_downstream_count=0,
         )
 
     traversed = await _traverse_bfs(
-        db, environment_id, primary_task_pks, upstream_depth
+        db, environment_id, primary_task_pks, upstream_depth, downstream_depth
     )
 
     total_upstream_count = sum(1 for t in traversed if t.depth > 0)
+    total_downstream_count = sum(1 for t in traversed if t.depth < 0)
 
-    # Group by (depth, task_name) for batching
-    groups_by_key: dict[tuple[int, str, str], list[_TraversedTask]] = {}
+    # We need statuses before grouping (status is part of the grouping key)
+    all_traversed_pks = [t.id for t in traversed]
+    statuses = await get_all_task_global_statuses(db, all_traversed_pks)
+
+    def _get_status(pk: UUID) -> TaskStatus:
+        tup = statuses.get(pk)
+        return tup[0] if tup else TaskStatus.PENDING
+
+    # Group by (depth, task_name, task_namespace, status) for batching
+    groups_by_key: dict[tuple[int, str, str, TaskStatus], list[_TraversedTask]] = {}
     for t in traversed:
-        key = (t.depth, t.task_name, t.task_namespace)
+        status = _get_status(t.id)
+        key = (t.depth, t.task_name, t.task_namespace, status)
         groups_by_key.setdefault(key, []).append(t)
 
-    # Decide which tasks to include individually vs group
+    # All-or-nothing: if count > threshold, ALL go into batch node
     included_task_pks: list[UUID] = []
     included_tasks: list[_TraversedTask] = []
     groups: list[GroupSummary] = []
     grouped_task_pks: set[UUID] = set()
     pk_to_group: dict[UUID, str] = {}
 
-    for (depth, task_name, task_namespace), tasks_in_group in groups_by_key.items():
+    for (
+        depth,
+        task_name,
+        task_namespace,
+        status,
+    ), tasks_in_group in groups_by_key.items():
         if len(tasks_in_group) <= max_per_type_per_level:
             for t in tasks_in_group:
                 included_task_pks.append(t.id)
                 included_tasks.append(t)
         else:
-            kept = tasks_in_group[:max_per_type_per_level]
-            for t in kept:
-                included_task_pks.append(t.id)
-                included_tasks.append(t)
-
-            group_id = f"group-{depth}-{task_name}-{task_namespace}"
-            overflow_pks = [t.id for t in tasks_in_group[max_per_type_per_level:]]
-            grouped_task_pks.update(overflow_pks)
-            for pk in overflow_pks:
+            # ALL go into batch node - none shown individually
+            group_id = f"group-{depth}-{task_name}-{task_namespace}-{status.value}"
+            all_pks = [t.id for t in tasks_in_group]
+            grouped_task_pks.update(all_pks)
+            for pk in all_pks:
                 pk_to_group[pk] = group_id
 
             groups.append(
@@ -169,6 +223,7 @@ async def traverse_upstream(
                     count=len(tasks_in_group),
                     sample_task_ids=[t.task_id for t in tasks_in_group[:5]],
                     depth=depth,
+                    status=status,
                     downstream_task_pks=[],
                 )
             )
@@ -201,17 +256,32 @@ async def traverse_upstream(
     included_pk_set = set(included_task_pks)
     edges: list[TaskEdgeExtended] = []
     group_downstream_pks: dict[str, set[UUID]] = {g.group_id: set() for g in groups}
+    group_upstream_pks: dict[str, set[UUID]] = {g.group_id: set() for g in groups}
+    group_to_group_edges: set[tuple[str, str]] = set()
 
     for edge in raw_edges:
         source = edge.upstream_task_id
         target = edge.downstream_task_id
+        source_grouped = source in grouped_task_pks
+        target_grouped = target in grouped_task_pks
 
-        if source in grouped_task_pks:
+        if source_grouped and target_grouped:
+            src_group = pk_to_group[source]
+            tgt_group = pk_to_group[target]
+            if src_group != tgt_group:
+                group_to_group_edges.add((src_group, tgt_group))
+            continue
+
+        if source_grouped:
             group_id = pk_to_group[source]
             if target in included_pk_set:
                 group_downstream_pks[group_id].add(target)
             continue
-        if target in grouped_task_pks:
+
+        if target_grouped:
+            group_id = pk_to_group[target]
+            if source in included_pk_set:
+                group_upstream_pks[group_id].add(source)
             continue
 
         if source in included_pk_set and target in included_pk_set:
@@ -222,9 +292,12 @@ async def traverse_upstream(
         group.downstream_task_pks = [str(pk) for pk in downstream_pks]
         for pk in downstream_pks:
             edges.append(TaskEdgeExtended(source=group.group_id, target=str(pk)))
+        upstream_pks = group_upstream_pks.get(group.group_id, set())
+        for pk in upstream_pks:
+            edges.append(TaskEdgeExtended(source=str(pk), target=group.group_id))
 
-    # Fetch statuses for all included tasks
-    statuses = await get_all_task_global_statuses(db, included_task_pks)
+    for src_group, tgt_group in group_to_group_edges:
+        edges.append(TaskEdgeExtended(source=src_group, target=tgt_group))
 
     # Fetch artifact counts
     artifact_counts: dict[UUID, int] = {}
@@ -239,10 +312,7 @@ async def traverse_upstream(
     # Build nodes
     nodes: list[TaskNodeExtended] = []
     for task_info in included_tasks:
-        status_tuple = statuses.get(
-            task_info.id, (TaskStatus.PENDING, None, None, None, None, False)
-        )
-        status = status_tuple[0]
+        status = _get_status(task_info.id)
 
         nodes.append(
             TaskNodeExtended(
@@ -263,4 +333,5 @@ async def traverse_upstream(
         groups=groups,
         truncated=truncated,
         total_upstream_count=total_upstream_count,
+        total_downstream_count=total_downstream_count,
     )

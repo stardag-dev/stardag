@@ -2,7 +2,15 @@ import { useCallback, useRef, useState } from "react";
 
 export interface DagControlsState {
   upstreamDepth: number;
+  downstreamDepth: number;
   maxPerType: number;
+}
+
+const DEPTH_OPTIONS = [0, 1, 2, 3, 4, 5, -1] as const; // -1 = "all"
+const DEPTH_LABELS: Record<number, string> = { [-1]: "all" };
+
+function depthLabel(d: number): string {
+  return DEPTH_LABELS[d] ?? String(d);
 }
 
 interface DagControlsProps {
@@ -10,6 +18,7 @@ interface DagControlsProps {
   onChange: (state: DagControlsState) => void;
   primaryCount: number;
   upstreamCount: number;
+  downstreamCount: number;
   groupCount: number;
   truncated: boolean;
 }
@@ -19,24 +28,12 @@ export function DagControls({
   onChange,
   primaryCount,
   upstreamCount,
+  downstreamCount,
   groupCount,
   truncated,
 }: DagControlsProps) {
-  const [localDepth, setLocalDepth] = useState(value.upstreamDepth);
   const [localMaxPerType, setLocalMaxPerType] = useState(value.maxPerType);
-  const depthDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const maxPerTypeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const handleDepthChange = useCallback(
-    (newDepth: number) => {
-      setLocalDepth(newDepth);
-      if (depthDebounceRef.current) clearTimeout(depthDebounceRef.current);
-      depthDebounceRef.current = setTimeout(() => {
-        onChange({ ...value, upstreamDepth: newDepth });
-      }, 300);
-    },
-    [onChange, value],
-  );
 
   const handleMaxPerTypeChange = useCallback(
     (newMax: number) => {
@@ -50,59 +47,103 @@ export function DagControls({
     [onChange, value],
   );
 
+  const hasTraversal = value.upstreamDepth !== 0 || value.downstreamDepth !== 0;
+  const totalExtra = upstreamCount + downstreamCount;
+
   return (
     <div className="flex items-center gap-3 text-xs text-gray-600 dark:text-gray-400">
-      <div className="flex items-center gap-1.5">
-        <label
-          htmlFor="upstream-depth"
+      {/* Upstream depth selector */}
+      <div className="flex items-center gap-1">
+        <span
           className="whitespace-nowrap font-medium"
-          title="How many levels of upstream dependencies to show beyond the primary tasks"
+          title="How many levels of upstream dependencies to show"
         >
-          Upstream depth:
-        </label>
-        <input
-          id="upstream-depth"
-          type="range"
-          min={0}
-          max={5}
-          value={localDepth}
-          onChange={(e) => handleDepthChange(Number(e.target.value))}
-          className="h-1 w-16 cursor-pointer accent-blue-500"
-        />
-        <span className="w-3 text-center font-mono">{localDepth}</span>
+          Up:
+        </span>
+        <div className="flex gap-0.5">
+          {DEPTH_OPTIONS.map((d) => (
+            <button
+              key={`up-${d}`}
+              onClick={() =>
+                onChange({
+                  ...value,
+                  upstreamDepth: d === -1 ? 100 : d,
+                })
+              }
+              className={`rounded px-1.5 py-0.5 font-mono transition-colors ${
+                (d === -1 ? 100 : d) === value.upstreamDepth
+                  ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+                  : "text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+              }`}
+            >
+              {depthLabel(d)}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {value.upstreamDepth > 0 && (
-        <>
-          <div className="flex items-center gap-1.5">
-            <label
-              htmlFor="max-per-type"
-              className="whitespace-nowrap font-medium"
-              title="Max tasks of the same type per depth level before grouping into a batch node"
+      {/* Downstream depth selector */}
+      <div className="flex items-center gap-1">
+        <span
+          className="whitespace-nowrap font-medium"
+          title="How many levels of downstream dependents to show"
+        >
+          Down:
+        </span>
+        <div className="flex gap-0.5">
+          {DEPTH_OPTIONS.map((d) => (
+            <button
+              key={`down-${d}`}
+              onClick={() =>
+                onChange({
+                  ...value,
+                  downstreamDepth: d === -1 ? 100 : d,
+                })
+              }
+              className={`rounded px-1.5 py-0.5 font-mono transition-colors ${
+                (d === -1 ? 100 : d) === value.downstreamDepth
+                  ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900 dark:text-blue-300"
+                  : "text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
+              }`}
             >
-              Group after:
-            </label>
-            <input
-              id="max-per-type"
-              type="number"
-              min={1}
-              max={100}
-              value={localMaxPerType}
-              onChange={(e) => handleMaxPerTypeChange(Number(e.target.value))}
-              className="w-12 rounded border border-gray-300 bg-white px-1.5 py-0.5 text-center text-xs tabular-nums dark:border-gray-600 dark:bg-gray-700"
-            />
-          </div>
+              {depthLabel(d)}
+            </button>
+          ))}
+        </div>
+      </div>
 
-          <span className="text-gray-500 dark:text-gray-500">
-            {primaryCount} primary + {upstreamCount} upstream
-            {groupCount > 0 && ` (${groupCount} groups)`}
-          </span>
-        </>
+      {/* Group threshold - always visible */}
+      <div className="flex items-center gap-1.5">
+        <label
+          htmlFor="max-per-type"
+          className="whitespace-nowrap font-medium"
+          title="Max tasks of the same type/status per depth level before grouping into a batch node"
+        >
+          Group after:
+        </label>
+        <input
+          id="max-per-type"
+          type="number"
+          min={1}
+          max={100}
+          value={localMaxPerType}
+          onChange={(e) => handleMaxPerTypeChange(Number(e.target.value))}
+          className="w-12 rounded border border-gray-300 bg-white px-1.5 py-0.5 text-center text-xs tabular-nums dark:border-gray-600 dark:bg-gray-700"
+        />
+      </div>
+
+      {/* Summary */}
+      {(hasTraversal || groupCount > 0) && (
+        <span className="text-gray-500 dark:text-gray-500">
+          {primaryCount} primary
+          {totalExtra > 0 && ` + ${totalExtra} deps`}
+          {groupCount > 0 && ` (${groupCount} groups)`}
+        </span>
       )}
 
       {truncated && (
         <span className="font-medium text-amber-600 dark:text-amber-400">
-          Graph truncated
+          Truncated
         </span>
       )}
     </div>

@@ -1104,9 +1104,10 @@ async def get_build_graph(
     build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
-    upstream_depth: Annotated[int, Query(ge=0, le=10)] = 0,
-    max_per_type_per_level: Annotated[int, Query(ge=1, le=200)] = 50,
-    max_total_nodes: Annotated[int, Query(ge=1, le=2000)] = 500,
+    upstream_depth: Annotated[int, Query(ge=0, le=100)] = 0,
+    downstream_depth: Annotated[int, Query(ge=0, le=100)] = 0,
+    max_per_type_per_level: Annotated[int, Query(ge=1, le=200)] = 5,
+    max_total_nodes: Annotated[int, Query(ge=1, le=5000)] = 500,
 ) -> TaskGraphResponse | TaskGraphExtendedResponse:
     """Get the task graph for a build.
 
@@ -1141,8 +1142,8 @@ async def get_build_graph(
     task_ids_list = [t.id for t in tasks]
     task_ids = set(task_ids_list)
 
-    # If upstream_depth > 0, use recursive traversal
-    if upstream_depth > 0:
+    # If any depth > 0, use recursive traversal
+    if upstream_depth > 0 or downstream_depth > 0:
         from stardag_api.services.graph import traverse_upstream
 
         return await traverse_upstream(
@@ -1150,6 +1151,7 @@ async def get_build_graph(
             environment_id=auth.environment_id,
             primary_task_pks=task_ids_list,
             upstream_depth=upstream_depth,
+            downstream_depth=downstream_depth,
             max_per_type_per_level=max_per_type_per_level,
             max_total_nodes=max_total_nodes,
         )

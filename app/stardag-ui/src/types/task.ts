@@ -108,6 +108,7 @@ export interface GroupSummary {
   count: number;
   sample_task_ids: string[];
   depth: number;
+  status: TaskStatus;
   downstream_task_pks: string[];
 }
 
@@ -122,6 +123,7 @@ export interface TaskGraphExtendedResponse {
   groups: GroupSummary[];
   truncated: boolean;
   total_upstream_count: number;
+  total_downstream_count: number;
 }
 
 // Task artifacts

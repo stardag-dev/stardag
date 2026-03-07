@@ -78,11 +78,14 @@ export async function fetchTasksInBuild(
   return response.json();
 }
 
-export interface UpstreamTraversalOptions {
+export interface TraversalOptions {
   upstream_depth?: number;
+  downstream_depth?: number;
   max_per_type_per_level?: number;
   max_total_nodes?: number;
 }
+
+export type UpstreamTraversalOptions = TraversalOptions;
 
 export async function fetchBuildGraph(
   buildId: string,
@@ -93,6 +96,8 @@ export async function fetchBuildGraph(
   if (environmentId) params.set("environment_id", environmentId);
   if (options?.upstream_depth)
     params.set("upstream_depth", String(options.upstream_depth));
+  if (options?.downstream_depth)
+    params.set("downstream_depth", String(options.downstream_depth));
   if (options?.max_per_type_per_level)
     params.set("max_per_type_per_level", String(options.max_per_type_per_level));
   if (options?.max_total_nodes)
@@ -116,6 +121,8 @@ export async function fetchTaskGraph(
   params.set("task_ids", taskIds.join(","));
   if (options?.upstream_depth)
     params.set("upstream_depth", String(options.upstream_depth));
+  if (options?.downstream_depth)
+    params.set("downstream_depth", String(options.downstream_depth));
   if (options?.max_per_type_per_level)
     params.set("max_per_type_per_level", String(options.max_per_type_per_level));
   if (options?.max_total_nodes)

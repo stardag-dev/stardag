@@ -264,6 +264,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   // Upstream traversal controls
   const [dagControls, setDagControls] = useState<DagControlsState>({
     upstreamDepth: 0,
+    downstreamDepth: 0,
     maxPerType: 5,
   });
 
@@ -574,6 +575,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
     fetchTaskGraph(taskIds, activeEnvironment.id, {
       upstream_depth: dagControls.upstreamDepth,
+      downstream_depth: dagControls.downstreamDepth,
       max_per_type_per_level: dagControls.maxPerType,
     })
       .then((graph) => {
@@ -602,6 +604,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     tasks,
     activeEnvironment?.id,
     dagControls.upstreamDepth,
+    dagControls.downstreamDepth,
     dagControls.maxPerType,
   ]);
 
@@ -679,10 +682,13 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   // Handle DAG task click
   const handleDagTaskClick = useCallback(
     (taskId: string) => {
-      const task = tasks.find((t) => t.task_id === taskId);
-      if (task) setSelectedTask(task);
+      // First check search results, then all graph nodes (for dependency tasks)
+      const task =
+        tasks.find((t) => t.task_id === taskId) ??
+        tasksWithContext.find((t) => t.task_id === taskId);
+      if (task) setSelectedTask(task as TaskSearchResult);
     },
-    [tasks],
+    [tasks, tasksWithContext],
   );
 
   // Handle click-to-filter on cell
@@ -1143,6 +1149,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                       onChange={setDagControls}
                       primaryCount={tasks.length}
                       upstreamCount={extendedDagGraph?.total_upstream_count ?? 0}
+                      downstreamCount={extendedDagGraph?.total_downstream_count ?? 0}
                       groupCount={extendedDagGraph?.groups.length ?? 0}
                       truncated={extendedDagGraph?.truncated ?? false}
                     />
@@ -1430,6 +1437,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                 onChange={setDagControls}
                 primaryCount={tasks.length}
                 upstreamCount={extendedDagGraph?.total_upstream_count ?? 0}
+                downstreamCount={extendedDagGraph?.total_downstream_count ?? 0}
                 groupCount={extendedDagGraph?.groups.length ?? 0}
                 truncated={extendedDagGraph?.truncated ?? false}
               />
