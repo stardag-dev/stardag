@@ -4,6 +4,7 @@ import type {
   Task,
   TaskArtifactListResponse,
   TaskEvent,
+  TaskGraphExtendedResponse,
   TaskGraphResponse,
   TaskStatus,
 } from "../types/task";
@@ -77,17 +78,53 @@ export async function fetchTasksInBuild(
   return response.json();
 }
 
+export interface UpstreamTraversalOptions {
+  upstream_depth?: number;
+  max_per_type_per_level?: number;
+  max_total_nodes?: number;
+}
+
 export async function fetchBuildGraph(
   buildId: string,
   environmentId?: string,
-): Promise<TaskGraphResponse> {
+  options?: UpstreamTraversalOptions,
+): Promise<TaskGraphResponse | TaskGraphExtendedResponse> {
   const params = new URLSearchParams();
   if (environmentId) params.set("environment_id", environmentId);
+  if (options?.upstream_depth)
+    params.set("upstream_depth", String(options.upstream_depth));
+  if (options?.max_per_type_per_level)
+    params.set("max_per_type_per_level", String(options.max_per_type_per_level));
+  if (options?.max_total_nodes)
+    params.set("max_total_nodes", String(options.max_total_nodes));
 
   const url = `${API_BASE}/builds/${buildId}/graph?${params.toString()}`;
   const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch graph: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchTaskGraph(
+  taskIds: string[],
+  environmentId: string,
+  options?: UpstreamTraversalOptions,
+): Promise<TaskGraphExtendedResponse> {
+  const params = new URLSearchParams();
+  params.set("environment_id", environmentId);
+  params.set("task_ids", taskIds.join(","));
+  if (options?.upstream_depth)
+    params.set("upstream_depth", String(options.upstream_depth));
+  if (options?.max_per_type_per_level)
+    params.set("max_per_type_per_level", String(options.max_per_type_per_level));
+  if (options?.max_total_nodes)
+    params.set("max_total_nodes", String(options.max_total_nodes));
+
+  const url = `${API_BASE}/tasks/graph?${params.toString()}`;
+  const response = await fetchWithAuth(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch task graph: ${response.statusText}`);
   }
   return response.json();
 }

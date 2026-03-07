@@ -96,6 +96,34 @@ export interface TaskGraphResponse {
   edges: TaskEdge[];
 }
 
+export interface TaskNodeExtended extends TaskNode {
+  is_primary: boolean;
+  traversal_depth: number;
+}
+
+export interface GroupSummary {
+  group_id: string;
+  task_name: string;
+  task_namespace: string;
+  count: number;
+  sample_task_ids: string[];
+  depth: number;
+  downstream_task_pks: string[];
+}
+
+export interface TaskEdgeExtended {
+  source: string;
+  target: string;
+}
+
+export interface TaskGraphExtendedResponse {
+  nodes: TaskNodeExtended[];
+  edges: TaskEdgeExtended[];
+  groups: GroupSummary[];
+  truncated: boolean;
+  total_upstream_count: number;
+}
+
 // Task artifacts
 export type TaskArtifactType = "markdown" | "json";
 

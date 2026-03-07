@@ -9,17 +9,23 @@ import { fetchWithAuth } from "../api/client";
 import { API_V1 } from "../api/config";
 import {
   fetchAvailableColumns,
-  fetchBuildGraph,
+  fetchTaskGraph,
   type AvailableColumnsResponse,
 } from "../api/tasks";
 import { useEnvironment } from "../context/EnvironmentContext";
-import type { Task, TaskGraphResponse, TaskStatus } from "../types/task";
+import type {
+  Task,
+  TaskGraphExtendedResponse,
+  TaskGraphResponse,
+  TaskStatus,
+} from "../types/task";
 import { truncateNestedKeyToWidth } from "../utils/truncateKey";
 import {
   ColumnManagerModal,
   type AvailableColumn,
   type ColumnConfig,
 } from "./ColumnManagerModal";
+import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import { TaskDetail } from "./TaskDetail";
 
@@ -248,9 +254,18 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   // showDag: actual display state (may be overridden when canShowDag is false)
   const [userPrefersShowDag, setUserPrefersShowDag] = useState(true);
   const [showDag, setShowDag] = useState(true);
-  const [dagGraph, setDagGraph] = useState<TaskGraphResponse | null>(null);
+  const [dagGraph, setDagGraph] = useState<
+    TaskGraphResponse | TaskGraphExtendedResponse | null
+  >(null);
   const [dagLoading, setDagLoading] = useState(false);
+  const [dagFullscreen, setDagFullscreen] = useState(false);
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
+
+  // Upstream traversal controls
+  const [dagControls, setDagControls] = useState<DagControlsState>({
+    upstreamDepth: 0,
+    maxPerType: 5,
+  });
 
   // Handle DAG toggle with panel resize - updates user preference
   const handleToggleDag = useCallback(() => {
@@ -503,18 +518,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     searchTasks();
   }, [searchTasks]);
 
-  // Compute unique builds in search results (for DAG view)
-  const uniqueBuildIds = useMemo(() => {
-    const buildIds = new Set<string>();
-    for (const task of tasks) {
-      if (task.build_id) buildIds.add(task.build_id);
-    }
-    return Array.from(buildIds);
-  }, [tasks]);
-
-  const canShowDag =
-    uniqueBuildIds.length === 1 && tasks.length > 0 && tasks.length <= 100;
-  const dagBuildId = canShowDag ? uniqueBuildIds[0] : null;
+  // DAG is available whenever there are tasks (no longer restricted to single build)
+  const canShowDag = tasks.length > 0 && tasks.length <= 500;
 
   // Auto-collapse DAG when canShowDag becomes false, restore when true
   useEffect(() => {
@@ -541,9 +546,25 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     }
   }, [canShowDag, userPrefersShowDag]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load DAG graph when expanded and there's a single build
+  // ESC to exit DAG fullscreen
   useEffect(() => {
-    if (!showDag || !dagBuildId || !activeEnvironment?.id) {
+    if (!dagFullscreen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDagFullscreen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [dagFullscreen]);
+
+  // Load DAG graph using task graph endpoint (cross-build)
+  useEffect(() => {
+    if (!showDag || !canShowDag || !activeEnvironment?.id) {
+      setDagGraph(null);
+      return;
+    }
+
+    const taskIds = tasks.map((t) => t.task_id);
+    if (taskIds.length === 0) {
       setDagGraph(null);
       return;
     }
@@ -551,7 +572,10 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     let cancelled = false;
     setDagLoading(true);
 
-    fetchBuildGraph(dagBuildId, activeEnvironment.id)
+    fetchTaskGraph(taskIds, activeEnvironment.id, {
+      upstream_depth: dagControls.upstreamDepth,
+      max_per_type_per_level: dagControls.maxPerType,
+    })
       .then((graph) => {
         if (!cancelled) {
           setDagGraph(graph);
@@ -572,7 +596,18 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     return () => {
       cancelled = true;
     };
-  }, [showDag, dagBuildId, activeEnvironment?.id]);
+  }, [
+    showDag,
+    canShowDag,
+    tasks,
+    activeEnvironment?.id,
+    dagControls.upstreamDepth,
+    dagControls.maxPerType,
+  ]);
+
+  // Extended graph metadata
+  const extendedDagGraph =
+    dagGraph && "groups" in dagGraph ? (dagGraph as TaskGraphExtendedResponse) : null;
 
   // Tasks with filter context for DAG view
   const tasksWithContext = useMemo(() => {
@@ -580,6 +615,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     const searchTaskIds = new Set(tasks.map((t) => t.task_id));
     return dagGraph.nodes.map((node) => {
       const searchTask = tasks.find((t) => t.task_id === node.task_id);
+      const isPrimary =
+        "is_primary" in node ? (node as { is_primary: boolean }).is_primary : true;
       return {
         id: node.id,
         task_id: node.task_id,
@@ -595,7 +632,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         completed_at: searchTask?.completed_at ?? null,
         error_message: searchTask?.error_message ?? null,
         artifact_count: node.artifact_count,
-        isFilterMatch: searchTaskIds.has(node.task_id),
+        isFilterMatch: isPrimary && searchTaskIds.has(node.task_id),
       };
     });
   }, [dagGraph, tasks, activeEnvironment?.id]);
@@ -1067,16 +1104,16 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
               </div>
 
               {/* DAG header - always visible */}
-              <button
-                onClick={() => canShowDag && handleToggleDag()}
-                disabled={!canShowDag}
-                className={`flex w-full items-center justify-between border-b border-gray-200 px-6 py-2 text-sm ${
-                  canShowDag
-                    ? "cursor-pointer text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800"
-                    : "cursor-not-allowed text-gray-400 dark:text-gray-500"
-                } dark:border-gray-700`}
-              >
-                <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between border-b border-gray-200 px-6 py-2 dark:border-gray-700">
+                <button
+                  onClick={() => canShowDag && handleToggleDag()}
+                  disabled={!canShowDag}
+                  className={`flex items-center gap-2 text-sm ${
+                    canShowDag
+                      ? "cursor-pointer text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+                      : "cursor-not-allowed text-gray-400 dark:text-gray-500"
+                  }`}
+                >
                   <svg
                     className={`h-4 w-4 transition-transform ${
                       showDag ? "rotate-90" : ""
@@ -1095,22 +1132,42 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                   <span className="font-medium">DAG View</span>
                   {!canShowDag && (
                     <span className="text-xs text-gray-400 dark:text-gray-500">
-                      {tasks.length === 0
-                        ? "(No tasks)"
-                        : tasks.length > 100
-                          ? "(Limit: 100 tasks)"
-                          : uniqueBuildIds.length > 1
-                            ? `(${uniqueBuildIds.length} builds - select a single build)`
-                            : "(No build associated)"}
+                      {tasks.length === 0 ? "(No tasks)" : "(Limit: 500 tasks)"}
                     </span>
                   )}
-                </div>
-                {canShowDag && (
-                  <span className="text-xs text-gray-500 dark:text-gray-400">
-                    {showDag ? "Click to collapse" : "Click to expand"}
-                  </span>
+                </button>
+                {showDag && canShowDag && (
+                  <div className="flex items-center gap-2">
+                    <DagControls
+                      value={dagControls}
+                      onChange={setDagControls}
+                      primaryCount={tasks.length}
+                      upstreamCount={extendedDagGraph?.total_upstream_count ?? 0}
+                      groupCount={extendedDagGraph?.groups.length ?? 0}
+                      truncated={extendedDagGraph?.truncated ?? false}
+                    />
+                    <button
+                      onClick={() => setDagFullscreen(true)}
+                      className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                      title="Fullscreen DAG"
+                    >
+                      <svg
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
+                        />
+                      </svg>
+                    </button>
+                  </div>
                 )}
-              </button>
+              </div>
 
               {/* DAG + Results with resizable split */}
               <PanelGroup direction="vertical" className="flex-1">
@@ -1359,6 +1416,54 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         availableColumns={availableColumns}
         onColumnsChange={setColumns}
       />
+
+      {/* DAG fullscreen overlay */}
+      {dagFullscreen && dagGraph && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900">
+          <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                DAG View
+              </span>
+              <DagControls
+                value={dagControls}
+                onChange={setDagControls}
+                primaryCount={tasks.length}
+                upstreamCount={extendedDagGraph?.total_upstream_count ?? 0}
+                groupCount={extendedDagGraph?.groups.length ?? 0}
+                truncated={extendedDagGraph?.truncated ?? false}
+              />
+            </div>
+            <button
+              onClick={() => setDagFullscreen(false)}
+              className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+              title="Exit fullscreen (Esc)"
+            >
+              <svg
+                className="h-5 w-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+          <div className="flex-1">
+            <DagGraph
+              tasks={tasksWithContext}
+              graph={dagGraph}
+              selectedTaskId={selectedTask?.task_id ?? null}
+              onTaskClick={handleDagTaskClick}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

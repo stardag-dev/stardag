@@ -11,12 +11,14 @@ from stardag_api.db import get_db
 from stardag_api.models import Event, Task, TaskArtifact
 from stardag_api.schemas import (
     EventResponse,
+    TaskGraphExtendedResponse,
     TaskListResponse,
     TaskMetadataResponse,
     TaskArtifactListResponse,
     TaskArtifactResponse,
     TaskResponse,
 )
+from stardag_api.services.graph import traverse_upstream
 from stardag_api.services.status import get_task_global_status
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -78,6 +80,50 @@ async def list_tasks(
         total=total,
         page=page,
         page_size=page_size,
+    )
+
+
+@router.get("/graph", response_model=TaskGraphExtendedResponse)
+async def get_task_graph(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    task_ids: Annotated[str, Query(description="Comma-separated task_id hashes")],
+    upstream_depth: Annotated[int, Query(ge=0, le=10)] = 0,
+    max_per_type_per_level: Annotated[int, Query(ge=1, le=200)] = 50,
+    max_total_nodes: Annotated[int, Query(ge=1, le=2000)] = 500,
+):
+    """Get the task graph for a set of tasks with optional upstream traversal.
+
+    Resolves task_id hashes to internal PKs and traverses upstream dependencies.
+    Used by the Task Explorer for cross-build DAG visualization.
+    """
+    task_id_list = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
+    if not task_id_list:
+        return TaskGraphExtendedResponse(
+            nodes=[], edges=[], groups=[], truncated=False, total_upstream_count=0
+        )
+
+    # Resolve task_id hashes to internal PKs
+    result = await db.execute(
+        select(Task)
+        .where(Task.environment_id == auth.environment_id)
+        .where(Task.task_id.in_(task_id_list))
+    )
+    tasks = result.scalars().all()
+    task_pks = [t.id for t in tasks]
+
+    if not task_pks:
+        return TaskGraphExtendedResponse(
+            nodes=[], edges=[], groups=[], truncated=False, total_upstream_count=0
+        )
+
+    return await traverse_upstream(
+        db=db,
+        environment_id=auth.environment_id,
+        primary_task_pks=task_pks,
+        upstream_depth=upstream_depth,
+        max_per_type_per_level=max_per_type_per_level,
+        max_total_nodes=max_total_nodes,
     )
 
 

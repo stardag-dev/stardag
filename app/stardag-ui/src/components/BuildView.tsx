@@ -15,7 +15,14 @@ import {
 } from "../api/tasks";
 import { useAuth } from "../context/AuthContext";
 import { useEnvironment } from "../context/EnvironmentContext";
-import type { Build, Task, TaskGraphResponse, TaskStatus } from "../types/task";
+import type {
+  Build,
+  Task,
+  TaskGraphExtendedResponse,
+  TaskGraphResponse,
+  TaskStatus,
+} from "../types/task";
+import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
@@ -39,12 +46,21 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // Data state
   const [build, setBuild] = useState<Build | null>(null);
   const [allTasks, setAllTasks] = useState<Task[]>([]);
-  const [graph, setGraph] = useState<TaskGraphResponse | null>(null);
+  const [graph, setGraph] = useState<
+    TaskGraphResponse | TaskGraphExtendedResponse | null
+  >(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Upstream traversal controls
+  const [dagControls, setDagControls] = useState<DagControlsState>({
+    upstreamDepth: 0,
+    maxPerType: 5,
+  });
+
   // DAG collapse state - expanded by default
   const [showDag, setShowDag] = useState(true);
+  const [dagFullscreen, setDagFullscreen] = useState(false);
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
 
   // Override state dropdown
@@ -91,7 +107,10 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       const [buildData, tasksData, graphData] = await Promise.all([
         fetchBuild(buildId, activeEnvironment.id),
         fetchTasksInBuild(buildId, { environment_id: activeEnvironment.id }),
-        fetchBuildGraph(buildId, activeEnvironment.id),
+        fetchBuildGraph(buildId, activeEnvironment.id, {
+          upstream_depth: dagControls.upstreamDepth,
+          max_per_type_per_level: dagControls.maxPerType,
+        }),
       ]);
       setBuild(buildData);
       setAllTasks(tasksData);
@@ -101,7 +120,12 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     } finally {
       setLoading(false);
     }
-  }, [activeEnvironment?.id, buildId]);
+  }, [
+    activeEnvironment?.id,
+    buildId,
+    dagControls.upstreamDepth,
+    dagControls.maxPerType,
+  ]);
 
   useEffect(() => {
     loadBuild();
@@ -176,6 +200,16 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     [activeEnvironment?.id, buildId, user?.profile?.sub],
   );
 
+  // ESC to exit DAG fullscreen
+  useEffect(() => {
+    if (!dagFullscreen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDagFullscreen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [dagFullscreen]);
+
   // Close override menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -230,6 +264,10 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     return true;
   });
 
+  // Extended graph metadata
+  const extendedGraph =
+    graph && "groups" in graph ? (graph as TaskGraphExtendedResponse) : null;
+
   // Tasks with context for DAG - memoized to avoid recalculating on every render
   const tasksWithContext: TaskWithContext[] = useMemo(() => {
     if (!graph) return [];
@@ -239,6 +277,8 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
 
     return graph.nodes.map((node) => {
       const fullTask = allTasks.find((t) => t.task_id === node.task_id);
+      const isPrimary =
+        "is_primary" in node ? (node as { is_primary: boolean }).is_primary : true;
 
       return {
         id: node.id,
@@ -255,7 +295,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         completed_at: fullTask?.completed_at ?? null,
         error_message: fullTask?.error_message ?? null,
         artifact_count: node.artifact_count,
-        isFilterMatch: noFilter || matchingTaskIds.has(node.task_id),
+        isFilterMatch: isPrimary && (noFilter || matchingTaskIds.has(node.task_id)),
         // Cross-build status fields
         waiting_for_lock: fullTask?.waiting_for_lock,
         status_build_id: fullTask?.status_build_id,
@@ -509,11 +549,11 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               />
 
               {/* DAG header - always visible */}
-              <button
-                onClick={handleToggleDag}
-                className="flex w-full items-center justify-between border-b border-gray-200 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
-              >
-                <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+                <button
+                  onClick={handleToggleDag}
+                  className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+                >
                   <svg
                     className={`h-4 w-4 transition-transform ${
                       showDag ? "rotate-90" : ""
@@ -530,11 +570,39 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                     />
                   </svg>
                   <span className="font-medium">DAG View</span>
-                </div>
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  {showDag ? "Click to collapse" : "Click to expand"}
-                </span>
-              </button>
+                </button>
+                {showDag && (
+                  <div className="flex items-center gap-2">
+                    <DagControls
+                      value={dagControls}
+                      onChange={setDagControls}
+                      primaryCount={allTasks.length}
+                      upstreamCount={extendedGraph?.total_upstream_count ?? 0}
+                      groupCount={extendedGraph?.groups.length ?? 0}
+                      truncated={extendedGraph?.truncated ?? false}
+                    />
+                    <button
+                      onClick={() => setDagFullscreen(true)}
+                      className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                      title="Fullscreen DAG"
+                    >
+                      <svg
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+              </div>
 
               {/* DAG + List with resizable split */}
               <PanelGroup direction="vertical" className="flex-1">
@@ -603,6 +671,56 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
           )}
         </PanelGroup>
       </div>
+
+      {/* DAG fullscreen overlay */}
+      {dagFullscreen && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900">
+          <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                DAG View
+              </span>
+              <DagControls
+                value={dagControls}
+                onChange={setDagControls}
+                primaryCount={allTasks.length}
+                upstreamCount={extendedGraph?.total_upstream_count ?? 0}
+                groupCount={extendedGraph?.groups.length ?? 0}
+                truncated={extendedGraph?.truncated ?? false}
+              />
+            </div>
+            <button
+              onClick={() => setDagFullscreen(false)}
+              className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+              title="Exit fullscreen (Esc)"
+            >
+              <svg
+                className="h-5 w-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M6 18L18 6M6 6l12 12"
+                />
+              </svg>
+            </button>
+          </div>
+          <div className="flex-1">
+            <DagGraph
+              tasks={tasksWithContext}
+              graph={graph}
+              selectedTaskId={selectedTask?.task_id ?? null}
+              onTaskClick={handleDagTaskClick}
+              buildId={buildId}
+              onStatusBuildClick={onNavigateToBuild}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

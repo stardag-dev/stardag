@@ -260,6 +260,42 @@ class TaskGraphResponse(BaseModel):
     edges: list[TaskEdge]
 
 
+class TaskNodeExtended(TaskNode):
+    """Extended node with traversal metadata."""
+
+    is_primary: bool = True
+    traversal_depth: int = 0
+
+
+class GroupSummary(BaseModel):
+    """Summary for a batch of same-type tasks collapsed into one node."""
+
+    group_id: str
+    task_name: str
+    task_namespace: str
+    count: int
+    sample_task_ids: list[str]
+    depth: int
+    downstream_task_pks: list[str]
+
+
+class TaskEdgeExtended(BaseModel):
+    """Edge that can reference both UUID task IDs and string group IDs."""
+
+    source: str
+    target: str
+
+
+class TaskGraphExtendedResponse(BaseModel):
+    """Extended DAG visualization data with upstream traversal."""
+
+    nodes: list[TaskNodeExtended]
+    edges: list[TaskEdgeExtended]
+    groups: list[GroupSummary] = []
+    truncated: bool = False
+    total_upstream_count: int = 0
+
+
 # --- API Key Schemas ---
 
 
