@@ -67,10 +67,10 @@ function TruncatedColumnHeader({
       return label;
     }
 
-    // Match the header CSS: text-xs (12px), font-medium (500), uppercase, tracking-wider (0.05em = 0.6px)
+    // Match the header CSS: text-[11px], font-medium (500), uppercase, tracking-wider (0.05em = 0.55px)
     return truncateNestedKeyToWidth(label, containerWidth, {
-      font: "500 12px Inter, system-ui, sans-serif",
-      letterSpacing: 0.6, // tracking-wider = 0.05em at 12px
+      font: "500 11px Inter, system-ui, sans-serif",
+      letterSpacing: 0.55, // tracking-wider = 0.05em at 11px
       uppercase: true, // CSS text-transform: uppercase
     });
   }, [label, isNested, containerWidth]);
@@ -936,7 +936,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
           <Panel defaultSize={selectedTask ? 70 : 100} minSize={40}>
             <div className="flex h-full flex-col">
               {/* Search bar */}
-              <div className="border-b border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
+              <div className="border-b border-gray-200 bg-white px-4 py-1.5 dark:border-gray-700 dark:bg-gray-800">
                 <form onSubmit={handleSearchSubmit} className="relative">
                   <div className="flex items-center gap-2">
                     <div className="relative flex-1">
@@ -949,10 +949,10 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                         onFocus={() => searchText && handleSearchInput(searchText)}
                         onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
                         placeholder="Search tasks... (e.g., task_name = MyTask, param.lr > 0.01)"
-                        className="w-full rounded-md border border-gray-300 bg-white px-4 py-2 pl-10 text-sm text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
+                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-1.5 pl-9 text-xs text-gray-900 placeholder-gray-500 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 dark:placeholder-gray-400"
                       />
                       <svg
-                        className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
+                        className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -992,7 +992,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                   handleAutocompleteSelect(option);
                                 }}
                                 onMouseEnter={() => setSelectedIndex(index)}
-                                className={`block w-full px-4 py-2 text-left text-sm ${
+                                className={`block w-full px-3 py-1.5 text-left text-xs ${
                                   isSelected
                                     ? "bg-blue-50 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
                                     : "text-gray-700 dark:text-gray-300"
@@ -1034,7 +1034,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
                     <button
                       type="submit"
-                      className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                      className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
                     >
                       Search
                     </button>
@@ -1043,7 +1043,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                     <button
                       type="button"
                       onClick={() => setShowColumnManager(true)}
-                      className="rounded-md border border-gray-300 p-2 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                      className="rounded-md border border-gray-300 p-1.5 text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
                       title="Manage columns"
                     >
                       <svg
@@ -1065,11 +1065,11 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
                 {/* Active filters */}
                 {filters.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-2">
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
                     {filters.map((filter) => (
                       <span
                         key={filter.id}
-                        className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-3 py-1 text-sm text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
+                        className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
                       >
                         <button
                           onClick={() => editFilter(filter)}
@@ -1105,7 +1105,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                     ))}
                     <button
                       onClick={() => setFilters([])}
-                      className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                      className="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
                     >
                       Clear all
                     </button>
@@ -1114,7 +1114,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
               </div>
 
               {/* DAG header - always visible */}
-              <div className="flex items-center justify-between border-b border-gray-200 px-6 py-2 dark:border-gray-700">
+              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-1.5 dark:border-gray-700">
                 <button
                   onClick={() => canShowDag && handleToggleDag()}
                   disabled={!canShowDag}
@@ -1254,7 +1254,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                 <th
                                   key={col.key}
                                   style={{ width: col.width }}
-                                  className="group relative cursor-pointer border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
+                                  className="group relative cursor-pointer border-b border-gray-200 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 hover:bg-gray-100 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-700"
                                 >
                                   <div
                                     className="flex items-center gap-1 overflow-hidden"
@@ -1293,7 +1293,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                 </th>
                               ))}
                               {/* Actions column header */}
-                              <th className="w-16 border-b border-gray-200 px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                              <th className="w-12 border-b border-gray-200 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 dark:border-gray-700 dark:text-gray-400">
                                 <span className="sr-only">Actions</span>
                               </th>
                             </tr>
@@ -1322,7 +1322,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                         );
                                       }
                                     }}
-                                    className="cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 text-sm text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
+                                    className="cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap px-3 py-1.5 text-xs text-gray-900 hover:bg-blue-50 dark:text-gray-100 dark:hover:bg-blue-900/20"
                                     title="Click to filter, Shift+click to exclude"
                                   >
                                     {renderCell(
@@ -1334,14 +1334,14 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                                   </td>
                                 ))}
                                 {/* Actions column */}
-                                <td className="whitespace-nowrap px-4 py-3 text-sm">
+                                <td className="whitespace-nowrap px-3 py-1.5 text-xs">
                                   <button
                                     onClick={() => setSelectedTask(task)}
-                                    className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
+                                    className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-700 dark:hover:text-gray-300"
                                     title="View task details"
                                   >
                                     <svg
-                                      className="h-5 w-5"
+                                      className="h-4 w-4"
                                       fill="none"
                                       stroke="currentColor"
                                       viewBox="0 0 24 24"
@@ -1370,26 +1370,26 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
                     {/* Pagination */}
                     {totalPages > 0 && (
-                      <div className="flex items-center justify-between border-t border-gray-200 bg-white px-6 py-3 dark:border-gray-700 dark:bg-gray-800">
-                        <span className="text-sm text-gray-500 dark:text-gray-400">
-                          Showing {(page - 1) * pageSize + 1}-
-                          {Math.min(page * pageSize, total)} of {total}
+                      <div className="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-1.5 dark:border-gray-700 dark:bg-gray-800">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">
+                          {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, total)}{" "}
+                          of {total}
                         </span>
                         <div className="flex items-center gap-2">
                           <button
                             onClick={() => setPage((p) => Math.max(1, p - 1))}
                             disabled={page === 1}
-                            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                            className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
                           >
-                            Previous
+                            Prev
                           </button>
-                          <span className="text-sm text-gray-500 dark:text-gray-400">
-                            Page {page} of {totalPages}
+                          <span className="text-xs text-gray-500 dark:text-gray-400">
+                            {page}/{totalPages}
                           </span>
                           <button
                             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                             disabled={page === totalPages}
-                            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
+                            className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-700"
                           >
                             Next
                           </button>

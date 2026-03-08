@@ -34,21 +34,21 @@ export function TaskTable({
     <div className="flex h-full flex-col overflow-hidden">
       {/* Error state */}
       {error && (
-        <div className="m-3 rounded-md bg-red-50 dark:bg-red-900/20 p-4 text-red-700 dark:text-red-400">
+        <div className="m-3 rounded-md bg-red-50 p-4 text-red-700 dark:bg-red-900/20 dark:text-red-400">
           {error}
         </div>
       )}
 
       {/* Loading state */}
       {loading && (
-        <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">
+        <div className="flex flex-1 items-center justify-center text-gray-500 dark:text-gray-400">
           Loading tasks...
         </div>
       )}
 
       {/* Empty state */}
       {!loading && !error && tasks.length === 0 && (
-        <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">
+        <div className="flex flex-1 items-center justify-center text-gray-500 dark:text-gray-400">
           No tasks found
         </div>
       )}
@@ -57,23 +57,23 @@ export function TaskTable({
       {!loading && tasks.length > 0 && (
         <div className="flex-1 overflow-auto">
           <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-            <thead className="bg-gray-50 dark:bg-gray-800 sticky top-0">
+            <thead className="sticky top-0 bg-gray-50 dark:bg-gray-800">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                <th className="px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   Task Name
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                <th className="px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   Task ID
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                <th className="px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   Status
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                <th className="px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   Created
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200 dark:divide-gray-700 bg-white dark:bg-gray-900">
+            <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-900">
               {tasks.map((task) => (
                 <tr
                   key={task.task_id}
@@ -84,7 +84,7 @@ export function TaskTable({
                       : "hover:bg-gray-50 dark:hover:bg-gray-800"
                   }`}
                 >
-                  <td className="px-4 py-3 text-sm font-medium text-gray-900 dark:text-gray-100">
+                  <td className="px-3 py-1.5 text-xs font-medium text-gray-900 dark:text-gray-100">
                     <div className="flex items-center gap-2">
                       {task.task_name}
                       {task.artifact_count > 0 && (
@@ -111,10 +111,10 @@ export function TaskTable({
                       )}
                     </div>
                   </td>
-                  <td className="px-4 py-3 font-mono text-sm text-gray-500 dark:text-gray-400">
+                  <td className="px-3 py-1.5 font-mono text-xs text-gray-500 dark:text-gray-400">
                     {task.task_id.slice(0, 12)}...
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-1.5">
                     <StatusBadge
                       status={task.status}
                       waitingForLock={task.waiting_for_lock}
@@ -123,7 +123,7 @@ export function TaskTable({
                       onStatusBuildClick={onStatusBuildClick}
                     />
                   </td>
-                  <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">
+                  <td className="px-3 py-1.5 text-xs text-gray-500 dark:text-gray-400">
                     {new Date(task.created_at).toLocaleString()}
                   </td>
                 </tr>
@@ -135,22 +135,22 @@ export function TaskTable({
 
       {/* Pagination */}
       {totalPages > 1 && (
-        <div className="flex items-center justify-between border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2">
-          <span className="text-sm text-gray-500 dark:text-gray-400">
+        <div className="flex items-center justify-between border-t border-gray-200 bg-white px-4 py-1.5 dark:border-gray-700 dark:bg-gray-800">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
             {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, total)} of {total}
           </span>
           <div className="flex gap-2">
             <button
               onClick={() => onPageChange(Math.max(1, page - 1))}
               disabled={page === 1}
-              className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-1 text-sm text-gray-700 dark:text-gray-200 disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-600"
+              className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
             >
               Prev
             </button>
             <button
               onClick={() => onPageChange(Math.min(totalPages, page + 1))}
               disabled={page === totalPages}
-              className="rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-1 text-sm text-gray-700 dark:text-gray-200 disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-600"
+              className="rounded border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
             >
               Next
             </button>
