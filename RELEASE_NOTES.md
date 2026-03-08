@@ -1,6 +1,6 @@
 # Release Notes
 
-Release notes for the **stardag SDK** (`pip install stardag`). These cover breaking changes and migration guides for SDK versions published to PyPI.
+Release notes for the **stardag SDK** (`pip install stardag`). These cover significant changes and migration guides for SDK versions published to PyPI.
 
 For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CHANGELOG.md).
 

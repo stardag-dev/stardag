@@ -21,7 +21,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - Task Explorer: DAG view works across multiple builds (removed single-build restriction)
 - Task Explorer: refactored into focused sub-components (`TaskExplorerSearch`, `TaskExplorerTable`)
 
-## [0.4.0] — 2025-07-14
+## [0.4.0] — 2026-03-06
 
 ### SDK (breaking)
 
@@ -40,7 +40,7 @@ See [release notes](RELEASE_NOTES.md#v040--breaking-target--serializer-type-hier
 - Build view with DAG visualization
 - Task detail panel with artifacts and events
 
-## [0.3.0] — 2025-04-28
+## [0.3.0] — 2026-03-03
 
 ### SDK (breaking)
 
