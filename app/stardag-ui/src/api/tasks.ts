@@ -118,18 +118,19 @@ export async function fetchTaskGraph(
 ): Promise<TaskGraphExtendedResponse> {
   const params = new URLSearchParams();
   params.set("environment_id", environmentId);
-  params.set("task_ids", taskIds.join(","));
-  if (options?.upstream_depth)
-    params.set("upstream_depth", String(options.upstream_depth));
-  if (options?.downstream_depth)
-    params.set("downstream_depth", String(options.downstream_depth));
-  if (options?.max_per_type_per_level)
-    params.set("max_per_type_per_level", String(options.max_per_type_per_level));
-  if (options?.max_total_nodes)
-    params.set("max_total_nodes", String(options.max_total_nodes));
 
   const url = `${API_BASE}/tasks/graph?${params.toString()}`;
-  const response = await fetchWithAuth(url);
+  const response = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task_ids: taskIds,
+      upstream_depth: options?.upstream_depth ?? 0,
+      downstream_depth: options?.downstream_depth ?? 0,
+      max_per_type_per_level: options?.max_per_type_per_level ?? 5,
+      max_total_nodes: options?.max_total_nodes ?? 500,
+    }),
+  });
   if (!response.ok) {
     throw new Error(`Failed to fetch task graph: ${response.statusText}`);
   }

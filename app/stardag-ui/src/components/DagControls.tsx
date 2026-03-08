@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 export interface DagControlsState {
   upstreamDepth: number;
@@ -26,6 +26,12 @@ function useDebouncedNumber(
 
   const handleChange = useCallback(
     (raw: number) => {
+      if (!Number.isFinite(raw)) {
+        if (ref.current) clearTimeout(ref.current);
+        ref.current = null;
+        setLocal(min);
+        return;
+      }
       const clamped = Math.max(min, Math.min(max, raw));
       setLocal(clamped);
       if (ref.current) clearTimeout(ref.current);
@@ -33,6 +39,12 @@ function useDebouncedNumber(
     },
     [onCommit, min, max],
   );
+
+  useEffect(() => {
+    return () => {
+      if (ref.current) clearTimeout(ref.current);
+    };
+  }, []);
 
   return [local, handleChange] as const;
 }
@@ -73,6 +85,7 @@ export function DagControls({
     { min: 1, max: 100 },
   );
 
+  const baseId = useId();
   const hasTraversal = value.upstreamDepth !== 0 || value.downstreamDepth !== 0;
   const totalExtra = upstreamCount + downstreamCount;
 
@@ -83,14 +96,14 @@ export function DagControls({
     <div className="flex items-center gap-3 text-xs text-gray-600 dark:text-gray-400">
       <div className="flex items-center gap-1.5">
         <label
-          htmlFor="upstream-depth"
+          htmlFor={`${baseId}-upstream`}
           className="whitespace-nowrap font-medium"
           title="How many levels of upstream dependencies to show (0 = none)"
         >
           Upstream:
         </label>
         <input
-          id="upstream-depth"
+          id={`${baseId}-upstream`}
           type="number"
           min={0}
           max={100}
@@ -102,14 +115,14 @@ export function DagControls({
 
       <div className="flex items-center gap-1.5">
         <label
-          htmlFor="downstream-depth"
+          htmlFor={`${baseId}-downstream`}
           className="whitespace-nowrap font-medium"
           title="How many levels of downstream dependents to show (0 = none)"
         >
           Downstream:
         </label>
         <input
-          id="downstream-depth"
+          id={`${baseId}-downstream`}
           type="number"
           min={0}
           max={100}
@@ -121,14 +134,14 @@ export function DagControls({
 
       <div className="flex items-center gap-1.5">
         <label
-          htmlFor="max-per-type"
+          htmlFor={`${baseId}-max-per-type`}
           className="whitespace-nowrap font-medium"
           title="Max tasks of the same type/status per depth level before grouping into a batch node"
         >
           Group after:
         </label>
         <input
-          id="max-per-type"
+          id={`${baseId}-max-per-type`}
           type="number"
           min={1}
           max={100}

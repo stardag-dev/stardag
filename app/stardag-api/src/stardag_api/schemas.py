@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from stardag_api.models.enums import BuildStatus, EventType, TaskStatus
 
@@ -285,6 +285,16 @@ class TaskEdgeExtended(BaseModel):
 
     source: str
     target: str
+
+
+class TaskGraphRequest(BaseModel):
+    """Request body for the POST /tasks/graph endpoint."""
+
+    task_ids: list[str] = Field(..., description="List of task_id hashes")
+    upstream_depth: int = Field(0, ge=0, le=100)
+    downstream_depth: int = Field(0, ge=0, le=100)
+    max_per_type_per_level: int = Field(5, ge=1, le=200)
+    max_total_nodes: int = Field(500, ge=1, le=5000)
 
 
 class TaskGraphExtendedResponse(BaseModel):

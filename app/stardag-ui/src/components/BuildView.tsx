@@ -22,17 +22,15 @@ import type {
   TaskGraphExtendedResponse,
   TaskGraphResponse,
   TaskStatus,
+  TaskWithContext,
 } from "../types/task";
+import { isExtendedResponse } from "../types/task";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { TaskTable } from "./TaskTable";
-
-interface TaskWithContext extends Task {
-  isFilterMatch: boolean;
-}
 
 interface BuildViewProps {
   buildId: string;
@@ -287,8 +285,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   });
 
   // Extended graph metadata
-  const extendedGraph =
-    graph && "groups" in graph ? (graph as TaskGraphExtendedResponse) : null;
+  const extendedGraph = graph && isExtendedResponse(graph) ? graph : null;
 
   // Tasks with context for DAG - memoized to avoid recalculating on every render
   const tasksWithContext: TaskWithContext[] = useMemo(() => {

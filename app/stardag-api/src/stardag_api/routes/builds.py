@@ -1099,7 +1099,9 @@ async def list_build_events(
     ]
 
 
-@router.get("/{build_id}/graph")
+@router.get(
+    "/{build_id}/graph", response_model=TaskGraphResponse | TaskGraphExtendedResponse
+)
 async def get_build_graph(
     build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],

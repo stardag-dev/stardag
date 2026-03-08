@@ -1,8 +1,7 @@
 import { useState, useEffect } from "react";
 import { DagGraph, type LayoutDirection } from "./DagGraph";
 import { PythonCodeBlock } from "./PythonCodeBlock";
-import type { TaskWithContext } from "../hooks/useTasks";
-import type { TaskGraphResponse } from "../types/task";
+import type { TaskWithContext, TaskGraphResponse } from "../types/task";
 import mlPipelineCode from "../code-examples/ml-pipeline.py?raw";
 
 // Hook to detect if screen is wide (for responsive DAG direction)

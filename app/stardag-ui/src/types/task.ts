@@ -172,3 +172,15 @@ export interface TaskEvent {
   error_message: string | null;
   event_metadata: Record<string, unknown> | null;
 }
+
+// Task with filter/DAG context
+export interface TaskWithContext extends Task {
+  isFilterMatch: boolean;
+}
+
+// Type guard for extended graph response
+export function isExtendedResponse(
+  graph: TaskGraphResponse | TaskGraphExtendedResponse,
+): graph is TaskGraphExtendedResponse {
+  return "groups" in graph;
+}

@@ -15,12 +15,13 @@ import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
-import type { TaskWithContext } from "../hooks/useTasks";
 import type {
+  TaskWithContext,
   TaskGraphResponse,
   TaskGraphExtendedResponse,
   GroupSummary,
 } from "../types/task";
+import { isExtendedResponse } from "../types/task";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 
@@ -95,12 +96,6 @@ function LayoutToggle({ direction, onDirectionChange }: LayoutToggleProps) {
       </div>
     </Panel>
   );
-}
-
-function isExtendedResponse(
-  graph: TaskGraphResponse | TaskGraphExtendedResponse,
-): graph is TaskGraphExtendedResponse {
-  return "groups" in graph;
 }
 
 interface DagGraphProps {
@@ -236,7 +231,7 @@ export function DagGraph({
         id: String(graphNode.id),
         type: "taskNode" as const,
         position: { x: 0, y: 0 },
-        style: depth > 0 ? { opacity: getDepthOpacity(depth) } : undefined,
+        style: depth !== 0 ? { opacity: getDepthOpacity(Math.abs(depth)) } : undefined,
         data: {
           label: graphNode.task_name,
           taskId: graphNode.task_id,
@@ -289,9 +284,9 @@ export function DagGraph({
         const targetTask = taskByInternalId.get(graphEdge.target);
         const sourceDepth = nodeDepthMap.get(sourceId) ?? 0;
         const targetDepth = nodeDepthMap.get(targetId) ?? 0;
-        const maxDepth = Math.max(sourceDepth, targetDepth);
+        const maxAbsDepth = Math.max(Math.abs(sourceDepth), Math.abs(targetDepth));
         const isMutedEdge =
-          maxDepth > 0 ||
+          maxAbsDepth > 0 ||
           !(sourceTask?.isFilterMatch ?? true) ||
           !(targetTask?.isFilterMatch ?? true);
 
@@ -310,7 +305,7 @@ export function DagGraph({
                 : "#94a3b8",
             strokeWidth: isMutedEdge ? 1.5 : 2,
             opacity: isMutedEdge
-              ? getDepthOpacity(maxDepth) * (isMutedEdge ? 0.7 : 1)
+              ? getDepthOpacity(maxAbsDepth) * (isMutedEdge ? 0.7 : 1)
               : 1,
           },
         };

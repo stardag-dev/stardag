@@ -1,5 +1,6 @@
 """Recursive upstream/downstream traversal for DAG visualization."""
 
+import hashlib
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -209,7 +210,9 @@ async def traverse_upstream(
                 included_tasks.append(t)
         else:
             # ALL go into batch node - none shown individually
-            group_id = f"group-{depth}-{task_name}-{task_namespace}-{status.value}"
+            raw_key = f"{depth}:{task_name}:{task_namespace}:{status.value}"
+            short_hash = hashlib.sha256(raw_key.encode()).hexdigest()[:12]
+            group_id = f"group-{short_hash}"
             all_pks = [t.id for t in tasks_in_group]
             grouped_task_pks.update(all_pks)
             for pk in all_pks:
