@@ -11,12 +11,15 @@ from stardag_api.db import get_db
 from stardag_api.models import Event, Task, TaskArtifact
 from stardag_api.schemas import (
     EventResponse,
+    TaskGraphExtendedResponse,
+    TaskGraphRequest,
     TaskListResponse,
     TaskMetadataResponse,
     TaskArtifactListResponse,
     TaskArtifactResponse,
     TaskResponse,
 )
+from stardag_api.services.graph import traverse_upstream
 from stardag_api.services.status import get_task_global_status
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -78,6 +81,57 @@ async def list_tasks(
         total=total,
         page=page,
         page_size=page_size,
+    )
+
+
+@router.post("/graph", response_model=TaskGraphExtendedResponse)
+async def get_task_graph(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    body: TaskGraphRequest,
+):
+    """Get the task graph for a set of tasks with optional upstream traversal.
+
+    Resolves task_id hashes to internal PKs and traverses upstream dependencies.
+    Used by the Task Explorer for cross-build DAG visualization.
+    """
+    if not body.task_ids:
+        return TaskGraphExtendedResponse(
+            nodes=[],
+            edges=[],
+            groups=[],
+            truncated=False,
+            total_upstream_count=0,
+            total_downstream_count=0,
+        )
+
+    # Resolve task_id hashes to internal PKs
+    result = await db.execute(
+        select(Task)
+        .where(Task.environment_id == auth.environment_id)
+        .where(Task.task_id.in_(body.task_ids))
+    )
+    tasks = result.scalars().all()
+    task_pks = [t.id for t in tasks]
+
+    if not task_pks:
+        return TaskGraphExtendedResponse(
+            nodes=[],
+            edges=[],
+            groups=[],
+            truncated=False,
+            total_upstream_count=0,
+            total_downstream_count=0,
+        )
+
+    return await traverse_upstream(
+        db=db,
+        environment_id=auth.environment_id,
+        primary_task_pks=task_pks,
+        upstream_depth=body.upstream_depth,
+        downstream_depth=body.downstream_depth,
+        max_per_type_per_level=body.max_per_type_per_level,
+        max_total_nodes=body.max_total_nodes,
     )
 
 

@@ -1,11 +1,15 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { fetchBuilds, fetchTasksInBuild, fetchBuildGraph } from "../api/tasks";
 import { useEnvironment } from "../context/EnvironmentContext";
-import type { Build, Task, TaskStatus, TaskGraphResponse } from "../types/task";
+import type {
+  Build,
+  Task,
+  TaskStatus,
+  TaskGraphResponse,
+  TaskWithContext,
+} from "../types/task";
 
-export interface TaskWithContext extends Task {
-  isFilterMatch: boolean;
-}
+export type { TaskWithContext } from "../types/task";
 
 interface UseTasksReturn {
   tasks: Task[];

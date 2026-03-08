@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from stardag_api.models.enums import BuildStatus, EventType, TaskStatus
 
@@ -258,6 +258,54 @@ class TaskGraphResponse(BaseModel):
 
     nodes: list[TaskNode]
     edges: list[TaskEdge]
+
+
+class TaskNodeExtended(TaskNode):
+    """Extended node with traversal metadata."""
+
+    is_primary: bool = True
+    traversal_depth: int = 0
+
+
+class GroupSummary(BaseModel):
+    """Summary for a batch of same-type tasks collapsed into one node."""
+
+    group_id: str
+    task_name: str
+    task_namespace: str
+    count: int
+    sample_task_ids: list[str]
+    depth: int
+    status: TaskStatus = TaskStatus.PENDING
+    downstream_task_pks: list[str]
+
+
+class TaskEdgeExtended(BaseModel):
+    """Edge that can reference both UUID task IDs and string group IDs."""
+
+    source: str
+    target: str
+
+
+class TaskGraphRequest(BaseModel):
+    """Request body for the POST /tasks/graph endpoint."""
+
+    task_ids: list[str] = Field(..., description="List of task_id hashes")
+    upstream_depth: int = Field(0, ge=0, le=100)
+    downstream_depth: int = Field(0, ge=0, le=100)
+    max_per_type_per_level: int = Field(5, ge=1, le=200)
+    max_total_nodes: int = Field(500, ge=1, le=5000)
+
+
+class TaskGraphExtendedResponse(BaseModel):
+    """Extended DAG visualization data with upstream traversal."""
+
+    nodes: list[TaskNodeExtended]
+    edges: list[TaskEdgeExtended]
+    groups: list[GroupSummary] = []
+    truncated: bool = False
+    total_upstream_count: int = 0
+    total_downstream_count: int = 0
 
 
 # --- API Key Schemas ---

@@ -41,6 +41,7 @@ from stardag_api.schemas import (
     TaskCreate,
     TaskEdge,
     TaskEventResponse,
+    TaskGraphExtendedResponse,
     TaskGraphResponse,
     TaskNode,
     TaskArtifactCreate,
@@ -1098,13 +1099,23 @@ async def list_build_events(
     ]
 
 
-@router.get("/{build_id}/graph", response_model=TaskGraphResponse)
+@router.get(
+    "/{build_id}/graph", response_model=TaskGraphResponse | TaskGraphExtendedResponse
+)
 async def get_build_graph(
     build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
-):
+    upstream_depth: Annotated[int, Query(ge=0, le=100)] = 0,
+    downstream_depth: Annotated[int, Query(ge=0, le=100)] = 0,
+    max_per_type_per_level: Annotated[int, Query(ge=1, le=200)] = 5,
+    max_total_nodes: Annotated[int, Query(ge=1, le=5000)] = 500,
+) -> TaskGraphResponse | TaskGraphExtendedResponse:
     """Get the task graph for a build.
+
+    When upstream_depth > 0 or downstream_depth > 0, recursively traverses
+    dependencies beyond the build boundary (upstream and/or downstream) and
+    returns an extended response with traversal metadata and optional grouping.
 
     Requires authentication via API key or JWT token with environment_id.
     """
@@ -1133,6 +1144,21 @@ async def get_build_graph(
     task_ids_list = [t.id for t in tasks]
     task_ids = set(task_ids_list)
 
+    # If any depth > 0, use recursive traversal
+    if upstream_depth > 0 or downstream_depth > 0:
+        from stardag_api.services.graph import traverse_upstream
+
+        return await traverse_upstream(
+            db=db,
+            environment_id=auth.environment_id,
+            primary_task_pks=task_ids_list,
+            upstream_depth=upstream_depth,
+            downstream_depth=downstream_depth,
+            max_per_type_per_level=max_per_type_per_level,
+            max_total_nodes=max_total_nodes,
+        )
+
+    # Original behavior: return basic TaskGraphResponse
     # Get global statuses (considering events from ALL builds)
     statuses = await get_all_task_global_statuses(db, task_ids_list)
 

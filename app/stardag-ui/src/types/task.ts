@@ -96,6 +96,36 @@ export interface TaskGraphResponse {
   edges: TaskEdge[];
 }
 
+export interface TaskNodeExtended extends TaskNode {
+  is_primary: boolean;
+  traversal_depth: number;
+}
+
+export interface GroupSummary {
+  group_id: string;
+  task_name: string;
+  task_namespace: string;
+  count: number;
+  sample_task_ids: string[];
+  depth: number;
+  status: TaskStatus;
+  downstream_task_pks: string[];
+}
+
+export interface TaskEdgeExtended {
+  source: string;
+  target: string;
+}
+
+export interface TaskGraphExtendedResponse {
+  nodes: TaskNodeExtended[];
+  edges: TaskEdgeExtended[];
+  groups: GroupSummary[];
+  truncated: boolean;
+  total_upstream_count: number;
+  total_downstream_count: number;
+}
+
 // Task artifacts
 export type TaskArtifactType = "markdown" | "json";
 
@@ -141,4 +171,16 @@ export interface TaskEvent {
   created_at: string;
   error_message: string | null;
   event_metadata: Record<string, unknown> | null;
+}
+
+// Task with filter/DAG context
+export interface TaskWithContext extends Task {
+  isFilterMatch: boolean;
+}
+
+// Type guard for extended graph response
+export function isExtendedResponse(
+  graph: TaskGraphResponse | TaskGraphExtendedResponse,
+): graph is TaskGraphExtendedResponse {
+  return "groups" in graph;
 }

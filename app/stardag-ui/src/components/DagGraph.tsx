@@ -15,8 +15,14 @@ import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
-import type { TaskWithContext } from "../hooks/useTasks";
-import type { TaskGraphResponse } from "../types/task";
+import type {
+  TaskWithContext,
+  TaskGraphResponse,
+  TaskGraphExtendedResponse,
+  GroupSummary,
+} from "../types/task";
+import { isExtendedResponse } from "../types/task";
+import { BatchNode, type BatchNodeData } from "./BatchNode";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 
 export type LayoutDirection = "TB" | "LR";
@@ -94,7 +100,7 @@ function LayoutToggle({ direction, onDirectionChange }: LayoutToggleProps) {
 
 interface DagGraphProps {
   tasks: TaskWithContext[];
-  graph: TaskGraphResponse | null;
+  graph: TaskGraphResponse | TaskGraphExtendedResponse | null;
   selectedTaskId: string | null;
   onTaskClick: (taskId: string) => void;
   buildId?: string;
@@ -104,18 +110,23 @@ interface DagGraphProps {
 
 const nodeTypes: NodeTypes = {
   taskNode: TaskNode,
+  batchNode: BatchNode,
 };
 
 type TaskNodeType = Node<TaskNodeData>;
+type BatchNodeType = Node<BatchNodeData>;
+type AnyNodeType = TaskNodeType | BatchNodeType;
 
 const NODE_WIDTH = 160;
 const NODE_HEIGHT = 90;
+const BATCH_NODE_WIDTH = 180;
+const BATCH_NODE_HEIGHT = 100;
 
 function getLayoutedElements(
-  nodes: TaskNodeType[],
+  nodes: AnyNodeType[],
   edges: Edge[],
   direction: LayoutDirection,
-): { nodes: TaskNodeType[]; edges: Edge[] } {
+): { nodes: AnyNodeType[]; edges: Edge[] } {
   if (nodes.length === 0) return { nodes, edges };
 
   const g = new Dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
@@ -129,7 +140,11 @@ function getLayoutedElements(
   });
 
   nodes.forEach((node) => {
-    g.setNode(node.id, { width: NODE_WIDTH, height: NODE_HEIGHT });
+    const isBatch = node.type === "batchNode";
+    g.setNode(node.id, {
+      width: isBatch ? BATCH_NODE_WIDTH : NODE_WIDTH,
+      height: isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT,
+    });
   });
 
   edges.forEach((edge) => {
@@ -140,16 +155,25 @@ function getLayoutedElements(
 
   const layoutedNodes = nodes.map((node) => {
     const nodeWithPosition = g.node(node.id);
+    const isBatch = node.type === "batchNode";
+    const w = isBatch ? BATCH_NODE_WIDTH : NODE_WIDTH;
+    const h = isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT;
     return {
       ...node,
       position: {
-        x: nodeWithPosition.x - NODE_WIDTH / 2,
-        y: nodeWithPosition.y - NODE_HEIGHT / 2,
+        x: nodeWithPosition.x - w / 2,
+        y: nodeWithPosition.y - h / 2,
       },
     };
   });
 
   return { nodes: layoutedNodes, edges };
+}
+
+function getDepthOpacity(depth: number): number {
+  if (depth === 0) return 1;
+  if (depth === 1) return 0.7;
+  return 0.5;
 }
 
 export function DagGraph({
@@ -171,24 +195,49 @@ export function DagGraph({
   );
   const taskByInternalId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
 
+  // Build depth map for extended responses
+  const nodeDepthMap = useMemo(() => {
+    const map = new Map<string, number>();
+    if (graph && isExtendedResponse(graph)) {
+      for (const node of graph.nodes) {
+        map.set(String(node.id), node.traversal_depth);
+      }
+      for (const group of graph.groups) {
+        map.set(group.group_id, group.depth);
+      }
+    }
+    return map;
+  }, [graph]);
+
   const { nodes: initialNodes, edges: initialEdges } = useMemo(() => {
     if (!graph || graph.nodes.length === 0) {
-      return { nodes: [], edges: [] };
+      return { nodes: [] as AnyNodeType[], edges: [] as Edge[] };
     }
 
+    const extended = isExtendedResponse(graph);
+
     // Create nodes from graph data
-    const nodes: TaskNodeType[] = graph.nodes.map((graphNode) => {
+    const nodes: AnyNodeType[] = graph.nodes.map((graphNode) => {
       const task = taskByTaskId.get(graphNode.task_id);
+      const depth = extended
+        ? (graphNode as { traversal_depth?: number }).traversal_depth ?? 0
+        : 0;
+      const isPrimary = extended
+        ? (graphNode as { is_primary?: boolean }).is_primary ?? true
+        : true;
+      const isFilterMatch = task?.isFilterMatch ?? isPrimary;
+
       return {
-        id: String(graphNode.id), // ReactFlow needs string IDs
-        type: "taskNode",
+        id: String(graphNode.id),
+        type: "taskNode" as const,
         position: { x: 0, y: 0 },
+        style: depth !== 0 ? { opacity: getDepthOpacity(Math.abs(depth)) } : undefined,
         data: {
           label: graphNode.task_name,
           taskId: graphNode.task_id,
           status: graphNode.status,
           isSelected: graphNode.task_id === selectedTaskId,
-          isFilterMatch: task?.isFilterMatch ?? true,
+          isFilterMatch,
           direction,
           hasArtifacts: graphNode.artifact_count > 0,
           waitingForLock: task?.waiting_for_lock,
@@ -196,34 +245,71 @@ export function DagGraph({
           currentBuildId: buildId,
           onStatusBuildClick,
         },
-      };
+      } satisfies TaskNodeType;
     });
+
+    // Add batch nodes for groups
+    const groups: GroupSummary[] = extended
+      ? (graph as TaskGraphExtendedResponse).groups
+      : [];
+    for (const group of groups) {
+      nodes.push({
+        id: group.group_id,
+        type: "batchNode" as const,
+        position: { x: 0, y: 0 },
+        style: { opacity: getDepthOpacity(group.depth) },
+        data: {
+          label: group.task_name,
+          count: group.count,
+          taskNamespace: group.task_namespace,
+          depth: group.depth,
+          status: group.status,
+          direction,
+        },
+      } satisfies BatchNodeType);
+    }
 
     // Create edges from graph data
-    const edges: Edge[] = graph.edges.map((graphEdge) => {
-      const sourceTask = taskByInternalId.get(graphEdge.source);
-      const targetTask = taskByInternalId.get(graphEdge.target);
-      const isMutedEdge =
-        !(sourceTask?.isFilterMatch ?? true) || !(targetTask?.isFilterMatch ?? true);
+    const nodeIdSet = new Set(nodes.map((n) => n.id));
+    const edges: Edge[] = graph.edges
+      .filter(
+        (graphEdge) =>
+          nodeIdSet.has(String(graphEdge.source)) &&
+          nodeIdSet.has(String(graphEdge.target)),
+      )
+      .map((graphEdge) => {
+        const sourceId = String(graphEdge.source);
+        const targetId = String(graphEdge.target);
+        const sourceTask = taskByInternalId.get(graphEdge.source);
+        const targetTask = taskByInternalId.get(graphEdge.target);
+        const sourceDepth = nodeDepthMap.get(sourceId) ?? 0;
+        const targetDepth = nodeDepthMap.get(targetId) ?? 0;
+        const maxAbsDepth = Math.max(Math.abs(sourceDepth), Math.abs(targetDepth));
+        const isMutedEdge =
+          maxAbsDepth > 0 ||
+          !(sourceTask?.isFilterMatch ?? true) ||
+          !(targetTask?.isFilterMatch ?? true);
 
-      return {
-        id: `${graphEdge.source}-${graphEdge.target}`,
-        source: String(graphEdge.source),
-        target: String(graphEdge.target),
-        animated: targetTask?.status === "running",
-        style: {
-          stroke: isMutedEdge
-            ? theme === "dark"
-              ? "#4b5563"
-              : "#d1d5db"
-            : theme === "dark"
-              ? "#6b7280"
-              : "#94a3b8",
-          strokeWidth: isMutedEdge ? 1.5 : 2,
-          opacity: isMutedEdge ? 0.5 : 1,
-        },
-      };
-    });
+        return {
+          id: `${graphEdge.source}-${graphEdge.target}`,
+          source: sourceId,
+          target: targetId,
+          animated: targetTask?.status === "running",
+          style: {
+            stroke: isMutedEdge
+              ? theme === "dark"
+                ? "#4b5563"
+                : "#d1d5db"
+              : theme === "dark"
+                ? "#6b7280"
+                : "#94a3b8",
+            strokeWidth: isMutedEdge ? 1.5 : 2,
+            opacity: isMutedEdge
+              ? getDepthOpacity(maxAbsDepth) * (isMutedEdge ? 0.7 : 1)
+              : 1,
+          },
+        };
+      });
 
     return getLayoutedElements(nodes, edges, direction);
   }, [
@@ -231,6 +317,7 @@ export function DagGraph({
     selectedTaskId,
     taskByTaskId,
     taskByInternalId,
+    nodeDepthMap,
     theme,
     direction,
     buildId,
@@ -245,7 +332,7 @@ export function DagGraph({
     const newNodes = initialNodes.map((node) => ({
       ...node,
       data: { ...node.data },
-    }));
+    })) as AnyNodeType[];
     setNodes(newNodes);
     setEdges([...initialEdges]);
   }, [initialNodes, initialEdges, setNodes, setEdges]);

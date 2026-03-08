@@ -4,6 +4,7 @@ import type {
   Task,
   TaskArtifactListResponse,
   TaskEvent,
+  TaskGraphExtendedResponse,
   TaskGraphResponse,
   TaskStatus,
 } from "../types/task";
@@ -77,17 +78,61 @@ export async function fetchTasksInBuild(
   return response.json();
 }
 
+export interface TraversalOptions {
+  upstream_depth?: number;
+  downstream_depth?: number;
+  max_per_type_per_level?: number;
+  max_total_nodes?: number;
+}
+
+export type UpstreamTraversalOptions = TraversalOptions;
+
 export async function fetchBuildGraph(
   buildId: string,
   environmentId?: string,
-): Promise<TaskGraphResponse> {
+  options?: UpstreamTraversalOptions,
+): Promise<TaskGraphResponse | TaskGraphExtendedResponse> {
   const params = new URLSearchParams();
   if (environmentId) params.set("environment_id", environmentId);
+  if (options?.upstream_depth)
+    params.set("upstream_depth", String(options.upstream_depth));
+  if (options?.downstream_depth)
+    params.set("downstream_depth", String(options.downstream_depth));
+  if (options?.max_per_type_per_level)
+    params.set("max_per_type_per_level", String(options.max_per_type_per_level));
+  if (options?.max_total_nodes)
+    params.set("max_total_nodes", String(options.max_total_nodes));
 
   const url = `${API_BASE}/builds/${buildId}/graph?${params.toString()}`;
   const response = await fetchWithAuth(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch graph: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function fetchTaskGraph(
+  taskIds: string[],
+  environmentId: string,
+  options?: UpstreamTraversalOptions,
+): Promise<TaskGraphExtendedResponse> {
+  const params = new URLSearchParams();
+  params.set("environment_id", environmentId);
+
+  const url = `${API_BASE}/tasks/graph?${params.toString()}`;
+  const response = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task_ids: taskIds,
+      upstream_depth: options?.upstream_depth ?? 0,
+      downstream_depth: options?.downstream_depth ?? 0,
+      max_per_type_per_level: options?.max_per_type_per_level ?? 5,
+      max_total_nodes: options?.max_total_nodes ?? 500,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch task graph: ${response.statusText}`);
   }
   return response.json();
 }
@@ -118,8 +163,13 @@ export async function fetchTasks(
   return response.json();
 }
 
-export async function fetchTask(taskId: string): Promise<Task> {
-  const response = await fetchWithAuth(`${API_BASE}/tasks/${taskId}`);
+export async function fetchTask(taskId: string, environmentId?: string): Promise<Task> {
+  const params = new URLSearchParams();
+  if (environmentId) params.set("environment_id", environmentId);
+
+  const response = await fetchWithAuth(
+    `${API_BASE}/tasks/${taskId}?${params.toString()}`,
+  );
   if (!response.ok) {
     throw new Error(`Failed to fetch task: ${response.statusText}`);
   }

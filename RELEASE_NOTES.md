@@ -1,5 +1,11 @@
 # Release Notes
 
+Release notes for the **stardag SDK** (`pip install stardag`). These cover significant changes and migration guides for SDK versions published to PyPI.
+
+For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CHANGELOG.md).
+
+---
+
 ## v0.4.0 — Breaking: Target & Serializer Type Hierarchy Restructure
 
 The target and serializer type hierarchies have been restructured to cleanly support both file and directory targets through a unified `Task` interface.
