@@ -97,7 +97,12 @@ async def get_task_graph(
     """
     if not body.task_ids:
         return TaskGraphExtendedResponse(
-            nodes=[], edges=[], groups=[], truncated=False, total_upstream_count=0
+            nodes=[],
+            edges=[],
+            groups=[],
+            truncated=False,
+            total_upstream_count=0,
+            total_downstream_count=0,
         )
 
     # Resolve task_id hashes to internal PKs
@@ -111,7 +116,12 @@ async def get_task_graph(
 
     if not task_pks:
         return TaskGraphExtendedResponse(
-            nodes=[], edges=[], groups=[], truncated=False, total_upstream_count=0
+            nodes=[],
+            edges=[],
+            groups=[],
+            truncated=False,
+            total_upstream_count=0,
+            total_downstream_count=0,
         )
 
     return await traverse_upstream(

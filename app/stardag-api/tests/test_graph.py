@@ -226,7 +226,9 @@ async def test_task_graph_basic(client: AsyncClient):
     await register_task(client, build_id, "t-x", "TaskX")
     await register_task(client, build_id, "t-y", "TaskY", dependency_task_ids=["t-x"])
 
-    response = await client.get("/api/v1/tasks/graph?task_ids=t-x,t-y")
+    response = await client.post(
+        "/api/v1/tasks/graph", json={"task_ids": ["t-x", "t-y"]}
+    )
     assert response.status_code == 200
     data = response.json()
 
@@ -252,8 +254,9 @@ async def test_task_graph_cross_build(client: AsyncClient):
     )
 
     # Query with both task IDs (from different builds)
-    response = await client.get(
-        "/api/v1/tasks/graph?task_ids=shared-task,consumer&upstream_depth=1"
+    response = await client.post(
+        "/api/v1/tasks/graph",
+        json={"task_ids": ["shared-task", "consumer"], "upstream_depth": 1},
     )
     data = response.json()
 
@@ -265,7 +268,7 @@ async def test_task_graph_cross_build(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_task_graph_empty_task_ids(client: AsyncClient):
     """Test /tasks/graph with empty task_ids returns empty response."""
-    response = await client.get("/api/v1/tasks/graph?task_ids=")
+    response = await client.post("/api/v1/tasks/graph", json={"task_ids": []})
     assert response.status_code == 200
     data = response.json()
     assert data["nodes"] == []
@@ -275,8 +278,9 @@ async def test_task_graph_empty_task_ids(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_task_graph_nonexistent_task_ids(client: AsyncClient):
     """Test /tasks/graph with nonexistent task_ids returns empty response."""
-    response = await client.get(
-        "/api/v1/tasks/graph?task_ids=nonexistent-1,nonexistent-2"
+    response = await client.post(
+        "/api/v1/tasks/graph",
+        json={"task_ids": ["nonexistent-1", "nonexistent-2"]},
     )
     assert response.status_code == 200
     data = response.json()
@@ -307,7 +311,10 @@ async def test_task_graph_upstream_traversal(client: AsyncClient):
     )
 
     # Query only t-d, traverse upstream 2 levels
-    response = await client.get("/api/v1/tasks/graph?task_ids=t-d&upstream_depth=2")
+    response = await client.post(
+        "/api/v1/tasks/graph",
+        json={"task_ids": ["t-d"], "upstream_depth": 2},
+    )
     data = response.json()
 
     node_names = {n["task_name"] for n in data["nodes"]}
