@@ -1113,9 +1113,9 @@ async def get_build_graph(
 ) -> TaskGraphResponse | TaskGraphExtendedResponse:
     """Get the task graph for a build.
 
-    When upstream_depth > 0, recursively traverses upstream dependencies
-    beyond the build boundary and returns an extended response with
-    traversal metadata and optional grouping.
+    When upstream_depth > 0 or downstream_depth > 0, recursively traverses
+    dependencies beyond the build boundary (upstream and/or downstream) and
+    returns an extended response with traversal metadata and optional grouping.
 
     Requires authentication via API key or JWT token with environment_id.
     """

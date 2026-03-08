@@ -384,7 +384,7 @@ export function TaskExplorerTable({
                       style={{ width: col.width }}
                       onClick={(e) => {
                         const value = getCellValue(task, col.key);
-                        if (value) {
+                        if (value !== null && value !== undefined) {
                           onCellClick(col.key, String(value), e.shiftKey);
                         }
                       }}

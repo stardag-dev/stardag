@@ -576,7 +576,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
       // For dependency nodes not in search results, fetch the full task
       try {
-        const fullTask = await fetchTask(taskId);
+        const fullTask = await fetchTask(taskId, activeEnvironment?.id);
         setSelectedTask(fullTask as TaskSearchResult);
       } catch (err) {
         console.error("Failed to fetch task:", err);
@@ -587,7 +587,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         }
       }
     },
-    [tasks, tasksWithContext],
+    [tasks, tasksWithContext, activeEnvironment?.id],
   );
 
   // Handle click-to-filter on cell

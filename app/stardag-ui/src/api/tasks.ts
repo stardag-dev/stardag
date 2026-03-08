@@ -163,8 +163,13 @@ export async function fetchTasks(
   return response.json();
 }
 
-export async function fetchTask(taskId: string): Promise<Task> {
-  const response = await fetchWithAuth(`${API_BASE}/tasks/${taskId}`);
+export async function fetchTask(taskId: string, environmentId?: string): Promise<Task> {
+  const params = new URLSearchParams();
+  if (environmentId) params.set("environment_id", environmentId);
+
+  const response = await fetchWithAuth(
+    `${API_BASE}/tasks/${taskId}?${params.toString()}`,
+  );
   if (!response.ok) {
     throw new Error(`Failed to fetch task: ${response.statusText}`);
   }

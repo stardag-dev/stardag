@@ -40,6 +40,12 @@ function useDebouncedNumber(
     [onCommit, min, max],
   );
 
+  // Sync local state when the external value changes (e.g., edits from
+  // another DagControls instance in inline vs fullscreen mode).
+  useEffect(() => {
+    setLocal(initial);
+  }, [initial]);
+
   useEffect(() => {
     return () => {
       if (ref.current) clearTimeout(ref.current);
