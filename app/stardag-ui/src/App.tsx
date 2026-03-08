@@ -375,7 +375,7 @@ function UspsCarousel() {
   );
 
   return (
-    <div className="mt-16 w-full min-w-0">
+    <div className="mt-20 w-full min-w-0">
       {/* Mobile carousel - uses grid for reliable sizing */}
       <div className="min-w-0 md:hidden">
         <div
@@ -462,12 +462,6 @@ function LandingPage() {
             faster on data science and ML workflows.
           </p>
 
-          <h3 className="mb-4 text-lg font-semibold text-gray-300">
-            The SDK at a glance
-          </h3>
-
-          <CodeExampleTabs />
-
           <div className="flex flex-col items-center gap-3 sm:flex-row sm:flex-wrap sm:justify-center sm:gap-4 mb-4">
             <button
               onClick={login}
@@ -494,6 +488,14 @@ function LandingPage() {
           </div>
 
           <UspsCarousel />
+
+          <div className="mt-20">
+            <h2 className="mb-3 text-2xl font-bold text-white sm:text-3xl">
+              The SDK at a Glance
+            </h2>
+
+            <CodeExampleTabs />
+          </div>
 
           <LandingPageDemo />
 
