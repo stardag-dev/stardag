@@ -259,7 +259,8 @@ class TestUITaskExplorer:
         task_explorer_btn.click()
         page.wait_for_load_state("networkidle")
 
-        page.locator("h1:has-text('Task Explorer')").wait_for(
+        # "Task Explorer" appears in breadcrumb nav (header span, not h1)
+        page.locator("header span:has-text('Task Explorer')").wait_for(
             state="visible", timeout=5000
         )
 
@@ -392,7 +393,8 @@ class TestUIDAGPanel:
         )
         task_explorer_btn.click()
         page.wait_for_load_state("networkidle")
-        page.locator("h1:has-text('Task Explorer')").wait_for(
+        # "Task Explorer" appears in breadcrumb nav (header span, not h1)
+        page.locator("header span:has-text('Task Explorer')").wait_for(
             state="visible", timeout=5000
         )
 
