@@ -44,12 +44,12 @@ function BreadcrumbNav() {
           {item.onClick ? (
             <button
               onClick={item.onClick}
-              className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+              className="text-base text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
             >
               {item.label}
             </button>
           ) : (
-            <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+            <span className="text-base font-medium text-gray-900 dark:text-gray-100">
               {item.label}
             </span>
           )}
