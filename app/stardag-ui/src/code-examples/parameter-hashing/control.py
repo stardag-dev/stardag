@@ -1,3 +1,4 @@
+"""Full control of parameter hashing with `StardagField`."""
 from typing import Annotated
 import stardag as sd
 
