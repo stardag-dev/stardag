@@ -12,7 +12,7 @@ def get_num_rows(df: sd.Depends[pd.DataFrame]) -> int:
 # Get task id from registry UI
 df_task_id = UUID("359d8374-de0e-521b-84c1-1e9fd3b8b112")
 
-# We must (only) know data type used for serialization
+# We must (only) know data type used for (de)serialization
 df_task = sd.AliasTask[pd.DataFrame].from_registry(id=df_task_id)
 
 # AliasTask maintains the original task's ID, and can be composed as usual

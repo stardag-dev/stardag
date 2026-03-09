@@ -1,5 +1,6 @@
-"""Completion checks already happen concurrently via asyncio. Decorate 
-async functions to get async concurrent task execution in build."""
+"""Completion checks already happen concurrently via asyncio.
+Decorate async functions to get async concurrent task execution 
+and saving output/loading inputs in build."""
 import httpx
 import stardag as sd
 

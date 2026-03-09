@@ -20,11 +20,11 @@ stardag config profile use my-workspace_personal
 import stardag as sd
 
 @sd.task(target_root_key="ingestion")
-def ingest(source: str) -> dict:
+def ingest(source: str) -> dict[str, str]:
     return {"result": source}
 
 @sd.task  # default target_root_key is "default"
-def process(data: sd.Depends[dict]) -> dict:
+def process(data: sd.Depends[dict[str, str]]) -> dict[str, str]:
     return {"result": data["result"] + " processed"}
 
 
