@@ -244,7 +244,12 @@ def build_sequential(
                     error = RuntimeError(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
-                    registry.task_fail(build_id, ready_task, str(error))
+                    try:
+                        registry.task_fail(build_id, ready_task, str(error))
+                    except Exception as reg_err:
+                        logger.warning(
+                            f"Failed to notify registry of task failure: {reg_err}"
+                        )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
                     continue
@@ -269,7 +274,12 @@ def build_sequential(
                 task_count.failed += 1
                 failed_cache.add(ready_task.id)
                 error = e
-                registry.task_fail(build_id, ready_task, str(e))
+                try:
+                    registry.task_fail(build_id, ready_task, str(e))
+                except Exception as reg_err:
+                    logger.warning(
+                        f"Failed to notify registry of task failure: {reg_err}"
+                    )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
             finally:
@@ -575,7 +585,12 @@ async def build_sequential_aio(
                     error = RuntimeError(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
-                    await registry.task_fail_aio(build_id, ready_task, str(error))
+                    try:
+                        await registry.task_fail_aio(build_id, ready_task, str(error))
+                    except Exception as reg_err:
+                        logger.warning(
+                            f"Failed to notify registry of task failure: {reg_err}"
+                        )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
                     continue
@@ -600,7 +615,12 @@ async def build_sequential_aio(
                 task_count.failed += 1
                 failed_cache.add(ready_task.id)
                 error = e
-                await registry.task_fail_aio(build_id, ready_task, str(e))
+                try:
+                    await registry.task_fail_aio(build_id, ready_task, str(e))
+                except Exception as reg_err:
+                    logger.warning(
+                        f"Failed to notify registry of task failure: {reg_err}"
+                    )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
             finally:

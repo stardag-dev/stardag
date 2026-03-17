@@ -510,3 +510,61 @@ class TestPreviouslyCompletedRegistryCommunication:
         parent_calls = tracking.calls_for(parent.id)
         assert "task_start" in parent_calls
         assert "task_complete" in parent_calls
+
+
+# ============================================================================
+# Test: Registry errors don't mask task errors
+# ============================================================================
+
+
+class FailingOnTaskFailRegistry(NoOpRegistry):
+    """A registry that raises when task_fail is called."""
+
+    def task_fail(self, build_id, task, error_message=None):
+        raise ConnectionError("Registry unavailable")
+
+
+class TestRegistryErrorResilience:
+    """Test that registry errors in task_fail don't mask the original task error."""
+
+    def test_registry_task_fail_error_does_not_mask_task_error(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """If registry.task_fail raises, the original task error still propagates."""
+        registry = FailingOnTaskFailRegistry()
+        task = FailingTask(error_message="task broke")
+
+        # FAIL_FAST: should raise the original ValueError, not ConnectionError
+        with pytest.raises(ValueError, match="task broke"):
+            build_sequential([task], registry=registry, fail_mode=FailMode.FAIL_FAST)
+
+    def test_registry_task_fail_error_does_not_mask_task_error_continue(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """In CONTINUE mode, registry.task_fail error is swallowed gracefully."""
+        registry = FailingOnTaskFailRegistry()
+        task = FailingTask(error_message="task broke")
+
+        # CONTINUE mode: should return a summary, not crash
+        summary = build_sequential(
+            [task], registry=registry, fail_mode=FailMode.CONTINUE
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_registry_task_fail_error_does_not_mask_task_error_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Async: registry.task_fail error doesn't mask the original task error."""
+        registry = FailingOnTaskFailRegistry()
+        task = FailingAsyncTask()
+
+        with pytest.raises(ValueError, match="Intentional"):
+            await build_sequential_aio(
+                [task], registry=registry, fail_mode=FailMode.FAIL_FAST
+            )
