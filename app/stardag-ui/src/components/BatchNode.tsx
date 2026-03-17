@@ -39,6 +39,12 @@ const STATUS_COLORS: Record<
     badge: "bg-gray-300 text-gray-600 dark:bg-gray-600 dark:text-gray-300",
     text: "text-gray-700 dark:text-gray-300",
   },
+  unregistered: {
+    bg: "bg-gray-50 dark:bg-gray-900/30",
+    border: "border-dashed border-gray-300 dark:border-gray-600",
+    badge: "bg-gray-200 text-gray-400 dark:bg-gray-700 dark:text-gray-500",
+    text: "text-gray-400 dark:text-gray-500",
+  },
 };
 
 function getStatusColors(status: string) {

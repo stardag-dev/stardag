@@ -1,4 +1,5 @@
 export type TaskStatus =
+  | "unregistered"
   | "pending"
   | "running"
   | "suspended"

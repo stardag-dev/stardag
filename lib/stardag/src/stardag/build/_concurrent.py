@@ -415,6 +415,7 @@ async def build_aio(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     resume_build_id: UUID | None = None,
+    register_all: bool = False,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -523,10 +524,11 @@ async def build_aio(
                 completion_events[task.id].set()
                 task_count.previously_completed += 1
                 previously_completed_tasks.append(task)
-            # Don't recurse into deps - they're already built
-            return
+            if not register_all:
+                # Don't recurse into deps - they're already built
+                return
 
-        # Task not complete - recurse into dependencies concurrently
+        # Task not complete (or register_all) - recurse into dependencies
         async with asyncio.TaskGroup() as tg:
             for dep in static_deps:
                 tg.create_task(discover(dep))
@@ -986,6 +988,7 @@ def build(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     resume_build_id: UUID | None = None,
+    register_all: bool = False,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -1008,6 +1011,7 @@ def build(
                 global_lock_manager,
                 global_lock_config,
                 resume_build_id,
+                register_all,
             )
         )
     except RuntimeError as e:

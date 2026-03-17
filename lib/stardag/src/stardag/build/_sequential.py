@@ -45,6 +45,7 @@ def build_sequential(
     resume_build_id: UUID | None = None,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
+    register_all: bool = False,
 ) -> BuildSummary:
     """Sync API for building tasks sequentially.
 
@@ -111,10 +112,11 @@ def build_sequential(
             completion_cache.add(task.id)
             task_count.previously_completed += 1
             previously_completed_tasks.append(task)
-            # Don't recurse into deps - they're already built
-            return
+            if not register_all:
+                # Don't recurse into deps - they're already built
+                return
 
-        # Task not complete - recurse into dependencies
+        # Task not complete (or register_all) - recurse into dependencies
         for dep in flatten_task_struct(task.requires()):
             discover(dep)
 
@@ -396,6 +398,7 @@ async def build_sequential_aio(
     resume_build_id: UUID | None = None,
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
+    register_all: bool = False,
 ) -> BuildSummary:
     """Async API for building tasks sequentially.
 
@@ -461,10 +464,11 @@ async def build_sequential_aio(
             completion_cache.add(task.id)
             task_count.previously_completed += 1
             previously_completed_tasks.append(task)
-            # Don't recurse into deps - they're already built
-            return
+            if not register_all:
+                # Don't recurse into deps - they're already built
+                return
 
-        # Task not complete - recurse into dependencies
+        # Task not complete (or register_all) - recurse into dependencies
         for dep in flatten_task_struct(task.requires()):
             await discover(dep)
 

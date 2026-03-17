@@ -20,7 +20,7 @@ from stardag_api.services.status import get_all_task_global_statuses
 class _TraversedTask:
     """Lightweight container for a traversed task row."""
 
-    __slots__ = ("id", "task_id", "task_name", "task_namespace", "depth")
+    __slots__ = ("id", "task_id", "task_name", "task_namespace", "depth", "is_phantom")
 
     def __init__(
         self,
@@ -29,12 +29,14 @@ class _TraversedTask:
         task_name: str,
         task_namespace: str,
         depth: int,
+        is_phantom: bool = False,
     ):
         self.id = id
         self.task_id = task_id
         self.task_name = task_name
         self.task_namespace = task_namespace
         self.depth = depth
+        self.is_phantom = is_phantom
 
 
 async def _traverse_bfs(
@@ -47,9 +49,9 @@ async def _traverse_bfs(
     """BFS traversal in both directions using iterative queries."""
     # Fetch primary tasks
     result = await db.execute(
-        select(Task.id, Task.task_id, Task.task_name, Task.task_namespace).where(
-            Task.id.in_(primary_task_pks), Task.environment_id == environment_id
-        )
+        select(
+            Task.id, Task.task_id, Task.task_name, Task.task_namespace, Task.is_phantom
+        ).where(Task.id.in_(primary_task_pks), Task.environment_id == environment_id)
     )
     rows = result.all()
 
@@ -61,6 +63,7 @@ async def _traverse_bfs(
             task_name=row.task_name,
             task_namespace=row.task_namespace,
             depth=0,
+            is_phantom=row.is_phantom,
         )
 
     # Upstream BFS (positive depth values)
@@ -75,6 +78,7 @@ async def _traverse_bfs(
                 Task.task_id,
                 Task.task_name,
                 Task.task_namespace,
+                Task.is_phantom,
                 TaskDependency.downstream_task_id,
             )
             .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
@@ -94,6 +98,7 @@ async def _traverse_bfs(
                     task_name=row.task_name,
                     task_namespace=row.task_namespace,
                     depth=depth,
+                    is_phantom=row.is_phantom,
                 )
                 next_frontier.add(row.id)
 
@@ -111,6 +116,7 @@ async def _traverse_bfs(
                 Task.task_id,
                 Task.task_name,
                 Task.task_namespace,
+                Task.is_phantom,
                 TaskDependency.upstream_task_id,
             )
             .join(TaskDependency, TaskDependency.downstream_task_id == Task.id)
@@ -130,6 +136,7 @@ async def _traverse_bfs(
                     task_name=row.task_name,
                     task_namespace=row.task_namespace,
                     depth=-depth_idx,
+                    is_phantom=row.is_phantom,
                 )
                 next_frontier.add(row.id)
 
@@ -180,7 +187,12 @@ async def traverse_upstream(
     all_traversed_pks = [t.id for t in traversed]
     statuses = await get_all_task_global_statuses(db, all_traversed_pks)
 
+    # Build a set of phantom PKs for quick lookup
+    phantom_pks = {t.id for t in traversed if t.is_phantom}
+
     def _get_status(pk: UUID) -> TaskStatus:
+        if pk in phantom_pks:
+            return TaskStatus.UNREGISTERED
         tup = statuses.get(pk)
         return tup[0] if tup else TaskStatus.PENDING
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Index, JSON, String, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, ForeignKey, Index, JSON, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
@@ -77,6 +77,10 @@ class Task(Base, TimestampMixin):
 
     # Output URI (path to task output if it has a FileSystemTarget)
     output_uri: Mapped[str | None] = mapped_column(String(2048))
+
+    # Phantom flag: True for tasks created as placeholders for unresolved dependencies.
+    # These are upgraded to real tasks when properly registered via the SDK.
+    is_phantom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="tasks")

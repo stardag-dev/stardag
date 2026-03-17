@@ -681,28 +681,52 @@ async def register_task(
         db.add(db_task)
         await db.flush()  # Get the id
 
-        # Create dependencies
-        for dep_task_id in task.dependency_task_ids:
-            # Find the upstream task
-            dep_result = await db.execute(
-                select(Task)
-                .where(Task.environment_id == build.environment_id)
-                .where(Task.task_id == dep_task_id)
+    elif db_task.is_phantom:
+        # Upgrade phantom to real task
+        db_task.task_namespace = task.task_namespace
+        db_task.task_name = task.task_name
+        db_task.task_data = task.task_data
+        db_task.version = task.version
+        db_task.output_uri = task.output_uri
+        db_task.is_phantom = False
+
+    # Reconcile dependency edges (always, not just on create).
+    # This ensures edges are created even when tasks are registered
+    # out of order across builds, or when a phantom is upgraded.
+    for dep_task_id in task.dependency_task_ids:
+        # Find or create the upstream task
+        dep_result = await db.execute(
+            select(Task)
+            .where(Task.environment_id == build.environment_id)
+            .where(Task.task_id == dep_task_id)
+        )
+        dep_task_record = dep_result.scalar_one_or_none()
+
+        if not dep_task_record:
+            # Create phantom task for unresolved dependency
+            dep_task_record = Task(
+                task_id=dep_task_id,
+                environment_id=build.environment_id,
+                task_namespace="",
+                task_name=dep_task_id[:12],  # Short ID as placeholder name
+                task_data={},
+                is_phantom=True,
             )
-            dep_task = dep_result.scalar_one_or_none()
-            if dep_task:
-                # Check if dependency edge already exists
-                edge_result = await db.execute(
-                    select(TaskDependency)
-                    .where(TaskDependency.upstream_task_id == dep_task.id)
-                    .where(TaskDependency.downstream_task_id == db_task.id)
-                )
-                if not edge_result.scalar_one_or_none():
-                    dep_edge = TaskDependency(
-                        upstream_task_id=dep_task.id,
-                        downstream_task_id=db_task.id,
-                    )
-                    db.add(dep_edge)
+            db.add(dep_task_record)
+            await db.flush()
+
+        # Create edge if it doesn't exist
+        edge_result = await db.execute(
+            select(TaskDependency)
+            .where(TaskDependency.upstream_task_id == dep_task_record.id)
+            .where(TaskDependency.downstream_task_id == db_task.id)
+        )
+        if not edge_result.scalar_one_or_none():
+            dep_edge = TaskDependency(
+                upstream_task_id=dep_task_record.id,
+                downstream_task_id=db_task.id,
+            )
+            db.add(dep_edge)
 
     # Create appropriate event for this build:
     # - TASK_PENDING if this build first registered the task
@@ -1175,9 +1199,12 @@ async def get_build_graph(
     # Build nodes
     nodes = []
     for task in tasks:
-        status, _, _, _, _, _ = statuses.get(
-            task.id, (TaskStatus.PENDING, None, None, None, None, False)
-        )
+        if task.is_phantom:
+            status = TaskStatus.UNREGISTERED
+        else:
+            status, _, _, _, _, _ = statuses.get(
+                task.id, (TaskStatus.PENDING, None, None, None, None, False)
+            )
         nodes.append(
             TaskNode(
                 id=task.id,
