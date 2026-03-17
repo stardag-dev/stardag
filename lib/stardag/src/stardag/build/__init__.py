@@ -33,6 +33,7 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
     LockHandle,
+    OnRegistryFailure,
     RoutedTaskExecutor,
     TaskCount,
     TaskExecutionError,
@@ -69,6 +70,7 @@ __all__ = [
     "LockAcquisitionResult",
     "LockAcquisitionStatus",
     "LockHandle",
+    "OnRegistryFailure",
     # Task executors
     "HybridConcurrentTaskExecutor",
     "RoutedTaskExecutor",

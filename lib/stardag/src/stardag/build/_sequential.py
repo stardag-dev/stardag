@@ -31,7 +31,9 @@ from stardag.build._base import (
     GlobalLockSelector,
     LockAcquisitionResult,
     LockAcquisitionStatus,
+    OnRegistryFailure,
     TaskCount,
+    handle_registry_error,
 )
 from stardag.registry import RegistryABC, init_registry
 
@@ -47,6 +49,7 @@ def build_sequential(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
+    on_registry_failure: OnRegistryFailure = "warn",
 ) -> BuildSummary:
     """Sync API for building tasks sequentially.
 
@@ -142,16 +145,19 @@ def build_sequential(
         try:
             registry.task_register(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to register previously completed task {task.id}: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to register previously completed task {task.id}",
+                on_registry_failure,
             )
             continue
         try:
             registry.task_complete(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to mark previously completed task {task.id} "
-                f"as complete: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark previously completed task {task.id} as complete",
+                on_registry_failure,
             )
 
     def has_failed_dep(task: BaseTask) -> bool:
@@ -279,8 +285,10 @@ def build_sequential(
                         registry.task_register(build_id, ready_task)
                         registry.task_fail(build_id, ready_task, str(error))
                     except Exception as reg_err:
-                        logger.warning(
-                            f"Failed to notify registry of task failure: {reg_err}"
+                        handle_registry_error(
+                            reg_err,
+                            "Failed to notify registry of lock failure",
+                            on_registry_failure,
                         )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
@@ -311,8 +319,10 @@ def build_sequential(
                 try:
                     registry.task_fail(build_id, ready_task, str(e))
                 except Exception as reg_err:
-                    logger.warning(
-                        f"Failed to notify registry of task failure: {reg_err}"
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {ready_task.id} failure",
+                        on_registry_failure,
                     )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
@@ -423,6 +433,7 @@ async def build_sequential_aio(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
+    on_registry_failure: OnRegistryFailure = "warn",
 ) -> BuildSummary:
     """Async API for building tasks sequentially.
 
@@ -517,16 +528,19 @@ async def build_sequential_aio(
         try:
             await registry.task_register_aio(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to register previously completed task {task.id}: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to register previously completed task {task.id}",
+                on_registry_failure,
             )
             continue
         try:
             await registry.task_complete_aio(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to mark previously completed task {task.id} "
-                f"as complete: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark previously completed task {task.id} as complete",
+                on_registry_failure,
             )
 
     def has_failed_dep(task: BaseTask) -> bool:
@@ -656,8 +670,10 @@ async def build_sequential_aio(
                         await registry.task_register_aio(build_id, ready_task)
                         await registry.task_fail_aio(build_id, ready_task, str(error))
                     except Exception as reg_err:
-                        logger.warning(
-                            f"Failed to notify registry of task failure: {reg_err}"
+                        handle_registry_error(
+                            reg_err,
+                            "Failed to notify registry of lock failure",
+                            on_registry_failure,
                         )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
@@ -688,8 +704,10 @@ async def build_sequential_aio(
                 try:
                     await registry.task_fail_aio(build_id, ready_task, str(e))
                 except Exception as reg_err:
-                    logger.warning(
-                        f"Failed to notify registry of task failure: {reg_err}"
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {ready_task.id} failure",
+                        on_registry_failure,
                     )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise

@@ -770,6 +770,69 @@ class TestSequentialDeadlockDetection:
             await build_sequential_aio([task_a], registry=noop_registry)
 
 
+# ============================================================================
+# Test: on_registry_failure parameter
+# ============================================================================
+
+
+class FailOnTaskCompleteRegistry(NoOpRegistry):
+    """Registry that fails on task_complete."""
+
+    def task_register(self, build_id: UUID, task) -> None:
+        pass
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        raise ConnectionError("Registry unavailable for task_complete")
+
+
+class TestOnRegistryFailure:
+    """Test the on_registry_failure parameter."""
+
+    def test_warn_mode_logs_warning_on_registry_failure(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Default 'warn' mode should log and continue."""
+        registry = FailOnTaskCompleteRegistry()
+        task = SyncOnlyTask(name="reg_fail_warn")
+        # Pre-complete so it triggers the previously-completed registration path
+        task.target().save({"name": "reg_fail_warn", "mode": "pre-existing"})
+
+        # Should NOT raise
+        summary = build_sequential(
+            [task], registry=registry, on_registry_failure="warn"
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+
+    def test_raise_mode_propagates_registry_failure(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """'raise' mode should propagate registry errors."""
+        registry = FailOnTaskCompleteRegistry()
+        task = SyncOnlyTask(name="reg_fail_raise")
+        # Pre-complete so it triggers the previously-completed registration path
+        task.target().save({"name": "reg_fail_raise", "mode": "pre-existing"})
+
+        with pytest.raises(ConnectionError, match="Registry unavailable"):
+            build_sequential([task], registry=registry, on_registry_failure="raise")
+
+    @pytest.mark.asyncio
+    async def test_raise_mode_propagates_registry_failure_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Async: 'raise' mode should propagate registry errors."""
+        registry = FailOnTaskCompleteRegistry()
+        task = SyncOnlyTask(name="reg_fail_raise_aio")
+        task.target().save({"name": "reg_fail_raise_aio", "mode": "pre-existing"})
+
+        with pytest.raises(ConnectionError, match="Registry unavailable"):
+            await build_sequential_aio(
+                [task], registry=registry, on_registry_failure="raise"
+            )
+
+
 class ArtifactTrackingRegistry(NoOpRegistry):
     """A registry that records artifact uploads."""
 
