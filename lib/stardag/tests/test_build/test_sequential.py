@@ -18,6 +18,7 @@ from stardag.build import (
 )
 from uuid import UUID
 
+from stardag.artifact import Artifact, MarkdownArtifact
 from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import (
@@ -568,3 +569,62 @@ class TestRegistryErrorResilience:
             await build_sequential_aio(
                 [task], registry=registry, fail_mode=FailMode.FAIL_FAST
             )
+
+
+# ============================================================================
+# Test: Async artifact collection
+# ============================================================================
+
+
+class ArtifactTrackingRegistry(NoOpRegistry):
+    """A registry that records artifact uploads."""
+
+    def __init__(self) -> None:
+        self.uploaded_artifacts: list[tuple[UUID, list]] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        pass
+
+    def task_upload_artifacts(self, build_id: UUID, task, artifacts) -> None:
+        self.uploaded_artifacts.append((task.id, artifacts))
+
+    async def task_upload_artifacts_aio(self, build_id: UUID, task, artifacts) -> None:
+        self.uploaded_artifacts.append((task.id, artifacts))
+
+
+class TestAsyncArtifactCollection:
+    """Test that artifacts_aio is properly awaited in async builds."""
+
+    @pytest.mark.asyncio
+    async def test_artifacts_aio_is_awaited(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Verify that artifacts_aio() is awaited (is async) in async sequential build."""
+        from stardag import Task, auto_namespace
+        from typing import Any
+
+        auto_namespace(__name__)
+
+        class TaskWithArtifacts(Task[dict[str, Any]]):
+            name: str
+
+            def run(self):
+                self._save({"name": self.name})
+
+            async def artifacts_aio(self) -> list[Artifact]:
+                return [
+                    MarkdownArtifact(name="report", body=f"# Report for {self.name}")
+                ]
+
+        registry = ArtifactTrackingRegistry()
+        task = TaskWithArtifacts(name="artifact_test")
+
+        summary = await build_sequential_aio([task], registry=registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert len(registry.uploaded_artifacts) == 1
+        task_id, artifacts = registry.uploaded_artifacts[0]
+        assert task_id == task.id
+        assert len(artifacts) == 1
+        assert artifacts[0].name == "report"

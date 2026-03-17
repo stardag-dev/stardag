@@ -328,7 +328,7 @@ class BaseTask(
         """
         return []
 
-    def artifacts_aio(self) -> list["Artifact"]:
+    async def artifacts_aio(self) -> list["Artifact"]:
         """Asynchronously return artifacts to be stored in the registry after task
         completion.
         """

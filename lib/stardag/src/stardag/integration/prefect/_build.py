@@ -152,7 +152,7 @@ class _PrefectTaskRunWrapper:
             await self.registry.task_complete_aio(self.build_id, task)
 
             # Upload artifacts if any
-            artifacts = task.artifacts_aio()
+            artifacts = await task.artifacts_aio()
             if artifacts:
                 await self.registry.task_upload_artifacts_aio(
                     self.build_id, task, artifacts

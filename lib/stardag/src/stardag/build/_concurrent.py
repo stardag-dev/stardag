@@ -632,7 +632,7 @@ async def build_aio(
             await release_lock_for_task(task, completed=True)
             try:
                 await registry.task_complete_aio(build_id, task)
-                artifacts = task.artifacts_aio()
+                artifacts = await task.artifacts_aio()
                 if artifacts:
                     await registry.task_upload_artifacts_aio(build_id, task, artifacts)
             except Exception as reg_err:
