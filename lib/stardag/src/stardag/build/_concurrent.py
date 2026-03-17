@@ -443,6 +443,10 @@ async def build_aio(
         global_lock_config: Configuration for global locking behavior.
         resume_build_id: Optional build ID to resume. If provided, continues tracking
             events under this existing build instead of starting a new one.
+        register_all: If True, discovery continues recursing into dependencies of
+            already-complete tasks. This ensures all tasks in the DAG get registered
+            in the registry (useful for complete DAG visualization). Default False
+            for performance — skipping complete subgraphs avoids unnecessary I/O.
 
     Returns:
         BuildSummary with status, task counts, and build_id

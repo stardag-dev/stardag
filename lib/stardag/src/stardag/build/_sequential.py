@@ -70,6 +70,10 @@ def build_sequential(
             If provided with global_lock_config.enabled=True, tasks will acquire locks
             before execution for "exactly once" semantics across processes.
         global_lock_config: Configuration for global locking behavior.
+        register_all: If True, discovery continues recursing into dependencies of
+            already-complete tasks. This ensures all tasks in the DAG get registered
+            in the registry (useful for complete DAG visualization). Default False
+            for performance — skipping complete subgraphs avoids unnecessary I/O.
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -423,6 +427,10 @@ async def build_sequential_aio(
             If provided with global_lock_config.enabled=True, tasks will acquire locks
             before execution for "exactly once" semantics across processes.
         global_lock_config: Configuration for global locking behavior.
+        register_all: If True, discovery continues recursing into dependencies of
+            already-complete tasks. This ensures all tasks in the DAG get registered
+            in the registry (useful for complete DAG visualization). Default False
+            for performance — skipping complete subgraphs avoids unnecessary I/O.
 
     Returns:
         BuildSummary with status, task counts, and build_id
