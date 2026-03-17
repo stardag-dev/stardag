@@ -3,12 +3,15 @@
 These functions execute tasks one at a time in dependency order.
 Intended for debugging and testing, not production use.
 
-Design note: build_sequential is intentionally kept as pure synchronous code
-(no event loop) to maximize debuggability and compatibility. It can be called
-from any context including inside running event loops, Jupyter notebooks, etc.
-The only exception is async-only tasks (implementing only run_aio), which use
-asyncio.run() as a best-effort fallback. Do NOT refactor build_sequential to
-wrap an async core — this breaks the sync contract.
+Design note: build_sequential exposes a synchronous interface and does not
+manage a long-lived event loop itself, to maximize debuggability and
+compatibility. Internally it may still call asyncio.run() for async-only
+tasks (implementing only run_aio) or async global-lock operations, which
+means calling build_sequential from within an already-running event loop
+(e.g. Jupyter, asyncio-based applications) can raise RuntimeError. In such
+environments, run it in a separate thread/process or use the async build API
+instead. Do NOT refactor build_sequential to wrap an async core — this
+breaks the sync contract.
 """
 
 from __future__ import annotations
