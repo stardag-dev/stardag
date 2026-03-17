@@ -161,6 +161,16 @@ Alembic tracks migrations by revision ID in the `alembic_version` table. Hand-cr
 - "Relation already exists" errors on fresh deployments
 - Confusion about which migrations have been applied
 
+## Stardag SDK Skill Bundle
+
+> **NOTE:** A Claude Code skill bundle for _using_ the Stardag SDK and platform is
+> maintained at `.claude/skills/stardag/`. It provides comprehensive reference on
+> the SDK public API, task definitions, build execution, targets, Registry API/UI,
+> CLI, and configuration. **Keep it updated** when making major changes to: public
+> exports in `__init__.py`, task hierarchy or build behavior, target/serialization
+> APIs, Registry API endpoints, CLI commands, or configuration system. See the
+> skill's `README.md` for structure details.
+
 ## Learnings
 
 This section captures project-specific corrections and preferences. When the user corrects how something should be done or you discover something new about this project, add it here.
