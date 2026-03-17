@@ -239,7 +239,21 @@ def build_sequential(
                     break
 
             if ready_task is None:
-                # No more tasks can run - either all done or blocked by failures
+                # No more tasks can run - check for deadlock
+                incomplete = [
+                    t
+                    for t in all_tasks.values()
+                    if t.id not in completion_cache and t.id not in failed_cache
+                ]
+                if incomplete:
+                    # Check if all incomplete tasks are blocked by failed deps
+                    truly_blocked = [t for t in incomplete if not has_failed_dep(t)]
+                    if truly_blocked:
+                        raise RuntimeError(
+                            f"Deadlock: {len(truly_blocked)} tasks cannot proceed. "
+                            f"Tasks: {[str(t.id) for t in truly_blocked[:5]]}"
+                        )
+                # All remaining tasks are blocked by failed deps - exit gracefully
                 break
 
             # Acquire lock if needed
@@ -597,7 +611,21 @@ async def build_sequential_aio(
                     break
 
             if ready_task is None:
-                # No more tasks can run - either all done or blocked by failures
+                # No more tasks can run - check for deadlock
+                incomplete = [
+                    t
+                    for t in all_tasks.values()
+                    if t.id not in completion_cache and t.id not in failed_cache
+                ]
+                if incomplete:
+                    # Check if all incomplete tasks are blocked by failed deps
+                    truly_blocked = [t for t in incomplete if not has_failed_dep(t)]
+                    if truly_blocked:
+                        raise RuntimeError(
+                            f"Deadlock: {len(truly_blocked)} tasks cannot proceed. "
+                            f"Tasks: {[str(t.id) for t in truly_blocked[:5]]}"
+                        )
+                # All remaining tasks are blocked by failed deps - exit gracefully
                 break
 
             # Acquire lock if needed

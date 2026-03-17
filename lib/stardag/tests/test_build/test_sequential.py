@@ -576,6 +576,144 @@ class TestRegistryErrorResilience:
 # ============================================================================
 
 
+# ============================================================================
+# Test: Deadlock detection in sequential builds
+# ============================================================================
+
+
+class TestSequentialDeadlockDetection:
+    """Test that sequential builds detect when tasks can't proceed."""
+
+    def test_continue_mode_reports_all_failures(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """In CONTINUE mode, build should complete and report the error when
+        no more tasks can run due to failed dependencies."""
+        # Create: task_a (fails), task_b depends on task_a, task_c is independent
+        task_a = FailingTask(error_message="task_a broke")
+        task_b = SyncOnlyTask(name="depends_on_failing", deps=(task_a,))
+        task_c = SyncOnlyTask(name="independent")
+
+        summary = build_sequential(
+            [task_b, task_c],
+            registry=noop_registry,
+            fail_mode=FailMode.CONTINUE,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed >= 1
+        # task_c should still succeed
+        assert task_c.complete()
+        # task_b should not have run (dep failed)
+        assert not task_b.complete()
+        # pending should reflect task_b being blocked
+        assert summary.task_count.pending == 1
+
+    @pytest.mark.asyncio
+    async def test_continue_mode_reports_all_failures_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async: CONTINUE mode should complete and report blocked tasks."""
+        task_a = FailingTask(error_message="task_a broke")
+        task_b = SyncOnlyTask(name="depends_on_failing_aio", deps=(task_a,))
+        task_c = SyncOnlyTask(name="independent_aio")
+
+        summary = await build_sequential_aio(
+            [task_b, task_c],
+            registry=noop_registry,
+            fail_mode=FailMode.CONTINUE,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed >= 1
+        assert task_c.complete()
+        assert not task_b.complete()
+        assert summary.task_count.pending == 1
+
+    def test_deadlock_detection_with_circular_deps(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Circular dependency creates a true deadlock - should raise RuntimeError.
+
+        Task A depends on Task B and Task B depends on Task A. Both are discovered
+        (discover() guards against revisiting), but neither can ever become ready.
+        """
+        from stardag import Task, auto_namespace
+        from typing import Any
+
+        auto_namespace(__name__)
+
+        # We can't create Pydantic circular refs directly, but we can use a
+        # class whose requires() creates a mutual dependency at runtime.
+        # The trick: create a shared list that we mutate after both tasks exist.
+        dep_holder_a: list[Task] = []
+        dep_holder_b: list[Task] = []
+
+        class CircularDepTask(Task[dict[str, Any]]):
+            name: str
+            _dep_holder: list[Task] = []
+
+            def requires(self):
+                if self.name == "circ_a":
+                    return tuple(dep_holder_a)
+                return tuple(dep_holder_b)
+
+            def run(self):
+                self._save({"name": self.name})
+
+        task_a = CircularDepTask(name="circ_a")
+        task_b = CircularDepTask(name="circ_b")
+
+        # Set up circular deps
+        dep_holder_a.append(task_b)
+        dep_holder_b.append(task_a)
+
+        # Both tasks discovered, but neither can proceed
+        with pytest.raises(RuntimeError, match="[Dd]eadlock"):
+            build_sequential([task_a], registry=noop_registry)
+
+    @pytest.mark.asyncio
+    async def test_deadlock_detection_with_circular_deps_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async: circular deps should raise RuntimeError for deadlock."""
+        from stardag import Task, auto_namespace
+        from typing import Any
+
+        auto_namespace(__name__)
+
+        dep_holder_a: list[Task] = []
+        dep_holder_b: list[Task] = []
+
+        class CircularDepTaskAio(Task[dict[str, Any]]):
+            name: str
+
+            def requires(self):
+                if self.name == "circ_a_aio":
+                    return tuple(dep_holder_a)
+                return tuple(dep_holder_b)
+
+            def run(self):
+                self._save({"name": self.name})
+
+        task_a = CircularDepTaskAio(name="circ_a_aio")
+        task_b = CircularDepTaskAio(name="circ_b_aio")
+
+        dep_holder_a.append(task_b)
+        dep_holder_b.append(task_a)
+
+        with pytest.raises(RuntimeError, match="[Dd]eadlock"):
+            await build_sequential_aio([task_a], registry=noop_registry)
+
+
 class ArtifactTrackingRegistry(NoOpRegistry):
     """A registry that records artifact uploads."""
 
