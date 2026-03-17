@@ -52,7 +52,7 @@ class TaskCount:
 
 
 class BuildFailed(Exception):
-    """Raised by :meth:`BuildSummary.raise_for_status` when a build did not succeed."""
+    """Raised by :meth:`BuildSummary.raise_on_failure` when a build has failed."""
 
     summary: BuildSummary
 
@@ -75,12 +75,9 @@ class BuildSummary:
         """Whether the build completed successfully."""
         return self.status == BuildExitStatus.SUCCESS
 
-    def raise_for_status(self) -> None:
-        """Raise :class:`BuildFailed` if the build did not succeed.
-
-        Analogous to ``requests.Response.raise_for_status()``.
-        """
-        if self.status != BuildExitStatus.SUCCESS:
+    def raise_on_failure(self) -> None:
+        """Raise :class:`BuildFailed` if the build status is ``FAILURE``."""
+        if self.status == BuildExitStatus.FAILURE:
             raise BuildFailed(self)
 
     def __repr__(self) -> str:
