@@ -5,6 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import (
@@ -32,6 +33,7 @@ from stardag_api.models import (
     TaskStatus,
     User,
 )
+from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.schemas import (
     BuildCreate,
     BuildListResponse,
@@ -681,28 +683,71 @@ async def register_task(
         db.add(db_task)
         await db.flush()  # Get the id
 
-        # Create dependencies
-        for dep_task_id in task.dependency_task_ids:
-            # Find the upstream task
+    elif db_task.is_phantom:
+        # Upgrade phantom to real task
+        db_task.task_namespace = task.task_namespace
+        db_task.task_name = task.task_name
+        db_task.task_data = task.task_data
+        db_task.version = task.version
+        db_task.output_uri = task.output_uri
+        db_task.is_phantom = False
+
+    # Reconcile dependency edges (always, not just on create).
+    # This ensures edges are created even when tasks are registered
+    # out of order across builds, or when a phantom is upgraded.
+    # Uses ON CONFLICT DO NOTHING to handle concurrent registrations safely.
+    for dep_task_id in task.dependency_task_ids:
+        # Find or create the upstream task
+        dep_result = await db.execute(
+            select(Task)
+            .where(Task.environment_id == build.environment_id)
+            .where(Task.task_id == dep_task_id)
+        )
+        dep_task_record = dep_result.scalar_one_or_none()
+
+        if not dep_task_record:
+            # Create phantom task for unresolved dependency.
+            # Use INSERT ... ON CONFLICT DO NOTHING to handle races where
+            # another request creates the same task concurrently.
+            stmt = (
+                pg_insert(Task)
+                .values(
+                    id=generate_uuid7(),
+                    task_id=dep_task_id,
+                    environment_id=build.environment_id,
+                    task_namespace="",
+                    task_name=dep_task_id[:12],
+                    task_data={},
+                    is_phantom=True,
+                    created_at=utc_now(),
+                )
+                .on_conflict_do_nothing(
+                    constraint="uq_task_environment_taskid",
+                )
+            )
+            await db.execute(stmt)
+            # Re-query to get the record (ours or the concurrent winner's)
             dep_result = await db.execute(
                 select(Task)
                 .where(Task.environment_id == build.environment_id)
                 .where(Task.task_id == dep_task_id)
             )
-            dep_task = dep_result.scalar_one_or_none()
-            if dep_task:
-                # Check if dependency edge already exists
-                edge_result = await db.execute(
-                    select(TaskDependency)
-                    .where(TaskDependency.upstream_task_id == dep_task.id)
-                    .where(TaskDependency.downstream_task_id == db_task.id)
-                )
-                if not edge_result.scalar_one_or_none():
-                    dep_edge = TaskDependency(
-                        upstream_task_id=dep_task.id,
-                        downstream_task_id=db_task.id,
-                    )
-                    db.add(dep_edge)
+            dep_task_record = dep_result.scalar_one()
+
+        # Create edge if it doesn't exist (ON CONFLICT DO NOTHING for races)
+        edge_stmt = (
+            pg_insert(TaskDependency)
+            .values(
+                id=generate_uuid7(),
+                upstream_task_id=dep_task_record.id,
+                downstream_task_id=db_task.id,
+                created_at=utc_now(),
+            )
+            .on_conflict_do_nothing(
+                constraint="uq_task_dependency_edge",
+            )
+        )
+        await db.execute(edge_stmt)
 
     # Create appropriate event for this build:
     # - TASK_PENDING if this build first registered the task
@@ -1175,9 +1220,12 @@ async def get_build_graph(
     # Build nodes
     nodes = []
     for task in tasks:
-        status, _, _, _, _, _ = statuses.get(
-            task.id, (TaskStatus.PENDING, None, None, None, None, False)
-        )
+        if task.is_phantom:
+            status = TaskStatus.UNREGISTERED
+        else:
+            status, _, _, _, _, _ = statuses.get(
+                task.id, (TaskStatus.PENDING, None, None, None, None, False)
+            )
         nodes.append(
             TaskNode(
                 id=task.id,

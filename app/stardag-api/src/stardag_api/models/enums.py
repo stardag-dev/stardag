@@ -23,6 +23,7 @@ class InviteStatus(str, enum.Enum):
 class TaskStatus(str, enum.Enum):
     """Derived status for tasks, computed from events."""
 
+    UNREGISTERED = "unregistered"  # Phantom task, only known as a dependency
     PENDING = "pending"
     RUNNING = "running"
     SUSPENDED = "suspended"  # Waiting for dynamic dependencies
