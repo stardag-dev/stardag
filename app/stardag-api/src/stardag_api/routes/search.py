@@ -572,9 +572,9 @@ async def search_tasks(
 
         # Build final status map using global status but latest build for context
         for task_id in task_ids:
-            # Global status: (status, started_at, completed_at, error_message, status_build_id, waiting_for_lock)
+            # Global status: (status, started_at, completed_at, error_message, status_build_id, waiting_for_lock, commit_hash)
             global_status = global_statuses.get(
-                task_id, (TaskStatus.PENDING, None, None, None, None, False)
+                task_id, (TaskStatus.PENDING, None, None, None, None, False, None)
             )
             latest_build = task_to_latest_build.get(task_id)
 

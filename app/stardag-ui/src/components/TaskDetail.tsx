@@ -280,6 +280,21 @@ export function TaskDetail({
           )}
         </div>
 
+        {/* Commit hash - from the event that determined current status */}
+        {task.commit_hash && (
+          <div>
+            <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
+              Commit
+            </label>
+            <div className="mt-1 flex items-center gap-1">
+              <code className="rounded bg-gray-100 px-1.5 py-0.5 text-sm font-mono text-gray-800 dark:bg-gray-700 dark:text-gray-200">
+                {task.commit_hash}
+              </code>
+              <CopyButton text={task.commit_hash} className="flex-shrink-0" />
+            </div>
+          </div>
+        )}
+
         {/* Output URI - only show when present */}
         {task.output_uri && (
           <div>
@@ -413,6 +428,9 @@ export function TaskDetail({
                       Build
                     </th>
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                      Commit
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                       Details
                     </th>
                   </tr>
@@ -459,6 +477,17 @@ export function TaskDetail({
                         ) : (
                           <span className="font-mono text-sm text-gray-500 dark:text-gray-400">
                             {event.build_id.slice(0, 8)}...
+                          </span>
+                        )}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3">
+                        {event.event_metadata?.commit_hash ? (
+                          <code className="rounded bg-gray-100 px-1.5 py-0.5 text-xs font-mono text-gray-700 dark:bg-gray-700 dark:text-gray-300">
+                            {event.event_metadata.commit_hash as string}
+                          </code>
+                        ) : (
+                          <span className="text-sm text-gray-400 dark:text-gray-500">
+                            -
                           </span>
                         )}
                       </td>

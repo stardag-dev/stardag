@@ -342,14 +342,14 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/complete",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation="Complete build",
         )
         logger.info(f"Completed build: {build_id}")
 
     def build_fail(self, build_id: UUID, error_message: str | None = None) -> None:
         """Mark a build as failed."""
-        params = self._get_params()
+        params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
         self._request(
@@ -365,14 +365,14 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/cancel",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation="Cancel build",
         )
         logger.info(f"Cancelled build: {build_id}")
 
     def build_exit_early(self, build_id: UUID, reason: str | None = None) -> None:
         """Mark a build as exited early."""
-        params = self._get_params()
+        params = self._get_event_params()
         if reason:
             params["reason"] = reason
         self._request(
@@ -397,6 +397,15 @@ class APIRegistry(RegistryABC):
             operation=f"Register task {task.id}",
         )
 
+    def _get_event_params(self) -> dict[str, str]:
+        """Get query params for event endpoints, including commit_hash."""
+        params = self._get_params()
+        try:
+            params["commit_hash"] = get_git_commit_hash()
+        except RuntimeError:
+            pass  # Git not available, skip commit_hash
+        return params
+
     def task_start(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as started."""
         # Ensure task is registered first
@@ -405,7 +414,7 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Start task {task.id}",
         )
 
@@ -414,7 +423,7 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/complete",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Complete task {task.id}",
         )
 
@@ -422,7 +431,7 @@ class APIRegistry(RegistryABC):
         self, build_id: UUID, task: "BaseTask", error_message: str | None = None
     ) -> None:
         """Mark a task as failed."""
-        params = self._get_params()
+        params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
         self._request(
@@ -437,7 +446,7 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/suspend",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Suspend task {task.id}",
         )
 
@@ -446,7 +455,7 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/resume",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Resume task {task.id}",
         )
 
@@ -455,7 +464,7 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Cancel task {task.id}",
         )
 
@@ -463,7 +472,7 @@ class APIRegistry(RegistryABC):
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
     ) -> None:
         """Record that a task is waiting for a global lock."""
-        params = self._get_params()
+        params = self._get_event_params()
         if lock_owner:
             params["lock_owner"] = lock_owner
         self._request(
@@ -634,7 +643,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/complete",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation="Complete build",
         )
         logger.info(f"Completed build: {build_id}")
@@ -643,7 +652,7 @@ class APIRegistry(RegistryABC):
         self, build_id: UUID, error_message: str | None = None
     ) -> None:
         """Async version - mark a build as failed."""
-        params = self._get_params()
+        params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
         await self._arequest(
@@ -659,7 +668,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/cancel",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation="Cancel build",
         )
         logger.info(f"Cancelled build: {build_id}")
@@ -668,7 +677,7 @@ class APIRegistry(RegistryABC):
         self, build_id: UUID, reason: str | None = None
     ) -> None:
         """Async version - mark build as exited early."""
-        params = self._get_params()
+        params = self._get_event_params()
         if reason:
             params["reason"] = reason
         await self._arequest(
@@ -696,7 +705,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Start task {task.id}",
         )
 
@@ -705,7 +714,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/complete",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Complete task {task.id}",
         )
 
@@ -713,7 +722,7 @@ class APIRegistry(RegistryABC):
         self, build_id: UUID, task: "BaseTask", error_message: str | None = None
     ) -> None:
         """Async version - mark a task as failed."""
-        params = self._get_params()
+        params = self._get_event_params()
         if error_message:
             params["error_message"] = error_message
         await self._arequest(
@@ -728,7 +737,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/suspend",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Suspend task {task.id}",
         )
 
@@ -737,7 +746,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/resume",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Resume task {task.id}",
         )
 
@@ -746,7 +755,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
-            params=self._get_params(),
+            params=self._get_event_params(),
             operation=f"Cancel task {task.id}",
         )
 
@@ -754,7 +763,7 @@ class APIRegistry(RegistryABC):
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
     ) -> None:
         """Async version - record that task is waiting for global lock."""
-        params = self._get_params()
+        params = self._get_event_params()
         if lock_owner:
             params["lock_owner"] = lock_owner
         await self._arequest(

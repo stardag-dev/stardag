@@ -172,6 +172,8 @@ class TaskWithStatusResponse(TaskResponse):
     waiting_for_lock: bool = False
     # Build where the status-determining event occurred (for cross-build indicators)
     status_build_id: UUID | None = None
+    # Git commit hash from the event that determined the current status
+    commit_hash: str | None = None
 
 
 class TaskEventResponse(BaseModel):

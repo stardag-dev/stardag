@@ -376,3 +376,173 @@ async def test_task_reuse_across_runs(client: AsyncClient):
     assert (
         build2_task["status_build_id"] == build1_id
     )  # Completed by build1, not build2
+
+
+# --- commit_hash in event_metadata tests ---
+
+
+@pytest.mark.asyncio
+async def test_task_event_stores_commit_hash(client: AsyncClient):
+    """Test that task events store commit_hash in event_metadata."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "commit-task-1",
+        "task_namespace": "",
+        "task_name": "CommitTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+
+    # Start task with commit_hash
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/commit-task-1/start",
+        params={"commit_hash": "abc1234"},
+    )
+    assert response.status_code == 200
+
+    # Complete task with commit_hash
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/commit-task-1/complete",
+        params={"commit_hash": "abc1234"},
+    )
+    assert response.status_code == 200
+
+    # Check events have commit_hash in metadata
+    response = await client.get(f"/api/v1/builds/{build_id}/events")
+    events = response.json()
+    task_events = [
+        e for e in events if e["event_type"] in ("task_started", "task_completed")
+    ]
+    assert len(task_events) == 2
+    for event in task_events:
+        assert event["event_metadata"] is not None
+        assert event["event_metadata"]["commit_hash"] == "abc1234"
+
+
+@pytest.mark.asyncio
+async def test_task_event_without_commit_hash(client: AsyncClient):
+    """Test that task events without commit_hash have no event_metadata."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "no-commit-task",
+        "task_namespace": "",
+        "task_name": "NoCommitTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/no-commit-task/start"
+    )
+    assert response.status_code == 200
+
+    # Events should have no event_metadata
+    response = await client.get(f"/api/v1/builds/{build_id}/events")
+    events = response.json()
+    start_event = next(e for e in events if e["event_type"] == "task_started")
+    assert start_event["event_metadata"] is None
+
+
+@pytest.mark.asyncio
+async def test_commit_hash_in_task_list_response(client: AsyncClient):
+    """Test that commit_hash from completion event appears in task list response."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "commit-list-task",
+        "task_namespace": "",
+        "task_name": "CommitListTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/commit-list-task/start",
+        params={"commit_hash": "start123"},
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/commit-list-task/complete",
+        params={"commit_hash": "done456"},
+    )
+
+    # Task list should show commit_hash from completion event
+    response = await client.get(f"/api/v1/builds/{build_id}/tasks")
+    tasks = response.json()
+    task = next(t for t in tasks if t["task_id"] == "commit-list-task")
+    assert task["commit_hash"] == "done456"
+
+
+@pytest.mark.asyncio
+async def test_build_event_stores_commit_hash(client: AsyncClient):
+    """Test that build events store commit_hash in event_metadata."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Complete build with commit_hash
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/complete",
+        params={"commit_hash": "build-abc"},
+    )
+    assert response.status_code == 200
+
+    # Check events
+    response = await client.get(f"/api/v1/builds/{build_id}/events")
+    events = response.json()
+    complete_event = next(e for e in events if e["event_type"] == "build_completed")
+    assert complete_event["event_metadata"] is not None
+    assert complete_event["event_metadata"]["commit_hash"] == "build-abc"
+
+
+@pytest.mark.asyncio
+async def test_commit_hash_with_resumed_build(client: AsyncClient):
+    """Test commit_hash tracking across builds (simulating resume scenario).
+
+    When a task fails in build1 at commit A and completes in build2 at commit B,
+    the task's commit_hash should reflect commit B.
+    """
+    # Build 1: task fails at commit A
+    response = await client.post("/api/v1/builds", json={"commit_hash": "commit-A"})
+    build1_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "resume-task",
+        "task_namespace": "",
+        "task_name": "ResumeTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build1_id}/tasks", json=task_data)
+    await client.post(
+        f"/api/v1/builds/{build1_id}/tasks/resume-task/start",
+        params={"commit_hash": "commit-A"},
+    )
+    await client.post(
+        f"/api/v1/builds/{build1_id}/tasks/resume-task/fail",
+        params={"error_message": "oops", "commit_hash": "commit-A"},
+    )
+
+    # Build 2 (resume): task completes at commit B
+    response = await client.post("/api/v1/builds", json={"commit_hash": "commit-B"})
+    build2_id = response.json()["id"]
+
+    # Re-register task in build2
+    await client.post(f"/api/v1/builds/{build2_id}/tasks", json=task_data)
+    await client.post(
+        f"/api/v1/builds/{build2_id}/tasks/resume-task/start",
+        params={"commit_hash": "commit-B"},
+    )
+    await client.post(
+        f"/api/v1/builds/{build2_id}/tasks/resume-task/complete",
+        params={"commit_hash": "commit-B"},
+    )
+
+    # Global task status should show commit B (from completion event)
+    response = await client.get(f"/api/v1/builds/{build2_id}/tasks")
+    tasks = response.json()
+    task = next(t for t in tasks if t["task_id"] == "resume-task")
+    assert task["status"] == "completed"
+    assert task["commit_hash"] == "commit-B"
+    assert task["status_build_id"] == build2_id
