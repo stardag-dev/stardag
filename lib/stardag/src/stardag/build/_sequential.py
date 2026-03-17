@@ -127,12 +127,25 @@ def build_sequential(
     else:
         build_id = registry.build_start(root_tasks=tasks)
 
-    # Register previously completed tasks so they appear in the build's task list
+    # Register previously completed tasks so they appear in the build's task list.
+    # We also call task_complete to mark them as done — otherwise they remain in
+    # PENDING state in the registry (e.g. WrapperTasks that are complete because
+    # their deps are complete, but were never explicitly run).
     for task in previously_completed_tasks:
         try:
             registry.task_register(build_id, task)
-        except Exception:
-            pass  # Best effort
+        except Exception as reg_err:
+            logger.warning(
+                f"Failed to register previously completed task {task.id}: {reg_err}"
+            )
+            continue
+        try:
+            registry.task_complete(build_id, task)
+        except Exception as reg_err:
+            logger.warning(
+                f"Failed to mark previously completed task {task.id} "
+                f"as complete: {reg_err}"
+            )
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""
@@ -240,7 +253,14 @@ def build_sequential(
                     error = RuntimeError(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
-                    registry.task_fail(build_id, ready_task, str(error))
+                    try:
+                        # Register first so the registry has a task row to fail
+                        registry.task_register(build_id, ready_task)
+                        registry.task_fail(build_id, ready_task, str(error))
+                    except Exception as reg_err:
+                        logger.warning(
+                            f"Failed to notify registry of task failure: {reg_err}"
+                        )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
                     continue
@@ -265,7 +285,12 @@ def build_sequential(
                 task_count.failed += 1
                 failed_cache.add(ready_task.id)
                 error = e
-                registry.task_fail(build_id, ready_task, str(e))
+                try:
+                    registry.task_fail(build_id, ready_task, str(e))
+                except Exception as reg_err:
+                    logger.warning(
+                        f"Failed to notify registry of task failure: {reg_err}"
+                    )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
             finally:
@@ -452,12 +477,25 @@ async def build_sequential_aio(
     else:
         build_id = await registry.build_start_aio(root_tasks=tasks)
 
-    # Register previously completed tasks so they appear in the build's task list
+    # Register previously completed tasks so they appear in the build's task list.
+    # We also call task_complete_aio to mark them as done — otherwise they remain in
+    # PENDING state in the registry (e.g. WrapperTasks that are complete because
+    # their deps are complete, but were never explicitly run).
     for task in previously_completed_tasks:
         try:
             await registry.task_register_aio(build_id, task)
-        except Exception:
-            pass  # Best effort
+        except Exception as reg_err:
+            logger.warning(
+                f"Failed to register previously completed task {task.id}: {reg_err}"
+            )
+            continue
+        try:
+            await registry.task_complete_aio(build_id, task)
+        except Exception as reg_err:
+            logger.warning(
+                f"Failed to mark previously completed task {task.id} "
+                f"as complete: {reg_err}"
+            )
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""
@@ -567,7 +605,14 @@ async def build_sequential_aio(
                     error = RuntimeError(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
-                    await registry.task_fail_aio(build_id, ready_task, str(error))
+                    try:
+                        # Register first so the registry has a task row to fail
+                        await registry.task_register_aio(build_id, ready_task)
+                        await registry.task_fail_aio(build_id, ready_task, str(error))
+                    except Exception as reg_err:
+                        logger.warning(
+                            f"Failed to notify registry of task failure: {reg_err}"
+                        )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
                     continue
@@ -592,7 +637,12 @@ async def build_sequential_aio(
                 task_count.failed += 1
                 failed_cache.add(ready_task.id)
                 error = e
-                await registry.task_fail_aio(build_id, ready_task, str(e))
+                try:
+                    await registry.task_fail_aio(build_id, ready_task, str(e))
+                except Exception as reg_err:
+                    logger.warning(
+                        f"Failed to notify registry of task failure: {reg_err}"
+                    )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
             finally:
