@@ -70,11 +70,6 @@ class BuildSummary:
     build_id: UUID | None = None
     error: BaseException | None = None
 
-    @property
-    def successful(self) -> bool:
-        """Whether the build completed successfully."""
-        return self.status == BuildExitStatus.SUCCESS
-
     def raise_on_failure(self) -> None:
         """Raise :class:`BuildFailed` if the build status is ``FAILURE``."""
         if self.status == BuildExitStatus.FAILURE:
