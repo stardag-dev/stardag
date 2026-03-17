@@ -655,14 +655,21 @@ async def build_aio(
             await release_lock_for_task(task, completed=True)
             try:
                 await registry.task_complete_aio(build_id, task)
-                artifacts = await task.artifacts_aio()
-                if artifacts:
-                    await registry.task_upload_artifacts_aio(build_id, task, artifacts)
             except Exception as reg_err:
                 handle_registry_error(
                     reg_err,
                     f"Failed to notify registry of task {task.id} completion",
                     on_registry_failure,
+                )
+            # Artifact collection is best-effort — errors are always logged as
+            # warnings and do not fail the task (it already ran successfully).
+            try:
+                artifacts = await task.artifacts_aio()
+                if artifacts:
+                    await registry.task_upload_artifacts_aio(build_id, task, artifacts)
+            except Exception as artifact_err:
+                logger.warning(
+                    f"Failed to collect/upload artifacts for task {task.id}: {artifact_err}"
                 )
             state.completed = True
             completion_cache.add(task.id)
