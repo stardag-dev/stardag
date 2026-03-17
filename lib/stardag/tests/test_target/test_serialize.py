@@ -79,6 +79,54 @@ class CustomMockSerializer(Serializer[str, FileTarget]):
         return isinstance(value, CustomMockSerializer)
 
 
+class TestSerializerHashable:
+    """All serializers must be hashable so they work as Annotated args in pydantic generics."""
+
+    @pytest.mark.parametrize(
+        "serializer",
+        [
+            PlainTextSerializer(),
+            JSONSerializer(int),
+            JSONSerializer(dict[str, int]),
+            PickleSerializer(),
+            PandasDataFrameCSVSerializer(),
+            SelfFileSerializer(_SelfSerializing),
+            SelfDirectorySerializer(_SelfDirSerializing),
+        ],
+    )
+    def test_serializer_is_hashable(self, serializer):
+        # Must not raise TypeError
+        h = hash(serializer)
+        assert isinstance(h, int)
+
+    def test_equal_serializers_have_same_hash(self):
+        assert hash(PlainTextSerializer()) == hash(PlainTextSerializer())
+        assert hash(PickleSerializer()) == hash(PickleSerializer())
+        assert hash(JSONSerializer(int)) == hash(JSONSerializer(int))
+        assert hash(PandasDataFrameCSVSerializer()) == hash(
+            PandasDataFrameCSVSerializer()
+        )
+        assert hash(SelfFileSerializer(_SelfSerializing)) == hash(
+            SelfFileSerializer(_SelfSerializing)
+        )
+        assert hash(SelfDirectorySerializer(_SelfDirSerializing)) == hash(
+            SelfDirectorySerializer(_SelfDirSerializing)
+        )
+
+    def test_serializer_usable_in_set_and_dict(self):
+        s = PickleSerializer()
+        assert s in {s}
+        assert {s: 1}[s] == 1
+
+    def test_annotated_with_serializer_is_hashable(self):
+        """The motivating use-case: Annotated[T, Serializer()] as a type param."""
+        ann = typing.Annotated[str, PickleSerializer()]
+        # get_args must not raise when hashing args
+        args = typing.get_args(ann)
+        for arg in args:
+            hash(arg)
+
+
 @pytest.mark.parametrize(
     "annotation,expected_serializer",
     [

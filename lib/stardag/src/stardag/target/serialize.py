@@ -366,6 +366,9 @@ class PlainTextSerializer(_DumpsLoadsSerializer[str, str]):
     def __eq__(self, value: object) -> bool:
         return type(self) == type(value)  # noqa: E721
 
+    def __hash__(self) -> int:
+        return hash(type(self))
+
 
 class JSONSerializer(_DumpsLoadsSerializer[LoadedT, bytes]):
     stream_type = bytes
@@ -396,6 +399,9 @@ class JSONSerializer(_DumpsLoadsSerializer[LoadedT, bytes]):
             and self.type_adapter.core_schema == value.type_adapter.core_schema
         )
 
+    def __hash__(self) -> int:
+        return hash((type(self), repr(self.type_adapter.core_schema)))
+
 
 class PickleSerializer(_DumpsLoadsSerializer[LoadedT, bytes]):
     stream_type = bytes
@@ -416,6 +422,9 @@ class PickleSerializer(_DumpsLoadsSerializer[LoadedT, bytes]):
 
     def __eq__(self, value: object) -> bool:
         return type(self) == type(value)  # noqa: E721
+
+    def __hash__(self) -> int:
+        return hash(type(self))
 
 
 class PandasDataFrameCSVSerializer(_DumpsLoadsSerializer[DataFrame, str]):
@@ -447,6 +456,9 @@ class PandasDataFrameCSVSerializer(_DumpsLoadsSerializer[DataFrame, str]):
 
     def __eq__(self, value: object) -> bool:
         return type(self) == type(value)  # noqa: E721
+
+    def __hash__(self) -> int:
+        return hash(type(self))
 
 
 @typing.runtime_checkable
@@ -517,6 +529,9 @@ class SelfFileSerializer(Serializer[SelfFileSerializing, FileTarget]):
             and isinstance(value, SelfFileSerializer)
             and self.class_ == value.class_
         )
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.class_))
 
 
 class SelfDirectorySerializer(Serializer[SelfDirectorySerializing, DirectoryTarget]):
@@ -592,6 +607,9 @@ class SelfDirectorySerializer(Serializer[SelfDirectorySerializing, DirectoryTarg
             and isinstance(value, SelfDirectorySerializer)
             and self.class_ == value.class_
         )
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.class_))
 
 
 def strip_annotation(annotation: typing.Type[LoadedT]) -> typing.Type[LoadedT]:
