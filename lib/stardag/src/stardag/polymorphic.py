@@ -34,6 +34,13 @@ def _is_type_compatible(expected: Any, actual: Any) -> bool:
     Returns True if compatible or if we can't determine compatibility.
     Returns False only for obvious mismatches.
     """
+    # Unwrap Annotated types — metadata is not a type constraint.
+    # e.g. Annotated[str, SomeTag] is treated the same as str.
+    if get_origin(expected) is Annotated:
+        expected = get_args(expected)[0]
+    if get_origin(actual) is Annotated:
+        actual = get_args(actual)[0]
+
     # TypeVars match anything
     if isinstance(expected, TypeVar):
         return True

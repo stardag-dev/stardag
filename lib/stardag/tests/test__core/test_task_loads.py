@@ -428,3 +428,85 @@ def test_on_type_mismatch_raise_is_default():
     """on_type_mismatch='raise' is the default behavior for SubClass[TargetTask[...]]."""
     with pytest.raises(ValidationError):
         ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+
+
+# =============================================================================
+# Tests for TaskLoads with Annotated loaded types
+# =============================================================================
+
+
+class StrMetadataTag:
+    """Dummy annotation metadata for testing."""
+
+    pass
+
+
+AnnotatedStr = Annotated[str, StrMetadataTag()]
+
+
+class ContainerTaskLoadsAnnotatedStr(BaseTask):
+    """Container expecting TaskLoads[Annotated[str, ...]] — metadata should not constrain."""
+
+    task: TaskLoads[AnnotatedStr]  # type: ignore[type-arg]
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+
+class GenericWrapperTask(LoadableTask[str]):
+    """Multi-level LoadableTask subclass without __map_generic_args_to_ancestor__.
+
+    This mimics the WrapperTask[T] → ConcreteWrapper pattern from the bug report,
+    using a concrete subclass of LoadableTask with no generic intermediary.
+    """
+
+    data: str = "wrapped"
+
+    def complete(self) -> bool:
+        return True
+
+    def run(self) -> None:
+        pass
+
+    def load(self) -> str:
+        return self.data
+
+
+def test_task_loads_annotated_accepts_task():
+    """Task[str] should be accepted by TaskLoads[Annotated[str, ...]] — metadata is not a type constraint."""
+    container = ContainerTaskLoadsAnnotatedStr(task=TaskStr())
+    assert isinstance(container.task, TaskStr)
+
+
+def test_task_loads_annotated_accepts_bare_loadable():
+    """LoadableTask[str] should be accepted by TaskLoads[Annotated[str, ...]] — metadata is not a type constraint."""
+    container = ContainerTaskLoadsAnnotatedStr(task=BareLoadableStr())
+    assert isinstance(container.task, BareLoadableStr)
+
+
+def test_task_loads_annotated_rejects_type_mismatch():
+    """Task[int] should still be rejected by TaskLoads[Annotated[str, ...]]."""
+    with pytest.raises(ValidationError):
+        ContainerTaskLoadsAnnotatedStr(task=TaskInt())  # pyright: ignore[reportArgumentType]
+
+
+def test_task_loads_annotated_task_and_loadable_consistent():
+    """Task[str] and LoadableTask[str] should behave consistently with TaskLoads[Annotated[str, ...]]."""
+    task_accepted = True
+    loadable_accepted = True
+    try:
+        ContainerTaskLoadsAnnotatedStr(task=TaskStr())
+    except Exception:
+        task_accepted = False
+    try:
+        ContainerTaskLoadsAnnotatedStr(task=BareLoadableStr())
+    except Exception:
+        loadable_accepted = False
+    assert task_accepted == loadable_accepted, (
+        "Task[str] and LoadableTask[str] should behave consistently "
+        "for TaskLoads[Annotated[str, ...]] — got task_accepted="
+        f"{task_accepted}, loadable_accepted={loadable_accepted}"
+    )
