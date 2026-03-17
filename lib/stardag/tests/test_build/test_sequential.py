@@ -344,6 +344,62 @@ class TestDiamondPatternsSequential:
         assert get_execution_count("dyn_seq1", "dyn_task") == 1
         assert get_execution_count("dyn_seq1", "parent") == 1
 
+    def test_dynamic_deps_discovered_count(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """task_count.discovered should include dynamically discovered tasks.
+
+        parent (static: [])
+           |  (dynamic: [dyn_child])
+        dyn_child (static: [])
+
+        Discovery finds only parent (1). After parent runs and yields dyn_child,
+        dyn_child should also be counted as discovered (total: 2).
+        """
+        reset_execution_counts()
+
+        dyn_child = DynamicDiamondTask(name="dyn_child", test_id="disc_count")
+        parent = DynamicDiamondTask(
+            name="parent",
+            test_id="disc_count",
+            dynamic_task_deps=(dyn_child,),
+        )
+
+        summary = build_sequential([parent], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Both parent and dyn_child should be discovered
+        assert summary.task_count.discovered == 2, (
+            f"Expected 2 discovered (parent + dyn_child), got {summary.task_count.discovered}"
+        )
+        assert summary.task_count.succeeded == 2
+
+    @pytest.mark.asyncio
+    async def test_dynamic_deps_discovered_count_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async: task_count.discovered should include dynamically discovered tasks."""
+        reset_execution_counts()
+
+        dyn_child = DynamicDiamondTask(name="dyn_child_aio", test_id="disc_count_aio")
+        parent = DynamicDiamondTask(
+            name="parent_aio",
+            test_id="disc_count_aio",
+            dynamic_task_deps=(dyn_child,),
+        )
+
+        summary = await build_sequential_aio([parent], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert summary.task_count.discovered == 2, (
+            f"Expected 2 discovered, got {summary.task_count.discovered}"
+        )
+        assert summary.task_count.succeeded == 2
+
     def test_complex_dynamic_diamond(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],

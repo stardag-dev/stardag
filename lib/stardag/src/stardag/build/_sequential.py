@@ -9,8 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Awaitable, Sequence
+from typing import Callable, Literal
 from uuid import UUID
 
 from stardag import (
@@ -299,6 +299,8 @@ def build_sequential(
                     build_id,
                     registry,
                     dual_run_default,
+                    discover,
+                    task_count,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -347,6 +349,8 @@ def _run_task_sequential(
     build_id: UUID,
     registry: RegistryABC,
     dual_run_default: Literal["sync", "async"],
+    discover: Callable[[BaseTask], None],
+    task_count: TaskCount | None = None,
 ) -> None:
     """Run a single task in sequential mode, handling dynamic deps."""
     registry.task_start(build_id, task)
@@ -378,14 +382,11 @@ def _run_task_sequential(
                 yielded = next(gen)
                 dynamic_deps = flatten_task_struct(yielded)
 
-                # Discover and build dynamic deps
+                # Discover and build dynamic deps using the same discover()
+                # function used for static deps, so task_count.discovered
+                # is properly incremented and sub-deps are fully recursed.
                 for dep in dynamic_deps:
-                    if dep.id not in all_tasks:
-                        all_tasks[dep.id] = dep
-                        # Recursively discover
-                        for sub_dep in flatten_task_struct(dep.requires()):
-                            if sub_dep.id not in all_tasks:
-                                all_tasks[sub_dep.id] = sub_dep
+                    discover(dep)
 
                     if dep.id not in completion_cache:
                         _run_task_sequential(
@@ -395,7 +396,11 @@ def _run_task_sequential(
                             build_id,
                             registry,
                             dual_run_default,
+                            discover,
+                            task_count,
                         )
+                        if task_count is not None:
+                            task_count.succeeded += 1
 
             except StopIteration:
                 break
@@ -671,6 +676,8 @@ async def build_sequential_aio(
                     build_id,
                     registry,
                     sync_run_default,
+                    discover,
+                    task_count,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -719,6 +726,8 @@ async def _run_task_sequential_aio(
     build_id: UUID,
     registry: RegistryABC,
     sync_run_default: Literal["thread", "blocking"],
+    discover: Callable[[BaseTask], Awaitable[None]],
+    task_count: TaskCount | None = None,
 ) -> None:
     """Run a single task in async sequential mode, handling dynamic deps."""
     await registry.task_start_aio(build_id, task)
@@ -748,14 +757,11 @@ async def _run_task_sequential_aio(
                 yielded = next(gen)
                 dynamic_deps = flatten_task_struct(yielded)
 
-                # Discover and build dynamic deps
+                # Discover and build dynamic deps using the same discover()
+                # function used for static deps, so task_count.discovered
+                # is properly incremented and sub-deps are fully recursed.
                 for dep in dynamic_deps:
-                    if dep.id not in all_tasks:
-                        all_tasks[dep.id] = dep
-                        # Recursively discover
-                        for sub_dep in flatten_task_struct(dep.requires()):
-                            if sub_dep.id not in all_tasks:
-                                all_tasks[sub_dep.id] = sub_dep
+                    await discover(dep)
 
                     if dep.id not in completion_cache:
                         await _run_task_sequential_aio(
@@ -765,7 +771,11 @@ async def _run_task_sequential_aio(
                             build_id,
                             registry,
                             sync_run_default,
+                            discover,
+                            task_count,
                         )
+                        if task_count is not None:
+                            task_count.succeeded += 1
 
             except StopIteration:
                 break
