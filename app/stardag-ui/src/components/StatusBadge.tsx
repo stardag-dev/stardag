@@ -14,7 +14,7 @@ interface StatusBadgeProps {
 
 const statusStyles: Record<TaskStatus, string> = {
   unregistered:
-    "bg-gray-50 text-gray-400 dark:bg-gray-900/30 dark:text-gray-500 border border-dashed border-gray-300 dark:border-gray-600",
+    "bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400 border border-dashed border-gray-400 dark:border-gray-500",
   pending: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
   running: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
   suspended: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
@@ -25,7 +25,7 @@ const statusStyles: Record<TaskStatus, string> = {
 
 const statusStylesMuted: Record<TaskStatus, string> = {
   unregistered:
-    "bg-gray-50/50 text-gray-400/60 dark:bg-gray-900/20 dark:text-gray-500/50",
+    "bg-gray-200/50 text-gray-500/60 dark:bg-gray-700/50 dark:text-gray-400/50",
   pending:
     "bg-yellow-100/50 text-yellow-800/60 dark:bg-yellow-900/20 dark:text-yellow-400/50",
   running: "bg-blue-100/50 text-blue-800/60 dark:bg-blue-900/20 dark:text-blue-400/50",
