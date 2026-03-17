@@ -2,6 +2,13 @@
 
 These functions execute tasks one at a time in dependency order.
 Intended for debugging and testing, not production use.
+
+Design note: build_sequential is intentionally kept as pure synchronous code
+(no event loop) to maximize debuggability and compatibility. It can be called
+from any context including inside running event loops, Jupyter notebooks, etc.
+The only exception is async-only tasks (implementing only run_aio), which use
+asyncio.run() as a best-effort fallback. Do NOT refactor build_sequential to
+wrap an async core — this breaks the sync contract.
 """
 
 from __future__ import annotations
@@ -38,6 +45,74 @@ from stardag.build._base import (
 from stardag.registry import RegistryABC, init_registry
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Pure helper functions shared by both sync and async build variants.
+# These contain no I/O and are safe to call from any context.
+# ---------------------------------------------------------------------------
+
+
+def _validate_tasks(tasks: Sequence[BaseTask] | BaseTask) -> list[BaseTask]:
+    """Validate and normalize the tasks argument into a list of BaseTask."""
+    if isinstance(tasks, BaseTask):
+        return [tasks]
+    task_list = list(tasks)
+    for idx, task in enumerate(task_list):
+        if not isinstance(task, BaseTask):
+            raise ValueError(f"Invalid task at index {idx}: {task} (must be BaseTask)")
+    return task_list
+
+
+def _has_failed_dep(task: BaseTask, failed_cache: set[UUID]) -> bool:
+    """Check if any dependency of the given task has failed."""
+    deps = flatten_task_struct(task.requires())
+    return any(d.id in failed_cache for d in deps)
+
+
+def _find_ready_task(
+    all_tasks: dict[UUID, BaseTask],
+    completion_cache: set[UUID],
+    failed_cache: set[UUID],
+) -> BaseTask | None:
+    """Find the next task whose dependencies are all complete.
+
+    Returns None if no task is ready to run.
+    """
+    for task in all_tasks.values():
+        if task.id in completion_cache or task.id in failed_cache:
+            continue
+        if _has_failed_dep(task, failed_cache):
+            continue
+        deps = flatten_task_struct(task.requires())
+        if all(d.id in completion_cache for d in deps):
+            return task
+    return None
+
+
+def _check_for_deadlock(
+    all_tasks: dict[UUID, BaseTask],
+    completion_cache: set[UUID],
+    failed_cache: set[UUID],
+) -> None:
+    """Raise RuntimeError if incomplete tasks exist that are not blocked by failures.
+
+    Should be called when no ready task is found. If all remaining incomplete tasks
+    are blocked by failed dependencies, this is not a deadlock and the function
+    returns silently.
+    """
+    incomplete = [
+        t
+        for t in all_tasks.values()
+        if t.id not in completion_cache and t.id not in failed_cache
+    ]
+    if incomplete:
+        truly_blocked = [t for t in incomplete if not _has_failed_dep(t, failed_cache)]
+        if truly_blocked:
+            raise RuntimeError(
+                f"Deadlock: {len(truly_blocked)} tasks cannot proceed. "
+                f"Tasks: {[str(t.id) for t in truly_blocked[:5]]}"
+            )
 
 
 def build_sequential(
@@ -82,15 +157,7 @@ def build_sequential(
     Returns:
         BuildSummary with status, task counts, and build_id
     """
-    if isinstance(tasks, BaseTask):
-        tasks = [tasks]
-    else:
-        tasks = list(tasks)
-        for idx, task in enumerate(tasks):
-            if not isinstance(task, BaseTask):
-                raise ValueError(
-                    f"Invalid task at index {idx}: {task} (must be BaseTask)"
-                )
+    tasks_list = _validate_tasks(tasks)
 
     if registry is None:
         registry = init_registry()
@@ -128,14 +195,14 @@ def build_sequential(
         for dep in flatten_task_struct(task.requires()):
             discover(dep)
 
-    for root in tasks:
+    for root in tasks_list:
         discover(root)
 
     # Start or resume build
     if resume_build_id is not None:
         build_id = resume_build_id
     else:
-        build_id = registry.build_start(root_tasks=tasks)
+        build_id = registry.build_start(root_tasks=tasks_list)
 
     # Register previously completed tasks so they appear in the build's task list.
     # We also call task_complete to mark them as done — otherwise they remain in
@@ -159,11 +226,6 @@ def build_sequential(
                 f"Failed to mark previously completed task {task.id} as complete",
                 on_registry_failure,
             )
-
-    def has_failed_dep(task: BaseTask) -> bool:
-        """Check if any dependency has failed."""
-        deps = flatten_task_struct(task.requires())
-        return any(d.id in failed_cache for d in deps)
 
     def acquire_lock_sync(task: BaseTask) -> LockAcquisitionResult:
         """Acquire lock synchronously with retry/backoff."""
@@ -231,34 +293,10 @@ def build_sequential(
     try:
         # Build in topological order
         while True:
-            # Find a task ready to run
-            ready_task: BaseTask | None = None
-            for task in all_tasks.values():
-                if task.id in completion_cache or task.id in failed_cache:
-                    continue
-                # Skip tasks with failed dependencies
-                if has_failed_dep(task):
-                    continue
-                deps = flatten_task_struct(task.requires())
-                if all(d.id in completion_cache for d in deps):
-                    ready_task = task
-                    break
+            ready_task = _find_ready_task(all_tasks, completion_cache, failed_cache)
 
             if ready_task is None:
-                # No more tasks can run - check for deadlock
-                incomplete = [
-                    t
-                    for t in all_tasks.values()
-                    if t.id not in completion_cache and t.id not in failed_cache
-                ]
-                if incomplete:
-                    # Check if all incomplete tasks are blocked by failed deps
-                    truly_blocked = [t for t in incomplete if not has_failed_dep(t)]
-                    if truly_blocked:
-                        raise RuntimeError(
-                            f"Deadlock: {len(truly_blocked)} tasks cannot proceed. "
-                            f"Tasks: {[str(t.id) for t in truly_blocked[:5]]}"
-                        )
+                _check_for_deadlock(all_tasks, completion_cache, failed_cache)
                 # All remaining tasks are blocked by failed deps - exit gracefully
                 break
 
@@ -466,15 +504,8 @@ async def build_sequential_aio(
     Returns:
         BuildSummary with status, task counts, and build_id
     """
-    if isinstance(tasks, BaseTask):
-        tasks = [tasks]
-    else:
-        tasks = list(tasks)
-        for idx, task in enumerate(tasks):
-            if not isinstance(task, BaseTask):
-                raise ValueError(
-                    f"Invalid task at index {idx}: {task} (must be BaseTask)"
-                )
+    tasks_list = _validate_tasks(tasks)
+
     if registry is None:
         registry = init_registry()
     if global_lock_config is None:
@@ -511,14 +542,14 @@ async def build_sequential_aio(
         for dep in flatten_task_struct(task.requires()):
             await discover(dep)
 
-    for root in tasks:
+    for root in tasks_list:
         await discover(root)
 
     # Start or resume build
     if resume_build_id is not None:
         build_id = resume_build_id
     else:
-        build_id = await registry.build_start_aio(root_tasks=tasks)
+        build_id = await registry.build_start_aio(root_tasks=tasks_list)
 
     # Register previously completed tasks so they appear in the build's task list.
     # We also call task_complete_aio to mark them as done — otherwise they remain in
@@ -542,11 +573,6 @@ async def build_sequential_aio(
                 f"Failed to mark previously completed task {task.id} as complete",
                 on_registry_failure,
             )
-
-    def has_failed_dep(task: BaseTask) -> bool:
-        """Check if any dependency has failed."""
-        deps = flatten_task_struct(task.requires())
-        return any(d.id in failed_cache for d in deps)
 
     async def acquire_lock_aio(task: BaseTask) -> LockAcquisitionResult:
         """Acquire lock asynchronously with retry/backoff."""
@@ -616,34 +642,10 @@ async def build_sequential_aio(
     try:
         # Build in topological order
         while True:
-            # Find a task ready to run
-            ready_task: BaseTask | None = None
-            for task in all_tasks.values():
-                if task.id in completion_cache or task.id in failed_cache:
-                    continue
-                # Skip tasks with failed dependencies
-                if has_failed_dep(task):
-                    continue
-                deps = flatten_task_struct(task.requires())
-                if all(d.id in completion_cache for d in deps):
-                    ready_task = task
-                    break
+            ready_task = _find_ready_task(all_tasks, completion_cache, failed_cache)
 
             if ready_task is None:
-                # No more tasks can run - check for deadlock
-                incomplete = [
-                    t
-                    for t in all_tasks.values()
-                    if t.id not in completion_cache and t.id not in failed_cache
-                ]
-                if incomplete:
-                    # Check if all incomplete tasks are blocked by failed deps
-                    truly_blocked = [t for t in incomplete if not has_failed_dep(t)]
-                    if truly_blocked:
-                        raise RuntimeError(
-                            f"Deadlock: {len(truly_blocked)} tasks cannot proceed. "
-                            f"Tasks: {[str(t.id) for t in truly_blocked[:5]]}"
-                        )
+                _check_for_deadlock(all_tasks, completion_cache, failed_cache)
                 # All remaining tasks are blocked by failed deps - exit gracefully
                 break
 
