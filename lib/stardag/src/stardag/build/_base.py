@@ -9,6 +9,7 @@ This module contains:
 
 from __future__ import annotations
 
+import traceback as tb_module
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -88,6 +89,23 @@ class FailMode(StrEnum):
     CONTINUE = "continue"
 
 
+@dataclass
+class TaskExecutionError:
+    """Wraps a task exception together with its formatted traceback.
+
+    Returned by TaskExecutorABC.submit() on failure so callers can
+    re-raise or log with the original traceback even when the exception
+    was caught inside the executor (possibly in another thread/process).
+    """
+
+    exception: BaseException
+    traceback: str
+    """Pre-formatted traceback string (from traceback.format_exception)."""
+
+    def __str__(self) -> str:
+        return self.traceback or str(self.exception)
+
+
 # =============================================================================
 # Task Execution State
 # =============================================================================
@@ -137,7 +155,7 @@ class TaskExecutorABC(ABC):
     """
 
     @abstractmethod
-    async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
+    async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Submit a task for execution.
 
         Args:
@@ -147,7 +165,8 @@ class TaskExecutorABC(ABC):
             - None: Task completed successfully with no dynamic dependencies.
             - TaskStruct: Task "suspended" because it yielded dynamic dependencies.
                 The returned TaskStruct contains the discovered dependencies.
-            - Exception: Task failed with the given exception.
+            - TaskExecutionError: Task failed. Contains the exception and a
+                pre-formatted traceback string captured at the point of failure.
         """
         ...
 
@@ -200,12 +219,16 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         self.executors = executors
         self.router = router
 
-    async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
+    async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Route task to appropriate executor and submit."""
         key = self.router(task)
         executor = self.executors.get(key)
         if executor is None:
-            return KeyError(f"No executor found for routing key: {key}")
+            exc = KeyError(f"No executor found for routing key: {key}")
+            return TaskExecutionError(
+                exception=exc,
+                traceback="".join(tb_module.format_exception(exc)),
+            )
         return await executor.submit(task)
 
     async def setup(self) -> None:
