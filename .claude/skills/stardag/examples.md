@@ -107,10 +107,10 @@ from stardag.artifact import Artifact, JSONArtifact, MarkdownArtifact
 from stardag.build import GlobalLockConfig
 
 sd.namespace("examples.ml_pipeline", scope=__name__)
-
+from stardag.target import LoadedT
 
 # Shared base with versioning and sleep simulation
-class PipelineBase(sd.Task[T], abc.ABC, typing.Generic[T]):
+class PipelineBase(sd.Task[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "1"
     version: str = __version__
     sleep_seconds: Annotated[float, sd.StardagField(hash_exclude=True)] = 0.0
@@ -303,9 +303,9 @@ for t in all_tasks:
 
 Full working examples are available in the repository:
 
-- `stardag/lib/stardag-examples/src/stardag_examples/general/task_api_three_levels.py`
-- `stardag/lib/stardag-examples/src/stardag_examples/ml_pipeline/class_api.py`
-- `stardag/lib/stardag-examples/src/stardag_examples/ml_pipeline/decorator_api.py`
-- `stardag/lib/stardag-examples/src/stardag_examples/general/artifacts_demo.py`
+- `lib/stardag-examples/src/stardag_examples/general/task_api_three_levels.py`
+- `lib/stardag-examples/src/stardag_examples/ml_pipeline/class_api.py`
+- `lib/stardag-examples/src/stardag_examples/ml_pipeline/decorator_api.py`
+- `lib/stardag-examples/src/stardag_examples/general/artifacts_demo.py`
 
 For more examples and tutorials, visit [docs.stardag.com/getting-started](https://docs.stardag.com/getting-started/).

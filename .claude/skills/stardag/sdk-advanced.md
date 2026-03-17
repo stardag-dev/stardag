@@ -95,8 +95,8 @@ With `sd.namespace("my_app.pipeline", scope=__name__)`:
 
 ### Scope Parameter
 
-`scope=__name__` ensures the namespace applies only to tasks defined in that module.
-Without it, the namespace would be global.
+`scope` is a required parameter. Pass `__name__` to scope the namespace to the current module
+and its submodules. Tasks defined in other modules are unaffected.
 
 ## Artifacts
 
@@ -161,8 +161,8 @@ class FilterTask(sd.Task[pd.DataFrame]):
         filtered = df[df["category"].isin(self.categories)]
         self._save(filtered)
 
-# Usage
-task = FilterTask(categories=sd.HashableSet({"a", "b", "c"}))
+# Usage — pass a regular set or frozenset (Pydantic coerces it)
+task = FilterTask(categories={"a", "b", "c"})
 ```
 
 `HashableSet` ensures deterministic ordering for consistent task IDs regardless of set insertion order.
@@ -204,14 +204,22 @@ class Consumer(sd.Task[int]):
 
 ### Polymorphic Marker
 
-The `Polymorphic` marker enables runtime type discrimination for Pydantic union fields:
+`Polymorphic()` is an `Annotated` metadata marker that enables runtime polymorphic type
+discrimination in Pydantic fields. It is NOT used as a generic (`Polymorphic[T]` is wrong).
 
 ```python
+from typing import Annotated
 from stardag.polymorphic import Polymorphic
 
 class MyModel(sd.StardagBaseModel):
-    task: Polymorphic[sd.LoadableTask[int]]  # Accepts any LoadableTask[int] subclass
+    # Correct: Annotated with Polymorphic() marker
+    task: Annotated[sd.LoadableTask[int], Polymorphic()]
+
+    # Equivalent shorthand using SubClass:
+    task: sd.SubClass[sd.LoadableTask[int]]
 ```
+
+`SubClass[T]` is syntactic sugar for `Annotated[T, Polymorphic()]`.
 
 ## Integration Points
 
@@ -230,7 +238,7 @@ run_as_prefect_flow(root_task)
 from stardag.integration.modal import ModalExecutor
 
 # Execute tasks on Modal.com infrastructure
-sd.build(task, executor=ModalExecutor(...))
+sd.build(task, task_executor=ModalExecutor(...))
 ```
 
 ### AWS S3

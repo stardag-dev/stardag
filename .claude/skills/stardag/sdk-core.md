@@ -55,7 +55,7 @@ Key behaviors:
 - `self._save(data)` persists output to auto-configured target
 - `self.load()` loads the persisted output
 - `self.complete()` checks if target file exists
-- Output path: `<target_root>/<namespace>/<name>/<id[0:2]>/<id[2:4]>/<id>.json`
+- Output path: `<target_root>/<namespace>/<name>/v<version>/<id[0:2]>/<id[2:4]>/<id>.json`
 
 ### TargetTask[TargetType] (Maximum Control)
 
@@ -85,8 +85,10 @@ Use when: custom output paths, non-standard serializers, or S3/remote targets.
 Reference a task output that was produced elsewhere:
 
 ```python
+from uuid import UUID
+
 remote_task = sd.AliasTask[pd.DataFrame].from_registry(
-    task_id="abc123...",
+    id=UUID("abc123..."),
     registry=registry,
 )
 data = remote_task.load()

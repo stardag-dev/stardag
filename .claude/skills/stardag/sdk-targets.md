@@ -29,7 +29,7 @@ class MyTask(sd.Task[dict[str, float]]):
 - `self._save(data)` → serializes and writes to auto-configured target
 - `self.load()` → reads and deserializes from target
 - `self.complete()` → checks if target file exists
-- Path: `<target_root>/<namespace>/<name>/<id[0:2]>/<id[2:4]>/<id>.<ext>`
+- Path: `<target_root>/<namespace>/<name>/v<version>/<id[0:2]>/<id[2:4]>/<id>.<ext>`
 
 ### Custom Relative Path
 
@@ -44,7 +44,7 @@ class MyTask(sd.Task[dict]):
         """Inserted between name and id in the path."""
         return self.date
 
-# Output: <target_root>/<namespace>/MyTask/2024-01-15/<id[0:2]>/<id[2:4]>/<id>.json
+# Output: <target_root>/<namespace>/MyTask/v<version>/2024-01-15/<id[0:2]>/<id[2:4]>/<id>.json
 ```
 
 With the decorator API:
@@ -95,12 +95,11 @@ target = sd.get_file_target("output.json", target_root_key="ingestion")
 
 Built-in serializers in `stardag.target.serialize`:
 
-| Serializer                | Types                                              | Extension  |
-| ------------------------- | -------------------------------------------------- | ---------- |
-| `JSONSerializer(T)`       | int, str, float, bool, list, dict, Pydantic models | `.json`    |
-| `PickleSerializer(T)`     | Any Python object                                  | `.pkl`     |
-| `PandasCSVSerializer`     | `pd.DataFrame`                                     | `.csv`     |
-| `PandasParquetSerializer` | `pd.DataFrame`                                     | `.parquet` |
+| Serializer                     | Types                                              | Extension |
+| ------------------------------ | -------------------------------------------------- | --------- |
+| `JSONSerializer(T)`            | int, str, float, bool, list, dict, Pydantic models | `.json`   |
+| `PickleSerializer(T)`          | Any Python object                                  | `.pkl`    |
+| `PandasDataFrameCSVSerializer` | `pd.DataFrame`                                     | `.csv`    |
 
 ### Custom Serializer
 
