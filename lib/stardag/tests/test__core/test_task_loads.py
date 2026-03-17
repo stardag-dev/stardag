@@ -487,6 +487,18 @@ def test_task_loads_annotated_accepts_bare_loadable():
     assert isinstance(container.task, BareLoadableStr)
 
 
+def test_task_loads_annotated_accepts_generic_wrapper():
+    """LoadableTask[str] subclass (no __map_generic_args_to_ancestor__) should be accepted by TaskLoads[Annotated[str, ...]].
+
+    This is the 'WrapperTask' pattern from the bug report — a concrete LoadableTask
+    subclass whose origin differs from LoadableTask and has no mapper, previously
+    accepted via an early bail-out. After the fix both paths (with/without mapper)
+    consistently accept a compatible loaded type.
+    """
+    container = ContainerTaskLoadsAnnotatedStr(task=GenericWrapperTask())
+    assert isinstance(container.task, GenericWrapperTask)
+
+
 def test_task_loads_annotated_rejects_type_mismatch():
     """Task[int] should still be rejected by TaskLoads[Annotated[str, ...]]."""
     with pytest.raises(ValidationError):
@@ -495,18 +507,8 @@ def test_task_loads_annotated_rejects_type_mismatch():
 
 def test_task_loads_annotated_task_and_loadable_consistent():
     """Task[str] and LoadableTask[str] should behave consistently with TaskLoads[Annotated[str, ...]]."""
-    task_accepted = True
-    loadable_accepted = True
-    try:
-        ContainerTaskLoadsAnnotatedStr(task=TaskStr())
-    except Exception:
-        task_accepted = False
-    try:
-        ContainerTaskLoadsAnnotatedStr(task=BareLoadableStr())
-    except Exception:
-        loadable_accepted = False
-    assert task_accepted == loadable_accepted, (
-        "Task[str] and LoadableTask[str] should behave consistently "
-        "for TaskLoads[Annotated[str, ...]] — got task_accepted="
-        f"{task_accepted}, loadable_accepted={loadable_accepted}"
-    )
+    # Use explicit assertions rather than broad exception catching so that
+    # unrelated errors still fail loudly.
+    ContainerTaskLoadsAnnotatedStr(task=TaskStr())
+    ContainerTaskLoadsAnnotatedStr(task=BareLoadableStr())
+    ContainerTaskLoadsAnnotatedStr(task=GenericWrapperTask())
