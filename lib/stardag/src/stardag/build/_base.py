@@ -51,6 +51,16 @@ class TaskCount:
         )
 
 
+class BuildFailed(Exception):
+    """Raised by :meth:`BuildSummary.raise_for_status` when a build did not succeed."""
+
+    summary: BuildSummary
+
+    def __init__(self, summary: BuildSummary) -> None:
+        self.summary = summary
+        super().__init__(str(summary))
+
+
 @dataclass
 class BuildSummary:
     """Summary of a build execution."""
@@ -59,6 +69,19 @@ class BuildSummary:
     task_count: TaskCount
     build_id: UUID | None = None
     error: BaseException | None = None
+
+    @property
+    def successful(self) -> bool:
+        """Whether the build completed successfully."""
+        return self.status == BuildExitStatus.SUCCESS
+
+    def raise_for_status(self) -> None:
+        """Raise :class:`BuildFailed` if the build did not succeed.
+
+        Analogous to ``requests.Response.raise_for_status()``.
+        """
+        if self.status != BuildExitStatus.SUCCESS:
+            raise BuildFailed(self)
 
     def __repr__(self) -> str:
         """Return a human-readable summary of the build."""

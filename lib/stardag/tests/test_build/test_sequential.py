@@ -843,7 +843,7 @@ class ArtifactTrackingRegistry(NoOpRegistry):
     """A registry that records artifact uploads."""
 
     def __init__(self) -> None:
-        self.uploaded_artifacts: list[tuple[UUID, list]] = []
+        self.uploaded_artifacts: list[tuple[UUID, typing.Sequence]] = []
 
     def task_register(self, build_id: UUID, task) -> None:
         pass

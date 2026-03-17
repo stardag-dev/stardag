@@ -83,18 +83,21 @@ class AliasTask(Task[LoadedT], Generic[LoadedT]):
     @classmethod
     def from_registry(
         cls,
-        id: UUID,
+        id: UUID | str,
         registry: Union["RegistryABC", None] = None,
     ) -> "AliasTask[LoadedT]":
         """Create an AliasTask by loading metadata from the Stardag APIRegistry.
 
         Args:
-            id: The UUID of the task to alias.
+            id: The UUID (or string representation) of the task to alias.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
         Returns:
             An AliasTask instance referencing the specified task.
         """
+        if isinstance(id, str):
+            id = UUID(id)
+
         if registry is None:
             # Avoid circular import:
             from stardag.registry import registry_provider  # noqa: F401

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -473,7 +474,7 @@ class APIRegistry(RegistryABC):
         )
 
     def task_upload_artifacts(
-        self, build_id: UUID, task: "BaseTask", artifacts: list[Artifact]
+        self, build_id: UUID, task: "BaseTask", artifacts: Sequence[Artifact]
     ) -> None:
         """Upload artifacts for a completed task."""
         if not artifacts:
@@ -764,7 +765,7 @@ class APIRegistry(RegistryABC):
         )
 
     async def task_upload_artifacts_aio(
-        self, build_id: UUID, task: "BaseTask", artifacts: list[Artifact]
+        self, build_id: UUID, task: "BaseTask", artifacts: Sequence[Artifact]
     ) -> None:
         """Async version - upload artifacts for a completed task."""
         if not artifacts:

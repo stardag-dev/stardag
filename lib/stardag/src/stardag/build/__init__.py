@@ -24,6 +24,7 @@ Global concurrency locking:
 
 from stardag.build._base import (
     BuildExitStatus,
+    BuildFailed,
     BuildSummary,
     DefaultGlobalLockSelector,
     FailMode,
@@ -55,6 +56,7 @@ from stardag.build._sequential import (
 __all__ = [
     # Data structures
     "BuildExitStatus",
+    "BuildFailed",
     "BuildSummary",
     "FailMode",
     "TaskCount",
