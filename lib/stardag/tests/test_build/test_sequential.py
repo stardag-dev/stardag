@@ -592,9 +592,14 @@ class TestRegistryErrorResilience:
         registry = FailingOnTaskFailRegistry()
         task = FailingTask(error_message="task broke")
 
-        # FAIL_FAST: should raise the original ValueError, not ConnectionError
+        # FAIL_FAST with warn mode: should raise the original ValueError, not ConnectionError
         with pytest.raises(ValueError, match="task broke"):
-            build_sequential([task], registry=registry, fail_mode=FailMode.FAIL_FAST)
+            build_sequential(
+                [task],
+                registry=registry,
+                fail_mode=FailMode.FAIL_FAST,
+                on_registry_failure="warn",
+            )
 
     def test_registry_task_fail_error_does_not_mask_task_error_continue(
         self,
@@ -604,9 +609,12 @@ class TestRegistryErrorResilience:
         registry = FailingOnTaskFailRegistry()
         task = FailingTask(error_message="task broke")
 
-        # CONTINUE mode: should return a summary, not crash
+        # CONTINUE mode with warn: should return a summary, not crash
         summary = build_sequential(
-            [task], registry=registry, fail_mode=FailMode.CONTINUE
+            [task],
+            registry=registry,
+            fail_mode=FailMode.CONTINUE,
+            on_registry_failure="warn",
         )
 
         assert summary.status == BuildExitStatus.FAILURE
@@ -623,13 +631,11 @@ class TestRegistryErrorResilience:
 
         with pytest.raises(ValueError, match="Intentional"):
             await build_sequential_aio(
-                [task], registry=registry, fail_mode=FailMode.FAIL_FAST
+                [task],
+                registry=registry,
+                fail_mode=FailMode.FAIL_FAST,
+                on_registry_failure="warn",
             )
-
-
-# ============================================================================
-# Test: Async artifact collection
-# ============================================================================
 
 
 # ============================================================================

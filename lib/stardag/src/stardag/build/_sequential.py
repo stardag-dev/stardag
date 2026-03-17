@@ -127,7 +127,7 @@ def build_sequential(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> BuildSummary:
     """Sync API for building tasks sequentially.
 
@@ -156,6 +156,8 @@ def build_sequential(
             already-complete tasks. This ensures all tasks in the DAG get registered
             in the registry (useful for complete DAG visualization). Default False
             for performance — skipping complete subgraphs avoids unnecessary I/O.
+        on_registry_failure: How to handle registry call failures. "raise" (default)
+            propagates the exception; "warn" logs a warning and continues.
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -350,6 +352,7 @@ def build_sequential(
                     dual_run_default,
                     discover,
                     task_count,
+                    on_registry_failure,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -402,6 +405,7 @@ def _run_task_sequential(
     dual_run_default: Literal["sync", "async"],
     discover: Callable[[BaseTask], None],
     task_count: TaskCount | None = None,
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
     """Run a single task in sequential mode, handling dynamic deps."""
     registry.task_start(build_id, task)
@@ -437,7 +441,31 @@ def _run_task_sequential(
                 # function used for static deps, so task_count.discovered
                 # is properly incremented and sub-deps are fully recursed.
                 for dep in dynamic_deps:
+                    was_known = dep.id in all_tasks
                     discover(dep)
+
+                    # A dynamic dep that was newly discovered and already complete
+                    # won't be caught by the initial "register previously completed"
+                    # loop (which runs before the build loop). Register it now so it
+                    # appears correctly in the registry for this build.
+                    if not was_known and dep.id in completion_cache:
+                        try:
+                            registry.task_register(build_id, dep)
+                        except Exception as reg_err:
+                            handle_registry_error(
+                                reg_err,
+                                f"Failed to register dynamic previously-completed task {dep.id}",
+                                on_registry_failure,
+                            )
+                            continue
+                        try:
+                            registry.task_complete(build_id, dep)
+                        except Exception as reg_err:
+                            handle_registry_error(
+                                reg_err,
+                                f"Failed to mark dynamic previously-completed task {dep.id} as complete",
+                                on_registry_failure,
+                            )
 
                     if dep.id not in completion_cache:
                         _run_task_sequential(
@@ -449,6 +477,7 @@ def _run_task_sequential(
                             dual_run_default,
                             discover,
                             task_count,
+                            on_registry_failure,
                         )
                         if task_count is not None:
                             task_count.succeeded += 1
@@ -460,9 +489,16 @@ def _run_task_sequential(
     registry.task_complete(build_id, task)
 
     # Upload artifacts if any
-    artifacts = task.artifacts()
-    if artifacts:
-        registry.task_upload_artifacts(build_id, task, artifacts)
+    try:
+        artifacts = task.artifacts()
+        if artifacts:
+            registry.task_upload_artifacts(build_id, task, artifacts)
+    except Exception as artifact_err:
+        handle_registry_error(
+            artifact_err,
+            f"Failed to collect/upload artifacts for task {task.id}",
+            on_registry_failure,
+        )
 
 
 async def build_sequential_aio(
@@ -474,7 +510,7 @@ async def build_sequential_aio(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> BuildSummary:
     """Async API for building tasks sequentially.
 
@@ -503,6 +539,8 @@ async def build_sequential_aio(
             already-complete tasks. This ensures all tasks in the DAG get registered
             in the registry (useful for complete DAG visualization). Default False
             for performance — skipping complete subgraphs avoids unnecessary I/O.
+        on_registry_failure: How to handle registry call failures. "raise" (default)
+            propagates the exception; "warn" logs a warning and continues.
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -699,6 +737,7 @@ async def build_sequential_aio(
                     sync_run_default,
                     discover,
                     task_count,
+                    on_registry_failure,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -751,6 +790,7 @@ async def _run_task_sequential_aio(
     sync_run_default: Literal["thread", "blocking"],
     discover: Callable[[BaseTask], Awaitable[None]],
     task_count: TaskCount | None = None,
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
     """Run a single task in async sequential mode, handling dynamic deps."""
     await registry.task_start_aio(build_id, task)
@@ -784,7 +824,31 @@ async def _run_task_sequential_aio(
                 # function used for static deps, so task_count.discovered
                 # is properly incremented and sub-deps are fully recursed.
                 for dep in dynamic_deps:
+                    was_known = dep.id in all_tasks
                     await discover(dep)
+
+                    # A dynamic dep that was newly discovered and already complete
+                    # won't be caught by the initial "register previously completed"
+                    # loop (which runs before the build loop). Register it now so it
+                    # appears correctly in the registry for this build.
+                    if not was_known and dep.id in completion_cache:
+                        try:
+                            await registry.task_register_aio(build_id, dep)
+                        except Exception as reg_err:
+                            handle_registry_error(
+                                reg_err,
+                                f"Failed to register dynamic previously-completed task {dep.id}",
+                                on_registry_failure,
+                            )
+                            continue
+                        try:
+                            await registry.task_complete_aio(build_id, dep)
+                        except Exception as reg_err:
+                            handle_registry_error(
+                                reg_err,
+                                f"Failed to mark dynamic previously-completed task {dep.id} as complete",
+                                on_registry_failure,
+                            )
 
                     if dep.id not in completion_cache:
                         await _run_task_sequential_aio(
@@ -796,6 +860,7 @@ async def _run_task_sequential_aio(
                             sync_run_default,
                             discover,
                             task_count,
+                            on_registry_failure,
                         )
                         if task_count is not None:
                             task_count.succeeded += 1
@@ -807,9 +872,16 @@ async def _run_task_sequential_aio(
     await registry.task_complete_aio(build_id, task)
 
     # Upload artifacts if any
-    artifacts = await task.artifacts_aio()
-    if artifacts:
-        await registry.task_upload_artifacts_aio(build_id, task, artifacts)
+    try:
+        artifacts = await task.artifacts_aio()
+        if artifacts:
+            await registry.task_upload_artifacts_aio(build_id, task, artifacts)
+    except Exception as artifact_err:
+        handle_registry_error(
+            artifact_err,
+            f"Failed to collect/upload artifacts for task {task.id}",
+            on_registry_failure,
+        )
 
 
 __all__ = [

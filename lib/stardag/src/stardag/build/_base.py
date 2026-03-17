@@ -38,9 +38,9 @@ class BuildExitStatus(StrEnum):
 @dataclass
 class TaskCount:
     discovered: int = 0
+    # Tasks found complete during discovery or via lock service (ALREADY_COMPLETED).
+    # These tasks were not executed by this build.
     previously_completed: int = 0
-    """Tasks found complete during discovery or via lock service (ALREADY_COMPLETED).
-    These tasks were not executed by this build."""
     succeeded: int = 0
     failed: int = 0
 
@@ -454,5 +454,5 @@ def handle_registry_error(
         on_registry_failure: "warn" to log and continue, "raise" to propagate.
     """
     if on_registry_failure == "raise":
-        raise error
+        raise error.with_traceback(error.__traceback__)
     logger.warning(f"{message}: {error}")
