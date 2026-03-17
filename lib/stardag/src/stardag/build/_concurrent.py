@@ -558,9 +558,18 @@ async def build_aio(
     for task in previously_completed_tasks:
         try:
             await registry.task_register_aio(build_id, task)
+        except Exception as reg_err:
+            logger.warning(
+                f"Failed to register previously completed task {task.id}: {reg_err}"
+            )
+            continue
+        try:
             await registry.task_complete_aio(build_id, task)
         except Exception as reg_err:
-            logger.warning(f"Failed to register previously completed task: {reg_err}")
+            logger.warning(
+                f"Failed to mark previously completed task {task.id} "
+                f"as complete: {reg_err}"
+            )
 
     await task_executor.setup()
 
