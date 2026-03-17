@@ -9,8 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Awaitable, Sequence
+from typing import Callable, Literal
 from uuid import UUID
 
 from stardag import (
@@ -31,7 +31,9 @@ from stardag.build._base import (
     GlobalLockSelector,
     LockAcquisitionResult,
     LockAcquisitionStatus,
+    OnRegistryFailure,
     TaskCount,
+    handle_registry_error,
 )
 from stardag.registry import RegistryABC, init_registry
 
@@ -47,6 +49,7 @@ def build_sequential(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
+    on_registry_failure: OnRegistryFailure = "warn",
 ) -> BuildSummary:
     """Sync API for building tasks sequentially.
 
@@ -142,16 +145,19 @@ def build_sequential(
         try:
             registry.task_register(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to register previously completed task {task.id}: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to register previously completed task {task.id}",
+                on_registry_failure,
             )
             continue
         try:
             registry.task_complete(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to mark previously completed task {task.id} "
-                f"as complete: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark previously completed task {task.id} as complete",
+                on_registry_failure,
             )
 
     def has_failed_dep(task: BaseTask) -> bool:
@@ -239,7 +245,21 @@ def build_sequential(
                     break
 
             if ready_task is None:
-                # No more tasks can run - either all done or blocked by failures
+                # No more tasks can run - check for deadlock
+                incomplete = [
+                    t
+                    for t in all_tasks.values()
+                    if t.id not in completion_cache and t.id not in failed_cache
+                ]
+                if incomplete:
+                    # Check if all incomplete tasks are blocked by failed deps
+                    truly_blocked = [t for t in incomplete if not has_failed_dep(t)]
+                    if truly_blocked:
+                        raise RuntimeError(
+                            f"Deadlock: {len(truly_blocked)} tasks cannot proceed. "
+                            f"Tasks: {[str(t.id) for t in truly_blocked[:5]]}"
+                        )
+                # All remaining tasks are blocked by failed deps - exit gracefully
                 break
 
             # Acquire lock if needed
@@ -265,8 +285,10 @@ def build_sequential(
                         registry.task_register(build_id, ready_task)
                         registry.task_fail(build_id, ready_task, str(error))
                     except Exception as reg_err:
-                        logger.warning(
-                            f"Failed to notify registry of task failure: {reg_err}"
+                        handle_registry_error(
+                            reg_err,
+                            "Failed to notify registry of lock failure",
+                            on_registry_failure,
                         )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
@@ -285,6 +307,8 @@ def build_sequential(
                     build_id,
                     registry,
                     dual_run_default,
+                    discover,
+                    task_count,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -295,8 +319,10 @@ def build_sequential(
                 try:
                     registry.task_fail(build_id, ready_task, str(e))
                 except Exception as reg_err:
-                    logger.warning(
-                        f"Failed to notify registry of task failure: {reg_err}"
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {ready_task.id} failure",
+                        on_registry_failure,
                     )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
@@ -333,6 +359,8 @@ def _run_task_sequential(
     build_id: UUID,
     registry: RegistryABC,
     dual_run_default: Literal["sync", "async"],
+    discover: Callable[[BaseTask], None],
+    task_count: TaskCount | None = None,
 ) -> None:
     """Run a single task in sequential mode, handling dynamic deps."""
     registry.task_start(build_id, task)
@@ -364,14 +392,11 @@ def _run_task_sequential(
                 yielded = next(gen)
                 dynamic_deps = flatten_task_struct(yielded)
 
-                # Discover and build dynamic deps
+                # Discover and build dynamic deps using the same discover()
+                # function used for static deps, so task_count.discovered
+                # is properly incremented and sub-deps are fully recursed.
                 for dep in dynamic_deps:
-                    if dep.id not in all_tasks:
-                        all_tasks[dep.id] = dep
-                        # Recursively discover
-                        for sub_dep in flatten_task_struct(dep.requires()):
-                            if sub_dep.id not in all_tasks:
-                                all_tasks[sub_dep.id] = sub_dep
+                    discover(dep)
 
                     if dep.id not in completion_cache:
                         _run_task_sequential(
@@ -381,7 +406,11 @@ def _run_task_sequential(
                             build_id,
                             registry,
                             dual_run_default,
+                            discover,
+                            task_count,
                         )
+                        if task_count is not None:
+                            task_count.succeeded += 1
 
             except StopIteration:
                 break
@@ -404,6 +433,7 @@ async def build_sequential_aio(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
+    on_registry_failure: OnRegistryFailure = "warn",
 ) -> BuildSummary:
     """Async API for building tasks sequentially.
 
@@ -498,16 +528,19 @@ async def build_sequential_aio(
         try:
             await registry.task_register_aio(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to register previously completed task {task.id}: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to register previously completed task {task.id}",
+                on_registry_failure,
             )
             continue
         try:
             await registry.task_complete_aio(build_id, task)
         except Exception as reg_err:
-            logger.warning(
-                f"Failed to mark previously completed task {task.id} "
-                f"as complete: {reg_err}"
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark previously completed task {task.id} as complete",
+                on_registry_failure,
             )
 
     def has_failed_dep(task: BaseTask) -> bool:
@@ -597,7 +630,21 @@ async def build_sequential_aio(
                     break
 
             if ready_task is None:
-                # No more tasks can run - either all done or blocked by failures
+                # No more tasks can run - check for deadlock
+                incomplete = [
+                    t
+                    for t in all_tasks.values()
+                    if t.id not in completion_cache and t.id not in failed_cache
+                ]
+                if incomplete:
+                    # Check if all incomplete tasks are blocked by failed deps
+                    truly_blocked = [t for t in incomplete if not has_failed_dep(t)]
+                    if truly_blocked:
+                        raise RuntimeError(
+                            f"Deadlock: {len(truly_blocked)} tasks cannot proceed. "
+                            f"Tasks: {[str(t.id) for t in truly_blocked[:5]]}"
+                        )
+                # All remaining tasks are blocked by failed deps - exit gracefully
                 break
 
             # Acquire lock if needed
@@ -623,8 +670,10 @@ async def build_sequential_aio(
                         await registry.task_register_aio(build_id, ready_task)
                         await registry.task_fail_aio(build_id, ready_task, str(error))
                     except Exception as reg_err:
-                        logger.warning(
-                            f"Failed to notify registry of task failure: {reg_err}"
+                        handle_registry_error(
+                            reg_err,
+                            "Failed to notify registry of lock failure",
+                            on_registry_failure,
                         )
                     if fail_mode == FailMode.FAIL_FAST:
                         raise error
@@ -643,6 +692,8 @@ async def build_sequential_aio(
                     build_id,
                     registry,
                     sync_run_default,
+                    discover,
+                    task_count,
                 )
                 task_count.succeeded += 1
                 task_completed = True
@@ -653,8 +704,10 @@ async def build_sequential_aio(
                 try:
                     await registry.task_fail_aio(build_id, ready_task, str(e))
                 except Exception as reg_err:
-                    logger.warning(
-                        f"Failed to notify registry of task failure: {reg_err}"
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {ready_task.id} failure",
+                        on_registry_failure,
                     )
                 if fail_mode == FailMode.FAIL_FAST:
                     raise
@@ -691,6 +744,8 @@ async def _run_task_sequential_aio(
     build_id: UUID,
     registry: RegistryABC,
     sync_run_default: Literal["thread", "blocking"],
+    discover: Callable[[BaseTask], Awaitable[None]],
+    task_count: TaskCount | None = None,
 ) -> None:
     """Run a single task in async sequential mode, handling dynamic deps."""
     await registry.task_start_aio(build_id, task)
@@ -720,14 +775,11 @@ async def _run_task_sequential_aio(
                 yielded = next(gen)
                 dynamic_deps = flatten_task_struct(yielded)
 
-                # Discover and build dynamic deps
+                # Discover and build dynamic deps using the same discover()
+                # function used for static deps, so task_count.discovered
+                # is properly incremented and sub-deps are fully recursed.
                 for dep in dynamic_deps:
-                    if dep.id not in all_tasks:
-                        all_tasks[dep.id] = dep
-                        # Recursively discover
-                        for sub_dep in flatten_task_struct(dep.requires()):
-                            if sub_dep.id not in all_tasks:
-                                all_tasks[sub_dep.id] = sub_dep
+                    await discover(dep)
 
                     if dep.id not in completion_cache:
                         await _run_task_sequential_aio(
@@ -737,7 +789,11 @@ async def _run_task_sequential_aio(
                             build_id,
                             registry,
                             sync_run_default,
+                            discover,
+                            task_count,
                         )
+                        if task_count is not None:
+                            task_count.succeeded += 1
 
             except StopIteration:
                 break
@@ -746,7 +802,7 @@ async def _run_task_sequential_aio(
     await registry.task_complete_aio(build_id, task)
 
     # Upload artifacts if any
-    artifacts = task.artifacts_aio()
+    artifacts = await task.artifacts_aio()
     if artifacts:
         await registry.task_upload_artifacts_aio(build_id, task, artifacts)
 

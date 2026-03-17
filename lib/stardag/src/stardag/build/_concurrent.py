@@ -35,10 +35,12 @@ from stardag.build._base import (
     GlobalLockSelector,
     LockAcquisitionResult,
     LockAcquisitionStatus,
+    OnRegistryFailure,
     TaskCount,
     TaskExecutionError,
     TaskExecutionState,
     TaskExecutorABC,
+    handle_registry_error,
 )
 from stardag.registry import RegistryABC, init_registry
 
@@ -416,6 +418,7 @@ async def build_aio(
     global_lock_config: GlobalLockConfig | None = None,
     resume_build_id: UUID | None = None,
     register_all: bool = False,
+    on_registry_failure: OnRegistryFailure = "warn",
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -558,9 +561,21 @@ async def build_aio(
     for task in previously_completed_tasks:
         try:
             await registry.task_register_aio(build_id, task)
+        except Exception as reg_err:
+            handle_registry_error(
+                reg_err,
+                f"Failed to register previously completed task {task.id}",
+                on_registry_failure,
+            )
+            continue
+        try:
             await registry.task_complete_aio(build_id, task)
         except Exception as reg_err:
-            logger.warning(f"Failed to register previously completed task: {reg_err}")
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark previously completed task {task.id} as complete",
+                on_registry_failure,
+            )
 
     await task_executor.setup()
 
@@ -607,7 +622,11 @@ async def build_aio(
             try:
                 await registry.task_fail_aio(build_id, task, str(result))
             except Exception as reg_err:
-                logger.warning(f"Failed to notify registry of task failure: {reg_err}")
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to notify registry of task {task.id} failure",
+                    on_registry_failure,
+                )
             state.exception = result.exception
             task_count.failed += 1
             error = result.exception
@@ -620,7 +639,11 @@ async def build_aio(
             try:
                 await registry.task_fail_aio(build_id, task, str(result))
             except Exception as reg_err:
-                logger.warning(f"Failed to notify registry of task failure: {reg_err}")
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to notify registry of task {task.id} failure",
+                    on_registry_failure,
+                )
             state.exception = result
             task_count.failed += 1
             error = result
@@ -632,12 +655,14 @@ async def build_aio(
             await release_lock_for_task(task, completed=True)
             try:
                 await registry.task_complete_aio(build_id, task)
-                artifacts = task.artifacts_aio()
+                artifacts = await task.artifacts_aio()
                 if artifacts:
                     await registry.task_upload_artifacts_aio(build_id, task, artifacts)
             except Exception as reg_err:
-                logger.warning(
-                    f"Failed to notify registry of task completion: {reg_err}"
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to notify registry of task {task.id} completion",
+                    on_registry_failure,
                 )
             state.completed = True
             completion_cache.add(task.id)
@@ -653,8 +678,10 @@ async def build_aio(
             try:
                 await registry.task_suspend_aio(build_id, task)
             except Exception as reg_err:
-                logger.warning(
-                    f"Failed to notify registry of task suspension: {reg_err}"
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to notify registry of task {task.id} suspension",
+                    on_registry_failure,
                 )
 
             # Discover any new dynamic deps (discover handles counting)
@@ -775,7 +802,11 @@ async def build_aio(
                 try:
                     await registry.task_waiting_for_lock_aio(build_id, task, lock_owner)
                 except Exception as e:
-                    logger.warning(f"Failed to notify registry of lock wait: {e}")
+                    handle_registry_error(
+                        e,
+                        f"Failed to notify registry of lock wait for task {task.id}",
+                        on_registry_failure,
+                    )
 
             if timeout is None:
                 return result
@@ -943,8 +974,10 @@ async def build_aio(
                         try:
                             await registry.build_exit_early_aio(build_id, reason)
                         except Exception as reg_err:
-                            logger.warning(
-                                f"Failed to notify registry of exit early: {reg_err}"
+                            handle_registry_error(
+                                reg_err,
+                                "Failed to notify registry of exit early",
+                                on_registry_failure,
                             )
                         return BuildSummary(
                             status=BuildExitStatus.EXIT_EARLY,
@@ -993,6 +1026,7 @@ def build(
     global_lock_config: GlobalLockConfig | None = None,
     resume_build_id: UUID | None = None,
     register_all: bool = False,
+    on_registry_failure: OnRegistryFailure = "warn",
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -1016,6 +1050,7 @@ def build(
                 global_lock_config,
                 resume_build_id,
                 register_all,
+                on_registry_failure,
             )
         )
     except RuntimeError as e:

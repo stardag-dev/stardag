@@ -18,6 +18,7 @@ from stardag.build import (
 )
 from uuid import UUID
 
+from stardag.artifact import Artifact, MarkdownArtifact
 from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import (
@@ -343,6 +344,62 @@ class TestDiamondPatternsSequential:
         assert get_execution_count("dyn_seq1", "dyn_task") == 1
         assert get_execution_count("dyn_seq1", "parent") == 1
 
+    def test_dynamic_deps_discovered_count(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """task_count.discovered should include dynamically discovered tasks.
+
+        parent (static: [])
+           |  (dynamic: [dyn_child])
+        dyn_child (static: [])
+
+        Discovery finds only parent (1). After parent runs and yields dyn_child,
+        dyn_child should also be counted as discovered (total: 2).
+        """
+        reset_execution_counts()
+
+        dyn_child = DynamicDiamondTask(name="dyn_child", test_id="disc_count")
+        parent = DynamicDiamondTask(
+            name="parent",
+            test_id="disc_count",
+            dynamic_task_deps=(dyn_child,),
+        )
+
+        summary = build_sequential([parent], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Both parent and dyn_child should be discovered
+        assert summary.task_count.discovered == 2, (
+            f"Expected 2 discovered (parent + dyn_child), got {summary.task_count.discovered}"
+        )
+        assert summary.task_count.succeeded == 2
+
+    @pytest.mark.asyncio
+    async def test_dynamic_deps_discovered_count_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async: task_count.discovered should include dynamically discovered tasks."""
+        reset_execution_counts()
+
+        dyn_child = DynamicDiamondTask(name="dyn_child_aio", test_id="disc_count_aio")
+        parent = DynamicDiamondTask(
+            name="parent_aio",
+            test_id="disc_count_aio",
+            dynamic_task_deps=(dyn_child,),
+        )
+
+        summary = await build_sequential_aio([parent], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert summary.task_count.discovered == 2, (
+            f"Expected 2 discovered, got {summary.task_count.discovered}"
+        )
+        assert summary.task_count.succeeded == 2
+
     def test_complex_dynamic_diamond(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
@@ -568,3 +625,263 @@ class TestRegistryErrorResilience:
             await build_sequential_aio(
                 [task], registry=registry, fail_mode=FailMode.FAIL_FAST
             )
+
+
+# ============================================================================
+# Test: Async artifact collection
+# ============================================================================
+
+
+# ============================================================================
+# Test: Deadlock detection in sequential builds
+# ============================================================================
+
+
+class TestSequentialDeadlockDetection:
+    """Test that sequential builds detect when tasks can't proceed."""
+
+    def test_continue_mode_reports_all_failures(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """In CONTINUE mode, build should complete and report the error when
+        no more tasks can run due to failed dependencies."""
+        # Create: task_a (fails), task_b depends on task_a, task_c is independent
+        task_a = FailingTask(error_message="task_a broke")
+        task_b = SyncOnlyTask(name="depends_on_failing", deps=(task_a,))
+        task_c = SyncOnlyTask(name="independent")
+
+        summary = build_sequential(
+            [task_b, task_c],
+            registry=noop_registry,
+            fail_mode=FailMode.CONTINUE,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed >= 1
+        # task_c should still succeed
+        assert task_c.complete()
+        # task_b should not have run (dep failed)
+        assert not task_b.complete()
+        # pending should reflect task_b being blocked
+        assert summary.task_count.pending == 1
+
+    @pytest.mark.asyncio
+    async def test_continue_mode_reports_all_failures_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async: CONTINUE mode should complete and report blocked tasks."""
+        task_a = FailingTask(error_message="task_a broke")
+        task_b = SyncOnlyTask(name="depends_on_failing_aio", deps=(task_a,))
+        task_c = SyncOnlyTask(name="independent_aio")
+
+        summary = await build_sequential_aio(
+            [task_b, task_c],
+            registry=noop_registry,
+            fail_mode=FailMode.CONTINUE,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed >= 1
+        assert task_c.complete()
+        assert not task_b.complete()
+        assert summary.task_count.pending == 1
+
+    def test_deadlock_detection_with_circular_deps(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Circular dependency creates a true deadlock - should raise RuntimeError.
+
+        Task A depends on Task B and Task B depends on Task A. Both are discovered
+        (discover() guards against revisiting), but neither can ever become ready.
+        """
+        from stardag import Task, auto_namespace
+        from typing import Any
+
+        auto_namespace(__name__)
+
+        # We can't create Pydantic circular refs directly, but we can use a
+        # class whose requires() creates a mutual dependency at runtime.
+        # The trick: create a shared list that we mutate after both tasks exist.
+        dep_holder_a: list[Task] = []
+        dep_holder_b: list[Task] = []
+
+        class CircularDepTask(Task[dict[str, Any]]):
+            name: str
+            _dep_holder: list[Task] = []
+
+            def requires(self):
+                if self.name == "circ_a":
+                    return tuple(dep_holder_a)
+                return tuple(dep_holder_b)
+
+            def run(self):
+                self._save({"name": self.name})
+
+        task_a = CircularDepTask(name="circ_a")
+        task_b = CircularDepTask(name="circ_b")
+
+        # Set up circular deps
+        dep_holder_a.append(task_b)
+        dep_holder_b.append(task_a)
+
+        # Both tasks discovered, but neither can proceed
+        with pytest.raises(RuntimeError, match="[Dd]eadlock"):
+            build_sequential([task_a], registry=noop_registry)
+
+    @pytest.mark.asyncio
+    async def test_deadlock_detection_with_circular_deps_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async: circular deps should raise RuntimeError for deadlock."""
+        from stardag import Task, auto_namespace
+        from typing import Any
+
+        auto_namespace(__name__)
+
+        dep_holder_a: list[Task] = []
+        dep_holder_b: list[Task] = []
+
+        class CircularDepTaskAio(Task[dict[str, Any]]):
+            name: str
+
+            def requires(self):
+                if self.name == "circ_a_aio":
+                    return tuple(dep_holder_a)
+                return tuple(dep_holder_b)
+
+            def run(self):
+                self._save({"name": self.name})
+
+        task_a = CircularDepTaskAio(name="circ_a_aio")
+        task_b = CircularDepTaskAio(name="circ_b_aio")
+
+        dep_holder_a.append(task_b)
+        dep_holder_b.append(task_a)
+
+        with pytest.raises(RuntimeError, match="[Dd]eadlock"):
+            await build_sequential_aio([task_a], registry=noop_registry)
+
+
+# ============================================================================
+# Test: on_registry_failure parameter
+# ============================================================================
+
+
+class FailOnTaskCompleteRegistry(NoOpRegistry):
+    """Registry that fails on task_complete."""
+
+    def task_register(self, build_id: UUID, task) -> None:
+        pass
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        raise ConnectionError("Registry unavailable for task_complete")
+
+
+class TestOnRegistryFailure:
+    """Test the on_registry_failure parameter."""
+
+    def test_warn_mode_logs_warning_on_registry_failure(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Default 'warn' mode should log and continue."""
+        registry = FailOnTaskCompleteRegistry()
+        task = SyncOnlyTask(name="reg_fail_warn")
+        # Pre-complete so it triggers the previously-completed registration path
+        task.target().save({"name": "reg_fail_warn", "mode": "pre-existing"})
+
+        # Should NOT raise
+        summary = build_sequential(
+            [task], registry=registry, on_registry_failure="warn"
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+
+    def test_raise_mode_propagates_registry_failure(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """'raise' mode should propagate registry errors."""
+        registry = FailOnTaskCompleteRegistry()
+        task = SyncOnlyTask(name="reg_fail_raise")
+        # Pre-complete so it triggers the previously-completed registration path
+        task.target().save({"name": "reg_fail_raise", "mode": "pre-existing"})
+
+        with pytest.raises(ConnectionError, match="Registry unavailable"):
+            build_sequential([task], registry=registry, on_registry_failure="raise")
+
+    @pytest.mark.asyncio
+    async def test_raise_mode_propagates_registry_failure_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Async: 'raise' mode should propagate registry errors."""
+        registry = FailOnTaskCompleteRegistry()
+        task = SyncOnlyTask(name="reg_fail_raise_aio")
+        task.target().save({"name": "reg_fail_raise_aio", "mode": "pre-existing"})
+
+        with pytest.raises(ConnectionError, match="Registry unavailable"):
+            await build_sequential_aio(
+                [task], registry=registry, on_registry_failure="raise"
+            )
+
+
+class ArtifactTrackingRegistry(NoOpRegistry):
+    """A registry that records artifact uploads."""
+
+    def __init__(self) -> None:
+        self.uploaded_artifacts: list[tuple[UUID, list]] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        pass
+
+    def task_upload_artifacts(self, build_id: UUID, task, artifacts) -> None:
+        self.uploaded_artifacts.append((task.id, artifacts))
+
+    async def task_upload_artifacts_aio(self, build_id: UUID, task, artifacts) -> None:
+        self.uploaded_artifacts.append((task.id, artifacts))
+
+
+class TestAsyncArtifactCollection:
+    """Test that artifacts_aio is properly awaited in async builds."""
+
+    @pytest.mark.asyncio
+    async def test_artifacts_aio_is_awaited(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Verify that artifacts_aio() is awaited (is async) in async sequential build."""
+        from stardag import Task, auto_namespace
+        from typing import Any
+
+        auto_namespace(__name__)
+
+        class TaskWithArtifacts(Task[dict[str, Any]]):
+            name: str
+
+            def run(self):
+                self._save({"name": self.name})
+
+            async def artifacts_aio(self) -> list[Artifact]:
+                return [
+                    MarkdownArtifact(name="report", body=f"# Report for {self.name}")
+                ]
+
+        registry = ArtifactTrackingRegistry()
+        task = TaskWithArtifacts(name="artifact_test")
+
+        summary = await build_sequential_aio([task], registry=registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert len(registry.uploaded_artifacts) == 1
+        task_id, artifacts = registry.uploaded_artifacts[0]
+        assert task_id == task.id
+        assert len(artifacts) == 1
+        assert artifacts[0].name == "report"

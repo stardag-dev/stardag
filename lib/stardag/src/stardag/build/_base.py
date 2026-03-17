@@ -13,10 +13,16 @@ import traceback as tb_module
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Callable, Generator, Generic, Protocol, TypeVar
+import logging
+from typing import Callable, Generator, Generic, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
+
+logger = logging.getLogger(__name__)
+
+# Type alias for the on_registry_failure parameter
+OnRegistryFailure = Literal["warn", "raise"]
 
 # =============================================================================
 # Data Structures
@@ -33,6 +39,8 @@ class BuildExitStatus(StrEnum):
 class TaskCount:
     discovered: int = 0
     previously_completed: int = 0
+    """Tasks found complete during discovery or via lock service (ALREADY_COMPLETED).
+    These tasks were not executed by this build."""
     succeeded: int = 0
     failed: int = 0
 
@@ -426,3 +434,25 @@ class DefaultGlobalLockSelector:
         if callable(self.config.enabled):
             return self.config.enabled(task)
         return self.config.enabled
+
+
+# =============================================================================
+# Registry Error Handling
+# =============================================================================
+
+
+def handle_registry_error(
+    error: Exception,
+    message: str,
+    on_registry_failure: OnRegistryFailure,
+) -> None:
+    """Handle a registry call failure based on the configured mode.
+
+    Args:
+        error: The exception that occurred.
+        message: A human-readable message describing what failed.
+        on_registry_failure: "warn" to log and continue, "raise" to propagate.
+    """
+    if on_registry_failure == "raise":
+        raise error
+    logger.warning(f"{message}: {error}")

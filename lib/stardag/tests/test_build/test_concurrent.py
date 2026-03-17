@@ -10,6 +10,7 @@ import asyncio
 import threading
 import time
 import typing
+from uuid import UUID
 
 import pytest
 
@@ -1290,3 +1291,66 @@ class TestGlobalConcurrencyLock:
 
         assert summary.status == BuildExitStatus.SUCCESS
         assert task.complete()
+
+
+# ============================================================================
+# Test: Concurrent build previously-completed registration
+# ============================================================================
+
+
+class FailOnRegisterRegistry(NoOpRegistry):
+    """Registry that fails on task_register but succeeds on task_complete."""
+
+    def __init__(self) -> None:
+        self.register_calls: list[UUID] = []
+        self.complete_calls: list[UUID] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.register_calls.append(task.id)
+        raise ConnectionError("Registry register unavailable")
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.complete_calls.append(task.id)
+
+    async def task_register_aio(self, build_id: UUID, task) -> None:
+        self.register_calls.append(task.id)
+        raise ConnectionError("Registry register unavailable")
+
+    async def task_complete_aio(self, build_id: UUID, task) -> None:
+        self.complete_calls.append(task.id)
+
+
+class TestConcurrentPreviouslyCompletedRegistration:
+    """Test that register failure for previously-completed tasks logs task.id."""
+
+    @pytest.mark.asyncio
+    async def test_register_failure_logs_task_id(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        caplog,
+    ):
+        """Warning message for failed registration should include the task.id."""
+        import logging
+
+        registry = FailOnRegisterRegistry()
+
+        task = SyncOnlyTask(name="pre_complete_concurrent")
+        # Pre-complete the task
+        task.target().save({"name": "pre_complete_concurrent", "mode": "pre-existing"})
+
+        with caplog.at_level(logging.WARNING):
+            summary = await build_aio([task], registry=registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Register was attempted
+        assert len(registry.register_calls) == 1
+        # Complete should NOT have been called since register failed
+        assert len(registry.complete_calls) == 0
+
+        # The warning should include the task.id for debugging
+        warning_messages = [
+            r.message for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any(str(task.id) in msg for msg in warning_messages), (
+            f"Warning should include task.id ({task.id}), got: {warning_messages}"
+        )
