@@ -127,12 +127,16 @@ def build_sequential(
     else:
         build_id = registry.build_start(root_tasks=tasks)
 
-    # Register previously completed tasks so they appear in the build's task list
+    # Register previously completed tasks so they appear in the build's task list.
+    # We also call task_complete to mark them as done — otherwise they remain in
+    # PENDING state in the registry (e.g. WrapperTasks that are complete because
+    # their deps are complete, but were never explicitly run).
     for task in previously_completed_tasks:
         try:
             registry.task_register(build_id, task)
-        except Exception:
-            pass  # Best effort
+            registry.task_complete(build_id, task)
+        except Exception as reg_err:
+            logger.warning(f"Failed to register previously completed task: {reg_err}")
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""
@@ -452,12 +456,16 @@ async def build_sequential_aio(
     else:
         build_id = await registry.build_start_aio(root_tasks=tasks)
 
-    # Register previously completed tasks so they appear in the build's task list
+    # Register previously completed tasks so they appear in the build's task list.
+    # We also call task_complete_aio to mark them as done — otherwise they remain in
+    # PENDING state in the registry (e.g. WrapperTasks that are complete because
+    # their deps are complete, but were never explicitly run).
     for task in previously_completed_tasks:
         try:
             await registry.task_register_aio(build_id, task)
-        except Exception:
-            pass  # Best effort
+            await registry.task_complete_aio(build_id, task)
+        except Exception as reg_err:
+            logger.warning(f"Failed to register previously completed task: {reg_err}")
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""

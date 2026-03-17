@@ -16,6 +16,8 @@ from stardag.build import (
     build_sequential,
     build_sequential_aio,
 )
+from uuid import UUID
+
 from stardag.registry import NoOpRegistry
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import (
@@ -392,3 +394,119 @@ class TestDiamondPatternsSequential:
         assert get_execution_count("complex_seq", "21") == 1
         assert get_execution_count("complex_seq", "1") == 1
         assert get_execution_count("complex_seq", "0") == 1
+
+
+# ============================================================================
+# Test: Registry communication for previously-completed tasks
+# ============================================================================
+
+
+class TrackingRegistry(NoOpRegistry):
+    """A NoOpRegistry that records task lifecycle calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, UUID]] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    def task_start(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+    def task_fail(self, build_id: UUID, task, error_message=None) -> None:
+        self.calls.append(("task_fail", task.id))
+
+    def calls_for(self, task_id: UUID) -> list[str]:
+        return [method for method, tid in self.calls if tid == task_id]
+
+
+class TestPreviouslyCompletedRegistryCommunication:
+    """Test that previously-completed tasks are properly registered AND completed."""
+
+    def test_previously_completed_task_gets_task_complete(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Previously-completed tasks should get both task_register and task_complete."""
+        tracking = TrackingRegistry()
+
+        task = SyncOnlyTask(name="pre_complete")
+        # First build: task gets executed
+        build_sequential([task], registry=tracking)
+        assert task.complete()
+
+        # Reset tracking
+        tracking.calls.clear()
+
+        # Second build: task is already complete, should be registered + completed
+        summary = build_sequential([task], registry=tracking)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert summary.task_count.previously_completed == 1
+        assert summary.task_count.succeeded == 0
+
+        calls = tracking.calls_for(task.id)
+        assert "task_register" in calls
+        assert "task_complete" in calls
+        # Should NOT have task_start (it was not executed)
+        assert "task_start" not in calls
+
+    @pytest.mark.asyncio
+    async def test_previously_completed_task_gets_task_complete_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Async: previously-completed tasks get both task_register and task_complete."""
+        tracking = TrackingRegistry()
+
+        task = SyncOnlyTask(name="pre_complete_aio")
+        # First build: task gets executed
+        summary = await build_sequential_aio([task], registry=tracking)
+        assert task.complete()
+
+        # Reset tracking
+        tracking.calls.clear()
+
+        # Second build: task is already complete
+        summary = await build_sequential_aio([task], registry=tracking)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert summary.task_count.previously_completed == 1
+
+        calls = tracking.calls_for(task.id)
+        assert "task_register" in calls
+        assert "task_complete" in calls
+        assert "task_start" not in calls
+
+    def test_mixed_completed_and_new_tasks(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Build with mix of previously-completed deps and new tasks."""
+        tracking = TrackingRegistry()
+
+        dep = SyncOnlyTask(name="dep_mixed")
+        # Build the dep first
+        build_sequential([dep], registry=tracking)
+        assert dep.complete()
+        tracking.calls.clear()
+
+        # Now build a new task that depends on the completed dep
+        parent = SyncOnlyTask(name="parent_mixed", deps=(dep,))
+        summary = build_sequential([parent], registry=tracking)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        # dep should be registered + completed (previously complete)
+        dep_calls = tracking.calls_for(dep.id)
+        assert "task_register" in dep_calls
+        assert "task_complete" in dep_calls
+        assert "task_start" not in dep_calls
+
+        # parent should go through normal lifecycle
+        parent_calls = tracking.calls_for(parent.id)
+        assert "task_start" in parent_calls
+        assert "task_complete" in parent_calls
