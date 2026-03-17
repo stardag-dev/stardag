@@ -33,6 +33,8 @@ class BuildExitStatus(StrEnum):
 class TaskCount:
     discovered: int = 0
     previously_completed: int = 0
+    """Tasks found complete during discovery or via lock service (ALREADY_COMPLETED).
+    These tasks were not executed by this build."""
     succeeded: int = 0
     failed: int = 0
 
