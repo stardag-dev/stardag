@@ -418,7 +418,7 @@ async def build_aio(
     global_lock_config: GlobalLockConfig | None = None,
     resume_build_id: UUID | None = None,
     register_all: bool = False,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -450,6 +450,8 @@ async def build_aio(
             already-complete tasks. This ensures all tasks in the DAG get registered
             in the registry (useful for complete DAG visualization). Default False
             for performance — skipping complete subgraphs avoids unnecessary I/O.
+        on_registry_failure: How to handle registry call failures. "raise" (default)
+            propagates the exception; "warn" logs a warning and continues.
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -661,15 +663,16 @@ async def build_aio(
                     f"Failed to notify registry of task {task.id} completion",
                     on_registry_failure,
                 )
-            # Artifact collection is best-effort — errors are always logged as
-            # warnings and do not fail the task (it already ran successfully).
+            # Upload artifacts if any
             try:
                 artifacts = await task.artifacts_aio()
                 if artifacts:
                     await registry.task_upload_artifacts_aio(build_id, task, artifacts)
             except Exception as artifact_err:
-                logger.warning(
-                    f"Failed to collect/upload artifacts for task {task.id}: {artifact_err}"
+                handle_registry_error(
+                    artifact_err,
+                    f"Failed to collect/upload artifacts for task {task.id}",
+                    on_registry_failure,
                 )
             state.completed = True
             completion_cache.add(task.id)
@@ -1033,7 +1036,7 @@ def build(
     global_lock_config: GlobalLockConfig | None = None,
     resume_build_id: UUID | None = None,
     register_all: bool = False,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 

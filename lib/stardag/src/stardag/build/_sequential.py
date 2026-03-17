@@ -127,7 +127,7 @@ def build_sequential(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> BuildSummary:
     """Sync API for building tasks sequentially.
 
@@ -156,8 +156,8 @@ def build_sequential(
             already-complete tasks. This ensures all tasks in the DAG get registered
             in the registry (useful for complete DAG visualization). Default False
             for performance — skipping complete subgraphs avoids unnecessary I/O.
-        on_registry_failure: How to handle registry call failures. "warn" (default)
-            logs a warning and continues; "raise" propagates the exception.
+        on_registry_failure: How to handle registry call failures. "raise" (default)
+            propagates the exception; "warn" logs a warning and continues.
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -405,7 +405,7 @@ def _run_task_sequential(
     dual_run_default: Literal["sync", "async"],
     discover: Callable[[BaseTask], None],
     task_count: TaskCount | None = None,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
     """Run a single task in sequential mode, handling dynamic deps."""
     registry.task_start(build_id, task)
@@ -457,6 +457,7 @@ def _run_task_sequential(
                                 f"Failed to register dynamic previously-completed task {dep.id}",
                                 on_registry_failure,
                             )
+                            continue
                         try:
                             registry.task_complete(build_id, dep)
                         except Exception as reg_err:
@@ -487,15 +488,16 @@ def _run_task_sequential(
     completion_cache.add(task.id)
     registry.task_complete(build_id, task)
 
-    # Upload artifacts if any. Artifact collection is best-effort — errors are
-    # logged but do not fail the task (it already ran and completed successfully).
+    # Upload artifacts if any
     try:
         artifacts = task.artifacts()
         if artifacts:
             registry.task_upload_artifacts(build_id, task, artifacts)
     except Exception as artifact_err:
-        logger.warning(
-            f"Failed to collect/upload artifacts for task {task.id}: {artifact_err}"
+        handle_registry_error(
+            artifact_err,
+            f"Failed to collect/upload artifacts for task {task.id}",
+            on_registry_failure,
         )
 
 
@@ -508,7 +510,7 @@ async def build_sequential_aio(
     global_lock_manager: GlobalConcurrencyLockManager | None = None,
     global_lock_config: GlobalLockConfig | None = None,
     register_all: bool = False,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> BuildSummary:
     """Async API for building tasks sequentially.
 
@@ -537,8 +539,8 @@ async def build_sequential_aio(
             already-complete tasks. This ensures all tasks in the DAG get registered
             in the registry (useful for complete DAG visualization). Default False
             for performance — skipping complete subgraphs avoids unnecessary I/O.
-        on_registry_failure: How to handle registry call failures. "warn" (default)
-            logs a warning and continues; "raise" propagates the exception.
+        on_registry_failure: How to handle registry call failures. "raise" (default)
+            propagates the exception; "warn" logs a warning and continues.
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -788,7 +790,7 @@ async def _run_task_sequential_aio(
     sync_run_default: Literal["thread", "blocking"],
     discover: Callable[[BaseTask], Awaitable[None]],
     task_count: TaskCount | None = None,
-    on_registry_failure: OnRegistryFailure = "warn",
+    on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
     """Run a single task in async sequential mode, handling dynamic deps."""
     await registry.task_start_aio(build_id, task)
@@ -838,6 +840,7 @@ async def _run_task_sequential_aio(
                                 f"Failed to register dynamic previously-completed task {dep.id}",
                                 on_registry_failure,
                             )
+                            continue
                         try:
                             await registry.task_complete_aio(build_id, dep)
                         except Exception as reg_err:
@@ -868,15 +871,16 @@ async def _run_task_sequential_aio(
     completion_cache.add(task.id)
     await registry.task_complete_aio(build_id, task)
 
-    # Upload artifacts if any. Artifact collection is best-effort — errors are
-    # logged but do not fail the task (it already ran and completed successfully).
+    # Upload artifacts if any
     try:
         artifacts = await task.artifacts_aio()
         if artifacts:
             await registry.task_upload_artifacts_aio(build_id, task, artifacts)
     except Exception as artifact_err:
-        logger.warning(
-            f"Failed to collect/upload artifacts for task {task.id}: {artifact_err}"
+        handle_registry_error(
+            artifact_err,
+            f"Failed to collect/upload artifacts for task {task.id}",
+            on_registry_failure,
         )
 
 

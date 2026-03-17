@@ -1339,7 +1339,9 @@ class TestConcurrentPreviouslyCompletedRegistration:
         task.target().save({"name": "pre_complete_concurrent", "mode": "pre-existing"})
 
         with caplog.at_level(logging.WARNING):
-            summary = await build_aio([task], registry=registry)
+            summary = await build_aio(
+                [task], registry=registry, on_registry_failure="warn"
+            )
 
         assert summary.status == BuildExitStatus.SUCCESS
         # Register was attempted
