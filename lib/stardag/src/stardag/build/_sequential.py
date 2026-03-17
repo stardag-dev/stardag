@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Sequence
 from typing import Literal
 from uuid import UUID
 
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_sequential(
-    tasks: list[BaseTask] | BaseTask,
+    tasks: Sequence[BaseTask] | BaseTask,
     registry: RegistryABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     dual_run_default: Literal["sync", "async"] = "sync",
@@ -395,7 +396,7 @@ def _run_task_sequential(
 
 
 async def build_sequential_aio(
-    tasks: list[BaseTask] | BaseTask,
+    tasks: Sequence[BaseTask] | BaseTask,
     registry: RegistryABC | None = None,
     fail_mode: FailMode = FailMode.FAIL_FAST,
     sync_run_default: Literal["thread", "blocking"] = "blocking",
