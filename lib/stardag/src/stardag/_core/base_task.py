@@ -313,7 +313,7 @@ class BaseTask(
     def requires(self) -> TaskStruct | None:
         return None
 
-    def artifacts(self) -> list["Artifact"]:
+    def artifacts(self) -> Sequence["Artifact"]:
         """Return artifacts to be stored in the registry after task completion.
 
         Override this method to expose rich outputs (reports, summaries,
@@ -324,11 +324,11 @@ class BaseTask(
         than relying on in-memory state.
 
         Returns:
-            List of artifacts (MarkdownArtifact, JSONArtifact, etc.)
+            Sequence of artifacts (MarkdownArtifact, JSONArtifact, etc.)
         """
         return []
 
-    async def artifacts_aio(self) -> list["Artifact"]:
+    async def artifacts_aio(self) -> Sequence["Artifact"]:
         """Asynchronously return artifacts to be stored in the registry after task
         completion.
         """
@@ -387,19 +387,22 @@ class BaseTask(
     @classmethod
     def from_registry(
         cls,
-        id: UUID,
+        id: UUID | str,
         registry: Union["RegistryABC", None] = None,
     ) -> "BaseTask":
         """Instantiate the task from the registry.
 
         Args:
-            id: The UUID of the task to alias.
+            id: The UUID (or string representation) of the task to load.
             registry: An optional registry instance to use for loading metadata. If not
                 provided, the default registry from `registry_provider` will be used.
         Returns:
             An AliasTask instance referencing the specified task.
         """
         from stardag.registry import registry_provider
+
+        if isinstance(id, str):
+            id = UUID(id)
 
         registry = registry or registry_provider.get()
         metadata = registry.task_get_metadata(id)

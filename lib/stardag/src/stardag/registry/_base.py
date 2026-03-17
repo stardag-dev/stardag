@@ -5,6 +5,7 @@ import os
 import subprocess
 from datetime import datetime
 from functools import lru_cache
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -216,7 +217,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         pass
 
     def task_upload_artifacts(
-        self, build_id: UUID, task: "BaseTask", artifacts: list["Artifact"]
+        self, build_id: UUID, task: "BaseTask", artifacts: Sequence["Artifact"]
     ) -> None:
         """Upload artifacts for a completed task.
 
@@ -309,7 +310,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self.task_waiting_for_lock(build_id, task, lock_owner)
 
     async def task_upload_artifacts_aio(
-        self, build_id: UUID, task: "BaseTask", artifacts: list["Artifact"]
+        self, build_id: UUID, task: "BaseTask", artifacts: Sequence["Artifact"]
     ) -> None:
         """Async version of task_upload_artifacts."""
         self.task_upload_artifacts(build_id, task, artifacts)

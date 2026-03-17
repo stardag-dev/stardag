@@ -51,6 +51,16 @@ class TaskCount:
         )
 
 
+class BuildFailed(Exception):
+    """Raised by :meth:`BuildSummary.raise_on_failure` when a build has failed."""
+
+    summary: BuildSummary
+
+    def __init__(self, summary: BuildSummary) -> None:
+        self.summary = summary
+        super().__init__(str(summary))
+
+
 @dataclass
 class BuildSummary:
     """Summary of a build execution."""
@@ -59,6 +69,11 @@ class BuildSummary:
     task_count: TaskCount
     build_id: UUID | None = None
     error: BaseException | None = None
+
+    def raise_on_failure(self) -> None:
+        """Raise :class:`BuildFailed` if the build status is ``FAILURE``."""
+        if self.status == BuildExitStatus.FAILURE:
+            raise BuildFailed(self)
 
     def __repr__(self) -> str:
         """Return a human-readable summary of the build."""
