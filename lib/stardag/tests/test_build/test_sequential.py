@@ -464,7 +464,7 @@ class TestPreviouslyCompletedRegistryCommunication:
 
         task = SyncOnlyTask(name="pre_complete_aio")
         # First build: task gets executed
-        summary = await build_sequential_aio([task], registry=tracking)
+        await build_sequential_aio([task], registry=tracking)
         assert task.complete()
 
         # Reset tracking

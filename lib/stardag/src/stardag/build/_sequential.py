@@ -134,9 +134,18 @@ def build_sequential(
     for task in previously_completed_tasks:
         try:
             registry.task_register(build_id, task)
+        except Exception as reg_err:
+            logger.warning(
+                f"Failed to register previously completed task {task.id}: {reg_err}"
+            )
+            continue
+        try:
             registry.task_complete(build_id, task)
         except Exception as reg_err:
-            logger.warning(f"Failed to register previously completed task: {reg_err}")
+            logger.warning(
+                f"Failed to mark previously completed task {task.id} "
+                f"as complete: {reg_err}"
+            )
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""
@@ -245,6 +254,8 @@ def build_sequential(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
                     try:
+                        # Register first so the registry has a task row to fail
+                        registry.task_register(build_id, ready_task)
                         registry.task_fail(build_id, ready_task, str(error))
                     except Exception as reg_err:
                         logger.warning(
@@ -473,9 +484,18 @@ async def build_sequential_aio(
     for task in previously_completed_tasks:
         try:
             await registry.task_register_aio(build_id, task)
+        except Exception as reg_err:
+            logger.warning(
+                f"Failed to register previously completed task {task.id}: {reg_err}"
+            )
+            continue
+        try:
             await registry.task_complete_aio(build_id, task)
         except Exception as reg_err:
-            logger.warning(f"Failed to register previously completed task: {reg_err}")
+            logger.warning(
+                f"Failed to mark previously completed task {task.id} "
+                f"as complete: {reg_err}"
+            )
 
     def has_failed_dep(task: BaseTask) -> bool:
         """Check if any dependency has failed."""
@@ -586,6 +606,8 @@ async def build_sequential_aio(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
                     try:
+                        # Register first so the registry has a task row to fail
+                        await registry.task_register_aio(build_id, ready_task)
                         await registry.task_fail_aio(build_id, ready_task, str(error))
                     except Exception as reg_err:
                         logger.warning(
