@@ -32,7 +32,7 @@ from stardag._core.base_task import (
     _has_custom_run_aio,
     flatten_task_struct,
 )
-from stardag.build import FailMode, TaskExecutorABC
+from stardag.build import FailMode, TaskExecutionError, TaskExecutorABC
 from stardag.integration.prefect._utils import format_key
 from stardag.registry import RegistryABC, registry_provider
 
@@ -126,8 +126,11 @@ class _PrefectTaskRunWrapper:
             # Use custom executor if provided, otherwise execute locally
             if self.task_executor is not None:
                 result = await self.task_executor.submit(task)
-                # If executor returned an exception, raise it
-                if isinstance(result, Exception):
+                # If executor returned an error, raise the original exception
+                if isinstance(result, TaskExecutionError):
+                    raise result.exception
+                elif isinstance(result, BaseException):
+                    # Backward compat: custom executor returned a bare exception
                     raise result
             else:
                 result = await self._execute_locally(task)

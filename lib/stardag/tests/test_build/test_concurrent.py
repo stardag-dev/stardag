@@ -23,6 +23,7 @@ from stardag.build import (
     HybridConcurrentTaskExecutor,
     LockAcquisitionResult,
     LockAcquisitionStatus,
+    TaskExecutionError,
     build,
     build_aio,
 )
@@ -240,16 +241,14 @@ class TestBuildAio:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
-        """Test FAIL_FAST mode stops build on first failure."""
+        """Test FAIL_FAST mode raises the task exception to the caller."""
         failing = FailingTask()
         dependent = SyncOnlyTask(name="dependent", deps=(failing,))
 
-        summary = await build_aio(
-            [dependent], registry=noop_registry, fail_mode=FailMode.FAIL_FAST
-        )
-
-        assert summary.status == BuildExitStatus.FAILURE
-        assert summary.task_count.failed >= 1
+        with pytest.raises(ValueError, match="Intentional failure"):
+            await build_aio(
+                [dependent], registry=noop_registry, fail_mode=FailMode.FAIL_FAST
+            )
 
     @pytest.mark.asyncio
     async def test_continue_mode(
@@ -310,7 +309,7 @@ class TestBuildAio:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
-        """Test that task failures are properly propagated."""
+        """Test that task failures are properly propagated (raises in FAIL_FAST)."""
 
         class FailingAsyncTask(Task[str]):
             async def run_aio(self):
@@ -318,9 +317,8 @@ class TestBuildAio:
 
         task = FailingAsyncTask()
 
-        summary = await build_aio([task], registry=noop_registry)
-        assert summary.error is not None
-        assert isinstance(summary.error, ValueError)
+        with pytest.raises(ValueError, match="Intentional failure"):
+            await build_aio([task], registry=noop_registry)
 
 
 # ============================================================================
@@ -368,20 +366,23 @@ class TestHybridConcurrentTaskExecutor:
             await executor.teardown()
 
     @pytest.mark.asyncio
-    async def test_failing_task_returns_exception(
+    async def test_failing_task_returns_execution_error(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
-        """Test failing tasks return exception."""
+        """Test failing tasks return TaskExecutionError with traceback."""
         executor = HybridConcurrentTaskExecutor()
         task = FailingTask(error_message="test error")
 
         await executor.setup()
         try:
             result = await executor.submit(task)
-            assert isinstance(result, Exception)
-            assert "test error" in str(result)
+            assert isinstance(result, TaskExecutionError)
+            assert isinstance(result.exception, ValueError)
+            assert "test error" in str(result.exception)
+            assert "test error" in result.traceback
+            assert "Traceback" in result.traceback
         finally:
             await executor.teardown()
 
@@ -1022,16 +1023,13 @@ class TestGlobalConcurrencyLock:
             lock_wait_initial_interval_seconds=0.05,
         )
 
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=config,
-        )
-
-        assert summary.status == BuildExitStatus.FAILURE
-        assert summary.task_count.failed == 1
-        assert "Timeout" in str(summary.error) or "unavailable" in str(summary.error)
+        with pytest.raises(Exception, match="Timeout|unavailable"):
+            await build_aio(
+                [task],
+                registry=noop_registry,
+                global_lock_manager=lock_manager,
+                global_lock_config=config,
+            )
 
     @pytest.mark.asyncio
     async def test_lock_error_fails_task(
@@ -1052,15 +1050,13 @@ class TestGlobalConcurrencyLock:
             ),
         )
 
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=GlobalLockConfig(enabled=True),
-        )
-
-        assert summary.status == BuildExitStatus.FAILURE
-        assert "Connection failed" in str(summary.error)
+        with pytest.raises(Exception, match="Connection failed"):
+            await build_aio(
+                [task],
+                registry=noop_registry,
+                global_lock_manager=lock_manager,
+                global_lock_config=GlobalLockConfig(enabled=True),
+            )
 
     @pytest.mark.asyncio
     async def test_selective_locking(
@@ -1131,14 +1127,14 @@ class TestGlobalConcurrencyLock:
             LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
         )
 
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=GlobalLockConfig(enabled=True),
-        )
+        with pytest.raises(ValueError, match="intentional failure"):
+            await build_aio(
+                [task],
+                registry=noop_registry,
+                global_lock_manager=lock_manager,
+                global_lock_config=GlobalLockConfig(enabled=True),
+            )
 
-        assert summary.status == BuildExitStatus.FAILURE
         # Verify lock was released with completed=False
         assert len(lock_manager.releases) == 1
         task_id, completed = lock_manager.releases[0]
@@ -1170,15 +1166,13 @@ class TestGlobalConcurrencyLock:
             lock_wait_initial_interval_seconds=0.05,
         )
 
-        summary = await build_aio(
-            [task],
-            registry=noop_registry,
-            global_lock_manager=lock_manager,
-            global_lock_config=config,
-        )
-
-        assert summary.status == BuildExitStatus.FAILURE
-        assert summary.task_count.failed == 1
+        with pytest.raises(Exception, match="concurrency_limit_reached"):
+            await build_aio(
+                [task],
+                registry=noop_registry,
+                global_lock_manager=lock_manager,
+                global_lock_config=config,
+            )
 
     @pytest.mark.asyncio
     async def test_lock_with_dynamic_deps(

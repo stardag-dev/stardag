@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback as tb_module
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
 from typing import Generator, Literal, Protocol, Sequence
@@ -35,6 +36,7 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
     TaskCount,
+    TaskExecutionError,
     TaskExecutionState,
     TaskExecutorABC,
 )
@@ -262,7 +264,7 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
         self._suspended_generators.clear()
         self._pending_reexecution.clear()
 
-    async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
+    async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Execute a task and return result.
 
         Note: This method does not make any registry calls. The build function
@@ -283,7 +285,10 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
             result = await self._execute_task(task, mode)
             return self._handle_result(task, result)
         except Exception as e:
-            return e
+            return TaskExecutionError(
+                exception=e,
+                traceback="".join(tb_module.format_exception(e)),
+            )
 
     async def _execute_task(
         self, task: BaseTask, mode: ExecutionMode
@@ -374,7 +379,9 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
             # Generator completed without yielding
             return None
 
-    def _resume_generator(self, task: BaseTask) -> None | TaskStruct | Exception:
+    def _resume_generator(
+        self, task: BaseTask
+    ) -> None | TaskStruct | TaskExecutionError:
         """Resume a suspended generator."""
         gen = self._suspended_generators[task.id]
 
@@ -388,7 +395,10 @@ class HybridConcurrentTaskExecutor(TaskExecutorABC):
             return None
         except Exception as e:
             del self._suspended_generators[task.id]
-            return e
+            return TaskExecutionError(
+                exception=e,
+                traceback="".join(tb_module.format_exception(e)),
+            )
 
 
 # =============================================================================
@@ -553,7 +563,11 @@ async def build_aio(
 
     async def process_result(
         task: BaseTask,
-        result: LockAcquisitionResult | BaseException | TaskStruct | None,
+        result: LockAcquisitionResult
+        | TaskExecutionError
+        | BaseException
+        | TaskStruct
+        | None,
     ):
         """Process a single task result (including lock acquisition results)."""
         nonlocal error
@@ -581,8 +595,21 @@ async def build_aio(
             return
 
         # Handle normal task execution results
-        if isinstance(result, BaseException):
+        if isinstance(result, TaskExecutionError):
             # Task failed - release lock (not completed) and notify registry
+            await release_lock_for_task(task, completed=False)
+            try:
+                await registry.task_fail_aio(build_id, task, str(result))
+            except Exception as reg_err:
+                logger.warning(f"Failed to notify registry of task failure: {reg_err}")
+            state.exception = result.exception
+            task_count.failed += 1
+            error = result.exception
+            if fail_mode == FailMode.FAIL_FAST:
+                raise result.exception
+
+        elif isinstance(result, BaseException):
+            # Backward compat: custom executor returned a bare exception
             await release_lock_for_task(task, completed=False)
             try:
                 await registry.task_fail_aio(build_id, task, str(result))
@@ -772,7 +799,7 @@ async def build_aio(
 
     async def submit_with_lock(
         task: BaseTask,
-    ) -> LockAcquisitionResult | BaseException | TaskStruct | None:
+    ) -> LockAcquisitionResult | TaskExecutionError | TaskStruct | None:
         """Submit task for execution, acquiring lock first if enabled.
 
         This wraps lock acquisition + task execution as a single async unit,
@@ -781,7 +808,7 @@ async def build_aio(
         Returns:
             - LockAcquisitionResult: If lock was not acquired (ALREADY_COMPLETED,
                 ERROR, or timeout). The task was NOT executed.
-            - BaseException | TaskStruct | None: Normal task result if lock was
+            - TaskExecutionError | TaskStruct | None: Normal task result if lock was
                 acquired (or locking wasn't needed) and task was executed.
         """
         state = task_states[task.id]
@@ -886,7 +913,10 @@ async def build_aio(
                 try:
                     result = async_task.result()
                 except Exception as e:
-                    result = e
+                    result = TaskExecutionError(
+                        exception=e,
+                        traceback="".join(tb_module.format_exception(e)),
+                    )
                 await process_result(task, result)
 
             # Check for exit-early condition: all remaining tasks waiting for locks
@@ -929,6 +959,8 @@ async def build_aio(
 
     except Exception as e:
         await registry.build_fail_aio(build_id, str(e))
+        if fail_mode == FailMode.FAIL_FAST:
+            raise
         return BuildSummary(
             status=BuildExitStatus.FAILURE,
             task_count=task_count,

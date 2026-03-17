@@ -43,8 +43,10 @@ import typing
 import modal
 from modal.gpu import GPU_T
 
+import traceback as tb_module
+
 from stardag import BaseTask, TaskStruct, build
-from stardag.build import BuildExitStatus, TaskExecutorABC
+from stardag.build import BuildExitStatus, TaskExecutionError, TaskExecutorABC
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
@@ -328,7 +330,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
 
-    async def submit(self, task: BaseTask) -> None | TaskStruct | Exception:
+    async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Execute task on Modal."""
         try:
             worker_name = self.worker_selector(task)
@@ -337,12 +339,19 @@ class ModalTaskExecutor(TaskExecutorABC):
                 name=f"worker_{worker_name}",
             )
             if worker_function is None:
-                return ValueError(f"Worker function '{worker_name}' not found")
+                exc = ValueError(f"Worker function '{worker_name}' not found")
+                return TaskExecutionError(
+                    exception=exc,
+                    traceback="".join(tb_module.format_exception(exc)),
+                )
 
             res = await worker_function.remote.aio(task)
             return res
         except Exception as e:
-            return e
+            return TaskExecutionError(
+                exception=e,
+                traceback="".join(tb_module.format_exception(e)),
+            )
 
     async def setup(self) -> None:
         """No setup needed for Modal executor."""

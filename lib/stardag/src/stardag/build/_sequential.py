@@ -284,6 +284,8 @@ def build_sequential(
 
     except Exception as e:
         registry.build_fail(build_id, str(e))
+        if fail_mode == FailMode.FAIL_FAST:
+            raise
         return BuildSummary(
             status=BuildExitStatus.FAILURE,
             task_count=task_count,
@@ -609,6 +611,8 @@ async def build_sequential_aio(
 
     except Exception as e:
         await registry.build_fail_aio(build_id, str(e))
+        if fail_mode == FailMode.FAIL_FAST:
+            raise
         return BuildSummary(
             status=BuildExitStatus.FAILURE,
             task_count=task_count,

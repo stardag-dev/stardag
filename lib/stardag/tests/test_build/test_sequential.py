@@ -122,20 +122,15 @@ class TestBuildSequential:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
-        """Test FAIL_FAST mode stops at first failure."""
+        """Test FAIL_FAST mode raises the task exception to the caller."""
         task1 = SyncOnlyTask(name="task1")
         task2 = FailingTask()
         task3 = SyncOnlyTask(name="task3", deps=(task2,))
 
-        summary = build_sequential(
-            [task1, task3], registry=noop_registry, fail_mode=FailMode.FAIL_FAST
-        )
-
-        assert summary.status == BuildExitStatus.FAILURE
-        assert summary.error is not None
-        assert summary.task_count.failed == 1
-        # task1 should have completed, task3 depends on failed task2
-        assert task1.complete()
+        with pytest.raises(ValueError, match="Intentional failure"):
+            build_sequential(
+                [task1, task3], registry=noop_registry, fail_mode=FailMode.FAIL_FAST
+            )
 
     def test_continue_mode(
         self,
@@ -256,17 +251,15 @@ class TestBuildSequentialAio:
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
         noop_registry,
     ):
-        """Test FAIL_FAST mode in async build."""
+        """Test FAIL_FAST mode raises the task exception to the caller."""
         task1 = AsyncOnlyTask(name="task1")
         failing = FailingAsyncTask()
         task2 = AsyncOnlyTask(name="task2", deps=(failing,))
 
-        summary = await build_sequential_aio(
-            [task1, task2], registry=noop_registry, fail_mode=FailMode.FAIL_FAST
-        )
-
-        assert summary.status == BuildExitStatus.FAILURE
-        assert summary.task_count.failed >= 1
+        with pytest.raises(ValueError, match="Intentional"):
+            await build_sequential_aio(
+                [task1, task2], registry=noop_registry, fail_mode=FailMode.FAIL_FAST
+            )
 
 
 # ============================================================================
