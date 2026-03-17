@@ -563,7 +563,11 @@ async def build_aio(
 
     async def process_result(
         task: BaseTask,
-        result: LockAcquisitionResult | TaskExecutionError | TaskStruct | None,
+        result: LockAcquisitionResult
+        | TaskExecutionError
+        | BaseException
+        | TaskStruct
+        | None,
     ):
         """Process a single task result (including lock acquisition results)."""
         nonlocal error
@@ -603,6 +607,19 @@ async def build_aio(
             error = result.exception
             if fail_mode == FailMode.FAIL_FAST:
                 raise result.exception
+
+        elif isinstance(result, BaseException):
+            # Backward compat: custom executor returned a bare exception
+            await release_lock_for_task(task, completed=False)
+            try:
+                await registry.task_fail_aio(build_id, task, str(result))
+            except Exception as reg_err:
+                logger.warning(f"Failed to notify registry of task failure: {reg_err}")
+            state.exception = result
+            task_count.failed += 1
+            error = result
+            if fail_mode == FailMode.FAIL_FAST:
+                raise result
 
         elif result is None:
             # Task completed - release lock (completed) and notify registry

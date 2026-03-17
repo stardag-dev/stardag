@@ -129,6 +129,9 @@ class _PrefectTaskRunWrapper:
                 # If executor returned an error, raise the original exception
                 if isinstance(result, TaskExecutionError):
                     raise result.exception
+                elif isinstance(result, BaseException):
+                    # Backward compat: custom executor returned a bare exception
+                    raise result
             else:
                 result = await self._execute_locally(task)
 
