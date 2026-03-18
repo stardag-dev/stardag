@@ -47,6 +47,15 @@ class MyTask(sd.Task[dict]):
 # Output: <target_root>/<namespace>/MyTask/v<version>/2024-01-15/<id[0:2]>/<id[2:4]>/<id>.json
 ```
 
+### get_default_relpath (Standalone Utility)
+
+Construct the default task output relpath without a Task subclass:
+
+```python
+relpath = sd.get_default_relpath(task, extension=".json")
+# Equivalent to what Task._relpath computes internally
+```
+
 With the decorator API:
 
 ```python
@@ -100,6 +109,8 @@ Built-in serializers in `stardag.target.serialize`:
 | `JSONSerializer(T)`            | int, str, float, bool, list, dict, Pydantic models | `.json`   |
 | `PickleSerializer(T)`          | Any Python object                                  | `.pkl`    |
 | `PandasDataFrameCSVSerializer` | `pd.DataFrame`                                     | `.csv`    |
+
+All built-in serializers are hashable, so they can be used in `Annotated` type parameters with Pydantic generics (e.g., `Task[Annotated[dict, JSONSerializer(dict)]]`).
 
 ### Custom Serializer
 
@@ -182,9 +193,26 @@ factory = target_factory_provider.get()
 target = factory.get_file_target("relpath", target_root_key="default")
 ```
 
-## InMemoryTarget (Testing)
+## Testing
 
-For unit tests, use in-memory targets to avoid filesystem I/O:
+### test_harness (Recommended)
+
+The recommended approach for testing tasks. Sets up isolated temp target roots and `NoOpRegistry`:
+
+```python
+from stardag.testing import test_harness
+
+def test_my_pipeline():
+    with test_harness():
+        task = MyTask(param="value")
+        task.complete()
+        result = task.load()
+        assert result == expected
+```
+
+### InMemoryTarget (Low-Level)
+
+For unit tests that need direct target manipulation:
 
 ```python
 from stardag.target._in_memory import InMemoryTarget

@@ -1,4 +1,79 @@
-# SDK Advanced: Async, Dynamic Dependencies, Namespaces & Artifacts
+# SDK Advanced: Validation, Testing, Async, Dynamic Dependencies, Namespaces & Artifacts
+
+## Load Validation
+
+`LoadValidator[T]` provides automatic validation on `Task._save()` and `Task.load()`. Validators are attached via `typing.Annotated`, following the same pattern as serializers.
+
+### Defining a Validator
+
+```python
+import typing
+import stardag as sd
+
+class NonEmpty(sd.LoadValidator[list]):
+    def validate(self, value: list) -> list:
+        if not value:
+            raise ValueError("List must not be empty")
+        return value
+
+class Clamped(sd.LoadValidator[float]):
+    def __init__(self, lo: float, hi: float):
+        self.lo, self.hi = lo, hi
+
+    def validate(self, value: float) -> float:
+        return max(self.lo, min(self.hi, value))  # transform
+```
+
+### Using Validators
+
+```python
+# Class API — validators chain left-to-right in Annotated order
+class MyTask(sd.Task[typing.Annotated[list[int], NonEmpty()]]):
+    def run(self):
+        self._save([1, 2, 3])  # validated before saving
+
+# Decorator API
+@sd.task
+def my_task() -> typing.Annotated[list[int], NonEmpty()]:
+    return [1, 2, 3]
+
+# Multiple validators chain
+class StrictTask(sd.Task[typing.Annotated[float, Clamped(0, 1), RoundTo(2)]]):
+    ...
+```
+
+### Attribute-Based Discovery (MRO Escape Hatch)
+
+For cases where subclassing `LoadValidator` causes MRO conflicts:
+
+```python
+class MyValidator(SomeOtherBase):
+    stardag_load_validator = True  # marker attribute
+
+    def validate(self, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Empty string")
+        return value
+```
+
+Validators run on both `_save()` and `load()`. They can both reject (raise) and transform (return modified value).
+
+## Test Harness
+
+`test_harness` is a context manager in `stardag.testing` that sets up an isolated test environment with temporary target root directories and a `NoOpRegistry`:
+
+```python
+from stardag.testing import test_harness
+
+def test_my_pipeline():
+    with test_harness():
+        task = MyTask(param="value")
+        task.complete()
+        result = task.load()
+        assert result == expected
+```
+
+This is the recommended way to test task logic. It avoids touching real target roots or the registry.
 
 ## Async Support
 
@@ -103,6 +178,7 @@ and its submodules. Tasks defined in other modules are unaffected.
 Artifacts are rich outputs displayed in the Registry UI. They don't affect task execution.
 
 ```python
+from collections.abc import Sequence
 from stardag.artifact import Artifact, JSONArtifact, MarkdownArtifact
 
 class MetricsTask(sd.Task[dict[str, float]]):
@@ -110,7 +186,7 @@ class MetricsTask(sd.Task[dict[str, float]]):
         metrics = {"accuracy": 0.95, "f1": 0.92}
         self._save(metrics)
 
-    def artifacts(self) -> list[Artifact]:
+    def artifacts(self) -> Sequence[Artifact]:
         """Called after task completion to generate display artifacts."""
         metrics = self.load()
         return [
@@ -260,7 +336,14 @@ from stardag.exceptions import (
     AuthorizationError,    # Permission denied (403)
     TokenExpiredError,     # Auth token expiration
 )
+
+from stardag.build import (
+    BuildFailed,           # Raised by BuildSummary.raise_on_failure()
+    TaskExecutionError,    # Wraps task executor exceptions with formatted tracebacks
+)
 ```
+
+`TaskExecutionError` preserves tracebacks across thread/process/remote executor boundaries. `BuildFailed` has a `.summary` attribute with the full `BuildSummary`.
 
 ## TaskRef (Immutable Reference)
 
