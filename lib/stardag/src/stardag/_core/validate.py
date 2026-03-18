@@ -19,6 +19,17 @@ Validators are attached to the ``LoadedT`` type parameter via
             self._save("hello")
 
 Multiple validators in the same ``Annotated`` are executed in order.
+
+Alternatively, if subclassing ``LoadValidator`` is not possible (e.g. due to
+MRO conflicts with other base classes), you can mark any class as a validator
+by setting the class attribute ``stardag_load_validator = True`` and
+implementing a ``validate`` method::
+
+    class MyMixin(SomeOtherBase):
+        stardag_load_validator = True
+
+        def validate(self, value: str) -> str:
+            ...
 """
 
 import abc
@@ -37,6 +48,15 @@ class LoadValidator(typing.Generic[LoadedT], abc.ABC):
     The ``validate`` method receives the value and must return the
     (possibly transformed) value, or raise an exception to reject it.
 
+    **Discovery:** Validators are discovered in ``Annotated`` metadata if they
+    are either:
+
+    1. An instance of ``LoadValidator`` (the recommended approach), or
+    2. Any object with the class attribute ``stardag_load_validator = True``
+       and a ``validate(self, value)`` method. This escape hatch is useful
+       when subclassing ``LoadValidator`` is not possible due to MRO conflicts
+       with other base classes.
+
     Example::
 
         class HasPrefix(LoadValidator[str]):
@@ -53,6 +73,16 @@ class LoadValidator(typing.Generic[LoadedT], abc.ABC):
 
         class MyTask(Task[Annotated[str, HasPrefix("x")]]):
             ...
+
+    Example using ``stardag_load_validator``::
+
+        class MyMixin(SomeOtherBase):
+            stardag_load_validator = True
+
+            def validate(self, value: str) -> str:
+                if not value:
+                    raise ValueError("empty")
+                return value
     """
 
     @abc.abstractmethod
@@ -71,16 +101,35 @@ class LoadValidator(typing.Generic[LoadedT], abc.ABC):
         ...
 
 
+def _is_load_validator(obj: typing.Any) -> bool:
+    """Check if an object is a load validator.
+
+    Returns ``True`` if *obj* is a ``LoadValidator`` instance **or** has the
+    class attribute ``stardag_load_validator = True`` with a callable
+    ``validate`` method.
+    """
+    if isinstance(obj, LoadValidator):
+        return True
+    if getattr(obj, "stardag_load_validator", False) and callable(
+        getattr(obj, "validate", None)
+    ):
+        return True
+    return False
+
+
 def get_validators(
     annotation: typing.Any,
 ) -> tuple[LoadValidator, ...]:
-    """Extract ``LoadValidator`` instances from a ``typing.Annotated`` type.
+    """Extract load validators from a ``typing.Annotated`` type.
+
+    Discovers instances that are either ``LoadValidator`` subclasses or
+    objects with ``stardag_load_validator = True`` and a ``validate`` method.
 
     Args:
         annotation: A type annotation, possibly ``Annotated[T, ...]``.
 
     Returns:
-        A tuple of ``LoadValidator`` instances found in the annotation
+        A tuple of validator instances found in the annotation
         metadata, in the order they appear. Returns an empty tuple if
         the annotation is not ``Annotated`` or contains no validators.
     """
@@ -88,7 +137,7 @@ def get_validators(
     if origin is not typing.Annotated:
         return ()
     args = typing.get_args(annotation)
-    return tuple(arg for arg in args[1:] if isinstance(arg, LoadValidator))
+    return tuple(arg for arg in args[1:] if _is_load_validator(arg))
 
 
 def run_validators(

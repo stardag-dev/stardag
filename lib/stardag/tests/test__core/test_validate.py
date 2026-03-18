@@ -548,3 +548,143 @@ class TestRunValidators:
             15,
         )
         assert result == 10
+
+
+# ---------------------------------------------------------------------------
+# Tests: stardag_load_validator attribute-based discovery
+# ---------------------------------------------------------------------------
+
+
+class _SomeOtherBase:
+    """Simulates a third-party base class that can't coexist with LoadValidator."""
+
+    pass
+
+
+class AttributeValidator(_SomeOtherBase):
+    """Validator discovered via stardag_load_validator attribute."""
+
+    stardag_load_validator = True
+
+    def __init__(self, suffix: str) -> None:
+        self.suffix = suffix
+
+    def validate(self, value: str) -> str:
+        if not value.endswith(self.suffix):
+            raise ValueError(
+                f"Expected value to end with {self.suffix!r}, got {value!r}"
+            )
+        return value
+
+
+class AttributeTransformer(_SomeOtherBase):
+    """Transforming validator discovered via stardag_load_validator attribute."""
+
+    stardag_load_validator = True
+
+    def validate(self, value: str) -> str:
+        return value.upper()
+
+
+class NotAValidator(_SomeOtherBase):
+    """Has stardag_load_validator but no validate method — should be skipped."""
+
+    stardag_load_validator = True
+
+
+class HasValidateButNoFlag:
+    """Has validate method but no stardag_load_validator — should be skipped."""
+
+    def validate(self, value: str) -> str:
+        return value
+
+
+class AttributeValidatorTask(Task[typing.Annotated[str, AttributeValidator(".txt")]]):
+    value: str
+
+    def run(self):
+        self._save(self.value)
+
+
+class MixedValidatorTask(
+    Task[typing.Annotated[str, StripWhitespace(), AttributeValidator(".txt")]]
+):
+    """Mixes a LoadValidator subclass with an attribute-based validator."""
+
+    value: str
+
+    def run(self):
+        self._save(self.value)
+
+
+class TestAttributeBasedDiscovery:
+    """Tests for stardag_load_validator attribute-based validator discovery."""
+
+    def test_attribute_validator_discovered(self):
+        assert len(AttributeValidatorTask._load_validators) == 1
+
+    def test_attribute_validator_validates_on_save(self, default_in_memory_fs_target):
+        task = AttributeValidatorTask(value="file.txt")
+        task.run()
+        assert task.target().load() == "file.txt"
+
+    def test_attribute_validator_rejects_on_save(self, default_in_memory_fs_target):
+        task = AttributeValidatorTask(value="file.csv")
+        with pytest.raises(ValueError, match="Expected value to end with '.txt'"):
+            task.run()
+
+    def test_attribute_validator_validates_on_load(self, default_in_memory_fs_target):
+        task = AttributeValidatorTask(value="file.txt")
+        task.target().save("bad.csv")
+        with pytest.raises(ValueError, match="Expected value to end with '.txt'"):
+            task.load()
+
+    def test_mixed_validators_both_discovered(self):
+        assert len(MixedValidatorTask._load_validators) == 2
+        assert isinstance(MixedValidatorTask._load_validators[0], StripWhitespace)
+
+    def test_mixed_validators_chain(self, default_in_memory_fs_target):
+        task = MixedValidatorTask(value="  file.txt  ")
+        task.run()
+        assert task.target().load() == "file.txt"
+
+    def test_mixed_validators_reject(self, default_in_memory_fs_target):
+        task = MixedValidatorTask(value="  file.csv  ")
+        with pytest.raises(ValueError, match="Expected value to end with '.txt'"):
+            task.run()
+
+    def test_attribute_transformer(self, default_in_memory_fs_target):
+        class UpperTask(Task[typing.Annotated[str, AttributeTransformer()]]):
+            value: str
+
+            def run(self):
+                self._save(self.value)
+
+        task = UpperTask(value="hello")
+        task.run()
+        assert task.target().load() == "HELLO"
+
+    def test_skips_object_without_validate_method(self):
+        from stardag._core.validate import get_validators
+
+        # NotAValidator has the flag but no validate method
+        validators = get_validators(typing.Annotated[str, NotAValidator()])
+        assert len(validators) == 0
+
+    def test_skips_object_with_validate_but_no_flag(self):
+        from stardag._core.validate import get_validators
+
+        validators = get_validators(typing.Annotated[str, HasValidateButNoFlag()])
+        assert len(validators) == 0
+
+    def test_flag_false_is_not_discovered(self):
+        from stardag._core.validate import get_validators
+
+        class FlagFalse:
+            stardag_load_validator = False
+
+            def validate(self, value):
+                return value
+
+        validators = get_validators(typing.Annotated[str, FlagFalse()])
+        assert len(validators) == 0

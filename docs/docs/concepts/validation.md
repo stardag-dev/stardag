@@ -107,6 +107,41 @@ def clean_text(raw: str) -> typing.Annotated[str, StripWhitespace()]:
     return raw
 ```
 
+## Attribute-Based Validators
+
+If subclassing `LoadValidator` is not possible — for example, because your validator must inherit from another class that conflicts in the MRO — you can use the **attribute-based** discovery escape hatch. Set the class attribute `stardag_load_validator = True` and implement a `validate` method:
+
+```python
+class MyExternalBase:
+    """Some third-party base class."""
+
+    ...
+
+
+class SuffixValidator(MyExternalBase):
+    stardag_load_validator = True
+
+    def __init__(self, suffix: str) -> None:
+        self.suffix = suffix
+
+    def validate(self, value: str) -> str:
+        if not value.endswith(self.suffix):
+            raise ValueError(f"Expected suffix {self.suffix!r}")
+        return value
+
+
+class MyTask(sd.Task[typing.Annotated[str, SuffixValidator(".json")]]):
+    value: str
+
+    def run(self):
+        self._save(self.value)
+```
+
+Attribute-based validators can be freely mixed with `LoadValidator` subclasses in the same `Annotated` type — they chain in order just the same.
+
+!!! note
+Both `stardag_load_validator = True` **and** a callable `validate` method are required. Objects with only one of the two are silently skipped.
+
 ## When Validators Run
 
 | Method            | Validation order              |
