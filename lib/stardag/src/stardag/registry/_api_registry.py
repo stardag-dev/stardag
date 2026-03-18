@@ -402,7 +402,7 @@ class APIRegistry(RegistryABC):
         params = self._get_params()
         try:
             params["commit_hash"] = get_git_commit_hash()
-        except RuntimeError:
+        except Exception:
             pass  # Git not available, skip commit_hash
         return params
 
