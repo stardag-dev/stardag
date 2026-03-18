@@ -85,10 +85,8 @@ Use when: custom output paths, non-standard serializers, or S3/remote targets.
 Reference a task output that was produced elsewhere:
 
 ```python
-from uuid import UUID
-
 remote_task = sd.AliasTask[pd.DataFrame].from_registry(
-    id=UUID("abc123..."),
+    id="abc123...",  # accepts str or UUID
     registry=registry,
 )
 data = remote_task.load()
@@ -212,6 +210,25 @@ sd.build_sequential(task)          # Sync
 await sd.build_sequential_aio(task)  # Async
 ```
 
+### Build Options
+
+All build functions accept these optional parameters:
+
+```python
+sd.build(
+    task,
+    on_registry_failure="warn",  # "warn" (default) or "raise"
+    register_all=False,          # True: register all tasks (even already-complete deps)
+)
+
+# raise_on_failure() for quick error propagation
+summary = sd.build(task)
+summary.raise_on_failure()  # raises BuildFailed on FAILURE status
+```
+
+- **`on_registry_failure`**: Controls whether registry errors propagate (`"raise"`) or are logged as warnings (`"warn"`, default).
+- **`register_all`**: When `True`, discovery recurses into already-complete dependencies, ensuring all tasks in the DAG are registered in the registry for complete graph visibility.
+
 ### Global Concurrency Lock
 
 For coordinating distributed builds across multiple processes/machines:
@@ -230,6 +247,8 @@ Requires a configured Registry API connection.
 2. Checks `complete()` for each task — skips if already done
 3. Executes tasks in dependency order (concurrent by default)
 4. Handles dynamic dependencies (tasks that yield new deps during run)
+5. Deadlock detection in sequential builds (raises `RuntimeError` if stuck)
+6. In FAIL_FAST mode, task exceptions propagate to the caller immediately
 
 ## Type System
 

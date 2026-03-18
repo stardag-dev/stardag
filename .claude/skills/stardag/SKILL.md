@@ -93,6 +93,7 @@ sd.LoadableTask[T]      # Task with load() but no filesystem target
 sd.TargetTask[T]        # Task with explicit target control
 sd.BaseTask             # Abstract base (rarely used directly)
 sd.AliasTask[T]         # Reference a remote/existing task output
+sd.LoadValidator[T]     # Automatic validation on _save() and load()
 
 # Decorators & Types
 sd.task                 # @sd.task decorator
@@ -112,13 +113,13 @@ sd.target_factory_provider        # Custom target factory provider
 
 # Configuration
 sd.config_provider      # Configuration provider
-sd.registry_provider    # Registry provider
-sd.init_registry()      # Initialize registry connection
+sd.registry_provider    # Registry provider (use .get() to access)
 
 # Utilities
 sd.namespace(ns, scope=__name__)   # Set task namespace
 sd.auto_namespace(scope=__name__)  # Auto namespace from module
 sd.flatten_task_struct()           # Flatten nested task structures
+sd.get_default_relpath(task)       # Construct default task output relpath
 sd.HashableSet[T]                  # Hashable frozenset for parameters
 sd.StardagField(...)               # Field annotation (hash_exclude, etc.)
 sd.StardagBaseModel                # Base Pydantic model
@@ -126,6 +127,11 @@ sd.StardagBaseModel                # Base Pydantic model
 # Artifacts
 from stardag.artifact import MarkdownArtifact, JSONArtifact
 
+# Testing
+from stardag.testing import test_harness  # Isolated test environment
+
 # Exceptions
 sd.StardagError, sd.APIError, sd.AuthenticationError, sd.AuthorizationError
+from stardag.build import BuildFailed          # Raised by BuildSummary.raise_on_failure()
+from stardag.build import TaskExecutionError   # Wraps task executor exceptions
 ```
