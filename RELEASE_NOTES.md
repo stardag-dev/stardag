@@ -6,6 +6,34 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.1 — Automatic version field default
+
+Small quality-of-life improvement: the `version` instance field on task classes now
+automatically defaults to `cls.__version__`, eliminating the boilerplate
+`version: str = __version__` that previously had to be repeated in every versioned
+task subclass.
+
+**Before:**
+
+```python
+class MyTask(sd.Task[int]):
+    __version__ = "1"
+    version: str = __version__  # ← required boilerplate
+```
+
+**After:**
+
+```python
+class MyTask(sd.Task[int]):
+    __version__ = "1"  # version field defaults automatically
+```
+
+Existing code that already declares `version: str = __version__` continues to work
+without any changes. Stored/serialized tasks are also unaffected — explicit `version`
+values are always preserved.
+
+---
+
 ## v0.5.0 — LoadValidator, Test Harness, and Build System Robustness
 
 This release introduces load-time validation, a testing utility, and significant build system improvements. **No breaking changes** — all additions are backward-compatible.
