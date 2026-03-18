@@ -6,6 +6,7 @@ automatically when data passes through ``Task._save()`` and ``Task.load()``.
 Validators are attached to the ``LoadedT`` type parameter via
 ``typing.Annotated``::
 
+    import typing
     from stardag import Task, LoadValidator
 
     class NonEmpty(LoadValidator[str]):
@@ -14,7 +15,7 @@ Validators are attached to the ``LoadedT`` type parameter via
                 raise ValueError("Value must not be empty")
             return value
 
-    class MyTask(Task[Annotated[str, NonEmpty()]]):
+    class MyTask(Task[typing.Annotated[str, NonEmpty()]]):
         def run(self):
             self._save("hello")
 

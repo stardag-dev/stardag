@@ -155,7 +155,7 @@ Note that `target().save()` and `target().load()` **bypass** validators — they
 
 ## API Reference
 
-::: stardag.\_core.validate.LoadValidator
+::: stardag.LoadValidator
 options:
 show_root_heading: true
 show_source: true
