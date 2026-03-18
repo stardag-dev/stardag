@@ -28,7 +28,7 @@ from stardag.build import (
     build,
     build_aio,
 )
-from stardag.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry, registry_provider
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
@@ -89,6 +89,20 @@ class TestBuildSyncWrapper:
         assert summary.status == BuildExitStatus.SUCCESS
         assert_dynamic_deps_task_complete_recursive(dag, True)
 
+    def test_uses_registry_provider_when_registry_not_passed(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Test that build() uses registry_provider.get() when registry=None."""
+        task = SyncOnlyTask(name="provider-test-sync")
+        noop = NoOpRegistry()
+
+        with registry_provider.override(noop):
+            summary = build([task])
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.target().load()["mode"] == "sync"
+
     def test_with_completion_cache(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
@@ -131,6 +145,21 @@ class TestBuildAio:
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
         assert dag.target().load() == expected_output
+
+    @pytest.mark.asyncio
+    async def test_uses_registry_provider_when_registry_not_passed(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Test that build_aio() uses registry_provider.get() when registry=None."""
+        task = SyncOnlyTask(name="provider-test-aio")
+        noop = NoOpRegistry()
+
+        with registry_provider.override(noop):
+            summary = await build_aio([task])
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.target().load()["mode"] == "sync"
 
     @pytest.mark.asyncio
     async def test_dynamic_deps(

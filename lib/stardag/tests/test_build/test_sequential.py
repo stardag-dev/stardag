@@ -19,7 +19,7 @@ from stardag.build import (
 from uuid import UUID
 
 from stardag.artifact import Artifact, MarkdownArtifact
-from stardag.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry, registry_provider
 from stardag.target import InMemoryFileTarget
 from stardag.utils.testing.helper_tasks import (
     AsyncOnlyTask,
@@ -61,6 +61,20 @@ class TestBuildSequential:
         assert summary.status == BuildExitStatus.SUCCESS
         assert dag.complete()
         assert dag.target().load() == expected_output
+
+    def test_uses_registry_provider_when_registry_not_passed(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Test that build_sequential uses registry_provider.get() when registry=None."""
+        task = SyncOnlyTask(name="provider-test")
+        noop = NoOpRegistry()
+
+        with registry_provider.override(noop):
+            summary = build_sequential([task])
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.target().load()["mode"] == "sync"
 
     def test_simple_dag_output_serialization(
         self,

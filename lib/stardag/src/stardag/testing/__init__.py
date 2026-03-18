@@ -55,7 +55,7 @@ def test_harness(
     def _run(
         base_path: Path,
     ) -> typing.Generator[tuple[dict[str, str], RegistryABC], None, None]:
-        target_roots = {}
+        target_roots: dict[str, str] = {}
         for key in target_root_keys:
             root_dir = base_path / key
             root_dir.mkdir(parents=True, exist_ok=True)
