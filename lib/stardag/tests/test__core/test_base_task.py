@@ -79,15 +79,40 @@ def test_run_version_checked():
     class VersionedTask(MockBaseTask):
         __version__ = "1.0"
 
-        version: str = "1.0"
+    # Default instantiation uses __version__
+    task = VersionedTask()
+    assert task.version == "1.0"
+    task.run()  # Should not raise - version matches
 
-    task = VersionedTask(version="1.0")
-    # Should not raise - version matches
-    task.run()
+    # Explicit version matching __version__ also works
+    task_explicit = VersionedTask(version="1.0")
+    task_explicit.run()
 
+    # Old/mismatched version raises (deserialization of stale task)
     task_invalid = VersionedTask(version="2.0")
     with pytest.raises(ValueError, match="Task version mismatch"):
         task_invalid.run()
+
+
+def test_version_defaults_to_class_version():
+    """When version is not provided, it defaults to __version__."""
+
+    class UnversionedTask(MockBaseTask):
+        pass  # __version__ = "" by default
+
+    class VersionedTask(MockBaseTask):
+        __version__ = "2"
+
+    assert UnversionedTask().version == ""
+    assert VersionedTask().version == "2"
+
+    # Explicit version is preserved
+    assert VersionedTask(version="old").version == "old"
+
+    # model_validate without version uses __version__
+    assert VersionedTask.model_validate({}).version == "2"
+    # model_validate with explicit version preserves it (deserialization)
+    assert VersionedTask.model_validate({"version": "old"}).version == "old"
 
 
 def test_dynamic_deps():
