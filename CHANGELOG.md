@@ -6,12 +6,52 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-03-18
+
+### SDK
+
+#### New features
+
+- **`LoadValidator[T]`** — abstract base class for validators that run automatically on `Task._save()` and `Task.load()`. Attached via `typing.Annotated`, supports chaining, transforming, and an attribute-based escape hatch for MRO conflicts. Works with both the class API and `@task` decorator.
+- **`test_harness`** context manager in `stardag.testing` — sets up isolated test environments with temp target roots and `NoOpRegistry` by default.
+- **`get_default_relpath()`** — standalone public utility for constructing default task relpaths (previously internal to `Task._relpath`).
+- **`BuildSummary.raise_on_failure()`** — raises new `BuildFailed` exception (with `.summary`) on `FAILURE` status.
+- **`TaskExecutionError`** — wraps task executor exceptions with pre-formatted tracebacks, preserving context across thread/process boundaries.
+- **`on_registry_failure` parameter** on all build functions — `"warn"` (default) or `"raise"` to control registry error handling.
+- **`register_all` flag** on all build functions — opt-in full DAG registration, recursing into already-complete task dependencies.
+- **Commit hash in event metadata** — all task/build lifecycle events now include the git commit hash for traceability (critical for resumed builds at different commits).
+
+#### Improvements
+
+- All serializers are now hashable for use in `Annotated` type params (Pydantic generic cache compatibility).
+- `Annotated` wrappers are stripped in `_is_type_compatible`, fixing `TaskLoads[Annotated[T, ...]]` validation.
+- `artifacts()` / `artifacts_aio()` return `Sequence` instead of `list`; fixed `artifacts_aio` missing `async` keyword.
+- `Task.from_registry(id)` accepts `str | UUID` (previously `UUID` only).
+- `ResourceProvider.is_initialized()` added; `_target_roots_override` no longer triggers config loading prematurely.
+- Registry provider used consistently in build modules (enabling test overrides).
+- Removed unnecessary generic `_FileTargetType` from `DirectoryTarget`.
+
+#### Bug fixes
+
+- **FAIL_FAST exception surfacing**: Task exceptions now propagate to caller in FAIL_FAST mode (both sequential and concurrent builds), instead of being silently wrapped.
+- **Sequential build registry communication**: Previously-completed tasks now correctly marked complete in the registry (not left PENDING). Registry errors no longer mask original task errors.
+- **Deadlock detection** added to sequential builds (matching concurrent build behavior).
+- **Dynamic dependency discovery** uses `discover()` function, properly incrementing `task_count.discovered` and recursing sub-dependencies.
+- **Artifact errors separated from registry errors** — artifact collection is best-effort with warn semantics, not subject to `on_registry_failure`.
+- **Dynamically discovered already-complete deps** now registered immediately in sequential builds.
+- Deduplicated sync/async sequential build logic via shared pure helper functions.
+
 ### Registry API
 
 - Recursive upstream/downstream traversal on `GET /builds/{build_id}/graph` via optional `upstream_depth`, `downstream_depth`, `max_per_type_per_level`, `max_total_nodes` query params
 - New `POST /tasks/graph` endpoint for cross-build DAG queries (used by Task Explorer)
 - Graph traversal service with BFS, depth limiting, per-type grouping, and cycle protection
 - Task status aggregation across builds for graph nodes
+- Edge reconciliation on every `task_register` call (fixes missing edges across builds)
+- Phantom task records for unregistered upstream dependencies (upgraded on proper registration)
+- `is_phantom` column on tasks table; phantom tasks get `UNREGISTERED` status in graph responses
+- Commit hash stored in `event_metadata` on all task/build lifecycle events
+- `commit_hash` field in `TaskWithStatusResponse` (extracted from status-determining event)
 
 ### UI
 
@@ -20,6 +60,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - Depth-based visual fading for upstream and downstream nodes
 - Task Explorer: DAG view works across multiple builds (removed single-build restriction)
 - Task Explorer: refactored into focused sub-components (`TaskExplorerSearch`, `TaskExplorerTable`)
+- Breadcrumb navigation system in global header
+- Dashed border styling for phantom/unregistered task nodes
+- Task Detail: commit hash from status-determining event; Event Log: per-event commit column
+- DAG dependency node click fetches full task data via API
+- Layout density improvements (compact sizing across all views)
 
 ## [0.4.0] — 2026-03-06
 

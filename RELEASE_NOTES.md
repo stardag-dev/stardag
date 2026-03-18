@@ -6,6 +6,91 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.0 — LoadValidator, Test Harness, and Build System Robustness
+
+This release introduces load-time validation, a testing utility, and significant build system improvements. **No breaking changes** — all additions are backward-compatible.
+
+### New: `LoadValidator[T]`
+
+Validators that run automatically when data passes through `Task._save()` and `Task.load()`. Attach them via `typing.Annotated`, following the same pattern as serializers. Validators can reject (raise) or transform (return modified value), and multiple validators chain left-to-right.
+
+```python
+import typing
+import stardag as sd
+
+class NonEmpty(sd.LoadValidator[list]):
+    def validate(self, value: list) -> list:
+        if not value:
+            raise ValueError("List must not be empty")
+        return value
+
+class MyTask(sd.Task[typing.Annotated[list[int], NonEmpty()]]):
+    def run(self):
+        self._save([1, 2, 3])  # validated before saving
+
+# Also works with @task decorator
+@sd.task
+def my_task() -> typing.Annotated[list[int], NonEmpty()]:
+    return [1, 2, 3]
+```
+
+**Attribute-based escape hatch**: For cases where subclassing `LoadValidator` causes MRO conflicts, any class with `stardag_load_validator = True` and a `validate()` method is also discovered.
+
+### New: `test_harness`
+
+A context manager in `stardag.testing` that sets up an isolated test environment with temporary target root directories and a `NoOpRegistry`:
+
+```python
+from stardag.testing import test_harness
+
+def test_my_pipeline():
+    with test_harness():
+        task = MyTask(param="value")
+        task.complete()
+        result = task.load()
+        assert result == expected
+```
+
+### New: `get_default_relpath()`
+
+Standalone public utility for constructing default task output relpaths. Previously this logic was internal to `Task._relpath`:
+
+```python
+import stardag as sd
+
+relpath = sd.get_default_relpath(task, extension=".json")
+```
+
+### New: `BuildSummary.raise_on_failure()`
+
+Raises a new `BuildFailed` exception (with `.summary` attribute) when the build status is `FAILURE`:
+
+```python
+from stardag import build
+
+summary = build([my_task])
+summary.raise_on_failure()  # raises BuildFailed if any task failed
+```
+
+### Build System Improvements
+
+- **`on_registry_failure` parameter** on all build functions (`build`, `build_aio`, `build_sequential`, `build_sequential_aio`) — `"warn"` (default) or `"raise"` to control registry error handling.
+- **`register_all` flag** — opt-in full DAG registration, ensuring all tasks (including already-complete dependencies) are registered in the registry for complete graph visibility.
+- **FAIL_FAST fix**: Task exceptions now properly propagate to the caller in both sequential and concurrent builds.
+- **Deadlock detection** in sequential builds.
+- **`TaskExecutionError`**: Wraps executor exceptions with pre-formatted tracebacks for better debugging across thread/process boundaries.
+- **Commit hash traceability**: All task/build lifecycle events include the git commit hash in metadata.
+
+### Other Improvements
+
+- All serializers are now hashable (Pydantic generic cache compatibility with `Annotated` types).
+- `TaskLoads[Annotated[T, ...]]` validation fixed — `Annotated` wrappers are now stripped in type compatibility checks.
+- `Task.from_registry(id)` accepts `str | UUID`.
+- `artifacts()` / `artifacts_aio()` return `Sequence` instead of `list`.
+- `ResourceProvider.is_initialized()` added.
+
+---
+
 ## v0.4.0 — Breaking: Target & Serializer Type Hierarchy Restructure
 
 The target and serializer type hierarchies have been restructured to cleanly support both file and directory targets through a unified `Task` interface.
