@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 from pickle import loads as pickle_loads
 from uuid import UUID
 
-from pydantic import ConfigDict, Field, SerializationInfo
+from pydantic import ConfigDict, Field, SerializationInfo, model_validator
 from typing_extensions import TypeAlias, Union
 
 from stardag._core.target_base import TargetType
@@ -129,6 +129,20 @@ class BaseTask(
         default="",
         description="Version of the task run implementation.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _set_default_version(cls, data: Any) -> Any:
+        """Default ``version`` to ``cls.__version__`` when not explicitly provided.
+
+        This eliminates the boilerplate of declaring ``version: str = __version__``
+        in every subclass. Existing serialized tasks that carry an explicit
+        ``version`` value are unaffected — the validator only fires when the key
+        is absent from the input data.
+        """
+        if isinstance(data, dict) and "version" not in data:
+            return {**data, "version": cls.__version__}
+        return data
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Validate that subclasses implement either run() or run_aio().

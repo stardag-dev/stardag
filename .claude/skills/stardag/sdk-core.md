@@ -298,10 +298,9 @@ Same parameters → same ID → same output path → skips re-execution.
 ```python
 class MyTask(sd.Task[int]):
     __version__ = "1"
-    version: str = __version__
 
     def run(self):
         self._save(42)
 ```
 
-Bump `__version__` when task logic changes to force re-execution (changes the task ID and output path).
+Bump `__version__` when task logic changes to force re-execution (changes the task ID and output path). The `version` instance field defaults automatically to `cls.__version__` — no boilerplate needed.

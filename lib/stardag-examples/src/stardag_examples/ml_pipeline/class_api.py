@@ -24,7 +24,6 @@ sd.namespace("examples.ml_pipeline.class_api", scope=__name__)
 
 class ExamplesMLPipelineBase(sd.Task[LoadedT], abc.ABC, typing.Generic[LoadedT]):
     __version__ = "0"
-    version: str = __version__
 
     sleep_seconds: Annotated[float, sd.StardagField(hash_exclude=True)] = 3.0
 
