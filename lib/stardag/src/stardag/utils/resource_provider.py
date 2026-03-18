@@ -25,6 +25,10 @@ class ResourceProvider(Generic[_ResourceType]):
     def set(self, resource: _ResourceType):
         self._resource = resource
 
+    def is_initialized(self) -> bool:
+        """Check if a resource has been set or lazily initialized."""
+        return self._resource is not _ResourceUnset
+
     def clear(self):
         self._resource = _ResourceUnset  # type: ignore
 
