@@ -42,7 +42,7 @@ from stardag.build._base import (
     TaskExecutorABC,
     handle_registry_error,
 )
-from stardag.registry import RegistryABC, init_registry
+from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
 
@@ -437,7 +437,7 @@ async def build_aio(
         task_executor: TaskExecutor for executing tasks (default: HybridConcurrentTaskExecutor).
             Use RoutedTaskExecutor to route tasks to different executors (e.g., Modal).
         fail_mode: How to handle task failures
-        registry: Registry for tracking builds (default: from init_registry())
+        registry: Registry for tracking builds (default: from registry_provider)
         max_concurrent_discover: Maximum concurrent completion checks during DAG discovery.
             Higher values speed up discovery for large DAGs with remote targets.
         global_lock_manager: Global concurrency lock manager for distributed builds.
@@ -466,9 +466,9 @@ async def build_aio(
                     f"Invalid task at index {idx}: {task} (must be BaseTask)"
                 )
 
-    # Determine registry: explicit > init_registry()
+    # Determine registry: explicit > registry_provider
     if registry is None:
-        registry = init_registry()
+        registry = registry_provider.get()
     logger.info(f"Using registry: {type(registry).__name__}")
 
     if task_executor is None:

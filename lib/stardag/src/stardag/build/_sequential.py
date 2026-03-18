@@ -45,7 +45,7 @@ from stardag.build._base import (
     TaskCount,
     handle_registry_error,
 )
-from stardag.registry import RegistryABC, init_registry
+from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ def build_sequential(
     tasks_list = _validate_tasks(tasks)
 
     if registry is None:
-        registry = init_registry()
+        registry = registry_provider.get()
     if global_lock_config is None:
         global_lock_config = GlobalLockConfig()
     lock_selector: GlobalLockSelector = DefaultGlobalLockSelector(global_lock_config)
@@ -548,7 +548,7 @@ async def build_sequential_aio(
     tasks_list = _validate_tasks(tasks)
 
     if registry is None:
-        registry = init_registry()
+        registry = registry_provider.get()
     if global_lock_config is None:
         global_lock_config = GlobalLockConfig()
     lock_selector: GlobalLockSelector = DefaultGlobalLockSelector(global_lock_config)
