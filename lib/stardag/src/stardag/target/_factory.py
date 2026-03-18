@@ -167,11 +167,15 @@ def _target_roots_override(
     target_roots: dict[str, str],
 ) -> typing.Generator[None, None, None]:
     """Context manager to temporarily override the target roots in the TargetFactory."""
-    factory = target_factory_provider.get()
+    prefix_to_target_prototype = (
+        target_factory_provider.get().prefix_to_target_prototype
+        if target_factory_provider.is_initialized()
+        else None
+    )
     with target_factory_provider.override(
         TargetFactory(
             target_roots=target_roots,
-            prefix_to_target_prototype=factory.prefix_to_target_prototype,
+            prefix_to_target_prototype=prefix_to_target_prototype,
         )
     ):
         yield
