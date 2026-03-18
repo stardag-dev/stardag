@@ -1,7 +1,7 @@
 import abc
 import typing
 
-from stardag._core.base_task import LoadableTask, TargetTask
+from stardag._core.base_task import BaseTask, LoadableTask, TargetTask
 from stardag.config import DEFAULT_TARGET_ROOT_KEY
 from stardag.target import (
     FileSerializable,
@@ -16,6 +16,58 @@ from stardag.target.serialize import (
 )
 
 LoadedT = typing.TypeVar("LoadedT")
+
+
+def get_default_relpath(
+    task: BaseTask,
+    *,
+    base: str = "",
+    extra: str = "",
+    extension: str = "",
+    filename: str = "",
+) -> str:
+    """Construct the default relative path for a task's target.
+
+    This is the same path structure that ``Task`` and ``@task`` use automatically.
+    Useful when you need a task-derived path outside of the ``Task`` class hierarchy.
+
+    The path structure is::
+
+        [<base>/][<namespace>/]<name>/[v<version>/][<extra>/]
+        <id>[:2]/<id>[2:4]/<id>[/<filename>][.<extension>]
+
+    Args:
+        task: The task to derive the path from.
+        base: Optional base path prefix.
+        extra: Optional extra path component (inserted after version).
+        extension: Optional file extension (without leading dot).
+        filename: Optional filename (appended after the task ID).
+
+    Returns:
+        The constructed relative path string.
+    """
+    task_id_str = str(task.id)
+    relpath = "/".join(
+        [
+            part
+            for part in [
+                base,
+                task.get_namespace().replace(".", "/"),
+                task.get_name(),
+                f"v{task.version}" if task.version else "",
+                extra,
+                task_id_str[:2],
+                task_id_str[2:4],
+                task_id_str,
+                filename,
+            ]
+            if part
+        ]
+    )
+    if extension:
+        relpath = f"{relpath}.{extension.lstrip('.')}"
+
+    return relpath
 
 
 class Task(
@@ -133,29 +185,13 @@ class Task(
 
     @property
     def _relpath(self) -> str:
-        task_id_str = str(self.id)
-        relpath = "/".join(
-            [
-                part
-                for part in [
-                    self._relpath_base,
-                    self.get_namespace().replace(".", "/"),
-                    self.get_name(),
-                    f"v{self.version}" if self.version else "",
-                    self._relpath_extra,
-                    task_id_str[:2],
-                    task_id_str[2:4],
-                    task_id_str,
-                    self._relpath_filename,
-                ]
-                if part
-            ]
+        return get_default_relpath(
+            self,
+            base=self._relpath_base,
+            extra=self._relpath_extra,
+            extension=self._relpath_extension,
+            filename=self._relpath_filename,
         )
-        extension = self._relpath_extension
-        if extension:
-            relpath = f"{relpath}.{extension.lstrip('.')}"
-
-        return relpath
 
     @property
     def _target_root_key(self) -> str:

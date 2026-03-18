@@ -48,7 +48,7 @@ from stardag._core.base_task import (
 )
 from stardag._core.decorator import Depends, task
 from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
-from stardag._core.task import Task
+from stardag._core.task import Task, get_default_relpath
 from stardag._core.task_loads import TaskLoads
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.build import build, build_aio, build_sequential, build_sequential_aio
@@ -98,6 +98,7 @@ __all__ = [
     "DirectoryTarget",
     "FileSystemTarget",
     "FileTarget",
+    "get_default_relpath",
     "get_directory_target",
     "get_file_target",
     "HashableSet",
