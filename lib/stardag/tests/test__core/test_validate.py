@@ -364,6 +364,114 @@ class TestDecoratorApiValidation:
         t.run()
         assert t.load() == "hello"
 
+    def test_decorator_task_chained_validators(self, default_in_memory_fs_target):
+        from stardag import task
+
+        @task
+        def chained_task(
+            value: str,
+        ) -> typing.Annotated[str, StripWhitespace(), HasPrefix("x")]:
+            return value
+
+        t = chained_task(value="  x_hello  ")
+        t.run()
+        assert t.load() == "x_hello"
+
+    def test_decorator_task_chained_validators_rejects(
+        self, default_in_memory_fs_target
+    ):
+        from stardag import task
+
+        @task
+        def chained_task_reject(
+            value: str,
+        ) -> typing.Annotated[str, StripWhitespace(), HasPrefix("x")]:
+            return value
+
+        t = chained_task_reject(value="  no_prefix  ")
+        with pytest.raises(ValueError, match="Expected value to start with 'x'"):
+            t.run()
+
+    def test_decorator_task_load_validates(self, default_in_memory_fs_target):
+        """Validates that load() also runs validators for @task functions."""
+        from stardag import task
+
+        @task
+        def load_validated_task(
+            value: int,
+        ) -> typing.Annotated[int, ClampMax(100)]:
+            return value
+
+        t = load_validated_task(value=50)
+        # Write a value exceeding the clamp directly to the target
+        t.target().save(200)
+        assert t.load() == 100
+
+    def test_decorator_async_task_validates(self, default_in_memory_fs_target):
+        from stardag import task
+
+        @task
+        async def async_validated(
+            value: str,
+        ) -> typing.Annotated[str, HasPrefix("x")]:
+            return value
+
+        t = async_validated(value="x_async")
+        t.run()
+        assert t.load() == "x_async"
+
+    def test_decorator_async_task_rejects(self, default_in_memory_fs_target):
+        from stardag import task
+
+        @task
+        async def async_validated_reject(
+            value: str,
+        ) -> typing.Annotated[str, HasPrefix("x")]:
+            return value
+
+        t = async_validated_reject(value="no_prefix")
+        with pytest.raises(ValueError, match="Expected value to start with 'x'"):
+            t.run()
+
+    def test_decorator_task_with_dependency(self, default_in_memory_fs_target):
+        """Validates that validators work when a @task has upstream dependencies."""
+        from stardag import Depends, task
+
+        @task
+        def upstream(value: str) -> str:
+            return value
+
+        @task
+        def downstream(
+            data: Depends[str],
+        ) -> typing.Annotated[str, HasPrefix("x")]:
+            return data
+
+        up = upstream(value="x_from_upstream")
+        down = downstream(data=up)
+        up.run()
+        down.run()
+        assert down.load() == "x_from_upstream"
+
+    def test_decorator_task_with_dependency_rejects(self, default_in_memory_fs_target):
+        from stardag import Depends, task
+
+        @task
+        def upstream_bad(value: str) -> str:
+            return value
+
+        @task
+        def downstream_bad(
+            data: Depends[str],
+        ) -> typing.Annotated[str, HasPrefix("x")]:
+            return data
+
+        up = upstream_bad(value="no_prefix")
+        down = downstream_bad(data=up)
+        up.run()
+        with pytest.raises(ValueError, match="Expected value to start with 'x'"):
+            down.run()
+
 
 # ---------------------------------------------------------------------------
 # Tests: Unit tests for get_validators and run_validators
