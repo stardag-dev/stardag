@@ -250,7 +250,15 @@ async def get_all_task_global_statuses(
     db: AsyncSession, task_db_ids: list[UUID]
 ) -> dict[
     UUID,
-    tuple[TaskStatus, datetime | None, datetime | None, str | None, UUID | None, bool],
+    tuple[
+        TaskStatus,
+        datetime | None,
+        datetime | None,
+        str | None,
+        UUID | None,
+        bool,
+        str | None,
+    ],
 ]:
     """Get global status for multiple tasks considering events from ALL builds.
 
@@ -258,10 +266,11 @@ async def get_all_task_global_statuses(
 
     Returns:
         Dict mapping task_db_id to:
-        (status, started_at, completed_at, error_message, status_build_id, waiting_for_lock)
+        (status, started_at, completed_at, error_message, status_build_id,
+         waiting_for_lock, commit_hash)
 
         status_build_id is the build where the status-determining event occurred.
-        This allows the UI to show when a task's status came from a different build.
+        commit_hash is extracted from the status-determining event's metadata.
     """
     if not task_db_ids:
         return {}
@@ -278,10 +287,16 @@ async def get_all_task_global_statuses(
     statuses: dict[
         UUID,
         tuple[
-            TaskStatus, datetime | None, datetime | None, str | None, UUID | None, bool
+            TaskStatus,
+            datetime | None,
+            datetime | None,
+            str | None,
+            UUID | None,
+            bool,
+            str | None,
         ],
     ] = {
-        task_id: (TaskStatus.PENDING, None, None, None, None, False)
+        task_id: (TaskStatus.PENDING, None, None, None, None, False, None)
         for task_id in task_db_ids
     }
 
@@ -294,6 +309,7 @@ async def get_all_task_global_statuses(
             "error_message": None,
             "status_build_id": None,
             "waiting_for_lock": False,
+            "commit_hash": None,
         }
         for task_id in task_db_ids
     }
@@ -303,6 +319,9 @@ async def get_all_task_global_statuses(
             continue
 
         state = task_states[event.task_id]
+        event_commit = (
+            event.event_metadata.get("commit_hash") if event.event_metadata else None
+        )
 
         if event.event_type == EventType.TASK_COMPLETED:
             # Completed takes precedence over everything
@@ -310,6 +329,7 @@ async def get_all_task_global_statuses(
             state["completed_at"] = event.created_at
             state["status_build_id"] = event.build_id
             state["waiting_for_lock"] = False  # No longer waiting
+            state["commit_hash"] = event_commit
         elif event.event_type == EventType.TASK_STARTED:
             # Running takes precedence over pending (but not completed)
             if state["status"] != TaskStatus.COMPLETED:
@@ -318,11 +338,13 @@ async def get_all_task_global_statuses(
                 if state["started_at"] is None:
                     state["started_at"] = event.created_at
                 state["waiting_for_lock"] = False
+                state["commit_hash"] = event_commit
         elif event.event_type == EventType.TASK_RESUMED:
             if state["status"] != TaskStatus.COMPLETED:
                 state["status"] = TaskStatus.RUNNING
                 state["status_build_id"] = event.build_id
                 state["waiting_for_lock"] = False
+                state["commit_hash"] = event_commit
         elif event.event_type == EventType.TASK_FAILED:
             # Only set failed if not completed elsewhere
             if state["status"] != TaskStatus.COMPLETED:
@@ -330,11 +352,13 @@ async def get_all_task_global_statuses(
                 state["status_build_id"] = event.build_id
                 state["completed_at"] = event.created_at
                 state["error_message"] = event.error_message
+                state["commit_hash"] = event_commit
         elif event.event_type == EventType.TASK_CANCELLED:
             if state["status"] != TaskStatus.COMPLETED:
                 state["status"] = TaskStatus.CANCELLED
                 state["status_build_id"] = event.build_id
                 state["completed_at"] = event.created_at
+                state["commit_hash"] = event_commit
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Only mark as waiting if not yet completed/running
             if state["status"] == TaskStatus.PENDING:
@@ -349,6 +373,7 @@ async def get_all_task_global_statuses(
             state["error_message"],
             state["status_build_id"],
             state["waiting_for_lock"],
+            state["commit_hash"],
         )
 
     return statuses

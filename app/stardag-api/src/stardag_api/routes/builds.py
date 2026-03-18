@@ -132,6 +132,8 @@ async def _create_task_event(
     db: AsyncSession,
     auth: SdkAuth,
     error_message: str | None = None,
+    commit_hash: str | None = None,
+    extra_metadata: dict | None = None,
 ) -> TaskEventResponse:
     """Create a task event and return slim response."""
     # Limit checks
@@ -144,11 +146,21 @@ async def _create_task_event(
 
     _, db_task = await _get_build_and_task(build_id, task_id, db, auth)
 
+    # Build event_metadata from commit_hash and any extra metadata
+    event_metadata: dict | None = None
+    if commit_hash or extra_metadata:
+        event_metadata = {}
+        if commit_hash:
+            event_metadata["commit_hash"] = commit_hash
+        if extra_metadata:
+            event_metadata.update(extra_metadata)
+
     event = Event(
         build_id=build_id,
         task_id=db_task.id,
         event_type=event_type,
         error_message=error_message,
+        event_metadata=event_metadata,
     )
     db.add(event)
     await db.commit()
@@ -342,17 +354,32 @@ async def get_build(
     )
 
 
+def _build_event_metadata(
+    commit_hash: str | None = None,
+    triggered_by_user_id: str | None = None,
+) -> dict | None:
+    """Build event_metadata dict from optional fields."""
+    metadata: dict = {}
+    if commit_hash:
+        metadata["commit_hash"] = commit_hash
+    if triggered_by_user_id:
+        metadata["triggered_by_user_id"] = triggered_by_user_id
+    return metadata or None
+
+
 @router.post("/{build_id}/complete", response_model=BuildResponse)
 async def complete_build(
     build_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     triggered_by_user_id: str | None = None,
+    commit_hash: str | None = None,
 ):
     """Mark a build as completed.
 
     Args:
         triggered_by_user_id: Optional user ID if this is a manual override from UI.
+        commit_hash: Optional git commit hash of the code that ran this build.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -372,16 +399,11 @@ async def complete_build(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Store user ID in metadata if this was user-triggered
-    event_metadata = (
-        {"triggered_by_user_id": triggered_by_user_id} if triggered_by_user_id else None
-    )
-
     event = Event(
         build_id=build_id,
         task_id=None,
         event_type=EventType.BUILD_COMPLETED,
-        event_metadata=event_metadata,
+        event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
     db.add(event)
     await db.commit()
@@ -416,12 +438,14 @@ async def fail_build(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     error_message: str | None = None,
     triggered_by_user_id: str | None = None,
+    commit_hash: str | None = None,
 ):
     """Mark a build as failed.
 
     Args:
         error_message: Optional error message.
         triggered_by_user_id: Optional user ID if this is a manual override from UI.
+        commit_hash: Optional git commit hash of the code that ran this build.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -441,17 +465,12 @@ async def fail_build(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Store user ID in metadata if this was user-triggered
-    event_metadata = (
-        {"triggered_by_user_id": triggered_by_user_id} if triggered_by_user_id else None
-    )
-
     event = Event(
         build_id=build_id,
         task_id=None,
         event_type=EventType.BUILD_FAILED,
         error_message=error_message,
-        event_metadata=event_metadata,
+        event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
     db.add(event)
     await db.commit()
@@ -485,11 +504,13 @@ async def cancel_build(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     triggered_by_user_id: str | None = None,
+    commit_hash: str | None = None,
 ):
     """Cancel a build.
 
     Args:
         triggered_by_user_id: Optional user ID if this is a manual override from UI.
+        commit_hash: Optional git commit hash of the code that ran this build.
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -509,16 +530,11 @@ async def cancel_build(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Store user ID in metadata if this was user-triggered
-    event_metadata = (
-        {"triggered_by_user_id": triggered_by_user_id} if triggered_by_user_id else None
-    )
-
     event = Event(
         build_id=build_id,
         task_id=None,
         event_type=EventType.BUILD_CANCELLED,
-        event_metadata=event_metadata,
+        event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
     db.add(event)
     await db.commit()
@@ -552,6 +568,7 @@ async def exit_early(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     reason: str | None = None,
+    commit_hash: str | None = None,
 ):
     """Mark a build as exited early (all remaining tasks running in other builds)."""
     # Limit checks
@@ -577,6 +594,7 @@ async def exit_early(
         task_id=None,
         event_type=EventType.BUILD_EXIT_EARLY,
         error_message=reason,  # Reuse error_message field for the reason
+        event_metadata=_build_event_metadata(commit_hash),
     )
     db.add(event)
     await db.commit()
@@ -787,9 +805,12 @@ async def start_task(
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
 ):
     """Mark a task as started within a build."""
-    return await _create_task_event(build_id, task_id, EventType.TASK_STARTED, db, auth)
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_STARTED, db, auth, commit_hash=commit_hash
+    )
 
 
 @router.post("/{build_id}/tasks/{task_id}/complete", response_model=TaskEventResponse)
@@ -798,10 +819,11 @@ async def complete_task(
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
 ):
     """Mark a task as completed within a build."""
     return await _create_task_event(
-        build_id, task_id, EventType.TASK_COMPLETED, db, auth
+        build_id, task_id, EventType.TASK_COMPLETED, db, auth, commit_hash=commit_hash
     )
 
 
@@ -812,10 +834,17 @@ async def fail_task(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     error_message: str | None = None,
+    commit_hash: str | None = None,
 ):
     """Mark a task as failed within a build."""
     return await _create_task_event(
-        build_id, task_id, EventType.TASK_FAILED, db, auth, error_message
+        build_id,
+        task_id,
+        EventType.TASK_FAILED,
+        db,
+        auth,
+        error_message,
+        commit_hash=commit_hash,
     )
 
 
@@ -825,10 +854,11 @@ async def suspend_task(
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
 ):
     """Mark a task as suspended (waiting for dynamic dependencies)."""
     return await _create_task_event(
-        build_id, task_id, EventType.TASK_SUSPENDED, db, auth
+        build_id, task_id, EventType.TASK_SUSPENDED, db, auth, commit_hash=commit_hash
     )
 
 
@@ -838,9 +868,12 @@ async def resume_task(
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
 ):
     """Mark a task as resumed (dynamic dependencies completed)."""
-    return await _create_task_event(build_id, task_id, EventType.TASK_RESUMED, db, auth)
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_RESUMED, db, auth, commit_hash=commit_hash
+    )
 
 
 @router.post("/{build_id}/tasks/{task_id}/cancel", response_model=TaskEventResponse)
@@ -849,10 +882,11 @@ async def cancel_task(
     task_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
 ):
     """Cancel a task within a build."""
     return await _create_task_event(
-        build_id, task_id, EventType.TASK_CANCELLED, db, auth
+        build_id, task_id, EventType.TASK_CANCELLED, db, auth, commit_hash=commit_hash
     )
 
 
@@ -865,35 +899,19 @@ async def task_waiting_for_lock(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     lock_owner: str | None = None,
+    commit_hash: str | None = None,
 ):
     """Record that a task is waiting for a global lock held by another build."""
-    # Limit checks
-    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    _raise_if_limit_exceeded(
-        await check_entity_creation_limit(
-            db, auth.workspace_id, "events", limits_settings
-        )
+    extra_metadata = {"lock_owner": lock_owner} if lock_owner else None
+    return await _create_task_event(
+        build_id,
+        task_id,
+        EventType.TASK_WAITING_FOR_LOCK,
+        db,
+        auth,
+        commit_hash=commit_hash,
+        extra_metadata=extra_metadata,
     )
-
-    _, db_task = await _get_build_and_task(build_id, task_id, db, auth)
-
-    # Store lock owner info in event_metadata if provided
-    event_metadata = {"lock_owner": lock_owner} if lock_owner else None
-
-    event = Event(
-        build_id=build_id,
-        task_id=db_task.id,
-        event_type=EventType.TASK_WAITING_FOR_LOCK,
-        event_metadata=event_metadata,
-    )
-    db.add(event)
-    await db.commit()
-
-    record_entity_created(auth.workspace_id, "events")
-
-    status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
-
-    return TaskEventResponse(task_id=db_task.task_id, status=status)
 
 
 @router.post(
@@ -1080,7 +1098,10 @@ async def list_tasks_in_build(
             error_message,
             status_build_id,
             waiting_for_lock,
-        ) = statuses.get(task.id, (TaskStatus.PENDING, None, None, None, None, False))
+            commit_hash,
+        ) = statuses.get(
+            task.id, (TaskStatus.PENDING, None, None, None, None, False, None)
+        )
         responses.append(
             TaskWithStatusResponse(
                 id=task.id,
@@ -1099,6 +1120,7 @@ async def list_tasks_in_build(
                 artifact_count=artifact_counts.get(task.id, 0),
                 waiting_for_lock=waiting_for_lock,
                 status_build_id=status_build_id,
+                commit_hash=commit_hash,
             )
         )
 
@@ -1223,8 +1245,8 @@ async def get_build_graph(
         if task.is_phantom:
             status = TaskStatus.UNREGISTERED
         else:
-            status, _, _, _, _, _ = statuses.get(
-                task.id, (TaskStatus.PENDING, None, None, None, None, False)
+            status, _, _, _, _, _, _ = statuses.get(
+                task.id, (TaskStatus.PENDING, None, None, None, None, False, None)
             )
         nodes.append(
             TaskNode(

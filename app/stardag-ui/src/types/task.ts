@@ -68,6 +68,8 @@ export interface Task {
   waiting_for_lock?: boolean;
   // Build where the status-determining event occurred (for cross-build indicators)
   status_build_id?: string;
+  // Git commit hash from the event that determined the current status
+  commit_hash?: string | null;
 }
 
 export interface TaskListResponse {
