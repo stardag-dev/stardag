@@ -1115,10 +1115,7 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
                 await aiofiles.os.remove(tmp_cache_path)
 
 
-_FileTargetType = typing.TypeVar("_FileTargetType", bound=FileTarget)
-
-
-class DirectoryTarget(FileSystemTarget, typing.Generic[_FileTargetType]):
+class DirectoryTarget(FileSystemTarget):
     """A target representing a directory of file targets.
 
     Manages a collection of sub-targets (files) under a common URI prefix,
@@ -1129,13 +1126,12 @@ class DirectoryTarget(FileSystemTarget, typing.Generic[_FileTargetType]):
     def __init__(
         self,
         uri: str,
-        prototype: typing.Type[_FileTargetType]
-        | typing.Callable[[str], _FileTargetType],
+        prototype: typing.Type[FileTarget] | typing.Callable[[str], FileTarget],
     ) -> None:
         self.uri = uri.removesuffix("/") + "/"
         self.prototype = prototype
         self._flag_target = prototype(self.uri[:-1] + "._DONE")
-        self._sub_keys = set()
+        self._sub_keys: set[str] = set()
 
     def exists(self) -> bool:
         return self._flag_target.exists()
@@ -1146,7 +1142,7 @@ class DirectoryTarget(FileSystemTarget, typing.Generic[_FileTargetType]):
         with self._flag_target.open("w") as f:
             f.write("")  # empty file
 
-    def get_sub_target(self, relpath: str) -> _FileTargetType:
+    def get_sub_target(self, relpath: str) -> FileTarget:
         if relpath.startswith("/"):
             raise ValueError(
                 f"Invalid relpath {relpath}, not allowed to start with '/'"
@@ -1154,10 +1150,10 @@ class DirectoryTarget(FileSystemTarget, typing.Generic[_FileTargetType]):
         self._sub_keys.add(relpath)
         return self.prototype(self.uri + relpath)
 
-    def __truediv__(self, relpath: str) -> _FileTargetType:
+    def __truediv__(self, relpath: str) -> FileTarget:
         return self.get_sub_target(relpath)
 
-    def sub_keys_target(self) -> _FileTargetType:
+    def sub_keys_target(self) -> FileTarget:
         return self.prototype(self.uri[:-1] + "._SUB_KEYS")
 
     def __repr__(self):

@@ -196,7 +196,7 @@ def test_directory_target(tmp_path: Path):
     dir_target = DirectoryTarget(uri=str(tmp_path / "test"), prototype=LocalFileTarget)
     assert not dir_target.exists()
 
-    sub_a: LocalFileTarget = dir_target.get_sub_target("a")
+    sub_a = dir_target.get_sub_target("a")
     assert not sub_a.exists()
     assert sub_a.uri == str(tmp_path / "test" / "a")
     with sub_a.proxy_path("w") as sub_a_path:
@@ -206,7 +206,7 @@ def test_directory_target(tmp_path: Path):
     assert not dir_target.exists()
     assert dir_target._sub_keys == {"a"}  # noqa
 
-    sub_b: LocalFileTarget = dir_target / "b"
+    sub_b = dir_target / "b"
     assert not sub_b.exists()
     assert sub_b.uri == str(tmp_path / "test" / "b")
     with sub_b.proxy_path("w") as sub_b_path:
