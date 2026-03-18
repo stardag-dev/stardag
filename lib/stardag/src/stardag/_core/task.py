@@ -2,6 +2,7 @@ import abc
 import typing
 
 from stardag._core.base_task import BaseTask, LoadableTask, TargetTask
+from stardag._core.validate import LoadValidator, get_validators, run_validators
 from stardag.config import DEFAULT_TARGET_ROOT_KEY
 from stardag.target import (
     FileSerializable,
@@ -140,6 +141,8 @@ class Task(
             return args
         return None
 
+    _load_validators: tuple[LoadValidator, ...] = ()
+
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: typing.Any) -> None:  # type: ignore
         super().__pydantic_init_subclass__(**kwargs)
@@ -153,6 +156,7 @@ class Task(
         loaded_t = args[0]
         if type(loaded_t) != typing.TypeVar:  # noqa: E721
             cls._serializer = get_serializer(loaded_t)
+            cls._load_validators = get_validators(loaded_t)
 
     @property
     def _relpath_base(self) -> str:
@@ -219,17 +223,21 @@ class Task(
         return self._serializer
 
     def load(self) -> LoadedT:
-        """Convenience method to load the task target."""
-        return self.target().load()
+        """Load the task target and run any ``LoadValidator``s."""
+        value = self.target().load()
+        return run_validators(self._load_validators, value)
 
     async def load_aio(self) -> LoadedT:
-        """Async load — delegates to the target's ``load_aio``."""
-        return await self.target().load_aio()
+        """Async load — delegates to the target's ``load_aio`` and validates."""
+        value = await self.target().load_aio()
+        return run_validators(self._load_validators, value)
 
     def _save(self, data: LoadedT) -> None:
-        """Convenience method to save data to the task target."""
+        """Validate data with any ``LoadValidator``s and save to the task target."""
+        data = run_validators(self._load_validators, data)
         self.target().save(data)
 
     async def _save_aio(self, data: LoadedT) -> None:
-        """Async save — delegates to the target's ``save_aio``."""
+        """Async validate and save — delegates to the target's ``save_aio``."""
+        data = run_validators(self._load_validators, data)
         await self.target().save_aio(data)
