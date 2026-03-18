@@ -1,7 +1,7 @@
 import json
 import typing
 
-from stardag import Task, auto_namespace
+from stardag import Task, auto_namespace, get_default_relpath
 from stardag.target import DirectorySerializable, FileSerializable
 from stardag.target._base import DirectoryTarget
 from stardag.target.serialize import (
@@ -237,6 +237,82 @@ class _DirData(SelfDirectorySerializing):
 class DirTask(Task[_DirData]):
     def run(self):
         self._save(_DirData({"result": 1}))
+
+
+class TestGetDefaultRelpath:
+    """Tests for the standalone get_default_relpath utility."""
+
+    def test_matches_task_relpath(self):
+        """get_default_relpath produces the same result as Task._relpath."""
+        task = IntTask(value=42)
+        result = get_default_relpath(task, extension="json")
+        assert result == task._relpath
+
+    def test_matches_task_relpath_with_version(self):
+        task = IntTask(value=42, version="1.0")
+        result = get_default_relpath(task, extension="json")
+        assert result == task._relpath
+
+    def test_basic_structure(self):
+        task = IntTask(value=42)
+        task_id_str = str(task.id)
+        result = get_default_relpath(task)
+        parts = result.split("/")
+        # Should contain: namespace parts, name, id prefix dirs, id
+        assert "IntTask" in parts
+        assert task_id_str[:2] in parts
+        assert task_id_str[2:4] in parts
+        assert task_id_str in parts
+
+    def test_with_base(self):
+        task = IntTask(value=42)
+        result = get_default_relpath(task, base="my/base")
+        assert result.startswith("my/base/")
+
+    def test_with_extra(self):
+        task = IntTask(value=42)
+        result = get_default_relpath(task, extra="extra/path")
+        assert "/extra/path/" in result
+
+    def test_with_extension(self):
+        task = IntTask(value=42)
+        result = get_default_relpath(task, extension="json")
+        assert result.endswith(".json")
+
+    def test_with_dotted_extension(self):
+        task = IntTask(value=42)
+        result = get_default_relpath(task, extension=".json")
+        assert result.endswith(".json")
+        assert not result.endswith("..json")
+
+    def test_with_filename(self):
+        task = IntTask(value=42)
+        result = get_default_relpath(task, filename="output", extension="csv")
+        assert result.endswith("/output.csv")
+
+    def test_with_all_params(self):
+        task = IntTask(value=42, version="2")
+        task_id_str = str(task.id)
+        result = get_default_relpath(
+            task, base="base", extra="extra", extension="json", filename="result"
+        )
+        assert result.startswith("base/")
+        assert "/v2/" in result
+        assert "/extra/" in result
+        assert result.endswith(f"/{task_id_str}/result.json")
+
+    def test_no_extension(self):
+        task = IntTask(value=42)
+        result = get_default_relpath(task)
+        assert not result.endswith(".json")
+        # Should end with just the task id
+        assert result.endswith(str(task.id))
+
+    def test_empty_version_excluded(self):
+        task = IntTask(value=42, version="")
+        result = get_default_relpath(task)
+        assert "/v/" not in result
+        assert "/v" not in result.split("/")
 
 
 class TestDirectoryTarget:
