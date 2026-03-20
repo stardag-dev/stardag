@@ -103,8 +103,9 @@ export function TaskNode({ data }: TaskNodeProps) {
               ? "text-gray-500 dark:text-gray-400"
               : "text-gray-900 dark:text-gray-100"
           }`}
+          title={data.label}
         >
-          {data.label}
+          {data.label.length > 20 ? `${data.label.slice(0, 20)}…` : data.label}
         </span>
         <span
           className={`font-mono text-xs ${

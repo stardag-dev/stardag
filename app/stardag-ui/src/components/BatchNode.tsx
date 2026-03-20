@@ -74,7 +74,9 @@ export function BatchNode({ data }: BatchNodeProps) {
           className="!bg-gray-400 dark:!bg-gray-500"
         />
         <div className="flex flex-col items-center gap-1 opacity-80">
-          <span className={`text-sm font-medium ${colors.text}`}>{data.label}</span>
+          <span className={`text-sm font-medium ${colors.text}`} title={data.label}>
+            {data.label.length > 20 ? `${data.label.slice(0, 20)}…` : data.label}
+          </span>
           <div className="flex items-center gap-1">
             <span
               className={`rounded-full px-2 py-0.5 text-xs font-semibold ${colors.badge}`}
