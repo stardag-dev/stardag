@@ -29,6 +29,11 @@ import {
 } from "./ColumnManagerModal";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
+import {
+  createPositionCache,
+  type LayoutDirection,
+  type PositionCache,
+} from "./dagLayout";
 import { TaskDetail } from "./TaskDetail";
 import {
   TaskExplorerSearch,
@@ -166,7 +171,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   >(null);
   const [dagLoading, setDagLoading] = useState(false);
   const [dagFullscreen, setDagFullscreen] = useState(false);
+  const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
+  const dagPositionCacheRef = useRef<PositionCache>(createPositionCache());
 
   // Upstream traversal controls
   const [dagControls, setDagControls] = useState<DagControlsState>({
@@ -896,7 +903,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                   onCollapse={() => setShowDag(false)}
                   onExpand={() => setShowDag(true)}
                 >
-                  {showDag && canShowDag && (
+                  {showDag && canShowDag && !dagFullscreen && (
                     <div className="h-full bg-gray-50 dark:bg-gray-900">
                       {dagLoading ? (
                         <div className="flex h-full items-center justify-center">
@@ -908,6 +915,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                           graph={dagGraph}
                           selectedTaskId={selectedTask?.task_id ?? null}
                           onTaskClick={handleDagTaskClick}
+                          direction={dagDirection}
+                          onDirectionChange={setDagDirection}
+                          positionCache={dagPositionCacheRef}
                         />
                       ) : (
                         <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
@@ -1016,6 +1026,9 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
               graph={dagGraph}
               selectedTaskId={selectedTask?.task_id ?? null}
               onTaskClick={handleDagTaskClick}
+              direction={dagDirection}
+              onDirectionChange={setDagDirection}
+              positionCache={dagPositionCacheRef}
             />
           </div>
         </div>

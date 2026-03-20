@@ -2,6 +2,7 @@ import { Handle, Position } from "@xyflow/react";
 import type { TaskStatus } from "../types/task";
 import { StatusBadge } from "./StatusBadge";
 import type { LayoutDirection } from "./DagGraph";
+import { truncateLabel } from "./dagLayout";
 
 export interface TaskNodeData extends Record<string, unknown> {
   label: string;
@@ -103,8 +104,9 @@ export function TaskNode({ data }: TaskNodeProps) {
               ? "text-gray-500 dark:text-gray-400"
               : "text-gray-900 dark:text-gray-100"
           }`}
+          title={data.label}
         >
-          {data.label}
+          {truncateLabel(data.label)}
         </span>
         <span
           className={`font-mono text-xs ${

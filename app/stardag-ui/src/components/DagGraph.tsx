@@ -2,8 +2,6 @@ import {
   ReactFlow,
   Background,
   Controls,
-  Panel,
-  useReactFlow,
   type Node,
   type Edge,
   useNodesState,
@@ -13,7 +11,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import Dagre from "@dagrejs/dagre";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
 import type {
   TaskWithContext,
@@ -23,80 +21,16 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
+import { LayoutToggle } from "./LayoutToggle";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
+import {
+  createPositionCache,
+  MAX_LABEL_CHARS,
+  type LayoutDirection,
+  type PositionCache,
+} from "./dagLayout";
 
-export type LayoutDirection = "TB" | "LR";
-
-interface LayoutToggleProps {
-  direction: LayoutDirection;
-  onDirectionChange: (direction: LayoutDirection) => void;
-}
-
-function LayoutToggle({ direction, onDirectionChange }: LayoutToggleProps) {
-  const { fitView } = useReactFlow();
-
-  const handleDirectionChange = useCallback(
-    (newDirection: LayoutDirection) => {
-      onDirectionChange(newDirection);
-      // Delay fitView slightly to allow layout to update
-      setTimeout(() => fitView({ padding: 0.2 }), 50);
-    },
-    [onDirectionChange, fitView],
-  );
-
-  return (
-    <Panel position="top-right">
-      <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white p-1 shadow-sm dark:border-gray-700 dark:bg-gray-800">
-        <button
-          onClick={() => handleDirectionChange("LR")}
-          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-            direction === "LR"
-              ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
-              : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
-          }`}
-          title="Left to Right"
-        >
-          <svg
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M14 5l7 7m0 0l-7 7m7-7H3"
-            />
-          </svg>
-        </button>
-        <button
-          onClick={() => handleDirectionChange("TB")}
-          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-            direction === "TB"
-              ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
-              : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
-          }`}
-          title="Top to Bottom"
-        >
-          <svg
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M19 14l-7 7m0 0l-7-7m7 7V3"
-            />
-          </svg>
-        </button>
-      </div>
-    </Panel>
-  );
-}
+export type { LayoutDirection } from "./dagLayout";
 
 interface DagGraphProps {
   tasks: TaskWithContext[];
@@ -106,6 +40,9 @@ interface DagGraphProps {
   buildId?: string;
   onStatusBuildClick?: (buildId: string) => void;
   defaultDirection?: LayoutDirection;
+  direction?: LayoutDirection;
+  onDirectionChange?: (direction: LayoutDirection) => void;
+  positionCache?: React.MutableRefObject<PositionCache>;
 }
 
 const nodeTypes: NodeTypes = {
@@ -117,10 +54,53 @@ type TaskNodeType = Node<TaskNodeData>;
 type BatchNodeType = Node<BatchNodeData>;
 type AnyNodeType = TaskNodeType | BatchNodeType;
 
-const NODE_WIDTH = 160;
+// --- Node dimension constants ---
+
+const NODE_MIN_WIDTH = 160;
+const NODE_MAX_WIDTH = 300;
 const NODE_HEIGHT = 90;
-const BATCH_NODE_WIDTH = 180;
+const BATCH_NODE_MIN_WIDTH = 180;
+const BATCH_NODE_MAX_WIDTH = 320;
 const BATCH_NODE_HEIGHT = 100;
+const CHAR_WIDTH_ESTIMATE = 8;
+const NODE_PADDING = 40;
+
+function estimateNodeWidth(label: string, minWidth: number, maxWidth: number): number {
+  const displayLength = Math.min(label.length, MAX_LABEL_CHARS);
+  return Math.max(
+    minWidth,
+    Math.min(maxWidth, displayLength * CHAR_WIDTH_ESTIMATE + NODE_PADDING),
+  );
+}
+
+function getNodeDimensions(node: AnyNodeType): { w: number; h: number } {
+  const isBatch = node.type === "batchNode";
+  const label = (node.data as { label: string }).label;
+  return {
+    w: isBatch
+      ? estimateNodeWidth(label, BATCH_NODE_MIN_WIDTH, BATCH_NODE_MAX_WIDTH)
+      : estimateNodeWidth(label, NODE_MIN_WIDTH, NODE_MAX_WIDTH),
+    h: isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT,
+  };
+}
+
+// --- Edge color constants ---
+
+const EDGE_COLORS = {
+  dark: { normal: "#6b7280", muted: "#4b5563" },
+  light: { normal: "#94a3b8", muted: "#d1d5db" },
+} as const;
+
+function getEdgeStyle(isMuted: boolean, theme: string, depthOpacity: number) {
+  const palette = theme === "dark" ? EDGE_COLORS.dark : EDGE_COLORS.light;
+  return {
+    stroke: isMuted ? palette.muted : palette.normal,
+    strokeWidth: isMuted ? 1.5 : 2,
+    opacity: isMuted ? depthOpacity * 0.7 : 1,
+  };
+}
+
+// --- Layout helpers ---
 
 function getLayoutedElements(
   nodes: AnyNodeType[],
@@ -139,12 +119,11 @@ function getLayoutedElements(
     marginy: 20,
   });
 
+  const nodeSizes = new Map<string, { w: number; h: number }>();
   nodes.forEach((node) => {
-    const isBatch = node.type === "batchNode";
-    g.setNode(node.id, {
-      width: isBatch ? BATCH_NODE_WIDTH : NODE_WIDTH,
-      height: isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT,
-    });
+    const size = getNodeDimensions(node);
+    nodeSizes.set(node.id, size);
+    g.setNode(node.id, { width: size.w, height: size.h });
   });
 
   edges.forEach((edge) => {
@@ -154,15 +133,13 @@ function getLayoutedElements(
   Dagre.layout(g);
 
   const layoutedNodes = nodes.map((node) => {
-    const nodeWithPosition = g.node(node.id);
-    const isBatch = node.type === "batchNode";
-    const w = isBatch ? BATCH_NODE_WIDTH : NODE_WIDTH;
-    const h = isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT;
+    const pos = g.node(node.id);
+    const size = nodeSizes.get(node.id)!;
     return {
       ...node,
       position: {
-        x: nodeWithPosition.x - w / 2,
-        y: nodeWithPosition.y - h / 2,
+        x: pos.x - size.w / 2,
+        y: pos.y - size.h / 2,
       },
     };
   });
@@ -176,6 +153,8 @@ function getDepthOpacity(depth: number): number {
   return 0.5;
 }
 
+// --- Component ---
+
 export function DagGraph({
   tasks,
   graph,
@@ -184,9 +163,23 @@ export function DagGraph({
   buildId,
   onStatusBuildClick,
   defaultDirection = "LR",
+  direction: controlledDirection,
+  onDirectionChange: controlledOnDirectionChange,
+  positionCache: externalPositionCache,
 }: DagGraphProps) {
   const { theme } = useTheme();
-  const [direction, setDirection] = useState<LayoutDirection>(defaultDirection);
+  const isControlled =
+    controlledDirection !== undefined && controlledOnDirectionChange !== undefined;
+  const [localDirection, setLocalDirection] = useState<LayoutDirection>(
+    controlledDirection ?? defaultDirection,
+  );
+  const direction = isControlled ? controlledDirection : localDirection;
+  const setDirection = isControlled ? controlledOnDirectionChange : setLocalDirection;
+
+  // Cache of user-adjusted node positions per layout direction
+  // Use external cache if provided (shared across instances), otherwise local
+  const localPositionCacheRef = useRef<PositionCache>(createPositionCache());
+  const positionCacheRef = externalPositionCache ?? localPositionCacheRef;
 
   // Build maps for lookups
   const taskByTaskId = useMemo(
@@ -209,14 +202,15 @@ export function DagGraph({
     return map;
   }, [graph]);
 
-  const { nodes: initialNodes, edges: initialEdges } = useMemo(() => {
+  // Separate layout computation (expensive, resets positions) from data updates (cheap, preserves positions)
+  const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
     if (!graph || graph.nodes.length === 0) {
       return { nodes: [] as AnyNodeType[], edges: [] as Edge[] };
     }
 
     const extended = isExtendedResponse(graph);
 
-    // Create nodes from graph data
+    // Create nodes from graph data (without selection state - that's applied separately)
     const nodes: AnyNodeType[] = graph.nodes.map((graphNode) => {
       const task = taskByTaskId.get(graphNode.task_id);
       const depth = extended
@@ -236,7 +230,7 @@ export function DagGraph({
           label: graphNode.task_name,
           taskId: graphNode.task_id,
           status: graphNode.status,
-          isSelected: graphNode.task_id === selectedTaskId,
+          isSelected: false,
           isFilterMatch,
           direction,
           hasArtifacts: graphNode.artifact_count > 0,
@@ -295,26 +289,13 @@ export function DagGraph({
           source: sourceId,
           target: targetId,
           animated: targetTask?.status === "running",
-          style: {
-            stroke: isMutedEdge
-              ? theme === "dark"
-                ? "#4b5563"
-                : "#d1d5db"
-              : theme === "dark"
-                ? "#6b7280"
-                : "#94a3b8",
-            strokeWidth: isMutedEdge ? 1.5 : 2,
-            opacity: isMutedEdge
-              ? getDepthOpacity(maxAbsDepth) * (isMutedEdge ? 0.7 : 1)
-              : 1,
-          },
+          style: getEdgeStyle(isMutedEdge, theme, getDepthOpacity(maxAbsDepth)),
         };
       });
 
     return getLayoutedElements(nodes, edges, direction);
   }, [
     graph,
-    selectedTaskId,
     taskByTaskId,
     taskByInternalId,
     nodeDepthMap,
@@ -324,26 +305,97 @@ export function DagGraph({
     onStatusBuildClick,
   ]);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
 
+  // Apply layout: use cached positions if available, otherwise dagre defaults.
+  // Also backfill uncached nodes so the cache is complete for other instances.
   useEffect(() => {
-    // Force create new node objects to ensure React Flow detects the change
-    const newNodes = initialNodes.map((node) => ({
+    const cache = positionCacheRef.current[direction];
+    const newNodes = layoutedNodes.map((node) => {
+      const cachedPos = cache.get(node.id);
+      const position = cachedPos ?? node.position;
+      if (!cachedPos) {
+        cache.set(node.id, { ...position });
+      }
+      return {
+        ...node,
+        position,
+        data: { ...node.data },
+      };
+    }) as AnyNodeType[];
+    setNodes(newNodes);
+    setEdges([...layoutedEdges]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
+  }, [layoutedNodes, layoutedEdges, setNodes, setEdges, direction]);
+
+  // Update selection state without resetting positions
+  useEffect(() => {
+    setNodes((currentNodes) =>
+      currentNodes.map((node) => {
+        if (node.type !== "taskNode") return node;
+        const taskData = node.data as TaskNodeData;
+        const shouldBeSelected = taskData.taskId === selectedTaskId;
+        if (taskData.isSelected === shouldBeSelected) return node;
+        return {
+          ...node,
+          data: { ...node.data, isSelected: shouldBeSelected },
+        } as AnyNodeType;
+      }),
+    );
+  }, [selectedTaskId, setNodes]);
+
+  // Save current node positions to cache before switching direction
+  const handleDirectionChange = useCallback(
+    (newDirection: LayoutDirection) => {
+      setNodes((currentNodes) => {
+        const cache = new Map<string, { x: number; y: number }>();
+        for (const node of currentNodes) {
+          cache.set(node.id, { ...node.position });
+        }
+        positionCacheRef.current[direction] = cache;
+        return currentNodes;
+      });
+      setDirection(newDirection);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
+    [direction, setNodes],
+  );
+
+  // Reset layout: clear cache for current direction, re-apply dagre positions
+  const handleResetLayout = useCallback(() => {
+    positionCacheRef.current[direction] = new Map();
+    const newNodes = layoutedNodes.map((node) => ({
       ...node,
       data: { ...node.data },
     })) as AnyNodeType[];
     setNodes(newNodes);
-    setEdges([...initialEdges]);
-  }, [initialNodes, initialEdges, setNodes, setEdges]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
+  }, [direction, layoutedNodes, setNodes]);
 
   const handleNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      // Find the task_id from the node data
       const nodeData = node.data as TaskNodeData;
       onTaskClick(nodeData.taskId);
     },
     [onTaskClick],
+  );
+
+  // Persist positions to cache whenever nodes are dragged
+  const handleNodesChange: typeof onNodesChange = useCallback(
+    (changes) => {
+      onNodesChange(changes);
+      // After drag ends, update the position cache
+      for (const change of changes) {
+        if (change.type === "position" && change.position && !change.dragging) {
+          positionCacheRef.current[direction].set(change.id, {
+            ...change.position,
+          });
+        }
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
+    [onNodesChange, direction],
   );
 
   if (!graph || graph.nodes.length === 0) {
@@ -361,7 +413,7 @@ export function DagGraph({
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        onNodesChange={onNodesChange}
+        onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={handleNodeClick}
         nodeTypes={nodeTypes}
@@ -373,7 +425,11 @@ export function DagGraph({
       >
         <Background color={theme === "dark" ? "#374151" : "#e5e7eb"} gap={16} />
         <Controls className="!bg-white dark:!bg-gray-800 !border-gray-200 dark:!border-gray-700" />
-        <LayoutToggle direction={direction} onDirectionChange={setDirection} />
+        <LayoutToggle
+          direction={direction}
+          onDirectionChange={handleDirectionChange}
+          onResetLayout={handleResetLayout}
+        />
       </ReactFlow>
     </div>
   );
