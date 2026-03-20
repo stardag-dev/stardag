@@ -24,8 +24,13 @@ import type {
 import { isExtendedResponse } from "../types/task";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
+import {
+  createPositionCache,
+  type LayoutDirection,
+  type PositionCache,
+} from "./dagLayout";
 
-export type LayoutDirection = "TB" | "LR";
+export type { LayoutDirection } from "./dagLayout";
 
 interface LayoutToggleProps {
   direction: LayoutDirection;
@@ -135,6 +140,7 @@ interface DagGraphProps {
   buildId?: string;
   onStatusBuildClick?: (buildId: string) => void;
   defaultDirection?: LayoutDirection;
+  positionCache?: React.MutableRefObject<PositionCache>;
 }
 
 const nodeTypes: NodeTypes = {
@@ -228,14 +234,15 @@ export function DagGraph({
   buildId,
   onStatusBuildClick,
   defaultDirection = "LR",
+  positionCache: externalPositionCache,
 }: DagGraphProps) {
   const { theme } = useTheme();
   const [direction, setDirection] = useState<LayoutDirection>(defaultDirection);
 
   // Cache of user-adjusted node positions per layout direction
-  const positionCacheRef = useRef<
-    Record<LayoutDirection, Map<string, { x: number; y: number }>>
-  >({ TB: new Map(), LR: new Map() });
+  // Use external cache if provided (shared across instances), otherwise local
+  const localPositionCacheRef = useRef<PositionCache>(createPositionCache());
+  const positionCacheRef = externalPositionCache ?? localPositionCacheRef;
 
   // Build maps for lookups
   const taskByTaskId = useMemo(
@@ -389,6 +396,7 @@ export function DagGraph({
     }) as AnyNodeType[];
     setNodes(newNodes);
     setEdges([...layoutedEdges]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
   }, [layoutedNodes, layoutedEdges, setNodes, setEdges, direction]);
 
   // Update selection state without resetting positions
@@ -420,6 +428,7 @@ export function DagGraph({
       });
       setDirection(newDirection);
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
     [direction, setNodes],
   );
 
@@ -431,6 +440,7 @@ export function DagGraph({
       data: { ...node.data },
     })) as AnyNodeType[];
     setNodes(newNodes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
   }, [direction, layoutedNodes, setNodes]);
 
   const handleNodeClick = useCallback(
@@ -454,6 +464,7 @@ export function DagGraph({
         }
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positionCacheRef is a stable ref
     [onNodesChange, direction],
   );
 

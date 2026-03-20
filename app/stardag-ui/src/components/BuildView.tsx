@@ -28,6 +28,7 @@ import { isExtendedResponse } from "../types/task";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
+import { createPositionCache, type PositionCache } from "./dagLayout";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { TaskTable } from "./TaskTable";
@@ -64,6 +65,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const [showDag, setShowDag] = useState(true);
   const [dagFullscreen, setDagFullscreen] = useState(false);
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
+  const dagPositionCacheRef = useRef<PositionCache>(createPositionCache());
 
   // Override state dropdown
   const [showOverrideMenu, setShowOverrideMenu] = useState(false);
@@ -571,6 +573,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                         onTaskClick={handleDagTaskClick}
                         buildId={buildId}
                         onStatusBuildClick={onNavigateToBuild}
+                        positionCache={dagPositionCacheRef}
                       />
                     </div>
                   )}
@@ -665,6 +668,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               onTaskClick={handleDagTaskClick}
               buildId={buildId}
               onStatusBuildClick={onNavigateToBuild}
+              positionCache={dagPositionCacheRef}
             />
           </div>
         </div>

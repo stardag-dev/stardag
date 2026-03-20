@@ -29,6 +29,7 @@ import {
 } from "./ColumnManagerModal";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
+import { createPositionCache, type PositionCache } from "./dagLayout";
 import { TaskDetail } from "./TaskDetail";
 import {
   TaskExplorerSearch,
@@ -167,6 +168,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const [dagLoading, setDagLoading] = useState(false);
   const [dagFullscreen, setDagFullscreen] = useState(false);
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
+  const dagPositionCacheRef = useRef<PositionCache>(createPositionCache());
 
   // Upstream traversal controls
   const [dagControls, setDagControls] = useState<DagControlsState>({
@@ -908,6 +910,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                           graph={dagGraph}
                           selectedTaskId={selectedTask?.task_id ?? null}
                           onTaskClick={handleDagTaskClick}
+                          positionCache={dagPositionCacheRef}
                         />
                       ) : (
                         <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
@@ -1016,6 +1019,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
               graph={dagGraph}
               selectedTaskId={selectedTask?.task_id ?? null}
               onTaskClick={handleDagTaskClick}
+              positionCache={dagPositionCacheRef}
             />
           </div>
         </div>
