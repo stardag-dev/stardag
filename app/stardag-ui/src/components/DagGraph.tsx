@@ -4,6 +4,7 @@ import {
   Controls,
   type Node,
   type Edge,
+  Position,
   useNodesState,
   useEdgesState,
   type NodeTypes,
@@ -102,7 +103,22 @@ function getEdgeStyle(isMuted: boolean, theme: string, depthOpacity: number) {
 
 // --- Layout helpers ---
 
-function getLayoutedElements(
+function getDepthOpacity(depth: number): number {
+  if (depth === 0) return 1;
+  if (depth === 1) return 0.7;
+  return 0.5;
+}
+
+function getHandlePositions(direction: LayoutDirection): {
+  source: Position;
+  target: Position;
+} {
+  return direction === "LR"
+    ? { source: Position.Right, target: Position.Left }
+    : { source: Position.Bottom, target: Position.Top };
+}
+
+function applyDagreLayout(
   nodes: AnyNodeType[],
   edges: Edge[],
   direction: LayoutDirection,
@@ -147,10 +163,126 @@ function getLayoutedElements(
   return { nodes: layoutedNodes, edges };
 }
 
-function getDepthOpacity(depth: number): number {
-  if (depth === 0) return 1;
-  if (depth === 1) return 0.7;
-  return 0.5;
+// --- Graph data builders ---
+
+interface BuildNodesParams {
+  graph: TaskGraphResponse | TaskGraphExtendedResponse;
+  taskByTaskId: Map<string, TaskWithContext>;
+  direction: LayoutDirection;
+  buildId?: string;
+  onStatusBuildClick?: (buildId: string) => void;
+}
+
+function buildGraphNodes({
+  graph,
+  taskByTaskId,
+  direction,
+  buildId,
+  onStatusBuildClick,
+}: BuildNodesParams): AnyNodeType[] {
+  const extended = isExtendedResponse(graph);
+  const handlePositions = getHandlePositions(direction);
+
+  const nodes: AnyNodeType[] = graph.nodes.map((graphNode) => {
+    const task = taskByTaskId.get(graphNode.task_id);
+    const depth = extended
+      ? (graphNode as { traversal_depth?: number }).traversal_depth ?? 0
+      : 0;
+    const isPrimary = extended
+      ? (graphNode as { is_primary?: boolean }).is_primary ?? true
+      : true;
+    const isFilterMatch = task?.isFilterMatch ?? isPrimary;
+
+    return {
+      id: String(graphNode.id),
+      type: "taskNode" as const,
+      position: { x: 0, y: 0 },
+      sourcePosition: handlePositions.source,
+      targetPosition: handlePositions.target,
+      style: depth !== 0 ? { opacity: getDepthOpacity(Math.abs(depth)) } : undefined,
+      data: {
+        label: graphNode.task_name,
+        taskId: graphNode.task_id,
+        status: graphNode.status,
+        isSelected: false,
+        isFilterMatch,
+        direction,
+        hasArtifacts: graphNode.artifact_count > 0,
+        waitingForLock: task?.waiting_for_lock,
+        statusBuildId: task?.status_build_id,
+        currentBuildId: buildId,
+        onStatusBuildClick,
+      },
+    } satisfies TaskNodeType;
+  });
+
+  // Add batch nodes for groups
+  const groups: GroupSummary[] = extended
+    ? (graph as TaskGraphExtendedResponse).groups
+    : [];
+  for (const group of groups) {
+    nodes.push({
+      id: group.group_id,
+      type: "batchNode" as const,
+      position: { x: 0, y: 0 },
+      sourcePosition: handlePositions.source,
+      targetPosition: handlePositions.target,
+      style: { opacity: getDepthOpacity(group.depth) },
+      data: {
+        label: group.task_name,
+        count: group.count,
+        taskNamespace: group.task_namespace,
+        depth: group.depth,
+        status: group.status,
+        direction,
+      },
+    } satisfies BatchNodeType);
+  }
+
+  return nodes;
+}
+
+interface BuildEdgesParams {
+  graph: TaskGraphResponse | TaskGraphExtendedResponse;
+  nodeIds: Set<string>;
+  taskByInternalId: Map<string | number, TaskWithContext>;
+  nodeDepthMap: Map<string, number>;
+  theme: string;
+}
+
+function buildGraphEdges({
+  graph,
+  nodeIds,
+  taskByInternalId,
+  nodeDepthMap,
+  theme,
+}: BuildEdgesParams): Edge[] {
+  return graph.edges
+    .filter(
+      (graphEdge) =>
+        nodeIds.has(String(graphEdge.source)) && nodeIds.has(String(graphEdge.target)),
+    )
+    .map((graphEdge) => {
+      const sourceId = String(graphEdge.source);
+      const targetId = String(graphEdge.target);
+      const sourceTask = taskByInternalId.get(graphEdge.source);
+      const targetTask = taskByInternalId.get(graphEdge.target);
+      const sourceDepth = nodeDepthMap.get(sourceId) ?? 0;
+      const targetDepth = nodeDepthMap.get(targetId) ?? 0;
+      const maxAbsDepth = Math.max(Math.abs(sourceDepth), Math.abs(targetDepth));
+      const isMutedEdge =
+        maxAbsDepth > 0 ||
+        !(sourceTask?.isFilterMatch ?? true) ||
+        !(targetTask?.isFilterMatch ?? true);
+
+      return {
+        id: `${graphEdge.source}-${graphEdge.target}`,
+        source: sourceId,
+        target: targetId,
+        animated: targetTask?.status === "running",
+        style: getEdgeStyle(isMutedEdge, theme, getDepthOpacity(maxAbsDepth)),
+      };
+    });
 }
 
 // --- Component ---
@@ -202,98 +334,30 @@ export function DagGraph({
     return map;
   }, [graph]);
 
-  // Separate layout computation (expensive, resets positions) from data updates (cheap, preserves positions)
+  // Compute layout: build nodes and edges, then apply dagre positioning
   const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
     if (!graph || graph.nodes.length === 0) {
       return { nodes: [] as AnyNodeType[], edges: [] as Edge[] };
     }
 
-    const extended = isExtendedResponse(graph);
-
-    // Create nodes from graph data (without selection state - that's applied separately)
-    const nodes: AnyNodeType[] = graph.nodes.map((graphNode) => {
-      const task = taskByTaskId.get(graphNode.task_id);
-      const depth = extended
-        ? (graphNode as { traversal_depth?: number }).traversal_depth ?? 0
-        : 0;
-      const isPrimary = extended
-        ? (graphNode as { is_primary?: boolean }).is_primary ?? true
-        : true;
-      const isFilterMatch = task?.isFilterMatch ?? isPrimary;
-
-      return {
-        id: String(graphNode.id),
-        type: "taskNode" as const,
-        position: { x: 0, y: 0 },
-        style: depth !== 0 ? { opacity: getDepthOpacity(Math.abs(depth)) } : undefined,
-        data: {
-          label: graphNode.task_name,
-          taskId: graphNode.task_id,
-          status: graphNode.status,
-          isSelected: false,
-          isFilterMatch,
-          direction,
-          hasArtifacts: graphNode.artifact_count > 0,
-          waitingForLock: task?.waiting_for_lock,
-          statusBuildId: task?.status_build_id,
-          currentBuildId: buildId,
-          onStatusBuildClick,
-        },
-      } satisfies TaskNodeType;
+    const nodes = buildGraphNodes({
+      graph,
+      taskByTaskId,
+      direction,
+      buildId,
+      onStatusBuildClick,
     });
 
-    // Add batch nodes for groups
-    const groups: GroupSummary[] = extended
-      ? (graph as TaskGraphExtendedResponse).groups
-      : [];
-    for (const group of groups) {
-      nodes.push({
-        id: group.group_id,
-        type: "batchNode" as const,
-        position: { x: 0, y: 0 },
-        style: { opacity: getDepthOpacity(group.depth) },
-        data: {
-          label: group.task_name,
-          count: group.count,
-          taskNamespace: group.task_namespace,
-          depth: group.depth,
-          status: group.status,
-          direction,
-        },
-      } satisfies BatchNodeType);
-    }
+    const nodeIds = new Set(nodes.map((n) => n.id));
+    const edges = buildGraphEdges({
+      graph,
+      nodeIds,
+      taskByInternalId,
+      nodeDepthMap,
+      theme,
+    });
 
-    // Create edges from graph data
-    const nodeIdSet = new Set(nodes.map((n) => n.id));
-    const edges: Edge[] = graph.edges
-      .filter(
-        (graphEdge) =>
-          nodeIdSet.has(String(graphEdge.source)) &&
-          nodeIdSet.has(String(graphEdge.target)),
-      )
-      .map((graphEdge) => {
-        const sourceId = String(graphEdge.source);
-        const targetId = String(graphEdge.target);
-        const sourceTask = taskByInternalId.get(graphEdge.source);
-        const targetTask = taskByInternalId.get(graphEdge.target);
-        const sourceDepth = nodeDepthMap.get(sourceId) ?? 0;
-        const targetDepth = nodeDepthMap.get(targetId) ?? 0;
-        const maxAbsDepth = Math.max(Math.abs(sourceDepth), Math.abs(targetDepth));
-        const isMutedEdge =
-          maxAbsDepth > 0 ||
-          !(sourceTask?.isFilterMatch ?? true) ||
-          !(targetTask?.isFilterMatch ?? true);
-
-        return {
-          id: `${graphEdge.source}-${graphEdge.target}`,
-          source: sourceId,
-          target: targetId,
-          animated: targetTask?.status === "running",
-          style: getEdgeStyle(isMutedEdge, theme, getDepthOpacity(maxAbsDepth)),
-        };
-      });
-
-    return getLayoutedElements(nodes, edges, direction);
+    return applyDagreLayout(nodes, edges, direction);
   }, [
     graph,
     taskByTaskId,
