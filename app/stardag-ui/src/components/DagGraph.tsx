@@ -2,8 +2,6 @@ import {
   ReactFlow,
   Background,
   Controls,
-  Panel,
-  useReactFlow,
   type Node,
   type Edge,
   useNodesState,
@@ -23,6 +21,7 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BatchNode, type BatchNodeData } from "./BatchNode";
+import { LayoutToggle } from "./LayoutToggle";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 import {
   createPositionCache,
@@ -32,106 +31,6 @@ import {
 } from "./dagLayout";
 
 export type { LayoutDirection } from "./dagLayout";
-
-interface LayoutToggleProps {
-  direction: LayoutDirection;
-  onDirectionChange: (direction: LayoutDirection) => void;
-  onResetLayout: () => void;
-}
-
-function LayoutToggle({
-  direction,
-  onDirectionChange,
-  onResetLayout,
-}: LayoutToggleProps) {
-  const { fitView } = useReactFlow();
-
-  const handleDirectionChange = useCallback(
-    (newDirection: LayoutDirection) => {
-      onDirectionChange(newDirection);
-      setTimeout(() => fitView({ padding: 0.2 }), 50);
-    },
-    [onDirectionChange, fitView],
-  );
-
-  const handleResetLayout = useCallback(() => {
-    onResetLayout();
-    setTimeout(() => fitView({ padding: 0.2 }), 50);
-  }, [onResetLayout, fitView]);
-
-  return (
-    <Panel position="top-right">
-      <div className="flex items-center gap-1 rounded-md border border-gray-200 bg-white p-1 shadow-sm dark:border-gray-700 dark:bg-gray-800">
-        <button
-          onClick={() => handleDirectionChange("LR")}
-          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-            direction === "LR"
-              ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
-              : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
-          }`}
-          title="Left to Right"
-        >
-          <svg
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M14 5l7 7m0 0l-7 7m7-7H3"
-            />
-          </svg>
-        </button>
-        <button
-          onClick={() => handleDirectionChange("TB")}
-          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-            direction === "TB"
-              ? "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300"
-              : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
-          }`}
-          title="Top to Bottom"
-        >
-          <svg
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M19 14l-7 7m0 0l-7-7m7 7V3"
-            />
-          </svg>
-        </button>
-        <div className="mx-0.5 h-4 w-px bg-gray-200 dark:bg-gray-700" />
-        <button
-          onClick={handleResetLayout}
-          className="rounded px-2 py-1 text-xs font-medium text-gray-600 transition-colors hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
-          title="Reset layout"
-        >
-          <svg
-            className="h-4 w-4"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-            />
-          </svg>
-        </button>
-      </div>
-    </Panel>
-  );
-}
 
 interface DagGraphProps {
   tasks: TaskWithContext[];
@@ -155,6 +54,8 @@ type TaskNodeType = Node<TaskNodeData>;
 type BatchNodeType = Node<BatchNodeData>;
 type AnyNodeType = TaskNodeType | BatchNodeType;
 
+// --- Node dimension constants ---
+
 const NODE_MIN_WIDTH = 160;
 const NODE_MAX_WIDTH = 300;
 const NODE_HEIGHT = 90;
@@ -163,6 +64,7 @@ const BATCH_NODE_MAX_WIDTH = 320;
 const BATCH_NODE_HEIGHT = 100;
 const CHAR_WIDTH_ESTIMATE = 8;
 const NODE_PADDING = 40;
+
 function estimateNodeWidth(label: string, minWidth: number, maxWidth: number): number {
   const displayLength = Math.min(label.length, MAX_LABEL_CHARS);
   return Math.max(
@@ -170,6 +72,35 @@ function estimateNodeWidth(label: string, minWidth: number, maxWidth: number): n
     Math.min(maxWidth, displayLength * CHAR_WIDTH_ESTIMATE + NODE_PADDING),
   );
 }
+
+function getNodeDimensions(node: AnyNodeType): { w: number; h: number } {
+  const isBatch = node.type === "batchNode";
+  const label = (node.data as { label: string }).label;
+  return {
+    w: isBatch
+      ? estimateNodeWidth(label, BATCH_NODE_MIN_WIDTH, BATCH_NODE_MAX_WIDTH)
+      : estimateNodeWidth(label, NODE_MIN_WIDTH, NODE_MAX_WIDTH),
+    h: isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT,
+  };
+}
+
+// --- Edge color constants ---
+
+const EDGE_COLORS = {
+  dark: { normal: "#6b7280", muted: "#4b5563" },
+  light: { normal: "#94a3b8", muted: "#d1d5db" },
+} as const;
+
+function getEdgeStyle(isMuted: boolean, theme: string, depthOpacity: number) {
+  const palette = theme === "dark" ? EDGE_COLORS.dark : EDGE_COLORS.light;
+  return {
+    stroke: isMuted ? palette.muted : palette.normal,
+    strokeWidth: isMuted ? 1.5 : 2,
+    opacity: isMuted ? depthOpacity * 0.7 : 1,
+  };
+}
+
+// --- Layout helpers ---
 
 function getLayoutedElements(
   nodes: AnyNodeType[],
@@ -188,14 +119,11 @@ function getLayoutedElements(
     marginy: 20,
   });
 
+  const nodeSizes = new Map<string, { w: number; h: number }>();
   nodes.forEach((node) => {
-    const isBatch = node.type === "batchNode";
-    const label = (node.data as { label: string }).label;
-    const w = isBatch
-      ? estimateNodeWidth(label, BATCH_NODE_MIN_WIDTH, BATCH_NODE_MAX_WIDTH)
-      : estimateNodeWidth(label, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
-    const h = isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT;
-    g.setNode(node.id, { width: w, height: h });
+    const size = getNodeDimensions(node);
+    nodeSizes.set(node.id, size);
+    g.setNode(node.id, { width: size.w, height: size.h });
   });
 
   edges.forEach((edge) => {
@@ -205,18 +133,13 @@ function getLayoutedElements(
   Dagre.layout(g);
 
   const layoutedNodes = nodes.map((node) => {
-    const nodeWithPosition = g.node(node.id);
-    const isBatch = node.type === "batchNode";
-    const label = (node.data as { label: string }).label;
-    const w = isBatch
-      ? estimateNodeWidth(label, BATCH_NODE_MIN_WIDTH, BATCH_NODE_MAX_WIDTH)
-      : estimateNodeWidth(label, NODE_MIN_WIDTH, NODE_MAX_WIDTH);
-    const h = isBatch ? BATCH_NODE_HEIGHT : NODE_HEIGHT;
+    const pos = g.node(node.id);
+    const size = nodeSizes.get(node.id)!;
     return {
       ...node,
       position: {
-        x: nodeWithPosition.x - w / 2,
-        y: nodeWithPosition.y - h / 2,
+        x: pos.x - size.w / 2,
+        y: pos.y - size.h / 2,
       },
     };
   });
@@ -229,6 +152,8 @@ function getDepthOpacity(depth: number): number {
   if (depth === 1) return 0.7;
   return 0.5;
 }
+
+// --- Component ---
 
 export function DagGraph({
   tasks,
@@ -364,19 +289,7 @@ export function DagGraph({
           source: sourceId,
           target: targetId,
           animated: targetTask?.status === "running",
-          style: {
-            stroke: isMutedEdge
-              ? theme === "dark"
-                ? "#4b5563"
-                : "#d1d5db"
-              : theme === "dark"
-                ? "#6b7280"
-                : "#94a3b8",
-            strokeWidth: isMutedEdge ? 1.5 : 2,
-            opacity: isMutedEdge
-              ? getDepthOpacity(maxAbsDepth) * (isMutedEdge ? 0.7 : 1)
-              : 1,
-          },
+          style: getEdgeStyle(isMutedEdge, theme, getDepthOpacity(maxAbsDepth)),
         };
       });
 
