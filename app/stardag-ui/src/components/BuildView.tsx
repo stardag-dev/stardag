@@ -564,7 +564,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                   onCollapse={() => setShowDag(false)}
                   onExpand={() => setShowDag(true)}
                 >
-                  {showDag && (
+                  {showDag && !dagFullscreen && (
                     <div className="h-full">
                       <DagGraph
                         tasks={tasksWithContext}

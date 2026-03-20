@@ -383,14 +383,19 @@ export function DagGraph({
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
 
-  // Apply layout: use cached positions if available, otherwise dagre defaults
+  // Apply layout: use cached positions if available, otherwise dagre defaults.
+  // Also backfill uncached nodes so the cache is complete for other instances.
   useEffect(() => {
     const cache = positionCacheRef.current[direction];
     const newNodes = layoutedNodes.map((node) => {
       const cachedPos = cache.get(node.id);
+      const position = cachedPos ?? node.position;
+      if (!cachedPos) {
+        cache.set(node.id, { ...position });
+      }
       return {
         ...node,
-        position: cachedPos ?? node.position,
+        position,
         data: { ...node.data },
       };
     }) as AnyNodeType[];

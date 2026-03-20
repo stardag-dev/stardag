@@ -898,7 +898,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                   onCollapse={() => setShowDag(false)}
                   onExpand={() => setShowDag(true)}
                 >
-                  {showDag && canShowDag && (
+                  {showDag && canShowDag && !dagFullscreen && (
                     <div className="h-full bg-gray-50 dark:bg-gray-900">
                       {dagLoading ? (
                         <div className="flex h-full items-center justify-center">
