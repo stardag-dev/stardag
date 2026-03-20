@@ -26,6 +26,7 @@ import { BatchNode, type BatchNodeData } from "./BatchNode";
 import { TaskNode, type TaskNodeData } from "./TaskNode";
 import {
   createPositionCache,
+  MAX_LABEL_CHARS,
   type LayoutDirection,
   type PositionCache,
 } from "./dagLayout";
@@ -163,9 +164,10 @@ const BATCH_NODE_HEIGHT = 100;
 const CHAR_WIDTH_ESTIMATE = 8;
 const NODE_PADDING = 40;
 function estimateNodeWidth(label: string, minWidth: number, maxWidth: number): number {
+  const displayLength = Math.min(label.length, MAX_LABEL_CHARS);
   return Math.max(
     minWidth,
-    Math.min(maxWidth, label.length * CHAR_WIDTH_ESTIMATE + NODE_PADDING),
+    Math.min(maxWidth, displayLength * CHAR_WIDTH_ESTIMATE + NODE_PADDING),
   );
 }
 
@@ -241,10 +243,13 @@ export function DagGraph({
   positionCache: externalPositionCache,
 }: DagGraphProps) {
   const { theme } = useTheme();
-  const [localDirection, setLocalDirection] =
-    useState<LayoutDirection>(defaultDirection);
-  const direction = controlledDirection ?? localDirection;
-  const setDirection = controlledOnDirectionChange ?? setLocalDirection;
+  const isControlled =
+    controlledDirection !== undefined && controlledOnDirectionChange !== undefined;
+  const [localDirection, setLocalDirection] = useState<LayoutDirection>(
+    controlledDirection ?? defaultDirection,
+  );
+  const direction = isControlled ? controlledDirection : localDirection;
+  const setDirection = isControlled ? controlledOnDirectionChange : setLocalDirection;
 
   // Cache of user-adjusted node positions per layout direction
   // Use external cache if provided (shared across instances), otherwise local

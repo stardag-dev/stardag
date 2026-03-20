@@ -1,6 +1,7 @@
 import { Handle, Position } from "@xyflow/react";
 import type { TaskStatus } from "../types/task";
 import type { LayoutDirection } from "./DagGraph";
+import { truncateLabel } from "./dagLayout";
 
 export interface BatchNodeData extends Record<string, unknown> {
   label: string;
@@ -75,7 +76,7 @@ export function BatchNode({ data }: BatchNodeProps) {
         />
         <div className="flex flex-col items-center gap-1 opacity-80">
           <span className={`text-sm font-medium ${colors.text}`} title={data.label}>
-            {data.label.length > 20 ? `${data.label.slice(0, 20)}…` : data.label}
+            {truncateLabel(data.label)}
           </span>
           <div className="flex items-center gap-1">
             <span
