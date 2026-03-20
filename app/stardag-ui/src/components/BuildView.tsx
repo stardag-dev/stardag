@@ -28,7 +28,11 @@ import { isExtendedResponse } from "../types/task";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
-import { createPositionCache, type PositionCache } from "./dagLayout";
+import {
+  createPositionCache,
+  type LayoutDirection,
+  type PositionCache,
+} from "./dagLayout";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
 import { TaskTable } from "./TaskTable";
@@ -64,6 +68,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // DAG collapse state - expanded by default
   const [showDag, setShowDag] = useState(true);
   const [dagFullscreen, setDagFullscreen] = useState(false);
+  const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const dagPositionCacheRef = useRef<PositionCache>(createPositionCache());
 
@@ -573,6 +578,8 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                         onTaskClick={handleDagTaskClick}
                         buildId={buildId}
                         onStatusBuildClick={onNavigateToBuild}
+                        direction={dagDirection}
+                        onDirectionChange={setDagDirection}
                         positionCache={dagPositionCacheRef}
                       />
                     </div>
@@ -668,6 +675,8 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               onTaskClick={handleDagTaskClick}
               buildId={buildId}
               onStatusBuildClick={onNavigateToBuild}
+              direction={dagDirection}
+              onDirectionChange={setDagDirection}
               positionCache={dagPositionCacheRef}
             />
           </div>

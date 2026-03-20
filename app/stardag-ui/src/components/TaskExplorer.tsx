@@ -29,7 +29,11 @@ import {
 } from "./ColumnManagerModal";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
-import { createPositionCache, type PositionCache } from "./dagLayout";
+import {
+  createPositionCache,
+  type LayoutDirection,
+  type PositionCache,
+} from "./dagLayout";
 import { TaskDetail } from "./TaskDetail";
 import {
   TaskExplorerSearch,
@@ -167,6 +171,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   >(null);
   const [dagLoading, setDagLoading] = useState(false);
   const [dagFullscreen, setDagFullscreen] = useState(false);
+  const [dagDirection, setDagDirection] = useState<LayoutDirection>("LR");
   const dagPanelRef = useRef<ImperativePanelHandle>(null);
   const dagPositionCacheRef = useRef<PositionCache>(createPositionCache());
 
@@ -910,6 +915,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                           graph={dagGraph}
                           selectedTaskId={selectedTask?.task_id ?? null}
                           onTaskClick={handleDagTaskClick}
+                          direction={dagDirection}
+                          onDirectionChange={setDagDirection}
                           positionCache={dagPositionCacheRef}
                         />
                       ) : (
@@ -1019,6 +1026,8 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
               graph={dagGraph}
               selectedTaskId={selectedTask?.task_id ?? null}
               onTaskClick={handleDagTaskClick}
+              direction={dagDirection}
+              onDirectionChange={setDagDirection}
               positionCache={dagPositionCacheRef}
             />
           </div>

@@ -140,6 +140,8 @@ interface DagGraphProps {
   buildId?: string;
   onStatusBuildClick?: (buildId: string) => void;
   defaultDirection?: LayoutDirection;
+  direction?: LayoutDirection;
+  onDirectionChange?: (direction: LayoutDirection) => void;
   positionCache?: React.MutableRefObject<PositionCache>;
 }
 
@@ -234,10 +236,15 @@ export function DagGraph({
   buildId,
   onStatusBuildClick,
   defaultDirection = "LR",
+  direction: controlledDirection,
+  onDirectionChange: controlledOnDirectionChange,
   positionCache: externalPositionCache,
 }: DagGraphProps) {
   const { theme } = useTheme();
-  const [direction, setDirection] = useState<LayoutDirection>(defaultDirection);
+  const [localDirection, setLocalDirection] =
+    useState<LayoutDirection>(defaultDirection);
+  const direction = controlledDirection ?? localDirection;
+  const setDirection = controlledOnDirectionChange ?? setLocalDirection;
 
   // Cache of user-adjusted node positions per layout direction
   // Use external cache if provided (shared across instances), otherwise local
