@@ -1215,9 +1215,12 @@ def refresh(
         _validate_active_profile_cli()
 
     config = get_config()
-    registry_name = registry or config.context.registry_name
-    ws_id = workspace_id or config.context.workspace_id
-    user = config.context.user  # Get user from active profile
+    from stardag.config import get_config_context
+
+    ctx = get_config_context()
+    registry_name = registry or ctx.registry_name
+    ws_id = workspace_id or (config.registry.workspace_id if config.registry else None)
+    user = config.registry.auth.user_email if config.registry else None
 
     if not registry_name:
         typer.echo("Error: No registry specified and no active profile", err=True)
@@ -1292,7 +1295,7 @@ def refresh(
         typer.echo("Access token refreshed and cached")
 
         # Sync target roots from registry
-        environment_id = config.context.environment_id
+        environment_id = config.registry.environment_id if config.registry else None
         if environment_id:
             _sync_target_roots(registry_url, access_token, ws_id, environment_id)
 

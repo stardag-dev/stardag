@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from stardag.config import config_provider
+from stardag.config import DEFAULT_API_TIMEOUT, config_provider
 from stardag.exceptions import APIError
 
 
@@ -28,14 +28,17 @@ class RegistryAPIClientConfig:
     ) -> "RegistryAPIClientConfig":
         """Create config from central config with optional overrides."""
         config = config_provider.get()
+        reg = config.registry
 
-        # API key: explicit > config (which includes env var)
-        resolved_api_key = api_key or config.api_key
+        # API key: explicit > config
+        resolved_api_key = api_key or (reg.auth.api_key if reg else None)
 
         # Access token from config (browser login, only if no API key)
-        resolved_access_token = config.access_token if not resolved_api_key else None
+        resolved_access_token = (
+            reg.auth.access_token if reg and not resolved_api_key else None
+        )
 
-        resolved_url = api_url or config.api.url
+        resolved_url = api_url or (reg.url if reg else None)
         if not resolved_url:
             raise ValueError(
                 "Registry API client requires a URL. "
@@ -46,8 +49,10 @@ class RegistryAPIClientConfig:
             api_url=resolved_url.rstrip("/"),
             api_key=resolved_api_key,
             access_token=resolved_access_token,
-            environment_id=environment_id or config.context.environment_id,
-            timeout=timeout if timeout is not None else config.api.timeout,
+            environment_id=environment_id or (reg.environment_id if reg else None),
+            timeout=timeout
+            if timeout is not None
+            else (reg.timeout if reg else DEFAULT_API_TIMEOUT),
         )
 
 

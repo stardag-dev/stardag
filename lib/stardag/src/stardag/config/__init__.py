@@ -2,8 +2,8 @@
 
 This module provides a unified configuration system that consolidates:
 - Target factory settings (target roots)
-- API registry settings (URL, timeout, environment)
-- Active context (registry, workspace, environment)
+- Registry settings (URL, workspace, environment, auth, timeout)
+- Config context (provenance: which profile/registry name was used)
 
 Configuration is loaded from multiple sources with the following priority:
 1. Environment variables (STARDAG_*)
@@ -15,16 +15,18 @@ Usage:
     from stardag.config import get_config
 
     config = get_config()
-    print(config.api.url)
+    if config.registry:
+        print(config.registry.url)
     print(config.target.roots)
 
 Environment Variables (highest priority):
     STARDAG_PROFILE          - Profile name to use (looks up in config.toml)
     STARDAG_REGISTRY_URL     - Direct registry URL override
     STARDAG_WORKSPACE_ID     - Direct workspace ID override
-    STARDAG_ENVIRONMENT_ID     - Direct environment ID override
+    STARDAG_ENVIRONMENT_ID   - Direct environment ID override
     STARDAG_API_KEY          - API key for authentication
     STARDAG_TARGET_ROOTS     - JSON dict of target roots (override)
+    STARDAG_NO_REGISTRY      - Set to 1/true to force offline/local mode
 """
 
 # Re-export everything from submodules for backward compatibility.
@@ -56,18 +58,26 @@ from stardag.config.loader import (
     clear_config_cache as clear_config_cache,
     config_provider as config_provider,
     get_config as get_config,
+    get_config_context as get_config_context,
     load_config as load_config,
 )
 from stardag.config.models import (
-    APIConfig as APIConfig,
-    ContextConfig as ContextConfig,
-    ProfileConfig as ProfileConfig,
+    # Canonical models
+    ConfigContext as ConfigContext,
+    RegistryAuth as RegistryAuth,
     RegistryConfig as RegistryConfig,
     StardagConfig as StardagConfig,
+    StardagConfigWithContext as StardagConfigWithContext,
     StardagSettings as StardagSettings,
     TargetConfig as TargetConfig,
     TargetRoots as TargetRoots,
+    # TOML models
+    ProfileConfig as ProfileConfig,
     TomlConfig as TomlConfig,
+    TomlRegistryEntry as TomlRegistryEntry,
+    # Deprecated aliases
+    APIConfig as APIConfig,
+    ContextConfig as ContextConfig,
 )
 from stardag.config.paths import (
     DEFAULT_API_TIMEOUT as DEFAULT_API_TIMEOUT,

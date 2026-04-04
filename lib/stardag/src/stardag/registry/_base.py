@@ -344,15 +344,14 @@ class NoOpRegistry(RegistryABC):
 def init_registry() -> RegistryABC:
     """Initialize the default registry based on configuration.
 
-    Returns APIRegistry if authentication is configured, otherwise NoOpRegistry.
+    Returns APIRegistry if registry is configured, otherwise NoOpRegistry.
     """
     from stardag.config import config_provider
     from stardag.registry._api_registry import APIRegistry
 
     config = config_provider.get()
 
-    # Use API registry if we have authentication or an explicit API URL
-    if config.api_key or config.access_token or config.api.url is not None:
+    if config.registry is not None:
         return APIRegistry()
 
     return NoOpRegistry()

@@ -10,7 +10,7 @@ from uuid import UUID
 import httpx
 from httpx_retries import Retry, RetryTransport
 
-from stardag.config import config_provider
+from stardag.config import DEFAULT_API_TIMEOUT, config_provider
 from stardag.exceptions import (
     APIError,
     AuthorizationError,
@@ -76,15 +76,16 @@ class APIRegistry(RegistryABC):
     ):
         # Load central config
         config = config_provider.get()
+        reg = config.registry
 
-        # API key: explicit > config (which includes env var)
-        self.api_key = api_key or config.api_key
+        # API key: explicit > config
+        self.api_key = api_key or (reg.auth.api_key if reg else None)
 
         # Access token from config (browser login, only if no API key)
-        self.access_token = config.access_token if not self.api_key else None
+        self.access_token = reg.auth.access_token if reg and not self.api_key else None
 
         # API URL: explicit > config
-        resolved_url = api_url or config.api.url
+        resolved_url = api_url or (reg.url if reg else None)
         if not resolved_url:
             raise ValueError(
                 "APIRegistry requires a registry URL. "
@@ -93,10 +94,14 @@ class APIRegistry(RegistryABC):
         self.api_url = resolved_url.rstrip("/")
 
         # Timeout: explicit > config
-        self.timeout = timeout if timeout is not None else config.api.timeout
+        self.timeout = (
+            timeout
+            if timeout is not None
+            else (reg.timeout if reg else DEFAULT_API_TIMEOUT)
+        )
 
         # Environment ID: explicit > config
-        self.environment_id = environment_id or config.context.environment_id
+        self.environment_id = environment_id or (reg.environment_id if reg else None)
 
         self._client = None
         self._async_client = None

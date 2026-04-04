@@ -18,8 +18,8 @@ from stardag.config.paths import (
 # --- TOML Config Models ---
 
 
-class RegistryConfig(BaseModel):
-    """Registry configuration from TOML.
+class TomlRegistryEntry(BaseModel):
+    """Registry entry from TOML config.
 
     Attributes:
         url: Base URL of the Stardag API registry.
@@ -51,12 +51,12 @@ class TomlConfig(BaseModel):
     """Parsed TOML configuration.
 
     Attributes:
-        registry: Dict of registry name to RegistryConfig.
+        registry: Dict of registry name to TomlRegistryEntry.
         profile: Dict of profile name to ProfileConfig.
         default: Default settings (e.g., default profile).
     """
 
-    registry: dict[str, RegistryConfig] = Field(default_factory=dict)
+    registry: dict[str, TomlRegistryEntry] = Field(default_factory=dict)
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
     default: dict[str, str] = Field(default_factory=dict)
 
@@ -68,7 +68,7 @@ class TomlConfig(BaseModel):
 
         for key, value in data.get("registry", {}).items():
             if isinstance(value, dict) and "url" in value:
-                registries[key] = RegistryConfig(url=value["url"])
+                registries[key] = TomlRegistryEntry(url=value["url"])
 
         for key, value in data.get("profile", {}).items():
             if isinstance(value, dict):
@@ -118,40 +118,61 @@ class TargetConfig(BaseModel):
     roots: TargetRoots = {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
 
 
-# --- API Config ---
+# --- Canonical Registry Config ---
 
 
-class APIConfig(BaseModel):
-    """API registry configuration.
+class RegistryAuth(BaseModel):
+    """Authentication configuration for the registry.
 
     Attributes:
-        url: Base URL of the Stardag API.
+        api_key: API key for authentication (production/CI).
+        user_email: User identifier (email) for OIDC credential lookup + refresh.
+        access_token: JWT access token from browser login (local dev).
+    """
+
+    api_key: str | None = None
+    user_email: str | None = None
+    access_token: str | None = None
+
+
+class RegistryConfig(BaseModel):
+    """Canonical runtime registry configuration.
+
+    This is the canonical representation of the effective registry config,
+    combining URL, workspace/environment context, auth, and timeout.
+
+    Attributes:
+        url: Base URL of the Stardag API registry.
+        workspace_id: Active workspace ID.
+        environment_id: Active environment ID.
+        auth: Authentication configuration.
         timeout: Request timeout in seconds.
     """
 
-    url: str | None = None
+    url: str
+    workspace_id: str
+    environment_id: str
+    auth: RegistryAuth = Field(default_factory=RegistryAuth)
     timeout: float = DEFAULT_API_TIMEOUT
 
 
-# --- Context Config ---
+# --- Context (provenance info, not canonical config) ---
 
 
-class ContextConfig(BaseModel):
-    """Active context configuration.
+class ConfigContext(BaseModel):
+    """Config provenance/context -- where the canonical config came from.
+
+    This is not part of the canonical config, but tells you which profile
+    and registry name were used to resolve it (useful for credential lookup
+    and display).
 
     Attributes:
         profile: Active profile name (if using profile-based config).
-        registry_name: Registry name from config (for credential lookup).
-        user: User identifier (email) for credential lookup.
-        workspace_id: Active workspace ID.
-        environment_id: Active environment ID.
+        registry_name: Registry name from config (for credential file lookup).
     """
 
     profile: str | None = None
     registry_name: str | None = None
-    user: str | None = None
-    workspace_id: str | None = None
-    environment_id: str | None = None
 
 
 # --- Environment Settings ---
@@ -182,6 +203,9 @@ class StardagSettings(BaseSettings):
     # API key
     api_key: str | None = None
 
+    # Force no registry (offline/local mode)
+    no_registry: bool = False
+
     model_config = SettingsConfigDict(
         env_prefix="STARDAG_",
         extra="ignore",
@@ -194,14 +218,52 @@ class StardagSettings(BaseSettings):
 class StardagConfig(BaseModel):
     """Unified Stardag configuration.
 
-    This is the main configuration object that combines settings from
+    This is the canonical configuration object that combines settings from
     all sources (env vars, project config, user config, defaults).
+
+    ``registry`` is ``None`` when running in offline/local mode (no registry
+    configured, or ``STARDAG_NO_REGISTRY=1``).
     """
 
+    registry: RegistryConfig | None = None
     target: TargetConfig = Field(default_factory=TargetConfig)
-    api: APIConfig = Field(default_factory=APIConfig)
-    context: ContextConfig = Field(default_factory=ContextConfig)
 
-    # Credentials (loaded separately, not from env vars)
-    access_token: str | None = None
-    api_key: str | None = None
+
+class StardagConfigWithContext(StardagConfig):
+    """StardagConfig with additional provenance context.
+
+    This is the actual object returned by ``load_config()`` / ``config_provider.get()``,
+    but the return type annotation is ``StardagConfig`` so that programmatic overrides
+    only need to provide the canonical fields.
+    """
+
+    context: ConfigContext = Field(default_factory=ConfigContext)
+
+
+# --- Deprecated aliases for backward compatibility ---
+
+# These are kept importable but should not be used in new code.
+# The old RegistryConfig(url: str) from TOML is now TomlRegistryEntry.
+
+
+class APIConfig(BaseModel):
+    """Deprecated: Use ``StardagConfig.registry`` instead.
+
+    API registry configuration.
+    """
+
+    url: str | None = None
+    timeout: float = DEFAULT_API_TIMEOUT
+
+
+class ContextConfig(BaseModel):
+    """Deprecated: Use ``StardagConfigWithContext.context`` instead.
+
+    Active context configuration.
+    """
+
+    profile: str | None = None
+    registry_name: str | None = None
+    user: str | None = None
+    workspace_id: str | None = None
+    environment_id: str | None = None

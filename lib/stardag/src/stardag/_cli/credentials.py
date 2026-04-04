@@ -21,11 +21,13 @@ import httpx
 
 from stardag.config import (
     TomlConfig,
+    TomlRegistryEntry,
     _looks_like_uuid,
     cache_environment_id,
     cache_workspace_id,
     get_access_token_cache_path,
     get_config,
+    get_config_context,
     get_registry_credentials_path,
     get_user_config_path,
     load_toml_file,
@@ -58,8 +60,9 @@ def load_credentials(
     """
     if registry is None or user is None:
         config = get_config()
-        registry = registry or config.context.registry_name
-        user = user or config.context.user
+        ctx = get_config_context()
+        registry = registry or ctx.registry_name
+        user = user or (config.registry.auth.user_email if config.registry else None)
         if not registry or not user:
             return None
 
@@ -87,8 +90,9 @@ def save_credentials(
     """
     if registry is None or user is None:
         config = get_config()
-        registry = registry or config.context.registry_name
-        user = user or config.context.user
+        ctx = get_config_context()
+        registry = registry or ctx.registry_name
+        user = user or (config.registry.auth.user_email if config.registry else None)
         if not registry or not user:
             raise ValueError("No registry/user specified and no active profile")
 
@@ -114,8 +118,9 @@ def clear_credentials(registry: str | None = None, user: str | None = None) -> b
     """
     if registry is None or user is None:
         config = get_config()
-        registry = registry or config.context.registry_name
-        user = user or config.context.user
+        ctx = get_config_context()
+        registry = registry or ctx.registry_name
+        user = user or (config.registry.auth.user_email if config.registry else None)
         if not registry or not user:
             return False
 
@@ -265,9 +270,12 @@ def get_access_token(
     """
     if registry is None or workspace_id is None or user is None:
         config = get_config()
-        registry = registry or config.context.registry_name
-        workspace_id = workspace_id or config.context.workspace_id
-        user = user or config.context.user
+        ctx = get_config_context()
+        registry = registry or ctx.registry_name
+        workspace_id = workspace_id or (
+            config.registry.workspace_id if config.registry else None
+        )
+        user = user or (config.registry.auth.user_email if config.registry else None)
 
     if not registry or not workspace_id or not user:
         return None
@@ -324,7 +332,7 @@ def get_registry_url(registry: str | None = None) -> str | None:
     if registry is None:
         # Get from active profile
         stardag_config = get_config()
-        return stardag_config.api.url
+        return stardag_config.registry.url if stardag_config.registry else None
 
     reg_config = config.registry.get(registry)
     if reg_config:
@@ -340,9 +348,7 @@ def add_registry(name: str, url: str) -> None:
         url: Registry URL.
     """
     config = load_toml_config()
-    from stardag.config import RegistryConfig
-
-    config.registry[name] = RegistryConfig(url=url.rstrip("/"))
+    config.registry[name] = TomlRegistryEntry(url=url.rstrip("/"))
     save_toml_config(config)
 
 
@@ -600,9 +606,10 @@ def get_target_roots(
         Dict of target root name to URI prefix.
     """
     config = get_config()
-    registry_url = registry_url or config.api.url
-    workspace_id = workspace_id or config.context.workspace_id
-    environment_id = environment_id or config.context.environment_id
+    reg = config.registry
+    registry_url = registry_url or (reg.url if reg else None)
+    workspace_id = workspace_id or (reg.workspace_id if reg else None)
+    environment_id = environment_id or (reg.environment_id if reg else None)
 
     if not registry_url or not workspace_id or not environment_id:
         return {}
@@ -627,9 +634,10 @@ def set_target_roots(
         environment_id: Environment ID. If None, uses active config.
     """
     config = get_config()
-    registry_url = registry_url or config.api.url
-    workspace_id = workspace_id or config.context.workspace_id
-    environment_id = environment_id or config.context.environment_id
+    reg = config.registry
+    registry_url = registry_url or (reg.url if reg else None)
+    workspace_id = workspace_id or (reg.workspace_id if reg else None)
+    environment_id = environment_id or (reg.environment_id if reg else None)
 
     if not registry_url or not workspace_id or not environment_id:
         raise ValueError("Registry URL, workspace ID, and environment ID are required")
@@ -649,8 +657,13 @@ def get_credentials_path(registry: str | None = None, user: str | None = None) -
     """Get the path to the credentials file for display purposes."""
     if registry is None or user is None:
         config = get_config()
-        registry = registry or config.context.registry_name or "local"
-        user = user or config.context.user or "unknown"
+        ctx = get_config_context()
+        registry = registry or ctx.registry_name or "local"
+        user = (
+            user
+            or (config.registry.auth.user_email if config.registry else None)
+            or "unknown"
+        )
     return get_registry_credentials_path(registry, user)
 
 

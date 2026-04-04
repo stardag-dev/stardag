@@ -15,9 +15,11 @@ from stardag.config.cache import (
 )
 from stardag.config.io import load_json_file, load_toml_file
 from stardag.config.models import (
-    APIConfig,
-    ContextConfig,
+    ConfigContext,
+    RegistryAuth,
+    RegistryConfig,
     StardagConfig,
+    StardagConfigWithContext,
     StardagSettings,
     TargetConfig,
     TomlConfig,
@@ -113,10 +115,21 @@ def load_config(
         use_project_config: Whether to load .stardag/config.toml from project.
 
     Returns:
-        Fully resolved StardagConfig.
+        Fully resolved StardagConfig (actual type is StardagConfigWithContext).
     """
     # 1. Load env vars first (highest priority)
     env_settings = StardagSettings()
+
+    # Short-circuit: STARDAG_NO_REGISTRY forces offline/local mode
+    if env_settings.no_registry:
+        env_target_roots = _parse_target_roots_from_env()
+        target_roots = env_target_roots or {
+            DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT
+        }
+        return StardagConfigWithContext(
+            registry=None,
+            target=TargetConfig(roots=target_roots),
+        )
 
     # 2. Load user and project TOML configs
     user_toml = load_toml_file(get_user_config_path())
@@ -257,21 +270,28 @@ def load_config(
     # 6. Get API key from env
     api_key = env_settings.api_key or os.environ.get("STARDAG_API_KEY")
 
-    return StardagConfig(
-        target=TargetConfig(roots=target_roots),
-        api=APIConfig(
+    # 7. Build canonical RegistryConfig (or None for offline mode)
+    registry_cfg: RegistryConfig | None = None
+    if registry_url:
+        registry_cfg = RegistryConfig(
             url=registry_url,
+            workspace_id=workspace_id or "",
+            environment_id=environment_id or "",
+            auth=RegistryAuth(
+                api_key=api_key,
+                user_email=user,
+                access_token=access_token,
+            ),
             timeout=env_settings.api_timeout or DEFAULT_API_TIMEOUT,
-        ),
-        context=ContextConfig(
+        )
+
+    return StardagConfigWithContext(
+        registry=registry_cfg,
+        target=TargetConfig(roots=target_roots),
+        context=ConfigContext(
             profile=profile_name,
             registry_name=registry_name,
-            user=user,
-            workspace_id=workspace_id,
-            environment_id=environment_id,
         ),
-        access_token=access_token,
-        api_key=api_key,
     )
 
 
@@ -288,6 +308,22 @@ def get_config() -> StardagConfig:
         The global StardagConfig instance.
     """
     return config_provider.get()
+
+
+def get_config_context() -> "ConfigContext":
+    """Get the config context (provenance info) from the current config.
+
+    Convenience function for CLI code that needs the profile name,
+    registry name, etc.
+
+    Returns:
+        ConfigContext from the current config, or empty ConfigContext if the
+        config was set programmatically without context.
+    """
+    config = config_provider.get()
+    if isinstance(config, StardagConfigWithContext):
+        return config.context
+    return ConfigContext()
 
 
 def clear_config_cache() -> None:
