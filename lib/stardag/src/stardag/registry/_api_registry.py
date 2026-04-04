@@ -132,8 +132,8 @@ class APIRegistry(RegistryABC):
                     "APIRegistry initialized with browser login (JWT) authentication"
                 )
         else:
-            # No auth - create a no-op auth that doesn't set headers
-            self._auth = httpx.Auth()
+            # No auth - pass None; httpx handles this gracefully
+            self._auth = None  # type: ignore[assignment]
             logger.warning(
                 "APIRegistry initialized without authentication. "
                 "Run 'stardag auth login' or set STARDAG_API_KEY env var."

@@ -88,7 +88,7 @@ def show_config() -> None:
 
     typer.echo("")
     typer.echo("Authentication:")
-    if reg and reg.auth.api_key:
+    if config.api_key or (reg and reg.auth.api_key):
         typer.echo("  Method: API Key")
     elif reg and reg.auth.access_token:
         typer.echo("  Method: JWT")

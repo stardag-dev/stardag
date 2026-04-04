@@ -527,17 +527,15 @@ class TestEnsureAccessToken:
 
         assert result is None
 
-    def test_resolves_registry_url_from_config_when_not_provided(
-        self, temp_stardag_dir
-    ):
-        """When registry_url is not provided, falls back to CLI config lookup."""
+    def test_resolves_registry_url_from_toml_when_not_provided(self, temp_stardag_dir):
+        """When registry_url is not provided, reads from ~/.stardag/config.toml."""
         _write_credentials(temp_stardag_dir, "reg", "u@t.com")
 
+        # Write a TOML config with the registry URL
+        config_path = temp_stardag_dir / "config.toml"
+        config_path.write_text('[registry.reg]\nurl = "http://from-toml"\n')
+
         with (
-            patch(
-                "stardag._cli.credentials.get_registry_url",
-                return_value="http://from-config",
-            ),
             patch(
                 "stardag.registry._auth.refresh_oidc_token",
                 return_value={"access_token": "oidc"},
@@ -550,5 +548,5 @@ class TestEnsureAccessToken:
             result = ensure_access_token("reg", "ws-1", "u@t.com")
 
         assert result == "tok"
-        # Verify it used the URL from config
-        mock_exchange.assert_called_once_with("http://from-config", "oidc", "ws-1")
+        # Verify it used the URL from TOML config
+        mock_exchange.assert_called_once_with("http://from-toml", "oidc", "ws-1")

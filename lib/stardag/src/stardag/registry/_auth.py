@@ -146,34 +146,34 @@ def exchange_for_internal_token(
 
 
 def get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
-    """Fetch user's workspaces from API using OIDC token."""
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/me",
-                headers={"Authorization": f"Bearer {oidc_token}"},
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("workspaces", [])
-    except Exception:
-        pass
-    return []
+    """Fetch user's workspaces from API using OIDC token.
+
+    Raises on request, HTTP status, or response parsing failures so callers
+    can distinguish an empty workspace list from a failed request.
+    """
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(
+            f"{api_url}/api/v1/ui/me",
+            headers={"Authorization": f"Bearer {oidc_token}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("workspaces", [])
 
 
 def get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
-    """Fetch environments for a workspace using internal token."""
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            if response.status_code == 200:
-                return response.json()
-    except Exception:
-        pass
-    return []
+    """Fetch environments for a workspace using internal token.
+
+    Raises on request, HTTP status, or response parsing failures so callers
+    can distinguish an empty environment list from a failed request.
+    """
+    with httpx.Client(timeout=10.0) as client:
+        response = client.get(
+            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def ensure_access_token(
@@ -218,12 +218,17 @@ def ensure_access_token(
     if not token_endpoint or not client_id:
         return None
 
-    # Resolve registry URL if not provided
+    # Resolve registry URL if not provided — read from TOML config directly
+    # to avoid importing from the CLI layer.
     if not registry_url:
-        # Lazy import to avoid circular dependency with CLI
-        from stardag._cli.credentials import get_registry_url
+        from stardag.config.io import load_toml_file
+        from stardag.config.models import TomlConfig
+        from stardag.config.paths import get_user_config_path
 
-        registry_url = get_registry_url(registry_name)
+        toml_data = load_toml_file(get_user_config_path())
+        toml_config = TomlConfig.from_toml_dict(toml_data)
+        reg_entry = toml_config.registry.get(registry_name)
+        registry_url = reg_entry.url if reg_entry else None
         if not registry_url:
             return None
 
@@ -378,7 +383,7 @@ class StardagTokenAuth(httpx.Auth):
             return self._access_token
 
     def _is_cached_token_valid(self) -> bool:
-        """Check if the current cached token is still valid."""
+        """Check if the cached token is still valid, syncing self._access_token."""
         if not all([self._registry_name, self._workspace_id, self._user_email]):
             # Can't check cache without these identifiers
             return self._access_token is not None
@@ -389,7 +394,10 @@ class StardagTokenAuth(httpx.Auth):
         )
         if cache_path.exists():
             data = load_json_file(cache_path)
-            return data.get("expires_at", 0) > time.time()
+            cached_token = data.get("access_token")
+            if cached_token and data.get("expires_at", 0) > time.time():
+                self._access_token = cached_token
+                return True
         return False
 
     def _refresh(self) -> str | None:

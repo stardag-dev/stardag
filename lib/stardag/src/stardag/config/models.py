@@ -35,8 +35,9 @@ class ProfileConfig(BaseModel):
 
     Attributes:
         registry: Name of the registry to use.
-        user: User identifier (email) for credential lookup. Optional for
-            backward compatibility - if not set, uses registry-level credentials.
+        user: User identifier (email) for credential and token cache lookup.
+            Required for browser-login (OIDC) authentication. When not set,
+            token refresh and credential operations will be skipped.
         workspace: Workspace ID or slug.
         environment: Environment ID or slug.
     """
@@ -223,10 +224,14 @@ class StardagConfig(BaseModel):
 
     ``registry`` is ``None`` when running in offline/local mode (no registry
     configured, or ``STARDAG_NO_REGISTRY=1``).
+
+    ``api_key`` is set independently of ``registry`` so that ``config show``
+    can display it even when no registry URL is configured yet.
     """
 
     registry: RegistryConfig | None = None
     target: TargetConfig = Field(default_factory=TargetConfig)
+    api_key: str | None = None
 
 
 class StardagConfigWithContext(StardagConfig):

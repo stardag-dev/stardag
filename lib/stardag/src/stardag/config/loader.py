@@ -289,6 +289,7 @@ def load_config(
     return StardagConfigWithContext(
         registry=registry_cfg,
         target=TargetConfig(roots=target_roots),
+        api_key=api_key,
         context=ConfigContext(
             profile=profile_name,
             registry_name=registry_name,

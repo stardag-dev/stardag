@@ -11,6 +11,7 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
 )
+from stardag.registry._auth import StardagTokenAuth
 from stardag.registry._http_client import (
     RegistryAPIClientConfig,
     get_async_http_client,
@@ -167,7 +168,7 @@ class RegistryGlobalConcurrencyLockManager:
     def _get_params(self) -> dict[str, str]:
         """Get query params for API requests (environment_id for JWT auth)."""
         cfg = self._client_config
-        if cfg.access_token and not cfg.api_key and cfg.environment_id:
+        if isinstance(cfg.auth, StardagTokenAuth) and cfg.environment_id:
             return {"environment_id": cfg.environment_id}
         return {}
 
