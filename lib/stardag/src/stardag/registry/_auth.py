@@ -176,8 +176,45 @@ def get_environments(api_url: str, access_token: str, workspace_id: str) -> list
         return response.json()
 
 
+def _resolve_credential_key(
+    registry_name: str | None, registry_url: str | None
+) -> str | None:
+    """Resolve a credential storage key from registry name or URL.
+
+    Prefers ``registry_name`` (from TOML profile) when available for backward
+    compatibility with existing credential files. Falls back to deriving a
+    key from the registry URL (hostname) for env-var-only configurations.
+    """
+    if registry_name:
+        return registry_name
+    if registry_url:
+        from stardag.config.paths import registry_key_from_url
+
+        return registry_key_from_url(registry_url)
+    return None
+
+
+def _resolve_registry_url(
+    registry_name: str | None, registry_url: str | None
+) -> str | None:
+    """Resolve registry URL, looking up from TOML config if needed."""
+    if registry_url:
+        return registry_url
+    if not registry_name:
+        return None
+    # Read from TOML config directly — no CLI dependency.
+    from stardag.config.io import load_toml_file
+    from stardag.config.models import TomlConfig
+    from stardag.config.paths import get_user_config_path
+
+    toml_data = load_toml_file(get_user_config_path())
+    toml_config = TomlConfig.from_toml_dict(toml_data)
+    reg_entry = toml_config.registry.get(registry_name)
+    return reg_entry.url if reg_entry else None
+
+
 def ensure_access_token(
-    registry_name: str,
+    registry_name: str | None,
     workspace_id: str,
     user: str,
     registry_url: str | None = None,
@@ -190,24 +227,34 @@ def ensure_access_token(
     3. Exchanges the fresh OIDC token for an internal workspace-scoped token
     4. Caches the new token
 
+    Either ``registry_name`` or ``registry_url`` (or both) must be provided.
+    When only ``registry_url`` is given (env-var-only config), the credential
+    key is derived from the URL hostname.
+
     Args:
-        registry_name: Registry name (for credential/cache file lookup).
+        registry_name: Registry name from TOML config (for credential lookup).
+            May be None for env-var-only configurations.
         workspace_id: Workspace ID.
         user: User identifier (email).
-        registry_url: Registry URL. If None, looks up from TOML config.
+        registry_url: Registry URL. If None, looks up from TOML config using
+            registry_name.
 
     Returns:
         Access token if available/refreshed successfully, None otherwise.
     """
+    cred_key = _resolve_credential_key(registry_name, registry_url)
+    if not cred_key:
+        return None
+
     # Check for cached valid token first
-    cached = load_access_token_cache(registry_name, workspace_id, user)
+    cached = load_access_token_cache(cred_key, workspace_id, user)
     if cached:
         cached_token = cached.get("access_token")
         if cached_token:
             return cached_token
 
     # Need to refresh - get credentials
-    creds = load_credentials(registry_name, user)
+    creds = load_credentials(cred_key, user)
     if not creds:
         return None
 
@@ -218,19 +265,9 @@ def ensure_access_token(
     if not token_endpoint or not client_id:
         return None
 
-    # Resolve registry URL if not provided — read from TOML config directly
-    # to avoid importing from the CLI layer.
-    if not registry_url:
-        from stardag.config.io import load_toml_file
-        from stardag.config.models import TomlConfig
-        from stardag.config.paths import get_user_config_path
-
-        toml_data = load_toml_file(get_user_config_path())
-        toml_config = TomlConfig.from_toml_dict(toml_data)
-        reg_entry = toml_config.registry.get(registry_name)
-        registry_url = reg_entry.url if reg_entry else None
-        if not registry_url:
-            return None
+    resolved_url = _resolve_registry_url(registry_name, registry_url)
+    if not resolved_url:
+        return None
 
     try:
         if refresh_token_val:
@@ -239,7 +276,7 @@ def ensure_access_token(
             # Update stored refresh token if a new one was provided
             if tokens.get("refresh_token"):
                 creds["refresh_token"] = tokens["refresh_token"]
-                save_credentials(creds, registry_name, user)
+                save_credentials(creds, cred_key, user)
 
             oidc_token = tokens["access_token"]
         else:
@@ -247,22 +284,20 @@ def ensure_access_token(
 
         # Exchange for internal token
         internal_tokens = exchange_for_internal_token(
-            registry_url, oidc_token, workspace_id
+            resolved_url, oidc_token, workspace_id
         )
         access_token = internal_tokens["access_token"]
         expires_in = internal_tokens.get("expires_in", 600)
 
         # Cache it
-        save_access_token_cache(
-            registry_name, workspace_id, access_token, expires_in, user
-        )
+        save_access_token_cache(cred_key, workspace_id, access_token, expires_in, user)
 
         return access_token
 
     except Exception:
         logger.debug(
             "Token refresh failed for %s/%s/%s",
-            registry_name,
+            cred_key,
             user,
             workspace_id,
             exc_info=True,
@@ -331,16 +366,18 @@ class StardagTokenAuth(httpx.Auth):
     def __init__(
         self,
         access_token: str | None,
-        registry_name: str | None,
         workspace_id: str | None,
         user_email: str | None,
         registry_url: str | None = None,
+        registry_name: str | None = None,
     ):
         self._access_token = access_token
-        self._registry_name = registry_name
         self._workspace_id = workspace_id
         self._user_email = user_email
         self._registry_url = registry_url
+        self._registry_name = registry_name
+        # Derive stable credential key from name or URL
+        self._cred_key = _resolve_credential_key(registry_name, registry_url)
         self._sync_lock = threading.Lock()
         self._async_lock: asyncio.Lock | None = None
 
@@ -384,11 +421,11 @@ class StardagTokenAuth(httpx.Auth):
 
     def _is_cached_token_valid(self) -> bool:
         """Check if the cached token is still valid, syncing self._access_token."""
-        if not all([self._registry_name, self._workspace_id, self._user_email]):
+        if not all([self._cred_key, self._workspace_id, self._user_email]):
             # Can't check cache without these identifiers
             return self._access_token is not None
         cache_path = get_access_token_cache_path(
-            self._registry_name,  # type: ignore[arg-type]
+            self._cred_key,  # type: ignore[arg-type]
             self._workspace_id,  # type: ignore[arg-type]
             self._user_email,  # type: ignore[arg-type]
         )
@@ -402,11 +439,11 @@ class StardagTokenAuth(httpx.Auth):
 
     def _refresh(self) -> str | None:
         """Attempt to refresh the token. Returns new token or None."""
-        if not all([self._registry_name, self._workspace_id, self._user_email]):
+        if not all([self._cred_key, self._workspace_id, self._user_email]):
             return None
         try:
             return ensure_access_token(
-                registry_name=self._registry_name,  # type: ignore[arg-type]
+                registry_name=self._registry_name,
                 workspace_id=self._workspace_id,  # type: ignore[arg-type]
                 user=self._user_email,  # type: ignore[arg-type]
                 registry_url=self._registry_url,

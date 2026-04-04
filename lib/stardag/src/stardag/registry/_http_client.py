@@ -6,7 +6,6 @@ import httpx
 
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
-    ConfigContext,
     StardagConfigWithContext,
     config_provider,
 )
@@ -49,16 +48,14 @@ class RegistryAPIClientConfig:
             auth = StardagAPIKeyAuth(resolved_api_key)
         elif reg and reg.auth.access_token:
             ctx = (
-                config.context
-                if isinstance(config, StardagConfigWithContext)
-                else ConfigContext()
+                config.context if isinstance(config, StardagConfigWithContext) else None
             )
             auth = StardagTokenAuth(
                 access_token=reg.auth.access_token,
-                registry_name=ctx.registry_name,
                 workspace_id=reg.workspace_id,
                 user_email=reg.auth.user_email,
                 registry_url=reg.url,
+                registry_name=ctx.registry_name if ctx else None,
             )
         else:
             auth = None

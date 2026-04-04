@@ -95,4 +95,5 @@ from stardag.config.paths import (
     get_stardag_dir as get_stardag_dir,
     get_target_root_cache_path as get_target_root_cache_path,
     get_user_config_path as get_user_config_path,
+    registry_key_from_url as registry_key_from_url,
 )

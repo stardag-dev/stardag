@@ -12,7 +12,6 @@ from httpx_retries import Retry, RetryTransport
 
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
-    ConfigContext,
     StardagConfigWithContext,
     config_provider,
 )
@@ -109,18 +108,17 @@ class APIRegistry(RegistryABC):
             self._auth: httpx.Auth = StardagAPIKeyAuth(resolved_api_key)
             logger.debug("APIRegistry initialized with API key authentication")
         elif reg and reg.auth.access_token:
-            # Get context for credential file lookup
+            # registry_name is optional — StardagTokenAuth can derive a
+            # credential key from the URL when no profile is configured.
             ctx = (
-                config.context
-                if isinstance(config, StardagConfigWithContext)
-                else ConfigContext()
+                config.context if isinstance(config, StardagConfigWithContext) else None
             )
             self._auth = StardagTokenAuth(
                 access_token=reg.auth.access_token,
-                registry_name=ctx.registry_name,
                 workspace_id=reg.workspace_id,
                 user_email=reg.auth.user_email,
                 registry_url=reg.url,
+                registry_name=ctx.registry_name if ctx else None,
             )
             if not self.environment_id:
                 logger.warning(

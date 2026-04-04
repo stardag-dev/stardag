@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlparse
 
 # --- Constants ---
 
@@ -120,7 +121,29 @@ def find_project_config() -> Path | None:
     return None
 
 
-# Re-export os for backward compat (used by _expand_tilde_in_roots in models)
+def registry_key_from_url(url: str) -> str:
+    """Derive a stable credential-storage key from a registry URL.
+
+    Used when no TOML registry name is available (e.g., env-var-only config).
+    Returns the hostname (with port if non-standard), sanitised for filenames.
+
+    Examples:
+        "https://api.stardag.com"      -> "api.stardag.com"
+        "http://localhost:8000"         -> "localhost_8000"
+        "https://api.stardag.com:443"   -> "api.stardag.com"
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname or "unknown"
+    port = parsed.port
+    # Include port only when non-standard
+    if port and not (
+        (parsed.scheme == "https" and port == 443)
+        or (parsed.scheme == "http" and port == 80)
+    ):
+        return f"{host}_{port}"
+    return host
+
+
 __all__ = [
     "DEFAULT_TARGET_ROOT_KEY",
     "DEFAULT_TARGET_ROOT",
@@ -137,4 +160,5 @@ __all__ = [
     "get_registry_credentials_path",
     "get_access_token_cache_path",
     "find_project_config",
+    "registry_key_from_url",
 ]
