@@ -257,11 +257,12 @@ def load_config(
         # If no valid token in cache, try to refresh it
         if not access_token:
             try:
-                # Lazy import to avoid circular dependency
-                from stardag._cli.credentials import ensure_access_token
+                from stardag.registry._auth import (
+                    ensure_access_token as _ensure_token,
+                )
 
-                access_token = ensure_access_token(
-                    registry_name, workspace_id, user, quiet=True
+                access_token = _ensure_token(
+                    registry_name, workspace_id, user, registry_url=registry_url
                 )
             except Exception:
                 # Silently fail - user can manually refresh with `stardag auth refresh`

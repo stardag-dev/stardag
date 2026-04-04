@@ -10,7 +10,13 @@ from uuid import UUID
 import httpx
 from httpx_retries import Retry, RetryTransport
 
-from stardag.config import DEFAULT_API_TIMEOUT, config_provider
+from stardag.config import (
+    DEFAULT_API_TIMEOUT,
+    ConfigContext,
+    StardagConfigWithContext,
+    config_provider,
+)
+from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 from stardag.exceptions import (
     APIError,
     AuthorizationError,
@@ -78,13 +84,7 @@ class APIRegistry(RegistryABC):
         config = config_provider.get()
         reg = config.registry
 
-        # API key: explicit > config
-        self.api_key = api_key or (reg.auth.api_key if reg else None)
-
-        # Access token from config (browser login, only if no API key)
-        self.access_token = reg.auth.access_token if reg and not self.api_key else None
-
-        # API URL: explicit > config
+        # Resolve API URL: explicit > config
         resolved_url = api_url or (reg.url if reg else None)
         if not resolved_url:
             raise ValueError(
@@ -103,15 +103,25 @@ class APIRegistry(RegistryABC):
         # Environment ID: explicit > config
         self.environment_id = environment_id or (reg.environment_id if reg else None)
 
-        self._client = None
-        self._async_client = None
-        self._async_client_loop = (
-            None  # Track which event loop the async client belongs to
-        )
-
-        if self.api_key:
+        # Build auth object
+        resolved_api_key = api_key or (reg.auth.api_key if reg else None)
+        if resolved_api_key:
+            self._auth: httpx.Auth = StardagAPIKeyAuth(resolved_api_key)
             logger.debug("APIRegistry initialized with API key authentication")
-        elif self.access_token:
+        elif reg and reg.auth.access_token:
+            # Get context for credential file lookup
+            ctx = (
+                config.context
+                if isinstance(config, StardagConfigWithContext)
+                else ConfigContext()
+            )
+            self._auth = StardagTokenAuth(
+                access_token=reg.auth.access_token,
+                registry_name=ctx.registry_name,
+                workspace_id=reg.workspace_id,
+                user_email=reg.auth.user_email,
+                registry_url=reg.url,
+            )
             if not self.environment_id:
                 logger.warning(
                     "APIRegistry: JWT auth requires environment_id. "
@@ -122,10 +132,18 @@ class APIRegistry(RegistryABC):
                     "APIRegistry initialized with browser login (JWT) authentication"
                 )
         else:
+            # No auth - create a no-op auth that doesn't set headers
+            self._auth = httpx.Auth()
             logger.warning(
                 "APIRegistry initialized without authentication. "
                 "Run 'stardag auth login' or set STARDAG_API_KEY env var."
             )
+
+        self._client = None
+        self._async_client = None
+        self._async_client_loop = (
+            None  # Track which event loop the async client belongs to
+        )
 
     def _handle_response_error(self, response, operation: str = "API call") -> None:
         """Check response for errors and raise appropriate exceptions.
@@ -205,17 +223,9 @@ class APIRegistry(RegistryABC):
     @property
     def client(self):
         if self._client is None:
-            # Create client with appropriate auth header and retry transport
-            headers = {}
-            if self.api_key:
-                # API key auth (production/CI)
-                headers["X-API-Key"] = self.api_key
-            elif self.access_token:
-                # JWT auth from browser login (local dev)
-                headers["Authorization"] = f"Bearer {self.access_token}"
             transport = RetryTransport(retry=_RETRY_CONFIG)
             self._client = httpx.Client(
-                timeout=self.timeout, headers=headers, transport=transport
+                timeout=self.timeout, auth=self._auth, transport=transport
             )
         return self._client
 
@@ -224,7 +234,7 @@ class APIRegistry(RegistryABC):
 
         When using JWT auth, environment_id must be passed as a query param.
         """
-        if self.access_token and not self.api_key and self.environment_id:
+        if isinstance(self._auth, StardagTokenAuth) and self.environment_id:
             return {"environment_id": self.environment_id}
         return {}
 
@@ -597,11 +607,6 @@ class APIRegistry(RegistryABC):
                 except Exception:
                     pass  # Best effort cleanup
 
-            headers = {}
-            if self.api_key:
-                headers["X-API-Key"] = self.api_key
-            elif self.access_token:
-                headers["Authorization"] = f"Bearer {self.access_token}"
             # Use limits to prevent stale connection issues
             # keepalive_expiry=5 closes idle connections after 5 seconds
             limits = httpx.Limits(
@@ -612,7 +617,7 @@ class APIRegistry(RegistryABC):
             transport = RetryTransport(retry=_RETRY_CONFIG)
             self._async_client = httpx.AsyncClient(
                 timeout=self.timeout,
-                headers=headers,
+                auth=self._auth,
                 limits=limits,
                 transport=transport,
             )

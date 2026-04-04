@@ -12,6 +12,7 @@ The main classes are:
 """
 
 from stardag.registry._api_registry import APIRegistry
+from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 from stardag.registry._base import (
     NoOpRegistry,
     RegistryABC,
@@ -30,6 +31,8 @@ __all__ = [
     "RegistryABC",
     "RegistryGlobalConcurrencyLockManager",
     "RegistryLockHandle",
+    "StardagAPIKeyAuth",
+    "StardagTokenAuth",
     "get_git_commit_hash",
     "init_registry",
     "registry_provider",
