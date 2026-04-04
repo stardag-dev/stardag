@@ -61,6 +61,12 @@ from stardag.config import (
     cache_workspace_id,
     get_config,
 )
+from stardag.registry._auth import (
+    exchange_for_internal_token as exchange_for_internal_token,
+    get_environments as get_environments,
+    get_user_workspaces as get_user_workspaces,
+    refresh_oidc_token as _refresh_oidc_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,40 +194,6 @@ def _exchange_code_for_tokens(
         return response.json()
 
 
-def _refresh_oidc_token(
-    token_endpoint: str,
-    refresh_token: str,
-    client_id: str,
-) -> dict:
-    """Refresh OIDC tokens using refresh token."""
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-    }
-
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(token_endpoint, data=data)
-        response.raise_for_status()
-        return response.json()
-
-
-def exchange_for_internal_token(
-    api_url: str,
-    oidc_token: str,
-    workspace_id: str,
-) -> dict:
-    """Exchange OIDC token for internal workspace-scoped token via /auth/exchange."""
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(
-            f"{api_url}/api/v1/auth/exchange",
-            json={"workspace_id": workspace_id},
-            headers={"Authorization": f"Bearer {oidc_token}"},
-        )
-        response.raise_for_status()
-        return response.json()
-
-
 def _extract_user_from_oidc_token(token: str) -> str | None:
     """Extract user email from OIDC access token (JWT) for local use only.
 
@@ -286,30 +258,6 @@ def _get_oidc_config(issuer: str) -> dict:
     """Fetch OIDC configuration from issuer."""
     with httpx.Client(timeout=10.0) as client:
         response = client.get(f"{issuer}/.well-known/openid-configuration")
-        response.raise_for_status()
-        return response.json()
-
-
-def get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
-    """Fetch user's workspaces from API using OIDC token."""
-    # Use /ui/me which accepts OIDC tokens directly (before workspace-scoped exchange)
-    with httpx.Client(timeout=10.0) as client:
-        response = client.get(
-            f"{api_url}/api/v1/ui/me",
-            headers={"Authorization": f"Bearer {oidc_token}"},
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["workspaces"]
-
-
-def get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
-    """Fetch environments for a workspace."""
-    with httpx.Client(timeout=10.0) as client:
-        response = client.get(
-            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
         response.raise_for_status()
         return response.json()
 

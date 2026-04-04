@@ -12,12 +12,8 @@ Multi-user support:
 - This allows switching between personal and work accounts on the same machine
 """
 
-import json
-import time
 from pathlib import Path
 from typing import TypedDict
-
-import httpx
 
 from stardag.config import (
     TomlConfig,
@@ -25,7 +21,6 @@ from stardag.config import (
     _looks_like_uuid,
     cache_environment_id,
     cache_workspace_id,
-    get_access_token_cache_path,
     get_config,
     get_config_context,
     get_registry_credentials_path,
@@ -35,15 +30,32 @@ from stardag.config import (
     update_cached_target_roots,
 )
 
-# --- Credentials (OAuth refresh tokens - per registry/user) ---
+# Re-export from registry._auth for backward compatibility
+from stardag.registry._auth import (
+    AccessTokenCache as AccessTokenCache,
+    Credentials as Credentials,
+    ensure_access_token as _ensure_access_token_core,
+    exchange_for_internal_token as exchange_for_internal_token,
+    get_environments as get_environments,
+    get_fresh_oidc_token as get_fresh_oidc_token,
+    get_user_workspaces as get_user_workspaces,
+    load_access_token_cache as load_access_token_cache,
+    load_credentials as _load_credentials_core,
+    save_access_token_cache as save_access_token_cache,
+    save_credentials as _save_credentials_core,
+)
 
 
-class Credentials(TypedDict, total=False):
-    """Stored credentials structure (OAuth tokens only)."""
-
-    refresh_token: str  # Refresh token for getting new access tokens
-    token_endpoint: str  # Token endpoint for refresh
-    client_id: str  # OIDC client ID
+def _resolve_registry_user(
+    registry: str | None, user: str | None
+) -> tuple[str | None, str | None]:
+    """Resolve registry and user from config defaults when not provided."""
+    if registry is None or user is None:
+        config = get_config()
+        ctx = get_config_context()
+        registry = registry or ctx.registry_name
+        user = user or (config.registry.auth.user_email if config.registry else None)
+    return registry, user
 
 
 def load_credentials(
@@ -58,24 +70,10 @@ def load_credentials(
     Returns:
         Credentials dict if file exists and is valid, None otherwise.
     """
-    if registry is None or user is None:
-        config = get_config()
-        ctx = get_config_context()
-        registry = registry or ctx.registry_name
-        user = user or (config.registry.auth.user_email if config.registry else None)
-        if not registry or not user:
-            return None
-
-    path = get_registry_credentials_path(registry, user)
-    if not path.exists():
+    registry, user = _resolve_registry_user(registry, user)
+    if not registry or not user:
         return None
-
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return Credentials(**data)
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return None
+    return _load_credentials_core(registry, user)
 
 
 def save_credentials(
@@ -88,22 +86,10 @@ def save_credentials(
         registry: Registry name. If None, uses active registry from config.
         user: User identifier (email). If None, uses user from active profile.
     """
-    if registry is None or user is None:
-        config = get_config()
-        ctx = get_config_context()
-        registry = registry or ctx.registry_name
-        user = user or (config.registry.auth.user_email if config.registry else None)
-        if not registry or not user:
-            raise ValueError("No registry/user specified and no active profile")
-
-    path = get_registry_credentials_path(registry, user)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(path, "w") as f:
-        json.dump(credentials, f, indent=2)
-
-    # Make file readable only by owner (0600)
-    path.chmod(0o600)
+    registry, user = _resolve_registry_user(registry, user)
+    if not registry or not user:
+        raise ValueError("No registry/user specified and no active profile")
+    _save_credentials_core(credentials, registry, user)
 
 
 def clear_credentials(registry: str | None = None, user: str | None = None) -> bool:
@@ -116,13 +102,9 @@ def clear_credentials(registry: str | None = None, user: str | None = None) -> b
     Returns:
         True if credentials were cleared, False if no credentials existed.
     """
-    if registry is None or user is None:
-        config = get_config()
-        ctx = get_config_context()
-        registry = registry or ctx.registry_name
-        user = user or (config.registry.auth.user_email if config.registry else None)
-        if not registry or not user:
-            return False
+    registry, user = _resolve_registry_user(registry, user)
+    if not registry or not user:
+        return False
 
     path = get_registry_credentials_path(registry, user)
     if path.exists():
@@ -159,93 +141,16 @@ def get_refresh_token(
     return creds.get("refresh_token")
 
 
-# --- Access Token Cache (short-lived, per registry+user+workspace) ---
+# --- Access Token Cache ---
 
-
-class AccessTokenCache(TypedDict, total=False):
-    """Cached access token structure."""
-
-    access_token: str  # JWT access token
-    expires_at: float  # Unix timestamp when token expires
-
-
-def load_access_token_cache(
-    registry: str, workspace_id: str, user: str
-) -> AccessTokenCache | None:
-    """Load access token from cache.
-
-    Args:
-        registry: Registry name.
-        workspace_id: Workspace ID.
-        user: User identifier (email).
-
-    Returns:
-        AccessTokenCache dict if file exists and token is valid, None otherwise.
-    """
-    path = get_access_token_cache_path(registry, workspace_id, user)
-    if not path.exists():
-        return None
-
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        cache = AccessTokenCache(**data)
-
-        # Check if token is expired
-        expires_at = cache.get("expires_at", 0)
-        if expires_at <= time.time():
-            return None
-
-        return cache
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return None
-
-
-def save_access_token_cache(
-    registry: str,
-    workspace_id: str,
-    access_token: str,
-    expires_in: int,
-    user: str,
-) -> None:
-    """Save access token to cache.
-
-    Args:
-        registry: Registry name.
-        workspace_id: Workspace ID.
-        access_token: JWT access token.
-        expires_in: Token TTL in seconds.
-        user: User identifier (email).
-    """
-    path = get_access_token_cache_path(registry, workspace_id, user)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Calculate expiration time (subtract 30s buffer)
-    expires_at = time.time() + expires_in - 30
-
-    cache = AccessTokenCache(
-        access_token=access_token,
-        expires_at=expires_at,
-    )
-
-    with open(path, "w") as f:
-        json.dump(cache, f, indent=2)
-
-    # Make file readable only by owner (0600)
-    path.chmod(0o600)
+# load_access_token_cache, save_access_token_cache, clear_access_token_cache,
+# AccessTokenCache are re-exported from registry._auth at the top of this file.
 
 
 def clear_access_token_cache(registry: str, workspace_id: str, user: str) -> bool:
-    """Clear cached access token.
+    """Clear cached access token."""
+    from stardag.config import get_access_token_cache_path
 
-    Args:
-        registry: Registry name.
-        workspace_id: Workspace ID.
-        user: User identifier (email).
-
-    Returns:
-        True if cache was cleared, False if no cache existed.
-    """
     path = get_access_token_cache_path(registry, workspace_id, user)
     if path.exists():
         path.unlink()
@@ -674,88 +579,10 @@ def get_config_path() -> Path:
 
 # --- Token Refresh Helpers ---
 
-
-def _refresh_oidc_token(
-    token_endpoint: str,
-    refresh_token: str,
-    client_id: str,
-) -> dict:
-    """Refresh OIDC tokens using refresh token.
-
-    Returns the token response dict.
-    Raises httpx.HTTPStatusError on failure.
-    """
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-    }
-
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(token_endpoint, data=data)
-        response.raise_for_status()
-        return response.json()
-
-
-def exchange_for_internal_token(
-    api_url: str,
-    oidc_token: str,
-    workspace_id: str,
-) -> dict:
-    """Exchange OIDC token for internal workspace-scoped token.
-
-    Returns dict with access_token and expires_in.
-    Raises httpx.HTTPStatusError on failure.
-    """
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(
-            f"{api_url}/api/v1/auth/exchange",
-            json={"workspace_id": workspace_id},
-            headers={"Authorization": f"Bearer {oidc_token}"},
-        )
-        response.raise_for_status()
-        return response.json()
-
-
-def get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
-    """Fetch user's workspaces from API using OIDC token."""
-    try:
-        import httpx
-    except ImportError:
-        return []
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/me",
-                headers={"Authorization": f"Bearer {oidc_token}"},
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("workspaces", [])
-    except Exception:
-        pass
-    return []
-
-
-def get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
-    """Fetch environments for a workspace using internal token."""
-    try:
-        import httpx
-    except ImportError:
-        return []
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            if response.status_code == 200:
-                return response.json()
-    except Exception:
-        pass
-    return []
+# Core functions (refresh_oidc_token, exchange_for_internal_token,
+# ensure_access_token, get_fresh_oidc_token, get_user_workspaces,
+# get_environments) are re-exported from registry._auth at the top
+# of this file.
 
 
 def ensure_access_token(
@@ -766,6 +593,9 @@ def ensure_access_token(
 ) -> str | None:
     """Ensure we have a valid access token, refreshing if needed.
 
+    Thin wrapper around registry._auth.ensure_access_token that resolves
+    the registry URL from TOML config.
+
     Args:
         registry: Registry name.
         workspace_id: Workspace ID.
@@ -775,59 +605,11 @@ def ensure_access_token(
     Returns:
         Access token if available/refreshed successfully, None otherwise.
     """
-    # Check for cached valid token first
-    cached = load_access_token_cache(registry, workspace_id, user)
-    if cached:
-        cached_token = cached.get("access_token")
-        if cached_token:
-            return cached_token
-
-    # Need to refresh - get credentials
-    creds = load_credentials(registry, user)
-    if not creds:
-        return None
-
-    token_endpoint = creds.get("token_endpoint")
-    refresh_token = creds.get("refresh_token")
-    client_id = creds.get("client_id")
-
-    if not token_endpoint or not client_id:
-        return None
-
-    # Get registry URL
-    registry_url = get_registry_url(registry)
-    if not registry_url:
-        return None
-
-    try:
-        # If we have a refresh token, use it
-        if refresh_token:
-            tokens = _refresh_oidc_token(token_endpoint, refresh_token, client_id)
-
-            # Update stored refresh token if a new one was provided
-            if tokens.get("refresh_token"):
-                creds["refresh_token"] = tokens["refresh_token"]
-                save_credentials(creds, registry, user)
-
-            oidc_token = tokens["access_token"]
-        else:
-            # No refresh token - can't refresh
-            return None
-
-        # Exchange for internal token
-        internal_tokens = exchange_for_internal_token(
-            registry_url, oidc_token, workspace_id
-        )
-        access_token = internal_tokens["access_token"]
-        expires_in = internal_tokens.get("expires_in", 600)
-
-        # Cache it
-        save_access_token_cache(registry, workspace_id, access_token, expires_in, user)
-
-        return access_token
-
-    except Exception:
-        return None
+    return _ensure_access_token_core(
+        registry_name=registry,
+        workspace_id=workspace_id,
+        user=user,
+    )
 
 
 def resolve_workspace_slug_to_id(
@@ -940,34 +722,4 @@ def resolve_environment_slug_to_id(
     return result
 
 
-def get_fresh_oidc_token(registry: str, user: str) -> str | None:
-    """Get a fresh OIDC access token by refreshing.
-
-    Args:
-        registry: Registry name.
-        user: User identifier (email).
-
-    Returns the OIDC access token or None if refresh fails.
-    """
-    creds = load_credentials(registry, user)
-    if not creds:
-        return None
-
-    token_endpoint = creds.get("token_endpoint")
-    refresh_token = creds.get("refresh_token")
-    client_id = creds.get("client_id")
-
-    if not token_endpoint or not refresh_token or not client_id:
-        return None
-
-    try:
-        tokens = _refresh_oidc_token(token_endpoint, refresh_token, client_id)
-
-        # Update stored refresh token if a new one was provided
-        if tokens.get("refresh_token"):
-            creds["refresh_token"] = tokens["refresh_token"]
-            save_credentials(creds, registry, user)
-
-        return tokens.get("access_token")
-    except Exception:
-        return None
+# get_fresh_oidc_token is re-exported from registry._auth at the top of this file.
