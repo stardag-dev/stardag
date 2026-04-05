@@ -17,10 +17,13 @@ from typing import Generator, TypedDict
 
 import httpx
 
-from stardag.config.io import load_json_file
+from stardag.config.io import load_json_file, load_toml_file
+from stardag.config.models import TomlConfig
 from stardag.config.paths import (
     get_access_token_cache_path,
     get_registry_credentials_path,
+    get_user_config_path,
+    registry_key_from_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,8 +191,6 @@ def _resolve_credential_key(
     if registry_name:
         return registry_name
     if registry_url:
-        from stardag.config.paths import registry_key_from_url
-
         return registry_key_from_url(registry_url)
     return None
 
@@ -203,10 +204,6 @@ def _resolve_registry_url(
     if not registry_name:
         return None
     # Read from TOML config directly — no CLI dependency.
-    from stardag.config.io import load_toml_file
-    from stardag.config.models import TomlConfig
-    from stardag.config.paths import get_user_config_path
-
     toml_data = load_toml_file(get_user_config_path())
     toml_config = TomlConfig.from_toml_dict(toml_data)
     return toml_config.registry.get(registry_name)
