@@ -13,7 +13,7 @@ from stardag._cli.credentials import (
     resolve_environment_slug_to_id,
     set_target_roots as set_cached_target_roots,
 )
-from stardag.config import get_config
+from stardag.config.loader import get_config
 
 app = typer.Typer(help="Manage environments and target roots")
 

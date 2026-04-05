@@ -32,7 +32,6 @@ import httpx
 import typer
 
 from stardag._cli.credentials import (
-    Credentials,
     InvalidProfileError,
     add_profile,
     add_registry,
@@ -49,23 +48,24 @@ from stardag._cli.credentials import (
     load_credentials,
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
-    save_access_token_cache,
     save_credentials,
     set_default_profile,
     set_target_roots,
     validate_active_profile,
 )
-from stardag.config import (
+from stardag.config.cache import (
     _looks_like_uuid,
     cache_environment_id,
     cache_workspace_id,
-    get_config,
 )
+from stardag.config.loader import get_config
 from stardag.registry._auth import (
-    exchange_for_internal_token as exchange_for_internal_token,
-    get_environments as get_environments,
-    get_user_workspaces as get_user_workspaces,
+    Credentials,
+    exchange_for_internal_token,
+    get_environments,
+    get_user_workspaces,
     refresh_oidc_token as _refresh_oidc_token,
+    save_access_token_cache,
 )
 
 logger = logging.getLogger(__name__)

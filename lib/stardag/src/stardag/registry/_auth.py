@@ -209,8 +209,7 @@ def _resolve_registry_url(
 
     toml_data = load_toml_file(get_user_config_path())
     toml_config = TomlConfig.from_toml_dict(toml_data)
-    reg_entry = toml_config.registry.get(registry_name)
-    return reg_entry.url if reg_entry else None
+    return toml_config.registry.get(registry_name)
 
 
 def ensure_access_token(

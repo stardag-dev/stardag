@@ -18,16 +18,6 @@ from stardag.config.paths import (
 # --- TOML Config Models ---
 
 
-class TomlRegistryEntry(BaseModel):
-    """Registry entry from TOML config.
-
-    Attributes:
-        url: Base URL of the Stardag API registry.
-    """
-
-    url: str
-
-
 class ProfileConfig(BaseModel):
     """Profile configuration from TOML.
 
@@ -52,24 +42,24 @@ class TomlConfig(BaseModel):
     """Parsed TOML configuration.
 
     Attributes:
-        registry: Dict of registry name to TomlRegistryEntry.
+        registry: Dict of registry name to URL.
         profile: Dict of profile name to ProfileConfig.
         default: Default settings (e.g., default profile).
     """
 
-    registry: dict[str, TomlRegistryEntry] = Field(default_factory=dict)
+    registry: dict[str, str] = Field(default_factory=dict)
     profile: dict[str, ProfileConfig] = Field(default_factory=dict)
     default: dict[str, str] = Field(default_factory=dict)
 
     @classmethod
     def from_toml_dict(cls, data: dict[str, Any]) -> "TomlConfig":
         """Parse a TOML dict into a TomlConfig."""
-        registries = {}
+        registries: dict[str, str] = {}
         profiles = {}
 
         for key, value in data.get("registry", {}).items():
             if isinstance(value, dict) and "url" in value:
-                registries[key] = TomlRegistryEntry(url=value["url"])
+                registries[key] = value["url"]
 
         for key, value in data.get("profile", {}).items():
             if isinstance(value, dict):

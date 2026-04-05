@@ -9,7 +9,7 @@ from stardag._cli.credentials import (
     get_registry_url,
     validate_active_profile,
 )
-from stardag.config import get_config
+from stardag.config.loader import get_config
 
 
 def validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:

@@ -4,24 +4,20 @@ from pathlib import Path
 
 import pytest
 
-from pydantic import ValidationError
-
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
     ConfigContext,
-    ProfileConfig,
     RegistryAuth,
     RegistryConfig,
     StardagConfig,
-    TomlConfig,
-    TomlRegistryEntry,
     clear_config_cache,
-    find_project_config,
     get_config,
     load_config,
 )
+from stardag.config.models import ProfileConfig, TomlConfig
+from stardag.config.paths import find_project_config
 
 
 @pytest.fixture
@@ -78,8 +74,8 @@ class TestTomlConfig:
             }
         )
         assert "local" in config.registry
-        assert config.registry["local"].url == "http://localhost:8000"
-        assert config.registry["central"].url == "https://api.stardag.com"
+        assert config.registry["local"] == "http://localhost:8000"
+        assert config.registry["central"] == "https://api.stardag.com"
 
     def test_parses_profiles(self):
         """Test parsing profile configuration."""
@@ -460,16 +456,6 @@ class TestGetConfig:
 
         # After clearing cache, should be a new instance
         assert config1 is not config2
-
-
-class TestTomlRegistryEntry:
-    def test_url_is_required(self):
-        with pytest.raises(ValidationError):
-            TomlRegistryEntry()  # type: ignore[call-arg]
-
-    def test_custom_url(self):
-        entry = TomlRegistryEntry(url="https://api.stardag.com")
-        assert entry.url == "https://api.stardag.com"
 
 
 class TestProfileConfig:

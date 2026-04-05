@@ -35,7 +35,7 @@ from stardag._cli.credentials import (
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
 )
-from stardag.config import clear_config_cache, get_config
+from stardag.config.loader import clear_config_cache, get_config
 from stardag.integration.modal import StardagApp
 
 # Check if modal is available

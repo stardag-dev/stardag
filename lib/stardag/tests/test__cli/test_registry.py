@@ -21,15 +21,12 @@ def temp_config_dir():
         config_path = tmppath / "config.toml"
 
         # Patch the config module path functions
-        with mock.patch("stardag.config.get_stardag_dir", return_value=tmppath):
+        with mock.patch("stardag.config.paths.get_stardag_dir", return_value=tmppath):
             with mock.patch(
-                "stardag.config.get_user_config_path", return_value=config_path
+                "stardag.config.paths.get_user_config_path",
+                return_value=config_path,
             ):
-                with mock.patch(
-                    "stardag._cli.credentials.get_user_config_path",
-                    return_value=config_path,
-                ):
-                    yield tmppath, config_path
+                yield tmppath, config_path
 
 
 class TestListRegistries:

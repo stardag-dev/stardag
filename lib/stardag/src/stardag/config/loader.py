@@ -171,9 +171,9 @@ def load_config(
             environment_value = profile.environment  # Could be slug or ID
 
             # Look up registry URL from registry name
-            registry_config = toml_config.registry.get(registry_name)
-            if registry_config:
-                registry_url = registry_config.url
+            registry_url_from_toml = toml_config.registry.get(registry_name)
+            if registry_url_from_toml:
+                registry_url = registry_url_from_toml
             else:
                 logger.warning(
                     f"Profile '{profile_name}' references unknown registry '{registry_name}'"

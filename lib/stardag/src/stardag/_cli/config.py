@@ -14,14 +14,10 @@ from stardag._cli.auth import _sync_target_roots
 from stardag._cli.credentials import (
     add_profile,
     ensure_access_token,
-    exchange_for_internal_token,
     get_active_profile,
     get_config_path,
     get_default_profile,
-    get_environments,
-    get_fresh_oidc_token,
     get_registry_url,
-    get_user_workspaces,
     list_profiles,
     list_registries,
     remove_profile,
@@ -29,7 +25,14 @@ from stardag._cli.credentials import (
     resolve_workspace_slug_to_id,
     set_default_profile,
 )
-from stardag.config import get_config
+from stardag.config.loader import get_config
+from stardag.config.paths import get_credentials_dir
+from stardag.registry._auth import (
+    exchange_for_internal_token,
+    get_environments,
+    get_fresh_oidc_token,
+    get_user_workspaces,
+)
 
 app = typer.Typer(help="Manage Stardag CLI configuration")
 
@@ -110,8 +113,6 @@ def _find_user_for_registry(registry: str) -> str | None:
 
     Returns the user email if exactly one is found, None otherwise.
     """
-    from stardag.config import get_credentials_dir
-
     creds_dir = get_credentials_dir()
     if not creds_dir.exists():
         return None
