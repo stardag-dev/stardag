@@ -14,6 +14,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 - **Secret masking**: `RegistryAuth.api_key` and `RegistryAuth.access_token` now use Pydantic `SecretStr`. Values are masked as `**********` in `repr()`, `str()`, `model_dump()`, and log output, preventing accidental leakage of credentials.
 
+#### Bug fixes
+
+- **Token auth with env var overrides**: When `STARDAG_REGISTRY_URL` is set (bypassing profile for URL/workspace/environment), the loader now inherits user and registry_name from the active profile so that OIDC token auth still works.
+
 ## [0.5.2] — 2026-04-05
 
 ### SDK

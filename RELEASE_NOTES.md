@@ -23,6 +23,13 @@ if config.registry and config.registry.auth.api_key:
 
 Truthiness checks still work (`if config.registry.auth.api_key:` is fine).
 
+### Bug fix: token auth with env var overrides
+
+When `STARDAG_REGISTRY_URL`/`STARDAG_WORKSPACE_ID`/`STARDAG_ENVIRONMENT_ID` are
+set directly (bypassing profile for connection details), the loader now still
+inherits user and registry_name from the active profile. This fixes OIDC token
+auth failing in setups that override the URL but rely on a profile for identity.
+
 ---
 
 ## v0.5.2 — Configuration cleanup and auth token auto-refresh
