@@ -31,8 +31,11 @@ If you access `StardagConfig` fields programmatically, the following paths chang
 
 `config.registry` is `None` when no registry is configured (offline/local mode).
 
-Removed symbols: `APIConfig`, `ContextConfig`, `StardagConfigWithContext`,
-`get_config_context()`, `TomlRegistryEntry`, `DEFAULT_API_URL`.
+Removed symbols: `APIConfig`, `ContextConfig`, `DEFAULT_API_URL`.
+
+`RegistryConfig` repurposed: was `RegistryConfig(url: str)` (TOML entry), now
+`RegistryConfig(url, workspace_id, environment_id, auth, timeout)` (runtime config).
+TOML registry entries are plain `dict[str, str]` in `TomlConfig`.
 
 The `config/__init__.py` public API is now explicit. Internal symbols must be
 imported from submodules: `from stardag.config.cache import _looks_like_uuid`.

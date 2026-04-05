@@ -12,12 +12,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 #### Breaking changes (configuration only — core task/build API unchanged)
 
-- **`StardagConfig` restructured**: `config.api`, `config.context`, `config.access_token`, `config.api_key` replaced by `config.registry: RegistryConfig | None` and `config.context: ConfigContext`. Code using `config.api.url` must use `config.registry.url` (with null check).
-- **`APIConfig`, `ContextConfig` removed**: Use `RegistryConfig` and `ConfigContext` instead.
-- **`StardagConfigWithContext` removed**: `context` field is now directly on `StardagConfig`.
-- **`get_config_context()` removed**: Use `config.context` directly.
-- **`TomlRegistryEntry` removed**: `TomlConfig.registry` is now `dict[str, str]` (name → URL).
+- **`StardagConfig` restructured**: `config.api` (`APIConfig`), `config.context` (`ContextConfig`), and the loose `config.access_token`/`config.api_key` fields are replaced by `config.registry: RegistryConfig | None` and `config.context: ConfigContext`. Code using `config.api.url` must use `config.registry.url` (with null check for offline mode).
+- **`APIConfig` removed**: Subsumed by `RegistryConfig` (url, timeout, workspace_id, environment_id, auth).
+- **`ContextConfig` removed**: Replaced by `ConfigContext` (profile, registry_name only — user/workspace_id/environment_id moved to `RegistryConfig`).
+- **`RegistryConfig` repurposed**: Was `RegistryConfig(url: str)` (TOML entry). Now `RegistryConfig(url, workspace_id, environment_id, auth, timeout)` (runtime config). TOML registry entries are now plain `dict[str, str]` in `TomlConfig`.
 - **`config/__init__.py` trimmed**: Only public API symbols are exported. Internal code should import from submodules (`config.paths`, `config.cache`, `config.io`, `config.models`, `config.loader`).
+- **`DEFAULT_API_URL` removed**: Unused constant.
 
 #### New features
 

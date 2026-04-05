@@ -9,10 +9,12 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from stardag.config.paths import registry_key_from_url
 from stardag.registry._auth import (
     Credentials,
     StardagAPIKeyAuth,
     StardagTokenAuth,
+    _resolve_credential_key,
     ensure_access_token,
     load_access_token_cache,
     load_credentials,
@@ -550,3 +552,138 @@ class TestEnsureAccessToken:
         assert result == "tok"
         # Verify it used the URL from TOML config
         mock_exchange.assert_called_once_with("http://from-toml", "oidc", "ws-1")
+
+
+# ---------------------------------------------------------------------------
+# registry_key_from_url
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryKeyFromUrl:
+    def test_https_standard_port(self):
+        assert registry_key_from_url("https://api.stardag.com") == "api.stardag.com"
+
+    def test_https_explicit_443(self):
+        assert registry_key_from_url("https://api.stardag.com:443") == "api.stardag.com"
+
+    def test_http_standard_port(self):
+        assert registry_key_from_url("http://api.example.com") == "api.example.com"
+
+    def test_http_explicit_80(self):
+        assert registry_key_from_url("http://api.example.com:80") == "api.example.com"
+
+    def test_non_standard_port(self):
+        assert registry_key_from_url("http://localhost:8000") == "localhost_8000"
+
+    def test_https_non_standard_port(self):
+        assert (
+            registry_key_from_url("https://api.example.com:9443")
+            == "api.example.com_9443"
+        )
+
+
+# ---------------------------------------------------------------------------
+# _resolve_credential_key
+# ---------------------------------------------------------------------------
+
+
+class TestResolveCredentialKey:
+    def test_prefers_registry_name(self):
+        assert _resolve_credential_key("my-reg", "http://localhost:8000") == "my-reg"
+
+    def test_falls_back_to_url(self):
+        assert (
+            _resolve_credential_key(None, "https://api.stardag.com")
+            == "api.stardag.com"
+        )
+
+    def test_returns_none_without_either(self):
+        assert _resolve_credential_key(None, None) is None
+
+    def test_registry_name_only(self):
+        assert _resolve_credential_key("my-reg", None) == "my-reg"
+
+
+# ---------------------------------------------------------------------------
+# init_registry
+# ---------------------------------------------------------------------------
+
+
+class TestInitRegistry:
+    def test_returns_noop_when_registry_is_none(self, temp_stardag_dir, monkeypatch):
+        """init_registry returns NoOpRegistry when config.registry is None."""
+        from stardag.config.loader import clear_config_cache
+        from stardag.registry._base import NoOpRegistry, init_registry
+
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        clear_config_cache()
+
+        registry = init_registry()
+        assert isinstance(registry, NoOpRegistry)
+
+    def test_returns_api_registry_when_registry_configured(
+        self, temp_stardag_dir, monkeypatch
+    ):
+        """init_registry returns APIRegistry when config.registry is set."""
+        from stardag.config.loader import clear_config_cache
+        from stardag.registry._api_registry import APIRegistry
+        from stardag.registry._base import init_registry
+
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://localhost:8000")
+        monkeypatch.setenv("STARDAG_API_KEY", "test-key")
+        clear_config_cache()
+
+        registry = init_registry()
+        assert isinstance(registry, APIRegistry)
+
+
+# ---------------------------------------------------------------------------
+# Env-var-only config (no profiles)
+# ---------------------------------------------------------------------------
+
+
+class TestEnvVarOnlyConfig:
+    def test_env_vars_create_full_registry_config(self, temp_stardag_dir, monkeypatch):
+        """All env vars without any TOML profile creates a complete RegistryConfig."""
+        from stardag.config.loader import clear_config_cache, load_config
+
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "https://api.stardag.com")
+        monkeypatch.setenv("STARDAG_API_KEY", "sk_test_123")
+        monkeypatch.setenv("STARDAG_WORKSPACE_ID", "ws-uuid")
+        monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "env-uuid")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        assert config.registry.url == "https://api.stardag.com"
+        assert config.registry.auth.api_key == "sk_test_123"
+        assert config.registry.workspace_id == "ws-uuid"
+        assert config.registry.environment_id == "env-uuid"
+        # No profile context
+        assert config.context.profile is None
+        assert config.context.registry_name is None
+
+    def test_token_auth_derives_cred_key_from_url(self):
+        """StardagTokenAuth without registry_name derives key from URL."""
+        auth = StardagTokenAuth(
+            access_token="tok",
+            workspace_id="ws",
+            user_email="u@t.com",
+            registry_url="https://api.stardag.com",
+            registry_name=None,
+        )
+        assert auth._cred_key == "api.stardag.com"
+
+    def test_token_auth_prefers_registry_name(self):
+        """StardagTokenAuth prefers registry_name over URL-derived key."""
+        auth = StardagTokenAuth(
+            access_token="tok",
+            workspace_id="ws",
+            user_email="u@t.com",
+            registry_url="https://api.stardag.com",
+            registry_name="cloud",
+        )
+        assert auth._cred_key == "cloud"
