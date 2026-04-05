@@ -11,7 +11,6 @@ DEFAULT_TARGET_ROOT_KEY = "default"
 DEFAULT_TARGET_ROOT = str(
     Path("~/.stardag/local-target-roots/default/default").expanduser().absolute()
 )
-DEFAULT_API_URL = "http://localhost:8000"
 DEFAULT_API_TIMEOUT = 30.0
 
 
@@ -147,7 +146,6 @@ def registry_key_from_url(url: str) -> str:
 __all__ = [
     "DEFAULT_TARGET_ROOT_KEY",
     "DEFAULT_TARGET_ROOT",
-    "DEFAULT_API_URL",
     "DEFAULT_API_TIMEOUT",
     "get_stardag_dir",
     "get_user_config_path",

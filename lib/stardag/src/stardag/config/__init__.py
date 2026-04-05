@@ -75,13 +75,9 @@ from stardag.config.models import (
     ProfileConfig as ProfileConfig,
     TomlConfig as TomlConfig,
     TomlRegistryEntry as TomlRegistryEntry,
-    # Deprecated aliases
-    APIConfig as APIConfig,
-    ContextConfig as ContextConfig,
 )
 from stardag.config.paths import (
     DEFAULT_API_TIMEOUT as DEFAULT_API_TIMEOUT,
-    DEFAULT_API_URL as DEFAULT_API_URL,
     DEFAULT_TARGET_ROOT as DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY as DEFAULT_TARGET_ROOT_KEY,
     _sanitize_user_for_path as _sanitize_user_for_path,

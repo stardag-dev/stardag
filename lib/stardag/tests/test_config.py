@@ -11,7 +11,6 @@ from stardag.config import (
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
     ConfigContext,
-    ContextConfig,
     ProfileConfig,
     RegistryAuth,
     RegistryConfig,
@@ -481,27 +480,3 @@ class TestProfileConfig:
         assert config.registry == "local"
         assert config.workspace == "my-workspace"
         assert config.environment == "dev-env"
-
-
-# --- Deprecated model tests (kept for backward compat verification) ---
-
-
-class TestDeprecatedContextConfig:
-    def test_default_values(self):
-        ctx = ContextConfig()
-        assert ctx.profile is None
-        assert ctx.registry_name is None
-        assert ctx.workspace_id is None
-        assert ctx.environment_id is None
-
-    def test_with_values(self):
-        ctx = ContextConfig(
-            profile="dev",
-            registry_name="local",
-            workspace_id="workspace-123",
-            environment_id="env-456",
-        )
-        assert ctx.profile == "dev"
-        assert ctx.registry_name == "local"
-        assert ctx.workspace_id == "workspace-123"
-        assert ctx.environment_id == "env-456"

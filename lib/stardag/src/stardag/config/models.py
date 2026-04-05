@@ -239,32 +239,3 @@ class StardagConfigWithContext(StardagConfig):
     """
 
     context: ConfigContext = Field(default_factory=ConfigContext)
-
-
-# --- Deprecated aliases for backward compatibility ---
-
-# These are kept importable but should not be used in new code.
-# The old RegistryConfig(url: str) from TOML is now TomlRegistryEntry.
-
-
-class APIConfig(BaseModel):
-    """Deprecated: Use ``StardagConfig.registry`` instead.
-
-    API registry configuration.
-    """
-
-    url: str | None = None
-    timeout: float = DEFAULT_API_TIMEOUT
-
-
-class ContextConfig(BaseModel):
-    """Deprecated: Use ``StardagConfigWithContext.context`` instead.
-
-    Active context configuration.
-    """
-
-    profile: str | None = None
-    registry_name: str | None = None
-    user: str | None = None
-    workspace_id: str | None = None
-    environment_id: str | None = None
