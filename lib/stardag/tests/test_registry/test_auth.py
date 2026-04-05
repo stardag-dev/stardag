@@ -659,7 +659,8 @@ class TestEnvVarOnlyConfig:
 
         assert config.registry is not None
         assert config.registry.url == "https://api.stardag.com"
-        assert config.registry.auth.api_key == "sk_test_123"
+        assert config.registry.auth.api_key is not None
+        assert config.registry.auth.api_key.get_secret_value() == "sk_test_123"
         assert config.registry.workspace_id == "ws-uuid"
         assert config.registry.environment_id == "env-uuid"
         # No profile context

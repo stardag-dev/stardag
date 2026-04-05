@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Any
 
+from pydantic import SecretStr
+
 from stardag.config.cache import (
     _looks_like_uuid,
     get_cached_environment_id,
@@ -268,7 +270,10 @@ def load_config(
                 pass
 
     # 6. Get API key from env
-    api_key = env_settings.api_key or os.environ.get("STARDAG_API_KEY")
+    api_key_raw = os.environ.get("STARDAG_API_KEY")
+    api_key: SecretStr | None = env_settings.api_key or (
+        SecretStr(api_key_raw) if api_key_raw else None
+    )
 
     # 7. Build canonical RegistryConfig (or None for offline mode)
     registry_cfg: RegistryConfig | None = None
@@ -280,7 +285,7 @@ def load_config(
             auth=RegistryAuth(
                 api_key=api_key,
                 user_email=user,
-                access_token=access_token,
+                access_token=SecretStr(access_token) if access_token else None,
             ),
             timeout=env_settings.api_timeout or DEFAULT_API_TIMEOUT,
         )

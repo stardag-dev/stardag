@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Annotated, Any
 
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag.config.paths import (
@@ -115,15 +115,19 @@ class TargetConfig(BaseModel):
 class RegistryAuth(BaseModel):
     """Authentication configuration for the registry.
 
+    ``api_key`` and ``access_token`` use ``SecretStr`` so they are masked
+    in ``repr()``, ``str()``, and ``model_dump()`` by default — preventing
+    accidental leakage in logs or error messages.
+
     Attributes:
         api_key: API key for authentication (production/CI).
         user_email: User identifier (email) for OIDC credential lookup + refresh.
         access_token: JWT access token from browser login (local dev).
     """
 
-    api_key: str | None = None
+    api_key: SecretStr | None = None
     user_email: str | None = None
-    access_token: str | None = None
+    access_token: SecretStr | None = None
 
 
 class RegistryConfig(BaseModel):
@@ -192,7 +196,7 @@ class StardagSettings(BaseSettings):
     api_timeout: float | None = None
 
     # API key
-    api_key: str | None = None
+    api_key: SecretStr | None = None
 
     # Force no registry (offline/local mode)
     no_registry: bool = False

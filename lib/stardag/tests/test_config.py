@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import SecretStr
+
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_TARGET_ROOT,
@@ -307,7 +309,8 @@ environment = "project-env"
         config = load_config(use_project_config=False)
 
         assert config.registry is not None
-        assert config.registry.auth.api_key == "my-api-key"
+        assert config.registry.auth.api_key is not None
+        assert config.registry.auth.api_key.get_secret_value() == "my-api-key"
 
     def test_target_roots_from_json_env_var(self, temp_stardag_dir, monkeypatch):
         """STARDAG_TARGET_ROOTS as a JSON string sets target roots."""
@@ -420,12 +423,13 @@ class TestRegistryConfig:
             url="https://api.stardag.com",
             workspace_id="ws-123",
             environment_id="env-456",
-            auth=RegistryAuth(api_key="key123"),
+            auth=RegistryAuth(api_key=SecretStr("key123")),
         )
         assert config.url == "https://api.stardag.com"
         assert config.workspace_id == "ws-123"
         assert config.environment_id == "env-456"
-        assert config.auth.api_key == "key123"
+        assert config.auth.api_key is not None
+        assert config.auth.api_key.get_secret_value() == "key123"
         assert config.timeout == DEFAULT_API_TIMEOUT
 
     def test_registry_auth_defaults(self):
@@ -434,6 +438,16 @@ class TestRegistryConfig:
         assert auth.api_key is None
         assert auth.user_email is None
         assert auth.access_token is None
+
+    def test_registry_auth_secrets_masked_in_repr(self):
+        """SecretStr fields are masked in repr/str."""
+        auth = RegistryAuth(
+            api_key=SecretStr("sk_secret_key"), access_token=SecretStr("jwt_secret")
+        )
+        repr_str = repr(auth)
+        assert "sk_secret_key" not in repr_str
+        assert "jwt_secret" not in repr_str
+        assert "**********" in repr_str
 
 
 class TestGetConfig:

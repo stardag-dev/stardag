@@ -30,7 +30,9 @@ class RegistryAPIClientConfig:
         config = config_provider.get()
         reg = config.registry
 
-        resolved_api_key = api_key or (reg.auth.api_key if reg else None)
+        resolved_api_key = api_key or (
+            reg.auth.api_key.get_secret_value() if reg and reg.auth.api_key else None
+        )
         resolved_url = api_url or (reg.url if reg else None)
         if not resolved_url:
             raise ValueError(
@@ -44,7 +46,7 @@ class RegistryAPIClientConfig:
             auth = StardagAPIKeyAuth(resolved_api_key)
         elif reg and reg.auth.access_token:
             auth = StardagTokenAuth(
-                access_token=reg.auth.access_token,
+                access_token=reg.auth.access_token.get_secret_value(),
                 workspace_id=reg.workspace_id,
                 user_email=reg.auth.user_email,
                 registry_url=reg.url,
