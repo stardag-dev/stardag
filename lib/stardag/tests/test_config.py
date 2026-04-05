@@ -312,6 +312,49 @@ environment = "project-env"
         assert config.registry.auth.api_key is not None
         assert config.registry.auth.api_key.get_secret_value() == "my-api-key"
 
+    def test_env_var_overrides_inherit_user_from_profile(
+        self, temp_stardag_dir, monkeypatch
+    ):
+        """Direct env var overrides still pick up user from active profile."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+
+        config_path = temp_stardag_dir / "config.toml"
+        write_toml(
+            config_path,
+            """
+[registry.cloud]
+url = "https://old-url.example.com"
+
+[profile.myprofile]
+registry = "cloud"
+user = "me@example.com"
+workspace = "profile-ws"
+environment = "profile-env"
+
+[default]
+profile = "myprofile"
+""",
+        )
+
+        # Env vars override URL/workspace/environment
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "https://api.stardag.com")
+        monkeypatch.setenv("STARDAG_WORKSPACE_ID", "override-ws")
+        monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "override-env")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        # URL/workspace/env come from env vars
+        assert config.registry.url == "https://api.stardag.com"
+        assert config.registry.workspace_id == "override-ws"
+        assert config.registry.environment_id == "override-env"
+        # User inherited from profile (needed for token auth)
+        assert config.registry.auth.user_email == "me@example.com"
+        # Context shows profile was used
+        assert config.context.profile == "myprofile"
+        assert config.context.registry_name == "cloud"
+
     def test_target_roots_from_json_env_var(self, temp_stardag_dir, monkeypatch):
         """STARDAG_TARGET_ROOTS as a JSON string sets target roots."""
         monkeypatch.chdir(temp_stardag_dir.parent)

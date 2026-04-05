@@ -156,6 +156,15 @@ def load_config(
         registry_url = env_settings.registry_url
         workspace_id = env_settings.workspace_id
         environment_id = env_settings.environment_id
+        # Even with direct env var overrides, try to inherit user/registry_name
+        # from the active profile so that token auth (OIDC refresh) still works.
+        _profile_name = env_settings.profile or toml_config.default.get("profile")
+        if _profile_name:
+            _profile = toml_config.profile.get(_profile_name)
+            if _profile:
+                profile_name = _profile_name
+                registry_name = _profile.registry
+                user = _profile.user
     # Then check for profile-based config
     elif env_settings.profile:
         profile_name = env_settings.profile
