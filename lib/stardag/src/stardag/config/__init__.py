@@ -58,7 +58,6 @@ from stardag.config.loader import (
     clear_config_cache as clear_config_cache,
     config_provider as config_provider,
     get_config as get_config,
-    get_config_context as get_config_context,
     load_config as load_config,
 )
 from stardag.config.models import (
@@ -67,7 +66,6 @@ from stardag.config.models import (
     RegistryAuth as RegistryAuth,
     RegistryConfig as RegistryConfig,
     StardagConfig as StardagConfig,
-    StardagConfigWithContext as StardagConfigWithContext,
     StardagSettings as StardagSettings,
     TargetConfig as TargetConfig,
     TargetRoots as TargetRoots,

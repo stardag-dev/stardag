@@ -14,7 +14,7 @@ from stardag.config import (
     ProfileConfig,
     RegistryAuth,
     RegistryConfig,
-    StardagConfigWithContext,
+    StardagConfig,
     TomlConfig,
     TomlRegistryEntry,
     clear_config_cache,
@@ -164,7 +164,7 @@ profile = "dev"
         clear_config_cache()
         config = load_config(use_project_config=False)
 
-        assert isinstance(config, StardagConfigWithContext)
+        assert isinstance(config, StardagConfig)
         assert config.context.profile == "dev"
         assert config.context.registry_name == "local"
         assert config.registry is not None
@@ -242,7 +242,7 @@ profile = "dev"
         clear_config_cache()
         config = load_config(use_project_config=False)
 
-        assert isinstance(config, StardagConfigWithContext)
+        assert isinstance(config, StardagConfig)
         assert config.context.profile == "prod"
         assert config.context.registry_name == "prod"
         assert config.registry is not None
@@ -403,16 +403,16 @@ profile = "dev"
 
 class TestConfigContext:
     def test_config_with_context(self):
-        """StardagConfigWithContext has context field."""
-        config = StardagConfigWithContext(
+        """StardagConfig has context field."""
+        config = StardagConfig(
             context=ConfigContext(profile="dev", registry_name="local"),
         )
         assert config.context.profile == "dev"
         assert config.context.registry_name == "local"
 
     def test_config_without_context_defaults(self):
-        """StardagConfigWithContext defaults to empty context."""
-        config = StardagConfigWithContext()
+        """StardagConfig defaults to empty context."""
+        config = StardagConfig()
         assert config.context.profile is None
         assert config.context.registry_name is None
 

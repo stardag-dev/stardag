@@ -13,7 +13,7 @@ from stardag._cli.credentials import (
     resolve_environment_slug_to_id,
     set_target_roots as set_cached_target_roots,
 )
-from stardag.config import get_config, get_config_context
+from stardag.config import get_config
 
 app = typer.Typer(help="Manage environments and target roots")
 
@@ -37,8 +37,7 @@ def _get_environment_id(env_override: str | None = None) -> str:
 
     if env_override:
         # Resolve slug to ID if needed
-        ctx = get_config_context()
-        registry_name = ctx.registry_name
+        registry_name = config.context.registry_name
         workspace_id = config.registry.workspace_id if config.registry else None
         if not registry_name or not workspace_id:
             typer.echo(

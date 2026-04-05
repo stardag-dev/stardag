@@ -22,7 +22,6 @@ from stardag.config import (
     cache_environment_id,
     cache_workspace_id,
     get_config,
-    get_config_context,
     get_registry_credentials_path,
     get_user_config_path,
     load_toml_file,
@@ -52,8 +51,7 @@ def _resolve_registry_user(
     """Resolve registry and user from config defaults when not provided."""
     if registry is None or user is None:
         config = get_config()
-        ctx = get_config_context()
-        registry = registry or ctx.registry_name
+        registry = registry or config.context.registry_name
         user = user or (config.registry.auth.user_email if config.registry else None)
     return registry, user
 
@@ -175,8 +173,7 @@ def get_access_token(
     """
     if registry is None or workspace_id is None or user is None:
         config = get_config()
-        ctx = get_config_context()
-        registry = registry or ctx.registry_name
+        registry = registry or config.context.registry_name
         workspace_id = workspace_id or (
             config.registry.workspace_id if config.registry else None
         )
@@ -562,8 +559,7 @@ def get_credentials_path(registry: str | None = None, user: str | None = None) -
     """Get the path to the credentials file for display purposes."""
     if registry is None or user is None:
         config = get_config()
-        ctx = get_config_context()
-        registry = registry or ctx.registry_name or "local"
+        registry = registry or config.context.registry_name or "local"
         user = (
             user
             or (config.registry.auth.user_email if config.registry else None)

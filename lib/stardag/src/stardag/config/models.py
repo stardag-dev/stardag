@@ -224,18 +224,12 @@ class StardagConfig(BaseModel):
 
     ``registry`` is ``None`` when running in offline/local mode (no registry
     configured, or ``STARDAG_NO_REGISTRY=1``).
+
+    ``context`` carries provenance info (which profile/registry name was used).
+    It defaults to empty and is not required for programmatic use — SDK code
+    handles all ``context.*`` fields being ``None``.
     """
 
     registry: RegistryConfig | None = None
     target: TargetConfig = Field(default_factory=TargetConfig)
-
-
-class StardagConfigWithContext(StardagConfig):
-    """StardagConfig with additional provenance context.
-
-    This is the actual object returned by ``load_config()`` / ``config_provider.get()``,
-    but the return type annotation is ``StardagConfig`` so that programmatic overrides
-    only need to provide the canonical fields.
-    """
-
     context: ConfigContext = Field(default_factory=ConfigContext)

@@ -10,11 +10,7 @@ from uuid import UUID
 import httpx
 from httpx_retries import Retry, RetryTransport
 
-from stardag.config import (
-    DEFAULT_API_TIMEOUT,
-    StardagConfigWithContext,
-    config_provider,
-)
+from stardag.config import DEFAULT_API_TIMEOUT, config_provider
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 from stardag.exceptions import (
     APIError,
@@ -110,15 +106,12 @@ class APIRegistry(RegistryABC):
         elif reg and reg.auth.access_token:
             # registry_name is optional — StardagTokenAuth can derive a
             # credential key from the URL when no profile is configured.
-            ctx = (
-                config.context if isinstance(config, StardagConfigWithContext) else None
-            )
             self._auth = StardagTokenAuth(
                 access_token=reg.auth.access_token,
                 workspace_id=reg.workspace_id,
                 user_email=reg.auth.user_email,
                 registry_url=reg.url,
-                registry_name=ctx.registry_name if ctx else None,
+                registry_name=config.context.registry_name,
             )
             if not self.environment_id:
                 logger.warning(

@@ -19,7 +19,6 @@ from stardag.config.models import (
     RegistryAuth,
     RegistryConfig,
     StardagConfig,
-    StardagConfigWithContext,
     StardagSettings,
     TargetConfig,
     TomlConfig,
@@ -115,7 +114,7 @@ def load_config(
         use_project_config: Whether to load .stardag/config.toml from project.
 
     Returns:
-        Fully resolved StardagConfig (actual type is StardagConfigWithContext).
+        Fully resolved StardagConfig (actual type is StardagConfig).
     """
     # 1. Load env vars first (highest priority)
     env_settings = StardagSettings()
@@ -126,7 +125,7 @@ def load_config(
         target_roots = env_target_roots or {
             DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT
         }
-        return StardagConfigWithContext(
+        return StardagConfig(
             registry=None,
             target=TargetConfig(roots=target_roots),
         )
@@ -286,7 +285,7 @@ def load_config(
             timeout=env_settings.api_timeout or DEFAULT_API_TIMEOUT,
         )
 
-    return StardagConfigWithContext(
+    return StardagConfig(
         registry=registry_cfg,
         target=TargetConfig(roots=target_roots),
         context=ConfigContext(
@@ -309,22 +308,6 @@ def get_config() -> StardagConfig:
         The global StardagConfig instance.
     """
     return config_provider.get()
-
-
-def get_config_context() -> "ConfigContext":
-    """Get the config context (provenance info) from the current config.
-
-    Convenience function for CLI code that needs the profile name,
-    registry name, etc.
-
-    Returns:
-        ConfigContext from the current config, or empty ConfigContext if the
-        config was set programmatically without context.
-    """
-    config = config_provider.get()
-    if isinstance(config, StardagConfigWithContext):
-        return config.context
-    return ConfigContext()
 
 
 def clear_config_cache() -> None:

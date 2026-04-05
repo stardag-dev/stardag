@@ -35,7 +35,7 @@ from stardag._cli.credentials import (
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
 )
-from stardag.config import clear_config_cache, get_config, get_config_context
+from stardag.config import clear_config_cache, get_config
 from stardag.integration.modal import StardagApp
 
 # Check if modal is available
@@ -134,8 +134,7 @@ def _resolve_stardag_context(
         client, api_url, access_token = get_authenticated_client()
         config = get_config()
 
-        ctx = get_config_context()
-        registry_name = ctx.registry_name
+        registry_name = config.context.registry_name
         reg = config.registry
         user = reg.auth.user_email if reg else None
         workspace_id = reg.workspace_id if reg else None

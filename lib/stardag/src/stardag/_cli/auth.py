@@ -1163,10 +1163,7 @@ def refresh(
         _validate_active_profile_cli()
 
     config = get_config()
-    from stardag.config import get_config_context
-
-    ctx = get_config_context()
-    registry_name = registry or ctx.registry_name
+    registry_name = registry or config.context.registry_name
     ws_id = workspace_id or (config.registry.workspace_id if config.registry else None)
     user = config.registry.auth.user_email if config.registry else None
 

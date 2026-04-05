@@ -9,7 +9,7 @@ from stardag._cli.credentials import (
     get_registry_url,
     validate_active_profile,
 )
-from stardag.config import get_config, get_config_context
+from stardag.config import get_config
 
 
 def validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:
@@ -36,8 +36,7 @@ def get_authenticated_client(
         validate_active_profile_cli()
 
     config = get_config()
-    ctx = get_config_context()
-    registry_name = registry or ctx.registry_name
+    registry_name = registry or config.context.registry_name
     ws_id = workspace_id or (config.registry.workspace_id if config.registry else None)
 
     if not registry_name:

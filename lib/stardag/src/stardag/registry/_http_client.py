@@ -4,11 +4,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from stardag.config import (
-    DEFAULT_API_TIMEOUT,
-    StardagConfigWithContext,
-    config_provider,
-)
+from stardag.config import DEFAULT_API_TIMEOUT, config_provider
 from stardag.exceptions import APIError
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 
@@ -47,15 +43,12 @@ class RegistryAPIClientConfig:
         if resolved_api_key:
             auth = StardagAPIKeyAuth(resolved_api_key)
         elif reg and reg.auth.access_token:
-            ctx = (
-                config.context if isinstance(config, StardagConfigWithContext) else None
-            )
             auth = StardagTokenAuth(
                 access_token=reg.auth.access_token,
                 workspace_id=reg.workspace_id,
                 user_email=reg.auth.user_email,
                 registry_url=reg.url,
-                registry_name=ctx.registry_name if ctx else None,
+                registry_name=config.context.registry_name,
             )
         else:
             auth = None

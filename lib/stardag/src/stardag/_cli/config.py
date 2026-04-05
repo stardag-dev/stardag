@@ -29,7 +29,7 @@ from stardag._cli.credentials import (
     resolve_workspace_slug_to_id,
     set_default_profile,
 )
-from stardag.config import get_config, get_config_context
+from stardag.config import get_config
 
 app = typer.Typer(help="Manage Stardag CLI configuration")
 
@@ -50,23 +50,22 @@ def show_config() -> None:
     typer.echo(f"  Config file: {get_config_path()}")
     typer.echo("")
 
-    ctx = get_config_context()
     reg = config.registry
 
     typer.echo("Active Context:")
-    if ctx.profile:
-        typer.echo(f"  Profile: {ctx.profile}")
+    if config.context.profile:
+        typer.echo(f"  Profile: {config.context.profile}")
     else:
         typer.echo("  Profile: (none - using env vars or defaults)")
-    typer.echo(f"  Registry: {ctx.registry_name or '(not set)'}")
+    typer.echo(f"  Registry: {config.context.registry_name or '(not set)'}")
     typer.echo(f"  API URL: {reg.url if reg else '(none - local mode)'}")
     # Show slugs alongside IDs if the profile stores a slug (not a raw UUID)
     ws_slug = None
     env_slug = None
     ws_id_val = reg.workspace_id if reg else None
     env_id_val = reg.environment_id if reg else None
-    if ctx.profile:
-        prof = list_profiles().get(ctx.profile)
+    if config.context.profile:
+        prof = list_profiles().get(config.context.profile)
         if prof:
             if prof["workspace"] != ws_id_val:
                 ws_slug = prof["workspace"]
