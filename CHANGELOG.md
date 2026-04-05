@@ -6,6 +6,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.5.3] — 2026-04-05
+
+### SDK
+
+#### Security
+
+- **Secret masking**: `RegistryAuth.api_key` and `RegistryAuth.access_token` now use Pydantic `SecretStr`. Values are masked as `**********` in `repr()`, `str()`, `model_dump()`, and log output, preventing accidental leakage of credentials.
+
 ## [0.5.2] — 2026-04-05
 
 ### SDK

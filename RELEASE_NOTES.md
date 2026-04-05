@@ -6,6 +6,25 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.3 — Secret masking for auth credentials
+
+`RegistryAuth.api_key` and `RegistryAuth.access_token` now use Pydantic
+`SecretStr` instead of plain `str`. This means secrets are automatically masked
+as `**********` in `repr()`, `str()`, `model_dump()`, and log output.
+
+**Migration**: If you read these fields directly, call `.get_secret_value()`
+to get the plain string:
+
+```python
+config = get_config()
+if config.registry and config.registry.auth.api_key:
+    key = config.registry.auth.api_key.get_secret_value()
+```
+
+Truthiness checks still work (`if config.registry.auth.api_key:` is fine).
+
+---
+
 ## v0.5.2 — Configuration cleanup and auth token auto-refresh
 
 This release restructures the configuration system and adds automatic JWT token
