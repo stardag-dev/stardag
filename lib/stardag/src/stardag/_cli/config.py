@@ -4,6 +4,8 @@ Manages registries, profiles, and shows current configuration.
 Configuration is stored in ~/.stardag/config.toml.
 """
 
+import os
+
 import typer
 
 from stardag._cli import registry
@@ -12,14 +14,10 @@ from stardag._cli.auth import _sync_target_roots
 from stardag._cli.credentials import (
     add_profile,
     ensure_access_token,
-    exchange_for_internal_token,
     get_active_profile,
     get_config_path,
     get_default_profile,
-    get_environments,
-    get_fresh_oidc_token,
     get_registry_url,
-    get_user_workspaces,
     list_profiles,
     list_registries,
     remove_profile,
@@ -27,7 +25,14 @@ from stardag._cli.credentials import (
     resolve_workspace_slug_to_id,
     set_default_profile,
 )
-from stardag.config import get_config
+from stardag.config.loader import get_config
+from stardag.config.paths import get_credentials_dir
+from stardag.registry._auth import (
+    exchange_for_internal_token,
+    get_environments,
+    get_fresh_oidc_token,
+    get_user_workspaces,
+)
 
 app = typer.Typer(help="Manage Stardag CLI configuration")
 
@@ -48,26 +53,30 @@ def show_config() -> None:
     typer.echo(f"  Config file: {get_config_path()}")
     typer.echo("")
 
+    reg = config.registry
+
     typer.echo("Active Context:")
     if config.context.profile:
         typer.echo(f"  Profile: {config.context.profile}")
     else:
         typer.echo("  Profile: (none - using env vars or defaults)")
     typer.echo(f"  Registry: {config.context.registry_name or '(not set)'}")
-    typer.echo(f"  API URL: {config.api.url or '(none - local mode)'}")
+    typer.echo(f"  API URL: {reg.url if reg else '(none - local mode)'}")
     # Show slugs alongside IDs if the profile stores a slug (not a raw UUID)
     ws_slug = None
     env_slug = None
+    ws_id_val = reg.workspace_id if reg else None
+    env_id_val = reg.environment_id if reg else None
     if config.context.profile:
         prof = list_profiles().get(config.context.profile)
         if prof:
-            if prof["workspace"] != config.context.workspace_id:
+            if prof["workspace"] != ws_id_val:
                 ws_slug = prof["workspace"]
-            if prof["environment"] != config.context.environment_id:
+            if prof["environment"] != env_id_val:
                 env_slug = prof["environment"]
 
-    ws_id = config.context.workspace_id or "(not set)"
-    env_id = config.context.environment_id or "(not set)"
+    ws_id = ws_id_val or "(not set)"
+    env_id = env_id_val or "(not set)"
     ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
     env_display = f"{env_id} ({env_slug})" if env_slug else env_id
     typer.echo(f"  Workspace: {ws_display}")
@@ -83,11 +92,12 @@ def show_config() -> None:
 
     typer.echo("")
     typer.echo("Authentication:")
-    if config.api_key:
+    has_api_key = (reg and reg.auth.api_key) or os.environ.get("STARDAG_API_KEY")
+    if has_api_key:
         typer.echo("  Method: API Key")
-    elif config.access_token:
+    elif reg and reg.auth.access_token:
         typer.echo("  Method: JWT")
-        typer.echo(f"  Token: {config.access_token[:20]}...")
+        typer.echo(f"  Token: {reg.auth.access_token[:20]}...")
     else:
         typer.echo("  Method: Not authenticated")
 
@@ -103,8 +113,6 @@ def _find_user_for_registry(registry: str) -> str | None:
 
     Returns the user email if exactly one is found, None otherwise.
     """
-    from stardag.config import get_credentials_dir
-
     creds_dir = get_credentials_dir()
     if not creds_dir.exists():
         return None
@@ -521,7 +529,7 @@ def list_workspaces() -> None:
         return
 
     config = get_config()
-    current_workspace = config.context.workspace_id
+    current_workspace = config.registry.workspace_id if config.registry else None
 
     typer.echo("Workspaces:")
     for ws in workspaces:
@@ -537,7 +545,8 @@ def list_workspaces() -> None:
 def list_environments() -> None:
     """List environments in the active workspace."""
     config = get_config()
-    workspace_id = config.context.workspace_id
+    reg = config.registry
+    workspace_id = reg.workspace_id if reg else None
 
     if not workspace_id:
         typer.echo(
@@ -572,7 +581,7 @@ def list_environments() -> None:
         typer.echo(f"No environments found in workspace {workspace_id}.")
         return
 
-    current_env = config.context.environment_id
+    current_env = reg.environment_id if reg else None
 
     typer.echo(f"Environments in workspace {workspace_id}:")
     for env in environments:

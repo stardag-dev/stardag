@@ -6,6 +6,53 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.2 — Configuration cleanup and auth token auto-refresh
+
+This release restructures the configuration system and adds automatic JWT token
+refresh during builds. **Breaking changes are limited to the configuration/auth
+layer** — the core SDK for defining tasks, building DAGs, and working with
+targets is completely unaffected.
+
+### Breaking changes
+
+If you access `StardagConfig` fields programmatically, the following paths changed:
+
+| Before                          | After                                                       |
+| ------------------------------- | ----------------------------------------------------------- |
+| `config.api.url`                | `config.registry.url` (check `config.registry is not None`) |
+| `config.api.timeout`            | `config.registry.timeout`                                   |
+| `config.context.workspace_id`   | `config.registry.workspace_id`                              |
+| `config.context.environment_id` | `config.registry.environment_id`                            |
+| `config.context.user`           | `config.registry.auth.user_email`                           |
+| `config.access_token`           | `config.registry.auth.access_token`                         |
+| `config.api_key`                | `config.registry.auth.api_key`                              |
+| `config.context.profile`        | `config.context.profile` (unchanged)                        |
+| `config.context.registry_name`  | `config.context.registry_name` (unchanged)                  |
+
+`config.registry` is `None` when no registry is configured (offline/local mode).
+
+Removed symbols: `APIConfig`, `ContextConfig`, `DEFAULT_API_URL`.
+
+`RegistryConfig` repurposed: was `RegistryConfig(url: str)` (TOML entry), now
+`RegistryConfig(url, workspace_id, environment_id, auth, timeout)` (runtime config).
+TOML registry entries are plain `dict[str, str]` in `TomlConfig`.
+
+The `config/__init__.py` public API is now explicit. Internal symbols must be
+imported from submodules: `from stardag.config.cache import _looks_like_uuid`.
+
+### New: auto-refresh JWT tokens
+
+`APIRegistry` now transparently refreshes expired JWT tokens before each API
+request. This fixes a bug where long-running builds with browser-login auth
+would fail when the short-lived token expired mid-execution.
+
+### New: STARDAG_NO_REGISTRY
+
+Set `STARDAG_NO_REGISTRY=1` to force offline/local mode. The registry provider
+returns `NoOpRegistry` and `config.registry` is `None`.
+
+---
+
 ## v0.5.1 — Automatic version field default
 
 Small quality-of-life improvement: the `version` instance field on task classes now

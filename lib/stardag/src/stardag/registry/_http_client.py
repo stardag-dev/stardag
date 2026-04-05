@@ -1,11 +1,12 @@
 """Shared HTTP client utilities for registry API calls."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
-from stardag.config import config_provider
+from stardag.config import DEFAULT_API_TIMEOUT, config_provider
 from stardag.exceptions import APIError
+from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 
 
 @dataclass
@@ -13,10 +14,9 @@ class RegistryAPIClientConfig:
     """Configuration for Registry API client."""
 
     api_url: str
-    api_key: str | None
-    access_token: str | None
     environment_id: str | None
     timeout: float
+    auth: httpx.Auth | None = field(default=None, repr=False)
 
     @classmethod
     def from_config(
@@ -28,48 +28,55 @@ class RegistryAPIClientConfig:
     ) -> "RegistryAPIClientConfig":
         """Create config from central config with optional overrides."""
         config = config_provider.get()
+        reg = config.registry
 
-        # API key: explicit > config (which includes env var)
-        resolved_api_key = api_key or config.api_key
-
-        # Access token from config (browser login, only if no API key)
-        resolved_access_token = config.access_token if not resolved_api_key else None
-
-        resolved_url = api_url or config.api.url
+        resolved_api_key = api_key or (reg.auth.api_key if reg else None)
+        resolved_url = api_url or (reg.url if reg else None)
         if not resolved_url:
             raise ValueError(
                 "Registry API client requires a URL. "
                 "Set STARDAG_REGISTRY_URL or configure a profile."
             )
 
+        # Build auth object with auto-refresh support
+        auth: httpx.Auth | None
+        if resolved_api_key:
+            auth = StardagAPIKeyAuth(resolved_api_key)
+        elif reg and reg.auth.access_token:
+            auth = StardagTokenAuth(
+                access_token=reg.auth.access_token,
+                workspace_id=reg.workspace_id,
+                user_email=reg.auth.user_email,
+                registry_url=reg.url,
+                registry_name=config.context.registry_name,
+            )
+        else:
+            auth = None
+
         return cls(
             api_url=resolved_url.rstrip("/"),
-            api_key=resolved_api_key,
-            access_token=resolved_access_token,
-            environment_id=environment_id or config.context.environment_id,
-            timeout=timeout if timeout is not None else config.api.timeout,
+            environment_id=environment_id or (reg.environment_id if reg else None),
+            timeout=timeout
+            if timeout is not None
+            else (reg.timeout if reg else DEFAULT_API_TIMEOUT),
+            auth=auth,
         )
 
 
-def get_async_http_client(config: RegistryAPIClientConfig):
-    """Create an async HTTP client with proper authentication headers.
+def get_async_http_client(config: RegistryAPIClientConfig) -> httpx.AsyncClient:
+    """Create an async HTTP client with proper authentication.
+
+    Uses httpx.Auth objects for automatic token refresh support.
 
     Returns:
-        httpx.AsyncClient configured with auth headers and timeout.
-
-    Raises:
-        ImportError: If httpx is not installed.
+        httpx.AsyncClient configured with auth and timeout.
     """
-    headers = {}
-    if config.api_key:
-        headers["X-API-Key"] = config.api_key
-    elif config.access_token:
-        headers["Authorization"] = f"Bearer {config.access_token}"
-
-    return httpx.AsyncClient(timeout=config.timeout, headers=headers)
+    return httpx.AsyncClient(timeout=config.timeout, auth=config.auth)
 
 
-def handle_response_error(response, operation: str = "API operation") -> None:
+def handle_response_error(
+    response: httpx.Response, operation: str = "API operation"
+) -> None:
     """Check response for errors and raise appropriate exceptions.
 
     Args:

@@ -120,12 +120,13 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
 
     env_vars: dict[str, str] = {}
 
-    if config.api.url:
-        env_vars["STARDAG_REGISTRY_URL"] = config.api.url
-    if config.context.workspace_id:
-        env_vars["STARDAG_WORKSPACE_ID"] = config.context.workspace_id
-    if config.context.environment_id:
-        env_vars["STARDAG_ENVIRONMENT_ID"] = config.context.environment_id
+    reg = config.registry
+    if reg:
+        env_vars["STARDAG_REGISTRY_URL"] = reg.url
+        if reg.workspace_id:
+            env_vars["STARDAG_WORKSPACE_ID"] = reg.workspace_id
+        if reg.environment_id:
+            env_vars["STARDAG_ENVIRONMENT_ID"] = reg.environment_id
 
     # Add target roots as JSON (pydantic-settings parses JSON for nested fields)
     if config.target.roots:

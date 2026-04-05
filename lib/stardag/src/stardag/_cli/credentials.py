@@ -12,36 +12,50 @@ Multi-user support:
 - This allows switching between personal and work accounts on the same machine
 """
 
-import json
-import time
+import os
 from pathlib import Path
 from typing import TypedDict
 
-import httpx
-
-from stardag.config import (
-    TomlConfig,
+from stardag.config.cache import (
     _looks_like_uuid,
     cache_environment_id,
     cache_workspace_id,
-    get_access_token_cache_path,
-    get_config,
-    get_registry_credentials_path,
-    get_user_config_path,
-    load_toml_file,
-    save_toml_file,
+    get_cached_target_roots,
     update_cached_target_roots,
 )
+from stardag.config.io import load_toml_file, save_toml_file
+from stardag.config.loader import get_config
+from stardag.config.models import ProfileConfig, TomlConfig
+from stardag.config.paths import (
+    get_access_token_cache_path,
+    get_credentials_dir,
+    get_registry_credentials_path,
+    get_user_config_path,
+)
+from stardag.registry._auth import (
+    Credentials,
+    ensure_access_token as _ensure_access_token_core,
+    get_environments,
+    get_fresh_oidc_token,
+    get_user_workspaces,
+    load_access_token_cache,
+    load_credentials as _load_credentials_core,
+    save_credentials as _save_credentials_core,
+)
 
-# --- Credentials (OAuth refresh tokens - per registry/user) ---
+
+# --- Credential wrappers (resolve defaults from config) ---
 
 
-class Credentials(TypedDict, total=False):
-    """Stored credentials structure (OAuth tokens only)."""
-
-    refresh_token: str  # Refresh token for getting new access tokens
-    token_endpoint: str  # Token endpoint for refresh
-    client_id: str  # OIDC client ID
+def _resolve_registry_user(
+    registry: str | None, user: str | None
+) -> tuple[str | None, str | None]:
+    """Resolve registry and user from config defaults when not provided."""
+    if registry is None or user is None:
+        config = get_config()
+        registry = registry or config.context.registry_name
+        user = user or (config.registry.auth.user_email if config.registry else None)
+    return registry, user
 
 
 def load_credentials(
@@ -56,23 +70,10 @@ def load_credentials(
     Returns:
         Credentials dict if file exists and is valid, None otherwise.
     """
-    if registry is None or user is None:
-        config = get_config()
-        registry = registry or config.context.registry_name
-        user = user or config.context.user
-        if not registry or not user:
-            return None
-
-    path = get_registry_credentials_path(registry, user)
-    if not path.exists():
+    registry, user = _resolve_registry_user(registry, user)
+    if not registry or not user:
         return None
-
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        return Credentials(**data)
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return None
+    return _load_credentials_core(registry, user)
 
 
 def save_credentials(
@@ -85,21 +86,10 @@ def save_credentials(
         registry: Registry name. If None, uses active registry from config.
         user: User identifier (email). If None, uses user from active profile.
     """
-    if registry is None or user is None:
-        config = get_config()
-        registry = registry or config.context.registry_name
-        user = user or config.context.user
-        if not registry or not user:
-            raise ValueError("No registry/user specified and no active profile")
-
-    path = get_registry_credentials_path(registry, user)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(path, "w") as f:
-        json.dump(credentials, f, indent=2)
-
-    # Make file readable only by owner (0600)
-    path.chmod(0o600)
+    registry, user = _resolve_registry_user(registry, user)
+    if not registry or not user:
+        raise ValueError("No registry/user specified and no active profile")
+    _save_credentials_core(credentials, registry, user)
 
 
 def clear_credentials(registry: str | None = None, user: str | None = None) -> bool:
@@ -112,12 +102,9 @@ def clear_credentials(registry: str | None = None, user: str | None = None) -> b
     Returns:
         True if credentials were cleared, False if no credentials existed.
     """
-    if registry is None or user is None:
-        config = get_config()
-        registry = registry or config.context.registry_name
-        user = user or config.context.user
-        if not registry or not user:
-            return False
+    registry, user = _resolve_registry_user(registry, user)
+    if not registry or not user:
+        return False
 
     path = get_registry_credentials_path(registry, user)
     if path.exists():
@@ -132,8 +119,6 @@ def list_registries_with_credentials() -> list[str]:
     Returns:
         List of registry names with credentials files.
     """
-    from stardag.config import get_credentials_dir
-
     creds_dir = get_credentials_dir()
     if not creds_dir.exists():
         return []
@@ -154,93 +139,11 @@ def get_refresh_token(
     return creds.get("refresh_token")
 
 
-# --- Access Token Cache (short-lived, per registry+user+workspace) ---
-
-
-class AccessTokenCache(TypedDict, total=False):
-    """Cached access token structure."""
-
-    access_token: str  # JWT access token
-    expires_at: float  # Unix timestamp when token expires
-
-
-def load_access_token_cache(
-    registry: str, workspace_id: str, user: str
-) -> AccessTokenCache | None:
-    """Load access token from cache.
-
-    Args:
-        registry: Registry name.
-        workspace_id: Workspace ID.
-        user: User identifier (email).
-
-    Returns:
-        AccessTokenCache dict if file exists and token is valid, None otherwise.
-    """
-    path = get_access_token_cache_path(registry, workspace_id, user)
-    if not path.exists():
-        return None
-
-    try:
-        with open(path) as f:
-            data = json.load(f)
-        cache = AccessTokenCache(**data)
-
-        # Check if token is expired
-        expires_at = cache.get("expires_at", 0)
-        if expires_at <= time.time():
-            return None
-
-        return cache
-    except (json.JSONDecodeError, TypeError, KeyError):
-        return None
-
-
-def save_access_token_cache(
-    registry: str,
-    workspace_id: str,
-    access_token: str,
-    expires_in: int,
-    user: str,
-) -> None:
-    """Save access token to cache.
-
-    Args:
-        registry: Registry name.
-        workspace_id: Workspace ID.
-        access_token: JWT access token.
-        expires_in: Token TTL in seconds.
-        user: User identifier (email).
-    """
-    path = get_access_token_cache_path(registry, workspace_id, user)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Calculate expiration time (subtract 30s buffer)
-    expires_at = time.time() + expires_in - 30
-
-    cache = AccessTokenCache(
-        access_token=access_token,
-        expires_at=expires_at,
-    )
-
-    with open(path, "w") as f:
-        json.dump(cache, f, indent=2)
-
-    # Make file readable only by owner (0600)
-    path.chmod(0o600)
+# --- Access Token Cache ---
 
 
 def clear_access_token_cache(registry: str, workspace_id: str, user: str) -> bool:
-    """Clear cached access token.
-
-    Args:
-        registry: Registry name.
-        workspace_id: Workspace ID.
-        user: User identifier (email).
-
-    Returns:
-        True if cache was cleared, False if no cache existed.
-    """
+    """Clear cached access token."""
     path = get_access_token_cache_path(registry, workspace_id, user)
     if path.exists():
         path.unlink()
@@ -266,8 +169,10 @@ def get_access_token(
     if registry is None or workspace_id is None or user is None:
         config = get_config()
         registry = registry or config.context.registry_name
-        workspace_id = workspace_id or config.context.workspace_id
-        user = user or config.context.user
+        workspace_id = workspace_id or (
+            config.registry.workspace_id if config.registry else None
+        )
+        user = user or (config.registry.auth.user_email if config.registry else None)
 
     if not registry or not workspace_id or not user:
         return None
@@ -290,13 +195,10 @@ def load_toml_config() -> TomlConfig:
 
 def save_toml_config(config: TomlConfig) -> None:
     """Save the user's TOML config."""
-    # Convert back to dict format
     data: dict = {}
 
     if config.registry:
-        data["registry"] = {
-            name: {"url": reg.url} for name, reg in config.registry.items()
-        }
+        data["registry"] = {name: {"url": url} for name, url in config.registry.items()}
 
     if config.profile:
         profiles_data: dict = {}
@@ -306,7 +208,6 @@ def save_toml_config(config: TomlConfig) -> None:
                 "workspace": prof.workspace,
                 "environment": prof.environment,
             }
-            # Only include user if set (backward compatible)
             if prof.user:
                 profile_dict["user"] = prof.user
             profiles_data[name] = profile_dict
@@ -322,39 +223,21 @@ def get_registry_url(registry: str | None = None) -> str | None:
     """Get the URL for a registry from config."""
     config = load_toml_config()
     if registry is None:
-        # Get from active profile
         stardag_config = get_config()
-        return stardag_config.api.url
+        return stardag_config.registry.url if stardag_config.registry else None
 
-    reg_config = config.registry.get(registry)
-    if reg_config:
-        return reg_config.url
-    return None
+    return config.registry.get(registry)
 
 
 def add_registry(name: str, url: str) -> None:
-    """Add or update a registry in config.
-
-    Args:
-        name: Registry name.
-        url: Registry URL.
-    """
+    """Add or update a registry in config."""
     config = load_toml_config()
-    from stardag.config import RegistryConfig
-
-    config.registry[name] = RegistryConfig(url=url.rstrip("/"))
+    config.registry[name] = url.rstrip("/")
     save_toml_config(config)
 
 
 def remove_registry(name: str) -> bool:
-    """Remove a registry from config.
-
-    Args:
-        name: Registry name.
-
-    Returns:
-        True if registry was removed, False if it didn't exist.
-    """
+    """Remove a registry from config."""
     config = load_toml_config()
     if name in config.registry:
         del config.registry[name]
@@ -364,13 +247,9 @@ def remove_registry(name: str) -> bool:
 
 
 def list_registries() -> dict[str, str]:
-    """List all registries from config.
-
-    Returns:
-        Dict of registry name to URL.
-    """
+    """List all registries from config."""
     config = load_toml_config()
-    return {name: reg.url for name, reg in config.registry.items()}
+    return dict(config.registry)
 
 
 def add_profile(
@@ -380,18 +259,8 @@ def add_profile(
     environment: str,
     user: str | None = None,
 ) -> None:
-    """Add or update a profile in config.
-
-    Args:
-        name: Profile name.
-        registry: Registry name.
-        workspace: Workspace ID or slug.
-        environment: Environment ID or slug.
-        user: User identifier (email). Optional for multi-user support.
-    """
+    """Add or update a profile in config."""
     config = load_toml_config()
-    from stardag.config import ProfileConfig
-
     config.profile[name] = ProfileConfig(
         registry=registry,
         user=user,
@@ -402,18 +271,10 @@ def add_profile(
 
 
 def remove_profile(name: str) -> bool:
-    """Remove a profile from config.
-
-    Args:
-        name: Profile name.
-
-    Returns:
-        True if profile was removed, False if it didn't exist.
-    """
+    """Remove a profile from config."""
     config = load_toml_config()
     if name in config.profile:
         del config.profile[name]
-        # Unset default if the removed profile was the default
         if config.default.get("profile") == name:
             del config.default["profile"]
         save_toml_config(config)
@@ -431,11 +292,7 @@ class ProfileDetails(TypedDict):
 
 
 def list_profiles() -> dict[str, ProfileDetails]:
-    """List all profiles from config.
-
-    Returns:
-        Dict of profile name to profile details (including optional user).
-    """
+    """List all profiles from config."""
     config = load_toml_config()
     return {
         name: ProfileDetails(
@@ -463,14 +320,10 @@ def get_active_profile() -> tuple[str | None, str | None]:
         - "default" if set via [default] in config
         - None if no active profile
     """
-    import os
-
-    # Check env var first
     env_profile = os.environ.get("STARDAG_PROFILE")
     if env_profile:
         return env_profile, "env"
 
-    # Check config default
     default = get_default_profile()
     if default:
         return default, "default"
@@ -484,18 +337,7 @@ def find_matching_profile(
     environment: str,
     user: str | None = None,
 ) -> str | None:
-    """Find a profile that matches the given settings.
-
-    Args:
-        registry: Registry name.
-        workspace: Workspace slug/ID.
-        environment: Environment slug/ID.
-        user: User identifier (email). If provided, matches profiles with same user.
-            If None, matches profiles with no user set.
-
-    Returns:
-        Profile name if a matching profile exists, None otherwise.
-    """
+    """Find a profile that matches the given settings."""
     profiles = list_profiles()
     for name, details in profiles.items():
         if (
@@ -543,20 +385,12 @@ class InvalidProfileError(Exception):
 
 
 def validate_active_profile() -> tuple[str, str] | tuple[None, None]:
-    """Validate that the active profile exists in the config.
-
-    Returns:
-        Tuple of (profile_name, source) if valid or no profile set.
-
-    Raises:
-        InvalidProfileError: If STARDAG_PROFILE is set to a non-existent profile.
-    """
+    """Validate that the active profile exists in the config."""
     profile_name, source = get_active_profile()
 
     if profile_name is None:
         return None, None
 
-    # When profile_name is set, source is always "env" or "default"
     assert source is not None
 
     profiles = list_profiles()
@@ -571,11 +405,7 @@ def validate_active_profile() -> tuple[str, str] | tuple[None, None]:
 
 
 def set_default_profile(profile: str) -> None:
-    """Set the default profile in config.
-
-    Args:
-        profile: Profile name.
-    """
+    """Set the default profile in config."""
     config = load_toml_config()
     config.default["profile"] = profile
     save_toml_config(config)
@@ -589,25 +419,15 @@ def get_target_roots(
     workspace_id: str | None = None,
     environment_id: str | None = None,
 ) -> dict[str, str]:
-    """Get target roots from cache.
-
-    Args:
-        registry_url: Registry URL. If None, uses active config.
-        workspace_id: Workspace ID. If None, uses active config.
-        environment_id: Environment ID. If None, uses active config.
-
-    Returns:
-        Dict of target root name to URI prefix.
-    """
+    """Get target roots from cache."""
     config = get_config()
-    registry_url = registry_url or config.api.url
-    workspace_id = workspace_id or config.context.workspace_id
-    environment_id = environment_id or config.context.environment_id
+    reg = config.registry
+    registry_url = registry_url or (reg.url if reg else None)
+    workspace_id = workspace_id or (reg.workspace_id if reg else None)
+    environment_id = environment_id or (reg.environment_id if reg else None)
 
     if not registry_url or not workspace_id or not environment_id:
         return {}
-
-    from stardag.config import get_cached_target_roots
 
     return get_cached_target_roots(registry_url, workspace_id, environment_id) or {}
 
@@ -618,18 +438,12 @@ def set_target_roots(
     workspace_id: str | None = None,
     environment_id: str | None = None,
 ) -> None:
-    """Update target roots in cache.
-
-    Args:
-        target_roots: Dict of target root name to URI prefix.
-        registry_url: Registry URL. If None, uses active config.
-        workspace_id: Workspace ID. If None, uses active config.
-        environment_id: Environment ID. If None, uses active config.
-    """
+    """Update target roots in cache."""
     config = get_config()
-    registry_url = registry_url or config.api.url
-    workspace_id = workspace_id or config.context.workspace_id
-    environment_id = environment_id or config.context.environment_id
+    reg = config.registry
+    registry_url = registry_url or (reg.url if reg else None)
+    workspace_id = workspace_id or (reg.workspace_id if reg else None)
+    environment_id = environment_id or (reg.environment_id if reg else None)
 
     if not registry_url or not workspace_id or not environment_id:
         raise ValueError("Registry URL, workspace ID, and environment ID are required")
@@ -642,7 +456,7 @@ def set_target_roots(
     )
 
 
-# --- Path convenience functions (for CLI display) ---
+# --- Path convenience functions ---
 
 
 def get_credentials_path(registry: str | None = None, user: str | None = None) -> Path:
@@ -650,7 +464,11 @@ def get_credentials_path(registry: str | None = None, user: str | None = None) -
     if registry is None or user is None:
         config = get_config()
         registry = registry or config.context.registry_name or "local"
-        user = user or config.context.user or "unknown"
+        user = (
+            user
+            or (config.registry.auth.user_email if config.registry else None)
+            or "unknown"
+        )
     return get_registry_credentials_path(registry, user)
 
 
@@ -659,90 +477,7 @@ def get_config_path() -> Path:
     return get_user_config_path()
 
 
-# --- Token Refresh Helpers ---
-
-
-def _refresh_oidc_token(
-    token_endpoint: str,
-    refresh_token: str,
-    client_id: str,
-) -> dict:
-    """Refresh OIDC tokens using refresh token.
-
-    Returns the token response dict.
-    Raises httpx.HTTPStatusError on failure.
-    """
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-    }
-
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(token_endpoint, data=data)
-        response.raise_for_status()
-        return response.json()
-
-
-def exchange_for_internal_token(
-    api_url: str,
-    oidc_token: str,
-    workspace_id: str,
-) -> dict:
-    """Exchange OIDC token for internal workspace-scoped token.
-
-    Returns dict with access_token and expires_in.
-    Raises httpx.HTTPStatusError on failure.
-    """
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(
-            f"{api_url}/api/v1/auth/exchange",
-            json={"workspace_id": workspace_id},
-            headers={"Authorization": f"Bearer {oidc_token}"},
-        )
-        response.raise_for_status()
-        return response.json()
-
-
-def get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
-    """Fetch user's workspaces from API using OIDC token."""
-    try:
-        import httpx
-    except ImportError:
-        return []
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/me",
-                headers={"Authorization": f"Bearer {oidc_token}"},
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("workspaces", [])
-    except Exception:
-        pass
-    return []
-
-
-def get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
-    """Fetch environments for a workspace using internal token."""
-    try:
-        import httpx
-    except ImportError:
-        return []
-
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.get(
-                f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            if response.status_code == 200:
-                return response.json()
-    except Exception:
-        pass
-    return []
+# --- Token Refresh ---
 
 
 def ensure_access_token(
@@ -762,59 +497,11 @@ def ensure_access_token(
     Returns:
         Access token if available/refreshed successfully, None otherwise.
     """
-    # Check for cached valid token first
-    cached = load_access_token_cache(registry, workspace_id, user)
-    if cached:
-        cached_token = cached.get("access_token")
-        if cached_token:
-            return cached_token
-
-    # Need to refresh - get credentials
-    creds = load_credentials(registry, user)
-    if not creds:
-        return None
-
-    token_endpoint = creds.get("token_endpoint")
-    refresh_token = creds.get("refresh_token")
-    client_id = creds.get("client_id")
-
-    if not token_endpoint or not client_id:
-        return None
-
-    # Get registry URL
-    registry_url = get_registry_url(registry)
-    if not registry_url:
-        return None
-
-    try:
-        # If we have a refresh token, use it
-        if refresh_token:
-            tokens = _refresh_oidc_token(token_endpoint, refresh_token, client_id)
-
-            # Update stored refresh token if a new one was provided
-            if tokens.get("refresh_token"):
-                creds["refresh_token"] = tokens["refresh_token"]
-                save_credentials(creds, registry, user)
-
-            oidc_token = tokens["access_token"]
-        else:
-            # No refresh token - can't refresh
-            return None
-
-        # Exchange for internal token
-        internal_tokens = exchange_for_internal_token(
-            registry_url, oidc_token, workspace_id
-        )
-        access_token = internal_tokens["access_token"]
-        expires_in = internal_tokens.get("expires_in", 600)
-
-        # Cache it
-        save_access_token_cache(registry, workspace_id, access_token, expires_in, user)
-
-        return access_token
-
-    except Exception:
-        return None
+    return _ensure_access_token_core(
+        registry_name=registry,
+        workspace_id=workspace_id,
+        user=user,
+    )
 
 
 def resolve_workspace_slug_to_id(
@@ -823,26 +510,10 @@ def resolve_workspace_slug_to_id(
     user: str | None = None,
     oidc_token: str | None = None,
 ) -> str | None:
-    """Resolve a workspace slug to its ID.
-
-    Args:
-        registry: Registry name.
-        workspace_slug_or_id: Workspace slug or ID.
-        user: User identifier (email). Required if oidc_token not provided.
-        oidc_token: Optional OIDC token. If not provided, will try to refresh.
-
-    Returns:
-        Workspace ID if found, None otherwise.
-        If input looks like a UUID, returns it unchanged.
-
-    Side effects:
-        Populates the ID cache with all discovered workspace mappings.
-    """
-    # If it looks like a UUID, assume it's already an ID
+    """Resolve a workspace slug to its ID."""
     if _looks_like_uuid(workspace_slug_or_id):
         return workspace_slug_or_id
 
-    # Need to resolve slug - get OIDC token if not provided
     if not oidc_token:
         if not user:
             return None
@@ -850,21 +521,17 @@ def resolve_workspace_slug_to_id(
         if not oidc_token:
             return None
 
-    # Get registry URL
     registry_url = get_registry_url(registry)
     if not registry_url:
         return None
 
-    # Fetch workspaces and find matching slug
     workspaces = get_user_workspaces(registry_url, oidc_token)
     result = None
     for ws in workspaces:
         ws_id = ws.get("id")
         ws_slug = ws.get("slug")
-        # Cache all discovered workspaces
         if ws_id and ws_slug:
             cache_workspace_id(registry, ws_slug, ws_id)
-        # Check if this is the one we're looking for
         if ws_slug == workspace_slug_or_id or ws_id == workspace_slug_or_id:
             result = ws_id
 
@@ -878,27 +545,10 @@ def resolve_environment_slug_to_id(
     user: str | None = None,
     access_token: str | None = None,
 ) -> str | None:
-    """Resolve an environment slug to its ID.
-
-    Args:
-        registry: Registry name.
-        workspace_id: Workspace ID (must be resolved already).
-        environment_slug_or_id: Environment slug or ID.
-        user: User identifier (email). Required if access_token not provided.
-        access_token: Optional internal access token. If not provided, will try to get one.
-
-    Returns:
-        Environment ID if found, None otherwise.
-        If input looks like a UUID, returns it unchanged.
-
-    Side effects:
-        Populates the ID cache with all discovered environment mappings.
-    """
-    # If it looks like a UUID, assume it's already an ID
+    """Resolve an environment slug to its ID."""
     if _looks_like_uuid(environment_slug_or_id):
         return environment_slug_or_id
 
-    # Need to resolve slug - get access token if not provided
     if not access_token:
         if not user:
             return None
@@ -906,55 +556,18 @@ def resolve_environment_slug_to_id(
         if not access_token:
             return None
 
-    # Get registry URL
     registry_url = get_registry_url(registry)
     if not registry_url:
         return None
 
-    # Fetch environments and find matching slug
     environments = get_environments(registry_url, access_token, workspace_id)
     result = None
     for env in environments:
         env_id = env.get("id")
         env_slug = env.get("slug")
-        # Cache all discovered environments
         if env_id and env_slug:
             cache_environment_id(registry, workspace_id, env_slug, env_id)
-        # Check if this is the one we're looking for
         if env_slug == environment_slug_or_id or env_id == environment_slug_or_id:
             result = env_id
 
     return result
-
-
-def get_fresh_oidc_token(registry: str, user: str) -> str | None:
-    """Get a fresh OIDC access token by refreshing.
-
-    Args:
-        registry: Registry name.
-        user: User identifier (email).
-
-    Returns the OIDC access token or None if refresh fails.
-    """
-    creds = load_credentials(registry, user)
-    if not creds:
-        return None
-
-    token_endpoint = creds.get("token_endpoint")
-    refresh_token = creds.get("refresh_token")
-    client_id = creds.get("client_id")
-
-    if not token_endpoint or not refresh_token or not client_id:
-        return None
-
-    try:
-        tokens = _refresh_oidc_token(token_endpoint, refresh_token, client_id)
-
-        # Update stored refresh token if a new one was provided
-        if tokens.get("refresh_token"):
-            creds["refresh_token"] = tokens["refresh_token"]
-            save_credentials(creds, registry, user)
-
-        return tokens.get("access_token")
-    except Exception:
-        return None

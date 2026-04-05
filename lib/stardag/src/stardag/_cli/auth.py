@@ -32,7 +32,6 @@ import httpx
 import typer
 
 from stardag._cli.credentials import (
-    Credentials,
     InvalidProfileError,
     add_profile,
     add_registry,
@@ -49,17 +48,24 @@ from stardag._cli.credentials import (
     load_credentials,
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
-    save_access_token_cache,
     save_credentials,
     set_default_profile,
     set_target_roots,
     validate_active_profile,
 )
-from stardag.config import (
+from stardag.config.cache import (
     _looks_like_uuid,
     cache_environment_id,
     cache_workspace_id,
-    get_config,
+)
+from stardag.config.loader import get_config
+from stardag.registry._auth import (
+    Credentials,
+    exchange_for_internal_token,
+    get_environments,
+    get_user_workspaces,
+    refresh_oidc_token as _refresh_oidc_token,
+    save_access_token_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,40 +194,6 @@ def _exchange_code_for_tokens(
         return response.json()
 
 
-def _refresh_oidc_token(
-    token_endpoint: str,
-    refresh_token: str,
-    client_id: str,
-) -> dict:
-    """Refresh OIDC tokens using refresh token."""
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-    }
-
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(token_endpoint, data=data)
-        response.raise_for_status()
-        return response.json()
-
-
-def exchange_for_internal_token(
-    api_url: str,
-    oidc_token: str,
-    workspace_id: str,
-) -> dict:
-    """Exchange OIDC token for internal workspace-scoped token via /auth/exchange."""
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(
-            f"{api_url}/api/v1/auth/exchange",
-            json={"workspace_id": workspace_id},
-            headers={"Authorization": f"Bearer {oidc_token}"},
-        )
-        response.raise_for_status()
-        return response.json()
-
-
 def _extract_user_from_oidc_token(token: str) -> str | None:
     """Extract user email from OIDC access token (JWT) for local use only.
 
@@ -286,30 +258,6 @@ def _get_oidc_config(issuer: str) -> dict:
     """Fetch OIDC configuration from issuer."""
     with httpx.Client(timeout=10.0) as client:
         response = client.get(f"{issuer}/.well-known/openid-configuration")
-        response.raise_for_status()
-        return response.json()
-
-
-def get_user_workspaces(api_url: str, oidc_token: str) -> list[dict]:
-    """Fetch user's workspaces from API using OIDC token."""
-    # Use /ui/me which accepts OIDC tokens directly (before workspace-scoped exchange)
-    with httpx.Client(timeout=10.0) as client:
-        response = client.get(
-            f"{api_url}/api/v1/ui/me",
-            headers={"Authorization": f"Bearer {oidc_token}"},
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["workspaces"]
-
-
-def get_environments(api_url: str, access_token: str, workspace_id: str) -> list[dict]:
-    """Fetch environments for a workspace."""
-    with httpx.Client(timeout=10.0) as client:
-        response = client.get(
-            f"{api_url}/api/v1/ui/workspaces/{workspace_id}/environments",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
         response.raise_for_status()
         return response.json()
 
@@ -1216,8 +1164,8 @@ def refresh(
 
     config = get_config()
     registry_name = registry or config.context.registry_name
-    ws_id = workspace_id or config.context.workspace_id
-    user = config.context.user  # Get user from active profile
+    ws_id = workspace_id or (config.registry.workspace_id if config.registry else None)
+    user = config.registry.auth.user_email if config.registry else None
 
     if not registry_name:
         typer.echo("Error: No registry specified and no active profile", err=True)
@@ -1292,7 +1240,7 @@ def refresh(
         typer.echo("Access token refreshed and cached")
 
         # Sync target roots from registry
-        environment_id = config.context.environment_id
+        environment_id = config.registry.environment_id if config.registry else None
         if environment_id:
             _sync_target_roots(registry_url, access_token, ws_id, environment_id)
 

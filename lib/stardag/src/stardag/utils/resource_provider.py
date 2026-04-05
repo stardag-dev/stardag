@@ -14,12 +14,18 @@ _ResourceUnset = object()  # Sentinel for unset resource, distinct from None
 
 
 class ResourceProvider(Generic[_ResourceType]):
+    """A generic resource provider that supports lazy initialization."""
+
     def __init__(self):
         self._resource: _ResourceType = _ResourceUnset  # type: ignore
+        self._externally_set_default_factory: Callable[[], _ResourceType] | None = None
 
     def get(self) -> _ResourceType:
         if self._resource is _ResourceUnset:
-            self._resource = self.default_factory()
+            if self._externally_set_default_factory is not None:
+                self._resource = self._externally_set_default_factory()
+            else:
+                self._resource = self.default_factory()
         return self._resource
 
     def set(self, resource: _ResourceType):
@@ -40,6 +46,14 @@ class ResourceProvider(Generic[_ResourceType]):
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement a default_factory"
         )
+
+    def set_default_factory(self, factory: Callable[[], _ResourceType]):
+        """Override the default factory for this provider.
+
+        This allows tweaking the default resource creation logic without having to
+        instantiate the resource first (keeping it lazily initialized).
+        """
+        self._externally_set_default_factory = factory
 
     @contextmanager
     def override(

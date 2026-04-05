@@ -4,21 +4,20 @@ from pathlib import Path
 
 import pytest
 
-from pydantic import ValidationError
-
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_TARGET_ROOT,
     DEFAULT_TARGET_ROOT_KEY,
-    ContextConfig,
-    ProfileConfig,
+    ConfigContext,
+    RegistryAuth,
     RegistryConfig,
-    TomlConfig,
+    StardagConfig,
     clear_config_cache,
-    find_project_config,
     get_config,
     load_config,
 )
+from stardag.config.models import ProfileConfig, TomlConfig
+from stardag.config.paths import find_project_config
 
 
 @pytest.fixture
@@ -75,8 +74,8 @@ class TestTomlConfig:
             }
         )
         assert "local" in config.registry
-        assert config.registry["local"].url == "http://localhost:8000"
-        assert config.registry["central"].url == "https://api.stardag.com"
+        assert config.registry["local"] == "http://localhost:8000"
+        assert config.registry["central"] == "https://api.stardag.com"
 
     def test_parses_profiles(self):
         """Test parsing profile configuration."""
@@ -135,14 +134,7 @@ class TestLoadConfig:
         config = load_config(use_project_config=False)
 
         assert config.target.roots == {DEFAULT_TARGET_ROOT_KEY: DEFAULT_TARGET_ROOT}
-        assert config.api.url is None
-        assert config.api.timeout == DEFAULT_API_TIMEOUT
-        assert config.context.profile is None
-        assert config.context.registry_name is None
-        assert config.context.workspace_id is None
-        assert config.context.environment_id is None
-        assert config.access_token is None
-        assert config.api_key is None
+        assert config.registry is None
 
     def test_loads_from_user_config_toml(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -168,11 +160,13 @@ profile = "dev"
         clear_config_cache()
         config = load_config(use_project_config=False)
 
+        assert isinstance(config, StardagConfig)
         assert config.context.profile == "dev"
         assert config.context.registry_name == "local"
-        assert config.context.workspace_id == "workspace-123"
-        assert config.context.environment_id == "env-456"
-        assert config.api.url == "http://my-api:9000"
+        assert config.registry is not None
+        assert config.registry.url == "http://my-api:9000"
+        assert config.registry.workspace_id == "workspace-123"
+        assert config.registry.environment_id == "env-456"
 
     def test_env_vars_override_config(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -204,9 +198,10 @@ profile = "dev"
         config = load_config(use_project_config=False)
 
         # Direct env vars override profile-based config
-        assert config.api.url == "http://env-api:8080"
-        assert config.context.workspace_id == "env-workspace"
-        assert config.context.environment_id == "env-env"
+        assert config.registry is not None
+        assert config.registry.url == "http://env-api:8080"
+        assert config.registry.workspace_id == "env-workspace"
+        assert config.registry.environment_id == "env-env"
 
     def test_profile_env_var_selects_profile(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -243,11 +238,13 @@ profile = "dev"
         clear_config_cache()
         config = load_config(use_project_config=False)
 
+        assert isinstance(config, StardagConfig)
         assert config.context.profile == "prod"
         assert config.context.registry_name == "prod"
-        assert config.context.workspace_id == "prod-workspace"
-        assert config.context.environment_id == "prod-env"
-        assert config.api.url == "https://api.stardag.com"
+        assert config.registry is not None
+        assert config.registry.url == "https://api.stardag.com"
+        assert config.registry.workspace_id == "prod-workspace"
+        assert config.registry.environment_id == "prod-env"
 
     def test_project_config_overrides_user_config(
         self, temp_stardag_dir, temp_project_dir, monkeypatch
@@ -286,8 +283,9 @@ environment = "project-env"
         config = load_config()
 
         # Project config should override user config
-        assert config.context.workspace_id == "project-workspace"
-        assert config.context.environment_id == "project-env"
+        assert config.registry is not None
+        assert config.registry.workspace_id == "project-workspace"
+        assert config.registry.environment_id == "project-env"
 
     def test_api_key_from_env_var(self, temp_stardag_dir, monkeypatch):
         monkeypatch.chdir(temp_stardag_dir.parent)
@@ -296,7 +294,20 @@ environment = "project-env"
         clear_config_cache()
         config = load_config(use_project_config=False)
 
-        assert config.api_key == "my-api-key"
+        # Without a registry URL, api_key alone doesn't create a RegistryConfig
+        assert config.registry is None
+
+    def test_api_key_with_registry_url(self, temp_stardag_dir, monkeypatch):
+        """API key + registry URL creates a RegistryConfig with auth."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_API_KEY", "my-api-key")
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://localhost:8000")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        assert config.registry.auth.api_key == "my-api-key"
 
     def test_target_roots_from_json_env_var(self, temp_stardag_dir, monkeypatch):
         """STARDAG_TARGET_ROOTS as a JSON string sets target roots."""
@@ -344,25 +355,85 @@ environment = "project-env"
         assert config.target.roots == {"json-root": "/from/json"}
 
 
-class TestContextConfig:
-    def test_default_values(self):
-        ctx = ContextConfig()
-        assert ctx.profile is None
-        assert ctx.registry_name is None
-        assert ctx.workspace_id is None
-        assert ctx.environment_id is None
+class TestNoRegistry:
+    def test_no_registry_env_var(self, temp_stardag_dir, monkeypatch):
+        """STARDAG_NO_REGISTRY=1 forces offline/local mode."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_NO_REGISTRY", "1")
 
-    def test_with_values(self):
-        ctx = ContextConfig(
-            profile="dev",
-            registry_name="local",
-            workspace_id="workspace-123",
-            environment_id="env-456",
+        # Even with a profile configured, registry should be None
+        config_path = temp_stardag_dir / "config.toml"
+        write_toml(
+            config_path,
+            """
+[registry.local]
+url = "http://localhost:8000"
+
+[profile.dev]
+registry = "local"
+workspace = "ws-id"
+environment = "env-id"
+
+[default]
+profile = "dev"
+""",
         )
-        assert ctx.profile == "dev"
-        assert ctx.registry_name == "local"
-        assert ctx.workspace_id == "workspace-123"
-        assert ctx.environment_id == "env-456"
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is None
+
+    def test_no_registry_preserves_target_roots(self, temp_stardag_dir, monkeypatch):
+        """STARDAG_NO_REGISTRY still loads target roots from env."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_NO_REGISTRY", "1")
+        monkeypatch.setenv("STARDAG_TARGET_ROOTS", '{"default": "/my/root"}')
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is None
+        assert config.target.roots == {"default": "/my/root"}
+
+
+class TestConfigContext:
+    def test_config_with_context(self):
+        """StardagConfig has context field."""
+        config = StardagConfig(
+            context=ConfigContext(profile="dev", registry_name="local"),
+        )
+        assert config.context.profile == "dev"
+        assert config.context.registry_name == "local"
+
+    def test_config_without_context_defaults(self):
+        """StardagConfig defaults to empty context."""
+        config = StardagConfig()
+        assert config.context.profile is None
+        assert config.context.registry_name is None
+
+
+class TestRegistryConfig:
+    def test_registry_config(self):
+        """RegistryConfig holds canonical registry info."""
+        config = RegistryConfig(
+            url="https://api.stardag.com",
+            workspace_id="ws-123",
+            environment_id="env-456",
+            auth=RegistryAuth(api_key="key123"),
+        )
+        assert config.url == "https://api.stardag.com"
+        assert config.workspace_id == "ws-123"
+        assert config.environment_id == "env-456"
+        assert config.auth.api_key == "key123"
+        assert config.timeout == DEFAULT_API_TIMEOUT
+
+    def test_registry_auth_defaults(self):
+        """RegistryAuth fields default to None."""
+        auth = RegistryAuth()
+        assert auth.api_key is None
+        assert auth.user_email is None
+        assert auth.access_token is None
 
 
 class TestGetConfig:
@@ -385,16 +456,6 @@ class TestGetConfig:
 
         # After clearing cache, should be a new instance
         assert config1 is not config2
-
-
-class TestRegistryConfig:
-    def test_url_is_required(self):
-        with pytest.raises(ValidationError):
-            RegistryConfig()  # type: ignore[call-arg]
-
-    def test_custom_url(self):
-        config = RegistryConfig(url="https://api.stardag.com")
-        assert config.url == "https://api.stardag.com"
 
 
 class TestProfileConfig:

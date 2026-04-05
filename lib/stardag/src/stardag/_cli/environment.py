@@ -13,7 +13,7 @@ from stardag._cli.credentials import (
     resolve_environment_slug_to_id,
     set_target_roots as set_cached_target_roots,
 )
-from stardag.config import get_config
+from stardag.config.loader import get_config
 
 app = typer.Typer(help="Manage environments and target roots")
 
@@ -21,7 +21,7 @@ app = typer.Typer(help="Manage environments and target roots")
 def _get_workspace_id() -> str:
     """Get the active workspace ID or exit."""
     config = get_config()
-    workspace_id = config.context.workspace_id
+    workspace_id = config.registry.workspace_id if config.registry else None
     if not workspace_id:
         typer.echo(
             "Error: No workspace set. Use a profile or set STARDAG_WORKSPACE_ID.",
@@ -38,14 +38,14 @@ def _get_environment_id(env_override: str | None = None) -> str:
     if env_override:
         # Resolve slug to ID if needed
         registry_name = config.context.registry_name
-        workspace_id = config.context.workspace_id
+        workspace_id = config.registry.workspace_id if config.registry else None
         if not registry_name or not workspace_id:
             typer.echo(
                 "Error: No registry/workspace configured. Set STARDAG_PROFILE.",
                 err=True,
             )
             raise typer.Exit(1)
-        user = config.context.user
+        user = config.registry.auth.user_email if config.registry else None
         env_id = resolve_environment_slug_to_id(
             registry_name, workspace_id, env_override, user
         )
@@ -56,7 +56,7 @@ def _get_environment_id(env_override: str | None = None) -> str:
             raise typer.Exit(1)
         return env_id
 
-    environment_id = config.context.environment_id
+    environment_id = config.registry.environment_id if config.registry else None
     if not environment_id:
         typer.echo(
             "Error: No environment set. Use a profile, set STARDAG_ENVIRONMENT_ID, "
@@ -161,7 +161,7 @@ def env_list() -> None:
         return
 
     config = get_config()
-    current_env = config.context.environment_id
+    current_env = config.registry.environment_id if config.registry else None
 
     typer.echo("Environments:")
     for env in environments:
