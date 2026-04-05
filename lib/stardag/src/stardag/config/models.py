@@ -224,14 +224,10 @@ class StardagConfig(BaseModel):
 
     ``registry`` is ``None`` when running in offline/local mode (no registry
     configured, or ``STARDAG_NO_REGISTRY=1``).
-
-    ``api_key`` is set independently of ``registry`` so that ``config show``
-    can display it even when no registry URL is configured yet.
     """
 
     registry: RegistryConfig | None = None
     target: TargetConfig = Field(default_factory=TargetConfig)
-    api_key: str | None = None
 
 
 class StardagConfigWithContext(StardagConfig):

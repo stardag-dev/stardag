@@ -4,6 +4,8 @@ Manages registries, profiles, and shows current configuration.
 Configuration is stored in ~/.stardag/config.toml.
 """
 
+import os
+
 import typer
 
 from stardag._cli import registry
@@ -88,7 +90,8 @@ def show_config() -> None:
 
     typer.echo("")
     typer.echo("Authentication:")
-    if config.api_key or (reg and reg.auth.api_key):
+    has_api_key = (reg and reg.auth.api_key) or os.environ.get("STARDAG_API_KEY")
+    if has_api_key:
         typer.echo("  Method: API Key")
     elif reg and reg.auth.access_token:
         typer.echo("  Method: JWT")
