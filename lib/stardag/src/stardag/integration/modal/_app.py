@@ -84,7 +84,7 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
 
     Returns:
         Dict of environment variables to inject into Modal functions:
-        - STARDAG_REGISTRY_URL: API endpoint
+        - STARDAG_API_URL: API endpoint
         - STARDAG_WORKSPACE_ID: Workspace UUID
         - STARDAG_ENVIRONMENT_ID: Environment UUID
         - STARDAG_TARGET_ROOTS: JSON dict of target roots (pydantic-settings parses this)
@@ -94,7 +94,7 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
         >>> env_vars = get_profile_env_vars("production")
         >>> print(env_vars)
         {
-            'STARDAG_REGISTRY_URL': 'https://api.stardag.com',
+            'STARDAG_API_URL': 'https://api.stardag.com',
             'STARDAG_WORKSPACE_ID': '...',
             'STARDAG_ENVIRONMENT_ID': '...',
             'STARDAG_TARGET_ROOTS': '{"default": "s3://bucket/prefix"}',
@@ -122,7 +122,7 @@ def get_profile_env_vars(profile: str | None = None) -> dict[str, str]:
 
     reg = config.registry
     if reg:
-        env_vars["STARDAG_REGISTRY_URL"] = reg.url
+        env_vars["STARDAG_API_URL"] = reg.url
         if reg.workspace_id:
             env_vars["STARDAG_WORKSPACE_ID"] = reg.workspace_id
         if reg.environment_id:

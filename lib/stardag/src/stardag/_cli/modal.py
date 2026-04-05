@@ -95,7 +95,7 @@ def _print_stardag_context(
     """Print stardag context info (registry, workspace, environment, target roots)."""
     import json
 
-    registry = env_vars.get("STARDAG_REGISTRY_URL", "none (local mode)")
+    registry = env_vars.get("STARDAG_API_URL", "none (local mode)")
     ws_id = env_vars.get("STARDAG_WORKSPACE_ID", "N/A")
     env_id = env_vars.get("STARDAG_ENVIRONMENT_ID", "N/A")
 

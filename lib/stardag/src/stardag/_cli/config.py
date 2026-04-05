@@ -96,8 +96,9 @@ def show_config() -> None:
     if has_api_key:
         typer.echo("  Method: API Key")
     elif reg and reg.auth.access_token:
+        token_val = reg.auth.access_token.get_secret_value()
         typer.echo("  Method: JWT")
-        typer.echo(f"  Token: {reg.auth.access_token[:20]}...")
+        typer.echo(f"  Token: {token_val[:20]}...")
     else:
         typer.echo("  Method: Not authenticated")
 

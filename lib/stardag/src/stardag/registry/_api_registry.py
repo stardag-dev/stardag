@@ -84,7 +84,7 @@ class APIRegistry(RegistryABC):
         if not resolved_url:
             raise ValueError(
                 "APIRegistry requires a registry URL. "
-                "Set STARDAG_REGISTRY_URL or configure a profile with a registry."
+                "Set STARDAG_API_URL or configure a profile with a registry."
             )
         self.api_url = resolved_url.rstrip("/")
 
@@ -99,7 +99,9 @@ class APIRegistry(RegistryABC):
         self.environment_id = environment_id or (reg.environment_id if reg else None)
 
         # Build auth object
-        resolved_api_key = api_key or (reg.auth.api_key if reg else None)
+        resolved_api_key = api_key or (
+            reg.auth.api_key.get_secret_value() if reg and reg.auth.api_key else None
+        )
         if resolved_api_key:
             self._auth: httpx.Auth = StardagAPIKeyAuth(resolved_api_key)
             logger.debug("APIRegistry initialized with API key authentication")
@@ -107,7 +109,7 @@ class APIRegistry(RegistryABC):
             # registry_name is optional — StardagTokenAuth can derive a
             # credential key from the URL when no profile is configured.
             self._auth = StardagTokenAuth(
-                access_token=reg.auth.access_token,
+                access_token=reg.auth.access_token.get_secret_value(),
                 workspace_id=reg.workspace_id,
                 user_email=reg.auth.user_email,
                 registry_url=reg.url,

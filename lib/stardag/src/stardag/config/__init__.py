@@ -21,7 +21,8 @@ Usage:
 
 Environment Variables (highest priority):
     STARDAG_PROFILE          - Profile name to use (looks up in config.toml)
-    STARDAG_REGISTRY_URL     - Direct registry URL override
+    STARDAG_API_URL          - Registry API URL override
+    STARDAG_REGISTRY_URL     - Deprecated alias for STARDAG_API_URL
     STARDAG_WORKSPACE_ID     - Direct workspace ID override
     STARDAG_ENVIRONMENT_ID   - Direct environment ID override
     STARDAG_API_KEY          - API key for authentication

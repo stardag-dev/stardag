@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import SecretStr
+
 from stardag.config import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_TARGET_ROOT,
@@ -190,7 +192,7 @@ profile = "dev"
         )
 
         # Set env vars (should override)
-        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://env-api:8080")
+        monkeypatch.setenv("STARDAG_API_URL", "http://env-api:8080")
         monkeypatch.setenv("STARDAG_WORKSPACE_ID", "env-workspace")
         monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "env-env")
 
@@ -301,13 +303,88 @@ environment = "project-env"
         """API key + registry URL creates a RegistryConfig with auth."""
         monkeypatch.chdir(temp_stardag_dir.parent)
         monkeypatch.setenv("STARDAG_API_KEY", "my-api-key")
-        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://localhost:8000")
+        monkeypatch.setenv("STARDAG_API_URL", "http://localhost:8000")
 
         clear_config_cache()
         config = load_config(use_project_config=False)
 
         assert config.registry is not None
-        assert config.registry.auth.api_key == "my-api-key"
+        assert config.registry.auth.api_key is not None
+        assert config.registry.auth.api_key.get_secret_value() == "my-api-key"
+
+    def test_env_var_overrides_inherit_user_from_profile(
+        self, temp_stardag_dir, monkeypatch
+    ):
+        """Direct env var overrides still pick up user from active profile."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+
+        config_path = temp_stardag_dir / "config.toml"
+        write_toml(
+            config_path,
+            """
+[registry.cloud]
+url = "https://old-url.example.com"
+
+[profile.myprofile]
+registry = "cloud"
+user = "me@example.com"
+workspace = "profile-ws"
+environment = "profile-env"
+
+[default]
+profile = "myprofile"
+""",
+        )
+
+        # Env vars override URL/workspace/environment
+        monkeypatch.setenv("STARDAG_API_URL", "https://api.stardag.com")
+        monkeypatch.setenv("STARDAG_WORKSPACE_ID", "override-ws")
+        monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "override-env")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        # URL/workspace/env come from env vars
+        assert config.registry.url == "https://api.stardag.com"
+        assert config.registry.workspace_id == "override-ws"
+        assert config.registry.environment_id == "override-env"
+        # User inherited from profile (needed for token auth)
+        assert config.registry.auth.user_email == "me@example.com"
+        # Context shows profile was used
+        assert config.context.profile == "myprofile"
+        assert config.context.registry_name == "cloud"
+
+    def test_deprecated_registry_url_env_var(self, temp_stardag_dir, monkeypatch):
+        """STARDAG_REGISTRY_URL still works as deprecated alias."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://legacy-url:8000")
+
+        clear_config_cache()
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        assert config.registry.url == "http://legacy-url:8000"
+        # Should have emitted a deprecation warning
+        assert any("STARDAG_REGISTRY_URL is deprecated" in str(x.message) for x in w)
+
+    def test_api_url_takes_precedence_over_registry_url(
+        self, temp_stardag_dir, monkeypatch
+    ):
+        """STARDAG_API_URL takes precedence over deprecated STARDAG_REGISTRY_URL."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_API_URL", "http://canonical:8000")
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://legacy:9000")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        assert config.registry.url == "http://canonical:8000"
 
     def test_target_roots_from_json_env_var(self, temp_stardag_dir, monkeypatch):
         """STARDAG_TARGET_ROOTS as a JSON string sets target roots."""
@@ -420,12 +497,13 @@ class TestRegistryConfig:
             url="https://api.stardag.com",
             workspace_id="ws-123",
             environment_id="env-456",
-            auth=RegistryAuth(api_key="key123"),
+            auth=RegistryAuth(api_key=SecretStr("key123")),
         )
         assert config.url == "https://api.stardag.com"
         assert config.workspace_id == "ws-123"
         assert config.environment_id == "env-456"
-        assert config.auth.api_key == "key123"
+        assert config.auth.api_key is not None
+        assert config.auth.api_key.get_secret_value() == "key123"
         assert config.timeout == DEFAULT_API_TIMEOUT
 
     def test_registry_auth_defaults(self):
@@ -434,6 +512,16 @@ class TestRegistryConfig:
         assert auth.api_key is None
         assert auth.user_email is None
         assert auth.access_token is None
+
+    def test_registry_auth_secrets_masked_in_repr(self):
+        """SecretStr fields are masked in repr/str."""
+        auth = RegistryAuth(
+            api_key=SecretStr("sk_secret_key"), access_token=SecretStr("jwt_secret")
+        )
+        repr_str = repr(auth)
+        assert "sk_secret_key" not in repr_str
+        assert "jwt_secret" not in repr_str
+        assert "**********" in repr_str
 
 
 class TestGetConfig:

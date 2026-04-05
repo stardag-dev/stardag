@@ -30,7 +30,7 @@ Usage:
 
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.
-    Set STARDAG_REGISTRY_URL, STARDAG_WORKSPACE_ID, STARDAG_ENVIRONMENT_ID
+    Set STARDAG_API_URL, STARDAG_WORKSPACE_ID, STARDAG_ENVIRONMENT_ID
     for direct configuration (bypasses profiles).
     Set STARDAG_API_KEY for API key authentication.
 """

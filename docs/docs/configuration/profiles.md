@@ -175,7 +175,7 @@ Environment variables override profile settings:
 | Variable                 | Description                        |
 | ------------------------ | ---------------------------------- |
 | `STARDAG_PROFILE`        | Active profile name                |
-| `STARDAG_REGISTRY_URL`   | Registry URL (overrides profile)   |
+| `STARDAG_API_URL`        | Registry URL (overrides profile)   |
 | `STARDAG_API_KEY`        | API key for authentication         |
 | `STARDAG_WORKSPACE_ID`   | Workspace ID (overrides profile)   |
 | `STARDAG_ENVIRONMENT_ID` | Environment ID (overrides profile) |

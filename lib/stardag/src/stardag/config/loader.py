@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Any
 
+from pydantic import SecretStr
+
 from stardag.config.cache import (
     _looks_like_uuid,
     get_cached_environment_id,
@@ -149,11 +151,34 @@ def load_config(
     workspace_id: str | None = None
     environment_id: str | None = None
 
+    # Resolve API URL: STARDAG_API_URL (canonical) or STARDAG_REGISTRY_URL (deprecated)
+    explicit_url = env_settings.api_url
+    if not explicit_url:
+        legacy_url = os.environ.get("STARDAG_REGISTRY_URL")
+        if legacy_url:
+            import warnings
+
+            warnings.warn(
+                "STARDAG_REGISTRY_URL is deprecated, use STARDAG_API_URL instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            explicit_url = legacy_url
+
     # Check for direct env var overrides first
-    if env_settings.registry_url:
-        registry_url = env_settings.registry_url
+    if explicit_url:
+        registry_url = explicit_url
         workspace_id = env_settings.workspace_id
         environment_id = env_settings.environment_id
+        # Even with direct env var overrides, try to inherit user/registry_name
+        # from the active profile so that token auth (OIDC refresh) still works.
+        _profile_name = env_settings.profile or toml_config.default.get("profile")
+        if _profile_name:
+            _profile = toml_config.profile.get(_profile_name)
+            if _profile:
+                profile_name = _profile_name
+                registry_name = _profile.registry
+                user = _profile.user
     # Then check for profile-based config
     elif env_settings.profile:
         profile_name = env_settings.profile
@@ -268,7 +293,10 @@ def load_config(
                 pass
 
     # 6. Get API key from env
-    api_key = env_settings.api_key or os.environ.get("STARDAG_API_KEY")
+    api_key_raw = os.environ.get("STARDAG_API_KEY")
+    api_key: SecretStr | None = env_settings.api_key or (
+        SecretStr(api_key_raw) if api_key_raw else None
+    )
 
     # 7. Build canonical RegistryConfig (or None for offline mode)
     registry_cfg: RegistryConfig | None = None
@@ -280,7 +308,7 @@ def load_config(
             auth=RegistryAuth(
                 api_key=api_key,
                 user_email=user,
-                access_token=access_token,
+                access_token=SecretStr(access_token) if access_token else None,
             ),
             timeout=env_settings.api_timeout or DEFAULT_API_TIMEOUT,
         )

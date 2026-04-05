@@ -6,6 +6,38 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.3 — Secret masking for auth credentials
+
+`RegistryAuth.api_key` and `RegistryAuth.access_token` now use Pydantic
+`SecretStr` instead of plain `str`. This means secrets are automatically masked
+as `**********` in `repr()`, `str()`, `model_dump()`, and log output.
+
+**Migration**: If you read these fields directly, call `.get_secret_value()`
+to get the plain string:
+
+```python
+config = get_config()
+if config.registry and config.registry.auth.api_key:
+    key = config.registry.auth.api_key.get_secret_value()
+```
+
+Truthiness checks still work (`if config.registry.auth.api_key:` is fine).
+
+### Env var rename: `STARDAG_API_URL`
+
+`STARDAG_REGISTRY_URL` is renamed to `STARDAG_API_URL` for consistency with
+`STARDAG_API_KEY` and `STARDAG_API_TIMEOUT`. The old name still works as a
+deprecated alias (with a `DeprecationWarning`).
+
+### Bug fix: token auth with env var overrides
+
+When `STARDAG_API_URL`/`STARDAG_WORKSPACE_ID`/`STARDAG_ENVIRONMENT_ID` are
+set directly (bypassing profile for connection details), the loader now still
+inherits user and registry_name from the active profile. This fixes OIDC token
+auth failing in setups that override the URL but rely on a profile for identity.
+
+---
+
 ## v0.5.2 — Configuration cleanup and auth token auto-refresh
 
 This release restructures the configuration system and adds automatic JWT token
