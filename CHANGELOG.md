@@ -6,6 +6,31 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-04-05
+
+### SDK
+
+#### Breaking changes (configuration only — core task/build API unchanged)
+
+- **`StardagConfig` restructured**: `config.api`, `config.context`, `config.access_token`, `config.api_key` replaced by `config.registry: RegistryConfig | None` and `config.context: ConfigContext`. Code using `config.api.url` must use `config.registry.url` (with null check).
+- **`APIConfig`, `ContextConfig` removed**: Use `RegistryConfig` and `ConfigContext` instead.
+- **`StardagConfigWithContext` removed**: `context` field is now directly on `StardagConfig`.
+- **`get_config_context()` removed**: Use `config.context` directly.
+- **`TomlRegistryEntry` removed**: `TomlConfig.registry` is now `dict[str, str]` (name → URL).
+- **`config/__init__.py` trimmed**: Only public API symbols are exported. Internal code should import from submodules (`config.paths`, `config.cache`, `config.io`, `config.models`, `config.loader`).
+
+#### New features
+
+- **Automatic JWT token refresh during builds**: `APIRegistry` now uses `httpx.Auth` subclasses (`StardagAPIKeyAuth`, `StardagTokenAuth`) that transparently refresh expired tokens before each request. Long-running builds no longer fail when JWT tokens expire mid-execution.
+- **`STARDAG_NO_REGISTRY=1` env var**: Forces offline/local mode (`config.registry = None`, `NoOpRegistry`).
+- **Profile-less auth**: `StardagTokenAuth` can derive credential storage keys from the registry URL when no TOML profile is configured, enabling env-var-only setups.
+
+#### Improvements
+
+- `config.py` split into `config/` package with focused submodules: `paths`, `io`, `cache`, `models`, `loader`.
+- Token refresh logic extracted from `_cli/credentials.py` to `registry/_auth.py`, removing code duplication and the `config → _cli` circular dependency.
+- `get_user_workspaces()` and `get_environments()` now propagate exceptions instead of silently returning empty lists.
+
 ## [0.5.0] — 2026-03-18
 
 ### SDK
