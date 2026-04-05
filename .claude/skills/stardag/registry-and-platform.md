@@ -44,7 +44,7 @@ The SDK communicates with the API via `APIRegistry`:
 import stardag as sd
 
 # Option 1: Environment variables
-# STARDAG_REGISTRY_URL=https://api.stardag.com
+# STARDAG_API_URL=https://api.stardag.com
 # STARDAG_API_KEY=sk_...
 # STARDAG_WORKSPACE_ID=...
 
@@ -162,7 +162,7 @@ stardag modal stardag-api-key create        # Create API key for Modal
 | Variable                 | Purpose                   |
 | ------------------------ | ------------------------- |
 | `STARDAG_PROFILE`        | Active profile name       |
-| `STARDAG_REGISTRY_URL`   | Registry API URL          |
+| `STARDAG_API_URL`        | Registry API URL          |
 | `STARDAG_WORKSPACE_ID`   | Workspace UUID            |
 | `STARDAG_ENVIRONMENT_ID` | Environment UUID          |
 | `STARDAG_API_KEY`        | API key (`sk_...`)        |

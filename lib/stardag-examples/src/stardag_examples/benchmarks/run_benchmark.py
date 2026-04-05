@@ -292,7 +292,7 @@ Examples:
   # Run with local registry and global locks enabled:
   STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local --lock
 
-  # Run with remote registry (uses STARDAG_REGISTRY_URL env var):
+  # Run with remote registry (uses STARDAG_API_URL env var):
   uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 
 Authentication:

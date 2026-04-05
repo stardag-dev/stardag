@@ -347,7 +347,7 @@ All CLI behavior can be overridden with environment variables:
 | Variable                     | Description                   |
 | ---------------------------- | ----------------------------- |
 | `STARDAG_PROFILE`            | Active profile name           |
-| `STARDAG_REGISTRY_URL`       | Registry API URL              |
+| `STARDAG_API_URL`            | Registry API URL              |
 | `STARDAG_API_KEY`            | API key (bypasses OAuth)      |
 | `STARDAG_WORKSPACE_ID`       | Workspace UUID                |
 | `STARDAG_ENVIRONMENT_ID`     | Environment UUID              |
@@ -436,7 +436,7 @@ All CLI behavior can be overridden with environment variables:
 
 ```sh
 # No interactive login needed - use API key
-export STARDAG_REGISTRY_URL=https://api.stardag.com
+export STARDAG_API_URL=https://api.stardag.com
 export STARDAG_API_KEY=sk_...
 export STARDAG_WORKSPACE_ID=...
 export STARDAG_ENVIRONMENT_ID=...

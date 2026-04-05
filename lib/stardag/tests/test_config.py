@@ -192,7 +192,7 @@ profile = "dev"
         )
 
         # Set env vars (should override)
-        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://env-api:8080")
+        monkeypatch.setenv("STARDAG_API_URL", "http://env-api:8080")
         monkeypatch.setenv("STARDAG_WORKSPACE_ID", "env-workspace")
         monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "env-env")
 
@@ -303,7 +303,7 @@ environment = "project-env"
         """API key + registry URL creates a RegistryConfig with auth."""
         monkeypatch.chdir(temp_stardag_dir.parent)
         monkeypatch.setenv("STARDAG_API_KEY", "my-api-key")
-        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://localhost:8000")
+        monkeypatch.setenv("STARDAG_API_URL", "http://localhost:8000")
 
         clear_config_cache()
         config = load_config(use_project_config=False)
@@ -337,7 +337,7 @@ profile = "myprofile"
         )
 
         # Env vars override URL/workspace/environment
-        monkeypatch.setenv("STARDAG_REGISTRY_URL", "https://api.stardag.com")
+        monkeypatch.setenv("STARDAG_API_URL", "https://api.stardag.com")
         monkeypatch.setenv("STARDAG_WORKSPACE_ID", "override-ws")
         monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "override-env")
 
@@ -354,6 +354,37 @@ profile = "myprofile"
         # Context shows profile was used
         assert config.context.profile == "myprofile"
         assert config.context.registry_name == "cloud"
+
+    def test_deprecated_registry_url_env_var(self, temp_stardag_dir, monkeypatch):
+        """STARDAG_REGISTRY_URL still works as deprecated alias."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://legacy-url:8000")
+
+        clear_config_cache()
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        assert config.registry.url == "http://legacy-url:8000"
+        # Should have emitted a deprecation warning
+        assert any("STARDAG_REGISTRY_URL is deprecated" in str(x.message) for x in w)
+
+    def test_api_url_takes_precedence_over_registry_url(
+        self, temp_stardag_dir, monkeypatch
+    ):
+        """STARDAG_API_URL takes precedence over deprecated STARDAG_REGISTRY_URL."""
+        monkeypatch.chdir(temp_stardag_dir.parent)
+        monkeypatch.setenv("STARDAG_API_URL", "http://canonical:8000")
+        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://legacy:9000")
+
+        clear_config_cache()
+        config = load_config(use_project_config=False)
+
+        assert config.registry is not None
+        assert config.registry.url == "http://canonical:8000"
 
     def test_target_roots_from_json_env_var(self, temp_stardag_dir, monkeypatch):
         """STARDAG_TARGET_ROOTS as a JSON string sets target roots."""

@@ -630,7 +630,7 @@ class TestInitRegistry:
         from stardag.registry._base import init_registry
 
         monkeypatch.chdir(temp_stardag_dir.parent)
-        monkeypatch.setenv("STARDAG_REGISTRY_URL", "http://localhost:8000")
+        monkeypatch.setenv("STARDAG_API_URL", "http://localhost:8000")
         monkeypatch.setenv("STARDAG_API_KEY", "test-key")
         clear_config_cache()
 
@@ -649,7 +649,7 @@ class TestEnvVarOnlyConfig:
         from stardag.config.loader import clear_config_cache, load_config
 
         monkeypatch.chdir(temp_stardag_dir.parent)
-        monkeypatch.setenv("STARDAG_REGISTRY_URL", "https://api.stardag.com")
+        monkeypatch.setenv("STARDAG_API_URL", "https://api.stardag.com")
         monkeypatch.setenv("STARDAG_API_KEY", "sk_test_123")
         monkeypatch.setenv("STARDAG_WORKSPACE_ID", "ws-uuid")
         monkeypatch.setenv("STARDAG_ENVIRONMENT_ID", "env-uuid")

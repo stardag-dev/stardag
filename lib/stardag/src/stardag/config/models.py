@@ -188,7 +188,7 @@ class StardagSettings(BaseSettings):
     profile: str | None = None
 
     # Direct overrides (bypass profile)
-    registry_url: str | None = None
+    api_url: str | None = None  # STARDAG_API_URL (canonical)
     workspace_id: str | None = None
     environment_id: str | None = None
 

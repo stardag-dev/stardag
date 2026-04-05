@@ -37,7 +37,7 @@ class RegistryAPIClientConfig:
         if not resolved_url:
             raise ValueError(
                 "Registry API client requires a URL. "
-                "Set STARDAG_REGISTRY_URL or configure a profile."
+                "Set STARDAG_API_URL or configure a profile."
             )
 
         # Build auth object with auto-refresh support

@@ -23,9 +23,15 @@ if config.registry and config.registry.auth.api_key:
 
 Truthiness checks still work (`if config.registry.auth.api_key:` is fine).
 
+### Env var rename: `STARDAG_API_URL`
+
+`STARDAG_REGISTRY_URL` is renamed to `STARDAG_API_URL` for consistency with
+`STARDAG_API_KEY` and `STARDAG_API_TIMEOUT`. The old name still works as a
+deprecated alias (with a `DeprecationWarning`).
+
 ### Bug fix: token auth with env var overrides
 
-When `STARDAG_REGISTRY_URL`/`STARDAG_WORKSPACE_ID`/`STARDAG_ENVIRONMENT_ID` are
+When `STARDAG_API_URL`/`STARDAG_WORKSPACE_ID`/`STARDAG_ENVIRONMENT_ID` are
 set directly (bypassing profile for connection details), the loader now still
 inherits user and registry_name from the active profile. This fixes OIDC token
 auth failing in setups that override the URL but rely on a profile for identity.

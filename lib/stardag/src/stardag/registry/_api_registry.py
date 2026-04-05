@@ -84,7 +84,7 @@ class APIRegistry(RegistryABC):
         if not resolved_url:
             raise ValueError(
                 "APIRegistry requires a registry URL. "
-                "Set STARDAG_REGISTRY_URL or configure a profile with a registry."
+                "Set STARDAG_API_URL or configure a profile with a registry."
             )
         self.api_url = resolved_url.rstrip("/")
 

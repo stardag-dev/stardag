@@ -173,11 +173,11 @@ class TestCliEnvConfig:
         self,
         docker_services: ServiceEndpoints,
     ) -> None:
-        """Test that STARDAG_REGISTRY_URL is respected."""
+        """Test that STARDAG_API_URL is respected."""
         with tempfile.TemporaryDirectory() as tmpdir:
             env = {
                 "HOME": tmpdir,
-                "STARDAG_REGISTRY_URL": docker_services.api,
+                "STARDAG_API_URL": docker_services.api,
             }
             result = run_stardag_cli("config", "show", env=env)
             assert result.returncode == 0
@@ -196,7 +196,7 @@ class TestCliEnvConfig:
         with tempfile.TemporaryDirectory() as tmpdir:
             env = {
                 "HOME": tmpdir,
-                "STARDAG_REGISTRY_URL": docker_services.api,
+                "STARDAG_API_URL": docker_services.api,
                 "STARDAG_WORKSPACE_ID": test_workspace_id,
                 "STARDAG_ENVIRONMENT_ID": test_environment_id,
             }

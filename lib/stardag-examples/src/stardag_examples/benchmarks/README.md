@@ -19,7 +19,7 @@ STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark
 # With local registry and global concurrency locks enabled
 STARDAG_API_KEY=<key> uv run python -m stardag_examples.benchmarks.run_benchmark --registry local --lock
 
-# With remote registry (uses STARDAG_REGISTRY_URL from env/config)
+# With remote registry (uses STARDAG_API_URL from env/config)
 uv run python -m stardag_examples.benchmarks.run_benchmark --registry remote
 ```
 

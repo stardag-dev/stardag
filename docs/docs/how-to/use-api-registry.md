@@ -24,7 +24,7 @@ The API Registry:
 
 ```sh
 export STARDAG_API_KEY=sk_your_api_key_here
-export STARDAG_REGISTRY_URL=https://api.stardag.com
+export STARDAG_API_URL=https://api.stardag.com
 export STARDAG_WORKSPACE_ID=your-workspace-id
 ```
 
@@ -57,7 +57,7 @@ sd.build(my_task, registry=registry)
 ### Via Environment Variables
 
 ```sh
-export STARDAG_REGISTRY_URL=https://api.stardag.com
+export STARDAG_API_URL=https://api.stardag.com
 export STARDAG_WORKSPACE_ID=workspace-uuid
 export STARDAG_API_KEY=sk_...
 ```

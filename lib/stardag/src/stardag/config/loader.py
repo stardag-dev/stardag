@@ -151,9 +151,23 @@ def load_config(
     workspace_id: str | None = None
     environment_id: str | None = None
 
+    # Resolve API URL: STARDAG_API_URL (canonical) or STARDAG_REGISTRY_URL (deprecated)
+    explicit_url = env_settings.api_url
+    if not explicit_url:
+        legacy_url = os.environ.get("STARDAG_REGISTRY_URL")
+        if legacy_url:
+            import warnings
+
+            warnings.warn(
+                "STARDAG_REGISTRY_URL is deprecated, use STARDAG_API_URL instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            explicit_url = legacy_url
+
     # Check for direct env var overrides first
-    if env_settings.registry_url:
-        registry_url = env_settings.registry_url
+    if explicit_url:
+        registry_url = explicit_url
         workspace_id = env_settings.workspace_id
         environment_id = env_settings.environment_id
         # Even with direct env var overrides, try to inherit user/registry_name
