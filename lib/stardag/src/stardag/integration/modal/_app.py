@@ -41,7 +41,6 @@ import pathlib
 import typing
 
 import modal
-from modal.gpu import GPU_T
 
 import traceback as tb_module
 
@@ -262,7 +261,7 @@ class FunctionSettings(typing.TypedDict, total=False):
     """
 
     image: typing.Required[modal.Image]
-    gpu: GPU_T | list[GPU_T]
+    gpu: str | list[str]
     cpu: float | tuple[float, float]
     memory: int | tuple[int, int]
     timeout: int
