@@ -6,6 +6,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.5.4] — 2026-04-08
+
+### SDK
+
+#### Bug fixes
+
+- **Fix `modal >= 1.4` compatibility**: Remove import of `modal.gpu.GPU_T` which was deleted in modal 1.4. `FunctionSettings.gpu` now uses `str | list[str]` directly. (#113)
+
 ## [0.5.3] — 2026-04-05
 
 ### SDK

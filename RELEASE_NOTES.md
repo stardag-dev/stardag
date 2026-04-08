@@ -6,6 +6,14 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.4 — Fix modal >= 1.4 compatibility
+
+`import stardag.integration.modal` broke on `modal >= 1.4` due to the removed
+`modal.gpu` module. The `GPU_T` type is replaced with `str | list[str]`, which
+is what the modal 1.x API actually accepts.
+
+---
+
 ## v0.5.3 — Secret masking for auth credentials
 
 `RegistryAuth.api_key` and `RegistryAuth.access_token` now use Pydantic
