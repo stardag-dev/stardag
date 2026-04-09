@@ -241,64 +241,6 @@ class TestBuilderAndRunnerProtocols:
 
 
 # ---------------------------------------------------------------------------
-# _ModalCallable: __qualname__/__name__ robustness
-# ---------------------------------------------------------------------------
-
-
-class TestModalCallableSubclassing:
-    def test_builder_has_qualname(self):
-        b = Builder()
-        assert b.__qualname__ == "Builder"
-        assert b.__name__ == "Builder"
-
-    def test_runner_has_qualname(self):
-        r = Runner()
-        assert r.__qualname__ == "Runner"
-        assert r.__name__ == "Runner"
-
-    def test_subclass_without_init(self):
-        class MyBuilder(Builder):
-            def setup(self, tasks):
-                pass
-
-        b = MyBuilder()
-        assert b.__name__ == "MyBuilder"
-        # __qualname__ includes enclosing scope for locally-defined classes
-        assert "MyBuilder" in b.__qualname__
-
-    def test_subclass_with_init_calling_super(self):
-        class MyBuilder(Builder):
-            def __init__(self, x):
-                super().__init__()
-                self.x = x
-
-        b = MyBuilder(42)
-        assert b.__name__ == "MyBuilder"
-        assert "MyBuilder" in b.__qualname__
-        assert b.x == 42
-
-    def test_subclass_with_init_not_calling_super(self):
-        """The tricky case: __init_subclass__ ensures attrs are set anyway."""
-
-        class MyBuilder(Builder):
-            def __init__(self, config):
-                self.config = config  # no super().__init__()
-
-        b = MyBuilder("prod")
-        assert b.__name__ == "MyBuilder"
-        assert b.config == "prod"
-
-    def test_runner_subclass_without_super(self):
-        class MyRunner(Runner):
-            def __init__(self, gpu_id):
-                self.gpu_id = gpu_id
-
-        r = MyRunner(0)
-        assert r.__name__ == "MyRunner"
-        assert r.gpu_id == 0
-
-
-# ---------------------------------------------------------------------------
 # Builder: setup/build/teardown orchestration
 # ---------------------------------------------------------------------------
 

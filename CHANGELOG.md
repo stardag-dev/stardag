@@ -20,13 +20,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 #### New features
 
 - **`Builder` and `Runner` classes**: Subclassable defaults for `StardagApp.build_function` and `run_function` with overridable `setup()`/`teardown()` hooks for custom container-level initialization (logging, GPU setup, config, etc.).
+- **`PrefectBuilder`**: `Builder` subclass for Prefect-based build orchestration (replaces `_prefect_build` function).
 - **`BuildFunction` and `RunFunction` Protocol types**: Clear contracts for custom build/run callables.
 - **`stardag.testing.modal`**: Test tasks and app factory (`create_test_app()`) for Modal integration tests.
-
-#### Improvements
-
-- `finalize()` wraps callables in real functions for Modal `is_async()` compatibility.
-- `_ModalCallable` mixin ensures `__name__`/`__qualname__` on subclass instances (even without `super().__init__()`).
 
 ## [0.5.4] — 2026-04-08
 

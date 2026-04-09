@@ -421,50 +421,7 @@ class RunFunction(typing.Protocol):
 # --- Default build/run implementations, with overridable methods ---
 
 
-class _ModalCallable:
-    """Mixin that makes class instances compatible with Modal's app.function().
-
-    Modal's ``app.function()`` decorator accesses ``__qualname__`` and ``__name__``
-    on the callable to determine serialization and naming behavior. Regular
-    class instances don't have these attributes (they live on the class, not
-    instances). This mixin sets them on each instance from the actual class.
-
-    Subclasses automatically get correct ``__name__``/``__qualname__`` without
-    needing to call ``super().__init__()``:
-
-    .. code-block:: python
-
-        class MyBuilder(Builder):
-            # No __init__ needed — __name__/__qualname__ are set automatically
-            def setup(self, tasks):
-                ...
-
-        class MyBuilder2(Builder):
-            def __init__(self, config):
-                # Works even without super().__init__() — __init_subclass__
-                # ensures the attributes are set.
-                self.config = config
-    """
-
-    def __init_subclass__(cls, **kwargs: typing.Any) -> None:
-        super().__init_subclass__(**kwargs)
-        # Wrap __init__ to always set __name__/__qualname__ on instances,
-        # even if the subclass overrides __init__ without calling super().
-        original_init = cls.__init__
-
-        def _patched_init(self, *args: typing.Any, **kw: typing.Any) -> None:
-            original_init(self, *args, **kw)
-            self.__name__ = type(self).__name__
-            self.__qualname__ = type(self).__qualname__
-
-        cls.__init__ = _patched_init  # type: ignore[method-assign]
-
-    def __init__(self) -> None:
-        self.__name__ = type(self).__name__
-        self.__qualname__ = type(self).__qualname__
-
-
-class Builder(_ModalCallable, BuildFunction):
+class Builder(BuildFunction):
     """Default builder implementation with overridable setup/teardown.
 
     Override ``setup()``/``teardown()``/``build()`` to customize behavior.
@@ -543,7 +500,7 @@ class Builder(_ModalCallable, BuildFunction):
         return build(tasks, task_executor=task_executor)
 
 
-class Runner(_ModalCallable, RunFunction):
+class Runner(RunFunction):
     """Default runner implementation with overridable setup/teardown.
 
     Override ``setup()``/``teardown()``/``run()`` to customize behavior.
@@ -597,42 +554,61 @@ _default_build = Builder()
 _default_run = Runner()
 
 
-# TODO convert to Builder subclass.
-async def _prefect_build(
-    task: BaseTask,
-    worker_selector: WorkerSelector,
-    modal_app_name: str,
-    on_complete_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
-    | None = None,
-    before_run_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
-    | None = None,
-):
-    if (
-        prefect_build_flow is None
-        or create_markdown is None
-        or upload_task_on_complete_artifacts is None
-    ):
-        raise ImportError("Prefect is not installed")
+class PrefectBuilder(Builder):
+    """Builder that uses Prefect for build orchestration.
 
-    _setup_logging()
-    task_executor = ModalTaskExecutor(
-        modal_app_name=modal_app_name,
-        worker_selector=worker_selector,
-    )
-    logger.info(f"Building root task: {repr(task)}")
-    await prefect_build_flow.with_options(
-        name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
-    )(
-        task,
-        task_executor=task_executor,
-        before_run_callback=(
-            before_run_callback or create_markdown
-        ),  # TODO default to None
-        on_complete_callback=(
-            on_complete_callback or upload_task_on_complete_artifacts
-        ),
-    )
-    logger.info(f"Completed building root task {repr(task)}")
+    Requires the ``stardag.integration.prefect`` package to be installed.
+    """
+
+    def __init__(
+        self,
+        on_complete_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
+        | None = None,
+        before_run_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
+        | None = None,
+    ):
+        self.on_complete_callback = on_complete_callback
+        self.before_run_callback = before_run_callback
+
+    def build(
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        task_executor: ModalTaskExecutor,
+    ) -> BuildSummary:
+        if prefect_build_flow is None:
+            raise ImportError("Prefect is not installed")
+
+        import asyncio
+
+        _flow = prefect_build_flow  # local for pyright narrowing
+
+        # TODO: support multiple root tasks in PrefectBuilder
+        if isinstance(tasks, BaseTask):
+            task = tasks
+        else:
+            if len(tasks) != 1:
+                raise ValueError(
+                    f"PrefectBuilder currently supports only a single root task, "
+                    f"got {len(tasks)}"
+                )
+            task = tasks[0]
+
+        async def _run():
+            await _flow.with_options(
+                name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
+            )(
+                task,
+                task_executor=task_executor,
+                before_run_callback=(self.before_run_callback or create_markdown),
+                on_complete_callback=(
+                    self.on_complete_callback or upload_task_on_complete_artifacts
+                ),
+            )
+
+        asyncio.run(_run())
+        # PrefectBuilder doesn't return a standard BuildSummary from
+        # prefect_build_flow; return a placeholder for now.
+        return BuildSummary()  # type: ignore[call-arg]
 
 
 def _setup_logging():
