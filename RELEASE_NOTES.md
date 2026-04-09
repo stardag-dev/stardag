@@ -45,8 +45,8 @@ app = StardagApp(
 )
 ```
 
-Subclasses work without calling `super().__init__()` — the `_ModalCallable`
-mixin handles Modal compatibility automatically.
+Subclasses work without calling `super().__init__()` — the `finalize()`
+wrapper functions handle Modal compatibility automatically.
 
 ### New: `stardag.testing.modal`
 

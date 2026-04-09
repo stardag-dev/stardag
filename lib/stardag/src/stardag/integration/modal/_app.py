@@ -462,6 +462,8 @@ class Builder(BuildFunction):
                     f"{summary.task_count.failed} failed, "
                     f"{summary.task_count.pending} pending"
                 )
+        elif summary_or_exception is None:
+            logger.info("Build completed without a BuildSummary.")
         else:
             logger.error(f"Build exception:\n{repr(summary_or_exception)}")
 
@@ -535,15 +537,17 @@ class Runner(RunFunction):
         self, task: BaseTask
     ) -> None | typing.Generator[TaskStruct, None, None]:
         """Core logic to execute a single task."""
+        result: None | typing.Generator[TaskStruct, None, None] = None
         exception: Exception | None = None
         try:
             self.setup(task)
-            self.run(task)
+            result = self.run(task)
         except Exception as e:
             exception = e
             raise
         finally:
             self.teardown(task, exception)
+        return result
 
     def run(self, task: BaseTask) -> None | typing.Generator[TaskStruct, None, None]:
         """Default run logic - simply call task.run()."""
@@ -819,8 +823,8 @@ class StardagApp:
 
         run_fn = self._run_function
 
-        def _modal_run(task: BaseTask) -> None:
-            run_fn(task)
+        def _modal_run(task: BaseTask) -> typing.Any:
+            return run_fn(task)
 
         # Create builder function
         builder_settings = self._prepare_function_settings(

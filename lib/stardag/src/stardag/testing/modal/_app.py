@@ -11,9 +11,13 @@ from pathlib import Path
 
 import modal
 
-from stardag.integration.modal import FunctionSettings, StardagApp
-from stardag.integration.modal._app import FinalizeResult
-from stardag.integration.modal._config import get_package_deps, with_stardag_on_image
+from stardag.integration.modal import (
+    FinalizeResult,
+    FunctionSettings,
+    StardagApp,
+    get_package_deps,
+    with_stardag_on_image,
+)
 
 TEST_APP_NAME = "stardag-testing-app"
 VOLUME_NAME = "stardag-testing"
