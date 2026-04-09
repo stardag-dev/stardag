@@ -9,14 +9,16 @@ except ImportError:
 
 from unittest.mock import MagicMock, patch
 
+from stardag.build._base import BuildSummary
 from stardag.integration.modal import (
+    Builder,
     BuildFunction,
     FunctionSettings,
     RunFunction,
+    Runner,
     StardagApp,
-    default_build,
-    default_run,
 )
+from stardag.integration.modal._app import _default_build, _default_run
 
 
 def _make_image() -> modal.Image:
@@ -24,23 +26,21 @@ def _make_image() -> modal.Image:
 
 
 class TestStardagAppCustomFunctions:
-    def test_default_functions_when_none_provided(self):
-        """When no custom functions are given, defaults are used."""
+    def test_defaults_to_builder_and_runner_instances(self):
+        """When no custom functions given, defaults are Builder() and Runner()."""
         app = StardagApp(
             "test-app",
             builder_settings=FunctionSettings(image=_make_image()),
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
-        # The resolved functions are checked in finalize(), but we can verify
-        # the stored values
-        assert app._build_function is None
-        assert app._run_function is None
+        assert app._build_function is _default_build
+        assert app._run_function is _default_run
 
     def test_custom_build_function(self):
-        """Custom build_function is stored and used."""
+        """Custom build_function is stored."""
 
-        def my_build(task, worker_selector, modal_app_name):
-            pass  # custom logic
+        def my_build(tasks, worker_selector, app_name) -> BuildSummary:  # type: ignore[empty-body]
+            ...
 
         app = StardagApp(
             "test-app",
@@ -51,10 +51,10 @@ class TestStardagAppCustomFunctions:
         assert app._build_function is my_build
 
     def test_custom_run_function(self):
-        """Custom run_function is stored and used."""
+        """Custom run_function is stored."""
 
         def my_run(task):
-            pass  # custom logic
+            pass
 
         app = StardagApp(
             "test-app",
@@ -64,31 +64,45 @@ class TestStardagAppCustomFunctions:
         )
         assert app._run_function is my_run
 
-    def test_build_function_overrides_builder_type(self):
-        """Explicit build_function takes precedence over builder_type."""
+    def test_custom_builder_subclass(self):
+        """A Builder subclass can be passed as build_function."""
 
-        def my_build(task, worker_selector, modal_app_name):
-            pass
+        class MyBuilder(Builder):
+            def setup(self, tasks):
+                pass  # custom setup
 
+        my_builder = MyBuilder()
         app = StardagApp(
             "test-app",
-            builder_type="prefect",
-            build_function=my_build,
+            build_function=my_builder,
             builder_settings=FunctionSettings(image=_make_image()),
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
-        # build_function should win over builder_type="prefect"
-        assert app._build_function is my_build
+        assert app._build_function is my_builder
+
+    def test_custom_runner_subclass(self):
+        """A Runner subclass can be passed as run_function."""
+
+        class MyRunner(Runner):
+            def setup(self, task):
+                pass  # GPU init etc.
+
+        my_runner = MyRunner()
+        app = StardagApp(
+            "test-app",
+            run_function=my_runner,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+        assert app._run_function is my_runner
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
-    def test_finalize_uses_custom_build_function(self, mock_volumes):
+    def test_finalize_registers_custom_build_function(self, mock_volumes):
         """finalize() registers the custom build function with Modal."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
 
-        calls = []
-
-        def my_build(task, worker_selector, modal_app_name):
-            calls.append("build")
+        def my_build(tasks, worker_selector, app_name) -> BuildSummary:  # type: ignore[empty-body]
+            ...
 
         app = StardagApp(
             "test-app",
@@ -97,7 +111,6 @@ class TestStardagAppCustomFunctions:
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
 
-        # Mock modal_app.function to capture what gets registered
         registered_fns = {}
 
         def capture_function(**kwargs):
@@ -115,7 +128,7 @@ class TestStardagAppCustomFunctions:
         assert registered_fns["build"] is my_build
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
-    def test_finalize_uses_custom_run_function(self, mock_volumes):
+    def test_finalize_registers_custom_run_function_for_all_workers(self, mock_volumes):
         """finalize() registers the custom run function for all workers."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
 
@@ -151,7 +164,7 @@ class TestStardagAppCustomFunctions:
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
     def test_finalize_uses_defaults_when_no_custom(self, mock_volumes):
-        """finalize() uses default_build and default_run when no custom fns."""
+        """finalize() uses Builder() and Runner() instances by default."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
 
         app = StardagApp(
@@ -174,36 +187,35 @@ class TestStardagAppCustomFunctions:
         app.modal_app.function = capture_function  # type: ignore[assignment]
         app.finalize()
 
-        assert registered_fns["build"] is default_build
-        assert registered_fns["worker_default"] is default_run
+        assert registered_fns["build"] is _default_build
+        assert registered_fns["worker_default"] is _default_run
 
 
-class TestBuildAndRunProtocols:
-    def test_default_build_matches_protocol(self):
-        """default_build is a valid BuildFunction."""
-        fn: BuildFunction = default_build
+class TestBuilderAndRunnerProtocols:
+    def test_builder_satisfies_build_function(self):
+        """Builder instance satisfies BuildFunction protocol."""
+        fn: BuildFunction = Builder()
         assert callable(fn)
 
-    def test_default_run_matches_protocol(self):
-        """default_run is a valid RunFunction."""
-        fn: RunFunction = default_run
+    def test_runner_satisfies_run_function(self):
+        """Runner instance satisfies RunFunction protocol."""
+        fn: RunFunction = Runner()
         assert callable(fn)
 
-    def test_custom_functions_match_protocols(self):
-        """Custom functions with matching signatures satisfy the protocols."""
+    def test_plain_function_satisfies_build_function(self):
+        """A plain function with matching signature satisfies BuildFunction."""
 
-        def my_build(
-            task,  # noqa: ANN001
-            worker_selector,  # noqa: ANN001
-            modal_app_name,  # noqa: ANN001
-        ) -> None:
+        def my_build(tasks, worker_selector, app_name) -> BuildSummary:  # type: ignore[empty-body]
+            ...
+
+        fn: BuildFunction = my_build
+        assert callable(fn)
+
+    def test_plain_function_satisfies_run_function(self):
+        """A plain function with matching signature satisfies RunFunction."""
+
+        def my_run(task):
             pass
 
-        def my_run(task) -> None:  # noqa: ANN001
-            pass
-
-        # These assignments should not raise type errors
-        build_fn: BuildFunction = my_build
-        run_fn: RunFunction = my_run
-        assert callable(build_fn)
-        assert callable(run_fn)
+        fn: RunFunction = my_run
+        assert callable(fn)

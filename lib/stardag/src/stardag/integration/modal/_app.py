@@ -380,10 +380,10 @@ class BuildFunction(typing.Protocol):
     It receives the root task, a worker selector, and the Modal app name,
     then coordinates task execution across Modal worker functions.
 
-    The default implementation (``default_build``) creates a ``ModalTaskExecutor``
-    and calls ``stardag.build()``. Custom implementations can add setup logic
-    (e.g., logging config, Prefect integration, custom error handling) that
-    runs inside the Modal container before the build starts.
+    The default implementation (``Builder``) creates a ``ModalTaskExecutor``
+    and calls ``stardag.build()``. Custom implementations can subclass
+    ``Builder`` to override ``setup()``/``teardown()``/``build()``, or
+    implement this protocol directly for full control.
 
     Any module-level code in the module where a custom build function is
     defined will execute inside the Modal container before the function is
@@ -404,10 +404,9 @@ class RunFunction(typing.Protocol):
     This function is called remotely on Modal to execute a single task.
     It receives a task instance and should call ``task.run()``.
 
-    The default implementation (``default_run``) calls ``task.run()`` with
-    logging. Custom implementations can add setup logic (e.g., GPU init,
-    environment checks, custom error handling) that runs inside the Modal
-    worker container before the task executes.
+    The default implementation (``Runner``) calls ``task.run()`` with
+    logging. Custom implementations can subclass ``Runner`` to override
+    ``setup()``/``teardown()``, or implement this protocol directly.
 
     Any module-level code in the module where a custom run function is
     defined will execute inside the Modal container before the function is
@@ -424,6 +423,12 @@ class RunFunction(typing.Protocol):
 
 class Builder(BuildFunction):
     """Default builder implementation with overridable setup/teardown."""
+
+    def __init__(self) -> None:
+        # Modal's app.function() decorator expects __qualname__ and __name__
+        # on the callable to determine serialization behavior.
+        self.__name__ = type(self).__name__
+        self.__qualname__ = type(self).__qualname__
 
     def setup(self, tasks: typing.Sequence[BaseTask] | BaseTask) -> None:
         """Optional setup logic before the build starts."""
@@ -444,8 +449,8 @@ class Builder(BuildFunction):
                     f"{summary.task_count.failed} failed, "
                     f"{summary.task_count.pending} pending"
                 )
-
-        logger.error(f"Build exception:\n{repr(summary_or_exception)}")
+        else:
+            logger.error(f"Build exception:\n{repr(summary_or_exception)}")
 
     def __call__(
         self,
@@ -483,6 +488,10 @@ class Builder(BuildFunction):
 
 
 class Runner(RunFunction):
+    def __init__(self) -> None:
+        self.__name__ = type(self).__name__
+        self.__qualname__ = type(self).__qualname__
+
     def setup(self, task: BaseTask) -> None:
         """Optional setup logic before the task runs."""
         _setup_logging()
@@ -499,12 +508,16 @@ class Runner(RunFunction):
         exception: Exception | None = None
         try:
             self.setup(task)
-            task.run()
+            self.run(task)
         except Exception as e:
             exception = e
             raise
         finally:
             self.teardown(task, exception)
+
+    def run(self, task: BaseTask) -> None | typing.Generator[TaskStruct, None, None]:
+        """Default run logic - simply call task.run()."""
+        return task.run()
 
 
 _default_build = Builder()
@@ -555,9 +568,6 @@ def _setup_logging():
 
 
 # --- Stardag App ---
-
-
-BuilderType = typing.Literal["basic", "prefect"]
 
 
 class StardagApp:
@@ -617,25 +627,26 @@ class StardagApp:
         Args:
             modal_app_or_name: Either a modal.App instance or a string name.
                 If a string, a new modal.App will be created with that name.
-            build_function: Custom function to register as the Modal "build"
-                function. Must match the ``BuildFunction`` protocol signature:
-                ``(task, worker_selector, modal_app_name) -> None``.
-                If not provided, uses ``default_build`` (or ``_prefect_build``
-                if ``builder_type="prefect"``).
+            build_function: Callable registered as the Modal "build" function.
+                Must match the ``BuildFunction`` protocol:
+                ``(tasks, worker_selector, app_name) -> BuildSummary``.
+                Defaults to ``Builder()`` which provides overridable
+                ``setup()``/``teardown()``/``build()`` hooks. Subclass
+                ``Builder`` for customization, or implement the protocol
+                directly.
 
-                Any module-level code in the module where this function is
+                Any module-level code in the module where this callable is
                 defined will run inside the Modal container at import time —
-                use this for container-level setup (custom imports, config,
-                environment initialization, etc.).
-            run_function: Custom function to register as the Modal worker
-                functions. Must match the ``RunFunction`` protocol signature:
+                use this for container-level setup.
+            run_function: Callable registered as the Modal worker functions.
+                Must match the ``RunFunction`` protocol:
                 ``(task) -> None``.
-                If not provided, uses ``default_run``.
+                Defaults to ``Runner()`` which provides overridable
+                ``setup()``/``teardown()`` hooks.
 
-                Any module-level code in the module where this function is
+                Any module-level code in the module where this callable is
                 defined will run inside the Modal container at import time —
-                use this for worker-level setup (GPU initialization, library
-                preloading, etc.).
+                use this for worker-level setup (GPU init, library preloading).
             builder_settings: Settings for the builder function.
             worker_settings: Dict of worker name to settings. Must include "default".
             worker_selector: Function to select worker for each task.
