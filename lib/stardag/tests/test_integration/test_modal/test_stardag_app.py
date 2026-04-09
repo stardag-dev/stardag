@@ -219,3 +219,196 @@ class TestBuilderAndRunnerProtocols:
 
         fn: RunFunction = my_run
         assert callable(fn)
+
+
+# ---------------------------------------------------------------------------
+# _ModalCallable: __qualname__/__name__ robustness
+# ---------------------------------------------------------------------------
+
+
+class TestModalCallableSubclassing:
+    def test_builder_has_qualname(self):
+        b = Builder()
+        assert b.__qualname__ == "Builder"
+        assert b.__name__ == "Builder"
+
+    def test_runner_has_qualname(self):
+        r = Runner()
+        assert r.__qualname__ == "Runner"
+        assert r.__name__ == "Runner"
+
+    def test_subclass_without_init(self):
+        class MyBuilder(Builder):
+            def setup(self, tasks):
+                pass
+
+        b = MyBuilder()
+        assert b.__name__ == "MyBuilder"
+        # __qualname__ includes enclosing scope for locally-defined classes
+        assert "MyBuilder" in b.__qualname__
+
+    def test_subclass_with_init_calling_super(self):
+        class MyBuilder(Builder):
+            def __init__(self, x):
+                super().__init__()
+                self.x = x
+
+        b = MyBuilder(42)
+        assert b.__name__ == "MyBuilder"
+        assert "MyBuilder" in b.__qualname__
+        assert b.x == 42
+
+    def test_subclass_with_init_not_calling_super(self):
+        """The tricky case: __init_subclass__ ensures attrs are set anyway."""
+
+        class MyBuilder(Builder):
+            def __init__(self, config):
+                self.config = config  # no super().__init__()
+
+        b = MyBuilder("prod")
+        assert b.__name__ == "MyBuilder"
+        assert b.config == "prod"
+
+    def test_runner_subclass_without_super(self):
+        class MyRunner(Runner):
+            def __init__(self, gpu_id):
+                self.gpu_id = gpu_id
+
+        r = MyRunner(0)
+        assert r.__name__ == "MyRunner"
+        assert r.gpu_id == 0
+
+
+# ---------------------------------------------------------------------------
+# Builder: setup/build/teardown orchestration
+# ---------------------------------------------------------------------------
+
+
+class TestBuilderOrchestration:
+    def test_calls_setup_build_teardown_in_order(self):
+        calls = []
+        mock_summary = MagicMock()
+        mock_summary.status = MagicMock(value="SUCCESS")
+
+        class TracingBuilder(Builder):
+            def setup(self, tasks):
+                calls.append("setup")
+
+            def build(self, tasks, task_executor):
+                calls.append("build")
+                return mock_summary
+
+            def teardown(self, tasks, summary_or_exception):
+                calls.append("teardown")
+
+        builder = TracingBuilder()
+        mock_task = MagicMock()
+        builder(mock_task, MagicMock(), "app")
+
+        assert calls == ["setup", "build", "teardown"]
+
+    def test_teardown_called_on_build_exception(self):
+        calls = []
+
+        class FailingBuilder(Builder):
+            def setup(self, tasks):
+                calls.append("setup")
+
+            def build(self, tasks, task_executor):
+                calls.append("build")
+                raise RuntimeError("boom")
+
+            def teardown(self, tasks, summary_or_exception):
+                calls.append(("teardown", type(summary_or_exception).__name__))
+
+        builder = FailingBuilder()
+        with pytest.raises(RuntimeError, match="boom"):
+            builder(MagicMock(), MagicMock(), "app")
+
+        assert calls == ["setup", "build", ("teardown", "RuntimeError")]
+
+    def test_teardown_receives_summary_on_success(self):
+        received = {}
+
+        mock_summary = MagicMock()
+        mock_summary.status = MagicMock()
+        mock_summary.status.value = "SUCCESS"
+
+        class InspectingBuilder(Builder):
+            def setup(self, tasks):
+                pass
+
+            def build(self, tasks, task_executor):
+                return mock_summary
+
+            def teardown(self, tasks, summary_or_exception):
+                received["arg"] = summary_or_exception
+
+        builder = InspectingBuilder()
+        result = builder(MagicMock(), MagicMock(), "app")
+
+        assert received["arg"] is mock_summary
+        assert result is mock_summary
+
+
+# ---------------------------------------------------------------------------
+# Runner: setup/run/teardown orchestration
+# ---------------------------------------------------------------------------
+
+
+class TestRunnerOrchestration:
+    def test_calls_setup_run_teardown_in_order(self):
+        calls = []
+
+        class TracingRunner(Runner):
+            def setup(self, task):
+                calls.append("setup")
+
+            def run(self, task):
+                calls.append("run")
+
+            def teardown(self, task, exception):
+                calls.append("teardown")
+
+        runner = TracingRunner()
+        mock_task = MagicMock()
+        runner(mock_task)
+
+        assert calls == ["setup", "run", "teardown"]
+
+    def test_teardown_called_on_run_exception(self):
+        calls = []
+
+        class FailingRunner(Runner):
+            def setup(self, task):
+                calls.append("setup")
+
+            def run(self, task):
+                raise ValueError("task failed")
+
+            def teardown(self, task, exception):
+                calls.append(("teardown", type(exception).__name__))
+
+        runner = FailingRunner()
+        with pytest.raises(ValueError, match="task failed"):
+            runner(MagicMock())
+
+        assert calls == ["setup", ("teardown", "ValueError")]
+
+    def test_teardown_receives_none_on_success(self):
+        received = {}
+
+        class InspectingRunner(Runner):
+            def setup(self, task):
+                pass
+
+            def run(self, task):
+                pass
+
+            def teardown(self, task, exception):
+                received["exception"] = exception
+
+        runner = InspectingRunner()
+        runner(MagicMock())
+
+        assert received["exception"] is None
