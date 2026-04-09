@@ -6,6 +6,55 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.5 — Customizable Modal Builder and Runner
+
+The Modal integration now uses subclassable `Builder` and `Runner` classes
+instead of fixed functions. Override `setup()`/`teardown()` to add custom
+container-level initialization without replacing the entire build/run logic.
+
+### Breaking changes
+
+- `builder_type` parameter removed from `StardagApp.__init__` — use
+  `build_function=MyBuilder()` instead.
+- `default_build`/`default_run` functions removed — use `Builder`/`Runner` classes.
+- `BuildFunction` protocol signature changed to
+  `(tasks, worker_selector, app_name) -> BuildSummary`.
+- `build_remote`/`build_spawn` kwargs: `task=` → `tasks=`, `modal_app_name=` → `app_name=`.
+
+### Usage
+
+```python
+from stardag.integration.modal import StardagApp, Builder, Runner, FunctionSettings
+
+class MyBuilder(Builder):
+    def setup(self, tasks):
+        super().setup(tasks)
+        configure_my_environment()
+
+class MyRunner(Runner):
+    def setup(self, task):
+        super().setup(task)
+        torch.cuda.set_device(0)
+
+app = StardagApp(
+    "my-app",
+    build_function=MyBuilder(),
+    run_function=MyRunner(),
+    builder_settings=FunctionSettings(image=image),
+    worker_settings={"default": FunctionSettings(image=image)},
+)
+```
+
+Subclasses work without calling `super().__init__()` — the `_ModalCallable`
+mixin handles Modal compatibility automatically.
+
+### New: `stardag.testing.modal`
+
+Test tasks (`make_range`, `sum_list`) and `create_test_app()` factory for
+Modal integration tests, defined inside the package for container serialization.
+
+---
+
 ## v0.5.4 — Fix modal >= 1.4 compatibility
 
 `import stardag.integration.modal` broke on `modal >= 1.4` due to the removed

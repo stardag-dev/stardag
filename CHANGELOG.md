@@ -6,6 +6,28 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.5.5] — 2026-04-09
+
+### SDK
+
+#### Breaking changes (Modal integration only)
+
+- **`builder_type` removed** from `StardagApp.__init__`. Use `build_function=` instead.
+- **`default_build`/`default_run` functions removed**. Replaced by `Builder` and `Runner` classes.
+- **`BuildFunction` protocol signature changed**: `(tasks: Sequence[BaseTask] | BaseTask, worker_selector, app_name) -> BuildSummary`.
+- **`build_remote`/`build_spawn` kwargs renamed**: `task=` → `tasks=`, `modal_app_name=` → `app_name=`.
+
+#### New features
+
+- **`Builder` and `Runner` classes**: Subclassable defaults for `StardagApp.build_function` and `run_function` with overridable `setup()`/`teardown()` hooks for custom container-level initialization (logging, GPU setup, config, etc.).
+- **`BuildFunction` and `RunFunction` Protocol types**: Clear contracts for custom build/run callables.
+- **`stardag.testing.modal`**: Test tasks and app factory (`create_test_app()`) for Modal integration tests.
+
+#### Improvements
+
+- `finalize()` wraps callables in real functions for Modal `is_async()` compatibility.
+- `_ModalCallable` mixin ensures `__name__`/`__qualname__` on subclass instances (even without `super().__init__()`).
+
 ## [0.5.4] — 2026-04-08
 
 ### SDK
