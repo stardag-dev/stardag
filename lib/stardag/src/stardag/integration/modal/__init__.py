@@ -1,10 +1,14 @@
 from stardag.integration.modal._app import (
     BuildFailedError,
+    BuildFunction,
     FinalizeResult,
     FunctionSettings,
+    RunFunction,
     StardagApp,
     WorkerSelector,
     WorkerSelectorByName,
+    default_build,
+    default_run,
     get_profile_env_vars,
     get_profile_secret,
 )
@@ -20,7 +24,11 @@ from stardag.integration.modal._target import (
 
 __all__ = [
     "BuildFailedError",
+    "BuildFunction",
+    "RunFunction",
     "StardagApp",
+    "default_build",
+    "default_run",
     "FinalizeResult",
     "FunctionSettings",
     "MODAL_VOLUME_URI_PREFIX",

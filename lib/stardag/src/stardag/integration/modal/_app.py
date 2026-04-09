@@ -362,7 +362,54 @@ class ModalTaskExecutor(TaskExecutorABC):
         pass
 
 
-# --- Internal build/run functions ---
+# --- Build and run function protocols ---
+
+
+class BuildFunction(typing.Protocol):
+    """Protocol for the function registered as the Modal "build" function.
+
+    This function is called remotely on Modal to orchestrate a DAG build.
+    It receives the root task, a worker selector, and the Modal app name,
+    then coordinates task execution across Modal worker functions.
+
+    The default implementation (``default_build``) creates a ``ModalTaskExecutor``
+    and calls ``stardag.build()``. Custom implementations can add setup logic
+    (e.g., logging config, Prefect integration, custom error handling) that
+    runs inside the Modal container before the build starts.
+
+    Any module-level code in the module where a custom build function is
+    defined will execute inside the Modal container before the function is
+    called — use this for container-level setup (imports, config, etc.).
+    """
+
+    def __call__(
+        self,
+        task: BaseTask,
+        worker_selector: WorkerSelector,
+        modal_app_name: str,
+    ) -> None: ...
+
+
+class RunFunction(typing.Protocol):
+    """Protocol for the function registered as Modal "worker_*" functions.
+
+    This function is called remotely on Modal to execute a single task.
+    It receives a task instance and should call ``task.run()``.
+
+    The default implementation (``default_run``) calls ``task.run()`` with
+    logging. Custom implementations can add setup logic (e.g., GPU init,
+    environment checks, custom error handling) that runs inside the Modal
+    worker container before the task executes.
+
+    Any module-level code in the module where a custom run function is
+    defined will execute inside the Modal container before the function is
+    called — use this for container-level setup (imports, config, etc.).
+    """
+
+    def __call__(self, task: BaseTask) -> None: ...
+
+
+# --- Default build/run implementations ---
 
 
 class BuildFailedError(Exception):
@@ -371,11 +418,19 @@ class BuildFailedError(Exception):
     pass
 
 
-def _build(
+def default_build(
     task: BaseTask,
     worker_selector: WorkerSelector,
     modal_app_name: str,
-):
+) -> None:
+    """Default build function: run a stardag build using ModalTaskExecutor.
+
+    Creates a ``ModalTaskExecutor`` that dispatches individual task execution
+    to Modal worker functions, then runs the DAG build.
+
+    Raises:
+        BuildFailedError: If the build finishes with failures or pending tasks.
+    """
     _setup_logging()
     modal_executor = ModalTaskExecutor(
         modal_app_name=modal_app_name,
@@ -390,6 +445,29 @@ def _build(
             f"{summary.task_count.failed} failed, "
             f"{summary.task_count.pending} pending"
         )
+
+
+def default_run(task: BaseTask) -> None:
+    """Default run function: execute a single task with logging.
+
+    Calls ``task.run()`` with basic logging setup.
+
+    Raises:
+        Exception: Re-raises any exception from ``task.run()``.
+    """
+    _setup_logging()
+    logger.info(f"Running task: {repr(task)}")
+    try:
+        task.run()
+    except Exception as e:
+        logger.exception(f"Error running task: {repr(task)} - {e}")
+        raise
+    logger.info(f"Completed running task: {repr(task)}")
+
+
+# Keep old names as aliases for backward compatibility within this module
+_build = default_build
+_run = default_run
 
 
 async def _prefect_build(
@@ -429,20 +507,8 @@ async def _prefect_build(
     logger.info(f"Completed building root task {repr(task)}")
 
 
-def _run(task: BaseTask):
-    _setup_logging()
-    logger.info(f"Running task: {repr(task)}")
-    try:
-        task.run()
-    except Exception as e:
-        logger.exception(f"Error running task: {repr(task)} - {e}")
-        raise
-
-    logger.info(f"Completed running task: {repr(task)}")
-
-
 def _setup_logging():
-    """Setup logging for the modal app"""
+    """Setup logging for the modal app."""
     logging.basicConfig(level=logging.INFO)
 
 
@@ -499,6 +565,8 @@ class StardagApp:
         modal_app_or_name: modal.App | str,
         *,
         builder_type: BuilderType = "basic",
+        build_function: BuildFunction | None = None,
+        run_function: RunFunction | None = None,
         builder_settings: FunctionSettings,
         worker_settings: dict[str, FunctionSettings],
         worker_selector: WorkerSelector | None = None,
@@ -509,6 +577,26 @@ class StardagApp:
             modal_app_or_name: Either a modal.App instance or a string name.
                 If a string, a new modal.App will be created with that name.
             builder_type: Type of builder to use ("basic" or "prefect").
+                Ignored if ``build_function`` is provided.
+            build_function: Custom function to register as the Modal "build"
+                function. Must match the ``BuildFunction`` protocol signature:
+                ``(task, worker_selector, modal_app_name) -> None``.
+                If not provided, uses ``default_build`` (or ``_prefect_build``
+                if ``builder_type="prefect"``).
+
+                Any module-level code in the module where this function is
+                defined will run inside the Modal container at import time —
+                use this for container-level setup (custom imports, config,
+                environment initialization, etc.).
+            run_function: Custom function to register as the Modal worker
+                functions. Must match the ``RunFunction`` protocol signature:
+                ``(task) -> None``.
+                If not provided, uses ``default_run``.
+
+                Any module-level code in the module where this function is
+                defined will run inside the Modal container at import time —
+                use this for worker-level setup (GPU initialization, library
+                preloading, etc.).
             builder_settings: Settings for the builder function.
             worker_settings: Dict of worker name to settings. Must include "default".
             worker_selector: Function to select worker for each task.
@@ -523,6 +611,8 @@ class StardagApp:
 
         self.worker_selector = worker_selector or _default_worker_selector
         self.builder_type = builder_type
+        self._build_function = build_function
+        self._run_function = run_function
         self._builder_settings = builder_settings
         self._worker_settings = worker_settings
         self._is_finalized = False
@@ -618,20 +708,30 @@ class StardagApp:
                 )
             )
 
+        # Resolve build function: explicit > builder_type > default
+        if self._build_function is not None:
+            resolved_build_fn = self._build_function
+        elif self.builder_type == "prefect":
+            resolved_build_fn = _prefect_build
+        else:
+            resolved_build_fn = default_build
+
+        # Resolve run function: explicit > default
+        resolved_run_fn = self._run_function or default_run
+
         # Create builder function
         builder_settings = self._prepare_function_settings(
             self._builder_settings,
             extra_secrets=extra_secrets,
             auto_volumes=auto_volumes,
         )
-        build_function = _prefect_build if self.builder_type == "prefect" else _build
         self.modal_app.function(
             **{
                 **builder_settings,
                 "name": "build",
                 "serialized": True,
             }
-        )(build_function)
+        )(resolved_build_fn)
 
         function_names = ["build"]
 
@@ -650,7 +750,7 @@ class StardagApp:
                     "name": func_name,
                     "serialized": True,
                 }
-            )(_run)
+            )(resolved_run_fn)
             function_names.append(func_name)
 
         self._is_finalized = True
