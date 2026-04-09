@@ -97,12 +97,14 @@ class TestStardagAppCustomFunctions:
         assert app._run_function is my_runner
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
-    def test_finalize_registers_custom_build_function(self, mock_volumes):
-        """finalize() registers the custom build function with Modal."""
+    def test_finalize_registers_build_wrapper_that_delegates(self, mock_volumes):
+        """finalize() registers a wrapper that delegates to the build function."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
 
+        calls = []
+
         def my_build(tasks, worker_selector, app_name) -> BuildSummary:  # type: ignore[empty-body]
-            ...
+            calls.append(("build", tasks, app_name))
 
         app = StardagApp(
             "test-app",
@@ -111,7 +113,7 @@ class TestStardagAppCustomFunctions:
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
 
-        registered_fns = {}
+        registered_fns: dict = {}
 
         def capture_function(**kwargs):
             name = kwargs.get("name", "unknown")
@@ -125,15 +127,23 @@ class TestStardagAppCustomFunctions:
         app.modal_app.function = capture_function  # type: ignore[assignment]
         app.finalize()
 
-        assert registered_fns["build"] is my_build
+        # The registered function is a wrapper (real function for Modal compat)
+        import inspect
+
+        assert inspect.isfunction(registered_fns["build"])
+        # Calling it delegates to my_build
+        registered_fns["build"]("task", "selector", "app")
+        assert calls == [("build", "task", "app")]
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
-    def test_finalize_registers_custom_run_function_for_all_workers(self, mock_volumes):
-        """finalize() registers the custom run function for all workers."""
+    def test_finalize_registers_run_wrapper_for_all_workers(self, mock_volumes):
+        """finalize() registers run wrappers for all workers."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
 
+        calls = []
+
         def my_run(task):
-            pass
+            calls.append(task)
 
         app = StardagApp(
             "test-app",
@@ -145,7 +155,7 @@ class TestStardagAppCustomFunctions:
             },
         )
 
-        registered_fns = {}
+        registered_fns: dict = {}
 
         def capture_function(**kwargs):
             name = kwargs.get("name", "unknown")
@@ -159,12 +169,18 @@ class TestStardagAppCustomFunctions:
         app.modal_app.function = capture_function  # type: ignore[assignment]
         app.finalize()
 
-        assert registered_fns["worker_default"] is my_run
-        assert registered_fns["worker_gpu"] is my_run
+        import inspect
+
+        assert inspect.isfunction(registered_fns["worker_default"])
+        assert inspect.isfunction(registered_fns["worker_gpu"])
+        # Both wrappers delegate to my_run
+        registered_fns["worker_default"]("task1")
+        registered_fns["worker_gpu"]("task2")
+        assert calls == ["task1", "task2"]
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
-    def test_finalize_uses_defaults_when_no_custom(self, mock_volumes):
-        """finalize() uses Builder() and Runner() instances by default."""
+    def test_finalize_wrappers_are_real_functions(self, mock_volumes):
+        """Registered wrappers are real functions (Modal compatibility)."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
 
         app = StardagApp(
@@ -173,7 +189,7 @@ class TestStardagAppCustomFunctions:
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
 
-        registered_fns = {}
+        registered_fns: dict = {}
 
         def capture_function(**kwargs):
             name = kwargs.get("name", "unknown")
@@ -187,8 +203,11 @@ class TestStardagAppCustomFunctions:
         app.modal_app.function = capture_function  # type: ignore[assignment]
         app.finalize()
 
-        assert registered_fns["build"] is _default_build
-        assert registered_fns["worker_default"] is _default_run
+        import inspect
+
+        # All registered functions must be real functions for Modal's is_async()
+        for name, fn in registered_fns.items():
+            assert inspect.isfunction(fn), f"{name} is {type(fn)}, not a function"
 
 
 class TestBuilderAndRunnerProtocols:

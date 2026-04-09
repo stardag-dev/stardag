@@ -34,6 +34,8 @@ try:
         StardagApp,
         get_default_volume_mount_path,
     )
+    from stardag.integration.modal._config import with_stardag_on_image
+    from stardag.testing.modal import make_range, sum_list
 
     # check if logged in and volume exists
     try:
@@ -70,8 +72,10 @@ def _get_deps_for_modal_image() -> list[str]:
         return []
 
 
-TEST_IMAGE = modal.Image.debian_slim(python_version="3.12").pip_install(
-    *_get_deps_for_modal_image()
+TEST_IMAGE = with_stardag_on_image(
+    modal.Image.debian_slim(python_version="3.12").pip_install(
+        *_get_deps_for_modal_image()
+    )
 )
 
 stardag_app = StardagApp(
@@ -261,3 +265,34 @@ class TestUserVolumesOverride:
             auto_volumes=result.auto_volumes,
         )
         assert EXPECTED_MOUNT_PATH in settings["volumes"]
+
+
+# --- End-to-end build test ---
+
+
+class TestEndToEndBuild:
+    """End-to-end test: build a DAG through the deployed Modal app.
+
+    This exercises the full Builder/Runner flow:
+    1. build_remote() calls the deployed "build" function (Builder.__call__)
+    2. Builder creates ModalTaskExecutor and runs stardag.build()
+    3. ModalTaskExecutor dispatches each task to "worker_default" (Runner.__call__)
+    4. Runner calls task.run(), which writes output to the Modal volume
+    5. Build completes and returns BuildSummary
+
+    Tasks are defined in stardag.testing.modal._tasks (inside the stardag
+    package) so they can be deserialized in the Modal container.
+    """
+
+    def test_build_remote_returns_summary(self):
+        """Build a two-task DAG through Modal and verify BuildSummary."""
+        from stardag.build._base import BuildSummary
+
+        root = sum_list(values=make_range(limit=5))
+        result = stardag_app.build_remote(root)
+
+        # build_remote returns BuildSummary (Builder.teardown raises on failure)
+        assert isinstance(result, BuildSummary)
+        # 2 tasks: make_range + sum_list (may be succeeded or previously_completed)
+        total = result.task_count.succeeded + result.task_count.previously_completed
+        assert total == 2

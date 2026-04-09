@@ -829,6 +829,24 @@ class StardagApp:
                     {"STARDAG_MODAL_VOLUME_MOUNTS": json.dumps(volume_mounts)}
                 )
             )
+        # Wrap callables in real functions for Modal compatibility.
+        # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
+        # not callable class instances. The wrappers delegate to the actual callable
+        # and are what get serialized/sent to Modal.
+        build_fn = self._build_function
+
+        def _modal_build(
+            tasks: typing.Sequence[BaseTask] | BaseTask,
+            worker_selector: WorkerSelector,
+            app_name: str,
+        ) -> BuildSummary:
+            return build_fn(tasks, worker_selector, app_name)
+
+        run_fn = self._run_function
+
+        def _modal_run(task: BaseTask) -> None:
+            run_fn(task)
+
         # Create builder function
         builder_settings = self._prepare_function_settings(
             self._builder_settings,
@@ -841,7 +859,7 @@ class StardagApp:
                 "name": "build",
                 "serialized": True,
             }
-        )(self._build_function)
+        )(_modal_build)
 
         function_names = ["build"]
 
@@ -860,7 +878,7 @@ class StardagApp:
                     "name": func_name,
                     "serialized": True,
                 }
-            )(self._run_function)
+            )(_modal_run)
             function_names.append(func_name)
 
         self._is_finalized = True
@@ -898,9 +916,9 @@ class StardagApp:
             name="build",
         )
         return build_function.spawn(
-            task=task,
+            tasks=task,
             worker_selector=worker_selector or self.worker_selector,
-            modal_app_name=self.name,
+            app_name=self.name,
         )
 
     def build_remote(
@@ -927,9 +945,9 @@ class StardagApp:
             name="build",
         )
         return build_function.remote(
-            task=task,
+            tasks=task,
             worker_selector=worker_selector or self.worker_selector,
-            modal_app_name=self.name,
+            app_name=self.name,
         )
 
     def local_entrypoint(self, *args, **kwargs):
