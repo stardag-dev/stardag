@@ -421,14 +421,70 @@ class RunFunction(typing.Protocol):
 # --- Default build/run implementations, with overridable methods ---
 
 
-class Builder(BuildFunction):
-    """Default builder implementation with overridable setup/teardown."""
+class _ModalCallable:
+    """Mixin that makes class instances compatible with Modal's app.function().
+
+    Modal's ``app.function()`` decorator accesses ``__qualname__`` and ``__name__``
+    on the callable to determine serialization and naming behavior. Regular
+    class instances don't have these attributes (they live on the class, not
+    instances). This mixin sets them on each instance from the actual class.
+
+    Subclasses automatically get correct ``__name__``/``__qualname__`` without
+    needing to call ``super().__init__()``:
+
+    .. code-block:: python
+
+        class MyBuilder(Builder):
+            # No __init__ needed — __name__/__qualname__ are set automatically
+            def setup(self, tasks):
+                ...
+
+        class MyBuilder2(Builder):
+            def __init__(self, config):
+                # Works even without super().__init__() — __init_subclass__
+                # ensures the attributes are set.
+                self.config = config
+    """
+
+    def __init_subclass__(cls, **kwargs: typing.Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Wrap __init__ to always set __name__/__qualname__ on instances,
+        # even if the subclass overrides __init__ without calling super().
+        original_init = cls.__init__
+
+        def _patched_init(self, *args: typing.Any, **kw: typing.Any) -> None:
+            original_init(self, *args, **kw)
+            self.__name__ = type(self).__name__
+            self.__qualname__ = type(self).__qualname__
+
+        cls.__init__ = _patched_init  # type: ignore[method-assign]
 
     def __init__(self) -> None:
-        # Modal's app.function() decorator expects __qualname__ and __name__
-        # on the callable to determine serialization behavior.
         self.__name__ = type(self).__name__
         self.__qualname__ = type(self).__qualname__
+
+
+class Builder(_ModalCallable, BuildFunction):
+    """Default builder implementation with overridable setup/teardown.
+
+    Override ``setup()``/``teardown()``/``build()`` to customize behavior.
+    Pass an instance to ``StardagApp(build_function=MyBuilder())``.
+
+    Example:
+
+    .. code-block:: python
+
+        class MyBuilder(Builder):
+            def setup(self, tasks):
+                super().setup(tasks)
+                configure_my_environment()
+
+        stardag_app = StardagApp(
+            "my-app",
+            build_function=MyBuilder(),
+            ...
+        )
+    """
 
     def setup(self, tasks: typing.Sequence[BaseTask] | BaseTask) -> None:
         """Optional setup logic before the build starts."""
@@ -487,10 +543,27 @@ class Builder(BuildFunction):
         return build(tasks, task_executor=task_executor)
 
 
-class Runner(RunFunction):
-    def __init__(self) -> None:
-        self.__name__ = type(self).__name__
-        self.__qualname__ = type(self).__qualname__
+class Runner(_ModalCallable, RunFunction):
+    """Default runner implementation with overridable setup/teardown.
+
+    Override ``setup()``/``teardown()``/``run()`` to customize behavior.
+    Pass an instance to ``StardagApp(run_function=MyRunner())``.
+
+    Example:
+
+    .. code-block:: python
+
+        class MyRunner(Runner):
+            def setup(self, task):
+                super().setup(task)
+                torch.cuda.set_device(0)
+
+        stardag_app = StardagApp(
+            "my-app",
+            run_function=MyRunner(),
+            ...
+        )
+    """
 
     def setup(self, task: BaseTask) -> None:
         """Optional setup logic before the task runs."""
