@@ -35,7 +35,7 @@ try:
         get_default_volume_mount_path,
     )
     from stardag.integration.modal._config import with_stardag_on_image
-    from stardag.testing.modal import make_range, sum_list
+    from stardag.testing.modal._tasks import make_range, sum_list
 
     # check if logged in and volume exists
     try:
