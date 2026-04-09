@@ -1,7 +1,12 @@
 from stardag.integration.modal._app import (
+    Builder,
     BuildFailedError,
+    BuildFunction,
     FinalizeResult,
     FunctionSettings,
+    PrefectBuilder,
+    RunFunction,
+    Runner,
     StardagApp,
     WorkerSelector,
     WorkerSelectorByName,
@@ -20,7 +25,12 @@ from stardag.integration.modal._target import (
 
 __all__ = [
     "BuildFailedError",
+    "BuildFunction",
+    "RunFunction",
     "StardagApp",
+    "Builder",
+    "PrefectBuilder",
+    "Runner",
     "FinalizeResult",
     "FunctionSettings",
     "MODAL_VOLUME_URI_PREFIX",

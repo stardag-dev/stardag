@@ -38,14 +38,14 @@ import json
 import logging
 import os
 import pathlib
+import traceback as tb_module
 import typing
 
 import modal
 
-import traceback as tb_module
-
 from stardag import BaseTask, TaskStruct, build
 from stardag.build import BuildExitStatus, TaskExecutionError, TaskExecutorABC
+from stardag.build._base import BuildSummary
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
@@ -57,6 +57,8 @@ from stardag.registry._base import get_git_commit_hash
 try:
     from stardag.integration.prefect import (
         build_flow as prefect_build_flow,
+    )
+    from stardag.integration.prefect import (
         create_markdown,
         upload_task_on_complete_artifacts,
     )
@@ -362,7 +364,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         pass
 
 
-# --- Internal build/run functions ---
+# --- Build and run function protocols ---
 
 
 class BuildFailedError(Exception):
@@ -371,85 +373,253 @@ class BuildFailedError(Exception):
     pass
 
 
-def _build(
-    task: BaseTask,
-    worker_selector: WorkerSelector,
-    modal_app_name: str,
-):
-    _setup_logging()
-    modal_executor = ModalTaskExecutor(
-        modal_app_name=modal_app_name,
-        worker_selector=worker_selector,
-    )
-    logger.info(f"Building root task: {repr(task)}")
-    summary = build([task], task_executor=modal_executor)
-    logger.info(f"Build summary:\n{repr(summary)}")
-    if summary.status != BuildExitStatus.SUCCESS:
-        raise BuildFailedError(
-            f"Build finished with status {summary.status.value}: "
-            f"{summary.task_count.failed} failed, "
-            f"{summary.task_count.pending} pending"
+class BuildFunction(typing.Protocol):
+    """Protocol for the function registered as the Modal "build" function.
+
+    This function is called remotely on Modal to orchestrate a DAG build.
+    It receives the root task, a worker selector, and the Modal app name,
+    then coordinates task execution across Modal worker functions.
+
+    The default implementation (``Builder``) creates a ``ModalTaskExecutor``
+    and calls ``stardag.build()``. Custom implementations can subclass
+    ``Builder`` to override ``setup()``/``teardown()``/``build()``, or
+    implement this protocol directly for full control.
+
+    Any module-level code in the module where a custom build function is
+    defined will execute inside the Modal container before the function is
+    called — use this for container-level setup (imports, config, etc.).
+    """
+
+    def __call__(
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        worker_selector: WorkerSelector,
+        app_name: str,
+    ) -> BuildSummary | None: ...
+
+
+class RunFunction(typing.Protocol):
+    """Protocol for the function registered as Modal "worker_*" functions.
+
+    This function is called remotely on Modal to execute a single task.
+    It receives a task instance and should call ``task.run()``.
+
+    The default implementation (``Runner``) calls ``task.run()`` with
+    logging. Custom implementations can subclass ``Runner`` to override
+    ``setup()``/``teardown()``, or implement this protocol directly.
+
+    Any module-level code in the module where a custom run function is
+    defined will execute inside the Modal container before the function is
+    called — use this for container-level setup (imports, config, etc.).
+    """
+
+    def __call__(
+        self, task: BaseTask
+    ) -> None | typing.Generator[TaskStruct, None, None]: ...
+
+
+# --- Default build/run implementations, with overridable methods ---
+
+
+class Builder(BuildFunction):
+    """Default builder implementation with overridable setup/teardown.
+
+    Override ``setup()``/``teardown()``/``build()`` to customize behavior.
+    Pass an instance to ``StardagApp(build_function=MyBuilder())``.
+
+    Example:
+
+    .. code-block:: python
+
+        class MyBuilder(Builder):
+            def setup(self, tasks):
+                super().setup(tasks)
+                configure_my_environment()
+
+        stardag_app = StardagApp(
+            "my-app",
+            build_function=MyBuilder(),
+            ...
         )
+    """
+
+    def setup(self, tasks: typing.Sequence[BaseTask] | BaseTask) -> None:
+        """Optional setup logic before the build starts."""
+        _setup_logging()
+
+    def teardown(
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        summary_or_exception: BuildSummary | None | Exception,
+    ) -> None:
+        """Optional teardown logic after the build finishes."""
+        if isinstance(summary_or_exception, BuildSummary):
+            summary = summary_or_exception
+            logger.info(f"Build summary:\n{repr(summary)}")
+            if summary.status != BuildExitStatus.SUCCESS:
+                raise BuildFailedError(
+                    f"Build finished with status {summary.status.value}: "
+                    f"{summary.task_count.failed} failed, "
+                    f"{summary.task_count.pending} pending"
+                )
+        elif summary_or_exception is None:
+            logger.info("Build completed without a BuildSummary.")
+        else:
+            logger.error(f"Build exception:\n{repr(summary_or_exception)}")
+
+    def __call__(
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        worker_selector: WorkerSelector,
+        app_name: str,
+    ) -> BuildSummary | None:
+        """Core build logic to orchestrate the DAG build."""
+        modal_executor = ModalTaskExecutor(
+            modal_app_name=app_name,
+            worker_selector=worker_selector,
+        )
+        summary_or_exception: BuildSummary | None | Exception = BuildFailedError(
+            "Unknown error during build"
+        )  # Placeholder for type checking, this should never be raised
+
+        try:
+            self.setup(tasks)
+            summary = self.build(tasks, modal_executor)
+            summary_or_exception = summary
+            return summary
+        except Exception as exception:
+            summary_or_exception = exception
+            raise
+        finally:
+            self.teardown(tasks, summary_or_exception)
+
+    def build(
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        task_executor: ModalTaskExecutor,
+    ) -> BuildSummary | None:
+        """Default build logic using stardag.build() with the ModalTaskExecutor."""
+        return build(tasks, task_executor=task_executor)
 
 
-async def _prefect_build(
-    task: BaseTask,
-    worker_selector: WorkerSelector,
-    modal_app_name: str,
-    on_complete_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
-    | None = None,
-    before_run_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
-    | None = None,
-):
-    if (
-        prefect_build_flow is None
-        or create_markdown is None
-        or upload_task_on_complete_artifacts is None
+class Runner(RunFunction):
+    """Default runner implementation with overridable setup/teardown.
+
+    Override ``setup()``/``teardown()``/``run()`` to customize behavior.
+    Pass an instance to ``StardagApp(run_function=MyRunner())``.
+
+    Example:
+
+    .. code-block:: python
+
+        class MyRunner(Runner):
+            def setup(self, task):
+                super().setup(task)
+                torch.cuda.set_device(0)
+
+        stardag_app = StardagApp(
+            "my-app",
+            run_function=MyRunner(),
+            ...
+        )
+    """
+
+    def setup(self, task: BaseTask) -> None:
+        """Optional setup logic before the task runs."""
+        _setup_logging()
+
+    def teardown(self, task: BaseTask, exception: Exception | None) -> None:
+        """Optional teardown logic after the task runs."""
+        if exception:
+            logger.error(f"Task {repr(task)} raised an exception: {repr(exception)}")
+
+    def __call__(
+        self, task: BaseTask
+    ) -> None | typing.Generator[TaskStruct, None, None]:
+        """Core logic to execute a single task."""
+        result: None | typing.Generator[TaskStruct, None, None] = None
+        exception: Exception | None = None
+        try:
+            self.setup(task)
+            result = self.run(task)
+        except Exception as e:
+            exception = e
+            raise
+        finally:
+            self.teardown(task, exception)
+        return result
+
+    def run(self, task: BaseTask) -> None | typing.Generator[TaskStruct, None, None]:
+        """Default run logic - simply call task.run()."""
+        return task.run()
+
+
+_default_build = Builder()
+_default_run = Runner()
+
+
+class PrefectBuilder(Builder):
+    """Builder that uses Prefect for build orchestration.
+
+    Requires the ``stardag.integration.prefect`` package to be installed.
+    """
+
+    def __init__(
+        self,
+        on_complete_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
+        | None = None,
+        before_run_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
+        | None = None,
     ):
-        raise ImportError("Prefect is not installed")
+        self.on_complete_callback = on_complete_callback
+        self.before_run_callback = before_run_callback
 
-    _setup_logging()
-    task_executor = ModalTaskExecutor(
-        modal_app_name=modal_app_name,
-        worker_selector=worker_selector,
-    )
-    logger.info(f"Building root task: {repr(task)}")
-    await prefect_build_flow.with_options(
-        name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
-    )(
-        task,
-        task_executor=task_executor,
-        before_run_callback=(
-            before_run_callback or create_markdown
-        ),  # TODO default to None
-        on_complete_callback=(
-            on_complete_callback or upload_task_on_complete_artifacts
-        ),
-    )
-    logger.info(f"Completed building root task {repr(task)}")
+    def build(
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        task_executor: ModalTaskExecutor,
+    ) -> BuildSummary | None:
+        if prefect_build_flow is None:
+            raise ImportError("Prefect is not installed")
 
+        import asyncio
 
-def _run(task: BaseTask):
-    _setup_logging()
-    logger.info(f"Running task: {repr(task)}")
-    try:
-        task.run()
-    except Exception as e:
-        logger.exception(f"Error running task: {repr(task)} - {e}")
-        raise
+        _flow = prefect_build_flow  # local for pyright narrowing
 
-    logger.info(f"Completed running task: {repr(task)}")
+        # TODO: support multiple root tasks in PrefectBuilder
+        if isinstance(tasks, BaseTask):
+            task = tasks
+        else:
+            if len(tasks) != 1:
+                raise ValueError(
+                    f"PrefectBuilder currently supports only a single root task, "
+                    f"got {len(tasks)}"
+                )
+            task = tasks[0]
+
+        async def _run():
+            await _flow.with_options(
+                name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
+            )(
+                task,
+                task_executor=task_executor,
+                before_run_callback=(self.before_run_callback or create_markdown),
+                on_complete_callback=(
+                    self.on_complete_callback or upload_task_on_complete_artifacts
+                ),
+            )
+
+        asyncio.run(_run())
+        # Prefect manages its own flow result; no BuildSummary available.
+        return None
 
 
 def _setup_logging():
-    """Setup logging for the modal app"""
+    """Setup logging for the modal app."""
     logging.basicConfig(level=logging.INFO)
 
 
 # --- Stardag App ---
-
-
-BuilderType = typing.Literal["basic", "prefect"]
 
 
 class StardagApp:
@@ -498,7 +668,8 @@ class StardagApp:
         self,
         modal_app_or_name: modal.App | str,
         *,
-        builder_type: BuilderType = "basic",
+        build_function: BuildFunction = _default_build,
+        run_function: RunFunction = _default_run,
         builder_settings: FunctionSettings,
         worker_settings: dict[str, FunctionSettings],
         worker_selector: WorkerSelector | None = None,
@@ -508,7 +679,26 @@ class StardagApp:
         Args:
             modal_app_or_name: Either a modal.App instance or a string name.
                 If a string, a new modal.App will be created with that name.
-            builder_type: Type of builder to use ("basic" or "prefect").
+            build_function: Callable registered as the Modal "build" function.
+                Must match the ``BuildFunction`` protocol:
+                ``(tasks, worker_selector, app_name) -> BuildSummary | None``.
+                Defaults to ``Builder()`` which provides overridable
+                ``setup()``/``teardown()``/``build()`` hooks. Subclass
+                ``Builder`` for customization, or implement the protocol
+                directly.
+
+                Any module-level code in the module where this callable is
+                defined will run inside the Modal container at import time —
+                use this for container-level setup.
+            run_function: Callable registered as the Modal worker functions.
+                Must match the ``RunFunction`` protocol:
+                ``(task) -> None``.
+                Defaults to ``Runner()`` which provides overridable
+                ``setup()``/``teardown()`` hooks.
+
+                Any module-level code in the module where this callable is
+                defined will run inside the Modal container at import time —
+                use this for worker-level setup (GPU init, library preloading).
             builder_settings: Settings for the builder function.
             worker_settings: Dict of worker name to settings. Must include "default".
             worker_selector: Function to select worker for each task.
@@ -522,7 +712,8 @@ class StardagApp:
             self.modal_app = modal_app_or_name
 
         self.worker_selector = worker_selector or _default_worker_selector
-        self.builder_type = builder_type
+        self._build_function = build_function
+        self._run_function = run_function
         self._builder_settings = builder_settings
         self._worker_settings = worker_settings
         self._is_finalized = False
@@ -617,6 +808,23 @@ class StardagApp:
                     {"STARDAG_MODAL_VOLUME_MOUNTS": json.dumps(volume_mounts)}
                 )
             )
+        # Wrap callables in real functions for Modal compatibility.
+        # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
+        # not callable class instances. The wrappers delegate to the actual callable
+        # and are what get serialized/sent to Modal.
+        build_fn = self._build_function
+
+        def _modal_build(
+            tasks: typing.Sequence[BaseTask] | BaseTask,
+            worker_selector: WorkerSelector,
+            app_name: str,
+        ) -> BuildSummary | None:
+            return build_fn(tasks, worker_selector, app_name)
+
+        run_fn = self._run_function
+
+        def _modal_run(task: BaseTask) -> typing.Any:
+            return run_fn(task)
 
         # Create builder function
         builder_settings = self._prepare_function_settings(
@@ -624,14 +832,13 @@ class StardagApp:
             extra_secrets=extra_secrets,
             auto_volumes=auto_volumes,
         )
-        build_function = _prefect_build if self.builder_type == "prefect" else _build
         self.modal_app.function(
             **{
                 **builder_settings,
                 "name": "build",
                 "serialized": True,
             }
-        )(build_function)
+        )(_modal_build)
 
         function_names = ["build"]
 
@@ -650,7 +857,7 @@ class StardagApp:
                     "name": func_name,
                     "serialized": True,
                 }
-            )(_run)
+            )(_modal_run)
             function_names.append(func_name)
 
         self._is_finalized = True
@@ -688,9 +895,9 @@ class StardagApp:
             name="build",
         )
         return build_function.spawn(
-            task=task,
+            tasks=task,
             worker_selector=worker_selector or self.worker_selector,
-            modal_app_name=self.name,
+            app_name=self.name,
         )
 
     def build_remote(
@@ -717,9 +924,9 @@ class StardagApp:
             name="build",
         )
         return build_function.remote(
-            task=task,
+            tasks=task,
             worker_selector=worker_selector or self.worker_selector,
-            modal_app_name=self.name,
+            app_name=self.name,
         )
 
     def local_entrypoint(self, *args, **kwargs):
