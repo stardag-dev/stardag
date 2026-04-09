@@ -78,10 +78,16 @@ TEST_IMAGE = with_stardag_on_image(
     )
 )
 
+TARGET_ROOTS_SECRET = modal.Secret.from_dict(
+    {"STARDAG_TARGET_ROOTS__DEFAULT": f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}"}
+)
+
 stardag_app = StardagApp(
     "stardag-testing-app",
-    builder_settings=FunctionSettings(image=TEST_IMAGE),
-    worker_settings={"default": FunctionSettings(image=TEST_IMAGE)},
+    builder_settings=FunctionSettings(image=TEST_IMAGE, secrets=[TARGET_ROOTS_SECRET]),
+    worker_settings={
+        "default": FunctionSettings(image=TEST_IMAGE, secrets=[TARGET_ROOTS_SECRET])
+    },
 )
 
 finalize_result = stardag_app.finalize()
@@ -274,25 +280,64 @@ class TestEndToEndBuild:
     """End-to-end test: build a DAG through the deployed Modal app.
 
     This exercises the full Builder/Runner flow:
-    1. build_remote() calls the deployed "build" function (Builder.__call__)
-    2. Builder creates ModalTaskExecutor and runs stardag.build()
-    3. ModalTaskExecutor dispatches each task to "worker_default" (Runner.__call__)
-    4. Runner calls task.run(), which writes output to the Modal volume
-    5. Build completes and returns BuildSummary
+    1. Delete any existing targets on the Modal volume
+    2. build_remote() calls the deployed "build" function (Builder.__call__)
+    3. Builder creates ModalTaskExecutor and runs stardag.build()
+    4. ModalTaskExecutor dispatches each task to "worker_default" (Runner.__call__)
+    5. Runner calls task.run(), which writes output to the Modal volume
+    6. Load results locally via the Modal volume remote filesystem API
 
     Tasks are defined in stardag.testing.modal._tasks (inside the stardag
     package) so they can be deserialized in the Modal container.
     """
 
-    def test_build_remote_returns_summary(self):
-        """Build a two-task DAG through Modal and verify BuildSummary."""
+    @pytest.fixture(autouse=True)
+    def setup_target_roots(self):
+        """Set target roots to the Modal volume so local load() works."""
+        from stardag.testing import target_roots_override
+
+        target_roots = {"default": f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}"}
+        with target_roots_override(target_roots):
+            yield
+
+    @staticmethod
+    def _delete_targets_on_volume(*tasks):
+        """Delete task target files from the Modal volume."""
+        import stardag as sd
+        from stardag.integration.modal._target import get_volume_name_and_path
+
+        volume = modal.Volume.from_name(VOLUME_NAME)
+        all_tasks = list(tasks)
+        for task in tasks:
+            all_tasks.extend(sd.flatten_task_struct(task.requires()))
+
+        for task in all_tasks:
+            uri = task.target().uri
+            _, in_vol_path = get_volume_name_and_path(uri)
+            try:
+                volume.remove_file(in_vol_path)
+            except Exception:
+                pass  # file doesn't exist — fine
+
+    def test_build_and_load_result(self):
+        """Build a DAG through Modal, then load the result locally."""
         from stardag.build._base import BuildSummary
 
         root = sum_list(values=make_range(limit=5))
+
+        # Delete existing targets so the build actually executes all tasks
+        self._delete_targets_on_volume(root)
+        assert not root.target().exists(), "Target should not exist before build"
+
+        # Build remotely through Modal
         result = stardag_app.build_remote(root)
 
-        # build_remote returns BuildSummary (Builder.teardown raises on failure)
+        # Verify BuildSummary — both tasks should have succeeded (not previously_completed)
         assert isinstance(result, BuildSummary)
-        # 2 tasks: make_range + sum_list (may be succeeded or previously_completed)
-        total = result.task_count.succeeded + result.task_count.previously_completed
-        assert total == 2
+        assert result.task_count.succeeded == 2, (
+            f"Expected 2 succeeded, got {result.task_count}"
+        )
+
+        # Load results locally via Modal volume remote filesystem API
+        assert root.target().exists()
+        assert root.target().load() == 10  # sum(range(5)) = 0+1+2+3+4
