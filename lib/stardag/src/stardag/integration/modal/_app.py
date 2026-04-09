@@ -395,7 +395,7 @@ class BuildFunction(typing.Protocol):
         tasks: typing.Sequence[BaseTask] | BaseTask,
         worker_selector: WorkerSelector,
         app_name: str,
-    ) -> BuildSummary: ...
+    ) -> BuildSummary | None: ...
 
 
 class RunFunction(typing.Protocol):
@@ -450,7 +450,7 @@ class Builder(BuildFunction):
     def teardown(
         self,
         tasks: typing.Sequence[BaseTask] | BaseTask,
-        summary_or_exception: BuildSummary | Exception,
+        summary_or_exception: BuildSummary | None | Exception,
     ) -> None:
         """Optional teardown logic after the build finishes."""
         if isinstance(summary_or_exception, BuildSummary):
@@ -470,13 +470,13 @@ class Builder(BuildFunction):
         tasks: typing.Sequence[BaseTask] | BaseTask,
         worker_selector: WorkerSelector,
         app_name: str,
-    ) -> BuildSummary:
+    ) -> BuildSummary | None:
         """Core build logic to orchestrate the DAG build."""
         modal_executor = ModalTaskExecutor(
             modal_app_name=app_name,
             worker_selector=worker_selector,
         )
-        summary_or_exception: BuildSummary | Exception = BuildFailedError(
+        summary_or_exception: BuildSummary | None | Exception = BuildFailedError(
             "Unknown error during build"
         )  # Placeholder for type checking, this should never be raised
 
@@ -495,7 +495,7 @@ class Builder(BuildFunction):
         self,
         tasks: typing.Sequence[BaseTask] | BaseTask,
         task_executor: ModalTaskExecutor,
-    ) -> BuildSummary:
+    ) -> BuildSummary | None:
         """Default build logic using stardag.build() with the ModalTaskExecutor."""
         return build(tasks, task_executor=task_executor)
 
@@ -574,7 +574,7 @@ class PrefectBuilder(Builder):
         self,
         tasks: typing.Sequence[BaseTask] | BaseTask,
         task_executor: ModalTaskExecutor,
-    ) -> BuildSummary:
+    ) -> BuildSummary | None:
         if prefect_build_flow is None:
             raise ImportError("Prefect is not installed")
 
@@ -606,9 +606,8 @@ class PrefectBuilder(Builder):
             )
 
         asyncio.run(_run())
-        # PrefectBuilder doesn't return a standard BuildSummary from
-        # prefect_build_flow; return a placeholder for now.
-        return BuildSummary()  # type: ignore[call-arg]
+        # Prefect manages its own flow result; no BuildSummary available.
+        return None
 
 
 def _setup_logging():
@@ -678,7 +677,7 @@ class StardagApp:
                 If a string, a new modal.App will be created with that name.
             build_function: Callable registered as the Modal "build" function.
                 Must match the ``BuildFunction`` protocol:
-                ``(tasks, worker_selector, app_name) -> BuildSummary``.
+                ``(tasks, worker_selector, app_name) -> BuildSummary | None``.
                 Defaults to ``Builder()`` which provides overridable
                 ``setup()``/``teardown()``/``build()`` hooks. Subclass
                 ``Builder`` for customization, or implement the protocol
@@ -815,7 +814,7 @@ class StardagApp:
             tasks: typing.Sequence[BaseTask] | BaseTask,
             worker_selector: WorkerSelector,
             app_name: str,
-        ) -> BuildSummary:
+        ) -> BuildSummary | None:
             return build_fn(tasks, worker_selector, app_name)
 
         run_fn = self._run_function
