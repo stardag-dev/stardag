@@ -311,6 +311,24 @@ def is_generic_model(cls: Type[BaseModel]) -> bool:
     return False
 
 
+def _is_parameterized_generic_alias(cls: Type[BaseModel]) -> bool:
+    """True for parameterized generic aliases like ``Task[int]``.
+
+    These aren't real classes and must never be registered: the concrete subclass
+    that extends them (``class MyTask(Task[int]): pass``) is what carries the id.
+    """
+    return bool(cls.__pydantic_generic_metadata__.get("origin"))
+
+
+def _is_stardag_abstract(cls: type) -> bool:
+    """True if this class is explicitly marked as an abstract stardag base.
+
+    Only honored when set directly on the class (via ``cls.__dict__``), not
+    inherited — so user subclasses of abstract bases still get registered.
+    """
+    return cls.__dict__.get("__stardag_abstract__", False) is True
+
+
 _TPolymorphicRoot = TypeVar("_TPolymorphicRoot", bound="PolymorphicRoot")
 _TBaseModel = TypeVar("_TBaseModel", bound=StardagBaseModel)
 
@@ -394,7 +412,11 @@ class PolymorphicRoot(StardagBaseModel):
                 for base in cls.__mro__
                 if PolymorphicRoot in getattr(base, "__bases__", ())
             )
-            if cls is not family and not is_generic_model(cls):
+            if (
+                cls is not family
+                and not _is_parameterized_generic_alias(cls)
+                and not _is_stardag_abstract(cls)
+            ):
                 cls.__type_id__ = family._registry().add(
                     cls,
                     name_override=name_override,
@@ -510,9 +532,26 @@ class Polymorphic:
     ):
         _ = handler(source_type)  # ensure schema exists
 
-        # require source_type to be a PolymorphicRoot subclass
-        if not isinstance(source_type, type) or not issubclass(
-            source_type, PolymorphicRoot
+        # Resolve TypeVars to their bound so that generic Pydantic models can
+        # declare fields like ``field: SubClass[T]`` where ``T`` is a TypeVar
+        # bound to a PolymorphicRoot subclass. At schema-build time for the
+        # generic class, source_type is the TypeVar; at schema-build time for
+        # the parameterized form (``MyModel[Concrete]``), Pydantic re-invokes
+        # this method with the concrete class, so the TypeVar branch only
+        # shapes the generic-form schema.
+        resolved_source = source_type
+        if isinstance(source_type, TypeVar):
+            bound = source_type.__bound__
+            if not (isinstance(bound, type) and issubclass(bound, PolymorphicRoot)):
+                raise TypeError(
+                    "Polymorphic() used with a TypeVar requires the TypeVar "
+                    f"to be bound to a PolymorphicRoot subclass; got "
+                    f"TypeVar {source_type!r} with bound {bound!r}"
+                )
+            resolved_source = bound
+
+        if not isinstance(resolved_source, type) or not issubclass(
+            resolved_source, PolymorphicRoot
         ):
             raise TypeError(
                 "Polymorphic() can only be used with PolymorphicRoot subclasses"
@@ -520,10 +559,10 @@ class Polymorphic:
 
         # For parameterized generics like Task[LoadableTarget[str]], get the origin class
         # (Task) for isinstance checks, but keep source_type for generic args checking
-        pydantic_meta = getattr(source_type, "__pydantic_generic_metadata__", None)
+        pydantic_meta = getattr(resolved_source, "__pydantic_generic_metadata__", None)
         base_origin: type[PolymorphicRoot] = (
             pydantic_meta.get("origin") if pydantic_meta else None
-        ) or source_type
+        ) or resolved_source
 
         explicit_on_mismatch = self.on_generic_type_mismatch
 
@@ -531,12 +570,12 @@ class Polymorphic:
             if isinstance(v, base_origin):
                 # Best-effort generic args check for already-instantiated values
                 is_compatible, error_msg = _check_generic_args_compatibility(
-                    source_type, type(v)
+                    resolved_source, type(v)
                 )
                 if not is_compatible:
                     message = (
                         f"Value of type {type(v).__name__} is not compatible with "
-                        f"expected type {source_type}: {error_msg}"
+                        f"expected type {resolved_source}: {error_msg}"
                     )
                     on_mismatch = _resolve_on_generic_type_mismatch(
                         explicit_on_mismatch

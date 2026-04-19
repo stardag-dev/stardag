@@ -122,6 +122,7 @@ def test_smoke():
     expected_animal_type_id_to_class = {
         TypeId(namespace="", name="Dog"): Dog,
         TypeId(namespace="", name="Cat"): Cat,
+        TypeId(namespace="", name="BirdBase"): BirdBase,
         TypeId(namespace="", name="Parrot"): Parrot,
         TypeId(namespace="", name="Sparrow"): Sparrow,
     }
