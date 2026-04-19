@@ -1,5 +1,6 @@
 import abc
 import typing
+from typing import ClassVar
 
 from stardag._core.base_task import BaseTask, LoadableTask, TargetTask
 from stardag._core.validate import LoadValidator, get_validators, run_validators
@@ -115,6 +116,8 @@ class Task(
     # <stardag.target.serialize.JSONSerializer at 0x1064e4710>
     ```
     """
+
+    __stardag_abstract__: ClassVar[bool] = True
 
     @classmethod
     def __map_generic_args_to_ancestor__(

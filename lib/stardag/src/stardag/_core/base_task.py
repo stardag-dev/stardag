@@ -499,6 +499,8 @@ class LoadableTask(BaseTask, abc.ABC, Generic[LoadedT_co]):
     the ``run``/``run_aio`` pattern on ``BaseTask``).
     """
 
+    __stardag_abstract__: ClassVar[bool] = True
+
     def load(self) -> LoadedT_co:
         """Load the output of this task (sync).
 
@@ -543,6 +545,8 @@ class TargetTask(BaseTask, Generic[TargetType]):
     with automatic serialization and filesystem target management) rather than
     using ``TargetTask`` directly.
     """
+
+    __stardag_abstract__: ClassVar[bool] = True
 
     def complete(self) -> bool:
         """Check if the task is complete."""

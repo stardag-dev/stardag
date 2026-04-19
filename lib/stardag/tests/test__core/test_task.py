@@ -330,3 +330,136 @@ class TestDirectoryTarget:
         loaded = task.load()
         assert isinstance(loaded, _DirData)
         assert loaded.data == {"result": 1}
+
+
+class TestDirectGenericInstantiation:
+    """Generic user tasks can be instantiated directly without a concrete subclass.
+
+    Prior behavior required ``class Concrete(Generic[int]): pass`` boilerplate when
+    the type parameter was only meant as a type-hint convenience — direct
+    instantiation raised ``AttributeError: __type_id__`` at serialization time.
+    """
+
+    def test_direct_instantiation_of_user_generic_task(
+        self, default_in_memory_fs_target
+    ):
+        ItemT = typing.TypeVar("ItemT")
+
+        class GenericListTask(Task[list[ItemT]], typing.Generic[ItemT]):
+            items: list[ItemT]
+
+            def run(self):
+                self._save(list(self.items))
+
+        task: GenericListTask[int] = GenericListTask(items=[1, 2, 3])
+
+        # Serialization works (previously failed with AttributeError: __type_id__)
+        dumped = task.model_dump(mode="json")
+        assert dumped["items"] == [1, 2, 3]
+
+        # Deterministic id works (depends on model_dump with hash context)
+        assert task.id is not None
+
+        # Build + load round-trip works
+        task.run()
+        assert task.complete()
+        assert task.load() == [1, 2, 3]
+
+    def test_generic_task_has_type_id(self):
+        ItemT = typing.TypeVar("ItemT")
+
+        class RegisteredGeneric(Task[ItemT], typing.Generic[ItemT]):
+            value: int
+
+            def run(self):
+                self._save(self.value)  # type: ignore[arg-type]
+
+        assert hasattr(RegisteredGeneric, "__type_id__")
+        assert RegisteredGeneric.__type_id__.name == "RegisteredGeneric"
+
+    def test_parameterized_alias_does_not_get_registered(self):
+        """``Task[int]`` must not grab its own type id — only user classes do."""
+        ItemT = typing.TypeVar("ItemT")
+
+        class MyGeneric(Task[ItemT], typing.Generic[ItemT]):
+            value: int
+
+            def run(self):
+                self._save(self.value)  # type: ignore[arg-type]
+
+        alias = MyGeneric[int]
+        assert not hasattr(alias, "__type_id__") or (
+            alias.__type_id__ is MyGeneric.__type_id__
+        )
+
+
+class TestGenericTypeArgTransfer:
+    """Parameterized-at-call-site generics (``TestGeneric[int](...)``) transfer
+    their resolved type args in the serialized payload so distinct parameteriza-
+    tions get distinct ids and round-trip back to the correct parameterized class.
+    """
+
+    def test_distinct_parameterizations_have_distinct_ids(self):
+        ItemT = typing.TypeVar("ItemT")
+
+        class ParamTask(Task[list[ItemT]], typing.Generic[ItemT]):
+            items: list[ItemT]
+
+            def run(self):
+                self._save(list(self.items))
+
+        int_task: ParamTask[int] = ParamTask[int](items=[])
+        str_task: ParamTask[str] = ParamTask[str](items=[])
+        bare = ParamTask(items=[])
+
+        assert int_task.id != str_task.id
+        assert int_task.id != bare.id
+        assert str_task.id != bare.id
+
+    def test_round_trip_preserves_parameterization(self):
+        from pydantic import TypeAdapter
+
+        from stardag import BaseTask
+        from stardag.polymorphic import SubClass
+
+        ItemT = typing.TypeVar("ItemT")
+
+        class ParamTask(Task[list[ItemT]], typing.Generic[ItemT]):
+            items: list[ItemT]
+
+            def run(self):
+                self._save(list(self.items))
+
+        original: ParamTask[int] = ParamTask[int](items=[1, 2, 3])
+        dumped = original.model_dump(mode="json")
+
+        # Wire format carries the pickled type args.
+        assert "__type_args" in dumped
+
+        adapter = TypeAdapter(SubClass[BaseTask])
+        restored = adapter.validate_python(dumped)
+
+        # Class reconstructed with correct parameterization.
+        assert type(restored).__name__ == "ParamTask[int]"
+        assert typing.get_args(getattr(restored, "__orig_class__")) == (int,)
+        # Id survives round-trip.
+        assert restored.id == original.id
+
+    def test_concrete_subclass_skips_type_arg_transfer(self):
+        """``class Concrete(Gen[int])`` does not emit ``__type_args`` — its name
+        discriminator already determines the class fully."""
+        ItemT = typing.TypeVar("ItemT")
+
+        class ParamTask(Task[list[ItemT]], typing.Generic[ItemT]):
+            items: list[ItemT]
+
+            def run(self):
+                self._save(list(self.items))
+
+        class IntParamTask(ParamTask[int]):
+            pass
+
+        task = IntParamTask(items=[1, 2])
+        dumped = task.model_dump(mode="json")
+        assert "__type_args" not in dumped
+        assert dumped["__name"] == "IntParamTask"
