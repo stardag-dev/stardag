@@ -483,6 +483,22 @@ class _TypeVarRoundTripConcrete(_TypeVarRoundTripBase):
     payload: int = 0
 
 
+# Module-level family for ``test_nested_typevar_inside_taskloads_of_parameterized_type``
+# (same rationale as above — pickle-transferred ``__type_args`` need
+# qualname-addressable types, and types referenced inside field annotations
+# for a generic model also need to be resolvable at schema-build time).
+class _NestedBaseParam(_PolymorphicRoot):
+    pass
+
+
+class _NestedConcreteA(_NestedBaseParam):
+    a: int = 1
+
+
+class _NestedConcreteB(_NestedBaseParam):
+    b: int = 2
+
+
 class TestGenericTaskWithSubClassField:
     """A generic task can use a ``TypeVar`` bound to a ``PolymorphicRoot`` as a
     ``SubClass[...]`` field annotation, so the polymorphic base narrows with the
@@ -610,3 +626,125 @@ class TestGenericTaskWithSubClassField:
 
                 def run(self):
                     self._save(self.value)
+
+    def test_nested_typevar_inside_taskloads_of_parameterized_type(self):
+        """TypeVar appears *inside* a parameterized loadable type inside
+        ``TaskLoads[...]``, alongside a direct ``SubClass[T]`` field.
+
+        This is the compound pattern from real-world code: one field drives
+        dispatch on the TypeVar directly, another field takes a loadable whose
+        loaded type is itself parameterized by the same TypeVar:
+
+            class GenericTask(Task[...], Generic[T]):
+                loader: TaskLoads[LoaderBase[T]]
+                param:  SubClass[T]
+
+        Asserts end-to-end:
+          - schema build succeeds for the generic form
+          - parameterized instances construct correctly
+          - distinct parameterizations produce distinct ids
+          - round-trip through ``SubClass[BaseTask]`` preserves parameterization
+          - direct ``SubClass[T]`` field narrows strictly via Pydantic
+          - the heuristic ``on_generic_type_mismatch`` check traverses nested
+            generics and warns on a wrong-concrete loader (default is
+            ``"warn"``; ``STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH=raise``
+            promotes it to a hard error)
+        """
+        from pydantic import TypeAdapter, ValidationError
+
+        from stardag import BaseTask, LoadableTask, TaskLoads
+        from stardag.polymorphic import SubClass
+
+        # Stand-in for the loaded value type — a plain generic class
+        # parameterized by the same param family. Mirrors the real pattern
+        # where ``TaskLoads[LoadedValue[T]]`` means "a LoadableTask whose
+        # loaded value is a ``LoadedValue[T]``", so the TypeVar ``T``
+        # appears nested inside ``TaskLoads[...]``.
+        ValueT_inner = typing.TypeVar("ValueT_inner", bound=_NestedBaseParam)
+
+        class _NestedLoadedValue(typing.Generic[ValueT_inner]):
+            def __init__(self, tag: str = "") -> None:
+                self.tag = tag
+
+        class _NestedLoaderForA(LoadableTask[_NestedLoadedValue[_NestedConcreteA]]):
+            def complete(self) -> bool:
+                return True
+
+            def load(self) -> _NestedLoadedValue[_NestedConcreteA]:
+                return _NestedLoadedValue("for-a")
+
+            def run(self):
+                pass
+
+        class _NestedLoaderForB(LoadableTask[_NestedLoadedValue[_NestedConcreteB]]):
+            def complete(self) -> bool:
+                return True
+
+            def load(self) -> _NestedLoadedValue[_NestedConcreteB]:
+                return _NestedLoadedValue("for-b")
+
+            def run(self):
+                pass
+
+        # The generic task: TypeVar appears at two positions — nested inside
+        # ``TaskLoads[_NestedLoadedValue[T]]`` and directly inside
+        # ``SubClass[T]``.
+        ParamT = typing.TypeVar("ParamT", bound=_NestedBaseParam)
+
+        class _NestedGenericTask(Task[int], typing.Generic[ParamT]):
+            loader: TaskLoads[_NestedLoadedValue[ParamT]]
+            param: SubClass[ParamT]
+            value: int
+
+            def run(self):
+                self._save(self.value)
+
+        # --- schema build succeeded ---
+        assert hasattr(_NestedGenericTask, "__type_id__")
+
+        # --- correct construction works ---
+        ok_a = _NestedGenericTask[_NestedConcreteA](
+            loader=_NestedLoaderForA(),
+            param=_NestedConcreteA(a=5),
+            value=1,
+        )
+        assert isinstance(ok_a.loader, _NestedLoaderForA)
+        assert isinstance(ok_a.param, _NestedConcreteA)
+
+        # --- distinct parameterizations → distinct ids ---
+        ok_b = _NestedGenericTask[_NestedConcreteB](
+            loader=_NestedLoaderForB(),
+            param=_NestedConcreteB(b=7),
+            value=1,
+        )
+        assert ok_a.id != ok_b.id
+
+        # --- round-trip preserves parameterization ---
+        dumped = ok_a.model_dump(mode="json")
+        assert "__type_args" in dumped
+        restored = TypeAdapter(SubClass[BaseTask]).validate_python(dumped)
+        assert isinstance(restored, _NestedGenericTask)
+        assert type(restored).__name__ == "_NestedGenericTask[_NestedConcreteA]"
+        assert restored.id == ok_a.id
+
+        # --- direct SubClass[T] field narrows strictly via Pydantic ---
+        with pytest.raises(ValidationError):
+            _NestedGenericTask[_NestedConcreteA](
+                loader=_NestedLoaderForB(),  # type: ignore[arg-type]
+                param=_NestedConcreteB(),  # type: ignore[arg-type]  # wrong: SubClass[_NestedConcreteA]
+                value=1,
+            )
+
+        # --- nested generic-args mismatch in ``TaskLoads[LoadedValue[T]]`` is
+        # caught by the heuristic check and surfaces under the default
+        # ``on_generic_type_mismatch="warn"`` mode: value is still accepted
+        # but a UserWarning is emitted. Setting
+        # ``STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH=raise`` would promote
+        # it to a ValidationError.
+        with pytest.warns(UserWarning, match="not compatible"):
+            warned = _NestedGenericTask[_NestedConcreteA](
+                loader=_NestedLoaderForB(),  # type: ignore[arg-type]
+                param=_NestedConcreteA(a=1),
+                value=1,
+            )
+        assert isinstance(warned.loader, _NestedLoaderForB)
