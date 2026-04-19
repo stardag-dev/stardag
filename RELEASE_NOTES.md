@@ -6,6 +6,99 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.7 — Support for user-defined generic task classes
+
+User-defined generic tasks can now be declared and instantiated directly —
+two long-standing blockers have been removed without introducing any new
+wire format or hash dependency.
+
+### Unblocker 1: generic tasks get a `__type_id__`
+
+Previously, any class with unresolved `__parameters__` was skipped during
+polymorphic registration. That meant a user-defined generic task like
+
+```python
+class MyGenericTask[ItemT](sd.Task[list[ItemT]]):
+    deps: list[sd.TaskLoads[ItemT]]
+    def run(self):
+        self._save([d.load() for d in self.deps])
+
+MyGenericTask(deps=[...])  # AttributeError: __type_id__
+```
+
+failed at the first `model_dump()`. The registration filter now only skips
+**parameterized generic aliases** (`Task[int]`, not real classes) and
+classes explicitly marked `__stardag_abstract__ = True`. `Task`,
+`LoadableTask`, and `TargetTask` carry the marker, so their current
+unregistered status is preserved. Any user-defined generic task is
+registered under its own name and works end-to-end.
+
+### Unblocker 2: `SubClass[T]` inside generic tasks
+
+A generic task that wants to dispatch polymorphically on its TypeVar can
+now declare:
+
+```python
+from typing import TypeVar
+import stardag as sd
+from stardag.polymorphic import PolymorphicRoot, SubClass
+
+class ParamsBase(PolymorphicRoot): ...
+ParamT = TypeVar("ParamT", bound=ParamsBase)
+
+class MyGenericTask(sd.Task[int], Generic[ParamT]):
+    params: SubClass[ParamT]
+    # ...
+```
+
+Previously, the `SubClass[T]` annotation raised `TypeError: Polymorphic()
+can only be used with PolymorphicRoot subclasses` at class-body time
+because the TypeVar itself isn't a `PolymorphicRoot`. The schema builder
+now treats a TypeVar as its `__bound__` for the generic form; Pydantic
+re-invokes it with the concrete type for each parameterized form
+(`MyGenericTask[Concrete]`), which narrows validation strictly. Unbounded
+TypeVars still raise a clear `TypeError` at schema-build time.
+
+### What remains class-definition-time
+
+A TypeVar on a generic `Task` is a **static-typing convenience**. Runtime
+behavior — serializer selection, target path, validators — is baked in at
+class-definition time. If you need _different_ runtime behavior for
+different type parameters (e.g. a distinct serializer for `MyTask[int]`
+vs `MyTask[str]`), define a concrete subclass:
+
+```python
+class MyInt(MyGeneric[int]): pass
+```
+
+Concrete subclasses get their own `__type_id__` and hash distinctly;
+parameterized aliases (`MyGeneric[int]`) do not — they share the generic
+class's `__type_id__` and hash identically to the bare form. This is an
+intentional invariant: **different `__type_id__` ⇔ different class with
+different runtime behavior**.
+
+### What this release does NOT do
+
+An earlier iteration of this branch also pickle-transferred resolved type
+args in the serialized payload (under `__type_args`), so distinct
+parameterizations like `MyGeneric[int](...)` and `MyGeneric[str](...)`
+hashed distinctly and round-tripped back to the parameterized class. We
+decided against that path:
+
+- It coupled task id stability to pickle output, which is version-
+  sensitive (task ids could drift across Python minor versions).
+- The `Task` machinery already draws the runtime-behavior line at
+  concrete subclasses (parameterized aliases don't get their own
+  serializer anyway). Introducing a finer hash granularity than the
+  behavior granularity would be a surprise, not an asset.
+- Users who genuinely need per-parameterization ids have a clear,
+  already-supported path: concrete subclass.
+
+If this tradeoff doesn't hold for a future use case, the pickle-transfer
+design is recoverable from the PR history.
+
+---
+
 ## v0.5.6 — Softer default for generic-type-mismatch handling
 
 `Polymorphic(on_generic_type_mismatch=...)` — the option that controls what
