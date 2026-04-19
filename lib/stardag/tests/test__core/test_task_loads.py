@@ -470,9 +470,14 @@ def test_on_type_mismatch_explicit_arg_overrides_env_var(monkeypatch):
 
 
 def test_on_type_mismatch_invalid_env_var_raises(monkeypatch):
-    """Invalid env var value raises at mismatch-evaluation time."""
+    """Invalid env var value surfaces as a Pydantic ValidationError.
+
+    The helper raises ``ValueError``, which Pydantic wraps into a
+    ``ValidationError`` at validator boundary. Assert on the wrapping type
+    (not its ``ValueError`` base) so the test documents the real contract.
+    """
     monkeypatch.setenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", "bogus")
-    with pytest.raises(ValueError, match="Invalid value for env var"):
+    with pytest.raises(ValidationError, match="Invalid value for env var"):
         ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
 
 
