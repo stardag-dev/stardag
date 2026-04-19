@@ -1,7 +1,10 @@
 import json
 import typing
 
+import pytest
+
 from stardag import Task, auto_namespace, get_default_relpath
+from stardag.polymorphic import PolymorphicRoot as _PolymorphicRoot
 from stardag.target import DirectorySerializable, FileSerializable
 from stardag.target._base import DirectoryTarget
 from stardag.target.serialize import (
@@ -463,3 +466,147 @@ class TestGenericTypeArgTransfer:
         dumped = task.model_dump(mode="json")
         assert "__type_args" not in dumped
         assert dumped["__name"] == "IntParamTask"
+
+
+class _TypeVarRoundTripBase(_PolymorphicRoot):
+    """Module-level PolymorphicRoot family used by the round-trip test below.
+
+    The pickle-transfer mechanism needs module-level classes (pickle can't
+    find locally-defined ones by qualname), so this base and its subclass
+    must live at module scope.
+    """
+
+    pass
+
+
+class _TypeVarRoundTripConcrete(_TypeVarRoundTripBase):
+    payload: int = 0
+
+
+class TestGenericTaskWithSubClassField:
+    """A generic task can use a ``TypeVar`` bound to a ``PolymorphicRoot`` as a
+    ``SubClass[...]`` field annotation, so the polymorphic base narrows with the
+    task's type parameter.
+
+    Pattern:
+
+        class BaseParam(PolymorphicRoot):
+            ...
+
+        ParamT = TypeVar("ParamT", bound=BaseParam)
+
+        class GenericTask(Task[...], Generic[ParamT]):
+            param: SubClass[ParamT]
+
+        GenericTask[ConcreteParam](param=ConcreteParam(), ...)
+
+    The generic form builds a schema using the TypeVar's bound as the dispatch
+    target (so ``GenericTask(param=...)`` accepts any ``BaseParam`` subclass).
+    Pydantic re-invokes schema construction for each parameterized form,
+    narrowing the dispatch to the concrete type.
+    """
+
+    def test_generic_class_with_subclass_typevar_field_can_be_declared(self):
+        """Previously raised ``TypeError: Polymorphic() can only be used with
+        PolymorphicRoot subclasses`` at class-body evaluation because source_type
+        was the unresolved TypeVar."""
+        from stardag.polymorphic import PolymorphicRoot, SubClass
+
+        class BaseParam(PolymorphicRoot):
+            pass
+
+        ParamT = typing.TypeVar("ParamT", bound=BaseParam)
+
+        class GenericTask(Task[int], typing.Generic[ParamT]):
+            param: SubClass[ParamT]
+            value: int
+
+            def run(self):
+                self._save(self.value)
+
+        assert hasattr(GenericTask, "__type_id__")
+        assert GenericTask.__type_id__.name == "GenericTask"
+
+    def test_narrowing_rejects_wrong_concrete_subclass(self):
+        """``GenericTask[ConcreteA](param=ConcreteB())`` is rejected by Pydantic's
+        strict schema for the parameterized form."""
+        from pydantic import ValidationError
+
+        from stardag.polymorphic import PolymorphicRoot, SubClass
+
+        class BaseParam(PolymorphicRoot):
+            pass
+
+        class ConcreteA(BaseParam):
+            a: int = 1
+
+        class ConcreteB(BaseParam):
+            b: int = 2
+
+        ParamT = typing.TypeVar("ParamT", bound=BaseParam)
+
+        class GenericTask(Task[int], typing.Generic[ParamT]):
+            param: SubClass[ParamT]
+            value: int
+
+            def run(self):
+                self._save(self.value)
+
+        # Correct parameterization: accepted.
+        ok = GenericTask[ConcreteA](param=ConcreteA(a=5), value=1)
+        assert isinstance(ok.param, ConcreteA)
+
+        # Mismatched concrete: rejected.
+        with pytest.raises(ValidationError):
+            GenericTask[ConcreteA](param=ConcreteB(), value=1)  # type: ignore[arg-type]
+
+    def test_round_trip_preserves_typevar_parameterization(self):
+        """Serialize + dispatch on ``SubClass[BaseTask]`` reconstructs the
+        parameterized class; the ``SubClass[ParamT]`` field still resolves
+        polymorphically inside.
+
+        Uses module-level classes for the polymorphic family because the
+        pickle-transferred ``__type_args`` need qualname-addressable types.
+        """
+        from pydantic import TypeAdapter
+
+        from stardag import BaseTask
+        from stardag.polymorphic import SubClass
+
+        ParamT = typing.TypeVar("ParamT", bound=_TypeVarRoundTripBase)
+
+        class _RTGenericTask(Task[int], typing.Generic[ParamT]):
+            param: SubClass[ParamT]
+            value: int
+
+            def run(self):
+                self._save(self.value)
+
+        original = _RTGenericTask[_TypeVarRoundTripConcrete](
+            param=_TypeVarRoundTripConcrete(payload=7), value=3
+        )
+        dumped = original.model_dump(mode="json")
+        assert "__type_args" in dumped
+
+        adapter = TypeAdapter(SubClass[BaseTask])
+        restored = adapter.validate_python(dumped)
+        assert type(restored).__name__ == "_RTGenericTask[_TypeVarRoundTripConcrete]"
+        assert isinstance(restored, _RTGenericTask)
+        assert isinstance(restored.param, _TypeVarRoundTripConcrete)
+        assert restored.id == original.id
+
+    def test_typevar_without_polymorphic_bound_raises(self):
+        """A TypeVar without a PolymorphicRoot bound can't drive polymorphic
+        dispatch — declaring such a field must raise at schema-build time."""
+        from stardag.polymorphic import SubClass
+
+        ParamT = typing.TypeVar("ParamT")  # no bound
+
+        with pytest.raises(TypeError, match="TypeVar"):
+
+            class GenericTask(Task[int], typing.Generic[ParamT]):
+                param: SubClass[ParamT]  # type: ignore[type-var]
+                value: int
+
+                def run(self):
+                    self._save(self.value)
