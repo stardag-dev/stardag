@@ -14,16 +14,22 @@ wire format or hash dependency.
 
 ### Unblocker 1: generic tasks get a `__type_id__`
 
-Previously, any class with unresolved `__parameters__` was skipped during
-polymorphic registration. That meant a user-defined generic task like
+Previously, any class with unresolved `__parameters__` was silently skipped
+during polymorphic registration — so no `__type_id__` was attached. That
+meant a user-defined generic task like
 
 ```python
-class MyGenericTask[ItemT](sd.Task[list[ItemT]]):
+from typing import Generic, TypeVar
+import stardag as sd
+
+ItemT = TypeVar("ItemT")
+
+class MyGenericTask(sd.Task[list[ItemT]], Generic[ItemT]):
     deps: list[sd.TaskLoads[ItemT]]
     def run(self):
         self._save([d.load() for d in self.deps])
 
-MyGenericTask(deps=[...])  # AttributeError: __type_id__
+MyGenericTask(deps=[...])  # AttributeError: __type_id__ (at model_dump)
 ```
 
 failed at the first `model_dump()`. The registration filter now only skips
@@ -39,7 +45,7 @@ A generic task that wants to dispatch polymorphically on its TypeVar can
 now declare:
 
 ```python
-from typing import TypeVar
+from typing import Generic, TypeVar
 import stardag as sd
 from stardag.polymorphic import PolymorphicRoot, SubClass
 
