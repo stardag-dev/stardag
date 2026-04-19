@@ -1,4 +1,5 @@
 import logging
+import os
 import types
 import typing
 import warnings
@@ -453,19 +454,52 @@ class PolymorphicRoot(StardagBaseModel):
         return cls.__type_id__.namespace
 
 
+ON_GENERIC_TYPE_MISMATCH_ENV_VAR = "STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH"
+_DEFAULT_ON_GENERIC_TYPE_MISMATCH: OnGenericTypeMismatch = "warn"
+
+
+def _resolve_on_generic_type_mismatch(
+    explicit: OnGenericTypeMismatch | None,
+) -> OnGenericTypeMismatch:
+    """Resolve the on-mismatch mode from explicit arg, env var, or default.
+
+    Explicit (non-None) arg always wins. Otherwise reads
+    ``STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH``, falling back to
+    ``"warn"`` when unset.
+    """
+    if explicit is not None:
+        return explicit
+    env_val = os.environ.get(ON_GENERIC_TYPE_MISMATCH_ENV_VAR)
+    if env_val is None:
+        return _DEFAULT_ON_GENERIC_TYPE_MISMATCH
+    allowed = typing.get_args(OnGenericTypeMismatch)
+    if env_val not in allowed:
+        raise ValueError(
+            f"Invalid value for env var {ON_GENERIC_TYPE_MISMATCH_ENV_VAR}: "
+            f"{env_val!r}. Expected one of {allowed}."
+        )
+    return typing.cast(OnGenericTypeMismatch, env_val)
+
+
 class Polymorphic:
     """Pydantic annotation for polymorphic validation of PolymorphicRoot subclasses.
 
     Args:
-        on_type_mismatch: Behavior when generic type args don't match.
-            - "raise" (default): Raise a ValidationError
-            - "warn": Log a warning but accept the value
-            - "ignore": Silently accept the value
+        on_generic_type_mismatch: Behavior when generic type args don't match.
+            - ``"raise"``: Raise a ValidationError
+            - ``"warn"``: Emit a warning but accept the value
+            - ``"ignore"``: Silently accept the value
+            - ``None`` (default): Resolve at validation time from env var
+              ``STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH``; if that env
+              var is unset, fall back to ``"warn"``. An explicit non-None
+              value always overrides the env var.
     """
+
+    on_generic_type_mismatch: OnGenericTypeMismatch | None
 
     def __init__(
         self,
-        on_generic_type_mismatch: OnGenericTypeMismatch = "raise",
+        on_generic_type_mismatch: OnGenericTypeMismatch | None = None,
     ) -> None:
         self.on_generic_type_mismatch = on_generic_type_mismatch
 
@@ -491,7 +525,7 @@ class Polymorphic:
             pydantic_meta.get("origin") if pydantic_meta else None
         ) or source_type
 
-        on_generic_type_mismatch = self.on_generic_type_mismatch
+        explicit_on_mismatch = self.on_generic_type_mismatch
 
         def dispatch(v: Any, info):
             if isinstance(v, base_origin):
@@ -504,10 +538,18 @@ class Polymorphic:
                         f"Value of type {type(v).__name__} is not compatible with "
                         f"expected type {source_type}: {error_msg}"
                     )
-                    if on_generic_type_mismatch == "raise":
+                    on_mismatch = _resolve_on_generic_type_mismatch(
+                        explicit_on_mismatch
+                    )
+                    if on_mismatch == "raise":
                         raise ValueError(message)
-                    elif on_generic_type_mismatch == "warn":
-                        warnings.warn(message, UserWarning, stacklevel=2)
+                    elif on_mismatch == "warn":
+                        warnings.warn(
+                            f"{message} (suppress by setting "
+                            f"{ON_GENERIC_TYPE_MISMATCH_ENV_VAR}=ignore)",
+                            UserWarning,
+                            stacklevel=2,
+                        )
                 return v
 
             if not isinstance(v, dict):

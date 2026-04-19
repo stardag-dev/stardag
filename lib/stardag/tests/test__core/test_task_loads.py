@@ -12,6 +12,18 @@ from stardag.utils.testing.generic import assert_serialize_validate_roundtrip
 
 auto_namespace(__name__)  # Avoid collisions in task registry
 
+
+@pytest.fixture
+def raise_on_mismatch(monkeypatch):
+    """Force ``on_generic_type_mismatch="raise"`` via env var for this test.
+
+    Used by pre-existing tests that assert a ``ValidationError`` is raised on
+    type mismatch — now that the default has moved to ``"warn"``, they need to
+    opt back in.
+    """
+    monkeypatch.setenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", "raise")
+
+
 # =============================================================================
 # TargetTask classes for testing SubClass[TargetTask[...]] directly
 # =============================================================================
@@ -291,7 +303,9 @@ def test_task_loads_compatible_types(task_instance, description):
         ),
     ],
 )
-def test_task_loads_type_mismatch(container_cls, task_instance, description):
+def test_task_loads_type_mismatch(
+    container_cls, task_instance, description, raise_on_mismatch
+):
     """Test that incompatible Task types are rejected by TaskLoads."""
     with pytest.raises(ValidationError):
         container_cls(task=task_instance)  # pyright: ignore[reportArgumentType]
@@ -303,7 +317,7 @@ def test_task_loads_accepts_bare_loadable_task():
     assert_serialize_validate_roundtrip(ContainerTaskLoadsStr, container)
 
 
-def test_task_loads_rejects_bare_loadable_task_type_mismatch():
+def test_task_loads_rejects_bare_loadable_task_type_mismatch(raise_on_mismatch):
     """TaskLoads[str] should reject LoadableTask[int] (type mismatch)."""
     with pytest.raises(ValidationError):
         ContainerTaskLoadsStr(task=BareLoadableInt())  # pyright: ignore[reportArgumentType]
@@ -321,7 +335,7 @@ def test_annotated_field_compatible():
     assert_serialize_validate_roundtrip(ContainerWithAnnotatedField, container)
 
 
-def test_annotated_field_mismatch():
+def test_annotated_field_mismatch(raise_on_mismatch):
     """Annotated[TaskLoads[...], ...] should also catch type mismatches."""
     with pytest.raises(ValidationError):
         ContainerWithAnnotatedField(task=TaskInt())  # pyright: ignore[reportArgumentType]
@@ -350,7 +364,7 @@ def test_subclass_annotation_compatible():
     assert_serialize_validate_roundtrip(ContainerWithSubClass, container)
 
 
-def test_subclass_annotation_mismatch():
+def test_subclass_annotation_mismatch(raise_on_mismatch):
     """SubClass[TargetTask[...]] should catch type mismatches."""
     with pytest.raises(ValidationError) as exc_info:
         ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
@@ -424,9 +438,51 @@ def test_on_type_mismatch_ignore():
     assert isinstance(container.task, LoadsIntTask)
 
 
-def test_on_type_mismatch_raise_is_default():
-    """on_type_mismatch='raise' is the default behavior for SubClass[TargetTask[...]]."""
+def test_on_type_mismatch_warn_is_default(monkeypatch):
+    """Default behavior (no explicit arg, no env var) is 'warn'."""
+    monkeypatch.delenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", raising=False)
+    with pytest.warns(UserWarning, match="LoadsIntTask.*not compatible"):
+        container = ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+    assert isinstance(container.task, LoadsIntTask)
+
+
+def test_on_type_mismatch_env_var_raise(monkeypatch):
+    """Env var 'raise' makes SubClass mismatches raise when no explicit arg set."""
+    monkeypatch.setenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", "raise")
     with pytest.raises(ValidationError):
+        ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+
+
+def test_on_type_mismatch_env_var_ignore(monkeypatch):
+    """Env var 'ignore' silences mismatches when no explicit arg set."""
+    monkeypatch.setenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", "ignore")
+    container = ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+    assert isinstance(container.task, LoadsIntTask)
+
+
+def test_on_type_mismatch_explicit_arg_overrides_env_var(monkeypatch):
+    """Explicit non-None arg always beats the env var."""
+    monkeypatch.setenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", "raise")
+    # ContainerWithIgnoreOnMismatch uses Polymorphic(on_generic_type_mismatch="ignore"),
+    # which must win over env var "raise".
+    container = ContainerWithIgnoreOnMismatch(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+    assert isinstance(container.task, LoadsIntTask)
+
+
+def test_on_type_mismatch_invalid_env_var_raises(monkeypatch):
+    """Invalid env var value raises at mismatch-evaluation time."""
+    monkeypatch.setenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", "bogus")
+    with pytest.raises(ValueError, match="Invalid value for env var"):
+        ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
+
+
+def test_on_type_mismatch_warning_mentions_env_var(monkeypatch):
+    """Warning message includes the env-var suppression hint."""
+    monkeypatch.delenv("STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH", raising=False)
+    with pytest.warns(
+        UserWarning,
+        match=r"STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH=ignore",
+    ):
         ContainerWithSubClass(task=LoadsIntTask())  # pyright: ignore[reportArgumentType]
 
 
@@ -499,7 +555,7 @@ def test_task_loads_annotated_accepts_generic_wrapper():
     assert isinstance(container.task, GenericWrapperTask)
 
 
-def test_task_loads_annotated_rejects_type_mismatch():
+def test_task_loads_annotated_rejects_type_mismatch(raise_on_mismatch):
     """Task[int] should still be rejected by TaskLoads[Annotated[str, ...]]."""
     with pytest.raises(ValidationError):
         ContainerTaskLoadsAnnotatedStr(task=TaskInt())  # pyright: ignore[reportArgumentType]
