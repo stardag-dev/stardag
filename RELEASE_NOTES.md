@@ -6,6 +6,54 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.6 — Softer default for generic-type-mismatch handling
+
+`Polymorphic(on_generic_type_mismatch=...)` — the option that controls what
+happens when the best-effort generic-args compatibility check inside
+`SubClass[...]` annotations fires — now defaults to `"warn"` instead of
+`"raise"`. The same default applies transitively to plain `SubClass[T]`
+annotations and to `TaskLoads[T]`-driven dispatch, which all flow through
+`Polymorphic()`.
+
+### Why
+
+The compatibility check is heuristic and occasionally produces false positives
+on patterns that are safe in context (different origins without a mapper,
+nested `Annotated[...]`, etc.). A hard `ValidationError` on every such case
+was too strict for what is ultimately an informational signal. A warning
+surfaces the same information without blocking otherwise-valid code.
+
+### Env var override: `STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH`
+
+The mode can now be controlled globally via
+`STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH`. Accepted values are `"raise"`,
+`"warn"`, or `"ignore"`. Any other value raises a clear `ValueError`.
+Resolution order:
+
+1. Explicit non-`None` arg on `Polymorphic(...)` — always wins.
+2. Env var.
+3. Fallback to `"warn"`.
+
+Resolution happens at validation time, so toggling the env var takes effect
+live (useful with `monkeypatch.setenv(...)` in tests).
+
+### Migration
+
+- **Tolerate the warnings** (do nothing) — new default.
+- **Silence them entirely** — `export STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH=ignore`.
+- **Restore the old strict behavior** — `export STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH=raise`.
+- **Per-field override** — pass `Polymorphic(on_generic_type_mismatch="raise")` (or `"warn"` / `"ignore"`) explicitly; that wins over the env var.
+
+The emitted warning now carries a suppression hint so users encountering it
+know how to silence it:
+
+```
+UserWarning: Value of type LoadsIntTask is not compatible with expected type
+... (suppress by setting STARDAG_POLYMORPHIC_ON_GENERIC_TYPE_MISMATCH=ignore)
+```
+
+---
+
 ## v0.5.5 — Customizable Modal Builder and Runner
 
 The Modal integration now uses subclassable `Builder` and `Runner` classes
