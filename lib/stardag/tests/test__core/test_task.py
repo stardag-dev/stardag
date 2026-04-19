@@ -396,84 +396,11 @@ class TestDirectGenericInstantiation:
         )
 
 
-class TestGenericTypeArgTransfer:
-    """Parameterized-at-call-site generics (``TestGeneric[int](...)``) transfer
-    their resolved type args in the serialized payload so distinct parameteriza-
-    tions get distinct ids and round-trip back to the correct parameterized class.
-    """
-
-    def test_distinct_parameterizations_have_distinct_ids(self):
-        ItemT = typing.TypeVar("ItemT")
-
-        class ParamTask(Task[list[ItemT]], typing.Generic[ItemT]):
-            items: list[ItemT]
-
-            def run(self):
-                self._save(list(self.items))
-
-        int_task: ParamTask[int] = ParamTask[int](items=[])
-        str_task: ParamTask[str] = ParamTask[str](items=[])
-        bare = ParamTask(items=[])
-
-        assert int_task.id != str_task.id
-        assert int_task.id != bare.id
-        assert str_task.id != bare.id
-
-    def test_round_trip_preserves_parameterization(self):
-        from pydantic import TypeAdapter
-
-        from stardag import BaseTask
-        from stardag.polymorphic import SubClass
-
-        ItemT = typing.TypeVar("ItemT")
-
-        class ParamTask(Task[list[ItemT]], typing.Generic[ItemT]):
-            items: list[ItemT]
-
-            def run(self):
-                self._save(list(self.items))
-
-        original: ParamTask[int] = ParamTask[int](items=[1, 2, 3])
-        dumped = original.model_dump(mode="json")
-
-        # Wire format carries the pickled type args.
-        assert "__type_args" in dumped
-
-        adapter = TypeAdapter(SubClass[BaseTask])
-        restored = adapter.validate_python(dumped)
-
-        # Class reconstructed with correct parameterization.
-        assert type(restored).__name__ == "ParamTask[int]"
-        assert typing.get_args(getattr(restored, "__orig_class__")) == (int,)
-        # Id survives round-trip.
-        assert restored.id == original.id
-
-    def test_concrete_subclass_skips_type_arg_transfer(self):
-        """``class Concrete(Gen[int])`` does not emit ``__type_args`` — its name
-        discriminator already determines the class fully."""
-        ItemT = typing.TypeVar("ItemT")
-
-        class ParamTask(Task[list[ItemT]], typing.Generic[ItemT]):
-            items: list[ItemT]
-
-            def run(self):
-                self._save(list(self.items))
-
-        class IntParamTask(ParamTask[int]):
-            pass
-
-        task = IntParamTask(items=[1, 2])
-        dumped = task.model_dump(mode="json")
-        assert "__type_args" not in dumped
-        assert dumped["__name"] == "IntParamTask"
-
-
 class _TypeVarRoundTripBase(_PolymorphicRoot):
-    """Module-level PolymorphicRoot family used by the round-trip test below.
+    """Module-level PolymorphicRoot family for ``test_round_trip_lands_on_bare_generic_class``.
 
-    The pickle-transfer mechanism needs module-level classes (pickle can't
-    find locally-defined ones by qualname), so this base and its subclass
-    must live at module scope.
+    Kept at module scope so both sides of the round-trip can find the class
+    via its qualname during polymorphic dispatch.
     """
 
     pass
@@ -484,9 +411,7 @@ class _TypeVarRoundTripConcrete(_TypeVarRoundTripBase):
 
 
 # Module-level family for ``test_nested_typevar_inside_taskloads_of_parameterized_type``
-# (same rationale as above — pickle-transferred ``__type_args`` need
-# qualname-addressable types, and types referenced inside field annotations
-# for a generic model also need to be resolvable at schema-build time).
+# (same rationale as above — qualname-addressable so dispatch round-trips).
 class _NestedBaseParam(_PolymorphicRoot):
     pass
 
@@ -576,13 +501,16 @@ class TestGenericTaskWithSubClassField:
         with pytest.raises(ValidationError):
             GenericTask[ConcreteA](param=ConcreteB(), value=1)  # type: ignore[arg-type]
 
-    def test_round_trip_preserves_typevar_parameterization(self):
-        """Serialize + dispatch on ``SubClass[BaseTask]`` reconstructs the
-        parameterized class; the ``SubClass[ParamT]`` field still resolves
-        polymorphically inside.
+    def test_round_trip_lands_on_bare_generic_class(self):
+        """Serialize + dispatch on ``SubClass[BaseTask]`` lands on the *bare*
+        generic class (not ``Gen[Concrete]``) — parameterization info is not
+        carried across the wire, because the framework treats runtime behavior
+        as class-definition-time (concrete subclass → own ``__type_id__``).
 
-        Uses module-level classes for the polymorphic family because the
-        pickle-transferred ``__type_args`` need qualname-addressable types.
+        Inner polymorphic fields (here ``SubClass[ParamT]``) still resolve
+        correctly via their own discriminators on the receiver, and the
+        round-tripped id matches the original's id because both sides dump
+        to the same structural payload.
         """
         from pydantic import TypeAdapter
 
@@ -602,13 +530,18 @@ class TestGenericTaskWithSubClassField:
             param=_TypeVarRoundTripConcrete(payload=7), value=3
         )
         dumped = original.model_dump(mode="json")
-        assert "__type_args" in dumped
+        # No pickle of type args on the wire.
+        assert "__type_args" not in dumped
 
         adapter = TypeAdapter(SubClass[BaseTask])
         restored = adapter.validate_python(dumped)
-        assert type(restored).__name__ == "_RTGenericTask[_TypeVarRoundTripConcrete]"
+
+        # Bare generic class, not ``_RTGenericTask[_TypeVarRoundTripConcrete]``.
+        assert type(restored) is _RTGenericTask
+        # Inner polymorphic field resolved correctly via its own discriminator.
         assert isinstance(restored, _RTGenericTask)
         assert isinstance(restored.param, _TypeVarRoundTripConcrete)
+        # Id round-trips because payloads are structurally identical on both sides.
         assert restored.id == original.id
 
     def test_typevar_without_polymorphic_bound_raises(self):
@@ -642,8 +575,14 @@ class TestGenericTaskWithSubClassField:
         Asserts end-to-end:
           - schema build succeeds for the generic form
           - parameterized instances construct correctly
-          - distinct parameterizations produce distinct ids
-          - round-trip through ``SubClass[BaseTask]`` preserves parameterization
+          - distinct instances produce distinct ids when their *field values*
+            differ (type parameters do not enter the hash — different
+            parameterizations with identical field values would collide by
+            design; use a concrete subclass if you need per-parameterization
+            ids / runtime behavior)
+          - round-trip through ``SubClass[BaseTask]`` lands on the bare
+            generic class (no pickle of type args on the wire) with the
+            inner polymorphic field resolved and the id preserved
           - direct ``SubClass[T]`` field narrows strictly via Pydantic
           - the heuristic ``on_generic_type_mismatch`` check traverses nested
             generics and warns on a wrong-concrete loader (default is
@@ -711,7 +650,9 @@ class TestGenericTaskWithSubClassField:
         assert isinstance(ok_a.loader, _NestedLoaderForA)
         assert isinstance(ok_a.param, _NestedConcreteA)
 
-        # --- distinct parameterizations → distinct ids ---
+        # --- distinct field values → distinct ids ---
+        # (parameterization alone does not enter the hash; field-value differ-
+        # ences do.)
         ok_b = _NestedGenericTask[_NestedConcreteB](
             loader=_NestedLoaderForB(),
             param=_NestedConcreteB(b=7),
@@ -719,12 +660,12 @@ class TestGenericTaskWithSubClassField:
         )
         assert ok_a.id != ok_b.id
 
-        # --- round-trip preserves parameterization ---
+        # --- round-trip lands on the bare generic class ---
         dumped = ok_a.model_dump(mode="json")
-        assert "__type_args" in dumped
+        assert "__type_args" not in dumped
         restored = TypeAdapter(SubClass[BaseTask]).validate_python(dumped)
+        assert type(restored) is _NestedGenericTask
         assert isinstance(restored, _NestedGenericTask)
-        assert type(restored).__name__ == "_NestedGenericTask[_NestedConcreteA]"
         assert restored.id == ok_a.id
 
         # --- direct SubClass[T] field narrows strictly via Pydantic ---

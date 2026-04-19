@@ -1,12 +1,9 @@
-import base64
 import logging
 import os
 import types
 import typing
 import warnings
 from dataclasses import dataclass
-from pickle import dumps as pickle_dumps
-from pickle import loads as pickle_loads
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -166,25 +163,6 @@ def _check_generic_args_compatibility(
 
 NAMESPACE_KEY = "__namespace"
 NAME_KEY = "__name"
-TYPE_ARGS_KEY = "__type_args"
-
-
-def _encode_type_args(args: tuple[Any, ...]) -> str:
-    return base64.b64encode(pickle_dumps(args)).decode("ascii")
-
-
-def _decode_type_args(encoded: str) -> tuple[Any, ...]:
-    return pickle_loads(base64.b64decode(encoded))
-
-
-def _contains_typevar(annotation: Any) -> bool:
-    """Recursively detect unresolved ``TypeVar``s inside a type annotation."""
-    if isinstance(annotation, TypeVar):
-        return True
-    for sub in get_args(annotation):
-        if _contains_typevar(sub):
-            return True
-    return False
 
 
 @dataclass(frozen=True)
@@ -403,19 +381,6 @@ class PolymorphicRoot(StardagBaseModel):
         # narrow + safety: only allow subclasses of the annotated base
         if not issubclass(sub, cls):
             raise TypeError(f"Registered class {sub} is not a subclass of {cls}")
-
-        # If type args travelled with the payload (parameterized-at-call-site
-        # generic), re-parameterize the registered class so the resulting
-        # instance carries the correct ``__orig_class__``.
-        type_args_encoded = extra.get(TYPE_ARGS_KEY)
-        if type_args_encoded is not None:
-            sub_params = sub.__pydantic_generic_metadata__.get("parameters") or ()
-            if sub_params:
-                args = tuple(_decode_type_args(type_args_encoded))
-                if len(args) == 1:
-                    sub = sub[args[0]]  # type: ignore[index]
-                elif len(args) > 1:
-                    sub = sub[args]  # type: ignore[index]
         return sub  # type: ignore[return-value]
 
     @classmethod
@@ -481,39 +446,12 @@ class PolymorphicRoot(StardagBaseModel):
         """Always add discriminator keys. This runs for all subclasses too."""
         if isinstance(data, dict):
             tid = self.__class__.__type_id__
-            header: dict[str, Any] = {
+            data = {
                 NAMESPACE_KEY: tid.namespace,
                 NAME_KEY: tid.name,
+                **data,
             }
-            type_args = self._get_transferable_type_args()
-            if type_args is not None:
-                header[TYPE_ARGS_KEY] = _encode_type_args(type_args)
-            data = {**header, **data}
         return data
-
-    def _get_transferable_type_args(self) -> tuple | None:
-        """Concrete generic type args that need to travel with this instance.
-
-        Returns the args tuple when the instance was produced from a
-        parameterized-at-call-site generic (e.g. ``TestGeneric[int](...)``) and
-        the registry-resolvable class still carries unresolved type parameters
-        without those args. Returns ``None`` for concrete named subclasses —
-        their ``__name`` discriminator already fully determines the class.
-        """
-        orig_class = getattr(self, "__orig_class__", None)
-        if orig_class is None:
-            return None
-        args = get_args(orig_class)
-        if not args:
-            return None
-        if any(_contains_typevar(a) for a in args):
-            return None
-        cls = self.__class__
-        meta = cls.__pydantic_generic_metadata__
-        origin = meta.get("origin") or cls
-        if not origin.__pydantic_generic_metadata__.get("parameters"):
-            return None
-        return args
 
     @classmethod
     def _before_validate(cls, payload: Any, info: ValidationInfo) -> Any:
@@ -524,7 +462,6 @@ class PolymorphicRoot(StardagBaseModel):
         payload = dict(payload)
         payload.pop(NAMESPACE_KEY, None)
         payload.pop(NAME_KEY, None)
-        payload.pop(TYPE_ARGS_KEY, None)
 
         return payload
 
