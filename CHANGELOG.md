@@ -6,6 +6,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.5.6] — 2026-04-19
+
 ### SDK
 
 #### Behavior changes
