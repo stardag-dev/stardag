@@ -28,6 +28,7 @@ from stardag.utils.testing.dynamic_deps_dag import (
     assert_dynamic_deps_task_complete_recursive,
 )
 from stardag.utils.testing.helper_tasks import (
+    AsyncDynamicDiamondTask,
     AsyncOnlyTask,
     DiamondTask,
     DualTask,
@@ -610,6 +611,86 @@ class TestDynamicDepsWithRequiresRegistryBookkeeping:
             f"calls: {leaf_calls}"
         )
         assert "task_complete" in leaf_calls
+
+
+# ============================================================================
+# Test: Async-generator dynamic deps (yield from `async def run_aio`)
+#
+# Parameterized across build_sequential_aio and build_aio so the async-gen
+# handling is exercised for both executors.
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "build_aio_fn",
+    [build_sequential_aio, build_aio],
+    ids=["sequential", "concurrent"],
+)
+class TestAsyncDynamicDeps:
+    @pytest.mark.asyncio
+    async def test_async_dynamic_diamond(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async dynamic diamond pattern.
+
+        parent (static: [dyn_task, shared])
+           |
+        dyn_task (dynamic: [shared])
+           |
+        shared (appears in both paths)
+        """
+        reset_execution_counts()
+        test_id = f"async_dyn_{build_aio_fn.__name__}"
+
+        shared = AsyncDynamicDiamondTask(name="shared", test_id=test_id)
+        dyn_task = AsyncDynamicDiamondTask(
+            name="dyn_task", test_id=test_id, dynamic_task_deps=(shared,)
+        )
+        parent = AsyncDynamicDiamondTask(
+            name="parent", test_id=test_id, static_task_deps=(dyn_task, shared)
+        )
+
+        summary = await build_aio_fn([parent], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert get_execution_count(test_id, "shared") == 1
+        assert get_execution_count(test_id, "dyn_task") == 1
+        assert get_execution_count(test_id, "parent") == 1
+
+    @pytest.mark.asyncio
+    async def test_async_yielded_dep_with_static_requires(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async generator: yielded dep's requires() chain must be resolved.
+
+        Same contract as issue #118 but exercised through ``async def run_aio: yield``.
+        """
+        reset_execution_counts()
+        test_id = f"async_req_{build_aio_fn.__name__}"
+
+        leaf = AsyncDynamicDiamondTask(name="leaf", test_id=test_id)
+        middle = AsyncDynamicDiamondTask(
+            name="middle", test_id=test_id, static_task_deps=(leaf,)
+        )
+        orch = AsyncDynamicDiamondTask(
+            name="orch", test_id=test_id, dynamic_task_deps=(middle,)
+        )
+
+        summary = await build_aio_fn([orch], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert leaf.complete()
+        assert middle.complete()
+        assert orch.complete()
+        assert get_execution_count(test_id, "leaf") == 1
+        assert get_execution_count(test_id, "middle") == 1
+        assert get_execution_count(test_id, "orch") == 1
 
 
 # ============================================================================

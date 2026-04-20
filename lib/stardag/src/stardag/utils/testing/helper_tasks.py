@@ -155,3 +155,41 @@ class DynamicDiamondTask(Task[str]):
             yield dep
 
         self._save(f"{self.name}:{_execution_counts[key]}")
+
+
+class AsyncDynamicDiamondTask(Task[str]):
+    """Async task with dynamic deps that tracks execution for diamond tests.
+
+    Uses an async generator ``run_aio`` to yield dynamic dependencies.
+    """
+
+    name: str
+    test_id: str
+    static_task_deps: tuple["AsyncDynamicDiamondTask", ...] = ()
+    dynamic_task_deps: tuple["AsyncDynamicDiamondTask", ...] = ()
+
+    def requires(self):
+        return self.static_task_deps
+
+    async def run_aio(self):  # type: ignore[override]
+        global _execution_counts
+        key = f"{self.test_id}:{self.name}"
+        _execution_counts[key] = _execution_counts.get(key, 0) + 1
+
+        # CONTRACT: static requires() must be complete at the start of run.
+        for static_dep in self.static_task_deps:
+            if not static_dep.complete():
+                raise AssertionError(
+                    f"Static requires contract violated! Dep {static_dep} is not "
+                    f"complete at the start of {self}.run_aio()."
+                )
+
+        for dep in self.dynamic_task_deps:
+            yield dep
+            if not dep.complete():
+                raise AssertionError(
+                    f"Dynamic deps contract violated! Dep {dep} is not complete "
+                    f"after yield in {self}.run_aio()."
+                )
+
+        self._save(f"{self.name}:{_execution_counts[key]}")

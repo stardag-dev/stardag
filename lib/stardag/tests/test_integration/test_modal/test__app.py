@@ -35,7 +35,13 @@ try:
         get_default_volume_mount_path,
     )
     from stardag.integration.modal._config import with_stardag_on_image
-    from stardag.testing.modal._tasks import make_range, sum_list
+    from stardag.testing.modal._tasks import (
+        AsyncDoubleTask,
+        AsyncDynamicRangeSumTask,
+        SyncDynamicRangeSumTask,
+        make_range,
+        sum_list,
+    )
 
     # check if logged in and volume exists
     try:
@@ -280,54 +286,25 @@ class TestEndToEndBuild:
     """End-to-end test: build a DAG through the deployed Modal app.
 
     This exercises the full Builder/Runner flow:
-    1. Delete any existing targets on the Modal volume
+    1. ``isolated_modal_target_root`` points the ``default`` target root at
+       a unique subpath on the Modal volume (no pre-existing targets).
     2. build_remote() calls the deployed "build" function (Builder.__call__)
     3. Builder creates ModalTaskExecutor and runs stardag.build()
     4. ModalTaskExecutor dispatches each task to "worker_default" (Runner.__call__)
     5. Runner calls task.run(), which writes output to the Modal volume
     6. Load results locally via the Modal volume remote filesystem API
+    7. Fixture recursively deletes the subpath on teardown.
 
     Tasks are defined in stardag.testing.modal._tasks (inside the stardag
     package) so they can be deserialized in the Modal container.
     """
 
-    @pytest.fixture(autouse=True)
-    def setup_target_roots(self):
-        """Set target roots to the Modal volume so local load() works."""
-        from stardag.testing import target_roots_override
-
-        target_roots = {"default": f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}"}
-        with target_roots_override(target_roots):
-            yield
-
-    @staticmethod
-    def _delete_targets_on_volume(*tasks):
-        """Delete task target files from the Modal volume."""
-        import stardag as sd
-        from stardag.integration.modal._target import get_volume_name_and_path
-
-        volume = modal.Volume.from_name(VOLUME_NAME)
-        all_tasks = list(tasks)
-        for task in tasks:
-            all_tasks.extend(sd.flatten_task_struct(task.requires()))
-
-        for task in all_tasks:
-            uri = task.target().uri
-            _, in_vol_path = get_volume_name_and_path(uri)
-            try:
-                volume.remove_file(in_vol_path)
-            except Exception:
-                pass  # file doesn't exist — fine
-
-    def test_build_and_load_result(self):
+    def test_build_and_load_result(self, isolated_modal_target_root):
         """Build a DAG through Modal, then load the result locally."""
         from stardag.build._base import BuildSummary
 
         root = sum_list(values=make_range(limit=5))
-
-        # Delete existing targets so the build actually executes all tasks
-        self._delete_targets_on_volume(root)
-        assert not root.target().exists(), "Target should not exist before build"
+        assert not root.target().exists()
 
         # Build remotely through Modal
         result = stardag_app.build_remote(root)
@@ -341,3 +318,112 @@ class TestEndToEndBuild:
         # Load results locally via Modal volume remote filesystem API
         assert root.target().exists()
         assert root.target().load() == 10  # sum(range(5)) = 0+1+2+3+4
+
+
+@pytest.fixture
+def isolated_modal_target_root():
+    """Wipe the test target-root subtree on the Modal volume before & after a test.
+
+    The target root is baked into the Modal app at deploy time as a Secret
+    (``STARDAG_TARGET_ROOTS__DEFAULT``), so client-side ``target_roots_override``
+    does not propagate to remote containers. Instead we:
+
+    1. Before the test: recursively delete everything under
+       ``stardag/root/default`` on the Modal volume, and override local
+       target roots so ``task.target().exists()`` and ``.load()`` see the
+       same state as the remote container.
+    2. After the test: recursively delete the subtree again.
+
+    This is the Modal analogue of ``stardag.testing.test_harness``:
+    independent of which tasks a test builds (including dynamic deps), the
+    subtree is guaranteed empty pre-test and cleaned post-test. Any test
+    running after this one also starts from a clean subtree.
+    """
+    from stardag.testing import target_roots_override
+
+    target_roots = {"default": f"modalvol://{VOLUME_NAME}/{ROOT_DEFAULT}"}
+    volume = modal.Volume.from_name(VOLUME_NAME)
+
+    def _wipe():
+        try:
+            volume.remove_file(ROOT_DEFAULT, recursive=True)
+        except Exception:
+            pass  # path didn't exist — fine
+
+    _wipe()
+    with target_roots_override(target_roots):
+        yield target_roots
+    _wipe()
+
+
+class TestEndToEndDynamicDepsBuild:
+    """End-to-end tests verifying Runner.run()'s handling of async tasks and
+    dynamic deps across the Modal boundary.
+
+    Generators cannot be pickled, so ``Runner.run()`` drives them and returns
+    a ``TaskStruct`` of incomplete yielded deps for idempotent re-execution.
+    The ``ModalTaskExecutor`` builds those deps and re-invokes the task.
+
+    Every test uses ``isolated_modal_target_root`` to start from a clean
+    subpath on the Modal volume — no cross-test state, including dynamically
+    discovered tasks that a walk-from-requires() cleanup approach would miss.
+    """
+
+    # Distinct limits per test method — Modal worker containers cache the
+    # volume mount across invocations within a pytest run, so a ``make_range``
+    # file from one test can still be visible to a warm container after the
+    # volume-wipe fixture runs. Different params → different task IDs →
+    # different file paths → no cross-test cache hits.
+
+    def test_async_only_task_build(self, isolated_modal_target_root):
+        """Async-only class-based task (``run_aio`` only) — Runner uses ``asyncio.run``."""
+        from stardag.build._base import BuildSummary
+
+        limit = 7
+        source = sum_list(values=make_range(limit=limit))
+        root = AsyncDoubleTask(input_task=source)
+        assert not root.target().exists()
+
+        result = stardag_app.build_remote(root)
+        assert isinstance(result, BuildSummary)
+        # 3 tasks: make_range, sum_list, AsyncDoubleTask
+        assert result.task_count.succeeded == 3, (
+            f"Expected 3 succeeded, got {result.task_count}"
+        )
+        assert root.target().exists()
+        assert root.target().load() == sum(range(limit)) * 2
+
+    def test_sync_dynamic_deps_build(self, isolated_modal_target_root):
+        """Sync generator dynamic deps — Runner drives via re-execution."""
+        from stardag.build._base import BuildSummary
+
+        limit = 11
+        root = SyncDynamicRangeSumTask(limit=limit)
+        assert not root.target().exists()
+
+        result = stardag_app.build_remote(root)
+        assert isinstance(result, BuildSummary)
+        # 2 tasks succeed: make_range (dynamically discovered) and the root.
+        # The root is re-executed on Modal when the dyn dep becomes available,
+        # but each task is counted once at final completion.
+        assert result.task_count.succeeded == 2, (
+            f"Expected 2 succeeded, got {result.task_count}"
+        )
+        assert root.target().exists()
+        assert root.target().load() == sum(range(limit))
+
+    def test_async_dynamic_deps_build(self, isolated_modal_target_root):
+        """Async generator dynamic deps — Runner drives via ``_drive_async_generator``."""
+        from stardag.build._base import BuildSummary
+
+        limit = 13
+        root = AsyncDynamicRangeSumTask(limit=limit)
+        assert not root.target().exists()
+
+        result = stardag_app.build_remote(root)
+        assert isinstance(result, BuildSummary)
+        assert result.task_count.succeeded == 2, (
+            f"Expected 2 succeeded, got {result.task_count}"
+        )
+        assert root.target().exists()
+        assert root.target().load() == sum(range(limit))
