@@ -458,6 +458,41 @@ class APIRegistry(RegistryABC):
             operation=f"Suspend task {task.id}",
         )
 
+    def task_add_dependencies(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        upstream_tasks: Sequence["BaseTask"],
+        is_dynamic: bool = True,
+    ) -> None:
+        """Record dependency edges for a task.
+
+        Backward-compat: catches ``NotFoundError`` (which is raised for 404)
+        and logs a warning — an older API that doesn't expose the
+        ``/dependencies`` endpoint will return 404 and we don't want that to
+        break the build. Other errors propagate normally.
+        """
+        if not upstream_tasks:
+            return
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/dependencies",
+                json={
+                    "upstream_task_ids": [str(u.id) for u in upstream_tasks],
+                    "is_dynamic": is_dynamic,
+                },
+                params=self._get_params(),
+                operation=f"Add dependencies for task {task.id}",
+            )
+        except NotFoundError:
+            logger.warning(
+                "Registry API does not support POST /dependencies; "
+                "dynamic-dep edges for task %s will not be recorded. "
+                "Upgrade the Registry API to see dynamic deps in the DAG view.",
+                task.id,
+            )
+
     def task_resume(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as resumed (dynamic dependencies completed)."""
         self._request(
@@ -743,6 +778,39 @@ class APIRegistry(RegistryABC):
             params=self._get_event_params(),
             operation=f"Suspend task {task.id}",
         )
+
+    async def task_add_dependencies_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        upstream_tasks: Sequence["BaseTask"],
+        is_dynamic: bool = True,
+    ) -> None:
+        """Async version - record dependency edges for a task.
+
+        Same backward-compat behavior as the sync version: 404 swallowed
+        with a warning so older API deployments don't break builds.
+        """
+        if not upstream_tasks:
+            return
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/dependencies",
+                json={
+                    "upstream_task_ids": [str(u.id) for u in upstream_tasks],
+                    "is_dynamic": is_dynamic,
+                },
+                params=self._get_params(),
+                operation=f"Add dependencies for task {task.id}",
+            )
+        except NotFoundError:
+            logger.warning(
+                "Registry API does not support POST /dependencies; "
+                "dynamic-dep edges for task %s will not be recorded. "
+                "Upgrade the Registry API to see dynamic deps in the DAG view.",
+                task.id,
+            )
 
     async def task_resume_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as resumed."""

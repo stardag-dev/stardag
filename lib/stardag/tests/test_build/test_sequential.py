@@ -703,6 +703,7 @@ class TrackingRegistry(NoOpRegistry):
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, UUID]] = []
+        self.dynamic_dep_edges: list[tuple[UUID, UUID]] = []
 
     def task_register(self, build_id: UUID, task) -> None:
         self.calls.append(("task_register", task.id))
@@ -715,6 +716,12 @@ class TrackingRegistry(NoOpRegistry):
 
     def task_fail(self, build_id: UUID, task, error_message=None) -> None:
         self.calls.append(("task_fail", task.id))
+
+    def task_add_dependencies(
+        self, build_id: UUID, task, upstream_tasks, is_dynamic=True
+    ) -> None:
+        for upstream in upstream_tasks:
+            self.dynamic_dep_edges.append((upstream.id, task.id))
 
     def calls_for(self, task_id: UUID) -> list[str]:
         return [method for method, tid in self.calls if tid == task_id]
@@ -1131,3 +1138,72 @@ class TestAsyncArtifactCollection:
         assert task_id == task.id
         assert len(artifacts) == 1
         assert artifacts[0].name == "report"
+
+
+# ============================================================================
+# Test: Dynamic dep edges reach the registry
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "build_fn",
+    [build_sequential, build],
+    ids=["sequential", "concurrent"],
+)
+class TestDynamicDepEdgesRegistrySync:
+    """When a task yields a dep, the edge parent -> yielded_dep must be
+    reported to the registry so the DAG view can render the upstream
+    relationship. Previously only the yielded dep's own ``requires()``
+    chain reached the registry.
+    """
+
+    def test_yielded_dep_registers_edge(
+        self,
+        build_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        reset_execution_counts()
+        tracking = TrackingRegistry()
+
+        test_id = f"edges_{build_fn.__name__}"
+        dyn = DynamicDiamondTask(name="dyn", test_id=test_id)
+        parent = DynamicDiamondTask(
+            name="parent", test_id=test_id, dynamic_task_deps=(dyn,)
+        )
+
+        summary = build_fn([parent], registry=tracking)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Edge: parent -> dyn (upstream=dyn, downstream=parent)
+        assert (dyn.id, parent.id) in tracking.dynamic_dep_edges, (
+            f"Dynamic edge not reported; saw: {tracking.dynamic_dep_edges}"
+        )
+
+
+@pytest.mark.parametrize(
+    "build_aio_fn",
+    [build_sequential_aio, build_aio],
+    ids=["sequential", "concurrent"],
+)
+class TestDynamicDepEdgesRegistryAio:
+    @pytest.mark.asyncio
+    async def test_yielded_dep_registers_edge(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        reset_execution_counts()
+        tracking = TrackingRegistry()
+
+        test_id = f"edges_aio_{build_aio_fn.__name__}"
+        dyn = AsyncDynamicDiamondTask(name="dyn", test_id=test_id)
+        parent = AsyncDynamicDiamondTask(
+            name="parent", test_id=test_id, dynamic_task_deps=(dyn,)
+        )
+
+        summary = await build_aio_fn([parent], registry=tracking)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert (dyn.id, parent.id) in tracking.dynamic_dep_edges, (
+            f"Dynamic edge not reported; saw: {tracking.dynamic_dep_edges}"
+        )

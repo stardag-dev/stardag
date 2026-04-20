@@ -745,6 +745,21 @@ async def build_aio(
                     on_registry_failure,
                 )
 
+            # Record yielded deps as edges so the DAG view shows them. This is
+            # the ONLY place dynamic edges enter the registry — static deps are
+            # recorded by task_register via task.requires().
+            if dynamic_deps:
+                try:
+                    await registry.task_add_dependencies_aio(
+                        build_id, task, dynamic_deps, is_dynamic=True
+                    )
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to record dynamic deps for task {task.id}",
+                        on_registry_failure,
+                    )
+
             # Discover any new dynamic deps (discover handles counting)
             for dep in dynamic_deps:
                 if dep.id not in task_states:
