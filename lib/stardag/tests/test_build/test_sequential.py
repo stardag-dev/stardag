@@ -13,6 +13,8 @@ import pytest
 from stardag.build import (
     BuildExitStatus,
     FailMode,
+    build,
+    build_aio,
     build_sequential,
     build_sequential_aio,
 )
@@ -21,6 +23,10 @@ from uuid import UUID
 from stardag.artifact import Artifact, MarkdownArtifact
 from stardag.registry import NoOpRegistry, registry_provider
 from stardag.target import InMemoryFileTarget
+from stardag.utils.testing.dynamic_deps_dag import (
+    DynamicDepsTask,
+    assert_dynamic_deps_task_complete_recursive,
+)
 from stardag.utils.testing.helper_tasks import (
     AsyncOnlyTask,
     DiamondTask,
@@ -465,6 +471,145 @@ class TestDiamondPatternsSequential:
         assert get_execution_count("complex_seq", "21") == 1
         assert get_execution_count("complex_seq", "1") == 1
         assert get_execution_count("complex_seq", "0") == 1
+
+
+# ============================================================================
+# Test: Dynamically-yielded deps with their own requires() chain (issue #118)
+#
+# Parameterized across build_sequential and build (and the aio variants) so the
+# same contract is verified for both executors. Before the fix for issue #118,
+# build_sequential ran yielded tasks directly without first resolving their
+# requires(), while build (concurrent) did not.
+#
+# DynamicDepsTask enforces (via assertions in run()) that static requires are
+# complete at the start of run, so these tests fail loudly on the bug.
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "build_fn",
+    [build_sequential, build],
+    ids=["sequential", "concurrent"],
+)
+class TestDynamicDepsWithRequiresSync:
+    def test_yielded_dep_with_static_requires(
+        self,
+        build_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Reproduces issue #118.
+
+        Orchestrator yields Middle, and Middle has Leaf as a static require.
+        Build systems must resolve Middle.requires() (i.e. build Leaf) before
+        running Middle.
+        """
+        leaf = DynamicDepsTask(value="leaf")
+        middle = DynamicDepsTask(value="middle", static_deps=(leaf,))
+        orchestrator = DynamicDepsTask(value="orch", dynamic_deps=(middle,))
+
+        summary = build_fn([orchestrator], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert_dynamic_deps_task_complete_recursive(orchestrator, True)
+
+    def test_yielded_dep_with_nested_requires(
+        self,
+        build_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Yielded task has a multi-level static requires chain."""
+        grand = DynamicDepsTask(value="grand")
+        leaf = DynamicDepsTask(value="leaf", static_deps=(grand,))
+        middle = DynamicDepsTask(value="middle", static_deps=(leaf,))
+        orchestrator = DynamicDepsTask(value="orch", dynamic_deps=(middle,))
+
+        summary = build_fn([orchestrator], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert_dynamic_deps_task_complete_recursive(orchestrator, True)
+
+
+@pytest.mark.parametrize(
+    "build_aio_fn",
+    [build_sequential_aio, build_aio],
+    ids=["sequential", "concurrent"],
+)
+class TestDynamicDepsWithRequiresAio:
+    @pytest.mark.asyncio
+    async def test_yielded_dep_with_static_requires(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """Async variant of the issue #118 regression test."""
+        leaf = DynamicDepsTask(value="leaf_aio")
+        middle = DynamicDepsTask(value="middle_aio", static_deps=(leaf,))
+        orchestrator = DynamicDepsTask(value="orch_aio", dynamic_deps=(middle,))
+
+        summary = await build_aio_fn([orchestrator], registry=noop_registry)
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert_dynamic_deps_task_complete_recursive(orchestrator, True)
+
+
+class TestDynamicDepsWithRequiresRegistryBookkeeping:
+    """Registry bookkeeping for static deps newly discovered via a dynamic-dep chain.
+
+    When a task is yielded dynamically and its ``requires()`` references a task
+    that was already complete on disk before the build started, that static
+    dep is only discovered at runtime. It should still get a ``task_register``
+    + ``task_complete`` event so it shows up in the build's task list — mirrors
+    the existing handling for dynamically yielded previously-complete tasks.
+    """
+
+    def test_static_dep_of_dynamic_dep_pre_complete(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        # Pre-build leaf so it's already complete on disk.
+        leaf = DynamicDepsTask(value="pre_leaf")
+        build_sequential([leaf], registry=NoOpRegistry())
+        assert leaf.complete()
+
+        middle = DynamicDepsTask(value="pre_middle", static_deps=(leaf,))
+        orchestrator = DynamicDepsTask(value="pre_orch", dynamic_deps=(middle,))
+
+        tracking = TrackingRegistry()
+        summary = build_sequential([orchestrator], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        leaf_calls = tracking.calls_for(leaf.id)
+        assert "task_register" in leaf_calls, (
+            f"Pre-complete static dep of a dynamic dep was not registered; "
+            f"calls: {leaf_calls}"
+        )
+        assert "task_complete" in leaf_calls
+
+    @pytest.mark.asyncio
+    async def test_static_dep_of_dynamic_dep_pre_complete_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        leaf = DynamicDepsTask(value="pre_leaf_aio")
+        await build_sequential_aio([leaf], registry=NoOpRegistry())
+        assert leaf.complete()
+
+        middle = DynamicDepsTask(value="pre_middle_aio", static_deps=(leaf,))
+        orchestrator = DynamicDepsTask(value="pre_orch_aio", dynamic_deps=(middle,))
+
+        tracking = TrackingRegistry()
+        summary = await build_sequential_aio([orchestrator], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        leaf_calls = tracking.calls_for(leaf.id)
+        assert "task_register" in leaf_calls, (
+            f"Pre-complete static dep of a dynamic dep was not registered; "
+            f"calls: {leaf_calls}"
+        )
+        assert "task_complete" in leaf_calls
 
 
 # ============================================================================
