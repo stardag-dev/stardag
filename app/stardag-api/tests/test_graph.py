@@ -38,7 +38,12 @@ async def register_task(
 
 @pytest.mark.asyncio
 async def test_build_graph_basic(client: AsyncClient):
-    """Test basic graph (no upstream traversal)."""
+    """Basic graph (no upstream traversal) — returns extended-shape response.
+
+    The endpoint always uses the traversal/grouping pipeline so that
+    ``max_per_type_per_level`` applies uniformly regardless of depth.
+    With only a handful of tasks, ``groups`` is empty.
+    """
     build_id = await create_build(client)
     await register_task(client, build_id, "t-a", "TaskA")
     await register_task(client, build_id, "t-b", "TaskB", dependency_task_ids=["t-a"])
@@ -48,13 +53,14 @@ async def test_build_graph_basic(client: AsyncClient):
     data = response.json()
     assert len(data["nodes"]) == 2
     assert len(data["edges"]) == 1
-    # Should NOT have extended fields when depth=0
-    assert "groups" not in data
+    # Extended response is always returned; groups is empty when nothing
+    # exceeds the grouping threshold.
+    assert data.get("groups", []) == []
 
 
 @pytest.mark.asyncio
 async def test_build_graph_upstream_depth_zero(client: AsyncClient):
-    """Test that upstream_depth=0 returns basic response (backward compat)."""
+    """upstream_depth=0 returns the build's own tasks (no cross-build traversal)."""
     build_id = await create_build(client)
     await register_task(client, build_id, "t-a", "TaskA")
 
@@ -62,8 +68,33 @@ async def test_build_graph_upstream_depth_zero(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert len(data["nodes"]) == 1
-    # Basic response has no groups field
-    assert "groups" not in data
+    assert data.get("groups", []) == []
+
+
+@pytest.mark.asyncio
+async def test_build_graph_groups_at_depth_zero(client: AsyncClient):
+    """Grouping applies at depth=0 — many structurally-identical tasks collapse.
+
+    This is the motivating case: within a single build, having e.g. 6
+    ``LoadChunk`` tasks should collapse to a single batch node when
+    ``max_per_type_per_level`` is smaller than that count, regardless of
+    whether cross-build traversal is requested.
+    """
+    build_id = await create_build(client)
+    for i in range(6):
+        await register_task(client, build_id, f"dz-load-{i}", "LoadChunk")
+
+    response = await client.get(
+        f"/api/v1/builds/{build_id}/graph?upstream_depth=0&max_per_type_per_level=3"
+    )
+    assert response.status_code == 200
+    data = response.json()
+    # 6 LoadChunks exceed max_per_type_per_level=3 → collapse into one group
+    assert len(data["nodes"]) == 0
+    assert len(data["groups"]) == 1
+    group = data["groups"][0]
+    assert group["task_name"] == "LoadChunk"
+    assert group["count"] == 6
 
 
 @pytest.mark.asyncio
@@ -355,3 +386,101 @@ async def test_diamond_graph_no_duplicates(client: AsyncClient):
     assert len(data["nodes"]) == 4
     task_ids = [n["task_id"] for n in data["nodes"]]
     assert len(set(task_ids)) == 4
+
+
+# --- is_dynamic propagation through group collapsing ---
+
+
+@pytest.mark.asyncio
+async def test_graph_group_edge_propagates_is_dynamic(client: AsyncClient):
+    """When underlying edges are dynamic, the collapsed group edge is marked dynamic.
+
+    Several same-type upstream tasks get collapsed into a group. Some of their
+    edges to the downstream are dynamic (recorded via
+    ``POST /.../dependencies``); the synthesized group → downstream edge in
+    the extended graph should have ``is_dynamic=True``.
+    """
+    build1_id = await create_build(client)
+
+    # Create 5 upstream tasks of the same type
+    for i in range(5):
+        await register_task(client, build1_id, f"pg-data-{i}", "LoadData")
+
+    # Downstream registered with only static deps from 2 of them
+    build2_id = await create_build(client)
+    await register_task(
+        client,
+        build2_id,
+        "pg-aggregate",
+        "Aggregate",
+        dependency_task_ids=["pg-data-0", "pg-data-1"],
+    )
+
+    # Add dynamic deps for the remaining 3 via the runtime endpoint
+    response = await client.post(
+        f"/api/v1/builds/{build2_id}/tasks/pg-aggregate/dependencies",
+        json={
+            "upstream_task_ids": ["pg-data-2", "pg-data-3", "pg-data-4"],
+            "is_dynamic": True,
+        },
+    )
+    assert response.status_code == 200
+
+    # Query extended graph with grouping so all 5 LoadData tasks collapse
+    response = await client.post(
+        "/api/v1/tasks/graph",
+        json={
+            "task_ids": ["pg-aggregate"],
+            "upstream_depth": 1,
+            "downstream_depth": 0,
+            "max_per_type_per_level": 2,
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    # LoadData tasks collapsed into one group
+    assert len(data["groups"]) == 1
+    group_id = data["groups"][0]["group_id"]
+
+    # The group → aggregate edge should be marked dynamic (at least one
+    # contributor is dynamic)
+    agg_node = next(n for n in data["nodes"] if n["task_id"] == "pg-aggregate")
+    agg_pk = agg_node["id"]
+    group_edges = [e for e in data["edges"] if e["source"] == group_id]
+    assert len(group_edges) == 1
+    assert group_edges[0]["target"] == agg_pk
+    assert group_edges[0]["is_dynamic"] is True
+
+
+@pytest.mark.asyncio
+async def test_graph_group_edge_static_only(client: AsyncClient):
+    """All-static contributors → group edge stays is_dynamic=False."""
+    build1_id = await create_build(client)
+    for i in range(4):
+        await register_task(client, build1_id, f"ps-data-{i}", "LoadData")
+
+    build2_id = await create_build(client)
+    await register_task(
+        client,
+        build2_id,
+        "ps-aggregate",
+        "Aggregate",
+        dependency_task_ids=[f"ps-data-{i}" for i in range(4)],
+    )
+
+    response = await client.post(
+        "/api/v1/tasks/graph",
+        json={
+            "task_ids": ["ps-aggregate"],
+            "upstream_depth": 1,
+            "downstream_depth": 0,
+            "max_per_type_per_level": 2,
+        },
+    )
+    data = response.json()
+
+    group_id = data["groups"][0]["group_id"]
+    group_edges = [e for e in data["edges"] if e["source"] == group_id]
+    assert len(group_edges) == 1
+    assert group_edges[0]["is_dynamic"] is False

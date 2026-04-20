@@ -1,9 +1,13 @@
 import {
   ReactFlow,
   Background,
+  BaseEdge,
   Controls,
   type Node,
   type Edge,
+  type EdgeProps,
+  type EdgeTypes,
+  getBezierPath,
   useNodesState,
   useEdgesState,
   type NodeTypes,
@@ -86,19 +90,82 @@ function getNodeDimensions(node: AnyNodeType): { w: number; h: number } {
 
 // --- Edge color constants ---
 
+// Both static and dynamic deps share the same grey palette. Dynamic edges
+// are distinguished only by a static dash pattern (applied via
+// strokeDasharray in getEdgeStyle) and a hover tooltip (rendered by the
+// custom `dynamicEdge` React Flow edge type defined below). React Flow's
+// `animated: true` adds its own marching-ants dash to signal a running
+// target; that combines fine with the static dash here.
 const EDGE_COLORS = {
   dark: { normal: "#6b7280", muted: "#4b5563" },
   light: { normal: "#94a3b8", muted: "#d1d5db" },
 } as const;
 
-function getEdgeStyle(isMuted: boolean, theme: string, depthOpacity: number) {
+const DYNAMIC_EDGE_TOOLTIP =
+  "Dynamic dependency — yielded at runtime from the upstream task's run() generator.";
+
+function getEdgeStyle(
+  isMuted: boolean,
+  theme: string,
+  depthOpacity: number,
+  isDynamic: boolean = false,
+) {
   const palette = theme === "dark" ? EDGE_COLORS.dark : EDGE_COLORS.light;
   return {
     stroke: isMuted ? palette.muted : palette.normal,
     strokeWidth: isMuted ? 1.5 : 2,
     opacity: isMuted ? depthOpacity * 0.7 : 1,
+    ...(isDynamic ? { strokeDasharray: "6 4" } : {}),
   };
 }
+
+// Custom edge used for dynamic deps: renders the default bezier path plus
+// an SVG <title> child and a wider invisible hit-path so the native browser
+// tooltip shows up when the user hovers the edge (a 2px stroke is very
+// narrow to hit).
+type DynamicEdgeData = { tooltip?: string };
+
+function DynamicEdge(props: EdgeProps<Edge<DynamicEdgeData>>) {
+  const {
+    id,
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+    style,
+    markerEnd,
+    data,
+  } = props;
+  const [edgePath] = getBezierPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+  });
+  const tooltip = data?.tooltip ?? DYNAMIC_EDGE_TOOLTIP;
+  return (
+    <g>
+      <title>{tooltip}</title>
+      {/* Invisible wider path to make the edge easier to hover. */}
+      <path
+        d={edgePath}
+        fill="none"
+        stroke="transparent"
+        strokeWidth={12}
+        pointerEvents="stroke"
+      />
+      <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
+    </g>
+  );
+}
+
+const edgeTypes: EdgeTypes = {
+  dynamicEdge: DynamicEdge,
+};
 
 // --- Layout helpers ---
 
@@ -284,12 +351,21 @@ export function DagGraph({
           !(sourceTask?.isFilterMatch ?? true) ||
           !(targetTask?.isFilterMatch ?? true);
 
+        const isDynamic = graphEdge.is_dynamic ?? false;
         return {
           id: `${graphEdge.source}-${graphEdge.target}`,
           source: sourceId,
           target: targetId,
           animated: targetTask?.status === "running",
-          style: getEdgeStyle(isMutedEdge, theme, getDepthOpacity(maxAbsDepth)),
+          style: getEdgeStyle(
+            isMutedEdge,
+            theme,
+            getDepthOpacity(maxAbsDepth),
+            isDynamic,
+          ),
+          // Use the custom edge type for dynamic deps so we get the hover
+          // tooltip. Static deps use React Flow's default edge type.
+          ...(isDynamic ? { type: "dynamicEdge", data: {} } : {}),
         };
       });
 
@@ -417,6 +493,7 @@ export function DagGraph({
         onEdgesChange={onEdgesChange}
         onNodeClick={handleNodeClick}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         colorMode={colorMode}
         fitView
         fitViewOptions={{ padding: 0.2 }}

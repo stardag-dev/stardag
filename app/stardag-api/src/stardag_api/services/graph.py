@@ -257,7 +257,9 @@ async def traverse_upstream(
     if all_relevant_pks:
         edge_result = await db.execute(
             select(
-                TaskDependency.upstream_task_id, TaskDependency.downstream_task_id
+                TaskDependency.upstream_task_id,
+                TaskDependency.downstream_task_id,
+                TaskDependency.is_dynamic,
             ).where(
                 TaskDependency.upstream_task_id.in_(all_relevant_pks),
                 TaskDependency.downstream_task_id.in_(all_relevant_pks),
@@ -267,12 +269,18 @@ async def traverse_upstream(
     else:
         raw_edges = []
 
-    # Build edges, collapsing grouped task edges to group nodes
+    # Build edges, collapsing grouped task edges to group nodes.
+    # For collapsed edges (group ↔ task or group ↔ group), ``is_dynamic`` is
+    # the OR over all contributing raw edges — any dynamic contributor marks
+    # the aggregate as dynamic. Matches the UI expectation "show this edge
+    # as dynamic if any underlying contributor is dynamic".
     included_pk_set = set(included_task_pks)
     edges: list[TaskEdgeExtended] = []
-    group_downstream_pks: dict[str, set[UUID]] = {g.group_id: set() for g in groups}
-    group_upstream_pks: dict[str, set[UUID]] = {g.group_id: set() for g in groups}
-    group_to_group_edges: set[tuple[str, str]] = set()
+    # group_id -> {counterpart_pk: any_dynamic}
+    group_downstream_pks: dict[str, dict[UUID, bool]] = {g.group_id: {} for g in groups}
+    group_upstream_pks: dict[str, dict[UUID, bool]] = {g.group_id: {} for g in groups}
+    # (src_group, tgt_group) -> any_dynamic
+    group_to_group_edges: dict[tuple[str, str], bool] = {}
 
     for edge in raw_edges:
         source = edge.upstream_task_id
@@ -284,35 +292,58 @@ async def traverse_upstream(
             src_group = pk_to_group[source]
             tgt_group = pk_to_group[target]
             if src_group != tgt_group:
-                group_to_group_edges.add((src_group, tgt_group))
+                key = (src_group, tgt_group)
+                group_to_group_edges[key] = (
+                    group_to_group_edges.get(key, False) or edge.is_dynamic
+                )
             continue
 
         if source_grouped:
             group_id = pk_to_group[source]
             if target in included_pk_set:
-                group_downstream_pks[group_id].add(target)
+                group_downstream_pks[group_id][target] = (
+                    group_downstream_pks[group_id].get(target, False) or edge.is_dynamic
+                )
             continue
 
         if target_grouped:
             group_id = pk_to_group[target]
             if source in included_pk_set:
-                group_upstream_pks[group_id].add(source)
+                group_upstream_pks[group_id][source] = (
+                    group_upstream_pks[group_id].get(source, False) or edge.is_dynamic
+                )
             continue
 
         if source in included_pk_set and target in included_pk_set:
-            edges.append(TaskEdgeExtended(source=str(source), target=str(target)))
+            edges.append(
+                TaskEdgeExtended(
+                    source=str(source),
+                    target=str(target),
+                    is_dynamic=edge.is_dynamic,
+                )
+            )
 
     for group in groups:
-        downstream_pks = group_downstream_pks.get(group.group_id, set())
+        downstream_pks = group_downstream_pks.get(group.group_id, {})
         group.downstream_task_pks = [str(pk) for pk in downstream_pks]
-        for pk in downstream_pks:
-            edges.append(TaskEdgeExtended(source=group.group_id, target=str(pk)))
-        upstream_pks = group_upstream_pks.get(group.group_id, set())
-        for pk in upstream_pks:
-            edges.append(TaskEdgeExtended(source=str(pk), target=group.group_id))
+        for pk, is_dynamic in downstream_pks.items():
+            edges.append(
+                TaskEdgeExtended(
+                    source=group.group_id, target=str(pk), is_dynamic=is_dynamic
+                )
+            )
+        upstream_pks = group_upstream_pks.get(group.group_id, {})
+        for pk, is_dynamic in upstream_pks.items():
+            edges.append(
+                TaskEdgeExtended(
+                    source=str(pk), target=group.group_id, is_dynamic=is_dynamic
+                )
+            )
 
-    for src_group, tgt_group in group_to_group_edges:
-        edges.append(TaskEdgeExtended(source=src_group, target=tgt_group))
+    for (src_group, tgt_group), is_dynamic in group_to_group_edges.items():
+        edges.append(
+            TaskEdgeExtended(source=src_group, target=tgt_group, is_dynamic=is_dynamic)
+        )
 
     # Fetch artifact counts
     artifact_counts: dict[UUID, int] = {}

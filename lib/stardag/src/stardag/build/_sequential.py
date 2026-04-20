@@ -491,6 +491,20 @@ def _run_task_sequential(
                 yielded = next(gen)
                 dynamic_deps = flatten_task_struct(yielded)
 
+                # Record yielded deps as edges so the DAG view shows them
+                # (static deps are recorded via task_register).
+                if dynamic_deps:
+                    try:
+                        registry.task_add_dependencies(
+                            build_id, task, dynamic_deps, is_dynamic=True
+                        )
+                    except Exception as reg_err:
+                        handle_registry_error(
+                            reg_err,
+                            f"Failed to record dynamic deps for task {task.id}",
+                            on_registry_failure,
+                        )
+
                 # Discover and build dynamic deps using the same discover()
                 # function used for static deps, so task_count.discovered
                 # is properly incremented and sub-deps are fully recursed.
@@ -919,6 +933,20 @@ async def _run_task_sequential_aio(
     # Handle dynamic deps — unified across sync and async generators
     async for yielded in _iter_dynamic_deps(result):
         dynamic_deps = flatten_task_struct(yielded)
+
+        # Record yielded deps as edges so the DAG view shows them
+        # (static deps are recorded via task_register).
+        if dynamic_deps:
+            try:
+                await registry.task_add_dependencies_aio(
+                    build_id, task, dynamic_deps, is_dynamic=True
+                )
+            except Exception as reg_err:
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to record dynamic deps for task {task.id}",
+                    on_registry_failure,
+                )
 
         # discover() is the runtime wrapper from build_sequential_aio: it
         # recurses into requires(), and registers any previously-complete

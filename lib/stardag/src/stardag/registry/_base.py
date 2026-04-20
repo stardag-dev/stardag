@@ -177,6 +177,33 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def task_add_dependencies(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        upstream_tasks: Sequence["BaseTask"],
+        is_dynamic: bool = True,
+    ) -> None:
+        """Record dependency edges for a task.
+
+        Called by the build system when a task yields dynamic deps — the
+        edges aren't known at ``task_register`` time (static ``requires()``
+        chain only), so this is how they reach the registry so that the
+        full DAG renders correctly in the UI.
+
+        Registries that can't write to a graph (the in-memory cases) may
+        treat this as a no-op. HTTP-backed implementations should tolerate
+        404 from older API versions that don't support the endpoint.
+
+        Args:
+            build_id: The build UUID returned by build_start.
+            task: The downstream task whose deps are being added.
+            upstream_tasks: The yielded deps to record as edges.
+            is_dynamic: Marks the edges as dynamic (True by default —
+                static ``requires()`` are recorded during task_register).
+        """
+        pass
+
     def task_resume(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as resumed after dynamic dependencies completed.
 
@@ -294,6 +321,16 @@ class RegistryABC(metaclass=abc.ABCMeta):
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_suspend."""
         self.task_suspend(build_id, task)
+
+    async def task_add_dependencies_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        upstream_tasks: Sequence["BaseTask"],
+        is_dynamic: bool = True,
+    ) -> None:
+        """Async version of task_add_dependencies."""
+        self.task_add_dependencies(build_id, task, upstream_tasks, is_dynamic)
 
     async def task_resume_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_resume."""

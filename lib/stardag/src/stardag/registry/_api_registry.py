@@ -46,6 +46,19 @@ _MAX_RATE_LIMIT_RETRIES = 5
 _MAX_RETRY_WAIT = 60  # Cap wait time at 60 seconds
 
 
+def _is_route_not_found(err: NotFoundError) -> bool:
+    """Distinguish FastAPI's default "missing route" 404 from app-level 404s.
+
+    FastAPI serves unknown paths as ``{"detail": "Not Found"}``. Any 404
+    raised inside an endpoint (``raise HTTPException(status_code=404,
+    detail=...)``) carries a more specific detail string (e.g.
+    ``"Build not found"``), so checking the exact ``"Not Found"`` literal
+    is a reliable way to tell "endpoint doesn't exist on this server"
+    apart from "this particular resource doesn't exist".
+    """
+    return err.detail == "Not Found"
+
+
 class APIRegistry(RegistryABC):
     """Registry that stores task information via the stardag-api REST service.
 
@@ -458,6 +471,45 @@ class APIRegistry(RegistryABC):
             operation=f"Suspend task {task.id}",
         )
 
+    def task_add_dependencies(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        upstream_tasks: Sequence["BaseTask"],
+        is_dynamic: bool = True,
+    ) -> None:
+        """Record dependency edges for a task.
+
+        Backward-compat: an older Registry API that lacks the
+        ``/dependencies`` endpoint returns FastAPI's default 404 with the
+        generic ``"Not Found"`` detail. We swallow that specific response
+        with a warning so builds don't break on version skew. All other
+        404s (e.g. our endpoint's explicit ``"Build not found"`` or
+        ``"Task … not registered …"`` responses) re-raise normally.
+        """
+        if not upstream_tasks:
+            return
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/dependencies",
+                json={
+                    "upstream_task_ids": [str(u.id) for u in upstream_tasks],
+                    "is_dynamic": is_dynamic,
+                },
+                params=self._get_params(),
+                operation=f"Add dependencies for task {task.id}",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /dependencies; "
+                "dynamic-dep edges for task %s will not be recorded. "
+                "Upgrade the Registry API to see dynamic deps in the DAG view.",
+                task.id,
+            )
+
     def task_resume(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as resumed (dynamic dependencies completed)."""
         self._request(
@@ -743,6 +795,42 @@ class APIRegistry(RegistryABC):
             params=self._get_event_params(),
             operation=f"Suspend task {task.id}",
         )
+
+    async def task_add_dependencies_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        upstream_tasks: Sequence["BaseTask"],
+        is_dynamic: bool = True,
+    ) -> None:
+        """Async version - record dependency edges for a task.
+
+        Same backward-compat behavior as the sync version: only swallow
+        the specific "missing route" 404 (FastAPI default ``"Not Found"``);
+        re-raise genuine resource-not-found 404s.
+        """
+        if not upstream_tasks:
+            return
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/dependencies",
+                json={
+                    "upstream_task_ids": [str(u.id) for u in upstream_tasks],
+                    "is_dynamic": is_dynamic,
+                },
+                params=self._get_params(),
+                operation=f"Add dependencies for task {task.id}",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /dependencies; "
+                "dynamic-dep edges for task %s will not be recorded. "
+                "Upgrade the Registry API to see dynamic deps in the DAG view.",
+                task.id,
+            )
 
     async def task_resume_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as resumed."""

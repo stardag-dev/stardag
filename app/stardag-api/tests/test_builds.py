@@ -546,3 +546,117 @@ async def test_commit_hash_with_resumed_build(client: AsyncClient):
     assert task["status"] == "completed"
     assert task["commit_hash"] == "commit-B"
     assert task["status_build_id"] == build2_id
+
+
+# --- Dynamic dependency registration (POST /tasks/{task_id}/dependencies) ---
+
+
+@pytest.mark.asyncio
+async def test_add_task_dependencies_creates_edges(client: AsyncClient):
+    """Dynamically-yielded deps register edges and show up in the graph."""
+    # Create a build
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Register the downstream (orchestrator) task with no static deps
+    orch = {
+        "task_id": "orch",
+        "task_name": "Orchestrator",
+        "task_data": {},
+        "dependency_task_ids": [],
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=orch)
+
+    # Dynamically record a dep via the new endpoint (upstream has not been
+    # registered yet — endpoint should create a phantom)
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/orch/dependencies",
+        json={"upstream_task_ids": ["yielded-dep"], "is_dynamic": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {"added": 1, "total": 1}
+
+    # Register the yielded dep properly so it appears in the build graph
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "yielded-dep",
+            "task_name": "Yielded",
+            "task_data": {},
+            "dependency_task_ids": [],
+        },
+    )
+
+    # Graph endpoint should return the edge with is_dynamic=True
+    response = await client.get(f"/api/v1/builds/{build_id}/graph")
+    assert response.status_code == 200
+    graph = response.json()
+    edges = graph["edges"]
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["is_dynamic"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_task_dependencies_idempotent(client: AsyncClient):
+    """Repeat calls with the same edge are idempotent (added=0 second time)."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={"task_id": "d", "task_name": "D", "task_data": {}},
+    )
+
+    payload = {"upstream_task_ids": ["u1", "u2"], "is_dynamic": True}
+    first = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/d/dependencies", json=payload
+    )
+    assert first.json() == {"added": 2, "total": 2}
+
+    second = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/d/dependencies", json=payload
+    )
+    # Same edges — nothing new inserted
+    assert second.json() == {"added": 0, "total": 2}
+
+
+@pytest.mark.asyncio
+async def test_static_deps_graph_has_is_dynamic_false(client: AsyncClient):
+    """Edges created via the standard task_register path are marked is_dynamic=False."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Register a downstream with a static dep
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "down",
+            "task_name": "Down",
+            "task_data": {},
+            "dependency_task_ids": ["up"],
+        },
+    )
+    # Register the upstream so it's in the build
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={"task_id": "up", "task_name": "Up", "task_data": {}},
+    )
+
+    response = await client.get(f"/api/v1/builds/{build_id}/graph")
+    edges = response.json()["edges"]
+    assert len(edges) == 1
+    assert edges[0]["is_dynamic"] is False
+
+
+@pytest.mark.asyncio
+async def test_add_task_dependencies_unknown_task_returns_404(client: AsyncClient):
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/nonexistent/dependencies",
+        json={"upstream_task_ids": ["u1"], "is_dynamic": True},
+    )
+    assert response.status_code == 404
