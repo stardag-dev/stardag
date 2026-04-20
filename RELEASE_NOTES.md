@@ -6,6 +6,141 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.8 — Dynamic deps fixes: sequential build & async generators & Modal
+
+This release is primarily a correctness fix for dynamically-yielded tasks plus expanded support for the pattern across all executors.
+
+### Fix: `build_sequential` resolves the `requires()` chain of yielded tasks
+
+`build_sequential` (and `build_sequential_aio`) previously executed a
+dynamically yielded task directly, skipping any static `requires()` that task
+declared. The concurrent `build()` already resolved them first.
+
+```python
+import stardag as sdag
+
+class Leaf(sdag.Task[int]):
+    value: int
+    def run(self):
+        self._save(self.value * 10)
+
+class Middle(sdag.Task[int]):
+    dep: sdag.TaskLoads[int]
+    def requires(self):
+        return self.dep
+    def run(self):
+        self._save(self.dep.load() + 1)
+
+class Orchestrator(sdag.BaseTask):
+    def complete(self):
+        return False
+    def run(self):
+        middle = Middle(dep=Leaf(value=5))
+        yield middle
+        # At this point Middle — and Leaf, its static require — must be complete.
+```
+
+Before v0.5.8: `sdag.build_sequential(Orchestrator())` would run `Middle.run()`
+before `Leaf.run()`, and `Middle` would fail with `FileNotFoundError` on
+`self.dep.load()`.
+
+After v0.5.8: both sequential and concurrent executors build `Leaf` first,
+then `Middle`, then resume `Orchestrator`. ([#118](https://github.com/stardag-dev/stardag/issues/118))
+
+No code changes needed — existing tasks that relied on the concurrent
+`build()` will now work with `build_sequential()` as well.
+
+### New: async generator dynamic dependencies
+
+You can now declare dynamic dependencies from an `async def run_aio` as an
+**async generator**:
+
+```python
+import stardag as sdag
+
+class AsyncOrchestrator(sdag.Task[int]):
+    limit: int
+
+    async def run_aio(self):  # type: ignore[override]
+        range_task = make_range(limit=self.limit)
+        yield range_task
+        # Build system ensures range_task is complete here
+        values = await range_task.load_aio()
+        await self._save_aio(sum(values))
+```
+
+Both the sequential and concurrent build executors detect async generators
+via `inspect.isasyncgenfunction` and drive them with `async for`. The yield
+semantics are identical to sync generators: after `yield task`, the build
+system has ensured `task` is complete before execution resumes.
+
+### New: Modal integration handles dynamic deps
+
+Generators cannot be pickled, so `ModalTaskExecutor` couldn't previously
+handle tasks that yielded dynamic deps. `Runner.run()` now drives generators
+(sync and async) in the worker container and returns a `TaskStruct` of
+yielded deps. The build system builds those deps and re-invokes the task —
+on re-execution the generator advances past the previously-yielded batch.
+This mirrors the existing behavior of `_run_task_in_process` for the
+subprocess executor.
+
+Async-only tasks (`run_aio` without `run`) are now also supported in Modal:
+they're executed via `asyncio.run(task.run_aio())` in the worker.
+
+### Minor breaking change: `@task` rejects generator functions
+
+Generator and async-generator functions are no longer accepted by the
+`@task` decorator:
+
+```python
+import stardag as sdag
+
+@sdag.task
+def bad(a: int) -> int:
+    yield a   # raises TypeError at decoration time
+```
+
+Dynamic dependencies were never properly supported by the decorator API —
+the class-based Task API is where the full machinery lives (type
+annotations for yielded tasks, `requires()`, etc.). The change surfaces the
+mismatch loudly instead of silently producing a task that misbehaves.
+Migrate to a `Task` subclass:
+
+```python
+import stardag as sdag
+
+class Good(sdag.Task[int]):
+    a: int
+    def run(self):
+        yield some_dep(self.a)
+        self._save(...)
+```
+
+### Also in this release
+
+- **Sequential build consistency.** `_run_task_sequential[_aio]` now routes
+  all dep discovery through a `runtime_discover()` wrapper that registers
+  previously-complete tasks surfaced at runtime (e.g. a static dep of a
+  dynamically-yielded task that's already on disk). Those tasks now appear
+  in the build's task list in the Registry as `task_register` +
+  `task_complete` events, instead of being silently excluded.
+- **Modal integration tests.** New `lib/stardag/tests/test_integration/test_modal/test_runner.py`
+  unit tests for `Runner.run()` dispatch behavior (no Modal account needed),
+  and `TestEndToEndDynamicDepsBuild` in
+  `lib/stardag/tests/test_integration/test_modal/test__app.py` covers the
+  full remote round-trip for async-only tasks and sync/async dynamic deps.
+
+### Known limitations
+
+- **Runtime config override for Modal.** `StardagApp.build_remote` does not
+  yet forward runtime configuration (e.g. target root overrides) to remote
+  build/worker containers. Test isolation on Modal therefore relies on
+  distinct task parameters plus pre/post volume wipes, rather than the
+  cleaner `test_harness`-style per-test subpath override used locally.
+  Tracked as [#121](https://github.com/stardag-dev/stardag/issues/121).
+
+---
+
 ## v0.5.7 — Support for user-defined generic task classes
 
 User-defined generic tasks can now be declared and instantiated directly —
