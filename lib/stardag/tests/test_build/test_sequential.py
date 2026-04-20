@@ -555,6 +555,63 @@ class TestDynamicDepsWithRequiresAio:
         assert_dynamic_deps_task_complete_recursive(orchestrator, True)
 
 
+class TestDynamicDepsWithRequiresRegistryBookkeeping:
+    """Registry bookkeeping for static deps newly discovered via a dynamic-dep chain.
+
+    When a task is yielded dynamically and its ``requires()`` references a task
+    that was already complete on disk before the build started, that static
+    dep is only discovered at runtime. It should still get a ``task_register``
+    + ``task_complete`` event so it shows up in the build's task list — mirrors
+    the existing handling for dynamically yielded previously-complete tasks.
+    """
+
+    def test_static_dep_of_dynamic_dep_pre_complete(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        # Pre-build leaf so it's already complete on disk.
+        leaf = DynamicDepsTask(value="pre_leaf")
+        build_sequential([leaf], registry=NoOpRegistry())
+        assert leaf.complete()
+
+        middle = DynamicDepsTask(value="pre_middle", static_deps=(leaf,))
+        orchestrator = DynamicDepsTask(value="pre_orch", dynamic_deps=(middle,))
+
+        tracking = TrackingRegistry()
+        summary = build_sequential([orchestrator], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        leaf_calls = tracking.calls_for(leaf.id)
+        assert "task_register" in leaf_calls, (
+            f"Pre-complete static dep of a dynamic dep was not registered; "
+            f"calls: {leaf_calls}"
+        )
+        assert "task_complete" in leaf_calls
+
+    @pytest.mark.asyncio
+    async def test_static_dep_of_dynamic_dep_pre_complete_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        leaf = DynamicDepsTask(value="pre_leaf_aio")
+        await build_sequential_aio([leaf], registry=NoOpRegistry())
+        assert leaf.complete()
+
+        middle = DynamicDepsTask(value="pre_middle_aio", static_deps=(leaf,))
+        orchestrator = DynamicDepsTask(value="pre_orch_aio", dynamic_deps=(middle,))
+
+        tracking = TrackingRegistry()
+        summary = await build_sequential_aio([orchestrator], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        leaf_calls = tracking.calls_for(leaf.id)
+        assert "task_register" in leaf_calls, (
+            f"Pre-complete static dep of a dynamic dep was not registered; "
+            f"calls: {leaf_calls}"
+        )
+        assert "task_complete" in leaf_calls
+
+
 # ============================================================================
 # Test: Registry communication for previously-completed tasks
 # ============================================================================
