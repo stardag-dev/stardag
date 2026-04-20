@@ -92,6 +92,7 @@ export interface TaskNode {
 export interface TaskEdge {
   source: string; // upstream task internal id
   target: string; // downstream task internal id
+  is_dynamic?: boolean; // true if the edge was yielded dynamically at runtime
 }
 
 export interface TaskGraphResponse {
@@ -118,6 +119,7 @@ export interface GroupSummary {
 export interface TaskEdgeExtended {
   source: string;
   target: string;
+  is_dynamic?: boolean;
 }
 
 export interface TaskGraphExtendedResponse {

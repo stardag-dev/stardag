@@ -86,15 +86,42 @@ function getNodeDimensions(node: AnyNodeType): { w: number; h: number } {
 
 // --- Edge color constants ---
 
+// Static deps use a neutral grey; dynamically yielded deps use indigo so
+// they're visually distinct from static deps. We avoid dashing / animation
+// on dynamic edges because React Flow already uses the marching-ants dash
+// via `animated: true` to indicate a running target — conflating the two
+// would be ambiguous.
 const EDGE_COLORS = {
-  dark: { normal: "#6b7280", muted: "#4b5563" },
-  light: { normal: "#94a3b8", muted: "#d1d5db" },
+  dark: {
+    normal: "#6b7280",
+    muted: "#4b5563",
+    dynamic: "#a78bfa",
+    dynamicMuted: "#6d4fa6",
+  },
+  light: {
+    normal: "#94a3b8",
+    muted: "#d1d5db",
+    dynamic: "#7c3aed",
+    dynamicMuted: "#c4b5fd",
+  },
 } as const;
 
-function getEdgeStyle(isMuted: boolean, theme: string, depthOpacity: number) {
+function getEdgeStyle(
+  isMuted: boolean,
+  theme: string,
+  depthOpacity: number,
+  isDynamic: boolean = false,
+) {
   const palette = theme === "dark" ? EDGE_COLORS.dark : EDGE_COLORS.light;
+  const stroke = isDynamic
+    ? isMuted
+      ? palette.dynamicMuted
+      : palette.dynamic
+    : isMuted
+      ? palette.muted
+      : palette.normal;
   return {
-    stroke: isMuted ? palette.muted : palette.normal,
+    stroke,
     strokeWidth: isMuted ? 1.5 : 2,
     opacity: isMuted ? depthOpacity * 0.7 : 1,
   };
@@ -289,7 +316,12 @@ export function DagGraph({
           source: sourceId,
           target: targetId,
           animated: targetTask?.status === "running",
-          style: getEdgeStyle(isMutedEdge, theme, getDepthOpacity(maxAbsDepth)),
+          style: getEdgeStyle(
+            isMutedEdge,
+            theme,
+            getDepthOpacity(maxAbsDepth),
+            graphEdge.is_dynamic ?? false,
+          ),
         };
       });
 
