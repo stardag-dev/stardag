@@ -81,7 +81,7 @@ handle tasks that yielded dynamic deps. `Runner.run()` now drives generators
 (sync and async) in the worker container and returns a `TaskStruct` of
 yielded deps. The build system builds those deps and re-invokes the task —
 on re-execution the generator advances past the previously-yielded batch.
-This mirrors the existing behaviour of `_run_task_in_process` for the
+This mirrors the existing behavior of `_run_task_in_process` for the
 subprocess executor.
 
 Async-only tasks (`run_aio` without `run`) are now also supported in Modal:
@@ -93,7 +93,9 @@ Generator and async-generator functions are no longer accepted by the
 `@task` decorator:
 
 ```python
-@task
+import stardag as sdag
+
+@sdag.task
 def bad(a: int) -> int:
     yield a   # raises TypeError at decoration time
 ```
@@ -105,7 +107,9 @@ mismatch loudly instead of silently producing a task that misbehaves.
 Migrate to a `Task` subclass:
 
 ```python
-class Good(Task[int]):
+import stardag as sdag
+
+class Good(sdag.Task[int]):
     a: int
     def run(self):
         yield some_dep(self.a)
@@ -120,10 +124,11 @@ class Good(Task[int]):
   dynamically-yielded task that's already on disk). Those tasks now appear
   in the build's task list in the Registry as `task_register` +
   `task_complete` events, instead of being silently excluded.
-- **Modal integration tests.** New `tests/test_integration/test_modal/test_runner.py`
+- **Modal integration tests.** New `lib/stardag/tests/test_integration/test_modal/test_runner.py`
   unit tests for `Runner.run()` dispatch behavior (no Modal account needed),
-  and `TestEndToEndDynamicDepsBuild` in `test__app.py` covers the full remote
-  round-trip for async-only tasks and sync/async dynamic deps.
+  and `TestEndToEndDynamicDepsBuild` in
+  `lib/stardag/tests/test_integration/test_modal/test__app.py` covers the
+  full remote round-trip for async-only tasks and sync/async dynamic deps.
 
 ### Known limitations
 
