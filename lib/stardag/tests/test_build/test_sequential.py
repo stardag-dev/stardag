@@ -1174,7 +1174,8 @@ class TestDynamicDepEdgesRegistrySync:
         summary = build_fn([parent], registry=tracking)
 
         assert summary.status == BuildExitStatus.SUCCESS
-        # Edge: parent -> dyn (upstream=dyn, downstream=parent)
+        # Edge dyn -> parent (upstream=dyn, downstream=parent), stored as
+        # (upstream_id, downstream_id) in TrackingRegistry.dynamic_dep_edges.
         assert (dyn.id, parent.id) in tracking.dynamic_dep_edges, (
             f"Dynamic edge not reported; saw: {tracking.dynamic_dep_edges}"
         )

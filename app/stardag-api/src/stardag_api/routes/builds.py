@@ -936,7 +936,10 @@ async def add_task_dependencies(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Locate the downstream task (created by register_task earlier in this build)
+    # Locate the downstream task. Scoped by environment, not by build —
+    # a task may pre-exist from an earlier build in the same environment
+    # and still be a valid target for new dynamic-edge records. Fails with
+    # 404 if the task_id is unknown in this environment.
     result = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)

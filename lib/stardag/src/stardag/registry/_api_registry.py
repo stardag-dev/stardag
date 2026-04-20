@@ -46,6 +46,19 @@ _MAX_RATE_LIMIT_RETRIES = 5
 _MAX_RETRY_WAIT = 60  # Cap wait time at 60 seconds
 
 
+def _is_route_not_found(err: NotFoundError) -> bool:
+    """Distinguish FastAPI's default "missing route" 404 from app-level 404s.
+
+    FastAPI serves unknown paths as ``{"detail": "Not Found"}``. Any 404
+    raised inside an endpoint (``raise HTTPException(status_code=404,
+    detail=...)``) carries a more specific detail string (e.g.
+    ``"Build not found"``), so checking the exact ``"Not Found"`` literal
+    is a reliable way to tell "endpoint doesn't exist on this server"
+    apart from "this particular resource doesn't exist".
+    """
+    return err.detail == "Not Found"
+
+
 class APIRegistry(RegistryABC):
     """Registry that stores task information via the stardag-api REST service.
 
@@ -467,10 +480,12 @@ class APIRegistry(RegistryABC):
     ) -> None:
         """Record dependency edges for a task.
 
-        Backward-compat: catches ``NotFoundError`` (which is raised for 404)
-        and logs a warning — an older API that doesn't expose the
-        ``/dependencies`` endpoint will return 404 and we don't want that to
-        break the build. Other errors propagate normally.
+        Backward-compat: an older Registry API that lacks the
+        ``/dependencies`` endpoint returns FastAPI's default 404 with the
+        generic ``"Not Found"`` detail. We swallow that specific response
+        with a warning so builds don't break on version skew. All other
+        404s (e.g. our endpoint's explicit ``"Build not found"`` or
+        ``"Task … not registered …"`` responses) re-raise normally.
         """
         if not upstream_tasks:
             return
@@ -485,7 +500,9 @@ class APIRegistry(RegistryABC):
                 params=self._get_params(),
                 operation=f"Add dependencies for task {task.id}",
             )
-        except NotFoundError:
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
             logger.warning(
                 "Registry API does not support POST /dependencies; "
                 "dynamic-dep edges for task %s will not be recorded. "
@@ -788,8 +805,9 @@ class APIRegistry(RegistryABC):
     ) -> None:
         """Async version - record dependency edges for a task.
 
-        Same backward-compat behavior as the sync version: 404 swallowed
-        with a warning so older API deployments don't break builds.
+        Same backward-compat behavior as the sync version: only swallow
+        the specific "missing route" 404 (FastAPI default ``"Not Found"``);
+        re-raise genuine resource-not-found 404s.
         """
         if not upstream_tasks:
             return
@@ -804,7 +822,9 @@ class APIRegistry(RegistryABC):
                 params=self._get_params(),
                 operation=f"Add dependencies for task {task.id}",
             )
-        except NotFoundError:
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
             logger.warning(
                 "Registry API does not support POST /dependencies; "
                 "dynamic-dep edges for task %s will not be recorded. "
