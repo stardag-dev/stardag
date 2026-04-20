@@ -6,6 +6,85 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.5.9 — Dynamic deps visible in the DAG view
+
+Dynamically-yielded dependencies now register as graph edges in the Registry,
+so the DAG view can finally render the parent → yielded-dep relationship.
+Before v0.5.9, a task yielded from a `run()` / `run_aio()` generator only
+had its own static `requires()` chain recorded — the yielded dep appeared as
+a disconnected node in the DAG view.
+
+```python
+import stardag as sdag
+
+class Orchestrator(sdag.Task[int]):
+    source_uri: str
+
+    def requires(self):
+        return GetChunksToProcess(source_uri=self.source_uri)
+
+    def run(self):
+        specs = self.requires().load()
+        chunks = [TransformChunk(chunk=LoadChunk(spec=s)) for s in specs]
+        yield chunks  # ← these edges now reach the registry
+        self._save(sum(c.load() for c in chunks))
+```
+
+In the UI:
+
+- **Static edges** (declared via `task.requires()`) render as solid grey
+  lines — unchanged.
+- **Dynamic edges** (yielded from `run()` / `run_aio()`) render as
+  _dashed_ grey lines. Hover an edge to see a tooltip explaining it was
+  yielded at runtime.
+
+### Registry protocol addition
+
+A new method `RegistryABC.task_add_dependencies(_aio)` has been added. It
+accepts a task plus a list of upstream tasks and an `is_dynamic` flag.
+Default implementations on in-memory registries (`NoOpRegistry` etc.) are
+no-ops. `APIRegistry` POSTs to the new
+`POST /builds/{build_id}/tasks/{task_id}/dependencies` endpoint. Users who
+subclass `RegistryABC` get the no-op default for free.
+
+### Backward compatibility with older Registry API
+
+If your SDK is newer than the deployed Registry API (no
+`/dependencies` endpoint yet), the SDK call swallows the specific
+FastAPI "missing route" 404 (`{"detail": "Not Found"}`) and logs a
+warning — your builds keep working, you just won't see dynamic edges in
+the DAG view until the API is upgraded. App-level 404s (`"Build not
+found"`, `"Task … not registered …"`) still propagate normally.
+
+### Requires a Registry API update
+
+The companion API change (`is_dynamic` column on `task_dependencies` +
+the new `/dependencies` endpoint) ships as part of the same release of
+the platform. To see dynamic edges in the UI, deploy the updated Registry
+API **before** upgrading the SDK (the SDK tolerates the old API with a
+warning; reverse ordering loses the new-edge persistence until the SDK is
+bumped).
+
+### Also in this release
+
+- **`max_per_type_per_level` grouping now applies at depth=0**. The
+  `GET /builds/{id}/graph` endpoint previously only grouped when
+  `upstream_depth` or `downstream_depth` was > 0 — the default in-build
+  view ignored the setting. Builds with many structurally-identical tasks
+  (e.g. a 50-chunk parallel fan-out) now collapse those into batch nodes
+  in the default view.
+- **Group edges inherit `is_dynamic`**: when same-type tasks collapse
+  into a batch node, the resulting aggregate edge is marked dynamic if
+  _any_ underlying contributor is dynamic.
+- **New example**:
+  `stardag_examples.general.dynamic_deps_demo` — a small pipeline with
+  one static dep feeding dynamic yields (`Orchestrator` reads a
+  `GetChunksToProcess` result to decide what to yield), each yielded
+  task having its own static require. Exercises both edge types in a
+  single DAG.
+
+---
+
 ## v0.5.8 — Dynamic deps fixes: sequential build & async generators & Modal
 
 This release is primarily a correctness fix for dynamically-yielded tasks plus expanded support for the pattern across all executors.
