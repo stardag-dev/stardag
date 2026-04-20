@@ -408,6 +408,27 @@ def _run_task_sequential(
     on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
     """Run a single task in sequential mode, handling dynamic deps."""
+    # Ensure static requires() are complete before running this task. When the
+    # outer build loop schedules a ready task this is a no-op (its deps are
+    # already in completion_cache), but it's required when this function is
+    # called recursively for a dynamically-yielded dep whose requires() chain
+    # has not been built yet (see issue #118).
+    for static_dep in flatten_task_struct(task.requires()):
+        if static_dep.id not in completion_cache:
+            _run_task_sequential(
+                static_dep,
+                completion_cache,
+                all_tasks,
+                build_id,
+                registry,
+                dual_run_default,
+                discover,
+                task_count,
+                on_registry_failure,
+            )
+            if task_count is not None:
+                task_count.succeeded += 1
+
     registry.task_start(build_id, task)
 
     has_run = _has_custom_run(task)
@@ -793,6 +814,24 @@ async def _run_task_sequential_aio(
     on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
     """Run a single task in async sequential mode, handling dynamic deps."""
+    # Ensure static requires() are complete before running this task — see the
+    # matching comment and issue #118 reference in _run_task_sequential.
+    for static_dep in flatten_task_struct(task.requires()):
+        if static_dep.id not in completion_cache:
+            await _run_task_sequential_aio(
+                static_dep,
+                completion_cache,
+                all_tasks,
+                build_id,
+                registry,
+                sync_run_default,
+                discover,
+                task_count,
+                on_registry_failure,
+            )
+            if task_count is not None:
+                task_count.succeeded += 1
+
     await registry.task_start_aio(build_id, task)
 
     has_run = _has_custom_run(task)

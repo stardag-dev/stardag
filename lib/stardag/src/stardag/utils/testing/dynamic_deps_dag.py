@@ -18,6 +18,17 @@ class DynamicDepsTask(Task[str]):
         return self.static_deps
 
     def run(self):  # type: ignore
+        # CONTRACT: When run() is called, static requires MUST be complete.
+        # This holds regardless of whether the task was discovered statically
+        # or yielded as a dynamic dep by another task (see issue #118).
+        for dep in self.static_deps:
+            if not dep.complete():  # type: ignore
+                raise AssertionError(
+                    f"Static requires contract violated! Dep {dep} is not complete "
+                    f"at the start of {self}.run(). The build system must resolve "
+                    f"task.requires() before executing the task."
+                )
+
         if self.dynamic_deps:
             # Yield all dynamic deps at once
             yield self.dynamic_deps
