@@ -38,7 +38,12 @@ async def register_task(
 
 @pytest.mark.asyncio
 async def test_build_graph_basic(client: AsyncClient):
-    """Test basic graph (no upstream traversal)."""
+    """Basic graph (no upstream traversal) — returns extended-shape response.
+
+    The endpoint always uses the traversal/grouping pipeline so that
+    ``max_per_type_per_level`` applies uniformly regardless of depth.
+    With only a handful of tasks, ``groups`` is empty.
+    """
     build_id = await create_build(client)
     await register_task(client, build_id, "t-a", "TaskA")
     await register_task(client, build_id, "t-b", "TaskB", dependency_task_ids=["t-a"])
@@ -48,13 +53,14 @@ async def test_build_graph_basic(client: AsyncClient):
     data = response.json()
     assert len(data["nodes"]) == 2
     assert len(data["edges"]) == 1
-    # Should NOT have extended fields when depth=0
-    assert "groups" not in data
+    # Extended response is always returned; groups is empty when nothing
+    # exceeds the grouping threshold.
+    assert data.get("groups", []) == []
 
 
 @pytest.mark.asyncio
 async def test_build_graph_upstream_depth_zero(client: AsyncClient):
-    """Test that upstream_depth=0 returns basic response (backward compat)."""
+    """upstream_depth=0 returns the build's own tasks (no cross-build traversal)."""
     build_id = await create_build(client)
     await register_task(client, build_id, "t-a", "TaskA")
 
@@ -62,8 +68,33 @@ async def test_build_graph_upstream_depth_zero(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert len(data["nodes"]) == 1
-    # Basic response has no groups field
-    assert "groups" not in data
+    assert data.get("groups", []) == []
+
+
+@pytest.mark.asyncio
+async def test_build_graph_groups_at_depth_zero(client: AsyncClient):
+    """Grouping applies at depth=0 — many structurally-identical tasks collapse.
+
+    This is the motivating case: within a single build, having e.g. 6
+    ``LoadChunk`` tasks should collapse to a single batch node when
+    ``max_per_type_per_level`` is smaller than that count, regardless of
+    whether cross-build traversal is requested.
+    """
+    build_id = await create_build(client)
+    for i in range(6):
+        await register_task(client, build_id, f"dz-load-{i}", "LoadChunk")
+
+    response = await client.get(
+        f"/api/v1/builds/{build_id}/graph?upstream_depth=0&max_per_type_per_level=3"
+    )
+    assert response.status_code == 200
+    data = response.json()
+    # 6 LoadChunks exceed max_per_type_per_level=3 → collapse into one group
+    assert len(data["nodes"]) == 0
+    assert len(data["groups"]) == 1
+    group = data["groups"][0]
+    assert group["task_name"] == "LoadChunk"
+    assert group["count"] == 6
 
 
 @pytest.mark.asyncio
