@@ -17,10 +17,11 @@ breaks the sync contract.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Awaitable, Sequence
-from typing import Callable, Literal
+from typing import Any, AsyncIterator, Callable, Literal
 from uuid import UUID
 
 from stardag import (
@@ -839,6 +840,28 @@ async def build_sequential_aio(
         )
 
 
+async def _iter_dynamic_deps(result: Any) -> AsyncIterator[Any]:
+    """Iterate yielded dynamic deps from a sync or async generator run result.
+
+    Normalizes the three cases into a single async iteration:
+    - None / non-generator: yields nothing
+    - Sync generator (``__next__``): wraps with ``next()`` calls
+    - Async generator (``__anext__``): iterates with ``async for``
+    """
+    if result is None:
+        return
+    if hasattr(result, "__anext__"):
+        async for value in result:
+            yield value
+        return
+    if hasattr(result, "__next__"):
+        while True:
+            try:
+                yield next(result)
+            except StopIteration:
+                return
+
+
 async def _run_task_sequential_aio(
     task: BaseTask,
     completion_cache: set[UUID],
@@ -877,8 +900,12 @@ async def _run_task_sequential_aio(
 
     # Determine how to run
     if has_run_aio:
-        # Async-only or Dual - use async
-        result = await task.run_aio()
+        # Async generators (dynamic deps via `async def run_aio: yield ...`)
+        # cannot be awaited — calling the bound method returns the generator.
+        if inspect.isasyncgenfunction(type(task).run_aio):
+            result: Any = task.run_aio()
+        else:
+            result = await task.run_aio()
     elif has_run:
         # Sync-only
         if sync_run_default == "thread":
@@ -889,38 +916,31 @@ async def _run_task_sequential_aio(
     else:
         raise ValueError(f"Task {task} has no run method")
 
-    # Handle generator (dynamic deps)
-    if result is not None and hasattr(result, "__next__"):
-        gen = result
-        while True:
-            try:
-                yielded = next(gen)
-                dynamic_deps = flatten_task_struct(yielded)
+    # Handle dynamic deps — unified across sync and async generators
+    async for yielded in _iter_dynamic_deps(result):
+        dynamic_deps = flatten_task_struct(yielded)
 
-                # discover() is the runtime wrapper from build_sequential_aio: it
-                # recurses into requires(), and registers any previously-complete
-                # tasks it surfaces (so they appear in the build's task list even
-                # though they were first seen after the initial registration pass).
-                for dep in dynamic_deps:
-                    await discover(dep)
+        # discover() is the runtime wrapper from build_sequential_aio: it
+        # recurses into requires(), and registers any previously-complete
+        # tasks it surfaces (so they appear in the build's task list even
+        # though they were first seen after the initial registration pass).
+        for dep in dynamic_deps:
+            await discover(dep)
 
-                    if dep.id not in completion_cache:
-                        await _run_task_sequential_aio(
-                            dep,
-                            completion_cache,
-                            all_tasks,
-                            build_id,
-                            registry,
-                            sync_run_default,
-                            discover,
-                            task_count,
-                            on_registry_failure,
-                        )
-                        if task_count is not None:
-                            task_count.succeeded += 1
-
-            except StopIteration:
-                break
+            if dep.id not in completion_cache:
+                await _run_task_sequential_aio(
+                    dep,
+                    completion_cache,
+                    all_tasks,
+                    build_id,
+                    registry,
+                    sync_run_default,
+                    discover,
+                    task_count,
+                    on_registry_failure,
+                )
+                if task_count is not None:
+                    task_count.succeeded += 1
 
     completion_cache.add(task.id)
     await registry.task_complete_aio(build_id, task)

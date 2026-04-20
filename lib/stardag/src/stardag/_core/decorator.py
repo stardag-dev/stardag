@@ -221,6 +221,14 @@ def task(
 
         is_async = inspect.iscoroutinefunction(_func)
 
+        # Reject generator functions — dynamic dependencies require the class API
+        if inspect.isgeneratorfunction(_func) or inspect.isasyncgenfunction(_func):
+            raise TypeError(
+                f"@task does not support generator functions (got {_func.__name__}). "
+                "Dynamic dependencies require the class-based Task API — "
+                "implement run()/run_aio() as a generator method on a Task subclass."
+            )
+
         signature = inspect.signature(_func)
         return_type = signature.return_annotation
         if return_type == inspect.Parameter.empty:
