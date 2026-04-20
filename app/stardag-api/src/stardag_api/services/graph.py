@@ -257,7 +257,9 @@ async def traverse_upstream(
     if all_relevant_pks:
         edge_result = await db.execute(
             select(
-                TaskDependency.upstream_task_id, TaskDependency.downstream_task_id
+                TaskDependency.upstream_task_id,
+                TaskDependency.downstream_task_id,
+                TaskDependency.is_dynamic,
             ).where(
                 TaskDependency.upstream_task_id.in_(all_relevant_pks),
                 TaskDependency.downstream_task_id.in_(all_relevant_pks),
@@ -300,7 +302,13 @@ async def traverse_upstream(
             continue
 
         if source in included_pk_set and target in included_pk_set:
-            edges.append(TaskEdgeExtended(source=str(source), target=str(target)))
+            edges.append(
+                TaskEdgeExtended(
+                    source=str(source),
+                    target=str(target),
+                    is_dynamic=edge.is_dynamic,
+                )
+            )
 
     for group in groups:
         downstream_pks = group_downstream_pks.get(group.group_id, set())

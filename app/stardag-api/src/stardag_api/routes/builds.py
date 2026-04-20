@@ -35,6 +35,8 @@ from stardag_api.models import (
 )
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.schemas import (
+    AddDependenciesRequest,
+    AddDependenciesResponse,
     BuildCreate,
     BuildListResponse,
     BuildResponse,
@@ -625,6 +627,82 @@ async def exit_early(
 # --- Tasks within Builds ---
 
 
+async def _reconcile_dependency_edges(
+    *,
+    db: AsyncSession,
+    environment_id: UUID,
+    downstream_task_pk: UUID,
+    upstream_task_ids: list[str],
+    is_dynamic: bool,
+) -> int:
+    """Create any missing upstream tasks (as phantoms) and dependency edges.
+
+    Idempotent: ``ON CONFLICT DO NOTHING`` handles concurrent registrations.
+    An edge's ``is_dynamic`` value is set from the *first* successful insert;
+    a later call with a different ``is_dynamic`` value does not overwrite the
+    existing row. That's intentional — if a dep is both static and yielded
+    dynamically (unusual) we record the first observation as authoritative.
+
+    Returns the number of edges inserted by this call (approximate — the race
+    resolution path may cause an edge to be counted as inserted by the loser
+    of a conflict).
+    """
+    inserted = 0
+    for dep_task_id in upstream_task_ids:
+        dep_result = await db.execute(
+            select(Task)
+            .where(Task.environment_id == environment_id)
+            .where(Task.task_id == dep_task_id)
+        )
+        dep_task_record = dep_result.scalar_one_or_none()
+
+        if not dep_task_record:
+            stmt = (
+                pg_insert(Task)
+                .values(
+                    id=generate_uuid7(),
+                    task_id=dep_task_id,
+                    environment_id=environment_id,
+                    task_namespace="",
+                    task_name=dep_task_id[:12],
+                    task_data={},
+                    is_phantom=True,
+                    created_at=utc_now(),
+                )
+                .on_conflict_do_nothing(
+                    constraint="uq_task_environment_taskid",
+                )
+            )
+            await db.execute(stmt)
+            dep_result = await db.execute(
+                select(Task)
+                .where(Task.environment_id == environment_id)
+                .where(Task.task_id == dep_task_id)
+            )
+            dep_task_record = dep_result.scalar_one()
+
+        edge_stmt = (
+            pg_insert(TaskDependency)
+            .values(
+                id=generate_uuid7(),
+                upstream_task_id=dep_task_record.id,
+                downstream_task_id=downstream_task_pk,
+                is_dynamic=is_dynamic,
+                created_at=utc_now(),
+            )
+            .on_conflict_do_nothing(
+                constraint="uq_task_dependency_edge",
+            )
+        )
+        result = await db.execute(edge_stmt)
+        # CursorResult.rowcount is 0 on conflict, 1 on insert. Accessed via
+        # getattr because the base Result type doesn't expose it statically.
+        if getattr(result, "rowcount", 0):
+            inserted += 1
+
+    return inserted
+
+
 @router.post("/{build_id}/tasks", response_model=TaskResponse, status_code=201)
 async def register_task(
     build_id: UUID,
@@ -710,62 +788,14 @@ async def register_task(
         db_task.output_uri = task.output_uri
         db_task.is_phantom = False
 
-    # Reconcile dependency edges (always, not just on create).
-    # This ensures edges are created even when tasks are registered
-    # out of order across builds, or when a phantom is upgraded.
-    # Uses ON CONFLICT DO NOTHING to handle concurrent registrations safely.
-    for dep_task_id in task.dependency_task_ids:
-        # Find or create the upstream task
-        dep_result = await db.execute(
-            select(Task)
-            .where(Task.environment_id == build.environment_id)
-            .where(Task.task_id == dep_task_id)
-        )
-        dep_task_record = dep_result.scalar_one_or_none()
-
-        if not dep_task_record:
-            # Create phantom task for unresolved dependency.
-            # Use INSERT ... ON CONFLICT DO NOTHING to handle races where
-            # another request creates the same task concurrently.
-            stmt = (
-                pg_insert(Task)
-                .values(
-                    id=generate_uuid7(),
-                    task_id=dep_task_id,
-                    environment_id=build.environment_id,
-                    task_namespace="",
-                    task_name=dep_task_id[:12],
-                    task_data={},
-                    is_phantom=True,
-                    created_at=utc_now(),
-                )
-                .on_conflict_do_nothing(
-                    constraint="uq_task_environment_taskid",
-                )
-            )
-            await db.execute(stmt)
-            # Re-query to get the record (ours or the concurrent winner's)
-            dep_result = await db.execute(
-                select(Task)
-                .where(Task.environment_id == build.environment_id)
-                .where(Task.task_id == dep_task_id)
-            )
-            dep_task_record = dep_result.scalar_one()
-
-        # Create edge if it doesn't exist (ON CONFLICT DO NOTHING for races)
-        edge_stmt = (
-            pg_insert(TaskDependency)
-            .values(
-                id=generate_uuid7(),
-                upstream_task_id=dep_task_record.id,
-                downstream_task_id=db_task.id,
-                created_at=utc_now(),
-            )
-            .on_conflict_do_nothing(
-                constraint="uq_task_dependency_edge",
-            )
-        )
-        await db.execute(edge_stmt)
+    # Reconcile static dependency edges (is_dynamic=False).
+    await _reconcile_dependency_edges(
+        db=db,
+        environment_id=build.environment_id,
+        downstream_task_pk=db_task.id,
+        upstream_task_ids=task.dependency_task_ids,
+        is_dynamic=False,
+    )
 
     # Create appropriate event for this build:
     # - TASK_PENDING if this build first registered the task
@@ -860,6 +890,75 @@ async def suspend_task(
     return await _create_task_event(
         build_id, task_id, EventType.TASK_SUSPENDED, db, auth, commit_hash=commit_hash
     )
+
+
+@router.post(
+    "/{build_id}/tasks/{task_id}/dependencies",
+    response_model=AddDependenciesResponse,
+)
+async def add_task_dependencies(
+    build_id: UUID,
+    task_id: str,
+    request: AddDependenciesRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Register dependency edges for an existing task.
+
+    Used by the SDK to record dynamically-yielded dependencies at runtime —
+    deps that weren't known at ``task_register`` time because they come from
+    a ``yield`` inside ``run()`` / ``run_aio()``. Static deps declared via
+    ``requires()`` are registered in :func:`register_task` and don't use
+    this endpoint.
+
+    Creates phantom upstream tasks for unknown ``upstream_task_ids`` and
+    inserts edges idempotently (``ON CONFLICT DO NOTHING``). The first write
+    of a given edge sets ``is_dynamic``; subsequent writes do not overwrite.
+
+    Returns:
+        ``{"added": <new edges>, "total": <upstream_task_ids length>}``.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        check_structural_limit(
+            len(request.upstream_task_ids),
+            limits_settings.max_dependency_ids_per_task,
+            ErrorCode.DEPENDENCY_COUNT_LIMIT,
+            "upstream_task_ids",
+        )
+    )
+
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+    if build.environment_id != auth.environment_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this environment"
+        )
+
+    # Locate the downstream task (created by register_task earlier in this build)
+    result = await db.execute(
+        select(Task)
+        .where(Task.environment_id == build.environment_id)
+        .where(Task.task_id == task_id)
+    )
+    db_task = result.scalar_one_or_none()
+    if not db_task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} not registered in this environment",
+        )
+
+    added = await _reconcile_dependency_edges(
+        db=db,
+        environment_id=build.environment_id,
+        downstream_task_pk=db_task.id,
+        upstream_task_ids=request.upstream_task_ids,
+        is_dynamic=request.is_dynamic,
+    )
+    await db.commit()
+
+    return AddDependenciesResponse(added=added, total=len(request.upstream_task_ids))
 
 
 @router.post("/{build_id}/tasks/{task_id}/resume", response_model=TaskEventResponse)
@@ -1269,7 +1368,12 @@ async def get_build_graph(
     deps = edge_result.scalars().all()
 
     edges = [
-        TaskEdge(source=d.upstream_task_id, target=d.downstream_task_id) for d in deps
+        TaskEdge(
+            source=d.upstream_task_id,
+            target=d.downstream_task_id,
+            is_dynamic=d.is_dynamic,
+        )
+        for d in deps
     ]
 
     return TaskGraphResponse(nodes=nodes, edges=edges)

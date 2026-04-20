@@ -160,6 +160,24 @@ class TaskResponse(BaseModel):
     created_at: datetime
 
 
+class AddDependenciesRequest(BaseModel):
+    """Schema for registering dependency edges on an existing task.
+
+    Used by the SDK to record dynamically-yielded dependencies at runtime
+    (dependencies that aren't known until a task's ``run()`` yields them).
+    """
+
+    upstream_task_ids: list[str]
+    is_dynamic: bool = True
+
+
+class AddDependenciesResponse(BaseModel):
+    """Response for ``add_task_dependencies``."""
+
+    added: int
+    total: int
+
+
 class TaskWithStatusResponse(TaskResponse):
     """Task response with status derived from events (global across all builds)."""
 
@@ -253,6 +271,7 @@ class TaskEdge(BaseModel):
 
     source: UUID  # upstream task id
     target: UUID  # downstream task id
+    is_dynamic: bool = False  # True if edge was discovered at runtime via yield
 
 
 class TaskGraphResponse(BaseModel):
@@ -287,6 +306,7 @@ class TaskEdgeExtended(BaseModel):
 
     source: str
     target: str
+    is_dynamic: bool = False
 
 
 class TaskGraphRequest(BaseModel):

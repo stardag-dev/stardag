@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Index, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, ForeignKey, Index, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
@@ -52,6 +52,19 @@ class TaskDependency(Base, TimestampMixin):
         Uuid,
         ForeignKey("tasks.id", ondelete="CASCADE"),
         nullable=False,
+    )
+
+    # True when this edge was added at runtime because the downstream task
+    # yielded the upstream as a dynamic dep. False for edges coming from a
+    # task's static ``requires()`` at registration time. An edge that exists
+    # as both static and dynamic (unusual but possible) is stored once with
+    # the FIRST observation; we don't flip from False -> True on later writes
+    # because the initial registration is authoritative.
+    is_dynamic: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default="false",
+        default=False,
     )
 
     # Relationships
