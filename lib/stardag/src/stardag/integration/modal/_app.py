@@ -406,9 +406,12 @@ class RunFunction(typing.Protocol):
 
     This function is called remotely on Modal to execute a single task.
     It receives a task instance and returns either ``None`` (task completed)
-    or a ``TaskStruct`` of dynamic dependencies that were not yet complete
-    (for idempotent re-execution — the task will be re-invoked after those
-    deps are built).
+    or the ``TaskStruct`` yielded at the first incomplete dynamic-deps yield
+    (which may include deps that are already complete — the caller is
+    expected to filter if that matters). This enables idempotent
+    re-execution: the build system schedules the yielded deps, then
+    re-invokes the task. On re-execution the generator advances past
+    previously-yielded batches whose deps are now complete.
 
     The default implementation (``Runner``) handles sync, async, and dynamic
     deps tasks. Custom implementations can subclass ``Runner`` to override
@@ -559,12 +562,25 @@ class Runner(RunFunction):
     def run(self, task: BaseTask) -> None | TaskStruct:
         """Default run logic — handles sync, async, and dynamic deps tasks.
 
+        Dispatch policy:
+
+        - **Async-only** (``run_aio`` defined, ``run`` not overridden):
+          async generator ``run_aio`` is driven via ``_drive_async_generator``;
+          otherwise ``asyncio.run(task.run_aio())``.
+        - **Sync-only and dual** (``run`` defined, with or without ``run_aio``):
+          ``task.run()`` is called. If it returns a sync generator it is
+          driven via ``_drive_sync_generator``. Dual tasks intentionally
+          prefer the sync path here because the Modal worker invocation is
+          itself synchronous — if you need async execution for a dual task,
+          implement it in ``run()`` (e.g. via ``asyncio.run`` internally).
+
         Generators cannot be serialized across the Modal boundary, so we
-        mirror ``_run_task_in_process``: drive the generator forward while
-        yielded deps are complete, and return the first batch of incomplete
-        deps as a ``TaskStruct``. The ``ModalTaskExecutor`` will build those
-        deps and re-invoke this function — on re-execution the generator
-        advances past previously-yielded completions.
+        mirror ``_run_task_in_process``: drive forward while yielded batches
+        are fully complete, and at the first yield with any incomplete dep
+        return the entire yielded ``TaskStruct``. The ``ModalTaskExecutor``
+        builds those deps (filtering for incomplete ones) and re-invokes this
+        function — on re-execution the generator advances past the
+        now-complete batch.
         """
         has_run_aio = _has_custom_run_aio(task)
         has_run = _has_custom_run(task)
@@ -576,14 +592,26 @@ class Runner(RunFunction):
             asyncio.run(task.run_aio())
             return None
 
-        # Sync (or dual) task — run and drive generator if returned
+        # Sync (or dual) task — run and drive generator if returned.
+        # Dual tasks deliberately take the sync path; see method docstring.
         return _drive_sync_generator(task.run())
 
 
 def _drive_sync_generator(
     result: None | typing.Generator[TaskStruct, None, None] | TaskStruct,
 ) -> None | TaskStruct:
-    """Drive a sync generator result, returning incomplete deps as TaskStruct."""
+    """Drive a sync generator result for idempotent re-execution.
+
+    Advances the generator past yield batches whose deps are all complete.
+    Stops at the first yield with any incomplete dep and returns that yield's
+    full ``TaskStruct`` (which may also include already-complete deps — the
+    caller is expected to filter for incomplete ones when scheduling). If
+    the generator completes, returns ``None``.
+
+    If ``result`` is ``None`` (no dynamic deps) returns ``None``. If
+    ``result`` is already a ``TaskStruct`` (unusual but possible when a
+    user's ``run()`` returns deps directly) it is returned as-is.
+    """
     if result is None:
         return None
     if not hasattr(result, "__next__"):
@@ -603,7 +631,13 @@ def _drive_sync_generator(
 
 
 async def _drive_async_generator(task: BaseTask) -> None | TaskStruct:
-    """Drive an async generator ``run_aio``, returning incomplete deps as TaskStruct."""
+    """Drive an async generator ``run_aio`` for idempotent re-execution.
+
+    Same contract as ``_drive_sync_generator``: advances past fully-complete
+    yield batches and returns the first batch that contains any incomplete
+    dep as a ``TaskStruct`` (may include already-complete deps). Returns
+    ``None`` when the generator finishes.
+    """
     agen = typing.cast(
         typing.AsyncGenerator[TaskStruct, None],
         task.run_aio(),  # type: ignore[assignment]
