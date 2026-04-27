@@ -38,6 +38,15 @@ export class ApiStack extends cdk.Stack {
 
     const { config, foundation } = props;
 
+    // Sizing knobs that ops may want to tune at deploy time without
+    // editing this file. Defaults match the OSS-friendly free-tier shape;
+    // production overrides come from the environment.
+    const apiCpu = Number(process.env.STARDAG_API_CPU ?? 256);
+    const apiMemoryMiB = Number(process.env.STARDAG_API_MEMORY_MIB ?? 512);
+    const apiDesiredCount = Number(process.env.STARDAG_API_DESIRED_COUNT ?? 1);
+    const apiAutoscaleMax = Number(process.env.STARDAG_API_AUTOSCALE_MAX ?? 4);
+    const apiGunicornWorkers = process.env.STARDAG_API_GUNICORN_WORKERS;
+
     // =============================================================
     // ECS Cluster
     // =============================================================
@@ -80,8 +89,8 @@ export class ApiStack extends cdk.Stack {
     // Task Definition
     // =============================================================
     const taskDefinition = new ecs.FargateTaskDefinition(this, "TaskDef", {
-      cpu: 256,
-      memoryLimitMiB: 512,
+      cpu: apiCpu,
+      memoryLimitMiB: apiMemoryMiB,
       runtimePlatform: {
         cpuArchitecture: ecs.CpuArchitecture.X86_64,
         operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
@@ -137,6 +146,9 @@ export class ApiStack extends cdk.Stack {
         LIMITS_MAX_ASSETS_PER_WORKSPACE_24H: "1000",
         LIMITS_MAX_DEPENDENCY_IDS_PER_TASK: "500",
         LIMITS_MAX_ASSETS_PER_TASK: "10",
+        // Worker count is read by the Dockerfile CMD; keep undefined here
+        // to fall through to the image's default (sized for 1 vCPU).
+        ...(apiGunicornWorkers ? { GUNICORN_WORKERS: apiGunicornWorkers } : {}),
       },
       secrets: {
         // Inject database credentials from Secrets Manager
@@ -181,7 +193,7 @@ export class ApiStack extends cdk.Stack {
       {
         cluster: this.cluster,
         taskDefinition,
-        desiredCount: 1,
+        desiredCount: apiDesiredCount,
         serviceName: "stardag-api",
 
         // Networking
@@ -234,8 +246,8 @@ export class ApiStack extends cdk.Stack {
     // Auto Scaling
     // =============================================================
     const scaling = this.service.service.autoScaleTaskCount({
-      minCapacity: 1,
-      maxCapacity: 4,
+      minCapacity: apiDesiredCount,
+      maxCapacity: apiAutoscaleMax,
     });
 
     scaling.scaleOnCpuUtilization("CpuScaling", {

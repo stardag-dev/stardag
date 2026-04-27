@@ -39,8 +39,8 @@ export class StardagStack extends cdk.Stack {
     this.database = new StardagDatabase(this, "Database", {
       vpc: this.vpc.vpc,
       databaseName: "stardag",
-      minCapacity: 0.5, // Minimum ACU
-      maxCapacity: 4, // Scale up to 4 ACU under load
+      minCapacity: Number(process.env.STARDAG_DB_MIN_ACU ?? 0.5),
+      maxCapacity: Number(process.env.STARDAG_DB_MAX_ACU ?? 4),
     });
 
     // =============================================================
@@ -83,9 +83,9 @@ export class StardagStack extends cdk.Stack {
       oidcAudience: this.cognito.userPoolClient.userPoolClientId,
       apiDomain: config.apiDomain,
       uiDomain: config.uiDomain,
-      cpu: 256, // 0.25 vCPU
-      memoryLimitMiB: 512,
-      desiredCount: 1,
+      cpu: Number(process.env.STARDAG_API_CPU ?? 256),
+      memoryLimitMiB: Number(process.env.STARDAG_API_MEMORY_MIB ?? 512),
+      desiredCount: Number(process.env.STARDAG_API_DESIRED_COUNT ?? 1),
       certificate: this.dns?.apiCertificate,
     });
 

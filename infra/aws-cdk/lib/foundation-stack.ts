@@ -70,8 +70,8 @@ export class FoundationStack extends cdk.Stack {
     const database = new StardagDatabase(this, "Database", {
       vpc: this.vpc,
       databaseName: "stardag",
-      minCapacity: 0.5,
-      maxCapacity: 4,
+      minCapacity: Number(process.env.STARDAG_DB_MIN_ACU ?? 0.5),
+      maxCapacity: Number(process.env.STARDAG_DB_MAX_ACU ?? 4),
     });
 
     this.dbClusterEndpoint = database.cluster.clusterEndpoint.hostname;
