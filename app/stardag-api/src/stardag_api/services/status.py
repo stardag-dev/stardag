@@ -6,7 +6,108 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import BuildStatus, Event, EventType, TaskStatus
+from stardag_api.models import BuildStatus, Event, EventType, Task, TaskStatus
+
+
+def apply_event_to_task(task: Task, event: Event) -> None:
+    """Mutate a Task's denormalised latest_* columns to reflect a new event.
+
+    This implements the same priority logic as the historical
+    get_all_task_global_statuses event scan, applied incrementally:
+
+      - TASK_COMPLETED is sticky — once completed, no other event downgrades.
+      - Otherwise TASK_RUNNING / TASK_FAILED / TASK_CANCELLED overwrite
+        PENDING (and each other, in event-arrival order).
+      - TASK_RESUMED is treated like TASK_STARTED (re-asserts RUNNING).
+      - TASK_WAITING_FOR_LOCK only sets the flag if the task is still PENDING.
+      - TASK_REFERENCED and TASK_PENDING are status-neutral on existing rows
+        (they don't downgrade COMPLETED → PENDING).
+
+    The caller is responsible for persisting the Task — this function only
+    mutates the in-memory ORM instance.
+    """
+    event_commit = (
+        event.event_metadata.get("commit_hash") if event.event_metadata else None
+    )
+    et = event.event_type
+
+    # Generic bookkeeping that always reflects the most-recently-applied event.
+    # latest_status_event_id moves only when status itself moves; see below.
+
+    if et == EventType.TASK_COMPLETED:
+        task.latest_status = TaskStatus.COMPLETED
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+        task.latest_completed_at = event.created_at
+        task.latest_waiting_for_lock = False
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
+        return
+
+    # All branches below are no-ops once the task is COMPLETED.
+    if task.latest_status == TaskStatus.COMPLETED:
+        return
+
+    if et == EventType.TASK_STARTED:
+        task.latest_status = TaskStatus.RUNNING
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+        if task.latest_started_at is None:
+            task.latest_started_at = event.created_at
+        task.latest_waiting_for_lock = False
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
+    elif et == EventType.TASK_RESUMED:
+        task.latest_status = TaskStatus.RUNNING
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+        task.latest_waiting_for_lock = False
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
+    elif et == EventType.TASK_FAILED:
+        task.latest_status = TaskStatus.FAILED
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+        task.latest_completed_at = event.created_at
+        task.latest_error_message = event.error_message
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
+    elif et == EventType.TASK_CANCELLED:
+        task.latest_status = TaskStatus.CANCELLED
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+        task.latest_completed_at = event.created_at
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
+    elif et == EventType.TASK_SKIPPED:
+        task.latest_status = TaskStatus.SKIPPED
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+        task.latest_completed_at = event.created_at
+    elif et == EventType.TASK_SUSPENDED:
+        task.latest_status = TaskStatus.SUSPENDED
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+    elif et == EventType.TASK_WAITING_FOR_LOCK:
+        if task.latest_status == TaskStatus.PENDING:
+            task.latest_waiting_for_lock = True
+    elif et == EventType.TASK_PENDING:
+        # Initial PENDING for a brand-new task: keep PENDING but record the
+        # event so the latest_status_at field reflects the most recent
+        # contributing event. Don't downgrade an already-non-PENDING state.
+        if task.latest_status == TaskStatus.PENDING:
+            task.latest_status_at = event.created_at
+            task.latest_status_event_id = event.id
+            task.latest_status_build_id = event.build_id
+    # TASK_REFERENCED is informational and never affects latest_* state
+    # (the global semantics treat it as a no-op).
 
 
 async def get_build_status(
@@ -193,57 +294,40 @@ async def get_task_global_status(
 ) -> tuple[TaskStatus, datetime | None, datetime | None, str | None, UUID | None]:
     """Get task status considering events from ALL builds.
 
-    This provides a "global" view of task status across all builds in the workspace.
-    Useful for understanding the true state when multiple builds share tasks.
-
-    Priority order:
-    1. TASK_COMPLETED in any build -> completed (with build_id)
-    2. TASK_STARTED/RUNNING in any build -> running
-    3. TASK_PENDING -> pending
+    Reads the denormalised ``latest_*`` columns on tasks (maintained
+    in-transaction by ``apply_event_to_task`` whenever a task event is
+    created). Falls back to PENDING for tasks that don't exist.
 
     Returns:
         Tuple of (status, started_at, completed_at, error_message, completed_in_build_id)
     """
-    # Get all events for this task across all builds
-    result = await db.execute(
-        select(Event)
-        .where(Event.task_id == task_db_id)
-        .order_by(Event.created_at.asc())
+    task = await db.get(Task, task_db_id)
+    if task is None:
+        return TaskStatus.PENDING, None, None, None, None
+
+    # The "completed_in_build_id" semantic was: the build where TASK_COMPLETED
+    # fired. With denormalised columns we use latest_status_build_id when the
+    # status is a terminal one (matches existing UI use, since the field is
+    # only consulted for non-pending statuses).
+    completed_in_build_id = (
+        task.latest_status_build_id
+        if task.latest_status
+        in (
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.SKIPPED,
+        )
+        else None
     )
-    events = result.scalars().all()
 
-    # Track the "best" status we've seen
-    # Priority: COMPLETED > RUNNING > PENDING
-    best_status = TaskStatus.PENDING
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    error_message: str | None = None
-    completed_in_build_id: UUID | None = None
-
-    for event in events:
-        if event.event_type == EventType.TASK_COMPLETED:
-            # Completed takes precedence over everything
-            best_status = TaskStatus.COMPLETED
-            completed_at = event.created_at
-            completed_in_build_id = event.build_id
-        elif event.event_type == EventType.TASK_STARTED:
-            # Running takes precedence over pending (but not completed)
-            if best_status != TaskStatus.COMPLETED:
-                best_status = TaskStatus.RUNNING
-                if started_at is None:
-                    started_at = event.created_at
-        elif event.event_type == EventType.TASK_RESUMED:
-            # Resumed also means running
-            if best_status != TaskStatus.COMPLETED:
-                best_status = TaskStatus.RUNNING
-        elif event.event_type == EventType.TASK_FAILED:
-            # Only set failed if not completed elsewhere
-            if best_status != TaskStatus.COMPLETED:
-                best_status = TaskStatus.FAILED
-                completed_at = event.created_at
-                error_message = event.error_message
-
-    return best_status, started_at, completed_at, error_message, completed_in_build_id
+    return (
+        task.latest_status,
+        task.latest_started_at,
+        task.latest_completed_at,
+        task.latest_error_message,
+        completed_in_build_id,
+    )
 
 
 async def get_all_task_global_statuses(
@@ -262,29 +346,31 @@ async def get_all_task_global_statuses(
 ]:
     """Get global status for multiple tasks considering events from ALL builds.
 
-    This is a batched version of get_task_global_status for efficiency.
+    Reads the denormalised ``latest_*`` columns on tasks. Tasks not present
+    in the DB default to PENDING with no metadata.
 
     Returns:
         Dict mapping task_db_id to:
         (status, started_at, completed_at, error_message, status_build_id,
          waiting_for_lock, commit_hash)
-
-        status_build_id is the build where the status-determining event occurred.
-        commit_hash is extracted from the status-determining event's metadata.
     """
     if not task_db_ids:
         return {}
 
-    # Get all events for these tasks across all builds
     result = await db.execute(
-        select(Event)
-        .where(Event.task_id.in_(task_db_ids))
-        .order_by(Event.created_at.asc())
+        select(
+            Task.id,
+            Task.latest_status,
+            Task.latest_started_at,
+            Task.latest_completed_at,
+            Task.latest_error_message,
+            Task.latest_status_build_id,
+            Task.latest_waiting_for_lock,
+            Task.latest_commit_hash,
+        ).where(Task.id.in_(task_db_ids))
     )
-    events = result.scalars().all()
 
-    # Initialize statuses for all requested tasks
-    statuses: dict[
+    found: dict[
         UUID,
         tuple[
             TaskStatus,
@@ -295,85 +381,39 @@ async def get_all_task_global_statuses(
             bool,
             str | None,
         ],
-    ] = {
-        task_id: (TaskStatus.PENDING, None, None, None, None, False, None)
-        for task_id in task_db_ids
-    }
-
-    # Track per-task state as we process events
-    task_states: dict[UUID, dict] = {
-        task_id: {
-            "status": TaskStatus.PENDING,
-            "started_at": None,
-            "completed_at": None,
-            "error_message": None,
-            "status_build_id": None,
-            "waiting_for_lock": False,
-            "commit_hash": None,
-        }
-        for task_id in task_db_ids
-    }
-
-    for event in events:
-        if event.task_id is None or event.task_id not in task_states:
-            continue
-
-        state = task_states[event.task_id]
-        event_commit = (
-            event.event_metadata.get("commit_hash") if event.event_metadata else None
+    ] = {}
+    for (
+        task_id,
+        latest_status,
+        latest_started_at,
+        latest_completed_at,
+        latest_error_message,
+        latest_status_build_id,
+        latest_waiting_for_lock,
+        latest_commit_hash,
+    ) in result.all():
+        # latest_status comes back as the string value because the column is
+        # String(32). Coerce back to the enum so callers see a TaskStatus.
+        status = (
+            latest_status
+            if isinstance(latest_status, TaskStatus)
+            else TaskStatus(latest_status)
+        )
+        found[task_id] = (
+            status,
+            latest_started_at,
+            latest_completed_at,
+            latest_error_message,
+            latest_status_build_id,
+            bool(latest_waiting_for_lock),
+            latest_commit_hash,
         )
 
-        if event.event_type == EventType.TASK_COMPLETED:
-            # Completed takes precedence over everything
-            state["status"] = TaskStatus.COMPLETED
-            state["completed_at"] = event.created_at
-            state["status_build_id"] = event.build_id
-            state["waiting_for_lock"] = False  # No longer waiting
-            state["commit_hash"] = event_commit
-        elif event.event_type == EventType.TASK_STARTED:
-            # Running takes precedence over pending (but not completed)
-            if state["status"] != TaskStatus.COMPLETED:
-                state["status"] = TaskStatus.RUNNING
-                state["status_build_id"] = event.build_id
-                if state["started_at"] is None:
-                    state["started_at"] = event.created_at
-                state["waiting_for_lock"] = False
-                state["commit_hash"] = event_commit
-        elif event.event_type == EventType.TASK_RESUMED:
-            if state["status"] != TaskStatus.COMPLETED:
-                state["status"] = TaskStatus.RUNNING
-                state["status_build_id"] = event.build_id
-                state["waiting_for_lock"] = False
-                state["commit_hash"] = event_commit
-        elif event.event_type == EventType.TASK_FAILED:
-            # Only set failed if not completed elsewhere
-            if state["status"] != TaskStatus.COMPLETED:
-                state["status"] = TaskStatus.FAILED
-                state["status_build_id"] = event.build_id
-                state["completed_at"] = event.created_at
-                state["error_message"] = event.error_message
-                state["commit_hash"] = event_commit
-        elif event.event_type == EventType.TASK_CANCELLED:
-            if state["status"] != TaskStatus.COMPLETED:
-                state["status"] = TaskStatus.CANCELLED
-                state["status_build_id"] = event.build_id
-                state["completed_at"] = event.created_at
-                state["commit_hash"] = event_commit
-        elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
-            # Only mark as waiting if not yet completed/running
-            if state["status"] == TaskStatus.PENDING:
-                state["waiting_for_lock"] = True
-
-    # Convert to return format
-    for task_id, state in task_states.items():
-        statuses[task_id] = (
-            state["status"],
-            state["started_at"],
-            state["completed_at"],
-            state["error_message"],
-            state["status_build_id"],
-            state["waiting_for_lock"],
-            state["commit_hash"],
+    # Preserve the contract of the prior implementation: every requested
+    # task_db_id appears in the result dict, with a default for missing rows.
+    return {
+        task_id: found.get(
+            task_id, (TaskStatus.PENDING, None, None, None, None, False, None)
         )
-
-    return statuses
+        for task_id in task_db_ids
+    }

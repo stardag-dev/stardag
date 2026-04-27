@@ -53,6 +53,7 @@ from stardag_api.schemas import (
 )
 from stardag_api.services import generate_build_slug, get_build_status
 from stardag_api.services.status import (
+    apply_event_to_task,
     get_all_task_global_statuses,
     get_task_status_in_build,
 )
@@ -162,6 +163,10 @@ async def _create_task_event(
         event_metadata=event_metadata,
     )
     db.add(event)
+    # Flush so event.id and event.created_at are populated before we feed the
+    # event into apply_event_to_task. The whole bundle commits atomically.
+    await db.flush()
+    apply_event_to_task(db_task, event)
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
@@ -691,6 +696,12 @@ async def _reconcile_dependency_edges(
                 "task_data": {},
                 "is_phantom": True,
                 "created_at": now,
+                # Match the historical "task with no events shows as PENDING"
+                # semantic so phantoms appear consistently in the UI; the
+                # is_phantom column distinguishes them for consumers that
+                # care.
+                "latest_status": TaskStatus.PENDING,
+                "latest_waiting_for_lock": False,
             }
             for tid in missing_ids
         ]
@@ -854,6 +865,8 @@ async def register_task(
         else EventType.TASK_PENDING,
     )
     db.add(event)
+    await db.flush()
+    apply_event_to_task(db_task, event)
 
     await db.commit()
     await db.refresh(db_task)
