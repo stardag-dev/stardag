@@ -49,7 +49,7 @@ async def _count_edges_into(session: AsyncSession, downstream_pk: UUID) -> int:
     result = await session.execute(
         select(TaskDependency).where(TaskDependency.downstream_task_id == downstream_pk)
     )
-    return len(list(result.scalars().all()))
+    return len(result.scalars().all())
 
 
 async def test_creates_phantoms_and_edges_in_one_call(
@@ -72,7 +72,12 @@ async def test_creates_phantoms_and_edges_in_one_call(
 
     # Phantoms exist for all three upstream ids.
     for tid in ("dep-1", "dep-2", "dep-3"):
-        result = await pg_session.execute(select(Task).where(Task.task_id == tid))
+        result = await pg_session.execute(
+            select(Task).where(
+                Task.environment_id == DEFAULT_ENVIRONMENT_ID,
+                Task.task_id == tid,
+            )
+        )
         row = result.scalar_one()
         assert row.is_phantom is True
 
@@ -103,7 +108,12 @@ async def test_mixed_existing_and_missing_upstreams(
     assert refreshed.is_phantom is False
 
     # Missing upstream got a phantom row.
-    result = await pg_session.execute(select(Task).where(Task.task_id == "missing-up"))
+    result = await pg_session.execute(
+        select(Task).where(
+            Task.environment_id == DEFAULT_ENVIRONMENT_ID,
+            Task.task_id == "missing-up",
+        )
+    )
     phantom = result.scalar_one()
     assert phantom.is_phantom is True
 
@@ -182,6 +192,11 @@ async def test_duplicate_ids_in_input_are_deduplicated(
     # One unique upstream — one phantom, one edge.
     assert inserted == 1
     assert await _count_edges_into(pg_session, downstream.id) == 1
-    result = await pg_session.execute(select(Task).where(Task.task_id == "dup-up"))
+    result = await pg_session.execute(
+        select(Task).where(
+            Task.environment_id == DEFAULT_ENVIRONMENT_ID,
+            Task.task_id == "dup-up",
+        )
+    )
     rows = list(result.scalars().all())
     assert len(rows) == 1

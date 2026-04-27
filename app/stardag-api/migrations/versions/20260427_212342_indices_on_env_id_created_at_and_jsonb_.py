@@ -55,6 +55,7 @@ def upgrade() -> None:
         existing_type=_existing_json,
         type_=_jsonb_variant,
         existing_nullable=False,
+        postgresql_using="root_task_ids::jsonb",
     )
     op.alter_column(
         "events",
@@ -62,6 +63,7 @@ def upgrade() -> None:
         existing_type=_existing_json,
         type_=_jsonb_variant,
         existing_nullable=True,
+        postgresql_using="event_metadata::jsonb",
     )
     op.alter_column(
         "task_artifacts",
@@ -69,6 +71,7 @@ def upgrade() -> None:
         existing_type=_existing_json,
         type_=_jsonb_variant,
         existing_nullable=False,
+        postgresql_using="body_json::jsonb",
     )
     op.create_index(
         "ix_task_artifacts_environment_created",
@@ -82,6 +85,7 @@ def upgrade() -> None:
         existing_type=_existing_json,
         type_=_jsonb_variant,
         existing_nullable=False,
+        postgresql_using="task_data::jsonb",
     )
     op.create_index(
         "ix_tasks_environment_created",
@@ -100,6 +104,7 @@ def downgrade() -> None:
         existing_type=_jsonb_variant,
         type_=_existing_json,
         existing_nullable=False,
+        postgresql_using="task_data::json",
     )
     op.drop_index("ix_task_artifacts_environment_created", table_name="task_artifacts")
     op.alter_column(
@@ -108,6 +113,7 @@ def downgrade() -> None:
         existing_type=_jsonb_variant,
         type_=_existing_json,
         existing_nullable=False,
+        postgresql_using="body_json::json",
     )
     op.alter_column(
         "events",
@@ -115,6 +121,7 @@ def downgrade() -> None:
         existing_type=_jsonb_variant,
         type_=_existing_json,
         existing_nullable=True,
+        postgresql_using="event_metadata::json",
     )
     op.alter_column(
         "builds",
@@ -122,4 +129,5 @@ def downgrade() -> None:
         existing_type=_jsonb_variant,
         type_=_existing_json,
         existing_nullable=False,
+        postgresql_using="root_task_ids::json",
     )

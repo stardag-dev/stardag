@@ -634,12 +634,17 @@ async def _reconcile_dependency_edges(
 ) -> int:
     """Create any missing upstream tasks (as phantoms) and dependency edges.
 
-    Issues at most three statements regardless of N upstream ids:
+    Issues two statements when every upstream task already exists, or four
+    when missing upstream ids must be created as phantoms — independent of
+    N otherwise:
       1. SELECT existing tasks WHERE task_id IN (...).
-      2. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — for missing phantoms.
-         Then a single SELECT to fetch the resulting PKs (covers both rows
-         this call inserted and rows a concurrent caller raced us on).
-      3. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
+      2. (only if any upstream ids were missing) INSERT ... VALUES (...)
+         ON CONFLICT DO NOTHING — bulk phantom insert.
+      3. (only if any upstream ids were missing) SELECT to re-fetch PKs.
+         Required because ON CONFLICT DO NOTHING + RETURNING only returns
+         our own inserted rows; a concurrent caller may have created the
+         row first and we still need its PK.
+      4. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
 
     Idempotent: ``ON CONFLICT DO NOTHING`` handles concurrent registrations.
     An edge's ``is_dynamic`` value is set from the *first* successful insert;
@@ -647,9 +652,10 @@ async def _reconcile_dependency_edges(
     existing row. That's intentional — if a dep is both static and yielded
     dynamically (unusual) we record the first observation as authoritative.
 
-    Returns the number of edges inserted by this call (approximate — the race
-    resolution path may cause an edge to be counted as inserted by the loser
-    of a conflict).
+    Returns the number of edges inserted by this call. On Postgres the
+    asyncpg cursor reports an accurate rowcount; on dialects that don't
+    expose rowcount we conservatively report 0 so callers like
+    ``AddDependenciesResponse.added`` don't over-claim.
     """
     if not upstream_task_ids:
         return 0
@@ -726,12 +732,14 @@ async def _reconcile_dependency_edges(
         .on_conflict_do_nothing(constraint="uq_task_dependency_edge")
     )
     result = await db.execute(edge_stmt)
-    # CursorResult.rowcount totals across all VALUES rows on Postgres.
-    # On dialect-specific paths that don't return rowcount, we conservatively
-    # fall back to len(edge_rows).
+    # CursorResult.rowcount totals across all VALUES rows on Postgres
+    # (with asyncpg, this is reliable even for ON CONFLICT DO NOTHING —
+    # only actually-inserted rows are counted). On dialects that don't
+    # expose rowcount we report 0 rather than len(edge_rows), since
+    # len(edge_rows) would over-claim whenever any conflict occurred.
     inserted = getattr(result, "rowcount", None)
     if inserted is None or inserted < 0:
-        inserted = len(edge_rows)
+        inserted = 0
     return inserted
 
 

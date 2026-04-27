@@ -216,7 +216,7 @@ def clear_limits_caches():
 
 
 @pytest.fixture
-async def pg_engine(request):
+async def pg_engine():
     """Create a PostgreSQL test database engine with the latest schema.
 
     Requires STARDAG_API_TEST_DATABASE_URL to be set, e.g.::
