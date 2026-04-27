@@ -205,12 +205,15 @@ async def unauthenticated_client(async_engine) -> AsyncGenerator[AsyncClient, No
 def clear_limits_caches():
     """Clear in-memory caches between tests to prevent cross-test pollution."""
     from stardag_api.limits import _entity_cache, _rate_limiter
+    from stardag_api.services.api_keys import _validation_cache
 
     _rate_limiter.clear()
     _entity_cache.clear()
+    _validation_cache.clear()
     yield
     _rate_limiter.clear()
     _entity_cache.clear()
+    _validation_cache.clear()
 
 
 # PostgreSQL test fixtures for integration testing with real migrations

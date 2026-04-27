@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from stardag_api.auth.tokens import get_token_manager
 from stardag_api.config import settings
 from stardag_api.routes import (
     auth_router,
@@ -12,6 +13,14 @@ from stardag_api.routes import (
     tasks_router,
     ui_router,
 )
+
+
+# Eagerly construct the InternalTokenManager so its (potentially ephemeral)
+# RSA keypair is generated at module-import time. Combined with gunicorn's
+# --preload flag this happens once in the master process and is inherited
+# by every forked worker — without it, each worker would generate a fresh
+# keypair and tokens signed in one worker would fail validation in another.
+get_token_manager()
 
 
 app = FastAPI(

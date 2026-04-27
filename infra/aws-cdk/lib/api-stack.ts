@@ -11,6 +11,7 @@ import * as route53 from "aws-cdk-lib/aws-route53";
 import * as route53_targets from "aws-cdk-lib/aws-route53-targets";
 import { Construct } from "constructs";
 import { StardagConfig } from "./config";
+import { intEnv } from "./env";
 import { FoundationStack } from "./foundation-stack";
 
 export interface ApiStackProps extends cdk.StackProps {
@@ -37,6 +38,43 @@ export class ApiStack extends cdk.Stack {
     super(scope, id, props);
 
     const { config, foundation } = props;
+
+    // Sizing knobs that ops may want to tune at deploy time without
+    // editing this file. Defaults match the OSS-friendly free-tier shape;
+    // production overrides come from the environment. Each helper throws
+    // on malformed input rather than silently emitting NaN into the
+    // rendered template.
+    const apiCpu = intEnv("STARDAG_API_CPU", 256);
+    const apiMemoryMiB = intEnv("STARDAG_API_MEMORY_MIB", 512);
+    const apiDesiredCount = intEnv("STARDAG_API_DESIRED_COUNT", 1);
+    // Autoscale floor defaults to desiredCount so ops who only set
+    // DESIRED_COUNT get the historical behaviour. Override with
+    // STARDAG_API_AUTOSCALE_MIN to let the service scale below the
+    // initial desired count.
+    const apiAutoscaleMin = intEnv("STARDAG_API_AUTOSCALE_MIN", apiDesiredCount);
+    const apiAutoscaleMax = intEnv("STARDAG_API_AUTOSCALE_MAX", 4);
+    if (apiAutoscaleMax < apiAutoscaleMin) {
+      throw new Error(
+        `STARDAG_API_AUTOSCALE_MAX (${apiAutoscaleMax}) must be >= ` +
+          `STARDAG_API_AUTOSCALE_MIN (${apiAutoscaleMin})`,
+      );
+    }
+    const apiGunicornWorkers = process.env.STARDAG_API_GUNICORN_WORKERS;
+    if (apiGunicornWorkers !== undefined) {
+      const trimmed = apiGunicornWorkers.trim();
+      const parsed = Number.parseInt(trimmed, 10);
+      if (
+        trimmed.length === 0 ||
+        !Number.isInteger(parsed) ||
+        parsed < 1 ||
+        parsed.toString() !== trimmed
+      ) {
+        throw new Error(
+          `STARDAG_API_GUNICORN_WORKERS=${JSON.stringify(apiGunicornWorkers)} ` +
+            `must be a positive integer`,
+        );
+      }
+    }
 
     // =============================================================
     // ECS Cluster
@@ -80,8 +118,8 @@ export class ApiStack extends cdk.Stack {
     // Task Definition
     // =============================================================
     const taskDefinition = new ecs.FargateTaskDefinition(this, "TaskDef", {
-      cpu: 256,
-      memoryLimitMiB: 512,
+      cpu: apiCpu,
+      memoryLimitMiB: apiMemoryMiB,
       runtimePlatform: {
         cpuArchitecture: ecs.CpuArchitecture.X86_64,
         operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
@@ -137,6 +175,9 @@ export class ApiStack extends cdk.Stack {
         LIMITS_MAX_ASSETS_PER_WORKSPACE_24H: "1000",
         LIMITS_MAX_DEPENDENCY_IDS_PER_TASK: "500",
         LIMITS_MAX_ASSETS_PER_TASK: "10",
+        // Worker count is read by the Dockerfile CMD; keep undefined here
+        // to fall through to the image's default (sized for 1 vCPU).
+        ...(apiGunicornWorkers ? { GUNICORN_WORKERS: apiGunicornWorkers } : {}),
       },
       secrets: {
         // Inject database credentials from Secrets Manager
@@ -181,7 +222,7 @@ export class ApiStack extends cdk.Stack {
       {
         cluster: this.cluster,
         taskDefinition,
-        desiredCount: 1,
+        desiredCount: apiDesiredCount,
         serviceName: "stardag-api",
 
         // Networking
@@ -234,8 +275,8 @@ export class ApiStack extends cdk.Stack {
     // Auto Scaling
     // =============================================================
     const scaling = this.service.service.autoScaleTaskCount({
-      minCapacity: 1,
-      maxCapacity: 4,
+      minCapacity: apiAutoscaleMin,
+      maxCapacity: apiAutoscaleMax,
     });
 
     scaling.scaleOnCpuUtilization("CpuScaling", {

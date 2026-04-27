@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { StardagConfig } from "./config";
+import { intEnv, numEnv } from "./env";
 import { StardagVpc } from "./constructs/vpc";
 import { StardagDatabase } from "./constructs/database";
 import { StardagCognito } from "./constructs/cognito";
@@ -36,11 +37,19 @@ export class StardagStack extends cdk.Stack {
     });
 
     // Aurora Serverless v2 PostgreSQL
+    const dbMinAcu = numEnv("STARDAG_DB_MIN_ACU", 0.5);
+    const dbMaxAcu = numEnv("STARDAG_DB_MAX_ACU", 4);
+    if (dbMaxAcu < dbMinAcu) {
+      throw new Error(
+        `STARDAG_DB_MAX_ACU (${dbMaxAcu}) must be >= ` +
+          `STARDAG_DB_MIN_ACU (${dbMinAcu})`,
+      );
+    }
     this.database = new StardagDatabase(this, "Database", {
       vpc: this.vpc.vpc,
       databaseName: "stardag",
-      minCapacity: 0.5, // Minimum ACU
-      maxCapacity: 4, // Scale up to 4 ACU under load
+      minCapacity: dbMinAcu,
+      maxCapacity: dbMaxAcu,
     });
 
     // =============================================================
@@ -83,9 +92,9 @@ export class StardagStack extends cdk.Stack {
       oidcAudience: this.cognito.userPoolClient.userPoolClientId,
       apiDomain: config.apiDomain,
       uiDomain: config.uiDomain,
-      cpu: 256, // 0.25 vCPU
-      memoryLimitMiB: 512,
-      desiredCount: 1,
+      cpu: intEnv("STARDAG_API_CPU", 256),
+      memoryLimitMiB: intEnv("STARDAG_API_MEMORY_MIB", 512),
+      desiredCount: intEnv("STARDAG_API_DESIRED_COUNT", 1),
       certificate: this.dns?.apiCertificate,
     });
 

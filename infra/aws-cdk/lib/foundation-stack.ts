@@ -4,6 +4,7 @@ import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { Construct } from "constructs";
 import { StardagConfig } from "./config";
+import { numEnv } from "./env";
 import { StardagVpc } from "./constructs/vpc";
 import { StardagDatabase } from "./constructs/database";
 import { StardagCognito } from "./constructs/cognito";
@@ -67,11 +68,19 @@ export class FoundationStack extends cdk.Stack {
     // =============================================================
     // Database
     // =============================================================
+    const dbMinAcu = numEnv("STARDAG_DB_MIN_ACU", 0.5);
+    const dbMaxAcu = numEnv("STARDAG_DB_MAX_ACU", 4);
+    if (dbMaxAcu < dbMinAcu) {
+      throw new Error(
+        `STARDAG_DB_MAX_ACU (${dbMaxAcu}) must be >= ` +
+          `STARDAG_DB_MIN_ACU (${dbMinAcu})`,
+      );
+    }
     const database = new StardagDatabase(this, "Database", {
       vpc: this.vpc,
       databaseName: "stardag",
-      minCapacity: 0.5,
-      maxCapacity: 4,
+      minCapacity: dbMinAcu,
+      maxCapacity: dbMaxAcu,
     });
 
     this.dbClusterEndpoint = database.cluster.clusterEndpoint.hostname;
