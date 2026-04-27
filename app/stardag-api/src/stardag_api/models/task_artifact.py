@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
@@ -43,6 +44,13 @@ class TaskArtifact(Base, TimestampMixin):
         ),
         Index("ix_task_artifacts_task_pk", "task_pk"),
         Index("ix_task_artifacts_environment", "environment_id"),
+        # Covers "list artifacts in env newest first" used by /tasks/keys and
+        # /tasks/values, which previously had to sort an unindexed column.
+        Index(
+            "ix_task_artifacts_environment_created",
+            "environment_id",
+            "created_at",
+        ),
     )
 
     # UUID7 primary key
@@ -81,7 +89,12 @@ class TaskArtifact(Base, TimestampMixin):
     # Content - always stored as JSON
     # For markdown: {"content": "<markdown string>"}
     # For json: the actual JSON data dict
-    body_json: Mapped[Any] = mapped_column(JSON, nullable=False)
+    # JSONB on Postgres avoids reparsing on every access (search/Task Explorer
+    # query inside this column); SQLite keeps JSON for tests.
+    body_json: Mapped[Any] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
 
     # Relationships
     task: Mapped[Task] = relationship(back_populates="artifacts")

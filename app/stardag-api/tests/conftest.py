@@ -5,7 +5,6 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -218,13 +217,19 @@ def clear_limits_caches():
 
 @pytest.fixture
 async def pg_engine(request):
-    """Create a PostgreSQL test database engine with migrations applied.
+    """Create a PostgreSQL test database engine with the latest schema.
 
-    This fixture requires a PostgreSQL database URL to be set via the
-    STARDAG_API_TEST_DATABASE_URL environment variable.
+    Requires STARDAG_API_TEST_DATABASE_URL to be set, e.g.::
 
-    Usage:
-        STARDAG_API_TEST_DATABASE_URL=postgresql+asyncpg://... pytest -m integration
+        STARDAG_API_TEST_DATABASE_URL=postgresql+asyncpg://... pytest
+
+    The schema is built with ``Base.metadata.create_all``; alembic migrations
+    are not applied here because ``migrations/env.py`` calls ``asyncio.run``,
+    which deadlocks when called from inside this async fixture's event loop.
+    The model classes use ``JSON().with_variant(JSONB, "postgresql")`` so
+    create_all on Postgres builds JSONB columns, matching what migrations
+    produce in production. Migrations themselves are exercised end-to-end via
+    the docker-compose pipeline, not in pytest.
     """
     import os
 
@@ -233,14 +238,26 @@ async def pg_engine(request):
         pytest.skip("PostgreSQL test database URL not configured")
 
     engine = create_async_engine(pg_url, echo=False)
+    async with engine.begin() as conn:
+        # Drop everything first to reset state across runs.
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
 
-    # Run migrations
-    sync_url = pg_url.replace("+asyncpg", "")
-    alembic_cfg = get_alembic_config(sync_url)
-    command.upgrade(alembic_cfg, "head")
+    # Seed defaults so tests share the SQLite fixture's mental model.
+    async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with async_session_maker() as session:
+        await seed_defaults(session)
 
     yield engine
 
-    # Cleanup - downgrade to base
-    command.downgrade(alembic_cfg, "base")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
+
+
+@pytest.fixture
+async def pg_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
+    """Postgres session paired with the pg_engine fixture."""
+    async_session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with async_session_maker() as session:
+        yield session
