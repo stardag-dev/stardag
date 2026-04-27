@@ -11,6 +11,7 @@ import * as route53 from "aws-cdk-lib/aws-route53";
 import * as route53_targets from "aws-cdk-lib/aws-route53-targets";
 import { Construct } from "constructs";
 import { StardagConfig } from "./config";
+import { intEnv } from "./env";
 import { FoundationStack } from "./foundation-stack";
 
 export interface ApiStackProps extends cdk.StackProps {
@@ -40,11 +41,18 @@ export class ApiStack extends cdk.Stack {
 
     // Sizing knobs that ops may want to tune at deploy time without
     // editing this file. Defaults match the OSS-friendly free-tier shape;
-    // production overrides come from the environment.
-    const apiCpu = Number(process.env.STARDAG_API_CPU ?? 256);
-    const apiMemoryMiB = Number(process.env.STARDAG_API_MEMORY_MIB ?? 512);
-    const apiDesiredCount = Number(process.env.STARDAG_API_DESIRED_COUNT ?? 1);
-    const apiAutoscaleMax = Number(process.env.STARDAG_API_AUTOSCALE_MAX ?? 4);
+    // production overrides come from the environment. Each helper throws
+    // on malformed input rather than silently emitting NaN into the
+    // rendered template.
+    const apiCpu = intEnv("STARDAG_API_CPU", 256);
+    const apiMemoryMiB = intEnv("STARDAG_API_MEMORY_MIB", 512);
+    const apiDesiredCount = intEnv("STARDAG_API_DESIRED_COUNT", 1);
+    // Autoscale floor defaults to desiredCount so ops who only set
+    // DESIRED_COUNT get the historical behaviour. Override with
+    // STARDAG_API_AUTOSCALE_MIN to let the service scale below the
+    // initial desired count.
+    const apiAutoscaleMin = intEnv("STARDAG_API_AUTOSCALE_MIN", apiDesiredCount);
+    const apiAutoscaleMax = intEnv("STARDAG_API_AUTOSCALE_MAX", 4);
     const apiGunicornWorkers = process.env.STARDAG_API_GUNICORN_WORKERS;
 
     // =============================================================
@@ -246,7 +254,7 @@ export class ApiStack extends cdk.Stack {
     // Auto Scaling
     // =============================================================
     const scaling = this.service.service.autoScaleTaskCount({
-      minCapacity: apiDesiredCount,
+      minCapacity: apiAutoscaleMin,
       maxCapacity: apiAutoscaleMax,
     });
 

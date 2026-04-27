@@ -68,9 +68,10 @@ class TestValidationCache:
             cache.put(f"sk_k{i}", UUID(int=i))
         # Fourth put should clear the cache before inserting.
         cache.put("sk_k_overflow", UUID(int=99))
-        # The first three are gone.
+        # All three pre-overflow entries are gone.
         assert cache.get("sk_k0") is None
         assert cache.get("sk_k1") is None
+        assert cache.get("sk_k2") is None
         # The new entry is present.
         assert cache.get("sk_k_overflow") == UUID(int=99)
 

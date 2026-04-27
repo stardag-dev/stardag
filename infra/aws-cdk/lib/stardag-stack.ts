@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { StardagConfig } from "./config";
+import { intEnv, numEnv } from "./env";
 import { StardagVpc } from "./constructs/vpc";
 import { StardagDatabase } from "./constructs/database";
 import { StardagCognito } from "./constructs/cognito";
@@ -39,8 +40,8 @@ export class StardagStack extends cdk.Stack {
     this.database = new StardagDatabase(this, "Database", {
       vpc: this.vpc.vpc,
       databaseName: "stardag",
-      minCapacity: Number(process.env.STARDAG_DB_MIN_ACU ?? 0.5),
-      maxCapacity: Number(process.env.STARDAG_DB_MAX_ACU ?? 4),
+      minCapacity: numEnv("STARDAG_DB_MIN_ACU", 0.5),
+      maxCapacity: numEnv("STARDAG_DB_MAX_ACU", 4),
     });
 
     // =============================================================
@@ -83,9 +84,9 @@ export class StardagStack extends cdk.Stack {
       oidcAudience: this.cognito.userPoolClient.userPoolClientId,
       apiDomain: config.apiDomain,
       uiDomain: config.uiDomain,
-      cpu: Number(process.env.STARDAG_API_CPU ?? 256),
-      memoryLimitMiB: Number(process.env.STARDAG_API_MEMORY_MIB ?? 512),
-      desiredCount: Number(process.env.STARDAG_API_DESIRED_COUNT ?? 1),
+      cpu: intEnv("STARDAG_API_CPU", 256),
+      memoryLimitMiB: intEnv("STARDAG_API_MEMORY_MIB", 512),
+      desiredCount: intEnv("STARDAG_API_DESIRED_COUNT", 1),
       certificate: this.dns?.apiCertificate,
     });
 

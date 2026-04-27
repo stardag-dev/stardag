@@ -111,12 +111,13 @@ class _ValidationCache:
         return hashlib.sha256(full_key.encode("utf-8")).digest()
 
     def get(self, full_key: str) -> UUID | None:
-        entry = self._cache.get(self._hash(full_key))
+        key = self._hash(full_key)
+        entry = self._cache.get(key)
         if entry is None:
             return None
         api_key_id, expires_at = entry
         if time.monotonic() > expires_at:
-            self._cache.pop(self._hash(full_key), None)
+            self._cache.pop(key, None)
             return None
         return api_key_id
 
