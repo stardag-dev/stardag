@@ -37,11 +37,19 @@ export class StardagStack extends cdk.Stack {
     });
 
     // Aurora Serverless v2 PostgreSQL
+    const dbMinAcu = numEnv("STARDAG_DB_MIN_ACU", 0.5);
+    const dbMaxAcu = numEnv("STARDAG_DB_MAX_ACU", 4);
+    if (dbMaxAcu < dbMinAcu) {
+      throw new Error(
+        `STARDAG_DB_MAX_ACU (${dbMaxAcu}) must be >= ` +
+          `STARDAG_DB_MIN_ACU (${dbMinAcu})`,
+      );
+    }
     this.database = new StardagDatabase(this, "Database", {
       vpc: this.vpc.vpc,
       databaseName: "stardag",
-      minCapacity: numEnv("STARDAG_DB_MIN_ACU", 0.5),
-      maxCapacity: numEnv("STARDAG_DB_MAX_ACU", 4),
+      minCapacity: dbMinAcu,
+      maxCapacity: dbMaxAcu,
     });
 
     // =============================================================

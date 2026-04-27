@@ -53,7 +53,28 @@ export class ApiStack extends cdk.Stack {
     // initial desired count.
     const apiAutoscaleMin = intEnv("STARDAG_API_AUTOSCALE_MIN", apiDesiredCount);
     const apiAutoscaleMax = intEnv("STARDAG_API_AUTOSCALE_MAX", 4);
+    if (apiAutoscaleMax < apiAutoscaleMin) {
+      throw new Error(
+        `STARDAG_API_AUTOSCALE_MAX (${apiAutoscaleMax}) must be >= ` +
+          `STARDAG_API_AUTOSCALE_MIN (${apiAutoscaleMin})`,
+      );
+    }
     const apiGunicornWorkers = process.env.STARDAG_API_GUNICORN_WORKERS;
+    if (apiGunicornWorkers !== undefined) {
+      const trimmed = apiGunicornWorkers.trim();
+      const parsed = Number.parseInt(trimmed, 10);
+      if (
+        trimmed.length === 0 ||
+        !Number.isInteger(parsed) ||
+        parsed < 1 ||
+        parsed.toString() !== trimmed
+      ) {
+        throw new Error(
+          `STARDAG_API_GUNICORN_WORKERS=${JSON.stringify(apiGunicornWorkers)} ` +
+            `must be a positive integer`,
+        );
+      }
+    }
 
     // =============================================================
     // ECS Cluster

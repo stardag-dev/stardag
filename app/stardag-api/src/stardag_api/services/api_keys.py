@@ -24,8 +24,10 @@ KEY_RANDOM_BYTES = 24  # 32 chars in base64
 # Validation cache TTL. Bcrypt verification is ~20-100ms of CPU per check at
 # default cost (12 rounds). Caching the result for a short window collapses
 # repeated SDK calls (which can be hundreds per build burst) to a single bcrypt
-# verification per key per minute per process. Revoked/expired keys are
-# detected on the next request after the entry expires.
+# verification per key per minute per process. Revocations are still detected
+# on the next request: validate_api_key re-fetches the ApiKey row by primary
+# key on cache hit and re-checks revoked_at, so the TTL only bounds how long
+# we can skip bcrypt — not how long a revoked key continues to authenticate.
 _VALIDATION_CACHE_TTL_SECONDS = 60.0
 # Soft cap on cache entries; valid keys only grow the cache, so this is mostly
 # a safety net. If exceeded the cache is cleared and re-warmed.
@@ -89,9 +91,12 @@ class _ValidationCache:
 
     Keys are sha256(full_key) so the plaintext key isn't kept as a dict key.
     Values are (api_key_id, expires_at_monotonic). Entries expire after
-    _VALIDATION_CACHE_TTL_SECONDS; revoked keys are detected on the next
-    request after the entry expires (acceptable per the in-memory guardrail
-    pattern used elsewhere in this service).
+    _VALIDATION_CACHE_TTL_SECONDS, which bounds how long a successful bcrypt
+    verification can be skipped for repeated requests in this process.
+    Revocations and deletions are detected immediately on the next cache-hit
+    request — validate_api_key re-fetches the ApiKey row by primary key and
+    re-checks revoked_at — so the TTL is purely a bcrypt-skip window, not a
+    correctness window.
 
     Concurrency: mutated only by async handlers running on a single uvicorn
     worker's event loop, so dict ops are safe without a lock.

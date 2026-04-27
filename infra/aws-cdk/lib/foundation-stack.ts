@@ -68,11 +68,19 @@ export class FoundationStack extends cdk.Stack {
     // =============================================================
     // Database
     // =============================================================
+    const dbMinAcu = numEnv("STARDAG_DB_MIN_ACU", 0.5);
+    const dbMaxAcu = numEnv("STARDAG_DB_MAX_ACU", 4);
+    if (dbMaxAcu < dbMinAcu) {
+      throw new Error(
+        `STARDAG_DB_MAX_ACU (${dbMaxAcu}) must be >= ` +
+          `STARDAG_DB_MIN_ACU (${dbMinAcu})`,
+      );
+    }
     const database = new StardagDatabase(this, "Database", {
       vpc: this.vpc,
       databaseName: "stardag",
-      minCapacity: numEnv("STARDAG_DB_MIN_ACU", 0.5),
-      maxCapacity: numEnv("STARDAG_DB_MAX_ACU", 4),
+      minCapacity: dbMinAcu,
+      maxCapacity: dbMaxAcu,
     });
 
     this.dbClusterEndpoint = database.cluster.clusterEndpoint.hostname;
