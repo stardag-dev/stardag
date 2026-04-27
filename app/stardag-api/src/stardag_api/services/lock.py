@@ -324,10 +324,13 @@ async def release_lock_with_completion(
     """
     # Find the task by task_id (load the full row so we can update its
     # denormalised latest_* columns alongside the completion event).
+    # Lock for update so a concurrent event-creator on the same task
+    # can't clobber the COMPLETED state we're about to write.
     task_result = await db.execute(
         select(Task)
         .where(Task.environment_id == environment_id)
         .where(Task.task_id == lock_name)
+        .with_for_update()
     )
     task_row = task_result.scalar_one_or_none()
 

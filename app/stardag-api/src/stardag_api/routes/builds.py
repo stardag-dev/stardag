@@ -102,8 +102,22 @@ async def _get_build_and_task(
     task_id: str,
     db: AsyncSession,
     auth: SdkAuth,
+    *,
+    for_update: bool = False,
 ) -> tuple[Build, Task]:
-    """Get build and task, verifying ownership. Raises HTTPException on errors."""
+    """Get build and task, verifying ownership. Raises HTTPException on errors.
+
+    When ``for_update=True`` issues ``SELECT ... FOR UPDATE`` on the task row
+    so concurrent event-creating handlers serialise on the same task. Required
+    by anything that does a read-modify-write on the denormalised
+    ``Task.latest_*`` columns — without it two concurrent writers can each
+    read PENDING, apply different events, and the last-committer wins
+    regardless of the priority logic in ``apply_event_to_task`` (e.g. a
+    concurrent TASK_STARTED could clobber a TASK_COMPLETED). The lock is
+    released on transaction commit, so request duration governs hold time.
+    On SQLite the FOR UPDATE clause is silently dropped — fine, since the
+    test suite runs single-connection.
+    """
     build = await db.get(Build, build_id)
     if not build:
         raise HTTPException(status_code=404, detail="Build not found")
@@ -113,11 +127,14 @@ async def _get_build_and_task(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    result = await db.execute(
+    stmt = (
         select(Task)
         .where(Task.environment_id == build.environment_id)
         .where(Task.task_id == task_id)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     db_task = result.scalar_one_or_none()
     if not db_task:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -144,7 +161,13 @@ async def _create_task_event(
         )
     )
 
-    _, db_task = await _get_build_and_task(build_id, task_id, db, auth)
+    # Lock the task row so apply_event_to_task can safely do a
+    # read-modify-write on the denormalised latest_* columns. Without the
+    # lock, two concurrent event-creators racing on the same task could
+    # both observe PENDING, apply different events (e.g. STARTED in one,
+    # COMPLETED in the other), and the last committer wins regardless of
+    # COMPLETED-stickiness.
+    _, db_task = await _get_build_and_task(build_id, task_id, db, auth, for_update=True)
 
     # Build event_metadata from commit_hash and any extra metadata
     event_metadata: dict | None = None
@@ -807,11 +830,17 @@ async def register_task(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Check if task already exists in environment
+    # Check if task already exists in environment. Lock for update so the
+    # phantom-upgrade path (mutating an existing row) and the apply_event_to_task
+    # call below don't race with a concurrent event-creator on the same task.
+    # New rows go through pg_insert ON CONFLICT in the dependency reconcile
+    # loop and are race-safe via the unique constraint, so the lock is only
+    # needed when an existing row is found.
     result = await db.execute(
         select(Task)
         .where(Task.environment_id == build.environment_id)
         .where(Task.task_id == task.task_id)
+        .with_for_update()
     )
     db_task = result.scalar_one_or_none()
     task_already_existed = db_task is not None
