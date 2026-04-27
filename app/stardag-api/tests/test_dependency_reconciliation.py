@@ -200,3 +200,77 @@ async def test_duplicate_ids_in_input_are_deduplicated(
     )
     rows = list(result.scalars().all())
     assert len(rows) == 1
+
+
+async def test_concurrent_reconcile_overlapping_upstreams_resolves_safely(
+    pg_engine,
+) -> None:
+    """Two transactions concurrently reconcile overlapping missing upstream
+    ids on different downstream tasks. Both ON CONFLICT DO NOTHING phantom
+    inserts and ON CONFLICT DO NOTHING edge inserts must converge to the
+    correct row count: one phantom per unique upstream id, exactly one
+    edge per (upstream, downstream) pair.
+
+    This locks in the function's headline claim of being concurrent-safe;
+    the sequential idempotency tests above don't actually race."""
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    # Two distinct downstreams so the test exercises the case where both
+    # transactions race to create the SAME phantom upstream rows.
+    async with sm() as setup:
+        d_a = Task(
+            id=generate_uuid7(),
+            task_id="conc-down-a",
+            environment_id=DEFAULT_ENVIRONMENT_ID,
+            task_namespace="",
+            task_name="conc-down-a",
+            task_data={},
+            is_phantom=False,
+        )
+        d_b = Task(
+            id=generate_uuid7(),
+            task_id="conc-down-b",
+            environment_id=DEFAULT_ENVIRONMENT_ID,
+            task_namespace="",
+            task_name="conc-down-b",
+            task_data={},
+            is_phantom=False,
+        )
+        setup.add(d_a)
+        setup.add(d_b)
+        await setup.commit()
+        d_a_pk, d_b_pk = d_a.id, d_b.id
+
+    shared_upstreams = ["conc-up-1", "conc-up-2", "conc-up-3"]
+
+    async def reconcile(downstream_pk):
+        async with sm() as s:
+            await _reconcile_dependency_edges(
+                db=s,
+                environment_id=DEFAULT_ENVIRONMENT_ID,
+                downstream_task_pk=downstream_pk,
+                upstream_task_ids=shared_upstreams,
+                is_dynamic=False,
+            )
+            await s.commit()
+
+    await asyncio.gather(reconcile(d_a_pk), reconcile(d_b_pk))
+
+    # Exactly 3 phantoms, regardless of which transaction won the inserts.
+    async with sm() as final:
+        ph_result = await final.execute(
+            select(Task).where(
+                Task.environment_id == DEFAULT_ENVIRONMENT_ID,
+                Task.task_id.in_(shared_upstreams),
+            )
+        )
+        phantoms = list(ph_result.scalars().all())
+        assert len(phantoms) == 3
+        assert all(p.is_phantom for p in phantoms)
+
+        # Each downstream has exactly 3 edges (one per shared upstream).
+        assert await _count_edges_into(final, d_a_pk) == 3
+        assert await _count_edges_into(final, d_b_pk) == 3

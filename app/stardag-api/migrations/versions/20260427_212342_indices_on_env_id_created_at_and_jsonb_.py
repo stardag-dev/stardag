@@ -24,6 +24,15 @@ table once. On the production data sizes observed during the 2026-04-27
 incident (events 1672 kB heap, tasks 2272 kB) this completes in seconds.
 The downgrade path goes the other way (jsonb -> json) which preserves the
 data and is also a one-pass rewrite.
+
+LOCK / DOWNTIME NOTE: ALTER COLUMN takes ACCESS EXCLUSIVE on the table
+for the duration of the rewrite, and op.create_index (without
+CONCURRENTLY) takes a SHARE lock that blocks concurrent writes. Both
+are sized for the current shape — a few seconds of write-blocking is
+acceptable. If the data ever grows by an order of magnitude, revisit
+this migration shape: CREATE INDEX CONCURRENTLY (which means stepping
+out of transactional DDL), or a column-swap pattern (add new jsonb
+column → backfill → DROP old → RENAME) for the type changes.
 """
 
 from typing import Sequence, Union

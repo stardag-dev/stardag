@@ -65,6 +65,51 @@ jobs:
       - name: Test with tox
         run: tox
 
+  test-python-pg:
+    name: Test Python (stardag-api on Postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: stardag
+          POSTGRES_PASSWORD: stardag
+          POSTGRES_DB: stardag
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Apply init.sql to create stardag_admin / service / readonly roles
+        env:
+          PGPASSWORD: stardag
+        run: |
+          psql -h localhost -U stardag -d stardag < docker/postgres/init.sql
+      - name: Create test database owned by stardag_admin
+        env:
+          PGPASSWORD: stardag
+        run: |
+          psql -h localhost -U stardag -d stardag -c "CREATE DATABASE stardag_test OWNER stardag_admin;"
+      - name: Install tox
+        run: pip install tox
+      - name: Run stardag-api tests against Postgres
+        env:
+          # The pg_engine fixture skips silently when this is unset;
+          # setting it makes the migration-applied PG-only tests
+          # (test_dependency_reconciliation.py, test_status_denormalisation.py)
+          # actually fire on every PR.
+          STARDAG_API_TEST_DATABASE_URL: postgresql+asyncpg://stardag_admin:stardag_admin@localhost:5432/stardag_test
+        run: tox -e stardag-api-py312
+
   test-frontend:
     name: Test Frontend
     runs-on: ubuntu-latest

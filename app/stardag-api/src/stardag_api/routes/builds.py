@@ -662,6 +662,10 @@ async def _reconcile_dependency_edges(
 
     # Deduplicate upstream ids so we don't propose the same row twice.
     requested_ids = list(dict.fromkeys(upstream_task_ids))
+    # Single timestamp for every row this call writes — phantoms and edges
+    # share it, which keeps the audit log self-consistent. UUID7 PKs encode
+    # time, so per-row order is still preserved within the batch.
+    now = utc_now()
 
     # 1. Find existing tasks for these task_ids in one round-trip.
     existing_result = await db.execute(
@@ -677,7 +681,6 @@ async def _reconcile_dependency_edges(
     # keeps us idempotent under concurrent registrations of the same id.
     missing_ids = [tid for tid in requested_ids if tid not in task_pk_by_task_id]
     if missing_ids:
-        now = utc_now()
         phantom_rows = [
             {
                 "id": generate_uuid7(),
@@ -708,11 +711,14 @@ async def _reconcile_dependency_edges(
         for pk, task_id in refetch_result.all():
             task_pk_by_task_id[task_id] = pk
 
-    # Defensive: every requested id must now resolve. If anything is still
-    # missing it means a concurrent delete raced us; let the caller see a
-    # KeyError rather than silently dropping a dep.
+    # Every requested id must now resolve to a PK. The KeyError below is
+    # essentially unreachable in practice — under READ COMMITTED the
+    # ON CONFLICT DO NOTHING + re-fetch resolves to a row in every
+    # realistic ordering. The realistic concurrent-delete failure mode is
+    # an FK violation on the edge insert below, not this lookup. The lookup
+    # exists as a defence-in-depth tripwire so a future regression would
+    # surface a clear error rather than silently dropping a dep.
     edge_rows = []
-    now = utc_now()
     for tid in requested_ids:
         upstream_pk = task_pk_by_task_id[tid]
         edge_rows.append(

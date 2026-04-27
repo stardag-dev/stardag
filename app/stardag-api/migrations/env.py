@@ -15,8 +15,12 @@ from stardag_api.models import Base
 config = context.config
 
 # Set the database URL from settings (use effective_database_url which constructs
-# URL from individual params if database_url is not explicitly set)
-config.set_main_option("sqlalchemy.url", settings.effective_database_url)
+# URL from individual params if database_url is not explicitly set). If a caller
+# has already supplied sqlalchemy.url via the Config object (e.g. a pytest
+# fixture pointing at a temporary test DB), respect that instead — otherwise
+# the test would silently migrate the developer's local dev DB.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", settings.effective_database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
