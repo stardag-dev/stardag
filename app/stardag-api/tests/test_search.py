@@ -5,7 +5,14 @@ from collections import Counter
 import pytest
 from httpx import AsyncClient
 
-from stardag_api.routes.search import _extract_keys
+from fastapi import HTTPException
+
+from stardag_api.routes.search import (
+    _extract_keys,
+    _validate_filter_value,
+    build_jsonb_condition,
+    parse_filter_string,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -154,3 +161,236 @@ async def test_sort_by_param_numeric(client: AsyncClient):
     assert len(tasks) >= 3
     task_ids = {t["task_id"] for t in tasks}
     assert {"num-1", "num-2", "num-10"}.issubset(task_ids)
+
+
+# ---------------------------------------------------------------------------
+# build_id filter SQL emission — defends the production fix for
+# "operator does not exist: uuid = character varying" by asserting the
+# generated SQL has the right casts.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildIdFilterSQL:
+    def test_build_id_equality_casts_param_to_uuid(self) -> None:
+        condition, needs_join, _ = build_jsonb_condition(
+            "build_id", "=", "doesntmatter"
+        )
+        assert needs_join is True
+        assert condition is not None
+        # The bound parameter must be cast to uuid so Postgres can compare
+        # against the uuid column without a varchar-uuid mismatch.
+        assert "CAST(:filter_build_id AS uuid)" in condition
+        # The column itself stays as uuid (no ::text cast on equality).
+        assert "builds.id =" in condition
+
+    def test_build_id_inequality_casts_param_to_uuid(self) -> None:
+        condition, needs_join, _ = build_jsonb_condition("build_id", "!=", "x")
+        assert needs_join is True
+        assert condition is not None
+        assert "CAST(:filter_build_id AS uuid)" in condition
+        assert "builds.id !=" in condition
+
+    def test_build_id_ilike_casts_column_to_text(self) -> None:
+        condition, needs_join, _ = build_jsonb_condition("build_id", "~", "abc")
+        assert needs_join is True
+        assert condition is not None
+        # ILIKE is a string operator; uuid columns need explicit text cast.
+        assert "builds.id::text ILIKE" in condition
+        # No CAST AS uuid on this branch — substring match is text-only.
+        assert "CAST(:filter_build_id AS uuid)" not in condition
+
+
+class TestBuildIdFilterValidation:
+    """Pin the validation rules around build_id filter values without
+    needing a Postgres connection. The route's CAST AS uuid would
+    otherwise fail at execution time with a 500 — these tests prove the
+    route fails fast at the API layer with a 400 instead."""
+
+    def test_valid_uuid_for_equality_passes(self) -> None:
+        # No exception expected.
+        _validate_filter_value("build_id", "=", "019dd0c6-2b40-7de3-af35-2e7d1d1e8b37")
+
+    def test_invalid_uuid_for_equality_raises_400(self) -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_filter_value("build_id", "=", "not-a-uuid")
+        assert exc_info.value.status_code == 400
+        assert "build_id" in exc_info.value.detail
+        assert "uuid" in exc_info.value.detail.lower()
+
+    def test_invalid_uuid_for_inequality_raises_400(self) -> None:
+        with pytest.raises(HTTPException):
+            _validate_filter_value("build_id", "!=", "garbage")
+
+    def test_invalid_uuid_for_ilike_passes(self) -> None:
+        # ILIKE is text substring match; any string is OK.
+        _validate_filter_value("build_id", "~", "not-a-uuid")
+        _validate_filter_value("build_id", "~", "abc123")
+
+    def test_other_keys_are_not_validated_as_uuid(self) -> None:
+        # task_name, params, etc. are free-form text and never UUID-checked.
+        _validate_filter_value("task_name", "=", "anything")
+        _validate_filter_value("param.lr", ">", "0.01")
+        _validate_filter_value("task_namespace", "~", "ml")
+
+    def test_parse_filter_string_propagates_validation_400(self) -> None:
+        # parse_filter_string is the single entry point for both filter
+        # call sites; ensure the validation propagates through it so every
+        # caller gets the 400 for free.
+        with pytest.raises(HTTPException) as exc_info:
+            parse_filter_string("build_id:=:not-a-uuid")
+        assert exc_info.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# End-to-end Postgres test for the build_id filter — the regression that
+# prompted the fix surfaced as an HTTP 500 in production logs:
+#   GET /api/v1/tasks/search?filter=build_id:=:<uuid> → 500
+#   "operator does not exist: uuid = character varying"
+# This test runs the full route against a real Postgres and asserts the
+# request succeeds. SQLite skips automatically because the route uses
+# Postgres-specific cast / JSONB operators throughout.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_filter_by_build_id_equality_does_not_500(
+    pg_client: AsyncClient,
+) -> None:
+    """Reproduces the production bug: filter=build_id:=:<uuid> previously
+    returned 500 because the bound varchar parameter couldn't be compared
+    to the uuid column. With the cast in place, the filter resolves and
+    the response is a normal task list."""
+    # Create a build + task so there's a real build_id to filter on.
+    build_resp = await pg_client.post("/api/v1/builds", json={})
+    assert build_resp.status_code == 201
+    build_id = build_resp.json()["id"]
+
+    task_resp = await pg_client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "search-build-id-task",
+            "task_namespace": "test",
+            "task_name": "BuildIdSearchTest",
+            "task_data": {},
+        },
+    )
+    assert task_resp.status_code == 201
+
+    # Filter by the real build_id — the failing path in the production
+    # log. Without the fix, this returned 500.
+    resp = await pg_client.get(
+        "/api/v1/tasks/search",
+        params={"filter": f"build_id:=:{build_id}", "page_size": 50},
+    )
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    # The created task must come back via the build_id filter.
+    task_ids = {t["task_id"] for t in payload["tasks"]}
+    assert "search-build-id-task" in task_ids
+
+
+@pytest.mark.asyncio
+async def test_search_filter_by_build_id_ilike_works_against_uuid_column(
+    pg_client: AsyncClient,
+) -> None:
+    """Substring match on build_id requires builds.id::text — without the
+    cast Postgres rejects ``uuid ILIKE varchar``."""
+    build_resp = await pg_client.post("/api/v1/builds", json={})
+    build_id = build_resp.json()["id"]
+    await pg_client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "search-ilike-task",
+            "task_namespace": "test",
+            "task_name": "BuildIdILike",
+            "task_data": {},
+        },
+    )
+    # Use the first 8 chars as a substring (ILIKE prefix-style). Single
+    # build in this test, so the timestamp-prefix collision in UUID7 (every
+    # uuid7 created in the same millisecond shares its leading hex) is fine.
+    prefix = build_id[:8]
+    resp = await pg_client.get(
+        "/api/v1/tasks/search",
+        params={"filter": f"build_id:~:{prefix}", "page_size": 50},
+    )
+    assert resp.status_code == 200, resp.text
+    task_ids = {t["task_id"] for t in resp.json()["tasks"]}
+    assert "search-ilike-task" in task_ids
+
+
+@pytest.mark.asyncio
+async def test_search_filter_by_build_id_inequality_excludes_match(
+    pg_client: AsyncClient,
+) -> None:
+    """``filter=build_id:!=:<uuid>`` must return tasks from every other
+    build but exclude tasks from the named build. Closes the e2e gap for
+    the inequality branch (the unit test pins the SQL string but doesn't
+    execute it)."""
+    # Build A: a task that should be EXCLUDED by the != filter.
+    a_resp = await pg_client.post("/api/v1/builds", json={})
+    a_build_id = a_resp.json()["id"]
+    await pg_client.post(
+        f"/api/v1/builds/{a_build_id}/tasks",
+        json={
+            "task_id": "ne-task-in-a",
+            "task_namespace": "test",
+            "task_name": "NeTaskA",
+            "task_data": {},
+        },
+    )
+
+    # Build B: a task that should be INCLUDED by the != filter.
+    b_resp = await pg_client.post("/api/v1/builds", json={})
+    b_build_id = b_resp.json()["id"]
+    await pg_client.post(
+        f"/api/v1/builds/{b_build_id}/tasks",
+        json={
+            "task_id": "ne-task-in-b",
+            "task_namespace": "test",
+            "task_name": "NeTaskB",
+            "task_data": {},
+        },
+    )
+
+    resp = await pg_client.get(
+        "/api/v1/tasks/search",
+        params={"filter": f"build_id:!=:{a_build_id}", "page_size": 100},
+    )
+    assert resp.status_code == 200, resp.text
+    task_ids = {t["task_id"] for t in resp.json()["tasks"]}
+    assert "ne-task-in-b" in task_ids
+    assert "ne-task-in-a" not in task_ids
+
+
+@pytest.mark.asyncio
+async def test_search_filter_build_id_with_malformed_uuid_returns_400(
+    pg_client: AsyncClient,
+) -> None:
+    """A non-UUID build_id value is rejected with a clear 400 instead of
+    propagating to a Postgres ``invalid input syntax for type uuid`` 500
+    at SQL execution time."""
+    resp = await pg_client.get(
+        "/api/v1/tasks/search",
+        params={"filter": "build_id:=:not-a-uuid", "page_size": 50},
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert "build_id" in detail.lower()
+    assert "uuid" in detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_search_filter_build_id_ilike_accepts_non_uuid_substring(
+    pg_client: AsyncClient,
+) -> None:
+    """ILIKE (~) is a text substring match, so any string is allowed —
+    even ones that aren't valid UUIDs. Validates that the
+    ``_validate_filter_value`` carve-out for ``~`` works correctly."""
+    resp = await pg_client.get(
+        "/api/v1/tasks/search",
+        params={"filter": "build_id:~:not-a-uuid", "page_size": 50},
+    )
+    # Returns 200 with empty results (no UUID happens to contain that text).
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["tasks"] == []

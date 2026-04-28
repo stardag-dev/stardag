@@ -6,7 +6,7 @@ from collections import Counter
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +60,31 @@ OPERATORS = {
 }
 
 
+def _validate_filter_value(key: str, op: str, value: str) -> None:
+    """Reject filter values that would otherwise crash at SQL execution time.
+
+    Currently only enforces UUID-shape on ``build_id`` for non-substring
+    operators. Without this, the SQL ``CAST(:p AS uuid)`` raises an
+    asyncpg ``InvalidTextRepresentation`` at execution time and the
+    request bubbles up as a 500. Validating in Python lets us return a
+    clear 400 with an actionable message instead.
+
+    ``~`` (ILIKE) is exempt — substring match is text-only and any string
+    is acceptable input.
+    """
+    if key == "build_id" and op != "~":
+        try:
+            UUID(value)
+        except (ValueError, AttributeError):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid build_id filter value {value!r}: "
+                    "must be a valid UUID for non-substring comparisons"
+                ),
+            )
+
+
 def parse_filter_string(filter_str: str) -> list[tuple[str, str, str]]:
     """Parse filter string into list of (key, operator, value) tuples.
 
@@ -68,6 +93,9 @@ def parse_filter_string(filter_str: str) -> list[tuple[str, str, str]]:
         - task_name:=:training
         - param.lr:>:0.01
         - task_namespace:~:ml
+
+    Raises HTTPException(400) if any filter value is rejected by
+    ``_validate_filter_value`` (e.g. a malformed UUID for ``build_id``).
     """
     if not filter_str:
         return []
@@ -87,7 +115,10 @@ def parse_filter_string(filter_str: str) -> list[tuple[str, str, str]]:
             key, op, value = match.groups()
             op = op or "="
             if op in OPERATORS:
-                filters.append((key.strip(), op, value.strip()))
+                key = key.strip()
+                value = value.strip()
+                _validate_filter_value(key, op, value)
+                filters.append((key, op, value))
 
     return filters
 
@@ -131,12 +162,29 @@ def build_jsonb_condition(
             return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'", False, None
         return f"{task_alias}.{key} {sql_op} :{param_name}", False, None
 
-    # Build fields - require join to events and builds tables
+    # Build fields - require join to events and builds tables.
+    # builds.id is a Postgres UUID column. Bound parameters arrive from the
+    # query string as text and asyncpg sends them as character varying; an
+    # implicit `uuid = varchar` comparison is rejected by Postgres
+    # ("operator does not exist: uuid = character varying"). Use explicit
+    # casts: column-to-text for substring match, parameter-to-uuid for any
+    # non-substring comparison (=, !=, <, <=, >, >=) so the PK index is
+    # still usable. ``_validate_filter_value`` upstream enforces that
+    # non-substring values are valid UUIDs, so the cast can't fail at
+    # execution time.
     if key == "build_id":
         param_name = f"filter_build_id{param_suffix}"
         if sql_op == "ILIKE":
-            return f"builds.id ILIKE '%' || :{param_name} || '%'", True, None
-        return f"builds.id {sql_op} :{param_name}", True, None
+            return (
+                f"builds.id::text ILIKE '%' || :{param_name} || '%'",
+                True,
+                None,
+            )
+        return (
+            f"builds.id {sql_op} CAST(:{param_name} AS uuid)",
+            True,
+            None,
+        )
 
     if key == "build_name":
         param_name = f"filter_build_name{param_suffix}"
