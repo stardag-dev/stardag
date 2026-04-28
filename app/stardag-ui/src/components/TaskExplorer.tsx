@@ -425,6 +425,14 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     searchTasks();
   }, [searchTasks]);
 
+  // Reset paginated/selected state when active environment changes so we
+  // don't request page N of a smaller env (briefly flashing an empty
+  // result) or keep a selected task that doesn't exist in the new env.
+  useEffect(() => {
+    setPage(1);
+    setSelectedTask(null);
+  }, [activeEnvironment?.id]);
+
   // DAG availability
   const canShowDag = tasks.length > 0 && tasks.length <= 500;
 

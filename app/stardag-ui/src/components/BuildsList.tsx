@@ -75,8 +75,10 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
 
   const loadBuilds = useCallback(async () => {
     if (!activeEnvironment?.id) {
+      // Don't flip loading=false here — the parent gate handles the
+      // no-environment case, and clearing loading would briefly leak
+      // the empty-state UI on env transitions.
       setBuilds([]);
-      setLoading(false);
       return;
     }
 
@@ -97,6 +99,12 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
     }
   }, [activeEnvironment?.id, page]);
 
+  // Reset to first page when the active environment changes so we don't
+  // request page N of a smaller env and flash an empty result.
+  useEffect(() => {
+    setPage(1);
+  }, [activeEnvironment?.id]);
+
   useEffect(() => {
     loadBuilds();
   }, [loadBuilds]);
@@ -111,7 +119,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
     );
   }
 
-  if (loading && builds.length === 0) {
+  if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />

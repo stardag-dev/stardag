@@ -142,6 +142,15 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     loadBuild();
   }, [loadBuild]);
 
+  // Reset task-list filters and pagination when the user navigates between
+  // builds — otherwise a filter set on Build A silently applies to Build B
+  // and may produce a confusing empty list.
+  useEffect(() => {
+    setNameFilter("");
+    setStatusFilter("");
+    setPage(1);
+  }, [buildId]);
+
   // Refresh handler
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);

@@ -205,6 +205,17 @@ export function EnvironmentProvider({ children }: EnvironmentProviderProps) {
     } else {
       localStorage.removeItem(STORAGE_KEY_ENVIRONMENT);
     }
+
+    // If the user is currently on an env-scoped detail route (e.g.
+    // /builds/<id>), the resource ID belongs to the *previous*
+    // environment and won't resolve in the new one. Redirect to the
+    // builds overview instead of leaving the user on a broken page.
+    // Collection routes (/tasks, /settings, /invites, ...) refetch
+    // against the new env on their own and don't need a redirect.
+    if (/\/builds\/[^/]+/.test(window.location.pathname)) {
+      window.history.pushState({}, "", "/");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
   }, []);
 
   // Get URL path for current workspace/environment
