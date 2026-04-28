@@ -53,6 +53,20 @@ export class ApiStack extends cdk.Stack {
     // initial desired count.
     const apiAutoscaleMin = intEnv("STARDAG_API_AUTOSCALE_MIN", apiDesiredCount);
     const apiAutoscaleMax = intEnv("STARDAG_API_AUTOSCALE_MAX", 4);
+    // Optional JWT signing key, fetched from Secrets Manager. When set, the
+    // API uses a stable RSA keypair across deploys so cached internal
+    // tokens (UI sessions) survive container rollover. When unset (default
+    // for OSS / fresh deploys), the API generates an ephemeral keypair on
+    // every container start — fine for single-deploy use but invalidates
+    // every existing UI session on every redeploy.
+    // The secret is expected to be a JSON document with a "private_key"
+    // field containing a PEM-encoded RSA private key.
+    // Trim whitespace so a typo like ``FOO=" "`` in an env file is
+    // treated as unset instead of silently turning into a broken
+    // ``fromSecretNameV2`` lookup at synth time.
+    const rawJwtSecretName =
+      process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME?.trim();
+    const jwtPrivateKeySecretName = rawJwtSecretName || undefined;
     if (apiAutoscaleMax < apiAutoscaleMin) {
       throw new Error(
         `STARDAG_API_AUTOSCALE_MAX (${apiAutoscaleMax}) must be >= ` +
@@ -130,6 +144,26 @@ export class ApiStack extends cdk.Stack {
     foundation.dbServiceSecret.grantRead(taskDefinition.taskRole);
     foundation.dbAdminSecret.grantRead(taskDefinition.taskRole);
 
+    // Look up the optional JWT private key secret so its ARN is in the
+    // task definition. The secret value must already exist in Secrets
+    // Manager when the task starts; ECS fetches it at container launch
+    // using the *execution role* (not the task role). When the secret is
+    // referenced via ``ecs.Secret.fromSecretsManager`` in the container's
+    // ``secrets`` block below, CDK auto-grants ``GetSecretValue`` to the
+    // execution role; we add an explicit grant here for clarity and to
+    // ensure the policy is in place even if a future refactor changes
+    // how the secret is referenced.
+    const jwtPrivateKeySecret = jwtPrivateKeySecretName
+      ? secretsmanager.Secret.fromSecretNameV2(
+          this,
+          "JwtPrivateKeySecret",
+          jwtPrivateKeySecretName,
+        )
+      : undefined;
+    if (jwtPrivateKeySecret) {
+      jwtPrivateKeySecret.grantRead(taskDefinition.obtainExecutionRole());
+    }
+
     // Grant task role permission to send emails via SES
     if (foundation.ses) {
       foundation.ses.grantSendEmail(taskDefinition.taskRole);
@@ -191,6 +225,18 @@ export class ApiStack extends cdk.Stack {
           foundation.dbAdminSecret,
           "password",
         ),
+        // JWT_PRIVATE_KEY mounted from Secrets Manager when configured.
+        // Picked up by config.JWTSettings.private_key (env_prefix=JWT_).
+        // The whole RSA-2048 PEM lives under the "private_key" JSON key in
+        // the secret value. See cloud/docs for one-time provisioning.
+        ...(jwtPrivateKeySecret
+          ? {
+              JWT_PRIVATE_KEY: ecs.Secret.fromSecretsManager(
+                jwtPrivateKeySecret,
+                "private_key",
+              ),
+            }
+          : {}),
       },
       portMappings: [
         {
