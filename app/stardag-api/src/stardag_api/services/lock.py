@@ -322,22 +322,33 @@ async def release_lock_with_completion(
     Returns:
         True if successfully released, False otherwise
     """
-    # Find the task by task_id
+    # Find the task by task_id (load the full row so we can update its
+    # denormalised latest_* columns alongside the completion event).
+    # Lock for update so a concurrent event-creator on the same task
+    # can't clobber the COMPLETED state we're about to write.
     task_result = await db.execute(
-        select(Task.id)
+        select(Task)
         .where(Task.environment_id == environment_id)
         .where(Task.task_id == lock_name)
+        .with_for_update()
     )
-    task_db_id = task_result.scalar_one_or_none()
+    task_row = task_result.scalar_one_or_none()
 
-    if task_db_id is not None:
-        # Record completion event
+    if task_row is not None:
         completion_event = Event(
             build_id=build_id,
-            task_id=task_db_id,
+            task_id=task_row.id,
             event_type=EventType.TASK_COMPLETED,
         )
         db.add(completion_event)
+        # Flush so completion_event.id and created_at are populated before
+        # we feed it into the apply helper.
+        await db.flush()
+        # Lazy import to avoid circular dependency between services.lock and
+        # services.status.
+        from stardag_api.services.status import apply_event_to_task
+
+        apply_event_to_task(task_row, completion_event)
 
     # Release the lock
     owner_id_str = str(owner_id)

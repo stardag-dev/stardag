@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Index, JSON, String, UniqueConstraint, Uuid
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
+from stardag_api.models.enums import TaskStatus
 
 if TYPE_CHECKING:
     from stardag_api.models.event import Event
@@ -90,6 +102,44 @@ class Task(Base, TimestampMixin):
     # Phantom flag: True for tasks created as placeholders for unresolved dependencies.
     # These are upgraded to real tasks when properly registered via the SDK.
     is_phantom: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # ------------------------------------------------------------------
+    # Denormalised "latest global status" columns.
+    #
+    # These are maintained in-transaction whenever a task event is created
+    # (see services.status.apply_event_to_task and routes/builds.py event
+    # handlers). They mirror the semantics of get_all_task_global_statuses:
+    # COMPLETED is sticky, RUNNING/FAILED/CANCELLED win over PENDING, etc.
+    #
+    # They exist so that read endpoints (Task Explorer, build graph, search)
+    # can return per-task status without scanning the events table for
+    # every request — see the 2026-04-27 incident for the motivation.
+    # ------------------------------------------------------------------
+    latest_status: Mapped[TaskStatus] = mapped_column(
+        String(32),
+        nullable=False,
+        default=TaskStatus.PENDING,
+        index=True,
+    )
+    latest_status_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    latest_status_event_id: Mapped[UUID | None] = mapped_column(Uuid)
+    latest_status_build_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("builds.id", ondelete="SET NULL"),
+    )
+    latest_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    latest_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    latest_error_message: Mapped[str | None] = mapped_column(Text)
+    latest_waiting_for_lock: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    latest_commit_hash: Mapped[str | None] = mapped_column(String(64))
 
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="tasks")
