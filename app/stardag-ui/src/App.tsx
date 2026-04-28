@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { setAccessTokenGetter } from "./api/client";
+import { setAccessTokenGetter, setSessionExpiredHandler } from "./api/client";
 import { AuthCallback } from "./components/AuthCallback";
 import { BuildsList } from "./components/BuildsList";
 import { BuildView } from "./components/BuildView";
@@ -8,6 +8,7 @@ import { CodeExampleTabs } from "./components/CodeExampleTabs";
 import { LandingPageDemo } from "./components/LandingPageDemo";
 import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
+import { SessionExpiredOverlay } from "./components/SessionExpiredOverlay";
 import { WorkspaceSelector } from "./components/WorkspaceSelector";
 import { WorkspaceSettings } from "./components/WorkspaceSettings";
 import { PendingInvites } from "./components/PendingInvites";
@@ -214,11 +215,16 @@ function SettingsPage({
 
 // Connect API client to auth when auth context is available
 function AuthConnector({ children }: { children: React.ReactNode }) {
-  const { getAccessToken } = useAuth();
+  const { getAccessToken, notifySessionExpired } = useAuth();
 
   useEffect(() => {
     setAccessTokenGetter(getAccessToken);
   }, [getAccessToken]);
+
+  useEffect(() => {
+    setSessionExpiredHandler(notifySessionExpired);
+    return () => setSessionExpiredHandler(null);
+  }, [notifySessionExpired]);
 
   return <>{children}</>;
 }
@@ -706,6 +712,10 @@ function App() {
           <EnvironmentProvider>
             <BreadcrumbProvider>
               <Router />
+              {/* Top-level overlay so the modal renders above any page,
+                  including unauthenticated screens. The component is a
+                  no-op when ``sessionExpired`` is false. */}
+              <SessionExpiredOverlay />
             </BreadcrumbProvider>
           </EnvironmentProvider>
         </AuthConnector>
