@@ -61,7 +61,12 @@ export class ApiStack extends cdk.Stack {
     // every existing UI session on every redeploy.
     // The secret is expected to be a JSON document with a "private_key"
     // field containing a PEM-encoded RSA private key.
-    const jwtPrivateKeySecretName = process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME;
+    // Trim whitespace so a typo like ``FOO=" "`` in an env file is
+    // treated as unset instead of silently turning into a broken
+    // ``fromSecretNameV2`` lookup at synth time.
+    const rawJwtSecretName =
+      process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME?.trim();
+    const jwtPrivateKeySecretName = rawJwtSecretName || undefined;
     if (apiAutoscaleMax < apiAutoscaleMin) {
       throw new Error(
         `STARDAG_API_AUTOSCALE_MAX (${apiAutoscaleMax}) must be >= ` +
@@ -141,7 +146,13 @@ export class ApiStack extends cdk.Stack {
 
     // Look up the optional JWT private key secret so its ARN is in the
     // task definition. The secret value must already exist in Secrets
-    // Manager when the task starts; ECS fetches it at container launch.
+    // Manager when the task starts; ECS fetches it at container launch
+    // using the *execution role* (not the task role). When the secret is
+    // referenced via ``ecs.Secret.fromSecretsManager`` in the container's
+    // ``secrets`` block below, CDK auto-grants ``GetSecretValue`` to the
+    // execution role; we add an explicit grant here for clarity and to
+    // ensure the policy is in place even if a future refactor changes
+    // how the secret is referenced.
     const jwtPrivateKeySecret = jwtPrivateKeySecretName
       ? secretsmanager.Secret.fromSecretNameV2(
           this,
@@ -150,7 +161,7 @@ export class ApiStack extends cdk.Stack {
         )
       : undefined;
     if (jwtPrivateKeySecret) {
-      jwtPrivateKeySecret.grantRead(taskDefinition.taskRole);
+      jwtPrivateKeySecret.grantRead(taskDefinition.obtainExecutionRole());
     }
 
     // Grant task role permission to send emails via SES

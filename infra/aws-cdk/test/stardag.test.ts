@@ -1,5 +1,7 @@
 import * as cdk from "aws-cdk-lib";
-import { Template } from "aws-cdk-lib/assertions";
+import { Match, Template } from "aws-cdk-lib/assertions";
+import { ApiStack } from "../lib/api-stack";
+import { FoundationStack } from "../lib/foundation-stack";
 import { StardagStack } from "../lib/stardag-stack";
 
 // Mock config for testing
@@ -186,6 +188,162 @@ describe("StardagStack", () => {
       template.hasOutput("UiUrl", {
         Value: "https://app.example.com",
       });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ApiStack — split-stack production path. Covers the optional JWT private
+// key secret wiring (STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME).
+// ---------------------------------------------------------------------------
+
+function synthApiStack(jwtSecretName: string | undefined): Template {
+  const original = process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME;
+  if (jwtSecretName === undefined) {
+    delete process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME;
+  } else {
+    process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME = jwtSecretName;
+  }
+  try {
+    const app = new cdk.App();
+    const env = {
+      account: mockConfig.awsAccountId,
+      region: mockConfig.awsRegion,
+    };
+    const foundation = new FoundationStack(app, "Foundation", {
+      env,
+      config: mockConfig,
+    });
+    const apiStack = new ApiStack(app, "Api", {
+      env,
+      config: mockConfig,
+      foundation,
+    });
+    return Template.fromStack(apiStack);
+  } finally {
+    if (original === undefined) {
+      delete process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME;
+    } else {
+      process.env.STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME = original;
+    }
+  }
+}
+
+describe("ApiStack JWT_PRIVATE_KEY secret wiring", () => {
+  describe("when STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME is unset", () => {
+    let template: Template;
+
+    beforeAll(() => {
+      template = synthApiStack(undefined);
+    });
+
+    test("does not mount JWT_PRIVATE_KEY in the container secrets block", () => {
+      // No container in the API task def references JWT_PRIVATE_KEY.
+      const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+      const apiTaskDef = Object.values(taskDefs).find(
+        (td) =>
+          td.Properties.ContainerDefinitions?.some(
+            (c: { Name?: string }) => c.Name === "Api",
+          ),
+      );
+      expect(apiTaskDef).toBeDefined();
+      const secrets = apiTaskDef!.Properties.ContainerDefinitions[0].Secrets ?? [];
+      const names = secrets.map((s: { Name: string }) => s.Name);
+      expect(names).not.toContain("JWT_PRIVATE_KEY");
+    });
+  });
+
+  describe("when STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME is set", () => {
+    let template: Template;
+    const secretName = "stardag/api/jwt-private-key";
+
+    beforeAll(() => {
+      template = synthApiStack(secretName);
+    });
+
+    test("mounts JWT_PRIVATE_KEY from Secrets Manager :private_key field", () => {
+      // ``ValueFrom`` is a CFN ``Fn::Join`` that builds the secret ARN at
+      // deploy time (``arn:aws:secretsmanager:<region>:<account>:secret:<name>:private_key::``).
+      // Match by serialising the template and asserting the assembled
+      // string substring is present — robust against the nested join form.
+      const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+      const apiTaskDef = Object.values(taskDefs).find(
+        (td) =>
+          td.Properties.ContainerDefinitions?.some(
+            (c: { Name?: string }) => c.Name === "Api",
+          ),
+      );
+      expect(apiTaskDef).toBeDefined();
+      const containers = apiTaskDef!.Properties.ContainerDefinitions as Array<{
+        Name: string;
+        Secrets?: Array<{ Name: string; ValueFrom: unknown }>;
+      }>;
+      const apiContainer = containers.find((c) => c.Name === "Api")!;
+      const jwtSecret = apiContainer.Secrets?.find((s) => s.Name === "JWT_PRIVATE_KEY");
+      expect(jwtSecret).toBeDefined();
+      // ValueFrom is { "Fn::Join": ["", [...parts...]] }; flatten to a
+      // string of all string parts and assert the secret name + private_key
+      // suffix appear.
+      const valueFromStr = JSON.stringify(jwtSecret!.ValueFrom);
+      expect(valueFromStr).toContain(secretName);
+      expect(valueFromStr).toContain(":private_key::");
+    });
+
+    test("execution role IAM policy allows GetSecretValue on the JWT secret", () => {
+      // The execution role's policy must include GetSecretValue (the
+      // ECS agent uses the execution role at task launch to fetch
+      // secrets — granting only the task role would fail to launch).
+      // Each ``AWS::IAM::Policy`` resource is attached to one or more
+      // roles; find any policy whose statements grant GetSecretValue on
+      // a resource ARN containing our secret name.
+      const policies = template.findResources("AWS::IAM::Policy");
+      let found = false;
+      for (const p of Object.values(policies)) {
+        const stmts = p.Properties.PolicyDocument.Statement as Array<{
+          Action: string | string[];
+          Effect: string;
+          Resource: unknown;
+        }>;
+        for (const stmt of stmts) {
+          const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+          if (
+            stmt.Effect === "Allow" &&
+            actions.includes("secretsmanager:GetSecretValue") &&
+            JSON.stringify(stmt.Resource).includes(secretName)
+          ) {
+            // Confirm at least one attached role has "ExecutionRole" in
+            // its logical ID — that's the role ECS uses at task start.
+            const roles = (p.Properties.Roles ?? []) as Array<{
+              Ref?: string;
+            }>;
+            const execRoleAttached = roles.some(
+              (r) => r.Ref?.includes("ExecutionRole"),
+            );
+            if (execRoleAttached) {
+              found = true;
+              break;
+            }
+          }
+        }
+        if (found) break;
+      }
+      expect(found).toBe(true);
+    });
+  });
+
+  describe("when STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME is whitespace", () => {
+    test("treats whitespace as unset (no JWT_PRIVATE_KEY in template)", () => {
+      const template = synthApiStack("   ");
+      const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+      const apiTaskDef = Object.values(taskDefs).find(
+        (td) =>
+          td.Properties.ContainerDefinitions?.some(
+            (c: { Name?: string }) => c.Name === "Api",
+          ),
+      );
+      const secrets = apiTaskDef?.Properties.ContainerDefinitions[0].Secrets ?? [];
+      const names = secrets.map((s: { Name: string }) => s.Name);
+      expect(names).not.toContain("JWT_PRIVATE_KEY");
     });
   });
 });
