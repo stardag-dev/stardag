@@ -5,7 +5,10 @@ import {
   setAccessTokenGetter,
   setCurrentWorkspaceId,
   setSessionExpiredHandler,
+  type GetAccessToken,
 } from "./client";
+
+const nullTokenGetter: GetAccessToken = async () => null;
 
 describe("fetchWithAuth — 401 retry semantics", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -18,19 +21,20 @@ describe("fetchWithAuth — 401 retry semantics", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    setAccessTokenGetter((async () => null) as never);
+    setAccessTokenGetter(nullTokenGetter);
     setSessionExpiredHandler(null);
     setCurrentWorkspaceId(null);
   });
 
   it("retries once with a refreshed token after a 401", async () => {
     let call = 0;
-    const tokenGetter = vi.fn(async (_workspaceId, opts) => {
+    const impl: GetAccessToken = async (_workspaceId, opts) => {
       call += 1;
       if (opts?.forceRefresh) return "fresh-token";
       return "stale-token";
-    });
-    setAccessTokenGetter(tokenGetter as never);
+    };
+    const tokenGetter = vi.fn(impl);
+    setAccessTokenGetter(tokenGetter);
 
     fetchMock
       .mockResolvedValueOnce(new Response("unauthorized", { status: 401 }))
@@ -52,7 +56,8 @@ describe("fetchWithAuth — 401 retry semantics", () => {
   });
 
   it("returns the original response without retry when status is not 401", async () => {
-    setAccessTokenGetter((async () => "tok") as never);
+    const tokenGetter: GetAccessToken = async () => "tok";
+    setAccessTokenGetter(tokenGetter);
     fetchMock.mockResolvedValueOnce(new Response("forbidden", { status: 403 }));
 
     const resp = await fetchWithAuth("/api/v1/builds");
@@ -61,7 +66,7 @@ describe("fetchWithAuth — 401 retry semantics", () => {
   });
 
   it("does not retry when no token was attached on attempt 1", async () => {
-    setAccessTokenGetter((async () => null) as never);
+    setAccessTokenGetter(nullTokenGetter);
     fetchMock.mockResolvedValueOnce(new Response("unauthorized", { status: 401 }));
 
     const resp = await fetchWithAuth("/api/v1/builds");
@@ -70,10 +75,10 @@ describe("fetchWithAuth — 401 retry semantics", () => {
   });
 
   it("calls the session-expired handler when the retry also returns 401", async () => {
-    const tokenGetter = vi.fn(async (_workspaceId, opts) => {
-      return opts?.forceRefresh ? "fresh-token" : "stale-token";
-    });
-    setAccessTokenGetter(tokenGetter as never);
+    const impl: GetAccessToken = async (_workspaceId, opts) =>
+      opts?.forceRefresh ? "fresh-token" : "stale-token";
+    const tokenGetter = vi.fn(impl);
+    setAccessTokenGetter(tokenGetter);
     const handler = vi.fn();
     setSessionExpiredHandler(handler);
 
@@ -90,8 +95,9 @@ describe("fetchWithAuth — 401 retry semantics", () => {
     // Cognito silent renew can return the same token if it's not yet
     // expired client-side; in that case retrying with the same bearer
     // would just produce another 401 — short-circuit and signal expired.
-    const tokenGetter = vi.fn(async () => "same-token");
-    setAccessTokenGetter(tokenGetter as never);
+    const impl: GetAccessToken = async () => "same-token";
+    const tokenGetter = vi.fn(impl);
+    setAccessTokenGetter(tokenGetter);
     const handler = vi.fn();
     setSessionExpiredHandler(handler);
 
@@ -104,10 +110,10 @@ describe("fetchWithAuth — 401 retry semantics", () => {
   });
 
   it("calls the session-expired handler when refresh returns null", async () => {
-    const tokenGetter = vi.fn(async (_workspaceId, opts) => {
-      return opts?.forceRefresh ? null : "stale-token";
-    });
-    setAccessTokenGetter(tokenGetter as never);
+    const impl: GetAccessToken = async (_workspaceId, opts) =>
+      opts?.forceRefresh ? null : "stale-token";
+    const tokenGetter = vi.fn(impl);
+    setAccessTokenGetter(tokenGetter);
     const handler = vi.fn();
     setSessionExpiredHandler(handler);
 

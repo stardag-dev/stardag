@@ -1,6 +1,6 @@
 // API client with authentication support
 
-interface GetAccessTokenOptions {
+export interface GetAccessTokenOptions {
   /**
    * Skip the localStorage token cache and always re-exchange via Cognito.
    * Used by ``fetchWithAuth`` after an unexpected 401 to recover from a
@@ -11,7 +11,7 @@ interface GetAccessTokenOptions {
   forceRefresh?: boolean;
 }
 
-type GetAccessToken = (
+export type GetAccessToken = (
   workspaceId: string | null,
   opts?: GetAccessTokenOptions,
 ) => Promise<string | null>;
