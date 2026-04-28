@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchBuilds } from "../api/tasks";
 import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
@@ -73,6 +73,10 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
     return () => setBreadcrumb([]);
   }, [setBreadcrumb]);
 
+  // Track the env id of the most recent fetch we initiated. Used below
+  // to detect "env just changed" inside loadBuilds — see comment there.
+  const lastFetchedEnvIdRef = useRef<string | null>(null);
+
   const loadBuilds = useCallback(async () => {
     if (!activeEnvironment?.id) {
       // Don't flip loading=false here — the parent gate handles the
@@ -81,6 +85,22 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
       setBuilds([]);
       return;
     }
+
+    // If the env just changed and we're not already on page 1, reset
+    // the page and bail. The page-state update re-creates this callback
+    // on the next render, which will run with page=1 against the new
+    // env. Doing this here (instead of in a separate ``useEffect`` that
+    // runs *alongside* the fetch effect) prevents a wasted fetch with
+    // the previous page that would briefly flash an empty result.
+    if (
+      lastFetchedEnvIdRef.current !== null &&
+      lastFetchedEnvIdRef.current !== activeEnvironment.id &&
+      page !== 1
+    ) {
+      setPage(1);
+      return;
+    }
+    lastFetchedEnvIdRef.current = activeEnvironment.id;
 
     setLoading(true);
     setError(null);
@@ -98,12 +118,6 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
       setLoading(false);
     }
   }, [activeEnvironment?.id, page]);
-
-  // Reset to first page when the active environment changes so we don't
-  // request page N of a smaller env and flash an empty result.
-  useEffect(() => {
-    setPage(1);
-  }, [activeEnvironment?.id]);
 
   useEffect(() => {
     loadBuilds();

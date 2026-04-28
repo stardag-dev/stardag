@@ -142,13 +142,15 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     loadBuild();
   }, [loadBuild]);
 
-  // Reset task-list filters and pagination when the user navigates between
-  // builds — otherwise a filter set on Build A silently applies to Build B
-  // and may produce a confusing empty list.
+  // Reset build-scoped UI state when the user navigates between builds.
+  // Otherwise, filters/pagination from Build A can silently apply to
+  // Build B, and a previously selected task can leave the detail panel
+  // and breadcrumb pointing at stale data from the prior build.
   useEffect(() => {
     setNameFilter("");
     setStatusFilter("");
     setPage(1);
+    setSelectedTask(null);
   }, [buildId]);
 
   // Refresh handler
