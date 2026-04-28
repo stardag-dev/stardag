@@ -142,6 +142,17 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     loadBuild();
   }, [loadBuild]);
 
+  // Reset build-scoped UI state when the user navigates between builds.
+  // Otherwise, filters/pagination from Build A can silently apply to
+  // Build B, and a previously selected task can leave the detail panel
+  // and breadcrumb pointing at stale data from the prior build.
+  useEffect(() => {
+    setNameFilter("");
+    setStatusFilter("");
+    setPage(1);
+    setSelectedTask(null);
+  }, [buildId]);
+
   // Refresh handler
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);

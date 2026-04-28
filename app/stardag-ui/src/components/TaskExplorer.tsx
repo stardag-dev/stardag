@@ -365,12 +365,32 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     return Array.from(artifactNames).sort().join(",");
   }, [columns]);
 
+  // Track the env id of the most recent search we initiated. Used below
+  // to detect "env just changed" inside searchTasks — see comment there.
+  const lastFetchedEnvIdRef = useRef<string | null>(null);
+
   // Search tasks
   const searchTasks = useCallback(async () => {
     if (!activeEnvironment?.id) {
       setTasks([]);
       return;
     }
+
+    // If the env just changed and we're not already on page 1, reset
+    // the page and bail. The page-state update re-creates this callback
+    // on the next render, which will run with page=1 against the new
+    // env. Doing this here (instead of in a separate ``useEffect`` that
+    // runs *alongside* the fetch effect) prevents a wasted search with
+    // the previous page that would briefly flash an empty result.
+    if (
+      lastFetchedEnvIdRef.current !== null &&
+      lastFetchedEnvIdRef.current !== activeEnvironment.id &&
+      page !== 1
+    ) {
+      setPage(1);
+      return;
+    }
+    lastFetchedEnvIdRef.current = activeEnvironment.id;
 
     setLoading(true);
     setError(null);
@@ -424,6 +444,14 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   useEffect(() => {
     searchTasks();
   }, [searchTasks]);
+
+  // Clear the selected task when the env changes — the previously
+  // selected task ID belongs to the prior env and won't resolve here.
+  // (Page reset is handled inline in searchTasks above to avoid a race
+  // with the fetch effect.)
+  useEffect(() => {
+    setSelectedTask(null);
+  }, [activeEnvironment?.id]);
 
   // DAG availability
   const canShowDag = tasks.length > 0 && tasks.length <= 500;
