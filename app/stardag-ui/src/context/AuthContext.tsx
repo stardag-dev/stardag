@@ -20,6 +20,14 @@ interface WorkspaceToken {
   expiresAt: number; // Unix timestamp in ms
 }
 
+interface GetAccessTokenOptions {
+  /**
+   * Skip the localStorage token cache and always re-exchange via Cognito.
+   * Used by the fetch wrapper after an unexpected 401.
+   */
+  forceRefresh?: boolean;
+}
+
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
@@ -28,14 +36,32 @@ interface AuthContextType {
   logout: () => Promise<void>;
   // Get the OIDC access token (for token exchange only)
   getOidcAccessToken: () => Promise<string | null>;
-  // Get workspace-scoped access token for API calls
-  getAccessToken: (workspaceId: string | null) => Promise<string | null>;
-  // Exchange OIDC token for workspace-scoped token
-  exchangeForWorkspaceToken: (workspaceId: string) => Promise<string | null>;
+  // Get workspace-scoped access token for API calls.
+  // ``forceRefresh: true`` skips the localStorage cache and re-exchanges.
+  getAccessToken: (
+    workspaceId: string | null,
+    opts?: GetAccessTokenOptions,
+  ) => Promise<string | null>;
+  // Exchange OIDC token for workspace-scoped token. ``forceRefresh: true``
+  // skips the localStorage cache and re-exchanges from a freshly-renewed
+  // Cognito session.
+  exchangeForWorkspaceToken: (
+    workspaceId: string,
+    opts?: GetAccessTokenOptions,
+  ) => Promise<string | null>;
   // Current workspace for which we have a valid token
   currentTokenWorkspaceId: string | null;
   // Token exchange in progress
   isExchangingToken: boolean;
+  // True when the API client signalled an unrecoverable 401. The UI shows
+  // a "session expired" overlay; clears on successful re-login.
+  sessionExpired: boolean;
+  // Imperatively flag the session as expired (used by the API client's
+  // 401 retry path).
+  notifySessionExpired: () => void;
+  // Clear the flag — call after a successful re-login so the overlay
+  // doesn't keep shadowing the app.
+  clearSessionExpired: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -83,6 +109,15 @@ export function AuthProvider({ children }: AuthProviderProps) {
     null,
   );
   const [isExchangingToken, setIsExchangingToken] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
+
+  const notifySessionExpired = useCallback(() => {
+    setSessionExpired(true);
+  }, []);
+
+  const clearSessionExpired = useCallback(() => {
+    setSessionExpired(false);
+  }, []);
 
   const manager = getUserManager();
 
@@ -109,7 +144,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
     loadUser();
 
     // Listen for user changes (e.g., token refresh)
-    const handleUserLoaded = (user: User) => setUser(user);
+    const handleUserLoaded = (user: User) => {
+      setUser(user);
+      // A fresh user load (silent renew completed, redirect callback
+      // returned, etc.) means the session is healthy again — clear any
+      // stale "session expired" flag so the overlay disappears.
+      setSessionExpired(false);
+    };
     const handleUserUnloaded = () => {
       setUser(null);
       setCurrentTokenWorkspaceId(null);
@@ -194,6 +235,21 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   }, [manager]);
 
+  // Force a silent renew of the Cognito session and return the renewed
+  // ID token. Distinguished from ``getIdToken`` because the API client's
+  // 401 retry path can't trust whatever's already cached locally — the
+  // cached id_token may itself be the reason we got the 401 (very rare,
+  // e.g. clock skew or Cognito-side revocation).
+  const getRefreshedIdToken = useCallback(async (): Promise<string | null> => {
+    if (!manager) return null;
+    try {
+      const renewedUser = await manager.signinSilent();
+      return renewedUser?.id_token ?? null;
+    } catch {
+      return null;
+    }
+  }, [manager]);
+
   // Get OIDC access token (for token exchange)
   const getOidcAccessToken = useCallback(async (): Promise<string | null> => {
     if (!manager) return null;
@@ -211,18 +267,47 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
   }, [manager]);
 
-  // Exchange OIDC token for workspace-scoped token
+  // Force a silent renew and return the renewed access token. Sibling to
+  // ``getRefreshedIdToken``; used by ``exchangeForWorkspaceToken`` when
+  // the caller asked for ``forceRefresh: true``.
+  const getRefreshedOidcAccessToken = useCallback(async (): Promise<string | null> => {
+    if (!manager) return null;
+    try {
+      const renewedUser = await manager.signinSilent();
+      return renewedUser?.access_token ?? null;
+    } catch {
+      return null;
+    }
+  }, [manager]);
+
+  // Exchange OIDC token for workspace-scoped token. ``forceRefresh: true``
+  // skips the localStorage cache and re-exchanges with the Cognito-provided
+  // OIDC token — used after an unexpected 401 to recover from a stale
+  // cached internal token (e.g. signed by a prior API container's keypair
+  // or invalidated by a server-side rotation).
   const exchangeForWorkspaceToken = useCallback(
-    async (workspaceId: string): Promise<string | null> => {
-      // Check cache first
-      const cached = getStoredWorkspaceToken(workspaceId);
-      if (cached) {
-        setCurrentTokenWorkspaceId(workspaceId);
-        return cached.accessToken;
+    async (
+      workspaceId: string,
+      opts: GetAccessTokenOptions = {},
+    ): Promise<string | null> => {
+      if (!opts.forceRefresh) {
+        const cached = getStoredWorkspaceToken(workspaceId);
+        if (cached) {
+          setCurrentTokenWorkspaceId(workspaceId);
+          return cached.accessToken;
+        }
+      } else {
+        // Drop the stale cache entry so subsequent reads don't accidentally
+        // pick it up again.
+        clearWorkspaceToken(workspaceId);
       }
 
-      // Get OIDC access token
-      const oidcToken = await getOidcAccessToken();
+      // Get OIDC access token. If forceRefresh is set, prefer a freshly-
+      // renewed Cognito token rather than whatever is in the user manager
+      // (the cached one might also be stale relative to the API).
+      const oidcToken = opts.forceRefresh
+        ? await getRefreshedOidcAccessToken()
+        : await getOidcAccessToken();
       if (!oidcToken) {
         console.warn("No OIDC token available for exchange");
         return null;
@@ -242,30 +327,35 @@ export function AuthProvider({ children }: AuthProviderProps) {
         setIsExchangingToken(false);
       }
     },
-    [getOidcAccessToken],
+    [getOidcAccessToken, getRefreshedOidcAccessToken],
   );
 
   // Get access token for API calls (workspace-scoped if workspaceId provided)
   const getAccessToken = useCallback(
-    async (workspaceId: string | null): Promise<string | null> => {
+    async (
+      workspaceId: string | null,
+      opts: GetAccessTokenOptions = {},
+    ): Promise<string | null> => {
       // If no workspace specified, use ID token for bootstrap endpoints
       // (ID token contains email/name claims needed by /ui/me endpoints)
       // NOTE: Access token doesn't have user claims in Cognito
       if (!workspaceId) {
-        return getIdToken();
+        return opts.forceRefresh ? getRefreshedIdToken() : getIdToken();
       }
 
-      // Check if we have a valid cached token for this workspace
-      const cached = getStoredWorkspaceToken(workspaceId);
-      if (cached) {
-        setCurrentTokenWorkspaceId(workspaceId);
-        return cached.accessToken;
+      if (!opts.forceRefresh) {
+        // Check if we have a valid cached token for this workspace
+        const cached = getStoredWorkspaceToken(workspaceId);
+        if (cached) {
+          setCurrentTokenWorkspaceId(workspaceId);
+          return cached.accessToken;
+        }
       }
 
-      // Need to exchange for a new token
-      return exchangeForWorkspaceToken(workspaceId);
+      // Need to (re-)exchange for a new token
+      return exchangeForWorkspaceToken(workspaceId, opts);
     },
-    [getIdToken, exchangeForWorkspaceToken],
+    [getIdToken, getRefreshedIdToken, exchangeForWorkspaceToken],
   );
 
   const value: AuthContextType = {
@@ -279,6 +369,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
     exchangeForWorkspaceToken,
     currentTokenWorkspaceId,
     isExchangingToken,
+    sessionExpired,
+    notifySessionExpired,
+    clearSessionExpired,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
