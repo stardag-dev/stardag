@@ -634,69 +634,118 @@ async def _reconcile_dependency_edges(
 ) -> int:
     """Create any missing upstream tasks (as phantoms) and dependency edges.
 
+    Issues two statements when every upstream task already exists, or four
+    when missing upstream ids must be created as phantoms — independent of
+    N otherwise:
+      1. SELECT existing tasks WHERE task_id IN (...).
+      2. (only if any upstream ids were missing) INSERT ... VALUES (...)
+         ON CONFLICT DO NOTHING — bulk phantom insert.
+      3. (only if any upstream ids were missing) SELECT to re-fetch PKs.
+         Required because ON CONFLICT DO NOTHING + RETURNING only returns
+         our own inserted rows; a concurrent caller may have created the
+         row first and we still need its PK.
+      4. INSERT ... VALUES (...) ON CONFLICT DO NOTHING — bulk edge insert.
+
     Idempotent: ``ON CONFLICT DO NOTHING`` handles concurrent registrations.
     An edge's ``is_dynamic`` value is set from the *first* successful insert;
     a later call with a different ``is_dynamic`` value does not overwrite the
     existing row. That's intentional — if a dep is both static and yielded
     dynamically (unusual) we record the first observation as authoritative.
 
-    Returns the number of edges inserted by this call (approximate — the race
-    resolution path may cause an edge to be counted as inserted by the loser
-    of a conflict).
+    Returns the number of edges inserted by this call. On Postgres the
+    asyncpg cursor reports an accurate rowcount; on dialects that don't
+    expose rowcount we conservatively report 0 so callers like
+    ``AddDependenciesResponse.added`` don't over-claim.
     """
-    inserted = 0
-    for dep_task_id in upstream_task_ids:
-        dep_result = await db.execute(
-            select(Task)
+    if not upstream_task_ids:
+        return 0
+
+    # Deduplicate upstream ids so we don't propose the same row twice.
+    requested_ids = list(dict.fromkeys(upstream_task_ids))
+    # Single timestamp for every row this call writes — phantoms and edges
+    # share it, which keeps the audit log self-consistent. UUID7 PKs encode
+    # time, so per-row order is still preserved within the batch.
+    now = utc_now()
+
+    # 1. Find existing tasks for these task_ids in one round-trip.
+    existing_result = await db.execute(
+        select(Task.id, Task.task_id)
+        .where(Task.environment_id == environment_id)
+        .where(Task.task_id.in_(requested_ids))
+    )
+    task_pk_by_task_id: dict[str, UUID] = {
+        task_id: pk for pk, task_id in existing_result.all()
+    }
+
+    # 2. For any missing ids, batch-insert phantoms. ON CONFLICT DO NOTHING
+    # keeps us idempotent under concurrent registrations of the same id.
+    missing_ids = [tid for tid in requested_ids if tid not in task_pk_by_task_id]
+    if missing_ids:
+        phantom_rows = [
+            {
+                "id": generate_uuid7(),
+                "task_id": tid,
+                "environment_id": environment_id,
+                "task_namespace": "",
+                "task_name": tid[:12],
+                "task_data": {},
+                "is_phantom": True,
+                "created_at": now,
+            }
+            for tid in missing_ids
+        ]
+        await db.execute(
+            pg_insert(Task)
+            .values(phantom_rows)
+            .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
+        )
+        # Re-fetch all missing rows in one go (catches both rows we inserted
+        # and rows a concurrent writer beat us to). This is required because
+        # ``RETURNING`` would only give us our own inserted rows, not the
+        # ones we lost the race on.
+        refetch_result = await db.execute(
+            select(Task.id, Task.task_id)
             .where(Task.environment_id == environment_id)
-            .where(Task.task_id == dep_task_id)
+            .where(Task.task_id.in_(missing_ids))
         )
-        dep_task_record = dep_result.scalar_one_or_none()
+        for pk, task_id in refetch_result.all():
+            task_pk_by_task_id[task_id] = pk
 
-        if not dep_task_record:
-            stmt = (
-                pg_insert(Task)
-                .values(
-                    id=generate_uuid7(),
-                    task_id=dep_task_id,
-                    environment_id=environment_id,
-                    task_namespace="",
-                    task_name=dep_task_id[:12],
-                    task_data={},
-                    is_phantom=True,
-                    created_at=utc_now(),
-                )
-                .on_conflict_do_nothing(
-                    constraint="uq_task_environment_taskid",
-                )
-            )
-            await db.execute(stmt)
-            dep_result = await db.execute(
-                select(Task)
-                .where(Task.environment_id == environment_id)
-                .where(Task.task_id == dep_task_id)
-            )
-            dep_task_record = dep_result.scalar_one()
-
-        edge_stmt = (
-            pg_insert(TaskDependency)
-            .values(
-                id=generate_uuid7(),
-                upstream_task_id=dep_task_record.id,
-                downstream_task_id=downstream_task_pk,
-                is_dynamic=is_dynamic,
-                created_at=utc_now(),
-            )
-            .on_conflict_do_nothing(
-                constraint="uq_task_dependency_edge",
-            )
+    # Every requested id must now resolve to a PK. The KeyError below is
+    # essentially unreachable in practice — under READ COMMITTED the
+    # ON CONFLICT DO NOTHING + re-fetch resolves to a row in every
+    # realistic ordering. The realistic concurrent-delete failure mode is
+    # an FK violation on the edge insert below, not this lookup. The lookup
+    # exists as a defence-in-depth tripwire so a future regression would
+    # surface a clear error rather than silently dropping a dep.
+    edge_rows = []
+    for tid in requested_ids:
+        upstream_pk = task_pk_by_task_id[tid]
+        edge_rows.append(
+            {
+                "id": generate_uuid7(),
+                "upstream_task_id": upstream_pk,
+                "downstream_task_id": downstream_task_pk,
+                "is_dynamic": is_dynamic,
+                "created_at": now,
+            }
         )
-        result = await db.execute(edge_stmt)
-        # CursorResult.rowcount is 0 on conflict, 1 on insert. Accessed via
-        # getattr because the base Result type doesn't expose it statically.
-        if getattr(result, "rowcount", 0):
-            inserted += 1
 
+    # 3. Bulk insert the edge rows.
+    edge_stmt = (
+        pg_insert(TaskDependency)
+        .values(edge_rows)
+        .on_conflict_do_nothing(constraint="uq_task_dependency_edge")
+    )
+    result = await db.execute(edge_stmt)
+    # CursorResult.rowcount totals across all VALUES rows on Postgres
+    # (with asyncpg, this is reliable even for ON CONFLICT DO NOTHING —
+    # only actually-inserted rows are counted). On dialects that don't
+    # expose rowcount we report 0 rather than len(edge_rows), since
+    # len(edge_rows) would over-claim whenever any conflict occurred.
+    inserted = getattr(result, "rowcount", None)
+    if inserted is None or inserted < 0:
+        inserted = 0
     return inserted
 
 

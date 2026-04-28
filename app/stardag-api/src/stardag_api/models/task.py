@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import Boolean, ForeignKey, Index, JSON, String, UniqueConstraint, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
@@ -35,6 +36,9 @@ class Task(Base, TimestampMixin):
         ),
         Index("ix_tasks_environment_name", "environment_id", "task_name"),
         Index("ix_tasks_environment_namespace", "environment_id", "task_namespace"),
+        # Covers the common "list/search tasks in env, newest first" pattern
+        # used by the Task Explorer UI and /tasks/values, /tasks/keys.
+        Index("ix_tasks_environment_created", "environment_id", "created_at"),
     )
 
     # UUID7 primary key for time-sortable, globally unique IDs
@@ -69,8 +73,13 @@ class Task(Base, TimestampMixin):
         index=True,
     )
 
-    # Full task data (Pydantic model dump from SDK)
-    task_data: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Full task data (Pydantic model dump from SDK).
+    # Use JSONB on Postgres so `->>` doesn't reparse the source text on every
+    # access (used by the Task Explorer search filters); SQLite keeps JSON.
+    task_data: Mapped[dict] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=False,
+    )
 
     # Version from task definition (optional)
     version: Mapped[str | None] = mapped_column(String(64))

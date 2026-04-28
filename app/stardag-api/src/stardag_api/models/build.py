@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import ForeignKey, Index, JSON, String, Text, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
@@ -55,9 +56,10 @@ class Build(Base, TimestampMixin):
     # Git context
     commit_hash: Mapped[str | None] = mapped_column(String(64), index=True)
 
-    # Root task IDs (the tasks passed to sd.build())
+    # Root task IDs (the tasks passed to sd.build()).
+    # JSONB on Postgres for consistency and to avoid reparsing on access.
     root_task_ids: Mapped[list[str]] = mapped_column(
-        JSON,
+        JSON().with_variant(JSONB(), "postgresql"),
         nullable=False,
         default=list,
     )

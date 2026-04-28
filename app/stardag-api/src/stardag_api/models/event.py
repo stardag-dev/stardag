@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, generate_uuid7, utc_now
@@ -75,8 +76,11 @@ class Event(Base):
     # Optional error message for failure events
     error_message: Mapped[str | None] = mapped_column(Text)
 
-    # Additional event data (flexible JSON)
-    event_metadata: Mapped[dict | None] = mapped_column(JSON)
+    # Additional event data (flexible JSON). JSONB on Postgres so future
+    # queries inside event_metadata don't reparse text on each row scan.
+    event_metadata: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+    )
 
     # Relationships
     build: Mapped[Build] = relationship(back_populates="events")
