@@ -286,3 +286,75 @@ async def pg_session(pg_engine) -> AsyncGenerator[AsyncSession, None]:
     async_session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
     async with async_session_maker() as session:
         yield session
+
+
+@pytest.fixture
+async def pg_client(pg_engine) -> AsyncGenerator[AsyncClient, None]:
+    """HTTP client backed by Postgres (Postgres-equivalent of ``client``).
+
+    Uses the same auth overrides as ``client`` so SDK / UI routes that
+    require authentication can be exercised against a real Postgres for
+    cases that depend on dialect-specific SQL (UUID casts, JSONB operators,
+    FOR UPDATE locks).
+    """
+    from stardag_api.auth import (
+        SdkAuth,
+        get_current_user,
+        get_current_user_flexible,
+        get_workspace_id_from_token,
+        require_sdk_auth,
+    )
+    from stardag_api.models import Environment, User
+
+    async_session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
+
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with async_session_maker() as session:
+            yield session
+
+    mock_environment = Environment(
+        id=DEFAULT_ENVIRONMENT_ID,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        name="Default Environment",
+        slug="default",
+    )
+    mock_user = User(
+        id=DEFAULT_USER_ID,
+        external_id="default-local-user",
+        email="default@localhost",
+        display_name="Default User",
+    )
+    mock_sdk_auth = SdkAuth(
+        environment=mock_environment,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user=mock_user,
+    )
+
+    async def override_require_sdk_auth() -> SdkAuth:
+        return mock_sdk_auth
+
+    async def override_get_current_user() -> User:
+        return mock_user
+
+    async def override_get_current_user_flexible() -> User:
+        return mock_user
+
+    async def override_get_workspace_id_from_token() -> UUID:
+        return DEFAULT_WORKSPACE_ID
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_sdk_auth] = override_require_sdk_auth
+    app.dependency_overrides[get_current_user] = override_get_current_user
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+    app.dependency_overrides[get_workspace_id_from_token] = (
+        override_get_workspace_id_from_token
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        yield ac
+
+    app.dependency_overrides.clear()

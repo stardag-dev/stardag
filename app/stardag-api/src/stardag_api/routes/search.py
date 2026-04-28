@@ -131,12 +131,26 @@ def build_jsonb_condition(
             return f"{task_alias}.{key} ILIKE '%' || :{param_name} || '%'", False, None
         return f"{task_alias}.{key} {sql_op} :{param_name}", False, None
 
-    # Build fields - require join to events and builds tables
+    # Build fields - require join to events and builds tables.
+    # builds.id is a Postgres UUID column. Bound parameters arrive from the
+    # query string as text and asyncpg sends them as character varying; an
+    # implicit `uuid = varchar` comparison is rejected by Postgres
+    # ("operator does not exist: uuid = character varying"). Use explicit
+    # casts: column-to-text for substring match, parameter-to-uuid for
+    # equality so the PK index is still usable.
     if key == "build_id":
         param_name = f"filter_build_id{param_suffix}"
         if sql_op == "ILIKE":
-            return f"builds.id ILIKE '%' || :{param_name} || '%'", True, None
-        return f"builds.id {sql_op} :{param_name}", True, None
+            return (
+                f"builds.id::text ILIKE '%' || :{param_name} || '%'",
+                True,
+                None,
+            )
+        return (
+            f"builds.id {sql_op} CAST(:{param_name} AS uuid)",
+            True,
+            None,
+        )
 
     if key == "build_name":
         param_name = f"filter_build_name{param_suffix}"
