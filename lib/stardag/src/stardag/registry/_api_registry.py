@@ -428,10 +428,12 @@ class APIRegistry(RegistryABC):
         return params
 
     def task_start(self, build_id: UUID, task: "BaseTask") -> None:
-        """Mark a task as started."""
-        # Ensure task is registered first
-        self.task_register(build_id, task)
+        """Mark a task as started.
 
+        Caller must have already registered the task (via ``task_register`` or
+        as a side effect of a parent's static-deps reconciliation). The /start
+        endpoint will 404 otherwise.
+        """
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
@@ -754,9 +756,12 @@ class APIRegistry(RegistryABC):
         )
 
     async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version - mark a task as started."""
-        await self.task_register_aio(build_id, task)
+        """Async version - mark a task as started.
 
+        Caller must have already registered the task (via ``task_register_aio``
+        or as a side effect of a parent's static-deps reconciliation). The
+        /start endpoint will 404 otherwise.
+        """
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",

@@ -1208,3 +1208,243 @@ class TestDynamicDepEdgesRegistryAio:
         assert (dyn.id, parent.id) in tracking.dynamic_dep_edges, (
             f"Dynamic edge not reported; saw: {tracking.dynamic_dep_edges}"
         )
+
+
+# ============================================================================
+# Test: Discover-time task registration
+#
+# All discovered tasks must be registered with the registry before any task
+# starts executing (so the full DAG is visible in the UI immediately, not
+# leaves-first as tasks become runnable). Sequential build must register in
+# deterministic DFS order from the roots.
+# ============================================================================
+
+
+class OrderedTrackingRegistry(NoOpRegistry):
+    """A NoOpRegistry that records the order of every lifecycle call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, UUID]] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    def task_start(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+    def task_fail(self, build_id: UUID, task, error_message=None) -> None:
+        self.calls.append(("task_fail", task.id))
+
+    async def task_register_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    async def task_start_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+
+    async def task_complete_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+    async def task_fail_aio(self, build_id: UUID, task, error_message=None) -> None:
+        self.calls.append(("task_fail", task.id))
+
+
+class TestDiscoverTimeRegistrationSequential:
+    """Sequential build registers all discovered tasks before any task starts."""
+
+    def test_all_tasks_registered_before_any_start(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Every discovered task should be registered before the first task_start."""
+        tracking = OrderedTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="reg_leaf_a")
+        leaf_b = SyncOnlyTask(name="reg_leaf_b")
+        root = SyncOnlyTask(name="reg_root", deps=(leaf_a, leaf_b))
+
+        summary = build_sequential([root], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        first_start_idx = next(
+            i for i, (m, _) in enumerate(tracking.calls) if m == "task_start"
+        )
+        prefix = tracking.calls[:first_start_idx]
+        registered_before_start = {tid for m, tid in prefix if m == "task_register"}
+
+        assert {leaf_a.id, leaf_b.id, root.id}.issubset(registered_before_start), (
+            f"Expected all 3 tasks registered before first task_start; "
+            f"prefix calls: {prefix}"
+        )
+
+    def test_each_task_registered_exactly_once(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """task_register must be called exactly once per task per build (no
+        duplicate-from-task_start_aio noise)."""
+        tracking = OrderedTrackingRegistry()
+
+        leaf = SyncOnlyTask(name="once_leaf")
+        root = SyncOnlyTask(name="once_root", deps=(leaf,))
+
+        build_sequential([root], registry=tracking)
+
+        for task in (leaf, root):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1, (
+                f"Expected exactly 1 task_register for {task.id}, got {register_calls}"
+            )
+
+    def test_registration_order_is_dfs_from_roots(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Sequential build registers in DFS order: root first, then deps."""
+        tracking = OrderedTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="dfs_leaf_a")
+        leaf_b = SyncOnlyTask(name="dfs_leaf_b")
+        root = SyncOnlyTask(name="dfs_root", deps=(leaf_a, leaf_b))
+
+        build_sequential([root], registry=tracking)
+
+        register_order = [tid for m, tid in tracking.calls if m == "task_register"]
+        # Each task registered exactly once and the order is root, leaf_a, leaf_b
+        assert register_order == [root.id, leaf_a.id, leaf_b.id], (
+            f"Expected DFS-from-root order; got {register_order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_tasks_registered_before_start_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+
+        leaf = SyncOnlyTask(name="aio_leaf")
+        root = SyncOnlyTask(name="aio_root", deps=(leaf,))
+
+        await build_sequential_aio([root], registry=tracking)
+
+        first_start_idx = next(
+            i for i, (m, _) in enumerate(tracking.calls) if m == "task_start"
+        )
+        prefix = tracking.calls[:first_start_idx]
+        registered_before_start = {tid for m, tid in prefix if m == "task_register"}
+        assert {leaf.id, root.id}.issubset(registered_before_start)
+
+    @pytest.mark.asyncio
+    async def test_each_task_registered_exactly_once_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+        leaf = SyncOnlyTask(name="once_leaf_aio")
+        root = SyncOnlyTask(name="once_root_aio", deps=(leaf,))
+        await build_sequential_aio([root], registry=tracking)
+        for task in (leaf, root):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1
+
+    def test_dynamic_deps_registered_when_discovered(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Tasks first discovered through a dynamic-deps yield must also be
+        registered (and only once)."""
+        tracking = OrderedTrackingRegistry()
+
+        dyn = DynamicDepsTask(value="dyn_reg")
+        orchestrator = DynamicDepsTask(value="orch_reg", dynamic_deps=(dyn,))
+
+        summary = build_sequential([orchestrator], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        for task in (orchestrator, dyn):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1, (
+                f"Expected exactly 1 task_register for {task.id}, got {register_calls}"
+            )
+
+
+@pytest.mark.parametrize(
+    "build_aio_fn",
+    [build_aio, build_sequential_aio],
+    ids=["concurrent", "sequential"],
+)
+class TestDiscoverTimeRegistrationAio:
+    """Both async builds register every discovered task once, before any
+    task starts. Concurrent build doesn't guarantee a deterministic order
+    between siblings, but parents-before-deps holds and start-after-register
+    holds for every task."""
+
+    @pytest.mark.asyncio
+    async def test_all_registered_before_any_start(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+        leaf_a = SyncOnlyTask(name=f"common_a_{build_aio_fn.__name__}")
+        leaf_b = SyncOnlyTask(name=f"common_b_{build_aio_fn.__name__}")
+        root = SyncOnlyTask(
+            name=f"common_root_{build_aio_fn.__name__}", deps=(leaf_a, leaf_b)
+        )
+        await build_aio_fn([root], registry=tracking)
+
+        first_start_idx = next(
+            i for i, (m, _) in enumerate(tracking.calls) if m == "task_start"
+        )
+        prefix = tracking.calls[:first_start_idx]
+        registered_before_start = {tid for m, tid in prefix if m == "task_register"}
+        assert {leaf_a.id, leaf_b.id, root.id}.issubset(registered_before_start)
+
+    @pytest.mark.asyncio
+    async def test_each_task_registered_exactly_once(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+        leaf = SyncOnlyTask(name=f"once_leaf_{build_aio_fn.__name__}")
+        root = SyncOnlyTask(name=f"once_root_{build_aio_fn.__name__}", deps=(leaf,))
+        await build_aio_fn([root], registry=tracking)
+        for task in (leaf, root):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1, (
+                f"Expected exactly 1 task_register for {task.id}, got {register_calls}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_previously_completed_registered_in_discover(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Previously-completed tasks should also be registered exactly once
+        and never get task_start."""
+        # Pre-build to make the task previously-complete.
+        pre = SyncOnlyTask(name=f"pre_{build_aio_fn.__name__}")
+        await build_aio_fn([pre], registry=NoOpRegistry())
+        assert pre.complete()
+
+        tracking = OrderedTrackingRegistry()
+        await build_aio_fn([pre], registry=tracking)
+
+        register_calls = [c for c in tracking.calls if c == ("task_register", pre.id)]
+        complete_calls = [c for c in tracking.calls if c == ("task_complete", pre.id)]
+        start_calls = [c for c in tracking.calls if c == ("task_start", pre.id)]
+        assert len(register_calls) == 1
+        assert len(complete_calls) == 1
+        assert start_calls == []

@@ -474,12 +474,14 @@ async def build_aio(
     """Build tasks concurrently using hybrid async/thread/process execution.
 
     This is the main build function for production use. It:
-    - Discovers all tasks in the DAG(s)
+    - Discovers all tasks in the DAG(s) and registers each one with the
+      registry as soon as it's discovered (so the full DAG is visible in the
+      UI immediately, not progressively as tasks become runnable)
     - Schedules tasks for execution when dependencies are met
     - Handles dynamic dependencies via generator suspension
     - Supports multiple root tasks (built concurrently)
     - Routes tasks to async/thread/process based on ExecutionModeSelector
-    - Manages all registry interactions (start/complete/fail task)
+    - Manages all registry interactions (register/start/complete/fail task)
     - Optionally uses global concurrency locks for distributed execution
 
     Args:
@@ -544,12 +546,42 @@ async def build_aio(
     # Currently executing tasks
     executing: set[UUID] = set()
 
-    # Tasks found to be already complete during discovery (to register after build starts)
+    # Tasks found to be already complete during discovery (mark complete in registry
+    # after discovery finishes — registration itself happens inline in discover()).
     previously_completed_tasks: list[BaseTask] = []
 
     # Synchronization for concurrent discovery
     discover_lock = asyncio.Lock()
     discover_semaphore = asyncio.Semaphore(max_concurrent_discover)
+
+    # Start or resume build *before* discovery so we can register tasks as
+    # they're found. Registering on discover (instead of at start-of-execution)
+    # makes the full DAG visible in the UI immediately rather than appearing
+    # leaves-first as tasks become runnable.
+    if resume_build_id is not None:
+        build_id = resume_build_id
+        logger.info(f"Resuming build: {build_id}")
+    else:
+        build_id = await registry.build_start_aio(root_tasks=tasks)
+        logger.info(f"Started build: {build_id}")
+
+    async def register_discovered(task: BaseTask) -> None:
+        """Register a freshly-discovered task with the registry.
+
+        Records on ``state.registered`` whether the call succeeded so that
+        ``submit_with_lock`` can retry the registration later if the discover
+        attempt was lost in ``warn`` mode.
+        """
+        try:
+            await registry.task_register_aio(build_id, task)
+        except Exception as reg_err:
+            handle_registry_error(
+                reg_err,
+                f"Failed to register task {task.id} during discovery",
+                on_registry_failure,
+            )
+            return
+        task_states[task.id].registered = True
 
     async def discover(task: BaseTask) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
@@ -560,7 +592,9 @@ async def build_aio(
 
         Uses concurrent recursion with TaskGroup for parallel discovery,
         with a lock protecting shared data structures and a semaphore
-        limiting concurrent completion checks.
+        limiting concurrent completion checks. Each newly-discovered task is
+        registered with the registry (concurrently, fire-and-forget within
+        the TaskGroup) so the full DAG appears in the UI immediately.
         """
         # Check if already discovered and reserve our spot (with lock)
         async with discover_lock:
@@ -572,6 +606,9 @@ async def build_aio(
             )
             completion_events[task.id] = asyncio.Event()
             task_count.discovered += 1
+
+        # Register with the registry (HTTP I/O — outside the lock).
+        await register_discovered(task)
 
         # Check completion outside lock (I/O bound, use semaphore to limit concurrency)
         async with discover_semaphore:
@@ -598,29 +635,17 @@ async def build_aio(
         for root in tasks:
             tg.create_task(discover(root))
 
-    # Start or resume build
-    if resume_build_id is not None:
-        build_id = resume_build_id
-        logger.info(f"Resuming build: {build_id}")
-    else:
-        build_id = await registry.build_start_aio(root_tasks=tasks)
-        logger.info(f"Started build: {build_id}")
-
-    # Register previously completed tasks so they appear in the build's task list.
-    # These get TASK_REFERENCED events since they already exist. We also call
-    # task_complete_aio to self-heal tasks that were left in "Started" state from
-    # a previous build that crashed or timed out — their target exists, so they
-    # are complete, but the registry still shows them as running.
-    for task in previously_completed_tasks:
-        try:
-            await registry.task_register_aio(build_id, task)
-        except Exception as reg_err:
-            handle_registry_error(
-                reg_err,
-                f"Failed to register previously completed task {task.id}",
-                on_registry_failure,
-            )
-            continue
+    # Mark previously completed tasks as complete in the registry. Registration
+    # already happened inline in discover() above; we still need to fire
+    # task_complete_aio so they appear COMPLETED rather than PENDING — and to
+    # self-heal tasks left in "Started" state from a previous build that
+    # crashed (their target exists, so they are complete, but the registry
+    # still shows them as running).
+    async def mark_previously_completed(task: BaseTask) -> None:
+        if not task_states[task.id].registered:
+            # Registration failed in `warn` mode; skip task_complete since
+            # the API row doesn't exist.
+            return
         try:
             await registry.task_complete_aio(build_id, task)
         except Exception as reg_err:
@@ -629,6 +654,11 @@ async def build_aio(
                 f"Failed to mark previously completed task {task.id} as complete",
                 on_registry_failure,
             )
+
+    if previously_completed_tasks:
+        async with asyncio.TaskGroup() as tg:
+            for task in previously_completed_tasks:
+                tg.create_task(mark_previously_completed(task))
 
     await task_executor.setup()
 
@@ -949,8 +979,20 @@ async def build_aio(
             held_locks.add(task_id_str)
 
         # Now we have the lock (or locking wasn't needed)
-        # Start the task in registry
+        # Start the task in registry. The task was already registered during
+        # discover; if registration failed in `warn` mode we retry once here so
+        # the /start endpoint doesn't 404.
         if not state.started:
+            if not state.registered:
+                try:
+                    await registry.task_register_aio(build_id, task)
+                    state.registered = True
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to register task {task.id} before start",
+                        on_registry_failure,
+                    )
             await registry.task_start_aio(build_id, task)
             state.started = True
         elif state.dynamic_deps:

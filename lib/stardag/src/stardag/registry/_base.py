@@ -132,7 +132,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
     def task_start(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as started/running.
 
-        Called immediately before a task begins execution.
+        Called immediately before a task begins execution. The caller is
+        responsible for having already registered the task in the build —
+        ``task_start`` only emits the started event.
 
         Args:
             build_id: The build UUID returned by build_start.

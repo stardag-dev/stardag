@@ -1261,8 +1261,17 @@ async def list_tasks_in_build(
         .scalar_subquery()
     )
 
-    # Get all tasks by those IDs
-    result = await db.execute(select(Task).where(Task.id.in_(task_ids_subquery)))
+    # Get all tasks by those IDs, ordered by Task.created_at ASC. With the SDK
+    # registering every discovered task during the discovery walk, this gives
+    # roughly roots-first / discovery order in the UI, rather than the
+    # arbitrary insert-order behaviour of an unordered SELECT. The task PK
+    # (UUID7, time-encoded) breaks ties deterministically when several rows
+    # were created in the same instant.
+    result = await db.execute(
+        select(Task)
+        .where(Task.id.in_(task_ids_subquery))
+        .order_by(Task.created_at.asc(), Task.id.asc())
+    )
     tasks = result.scalars().all()
     task_ids = [t.id for t in tasks]
 

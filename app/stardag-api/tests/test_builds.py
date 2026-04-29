@@ -299,6 +299,44 @@ async def test_get_build_graph(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_in_build_returns_stable_order(client: AsyncClient):
+    """Tasks are returned in registration order (created_at ASC, id ASC).
+
+    The SDK now registers every discovered task during the discovery walk —
+    roots first, then their static deps — so the UI relies on this endpoint
+    sorting by Task.created_at to render the table in roughly discovery
+    order. Without an ORDER BY clause Postgres/SQLite can return rows in
+    arbitrary order, which surfaces to the user as "task list shuffles
+    between refreshes".
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    expected_order = [f"order-task-{i}" for i in range(5)]
+    for task_id in expected_order:
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks",
+            json={
+                "task_id": task_id,
+                "task_namespace": "",
+                "task_name": task_id,
+                "task_data": {},
+            },
+        )
+
+    response = await client.get(f"/api/v1/builds/{build_id}/tasks")
+    assert response.status_code == 200
+    actual_order = [t["task_id"] for t in response.json()]
+    assert actual_order == expected_order, (
+        f"Expected stable insertion order; got {actual_order}"
+    )
+
+    # Hitting the endpoint a second time must return the same order.
+    response2 = await client.get(f"/api/v1/builds/{build_id}/tasks")
+    assert [t["task_id"] for t in response2.json()] == expected_order
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_in_build_includes_output_uri(client: AsyncClient):
     """Test that list_tasks_in_build endpoint includes output_uri."""
     # Create a build
