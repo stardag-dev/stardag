@@ -630,11 +630,6 @@ async def build_aio(
             for dep in static_deps:
                 tg.create_task(discover(dep))
 
-    # Discover all tasks from roots concurrently
-    async with asyncio.TaskGroup() as tg:
-        for root in tasks:
-            tg.create_task(discover(root))
-
     # Mark previously completed tasks as complete in the registry. Registration
     # already happened inline in discover() above; we still need to fire
     # task_complete_aio so they appear COMPLETED rather than PENDING — and to
@@ -654,13 +649,6 @@ async def build_aio(
                 f"Failed to mark previously completed task {task.id} as complete",
                 on_registry_failure,
             )
-
-    if previously_completed_tasks:
-        async with asyncio.TaskGroup() as tg:
-            for task in previously_completed_tasks:
-                tg.create_task(mark_previously_completed(task))
-
-    await task_executor.setup()
 
     # Map task_id -> asyncio.Task for in-flight executions
     pending_futures: dict[UUID, asyncio.Task] = {}
@@ -993,16 +981,55 @@ async def build_aio(
                         f"Failed to register task {task.id} before start",
                         on_registry_failure,
                     )
-            await registry.task_start_aio(build_id, task)
-            state.started = True
+            # Skip /start if registration never succeeded — the endpoint
+            # would 404 and that hard-fails the build even in `warn` mode.
+            if state.registered:
+                try:
+                    await registry.task_start_aio(build_id, task)
+                    state.started = True
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to start task {task.id}",
+                        on_registry_failure,
+                    )
         elif state.dynamic_deps:
-            # Task was suspended waiting for dynamic deps, now resuming
-            await registry.task_resume_aio(build_id, task)
+            # Task was suspended waiting for dynamic deps, now resuming. Same
+            # warn-mode protection: no point firing /resume if registration
+            # never landed.
+            if state.registered:
+                try:
+                    await registry.task_resume_aio(build_id, task)
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to resume task {task.id}",
+                        on_registry_failure,
+                    )
 
         # Execute the task via the executor
         return await task_executor.submit(task)
 
     try:
+        # Discover all tasks from roots concurrently. Inline-registration
+        # makes the full DAG appear in the registry/UI immediately. If any
+        # discover() raises (e.g. a task's requires() throws), the outer
+        # except below emits build_fail_aio so the build doesn't get stuck
+        # in RUNNING state.
+        async with asyncio.TaskGroup() as tg:
+            for root in tasks:
+                tg.create_task(discover(root))
+
+        # Mark previously-completed tasks as complete (concurrently). Has to
+        # happen after discover finishes so previously_completed_tasks is
+        # fully populated.
+        if previously_completed_tasks:
+            async with asyncio.TaskGroup() as tg:
+                for task in previously_completed_tasks:
+                    tg.create_task(mark_previously_completed(task))
+
+        await task_executor.setup()
+
         # Main build loop using as_completed pattern
         while True:
             # Check if all roots complete

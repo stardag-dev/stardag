@@ -240,9 +240,6 @@ def build_sequential(
         for dep in flatten_task_struct(task.requires()):
             discover(dep)
 
-    for root in tasks_list:
-        discover(root)
-
     # Mark previously-completed tasks as complete in the registry. Registration
     # already happened inline in discover(); we still need to fire
     # task_complete so they appear COMPLETED rather than PENDING — and to
@@ -275,8 +272,6 @@ def build_sequential(
                     f"Failed to mark previously completed task {pc_task.id} as complete",
                     on_registry_failure,
                 )
-
-    mark_pending_previously_completed()
 
     def runtime_discover(task: BaseTask) -> None:
         """``discover()`` wrapper used after the initial registration pass.
@@ -353,6 +348,16 @@ def build_sequential(
             held_locks.discard(task_id)
 
     try:
+        # Discover all tasks (with inline registration). If discover() raises
+        # (e.g. requires() / complete() throws), the outer except below emits
+        # build_fail so the build doesn't get stuck in RUNNING state.
+        for root in tasks_list:
+            discover(root)
+
+        # Mark previously-completed tasks as complete now that discovery has
+        # populated previously_completed_tasks fully.
+        mark_pending_previously_completed()
+
         # Build in topological order
         while True:
             ready_task = _find_ready_task(all_tasks, completion_cache, failed_cache)
@@ -499,9 +504,18 @@ def _run_task_sequential(
                 task_count.succeeded += 1
 
     # The task should already be registered (during discover), but retry once
-    # if discover-time registration failed in `warn` mode so /start doesn't 404.
+    # if discover-time registration failed in `warn` mode. We still wrap
+    # /start in handle_registry_error so a 404 (registration didn't land) or
+    # a transient blip doesn't hard-fail the build in `warn` mode.
     register_task_once(task)
-    registry.task_start(build_id, task)
+    try:
+        registry.task_start(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to start task {task.id}",
+            on_registry_failure,
+        )
 
     has_run = _has_custom_run(task)
     has_run_aio = _has_custom_run_aio(task)
@@ -574,7 +588,14 @@ def _run_task_sequential(
                 break
 
     completion_cache.add(task.id)
-    registry.task_complete(build_id, task)
+    try:
+        registry.task_complete(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to complete task {task.id}",
+            on_registry_failure,
+        )
 
     # Upload artifacts if any
     try:
@@ -707,9 +728,6 @@ async def build_sequential_aio(
         for dep in flatten_task_struct(task.requires()):
             await discover(dep)
 
-    for root in tasks_list:
-        await discover(root)
-
     # Mark previously-completed tasks as complete in the registry. Registration
     # already happened inline in discover(); we still need to fire
     # task_complete_aio so they appear COMPLETED rather than PENDING.
@@ -739,8 +757,6 @@ async def build_sequential_aio(
                     f"Failed to mark previously completed task {pc_task.id} as complete",
                     on_registry_failure,
                 )
-
-    await mark_pending_previously_completed_aio()
 
     async def runtime_discover_aio(task: BaseTask) -> None:
         """``discover()`` wrapper used after the initial registration pass.
@@ -819,6 +835,16 @@ async def build_sequential_aio(
             held_locks.discard(task_id)
 
     try:
+        # Discover all tasks (with inline registration). If discover() raises
+        # (e.g. requires() / complete_aio() throws), the outer except below
+        # emits build_fail_aio so the build doesn't get stuck in RUNNING state.
+        for root in tasks_list:
+            await discover(root)
+
+        # Mark previously-completed tasks as complete now that discovery has
+        # populated previously_completed_tasks fully.
+        await mark_pending_previously_completed_aio()
+
         # Build in topological order
         while True:
             ready_task = _find_ready_task(all_tasks, completion_cache, failed_cache)
@@ -978,9 +1004,18 @@ async def _run_task_sequential_aio(
                 task_count.succeeded += 1
 
     # The task should already be registered (during discover), but retry once
-    # if discover-time registration failed in `warn` mode so /start doesn't 404.
+    # if discover-time registration failed in `warn` mode. We still wrap
+    # /start in handle_registry_error so a 404 (registration didn't land) or
+    # a transient blip doesn't hard-fail the build in `warn` mode.
     await register_task_once_aio(task)
-    await registry.task_start_aio(build_id, task)
+    try:
+        await registry.task_start_aio(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to start task {task.id}",
+            on_registry_failure,
+        )
 
     has_run = _has_custom_run(task)
     has_run_aio = _has_custom_run_aio(task)
@@ -1045,7 +1080,14 @@ async def _run_task_sequential_aio(
                     task_count.succeeded += 1
 
     completion_cache.add(task.id)
-    await registry.task_complete_aio(build_id, task)
+    try:
+        await registry.task_complete_aio(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to complete task {task.id}",
+            on_registry_failure,
+        )
 
     # Upload artifacts if any
     try:

@@ -300,14 +300,13 @@ async def test_get_build_graph(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_list_tasks_in_build_returns_stable_order(client: AsyncClient):
-    """Tasks are returned in registration order (created_at ASC, id ASC).
+    """Tasks are returned in per-build registration order.
 
     The SDK now registers every discovered task during the discovery walk —
-    roots first, then their static deps — so the UI relies on this endpoint
-    sorting by Task.created_at to render the table in roughly discovery
-    order. Without an ORDER BY clause Postgres/SQLite can return rows in
-    arbitrary order, which surfaces to the user as "task list shuffles
-    between refreshes".
+    roots first, then their static deps. The UI relies on this endpoint
+    ordering by *first event in this build* (not by ``Task.created_at``,
+    which is the global "first ever seen in this environment" timestamp).
+    Without that, repeated calls would return rows in arbitrary order.
     """
     response = await client.post("/api/v1/builds", json={})
     build_id = response.json()["id"]
@@ -334,6 +333,60 @@ async def test_list_tasks_in_build_returns_stable_order(client: AsyncClient):
     # Hitting the endpoint a second time must return the same order.
     response2 = await client.get(f"/api/v1/builds/{build_id}/tasks")
     assert [t["task_id"] for t in response2.json()] == expected_order
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_in_build_orders_by_per_build_first_event(
+    client: AsyncClient,
+):
+    """A task that exists from an earlier build should appear at the
+    position it was *re-encountered* in the current build, not at the top
+    by virtue of having an older Task.created_at.
+    """
+    # Build 1 creates task A at the global level.
+    r1 = await client.post("/api/v1/builds", json={})
+    build1_id = r1.json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build1_id}/tasks",
+        json={
+            "task_id": "shared-A",
+            "task_namespace": "",
+            "task_name": "Shared",
+            "task_data": {},
+        },
+    )
+
+    # Build 2 registers a fresh task B *first*, then re-references the
+    # existing task A. If we ordered by Task.created_at the order would
+    # be [shared-A, fresh-B] (because shared-A was inserted earlier in
+    # build 1). With per-build ordering it must be [fresh-B, shared-A].
+    r2 = await client.post("/api/v1/builds", json={})
+    build2_id = r2.json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build2_id}/tasks",
+        json={
+            "task_id": "fresh-B",
+            "task_namespace": "",
+            "task_name": "Fresh",
+            "task_data": {},
+        },
+    )
+    await client.post(
+        f"/api/v1/builds/{build2_id}/tasks",
+        json={
+            "task_id": "shared-A",
+            "task_namespace": "",
+            "task_name": "Shared",
+            "task_data": {},
+        },
+    )
+
+    response = await client.get(f"/api/v1/builds/{build2_id}/tasks")
+    assert response.status_code == 200
+    order = [t["task_id"] for t in response.json()]
+    assert order == ["fresh-B", "shared-A"], (
+        f"Expected per-build first-event order, got {order}"
+    )
 
 
 @pytest.mark.asyncio

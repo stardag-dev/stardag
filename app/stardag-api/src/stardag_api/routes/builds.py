@@ -1252,25 +1252,30 @@ async def list_tasks_in_build(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    # Get distinct task IDs that have events in this build
-    task_ids_subquery = (
-        select(Event.task_id)
+    # Order tasks by their first-event-in-this-build timestamp so the list
+    # reflects per-build registration/discovery order — not Task.created_at,
+    # which is the global "first ever seen in this environment" timestamp
+    # and would surface previously-cached tasks at the top of every later
+    # build. UUID7 IDs break the timestamp tie deterministically.
+    first_event_subquery = (
+        select(
+            Event.task_id.label("task_id"),
+            func.min(Event.created_at).label("first_event_at"),
+            func.min(Event.id).label("first_event_id"),
+        )
         .where(Event.build_id == build_id)
         .where(Event.task_id.isnot(None))
-        .distinct()
-        .scalar_subquery()
+        .group_by(Event.task_id)
+        .subquery()
     )
 
-    # Get all tasks by those IDs, ordered by Task.created_at ASC. With the SDK
-    # registering every discovered task during the discovery walk, this gives
-    # roughly roots-first / discovery order in the UI, rather than the
-    # arbitrary insert-order behaviour of an unordered SELECT. The task PK
-    # (UUID7, time-encoded) breaks ties deterministically when several rows
-    # were created in the same instant.
     result = await db.execute(
         select(Task)
-        .where(Task.id.in_(task_ids_subquery))
-        .order_by(Task.created_at.asc(), Task.id.asc())
+        .join(first_event_subquery, Task.id == first_event_subquery.c.task_id)
+        .order_by(
+            first_event_subquery.c.first_event_at.asc(),
+            first_event_subquery.c.first_event_id.asc(),
+        )
     )
     tasks = result.scalars().all()
     task_ids = [t.id for t in tasks]

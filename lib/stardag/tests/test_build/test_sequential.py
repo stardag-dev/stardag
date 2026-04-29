@@ -1448,3 +1448,215 @@ class TestDiscoverTimeRegistrationAio:
         assert len(register_calls) == 1
         assert len(complete_calls) == 1
         assert start_calls == []
+
+
+# ============================================================================
+# Test: Discover-time registration error handling
+# ============================================================================
+
+
+class FailOnStartRegistry(NoOpRegistry):
+    """Always 404s task_start (e.g. registration didn't land in warn mode)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, UUID]] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    def task_start(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+        raise ConnectionError("would-be 404 on /start")
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+    async def task_register_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    async def task_start_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+        raise ConnectionError("would-be 404 on /start")
+
+    async def task_complete_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+
+class TestDiscoverTimeRegistrationErrorHandling:
+    """In `warn` mode, registry hiccups during discover-time registration —
+    or the resulting 404 from /start when registration didn't land — must
+    not abort the build. The task still executes locally."""
+
+    def test_warn_mode_tolerates_start_failure_sequential(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = FailOnStartRegistry()
+        task = SyncOnlyTask(name="warn_start_seq")
+        summary = build_sequential(
+            [task], registry=registry, on_registry_failure="warn"
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Task ran (so its target exists) and the build didn't blow up.
+        assert task.complete()
+
+    def test_raise_mode_propagates_start_failure_sequential(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = FailOnStartRegistry()
+        task = SyncOnlyTask(name="raise_start_seq")
+        with pytest.raises(ConnectionError, match="would-be 404"):
+            build_sequential([task], registry=registry, on_registry_failure="raise")
+
+    @pytest.mark.parametrize(
+        "build_aio_fn",
+        [build_aio, build_sequential_aio],
+        ids=["concurrent", "sequential"],
+    )
+    @pytest.mark.asyncio
+    async def test_warn_mode_tolerates_start_failure_aio(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = FailOnStartRegistry()
+        task = SyncOnlyTask(name=f"warn_start_aio_{build_aio_fn.__name__}")
+        summary = await build_aio_fn(
+            [task], registry=registry, on_registry_failure="warn"
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+
+    def test_warn_mode_skips_start_when_registration_failed_concurrent(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Concurrent build: when discover-time register fails (and the
+        retry inside submit_with_lock also fails), task_start_aio should
+        be skipped rather than 404-ing the build."""
+
+        class AlwaysFailRegisterRegistry(NoOpRegistry):
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, UUID]] = []
+
+            def task_register(self, build_id, task) -> None:
+                self.calls.append(("task_register", task.id))
+                raise ConnectionError("register down")
+
+            def task_start(self, build_id, task) -> None:
+                self.calls.append(("task_start", task.id))
+
+            def task_complete(self, build_id, task) -> None:
+                self.calls.append(("task_complete", task.id))
+
+            async def task_register_aio(self, build_id, task) -> None:
+                self.calls.append(("task_register", task.id))
+                raise ConnectionError("register down")
+
+            async def task_start_aio(self, build_id, task) -> None:
+                self.calls.append(("task_start", task.id))
+
+            async def task_complete_aio(self, build_id, task) -> None:
+                self.calls.append(("task_complete", task.id))
+
+        registry = AlwaysFailRegisterRegistry()
+        task = SyncOnlyTask(name="skip_start_concurrent")
+        summary = build([task], registry=registry, on_registry_failure="warn")
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+        # No start event should have been attempted — registration never
+        # landed, so /start would have 404'd.
+        start_calls = [c for c in registry.calls if c[0] == "task_start"]
+        assert start_calls == [], (
+            f"Expected /start to be skipped when registration didn't land; "
+            f"got {registry.calls}"
+        )
+
+
+# ============================================================================
+# Test: build_fail emitted when discover() raises
+# ============================================================================
+
+
+class _FailingRequiresTask(SyncOnlyTask):
+    """A task whose requires() raises, simulating a discovery-time crash."""
+
+    def requires(self):
+        raise RuntimeError("requires() exploded during discovery")
+
+
+class BuildFailTrackingRegistry(NoOpRegistry):
+    def __init__(self) -> None:
+        self.build_started_with: UUID | None = None
+        self.build_failed_with: UUID | None = None
+        self.build_completed_with: UUID | None = None
+
+    def build_start(self, root_tasks=None, description=None):
+        from uuid import uuid4
+
+        self.build_started_with = uuid4()
+        return self.build_started_with
+
+    async def build_start_aio(self, root_tasks=None, description=None):
+        return self.build_start(root_tasks, description)
+
+    def build_fail(self, build_id, error_message=None):
+        self.build_failed_with = build_id
+
+    async def build_fail_aio(self, build_id, error_message=None):
+        self.build_fail(build_id, error_message)
+
+    def build_complete(self, build_id):
+        self.build_completed_with = build_id
+
+    async def build_complete_aio(self, build_id):
+        self.build_complete(build_id)
+
+    def task_register(self, build_id, task):
+        pass
+
+    async def task_register_aio(self, build_id, task):
+        pass
+
+
+class TestDiscoveryFailureBuildFail:
+    """If discovery raises, build_fail must reach the registry — otherwise
+    the build is left RUNNING forever."""
+
+    def test_sequential_emits_build_fail_when_discover_raises(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BuildFailTrackingRegistry()
+        with pytest.raises(RuntimeError, match="requires.*exploded"):
+            build_sequential([_FailingRequiresTask(name="boom")], registry=registry)
+        assert registry.build_started_with is not None
+        assert registry.build_failed_with == registry.build_started_with
+        assert registry.build_completed_with is None
+
+    @pytest.mark.parametrize(
+        "build_aio_fn",
+        [build_aio, build_sequential_aio],
+        ids=["concurrent", "sequential"],
+    )
+    @pytest.mark.asyncio
+    async def test_aio_emits_build_fail_when_discover_raises(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BuildFailTrackingRegistry()
+        # build_aio's TaskGroup wraps the RuntimeError in an ExceptionGroup;
+        # build_sequential_aio re-raises directly. Both subclass `Exception`,
+        # so a single Exception catch works on Python 3.10+ without
+        # name-resolving BaseExceptionGroup at parse time.
+        with pytest.raises(Exception):
+            await build_aio_fn(
+                [_FailingRequiresTask(name=f"boom_{build_aio_fn.__name__}")],
+                registry=registry,
+            )
+        assert registry.build_started_with is not None
+        assert registry.build_failed_with == registry.build_started_with
+        assert registry.build_completed_with is None
