@@ -8,14 +8,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## `app/stardag-api|ui` only — 2026-04-28
 
-> Server-side changes only — no SDK release. Deployed continuously via
-> `stardag-cloud`.
+> App (API + UI) changes only — no SDK release. Deployed continuously
+> via `stardag-cloud`.
 
 ### API
 
 - **Performance**: bcrypt API-key validation moved off the event loop (in-process TTL cache + `asyncio.to_thread`), explicit DB pool config, gunicorn `--preload`/`UvicornWorker` with parameterised workers and sizing. JSONB metadata columns, `(environment_id, created_at)` indices, batched dependency reconciliation. Denormalised `Task.latest_*` status columns with `SELECT … FOR UPDATE` concurrent-write protection. ([#125](https://github.com/stardag-dev/stardag/pull/125), [#126](https://github.com/stardag-dev/stardag/pull/126), [#127](https://github.com/stardag-dev/stardag/pull/127))
 - **Bug fix**: `/tasks/search` no longer 500s on `filter=build_id:=:<uuid>`; malformed UUIDs now return 400. ([#128](https://github.com/stardag-dev/stardag/pull/128))
-- **Stable internal JWT signing key (optional)**: load the RSA keypair from a configured secret (`JWT_PRIVATE_KEY_SECRET_NAME`) instead of generating an ephemeral one per container, so deploys and scaleouts don't invalidate cached internal tokens. ([#129](https://github.com/stardag-dev/stardag/pull/129))
+- **Stable internal JWT signing key (optional)**: when `STARDAG_API_JWT_PRIVATE_KEY_SECRET_NAME` is set at CDK synth time, the named Secrets Manager secret (containing a PEM RSA private key under `private_key`) is mounted into the container as `JWT_PRIVATE_KEY` and used by the internal token manager instead of generating an ephemeral keypair per container. Deploys and scaleouts no longer invalidate cached internal tokens. ([#129](https://github.com/stardag-dev/stardag/pull/129))
 
 ### UI
 
