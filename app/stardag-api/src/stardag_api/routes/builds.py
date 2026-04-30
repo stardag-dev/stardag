@@ -1256,12 +1256,15 @@ async def list_tasks_in_build(
     # reflects per-build registration/discovery order — not Task.created_at,
     # which is the global "first ever seen in this environment" timestamp
     # and would surface previously-cached tasks at the top of every later
-    # build. UUID7 IDs break the timestamp tie deterministically.
+    # build. ``Task.id`` (UUID7, time-encoded) breaks the timestamp tie
+    # deterministically. ``min(events.id)`` would be a more precise
+    # tiebreaker but Postgres has no ``min(uuid)`` aggregate (unlike SQLite),
+    # and the practical risk of two tasks having identical
+    # ``min(events.created_at)`` is negligible.
     first_event_subquery = (
         select(
             Event.task_id.label("task_id"),
             func.min(Event.created_at).label("first_event_at"),
-            func.min(Event.id).label("first_event_id"),
         )
         .where(Event.build_id == build_id)
         .where(Event.task_id.isnot(None))
@@ -1274,7 +1277,7 @@ async def list_tasks_in_build(
         .join(first_event_subquery, Task.id == first_event_subquery.c.task_id)
         .order_by(
             first_event_subquery.c.first_event_at.asc(),
-            first_event_subquery.c.first_event_id.asc(),
+            Task.id.asc(),
         )
     )
     tasks = result.scalars().all()
