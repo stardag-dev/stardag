@@ -547,17 +547,23 @@ async def build_aio(
     executing: set[UUID] = set()
 
     # Tasks found to be already complete during discovery (mark complete in registry
-    # after discovery finishes — registration itself happens inline in discover()).
+    # after discovery finishes — registration itself happens via the bulk call).
     previously_completed_tasks: list[BaseTask] = []
+    # Tasks accumulated during the current discover() walk, in post-order,
+    # awaiting the bulk-registration call. Within each subtree this is
+    # strict post-order; sibling subtrees may interleave (TaskGroup runs
+    # them concurrently), but each task's static deps are always emitted
+    # before it — which is all the API needs to avoid phantom-creation.
+    # Cleared by ``flush_pending_registrations`` after each bulk call.
+    pending_registrations: list[BaseTask] = []
 
     # Synchronization for concurrent discovery
     discover_lock = asyncio.Lock()
     discover_semaphore = asyncio.Semaphore(max_concurrent_discover)
 
-    # Start or resume build *before* discovery so we can register tasks as
-    # they're found. Registering on discover (instead of at start-of-execution)
-    # makes the full DAG visible in the UI immediately rather than appearing
-    # leaves-first as tasks become runnable.
+    # Start or resume build *before* discovery so we have a build_id to
+    # register tasks against. Registering during discovery makes the full
+    # DAG visible in the UI immediately, not leaves-first as tasks run.
     if resume_build_id is not None:
         build_id = resume_build_id
         logger.info(f"Resuming build: {build_id}")
@@ -565,36 +571,21 @@ async def build_aio(
         build_id = await registry.build_start_aio(root_tasks=tasks)
         logger.info(f"Started build: {build_id}")
 
-    async def register_discovered(task: BaseTask) -> None:
-        """Register a freshly-discovered task with the registry.
-
-        Records on ``state.registered`` whether the call succeeded so that
-        ``submit_with_lock`` can retry the registration later if the discover
-        attempt was lost in ``warn`` mode.
-        """
-        try:
-            await registry.task_register_aio(build_id, task)
-        except Exception as reg_err:
-            handle_registry_error(
-                reg_err,
-                f"Failed to register task {task.id} during discovery",
-                on_registry_failure,
-            )
-            return
-        task_states[task.id].registered = True
-
     async def discover(task: BaseTask) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
 
-        This optimization avoids traversing into dependency subgraphs that
-        are already complete, which can significantly reduce discovery time
-        for large DAGs with cached results.
+        Discovery only populates local state and ``pending_registrations``;
+        the actual ``task_register_bulk_aio`` call fires once via
+        ``flush_pending_registrations()`` after the whole walk completes.
+        Walks in **post-order** so deps appear in ``pending_registrations``
+        before their parents — the bulk endpoint processes the array in
+        order, so by the time a parent's ``dependency_task_ids`` are
+        reconciled the dep rows already exist (no phantom creation in
+        ``_reconcile_dependency_edges``).
 
         Uses concurrent recursion with TaskGroup for parallel discovery,
         with a lock protecting shared data structures and a semaphore
-        limiting concurrent completion checks. Each newly-discovered task is
-        registered with the registry (concurrently, fire-and-forget within
-        the TaskGroup) so the full DAG appears in the UI immediately.
+        limiting concurrent completion checks.
         """
         # Check if already discovered and reserve our spot (with lock)
         async with discover_lock:
@@ -606,9 +597,6 @@ async def build_aio(
             )
             completion_events[task.id] = asyncio.Event()
             task_count.discovered += 1
-
-        # Register with the registry (HTTP I/O — outside the lock).
-        await register_discovered(task)
 
         # Check completion outside lock (I/O bound, use semaphore to limit concurrency)
         async with discover_semaphore:
@@ -622,13 +610,53 @@ async def build_aio(
                 task_count.previously_completed += 1
                 previously_completed_tasks.append(task)
             if not register_all:
-                # Don't recurse into deps - they're already built
+                # Don't recurse into deps — they're already built. Append
+                # to pending_registrations (leaf in post-order).
+                pending_registrations.append(task)
                 return
 
-        # Task not complete (or register_all) - recurse into dependencies
+        # Task not complete (or register_all) — recurse into deps first
+        # (post-order). TaskGroup waits for all children to finish before
+        # this body continues, so all child appends to pending_registrations
+        # land before our own append below.
         async with asyncio.TaskGroup() as tg:
             for dep in static_deps:
                 tg.create_task(discover(dep))
+
+        # Append self after children — preserves post-order within subtree.
+        pending_registrations.append(task)
+
+    async def flush_pending_registrations() -> None:
+        """Bulk-register every task accumulated since the last flush.
+
+        Called after each discover-walk (initial walk and each dynamic-deps
+        walk). On bulk-call failure: ``warn`` mode logs and continues —
+        the per-task retry inside ``submit_with_lock`` will pick up the
+        slack as tasks become runnable. ``raise`` mode propagates.
+        """
+        if not pending_registrations:
+            return
+        # Snapshot then clear so a recursive discover call inside the same
+        # event loop tick can't accidentally re-register these tasks.
+        batch = list(pending_registrations)
+        pending_registrations.clear()
+        try:
+            await registry.task_register_bulk_aio(build_id, batch)
+        except Exception as reg_err:
+            # Include up to 5 task IDs in the warning so debugging is
+            # possible without dumping a 1000-id list into logs.
+            ids_preview = ", ".join(str(t.id) for t in batch[:5])
+            if len(batch) > 5:
+                ids_preview += f", +{len(batch) - 5} more"
+            handle_registry_error(
+                reg_err,
+                f"Failed to bulk-register {len(batch)} tasks during discovery "
+                f"(ids: {ids_preview})",
+                on_registry_failure,
+            )
+            return
+        for t in batch:
+            task_states[t.id].registered = True
 
     # Mark previously completed tasks as complete in the registry. Registration
     # already happened inline in discover() above; we still need to fire
@@ -763,9 +791,20 @@ async def build_aio(
                     on_registry_failure,
                 )
 
-            # Record yielded deps as edges so the DAG view shows them. This is
-            # the ONLY place dynamic edges enter the registry — static deps are
-            # recorded by task_register via task.requires().
+            # Discover any new dynamic deps FIRST (which post-order-collects
+            # them and their requires() subtree into pending_registrations).
+            # Then bulk-register the new batch BEFORE recording the edge —
+            # this way the upstream row exists when the edge insert runs,
+            # and _reconcile_dependency_edges doesn't have to phantom-
+            # create it.
+            for dep in dynamic_deps:
+                if dep.id not in task_states:
+                    await discover(dep)
+            await flush_pending_registrations()
+
+            # Now record yielded deps as edges so the DAG view shows them.
+            # This is the ONLY place dynamic edges enter the registry —
+            # static deps are recorded by task_register via task.requires().
             if dynamic_deps:
                 try:
                     await registry.task_add_dependencies_aio(
@@ -777,11 +816,6 @@ async def build_aio(
                         f"Failed to record dynamic deps for task {task.id}",
                         on_registry_failure,
                     )
-
-            # Discover any new dynamic deps (discover handles counting)
-            for dep in dynamic_deps:
-                if dep.id not in task_states:
-                    await discover(dep)
 
             # Accumulate dynamic deps (don't overwrite)
             existing_dyn_ids = {d.id for d in state.dynamic_deps}
@@ -1020,9 +1054,14 @@ async def build_aio(
             for root in tasks:
                 tg.create_task(discover(root))
 
+        # Bulk-register every discovered task in one HTTP call. Order is
+        # post-order so the API resolves all dependency_task_ids to existing
+        # rows without phantom-creating any.
+        await flush_pending_registrations()
+
         # Mark previously-completed tasks as complete (concurrently). Has to
-        # happen after discover finishes so previously_completed_tasks is
-        # fully populated.
+        # happen after registration so the API rows exist; previously_completed
+        # is populated during discover() above.
         if previously_completed_tasks:
             async with asyncio.TaskGroup() as tg:
                 for task in previously_completed_tasks:

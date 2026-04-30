@@ -144,6 +144,20 @@ class TaskCreate(BaseModel):
     dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
 
 
+class TaskBulkCreate(BaseModel):
+    """Schema for bulk-registering multiple tasks to a build.
+
+    Tasks are processed in array order in a single transaction. Order
+    matters: with the SDK's post-order discover, deps appear earlier in
+    the array than parents, so when a parent's dependency_task_ids resolve
+    they find existing rows (no phantom-creation in
+    _reconcile_dependency_edges). Duplicates within the array are
+    deduplicated server-side.
+    """
+
+    tasks: list[TaskCreate]
+
+
 class TaskResponse(BaseModel):
     """Schema for task response."""
 
@@ -158,6 +172,17 @@ class TaskResponse(BaseModel):
     version: str | None
     output_uri: str | None = None
     created_at: datetime
+    # True for placeholder rows auto-created by ``_reconcile_dependency_edges``
+    # when an edge points at a not-yet-registered task. With the SDK's
+    # post-order discover walk this is rare; UI treats phantoms as
+    # incomplete/registering rows.
+    is_phantom: bool = False
+
+
+class TaskBulkResponse(BaseModel):
+    """Response from a bulk task registration."""
+
+    tasks: list[TaskResponse]
 
 
 class AddDependenciesRequest(BaseModel):

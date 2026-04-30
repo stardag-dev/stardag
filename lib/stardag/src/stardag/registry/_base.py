@@ -129,6 +129,26 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def task_register_bulk(self, build_id: UUID, tasks: Sequence["BaseTask"]) -> None:
+        """Register many tasks to a build in a single call.
+
+        Default implementation falls back to ``task_register`` per task —
+        backends that can batch (e.g. the API registry's bulk endpoint)
+        should override this to make one HTTP call instead of N.
+
+        Order of ``tasks`` is significant: the SDK's post-order discover
+        walk emits deps before parents so that ``dependency_task_ids``
+        lookups inside the registry resolve to existing rows (no phantom
+        creation). Backends that process the batch as one transaction
+        should preserve array order.
+
+        Args:
+            build_id: The build UUID returned by build_start.
+            tasks: Tasks to register, in registration order.
+        """
+        for task in tasks:
+            self.task_register(build_id, task)
+
     def task_start(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as started/running.
 
@@ -305,6 +325,18 @@ class RegistryABC(metaclass=abc.ABCMeta):
     async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_register."""
         self.task_register(build_id, task)
+
+    async def task_register_bulk_aio(
+        self, build_id: UUID, tasks: Sequence["BaseTask"]
+    ) -> None:
+        """Async version of task_register_bulk.
+
+        Default implementation falls back to ``task_register_aio`` per
+        task. Override for backends that can batch (the API registry
+        does so with the ``/tasks/bulk`` endpoint).
+        """
+        for task in tasks:
+            await self.task_register_aio(build_id, task)
 
     async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_start."""

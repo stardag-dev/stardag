@@ -42,6 +42,8 @@ from stardag_api.schemas import (
     BuildResponse,
     EventResponse,
     StatusTriggeredByUser,
+    TaskBulkCreate,
+    TaskBulkResponse,
     TaskCreate,
     TaskEventResponse,
     TaskGraphExtendedResponse,
@@ -662,6 +664,22 @@ async def _reconcile_dependency_edges(
 ) -> int:
     """Create any missing upstream tasks (as phantoms) and dependency edges.
 
+    **Phantom-creation is a safety hatch, not the happy path.** With the
+    SDK's post-order discover walk (every dep registers before its
+    parent) and within-batch ordering of the bulk-register endpoint, the
+    upstream ``task_id`` lookup at step 1 always finds existing rows in
+    normal operation, so steps 2 + 3 are skipped. Phantoms only appear
+    when:
+      - A build crashes between registering a parent and registering
+        its deps (orphan rows from the failed build).
+      - An out-of-band caller registers edges via the
+        ``/dependencies`` endpoint pointing at not-yet-registered task
+        ids.
+      - A future caller registers in pre-order again.
+    The rest of the system (UI list, DAG view) treats phantoms as
+    placeholder rows and the next register-with-real-data call upgrades
+    them in place.
+
     Issues two statements when every upstream task already exists, or four
     when missing upstream ids must be created as phantoms — independent of
     N otherwise:
@@ -915,6 +933,183 @@ async def register_task(
         output_uri=db_task.output_uri,
         created_at=db_task.created_at,
     )
+
+
+# Cap on the number of tasks per bulk-register call. Bounds memory/transaction
+# size on the API side; the SDK's build engine should chunk if it ever exceeds.
+_MAX_BULK_REGISTER_TASKS = 1000
+
+
+@router.post(
+    "/{build_id}/tasks/bulk",
+    response_model=TaskBulkResponse,
+    status_code=201,
+)
+async def register_tasks_bulk(
+    build_id: UUID,
+    payload: TaskBulkCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Register multiple tasks to a build in a single transaction.
+
+    Tasks are processed in array order. With the SDK's post-order discover
+    walk, deps appear earlier in the array than their parents — so when a
+    parent's ``dependency_task_ids`` resolves the API finds existing rows
+    (no phantom-creation in ``_reconcile_dependency_edges``). Within the
+    same transaction ``db.flush()`` makes earlier tasks visible to later
+    SELECTs, so the in-batch ordering carries through correctly.
+
+    Sibling-of single-task registration: same TASK_PENDING /
+    TASK_REFERENCED event semantics, same phantom-upgrade behaviour for
+    rows left over from prior failed builds.
+    """
+    tasks_in = payload.tasks
+
+    if not tasks_in:
+        return TaskBulkResponse(tasks=[])
+
+    if len(tasks_in) > _MAX_BULK_REGISTER_TASKS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Bulk register limited to {_MAX_BULK_REGISTER_TASKS} tasks per "
+                f"call (got {len(tasks_in)})"
+            ),
+        )
+
+    # Rate limit (1 per call). The bulk endpoint deliberately doesn't count
+    # as N requests — entity-creation limits below cap actual writes.
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+
+    # Per-task structural limits.
+    for t in tasks_in:
+        _raise_if_limit_exceeded(
+            check_payload_size(
+                t.task_data,
+                limits_settings.max_task_data_bytes,
+                ErrorCode.TASK_DATA_SIZE_LIMIT,
+                "task_data",
+            )
+        )
+        _raise_if_limit_exceeded(
+            check_structural_limit(
+                len(t.dependency_task_ids),
+                limits_settings.max_dependency_ids_per_task,
+                ErrorCode.DEPENDENCY_COUNT_LIMIT,
+                "dependency_task_ids",
+            )
+        )
+
+    # 24h entity-creation limits. Each task produces exactly one event;
+    # the task-creation count is an upper bound (some tasks may already
+    # exist and be referenced rather than created).
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db,
+            auth.workspace_id,
+            "events",
+            limits_settings,
+            amount=len(tasks_in),
+        )
+    )
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db,
+            auth.workspace_id,
+            "tasks",
+            limits_settings,
+            amount=len(tasks_in),
+        )
+    )
+
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+    if build.environment_id != auth.environment_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this environment"
+        )
+
+    responses: list[TaskResponse] = []
+    new_task_count = 0
+
+    for t in tasks_in:
+        # Mirror the single-task register flow: select-with-lock to avoid
+        # racing apply_event_to_task on the denormalised latest_* columns
+        # against another writer on the same task.
+        result = await db.execute(
+            select(Task)
+            .where(Task.environment_id == build.environment_id)
+            .where(Task.task_id == t.task_id)
+            .with_for_update()
+        )
+        db_task = result.scalar_one_or_none()
+        task_already_existed = db_task is not None
+
+        if not db_task:
+            db_task = Task(
+                task_id=t.task_id,
+                environment_id=build.environment_id,
+                task_namespace=t.task_namespace,
+                task_name=t.task_name,
+                task_data=t.task_data,
+                version=t.version,
+                output_uri=t.output_uri,
+            )
+            db.add(db_task)
+            await db.flush()  # Make visible to subsequent SELECTs in this txn
+            new_task_count += 1
+        elif db_task.is_phantom:
+            db_task.task_namespace = t.task_namespace
+            db_task.task_name = t.task_name
+            db_task.task_data = t.task_data
+            db_task.version = t.version
+            db_task.output_uri = t.output_uri
+            db_task.is_phantom = False
+
+        await _reconcile_dependency_edges(
+            db=db,
+            environment_id=build.environment_id,
+            downstream_task_pk=db_task.id,
+            upstream_task_ids=t.dependency_task_ids,
+            is_dynamic=False,
+        )
+
+        event = Event(
+            build_id=build_id,
+            task_id=db_task.id,
+            event_type=EventType.TASK_REFERENCED
+            if task_already_existed
+            else EventType.TASK_PENDING,
+        )
+        db.add(event)
+        await db.flush()
+        apply_event_to_task(db_task, event)
+
+        responses.append(
+            TaskResponse(
+                id=db_task.id,
+                task_id=db_task.task_id,
+                environment_id=db_task.environment_id,
+                task_namespace=db_task.task_namespace,
+                task_name=db_task.task_name,
+                task_data=db_task.task_data,
+                version=db_task.version,
+                output_uri=db_task.output_uri,
+                created_at=db_task.created_at,
+            )
+        )
+
+    await db.commit()
+
+    # Update entity-count cache for in-process limit tracking.
+    for _ in range(len(tasks_in)):
+        record_entity_created(auth.workspace_id, "events")
+    for _ in range(new_task_count):
+        record_entity_created(auth.workspace_id, "tasks")
+
+    return TaskBulkResponse(tasks=responses)
 
 
 @router.post("/{build_id}/tasks/{task_id}/start", response_model=TaskEventResponse)
@@ -1320,6 +1515,7 @@ async def list_tasks_in_build(
                 version=task.version,
                 output_uri=task.output_uri,
                 created_at=task.created_at,
+                is_phantom=task.is_phantom,
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,

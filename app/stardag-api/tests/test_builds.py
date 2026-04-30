@@ -336,6 +336,197 @@ async def test_list_tasks_in_build_returns_stable_order(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_bulk_register_creates_tasks_and_resolves_in_batch_deps(
+    client: AsyncClient,
+):
+    """Bulk register processes the array in order so that a task whose deps
+    appear earlier in the same batch resolves to existing rows — no
+    phantom-creation in _reconcile_dependency_edges. This is the key
+    invariant the SDK's post-order discover relies on.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Leaf, then mid, then root. Root depends on mid, mid depends on leaf.
+    payload = {
+        "tasks": [
+            {
+                "task_id": "bulk-leaf",
+                "task_namespace": "",
+                "task_name": "Leaf",
+                "task_data": {},
+            },
+            {
+                "task_id": "bulk-mid",
+                "task_namespace": "",
+                "task_name": "Mid",
+                "task_data": {},
+                "dependency_task_ids": ["bulk-leaf"],
+            },
+            {
+                "task_id": "bulk-root",
+                "task_namespace": "",
+                "task_name": "Root",
+                "task_data": {},
+                "dependency_task_ids": ["bulk-mid"],
+            },
+        ]
+    }
+    response = await client.post(f"/api/v1/builds/{build_id}/tasks/bulk", json=payload)
+    assert response.status_code == 201
+    data = response.json()
+    assert [t["task_id"] for t in data["tasks"]] == [
+        "bulk-leaf",
+        "bulk-mid",
+        "bulk-root",
+    ]
+    # No phantom rows in the response — every task got registered with full
+    # data, never as a placeholder.
+    assert all(t["is_phantom"] is False for t in data["tasks"])
+
+    # Sanity: list endpoint returns all three with proper namespaces and
+    # names (proves no phantoms persist after the bulk call).
+    response = await client.get(f"/api/v1/builds/{build_id}/tasks")
+    assert response.status_code == 200
+    listed = response.json()
+    assert len(listed) == 3
+    assert all(t["task_name"] in {"Leaf", "Mid", "Root"} for t in listed)
+    assert all(t["is_phantom"] is False for t in listed)
+
+
+@pytest.mark.asyncio
+async def test_bulk_register_upgrades_existing_phantoms(client: AsyncClient):
+    """A phantom row created by an earlier dep-edge call gets upgraded in
+    place by a later bulk register that sends real task_data.
+
+    Phantoms don't appear in ``list_tasks_in_build`` (the endpoint filters
+    by tasks with events in the build, and phantoms are event-less), so
+    we use the graph endpoint — which traverses the dependency edges and
+    includes the phantom node — to verify upgrade behaviour.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Trigger phantom creation: register a task whose dep doesn't exist yet.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "trigger",
+            "task_namespace": "",
+            "task_name": "Trigger",
+            "task_data": {},
+            "dependency_task_ids": ["phantom-target"],
+        },
+    )
+
+    # Now bulk-register the real task — it should upgrade the phantom row.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk",
+        json={
+            "tasks": [
+                {
+                    "task_id": "phantom-target",
+                    "task_namespace": "real",
+                    "task_name": "RealTask",
+                    "task_data": {"foo": "bar"},
+                }
+            ]
+        },
+    )
+    assert response.status_code == 201
+    upgraded = response.json()["tasks"][0]
+    assert upgraded["is_phantom"] is False
+    assert upgraded["task_namespace"] == "real"
+    assert upgraded["task_name"] == "RealTask"
+
+    # Verify via list endpoint that the upgraded task is now visible (it
+    # has a TASK_PENDING event from the bulk register).
+    listed = (await client.get(f"/api/v1/builds/{build_id}/tasks")).json()
+    listed_target = [t for t in listed if t["task_id"] == "phantom-target"]
+    assert len(listed_target) == 1
+    assert listed_target[0]["is_phantom"] is False
+    assert listed_target[0]["task_namespace"] == "real"
+
+
+@pytest.mark.asyncio
+async def test_bulk_register_empty_array_returns_200_empty(client: AsyncClient):
+    """Empty bulk request is a no-op — returns empty array, no error."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk", json={"tasks": []}
+    )
+    assert response.status_code == 201
+    assert response.json() == {"tasks": []}
+
+
+@pytest.mark.asyncio
+async def test_bulk_register_caps_batch_size(client: AsyncClient):
+    """Bulk request over the cap returns 400 rather than processing
+    silently — the SDK chunks if it ever has that many tasks."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+    too_many = [
+        {
+            "task_id": f"too-many-{i}",
+            "task_namespace": "",
+            "task_name": "T",
+            "task_data": {},
+        }
+        for i in range(1001)
+    ]
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk",
+        json={"tasks": too_many},
+    )
+    assert response.status_code == 400
+    assert "limited to" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_register_referenced_event_for_existing_task(
+    client: AsyncClient,
+):
+    """A task that already exists in the env from a prior build gets a
+    TASK_REFERENCED event when bulk-registered, not a TASK_PENDING."""
+    # Build 1 creates the task.
+    r1 = await client.post("/api/v1/builds", json={})
+    b1 = r1.json()["id"]
+    await client.post(
+        f"/api/v1/builds/{b1}/tasks",
+        json={
+            "task_id": "shared-x",
+            "task_namespace": "",
+            "task_name": "X",
+            "task_data": {},
+        },
+    )
+
+    # Build 2 bulk-registers the same task.
+    r2 = await client.post("/api/v1/builds", json={})
+    b2 = r2.json()["id"]
+    response = await client.post(
+        f"/api/v1/builds/{b2}/tasks/bulk",
+        json={
+            "tasks": [
+                {
+                    "task_id": "shared-x",
+                    "task_namespace": "",
+                    "task_name": "X",
+                    "task_data": {},
+                }
+            ]
+        },
+    )
+    assert response.status_code == 201
+
+    events_response = await client.get(f"/api/v1/builds/{b2}/events")
+    event_types = [e["event_type"] for e in events_response.json()]
+    assert "task_referenced" in event_types
+    assert "task_pending" not in event_types
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_in_build_orders_by_per_build_first_event(
     client: AsyncClient,
 ):

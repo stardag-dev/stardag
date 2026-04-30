@@ -418,6 +418,34 @@ class APIRegistry(RegistryABC):
             operation=f"Register task {task.id}",
         )
 
+    def task_register_bulk(self, build_id: UUID, tasks: Sequence["BaseTask"]) -> None:
+        """Bulk-register tasks via the ``/tasks/bulk`` endpoint.
+
+        Falls back to per-task ``task_register`` if the API doesn't
+        support the endpoint (older deployments) — same backwards-compat
+        pattern as ``task_add_dependencies``.
+        """
+        if not tasks:
+            return
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
+                json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
+                params=self._get_params(),
+                operation=f"Bulk-register {len(tasks)} tasks",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /tasks/bulk; "
+                "falling back to per-task registration. "
+                "Upgrade the Registry API for batched registration."
+            )
+            for t in tasks:
+                self.task_register(build_id, t)
+
     def _get_event_params(self) -> dict[str, str]:
         """Get query params for event endpoints, including commit_hash."""
         params = self._get_params()
@@ -754,6 +782,35 @@ class APIRegistry(RegistryABC):
             params=self._get_params(),
             operation=f"Register task {task.id}",
         )
+
+    async def task_register_bulk_aio(
+        self, build_id: UUID, tasks: Sequence["BaseTask"]
+    ) -> None:
+        """Async bulk-register via ``/tasks/bulk`` (one HTTP call instead of N).
+
+        Falls back to per-task ``task_register_aio`` if the API doesn't
+        support the endpoint (older deployments).
+        """
+        if not tasks:
+            return
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
+                json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
+                params=self._get_params(),
+                operation=f"Bulk-register {len(tasks)} tasks",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /tasks/bulk; "
+                "falling back to per-task registration. "
+                "Upgrade the Registry API for batched registration."
+            )
+            for t in tasks:
+                await self.task_register_aio(build_id, t)
 
     async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as started.

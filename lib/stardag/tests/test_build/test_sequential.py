@@ -1300,11 +1300,15 @@ class TestDiscoverTimeRegistrationSequential:
                 f"Expected exactly 1 task_register for {task.id}, got {register_calls}"
             )
 
-    def test_registration_order_is_dfs_from_roots(
+    def test_registration_order_is_post_order_dfs(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
-        """Sequential build registers in DFS order: root first, then deps."""
+        """Sequential build registers in post-order DFS: leaves first, then
+        their parents. This ensures every dep already exists in the registry
+        by the time its parent is registered, so the API never has to
+        phantom-create a dep row.
+        """
         tracking = OrderedTrackingRegistry()
 
         leaf_a = SyncOnlyTask(name="dfs_leaf_a")
@@ -1314,9 +1318,9 @@ class TestDiscoverTimeRegistrationSequential:
         build_sequential([root], registry=tracking)
 
         register_order = [tid for m, tid in tracking.calls if m == "task_register"]
-        # Each task registered exactly once and the order is root, leaf_a, leaf_b
-        assert register_order == [root.id, leaf_a.id, leaf_b.id], (
-            f"Expected DFS-from-root order; got {register_order}"
+        # Post-order DFS: leaf_a, leaf_b, root.
+        assert register_order == [leaf_a.id, leaf_b.id, root.id], (
+            f"Expected post-order DFS (leaves before parents); got {register_order}"
         )
 
     @pytest.mark.asyncio
@@ -1448,6 +1452,181 @@ class TestDiscoverTimeRegistrationAio:
         assert len(register_calls) == 1
         assert len(complete_calls) == 1
         assert start_calls == []
+
+
+# ============================================================================
+# Test: Bulk register
+#
+# Build engine should emit one bulk-register call per discover walk
+# instead of N per-task calls. Verifies the registration order within the
+# batch is post-order (deps before parents), so the API never has to
+# phantom-create a row.
+# ============================================================================
+
+
+class BulkTrackingRegistry(NoOpRegistry):
+    """A registry that records bulk_register batches *and* per-task calls."""
+
+    def __init__(self) -> None:
+        self.bulk_batches: list[list[UUID]] = []
+        self.per_task_register_calls: list[UUID] = []
+        self.task_complete_calls: list[UUID] = []
+        self.task_start_calls: list[UUID] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.per_task_register_calls.append(task.id)
+
+    async def task_register_aio(self, build_id: UUID, task) -> None:
+        self.per_task_register_calls.append(task.id)
+
+    def task_register_bulk(self, build_id: UUID, tasks) -> None:
+        self.bulk_batches.append([t.id for t in tasks])
+
+    async def task_register_bulk_aio(self, build_id: UUID, tasks) -> None:
+        self.bulk_batches.append([t.id for t in tasks])
+
+    def task_start(self, build_id: UUID, task) -> None:
+        self.task_start_calls.append(task.id)
+
+    async def task_start_aio(self, build_id: UUID, task) -> None:
+        self.task_start_calls.append(task.id)
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.task_complete_calls.append(task.id)
+
+    async def task_complete_aio(self, build_id: UUID, task) -> None:
+        self.task_complete_calls.append(task.id)
+
+
+class TestBulkRegister:
+    """Verify the build engine batches discover-time registrations."""
+
+    def test_sequential_emits_one_bulk_call_for_static_dag(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="bulk_seq_leaf_a")
+        leaf_b = SyncOnlyTask(name="bulk_seq_leaf_b")
+        root = SyncOnlyTask(name="bulk_seq_root", deps=(leaf_a, leaf_b))
+
+        build_sequential([root], registry=registry)
+
+        # Exactly one bulk batch with all three tasks. No per-task
+        # task_register calls (would mean the bulk path fell through).
+        assert len(registry.bulk_batches) == 1, registry.bulk_batches
+        assert set(registry.bulk_batches[0]) == {leaf_a.id, leaf_b.id, root.id}
+        assert registry.per_task_register_calls == []
+
+    def test_sequential_bulk_order_is_post_order(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="po_leaf_a")
+        leaf_b = SyncOnlyTask(name="po_leaf_b")
+        root = SyncOnlyTask(name="po_root", deps=(leaf_a, leaf_b))
+
+        build_sequential([root], registry=registry)
+
+        order = registry.bulk_batches[0]
+        # Leaves come before the root. Within siblings the SDK preserves
+        # the order returned by ``flatten_task_struct(requires())``.
+        assert order == [leaf_a.id, leaf_b.id, root.id], (
+            f"Expected post-order DFS, got {order}"
+        )
+
+    @pytest.mark.parametrize(
+        "build_aio_fn",
+        [build_aio, build_sequential_aio],
+        ids=["concurrent", "sequential"],
+    )
+    @pytest.mark.asyncio
+    async def test_aio_emits_one_bulk_call_for_static_dag(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+        leaf_a = SyncOnlyTask(name=f"bulk_aio_la_{build_aio_fn.__name__}")
+        leaf_b = SyncOnlyTask(name=f"bulk_aio_lb_{build_aio_fn.__name__}")
+        root = SyncOnlyTask(
+            name=f"bulk_aio_root_{build_aio_fn.__name__}", deps=(leaf_a, leaf_b)
+        )
+
+        await build_aio_fn([root], registry=registry)
+
+        # One bulk call covering the whole DAG. The concurrent build may
+        # interleave sibling subtrees but each subtree is post-order, so
+        # parents always come after their deps within the batch.
+        assert len(registry.bulk_batches) == 1
+        batch = registry.bulk_batches[0]
+        assert set(batch) == {leaf_a.id, leaf_b.id, root.id}
+        # Root comes after both leaves regardless of sibling interleaving.
+        leaf_indices = [batch.index(leaf_a.id), batch.index(leaf_b.id)]
+        assert batch.index(root.id) > max(leaf_indices)
+        assert registry.per_task_register_calls == []
+
+    def test_dynamic_deps_trigger_separate_bulk_call(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Each dynamic-deps yield triggers its own bulk-register call so
+        the new tasks are registered before the edge is recorded."""
+        registry = BulkTrackingRegistry()
+
+        dyn = DynamicDepsTask(value="dyn_bulk")
+        orchestrator = DynamicDepsTask(value="orch_bulk", dynamic_deps=(dyn,))
+
+        build_sequential([orchestrator], registry=registry)
+
+        # First batch: orchestrator (root has no static deps so it's the
+        # only thing in the initial walk). Second batch: dyn (yielded at
+        # runtime). At least 2 separate bulk calls.
+        assert len(registry.bulk_batches) >= 2, registry.bulk_batches
+        first_batch_ids = set(registry.bulk_batches[0])
+        assert orchestrator.id in first_batch_ids
+        # dyn must show up in some later batch.
+        dyn_in_later_batch = any(dyn.id in batch for batch in registry.bulk_batches[1:])
+        assert dyn_in_later_batch, (
+            f"dyn task not found in any post-initial batch: {registry.bulk_batches}"
+        )
+
+
+class TestNoPhantomsHappyPath:
+    """In normal operation (post-order discover + bulk register) every
+    task is registered with its real data before any edge referencing it
+    is emitted. The simplest way to verify this is to see that
+    ``dependency_task_ids`` only ever contains ids for tasks that
+    appeared *earlier* in the same bulk batch — so the API resolves them
+    without phantom creation.
+    """
+
+    def test_bulk_array_orders_deps_before_parents(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="np_leaf_a")
+        leaf_b = SyncOnlyTask(name="np_leaf_b")
+        mid = SyncOnlyTask(name="np_mid", deps=(leaf_a,))
+        root = SyncOnlyTask(name="np_root", deps=(mid, leaf_b))
+
+        build_sequential([root], registry=registry)
+
+        order = registry.bulk_batches[0]
+        # For every task in the batch, all of its *registration-time*
+        # deps must appear earlier in the array.
+        positions = {tid: i for i, tid in enumerate(order)}
+        for task in (leaf_a, leaf_b, mid, root):
+            for dep in task.deps:
+                assert positions[dep.id] < positions[task.id], (
+                    f"Dep {dep.id} should appear before {task.id} in bulk order; "
+                    f"got positions {positions}"
+                )
 
 
 # ============================================================================

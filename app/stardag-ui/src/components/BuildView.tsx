@@ -288,8 +288,16 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     return () => setBreadcrumb([]);
   }, [build, buildId, selectedTask, onBack, setBreadcrumb]);
 
+  // Hide phantom rows (placeholders auto-created by the API when an edge
+  // pointed at a not-yet-registered task). With the SDK's post-order
+  // discover walk this is rare; phantoms still render in the DAG (where
+  // dropping them would break edges) but we keep them out of the table
+  // and the "X tasks" counter to avoid showing "tid[:12]"-style
+  // placeholder names alongside real tasks.
+  const realTasks = useMemo(() => allTasks.filter((t) => !t.is_phantom), [allTasks]);
+
   // Client-side filtering
-  const filteredTasks = allTasks.filter((task) => {
+  const filteredTasks = realTasks.filter((task) => {
     if (
       nameFilter &&
       !task.task_name.toLowerCase().includes(nameFilter.toLowerCase())
@@ -419,7 +427,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs text-gray-500 dark:text-gray-400">
-                    {allTasks.length} tasks
+                    {realTasks.length} tasks
                   </span>
                   <button
                     onClick={handleRefreshClick}
@@ -540,7 +548,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                     <DagControls
                       value={dagControls}
                       onChange={setDagControls}
-                      primaryCount={allTasks.length}
+                      primaryCount={realTasks.length}
                       upstreamCount={extendedGraph?.total_upstream_count ?? 0}
                       downstreamCount={extendedGraph?.total_downstream_count ?? 0}
                       groupCount={extendedGraph?.groups.length ?? 0}
@@ -651,7 +659,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               <DagControls
                 value={dagControls}
                 onChange={setDagControls}
-                primaryCount={allTasks.length}
+                primaryCount={realTasks.length}
                 upstreamCount={extendedGraph?.total_upstream_count ?? 0}
                 downstreamCount={extendedGraph?.total_downstream_count ?? 0}
                 groupCount={extendedGraph?.groups.length ?? 0}
