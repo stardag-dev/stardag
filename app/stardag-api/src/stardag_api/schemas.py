@@ -181,9 +181,35 @@ class TaskResponse(BaseModel):
 
 
 class TaskBulkResponse(BaseModel):
-    """Response from a bulk task registration."""
+    """Full response from a bulk task registration.
+
+    Returned when ``id_only=false`` (the default) — each task in the
+    response carries its complete state (task_data, namespace, etc.),
+    matching the single-task ``register_task`` shape.
+    """
 
     tasks: list[TaskResponse]
+
+
+class BulkTaskIdRef(BaseModel):
+    """Slim id-only reference to a registered task in a bulk response."""
+
+    id: UUID
+    task_id: str
+
+
+class TaskBulkIdOnlyResponse(BaseModel):
+    """Lightweight response from a bulk task registration.
+
+    Returned when ``?id_only=true``. Contains only the
+    (database PK ↔ task_id) mapping — no task_data, no namespace, no
+    timestamps. Saves bandwidth + serialisation cost when the caller
+    (e.g. the SDK's build engine) doesn't need the full state echoed
+    back. For a 50-task batch with rich task_data this is the
+    difference between ~50 KB and ~3 KB on the wire.
+    """
+
+    tasks: list[BulkTaskIdRef]
 
 
 class AddDependenciesRequest(BaseModel):

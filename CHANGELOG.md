@@ -84,6 +84,9 @@ notes; the bullets below are the per-component summary.
   phantom-creation in `_reconcile_dependency_edges`). Deduplicates by
   `task_id`, keeping the first occurrence. Same TASK_PENDING /
   TASK_REFERENCED event semantics as the single-task endpoint.
+  Optional `?id_only=true` query param returns only `{id, task_id}`
+  per task instead of the full `TaskResponse` (~10× smaller
+  response — the SDK passes this since it doesn't read the response).
 - **`GZipRequestMiddleware`**: ASGI middleware that decompresses
   incoming `Content-Encoding: gzip` request bodies before route
   handlers parse them. Pass-through for non-gzipped requests so old

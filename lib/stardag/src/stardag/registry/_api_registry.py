@@ -496,6 +496,11 @@ class APIRegistry(RegistryABC):
         engine chunks above this method; external callers of
         ``APIRegistry`` get an explicit client-side error rather than a
         400 from the server.
+
+        Passes ``?id_only=true`` so the server returns only the
+        ``{id, task_id}`` mapping rather than echoing back full
+        ``TaskResponse`` rows we'd discard anyway. Cuts response size
+        by ~10× for batches with rich task_data.
         """
         if not tasks:
             return
@@ -510,7 +515,7 @@ class APIRegistry(RegistryABC):
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
-                params=self._get_params(),
+                params={**self._get_params(), "id_only": "true"},
                 operation=f"Bulk-register {len(tasks)} tasks",
             )
         except NotFoundError as e:
@@ -873,6 +878,11 @@ class APIRegistry(RegistryABC):
         ``_MAX_BULK_REGISTER_TASKS`` (mirrors the server cap). The build
         engine chunks above this method; external callers get an
         explicit client-side error rather than a 400 from the server.
+
+        Passes ``?id_only=true`` so the server returns only the
+        ``{id, task_id}`` mapping rather than echoing full ``TaskResponse``
+        rows that we discard. Cuts response size by ~10× for batches
+        with rich task_data.
         """
         if not tasks:
             return
@@ -887,7 +897,7 @@ class APIRegistry(RegistryABC):
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
-                params=self._get_params(),
+                params={**self._get_params(), "id_only": "true"},
                 operation=f"Bulk-register {len(tasks)} tasks",
             )
         except NotFoundError as e:

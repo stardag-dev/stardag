@@ -677,6 +677,78 @@ async def test_bulk_register_array_order_maps_to_list_order(
 
 
 @pytest.mark.asyncio
+async def test_bulk_register_id_only_returns_slim_response(client: AsyncClient):
+    """``?id_only=true`` returns just ``{id, task_id}`` per task,
+    skipping task_data / namespace / created_at to cut response size.
+    The DB rows are still fully written — only the response payload
+    differs."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    payload = {
+        "tasks": [
+            {
+                "task_id": f"slim-task-{i}",
+                "task_namespace": "demo",
+                "task_name": "SlimTask",
+                "task_data": {"big": "x" * 1024, "i": i},
+            }
+            for i in range(3)
+        ]
+    }
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk?id_only=true",
+        json=payload,
+    )
+    assert response.status_code == 201
+    body = response.json()
+    # Slim shape — exactly id + task_id, nothing else.
+    assert {tuple(t.keys()) for t in body["tasks"]} == {("id", "task_id")}
+    assert [t["task_id"] for t in body["tasks"]] == [
+        "slim-task-0",
+        "slim-task-1",
+        "slim-task-2",
+    ]
+
+    # Sanity: the persisted rows are still complete (the slim response
+    # is a serialisation choice, not a write-time choice).
+    listed = (await client.get(f"/api/v1/builds/{build_id}/tasks")).json()
+    persisted = next(t for t in listed if t["task_id"] == "slim-task-0")
+    assert persisted["task_namespace"] == "demo"
+    assert persisted["task_data"] == {"big": "x" * 1024, "i": 0}
+
+
+@pytest.mark.asyncio
+async def test_bulk_register_default_returns_full_response(client: AsyncClient):
+    """Default (``id_only`` omitted or ``false``) returns the full
+    ``TaskResponse`` shape — backward compatible with direct API
+    callers who rely on the rich response."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk",
+        json={
+            "tasks": [
+                {
+                    "task_id": "full-task",
+                    "task_namespace": "demo",
+                    "task_name": "FullTask",
+                    "task_data": {"k": "v"},
+                }
+            ]
+        },
+    )
+    assert response.status_code == 201
+    only_task = response.json()["tasks"][0]
+    # Full shape carries task_data, namespace, created_at, is_phantom, …
+    assert only_task["task_namespace"] == "demo"
+    assert only_task["task_data"] == {"k": "v"}
+    assert "created_at" in only_task
+    assert only_task["is_phantom"] is False
+
+
+@pytest.mark.asyncio
 async def test_concurrent_bulk_registers_overlapping_tasks(
     client: AsyncClient,
 ):

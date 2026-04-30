@@ -196,6 +196,13 @@ class TestAPIRegistryGzipsWireFormat:
             f"Expected Content-Encoding: gzip on big bulk request; "
             f"headers were {dict(request.headers)}"
         )
+        # SDK opts into the slim ``id_only=true`` response shape since
+        # it doesn't read the response body — this saves ~10× on
+        # response size at the server.
+        assert request.url.params.get("id_only") == "true", (
+            f"Expected id_only=true on bulk register request; "
+            f"params were {dict(request.url.params)}"
+        )
         # Decompressed body round-trips back to JSON with all 50 tasks,
         # each carrying a distinct task_id (UUID per-instance — proves
         # we're really compressing a batch of unique tasks, not 50

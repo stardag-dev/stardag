@@ -43,7 +43,9 @@ from stardag_api.schemas import (
     BuildResponse,
     EventResponse,
     StatusTriggeredByUser,
+    BulkTaskIdRef,
     TaskBulkCreate,
+    TaskBulkIdOnlyResponse,
     TaskBulkResponse,
     TaskCreate,
     TaskEventResponse,
@@ -943,7 +945,7 @@ _MAX_BULK_REGISTER_TASKS = 1000
 
 @router.post(
     "/{build_id}/tasks/bulk",
-    response_model=TaskBulkResponse,
+    response_model=TaskBulkResponse | TaskBulkIdOnlyResponse,
     status_code=201,
 )
 async def register_tasks_bulk(
@@ -951,6 +953,17 @@ async def register_tasks_bulk(
     payload: TaskBulkCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    id_only: Annotated[
+        bool,
+        Query(
+            description=(
+                "If true, return only ``{id, task_id}`` pairs in the response "
+                "instead of the full TaskResponse list. Cuts response size by "
+                "~10× for batches with rich task_data; the SDK's build engine "
+                "passes this since it doesn't read the response."
+            ),
+        ),
+    ] = False,
 ):
     """Register multiple tasks to a build in a single transaction.
 
@@ -1259,15 +1272,33 @@ async def register_tasks_bulk(
     # task INSERT batch) populated the rows we need to FK against.
     await db.commit()
 
-    # Build responses in array order from the (now-flushed) ORM
-    # instances. Refresh ensures ``created_at`` is populated for newly
-    # inserted rows (server-default would have applied at flush time).
-    responses: list[TaskResponse] = []
-    for t in tasks_in:
-        db_task = db_task_by_task_id[t.task_id]
-        responses.append(
+    # Update entity-count cache for in-process limit tracking. Done
+    # before response construction since the slim-response path skips
+    # the ORM column reads.
+    for _ in range(len(tasks_in)):
+        record_entity_created(auth.workspace_id, "events")
+    for _ in range(new_task_count):
+        record_entity_created(auth.workspace_id, "tasks")
+
+    if id_only:
+        # Slim path — caller (typically the SDK) doesn't read the
+        # response body, so save the per-task column reads + JSON
+        # serialisation. Echo only the (id ↔ task_id) mapping.
+        return TaskBulkIdOnlyResponse(
+            tasks=[
+                BulkTaskIdRef(
+                    id=db_task_by_task_id[t.task_id].id,
+                    task_id=t.task_id,
+                )
+                for t in tasks_in
+            ]
+        )
+
+    # Default: full TaskResponse for each task in array order.
+    return TaskBulkResponse(
+        tasks=[
             TaskResponse(
-                id=db_task.id,
+                id=(db_task := db_task_by_task_id[t.task_id]).id,
                 task_id=db_task.task_id,
                 environment_id=db_task.environment_id,
                 task_namespace=db_task.task_namespace,
@@ -1278,15 +1309,9 @@ async def register_tasks_bulk(
                 created_at=db_task.created_at,
                 is_phantom=db_task.is_phantom,
             )
-        )
-
-    # Update entity-count cache for in-process limit tracking.
-    for _ in range(len(tasks_in)):
-        record_entity_created(auth.workspace_id, "events")
-    for _ in range(new_task_count):
-        record_entity_created(auth.workspace_id, "tasks")
-
-    return TaskBulkResponse(tasks=responses)
+            for t in tasks_in
+        ]
+    )
 
 
 @router.post("/{build_id}/tasks/{task_id}/start", response_model=TaskEventResponse)
