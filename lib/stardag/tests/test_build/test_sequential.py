@@ -1595,6 +1595,105 @@ class TestBulkRegister:
         )
 
 
+class TestConcurrentDiscoverRaceFreedom:
+    """The concurrent discover walk used a fast-path
+    ``if task.id in task_states: return`` that could let a sibling
+    discoverer for a shared dep return *before* the original discoverer
+    appended that dep to ``pending_registrations`` — letting a parent
+    append ahead of its dep and re-introducing phantom-creation. Fixed
+    by waiting on a per-task ``discover_done`` event in the fast-path.
+
+    A diamond DAG (parent → mid_a, mid_b; mid_a, mid_b → leaf) exercises
+    this: both mid_a and mid_b race on ``discover(leaf)``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_diamond_dag_orders_shared_dep_before_all_parents(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf = SyncOnlyTask(name="diamond_leaf")
+        mid_a = SyncOnlyTask(name="diamond_mid_a", deps=(leaf,))
+        mid_b = SyncOnlyTask(name="diamond_mid_b", deps=(leaf,))
+        parent = SyncOnlyTask(name="diamond_parent", deps=(mid_a, mid_b))
+
+        await build_aio([parent], registry=registry)
+
+        assert len(registry.bulk_batches) == 1
+        order = registry.bulk_batches[0]
+        positions = {tid: i for i, tid in enumerate(order)}
+
+        # Shared dep must appear before *both* its parents, even when
+        # they're discovered concurrently and one of them hits the
+        # fast-path on the second discover(leaf) call.
+        assert positions[leaf.id] < positions[mid_a.id]
+        assert positions[leaf.id] < positions[mid_b.id]
+        # Parent comes last.
+        assert positions[parent.id] == len(order) - 1
+
+
+class TestBulkRegisterChunking:
+    """Discovery batches over the API cap must be chunked into
+    <=cap-sized bulk calls — otherwise the server 400s and we silently
+    fall back to per-task registration in warn mode (defeating the
+    bulk-register optimisation).
+    """
+
+    def test_sequential_chunks_large_batch(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch,
+    ):
+        """Force chunking by lowering the chunk constant to 3, build a
+        DAG of 7 tasks, assert 3 chunked bulk calls of sizes 3, 3, 1."""
+        from stardag.build import _sequential
+
+        monkeypatch.setattr(_sequential, "_BULK_REGISTER_CHUNK_SIZE", 3)
+
+        registry = BulkTrackingRegistry()
+        leaves = [SyncOnlyTask(name=f"chunk_leaf_{i}") for i in range(6)]
+        root = SyncOnlyTask(name="chunk_root", deps=tuple(leaves))
+
+        build_sequential([root], registry=registry)
+
+        # 7 tasks total → 3 chunks at chunk_size=3 (3+3+1).
+        chunk_sizes = [len(b) for b in registry.bulk_batches]
+        assert chunk_sizes == [3, 3, 1], (
+            f"Expected chunks of [3, 3, 1]; got {chunk_sizes}"
+        )
+        # All tasks accounted for, in post-order — root last.
+        flat = [tid for chunk in registry.bulk_batches for tid in chunk]
+        assert set(flat) == {root.id, *(leaf.id for leaf in leaves)}
+        assert flat[-1] == root.id
+
+    @pytest.mark.asyncio
+    async def test_concurrent_chunks_large_batch(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch,
+    ):
+        from stardag.build import _concurrent
+
+        monkeypatch.setattr(_concurrent, "_BULK_REGISTER_CHUNK_SIZE", 3)
+
+        registry = BulkTrackingRegistry()
+        leaves = [SyncOnlyTask(name=f"async_chunk_leaf_{i}") for i in range(6)]
+        root = SyncOnlyTask(name="async_chunk_root", deps=tuple(leaves))
+
+        await build_aio([root], registry=registry)
+
+        chunk_sizes = [len(b) for b in registry.bulk_batches]
+        assert chunk_sizes == [3, 3, 1], chunk_sizes
+        flat = [tid for chunk in registry.bulk_batches for tid in chunk]
+        assert set(flat) == {root.id, *(leaf.id for leaf in leaves)}
+        # Root must come after every leaf even with concurrent sibling
+        # interleaving.
+        leaf_positions = [flat.index(leaf.id) for leaf in leaves]
+        assert flat.index(root.id) > max(leaf_positions)
+
+
 class TestNoPhantomsHappyPath:
     """In normal operation (post-order discover + bulk register) every
     task is registered with its real data before any edge referencing it

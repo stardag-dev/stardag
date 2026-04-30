@@ -51,6 +51,12 @@ from stardag.registry import RegistryABC, registry_provider
 logger = logging.getLogger(__name__)
 
 
+# Maximum number of tasks per ``task_register_bulk[_aio]`` call. Matches
+# the Stardag API server's per-call cap; we chunk ``pending_registrations``
+# accordingly to stay within it for large fan-out DAGs.
+_BULK_REGISTER_CHUNK_SIZE = 1000
+
+
 # ---------------------------------------------------------------------------
 # Pure helper functions shared by both sync and async build variants.
 # These contain no I/O and are safe to call from any context.
@@ -225,30 +231,39 @@ def build_sequential(
         """Bulk-register every task accumulated since the last flush.
 
         Called after each discover walk (initial walk and any runtime
-        walk triggered by dynamic deps). On bulk-call failure: ``warn``
-        mode logs and continues; the per-task retry inside
-        ``_run_task_sequential`` will fall back to per-task register as
+        walk triggered by dynamic deps). Chunks the batch into
+        ``_BULK_REGISTER_CHUNK_SIZE``-sized slices to stay within the
+        API's per-call cap. On chunk failure: ``warn`` mode logs and
+        stops processing further chunks; the per-task retry inside
+        ``_run_task_sequential`` falls back to per-task register as
         tasks become runnable. ``raise`` mode propagates.
         """
         if not pending_registrations:
             return
         batch = list(pending_registrations)
         pending_registrations.clear()
-        try:
-            registry.task_register_bulk(build_id, batch)
-        except Exception as reg_err:
-            ids_preview = ", ".join(str(t.id) for t in batch[:5])
-            if len(batch) > 5:
-                ids_preview += f", +{len(batch) - 5} more"
-            handle_registry_error(
-                reg_err,
-                f"Failed to bulk-register {len(batch)} tasks during discovery "
-                f"(ids: {ids_preview})",
-                on_registry_failure,
-            )
-            return
-        for t in batch:
-            registered_tasks.add(t.id)
+
+        for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
+            chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
+            try:
+                registry.task_register_bulk(build_id, chunk)
+            except Exception as reg_err:
+                ids_preview = ", ".join(str(t.id) for t in chunk[:5])
+                if len(chunk) > 5:
+                    ids_preview += f", +{len(chunk) - 5} more"
+                total_chunks = (
+                    len(batch) + _BULK_REGISTER_CHUNK_SIZE - 1
+                ) // _BULK_REGISTER_CHUNK_SIZE
+                this_chunk = (chunk_start // _BULK_REGISTER_CHUNK_SIZE) + 1
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to bulk-register chunk {this_chunk}/{total_chunks} "
+                    f"({len(chunk)} tasks; ids: {ids_preview})",
+                    on_registry_failure,
+                )
+                return
+            for t in chunk:
+                registered_tasks.add(t.id)
 
     def discover(task: BaseTask) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
@@ -756,26 +771,39 @@ async def build_sequential_aio(
             )
 
     async def flush_pending_registrations_aio() -> None:
-        """Bulk-register every task collected since the last flush."""
+        """Bulk-register every task collected since the last flush.
+
+        Chunks the batch into ``_BULK_REGISTER_CHUNK_SIZE``-sized slices
+        to stay within the API's per-call cap. Stops on first chunk
+        failure (per-task retry inside ``_run_task_sequential_aio``
+        handles the rest in ``warn`` mode).
+        """
         if not pending_registrations:
             return
         batch = list(pending_registrations)
         pending_registrations.clear()
-        try:
-            await registry.task_register_bulk_aio(build_id, batch)
-        except Exception as reg_err:
-            ids_preview = ", ".join(str(t.id) for t in batch[:5])
-            if len(batch) > 5:
-                ids_preview += f", +{len(batch) - 5} more"
-            handle_registry_error(
-                reg_err,
-                f"Failed to bulk-register {len(batch)} tasks during discovery "
-                f"(ids: {ids_preview})",
-                on_registry_failure,
-            )
-            return
-        for t in batch:
-            registered_tasks.add(t.id)
+
+        for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
+            chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
+            try:
+                await registry.task_register_bulk_aio(build_id, chunk)
+            except Exception as reg_err:
+                ids_preview = ", ".join(str(t.id) for t in chunk[:5])
+                if len(chunk) > 5:
+                    ids_preview += f", +{len(chunk) - 5} more"
+                total_chunks = (
+                    len(batch) + _BULK_REGISTER_CHUNK_SIZE - 1
+                ) // _BULK_REGISTER_CHUNK_SIZE
+                this_chunk = (chunk_start // _BULK_REGISTER_CHUNK_SIZE) + 1
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to bulk-register chunk {this_chunk}/{total_chunks} "
+                    f"({len(chunk)} tasks; ids: {ids_preview})",
+                    on_registry_failure,
+                )
+                return
+            for t in chunk:
+                registered_tasks.add(t.id)
 
     async def discover(task: BaseTask) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.

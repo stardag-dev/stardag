@@ -151,8 +151,9 @@ class TaskBulkCreate(BaseModel):
     matters: with the SDK's post-order discover, deps appear earlier in
     the array than parents, so when a parent's dependency_task_ids resolve
     they find existing rows (no phantom-creation in
-    _reconcile_dependency_edges). Duplicates within the array are
-    deduplicated server-side.
+    _reconcile_dependency_edges). The endpoint deduplicates by ``task_id``
+    keeping the first occurrence, so callers don't pay event-emission
+    cost for accidental duplicates within a single batch.
     """
 
     tasks: list[TaskCreate]

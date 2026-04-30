@@ -302,11 +302,12 @@ async def test_get_build_graph(client: AsyncClient):
 async def test_list_tasks_in_build_returns_stable_order(client: AsyncClient):
     """Tasks are returned in per-build registration order.
 
-    The SDK now registers every discovered task during the discovery walk —
-    roots first, then their static deps. The UI relies on this endpoint
-    ordering by *first event in this build* (not by ``Task.created_at``,
-    which is the global "first ever seen in this environment" timestamp).
-    Without that, repeated calls would return rows in arbitrary order.
+    The SDK registers every discovered task during the discovery walk in
+    post-order — static deps first, then their parents. The UI relies on
+    this endpoint ordering by *first event in this build* (not by
+    ``Task.created_at``, which is the global "first ever seen in this
+    environment" timestamp). Without that, repeated calls would return
+    rows in arbitrary order.
     """
     response = await client.post("/api/v1/builds", json={})
     build_id = response.json()["id"]
@@ -458,6 +459,55 @@ async def test_bulk_register_empty_array_returns_200_empty(client: AsyncClient):
     )
     assert response.status_code == 201
     assert response.json() == {"tasks": []}
+
+
+@pytest.mark.asyncio
+async def test_bulk_register_dedupes_within_batch(client: AsyncClient):
+    """Duplicate task_ids within a single bulk request are deduplicated
+    (first occurrence wins) so the caller doesn't accidentally generate
+    multiple events / repeated dep reconciliation for the same task."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk",
+        json={
+            "tasks": [
+                {
+                    "task_id": "dupe-x",
+                    "task_namespace": "first",
+                    "task_name": "First",
+                    "task_data": {"v": 1},
+                },
+                {
+                    "task_id": "dupe-x",
+                    "task_namespace": "second",  # Should be ignored.
+                    "task_name": "Second",
+                    "task_data": {"v": 2},
+                },
+                {
+                    "task_id": "other-y",
+                    "task_namespace": "",
+                    "task_name": "Other",
+                    "task_data": {},
+                },
+            ]
+        },
+    )
+    assert response.status_code == 201
+    returned = response.json()["tasks"]
+    # Two unique tasks returned in input order, second occurrence dropped.
+    assert [t["task_id"] for t in returned] == ["dupe-x", "other-y"]
+    # First occurrence's data wins.
+    dupe = next(t for t in returned if t["task_id"] == "dupe-x")
+    assert dupe["task_namespace"] == "first"
+    assert dupe["task_name"] == "First"
+    assert dupe["task_data"] == {"v": 1}
+
+    # Exactly one TASK_PENDING event per unique task_id, not two for dupe-x.
+    events = (await client.get(f"/api/v1/builds/{build_id}/events")).json()
+    pending_count = sum(1 for e in events if e["event_type"] == "task_pending")
+    assert pending_count == 2
 
 
 @pytest.mark.asyncio

@@ -964,19 +964,31 @@ async def register_tasks_bulk(
     TASK_REFERENCED event semantics, same phantom-upgrade behaviour for
     rows left over from prior failed builds.
     """
-    tasks_in = payload.tasks
+    raw_tasks = payload.tasks
 
-    if not tasks_in:
+    if not raw_tasks:
         return TaskBulkResponse(tasks=[])
 
-    if len(tasks_in) > _MAX_BULK_REGISTER_TASKS:
+    if len(raw_tasks) > _MAX_BULK_REGISTER_TASKS:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Bulk register limited to {_MAX_BULK_REGISTER_TASKS} tasks per "
-                f"call (got {len(tasks_in)})"
+                f"call (got {len(raw_tasks)})"
             ),
         )
+
+    # Deduplicate by task_id, keeping the first occurrence. The schema
+    # contract documents this so callers can rely on "first wins" semantics
+    # for accidental duplicates in a single batch (rather than getting
+    # multiple events / repeated dep reconciliation per task).
+    seen_ids: set[str] = set()
+    tasks_in: list[TaskCreate] = []
+    for t in raw_tasks:
+        if t.task_id in seen_ids:
+            continue
+        seen_ids.add(t.task_id)
+        tasks_in.append(t)
 
     # Rate limit (1 per call). The bulk endpoint deliberately doesn't count
     # as N requests — entity-creation limits below cap actual writes.
@@ -1001,23 +1013,12 @@ async def register_tasks_bulk(
             )
         )
 
-    # 24h entity-creation limits. Each task produces exactly one event;
-    # the task-creation count is an upper bound (some tasks may already
-    # exist and be referenced rather than created).
+    # Each (post-dedup) task produces exactly one event in this build.
     _raise_if_limit_exceeded(
         await check_entity_creation_limit(
             db,
             auth.workspace_id,
             "events",
-            limits_settings,
-            amount=len(tasks_in),
-        )
-    )
-    _raise_if_limit_exceeded(
-        await check_entity_creation_limit(
-            db,
-            auth.workspace_id,
-            "tasks",
             limits_settings,
             amount=len(tasks_in),
         )
@@ -1029,6 +1030,31 @@ async def register_tasks_bulk(
     if build.environment_id != auth.environment_id:
         raise HTTPException(
             status_code=403, detail="Build does not belong to this environment"
+        )
+
+    # Pre-query which task_ids already exist in this environment so the
+    # 24h tasks limit only counts brand-new task creations. The previous
+    # ``amount=len(tasks_in)`` over-counted: a build that re-references
+    # all-cached tasks would burn the limit even though it creates 0 new
+    # Task rows.
+    existing_ids_result = await db.execute(
+        select(Task.task_id)
+        .where(Task.environment_id == build.environment_id)
+        .where(Task.task_id.in_([t.task_id for t in tasks_in]))
+    )
+    already_existing_ids = {row[0] for row in existing_ids_result.all()}
+    new_task_count_estimate = sum(
+        1 for t in tasks_in if t.task_id not in already_existing_ids
+    )
+    if new_task_count_estimate:
+        _raise_if_limit_exceeded(
+            await check_entity_creation_limit(
+                db,
+                auth.workspace_id,
+                "tasks",
+                limits_settings,
+                amount=new_task_count_estimate,
+            )
         )
 
     responses: list[TaskResponse] = []

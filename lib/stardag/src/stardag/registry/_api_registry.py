@@ -45,6 +45,12 @@ _RETRY_CONFIG = Retry(
 _MAX_RATE_LIMIT_RETRIES = 5
 _MAX_RETRY_WAIT = 60  # Cap wait time at 60 seconds
 
+# Maximum number of tasks per ``task_register_bulk[_aio]`` HTTP call.
+# Mirrors the server's per-call cap; the build engine chunks above this so
+# this is mostly a defensive check for direct external callers of
+# ``APIRegistry``.
+_MAX_BULK_REGISTER_TASKS = 1000
+
 
 def _is_route_not_found(err: NotFoundError) -> bool:
     """Distinguish FastAPI's default "missing route" 404 from app-level 404s.
@@ -424,9 +430,21 @@ class APIRegistry(RegistryABC):
         Falls back to per-task ``task_register`` if the API doesn't
         support the endpoint (older deployments) — same backwards-compat
         pattern as ``task_add_dependencies``.
+
+        Raises ``ValueError`` if the batch exceeds
+        ``_MAX_BULK_REGISTER_TASKS`` (mirrors the server cap). The build
+        engine chunks above this method; external callers of
+        ``APIRegistry`` get an explicit client-side error rather than a
+        400 from the server.
         """
         if not tasks:
             return
+        if len(tasks) > _MAX_BULK_REGISTER_TASKS:
+            raise ValueError(
+                f"task_register_bulk supports at most {_MAX_BULK_REGISTER_TASKS} "
+                f"tasks per call (got {len(tasks)}). Chunk the input on the "
+                f"caller side."
+            )
         try:
             self._request(
                 "POST",
@@ -790,9 +808,20 @@ class APIRegistry(RegistryABC):
 
         Falls back to per-task ``task_register_aio`` if the API doesn't
         support the endpoint (older deployments).
+
+        Raises ``ValueError`` if the batch exceeds
+        ``_MAX_BULK_REGISTER_TASKS`` (mirrors the server cap). The build
+        engine chunks above this method; external callers get an
+        explicit client-side error rather than a 400 from the server.
         """
         if not tasks:
             return
+        if len(tasks) > _MAX_BULK_REGISTER_TASKS:
+            raise ValueError(
+                f"task_register_bulk_aio supports at most {_MAX_BULK_REGISTER_TASKS} "
+                f"tasks per call (got {len(tasks)}). Chunk the input on the "
+                f"caller side."
+            )
         try:
             await self._arequest(
                 "POST",

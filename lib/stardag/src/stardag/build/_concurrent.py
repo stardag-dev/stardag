@@ -48,6 +48,12 @@ from stardag.registry import RegistryABC, registry_provider
 logger = logging.getLogger(__name__)
 
 
+# Maximum number of tasks per ``task_register_bulk_aio`` call. Matches the
+# Stardag API server's per-call cap and keeps each transaction bounded.
+# The build engine chunks ``pending_registrations`` accordingly.
+_BULK_REGISTER_CHUNK_SIZE = 1000
+
+
 # =============================================================================
 # Execution Mode Selection
 # =============================================================================
@@ -552,10 +558,17 @@ async def build_aio(
     # Tasks accumulated during the current discover() walk, in post-order,
     # awaiting the bulk-registration call. Within each subtree this is
     # strict post-order; sibling subtrees may interleave (TaskGroup runs
-    # them concurrently), but each task's static deps are always emitted
+    # them concurrently), but each task's static deps are always appended
     # before it — which is all the API needs to avoid phantom-creation.
     # Cleared by ``flush_pending_registrations`` after each bulk call.
     pending_registrations: list[BaseTask] = []
+    # Per-task event signalling that this task's discover() has finished
+    # appending it to pending_registrations. The fast-path
+    # ``if task.id in task_states: return`` would otherwise let a sibling
+    # discoverer race past — appending its own parent ahead of the still-
+    # in-flight dep — re-introducing exactly the phantom window the
+    # post-order walk is designed to eliminate (diamond DAGs, shared deps).
+    discover_done: dict[UUID, asyncio.Event] = {}
 
     # Synchronization for concurrent discovery
     discover_lock = asyncio.Lock()
@@ -586,53 +599,90 @@ async def build_aio(
         Uses concurrent recursion with TaskGroup for parallel discovery,
         with a lock protecting shared data structures and a semaphore
         limiting concurrent completion checks.
+
+        Concurrency invariant: when a sibling coroutine encounters this
+        task already-discovered (fast-path), it ``await``s the
+        ``discover_done`` event before returning. Without that, a
+        diamond-DAG sibling could append its own parent to
+        ``pending_registrations`` before this coroutine appends the
+        shared dep — re-introducing the phantom window we're trying to
+        eliminate.
         """
         # Check if already discovered and reserve our spot (with lock)
         async with discover_lock:
             if task.id in task_states:
-                return
-            static_deps = flatten_task_struct(task.requires())
-            task_states[task.id] = TaskExecutionState(
-                task=task, static_deps=static_deps
-            )
-            completion_events[task.id] = asyncio.Event()
-            task_count.discovered += 1
+                done_event = discover_done[task.id]
+                already_seen = True
+            else:
+                static_deps = flatten_task_struct(task.requires())
+                task_states[task.id] = TaskExecutionState(
+                    task=task, static_deps=static_deps
+                )
+                completion_events[task.id] = asyncio.Event()
+                discover_done[task.id] = asyncio.Event()
+                done_event = discover_done[task.id]
+                task_count.discovered += 1
+                already_seen = False
 
-        # Check completion outside lock (I/O bound, use semaphore to limit concurrency)
-        async with discover_semaphore:
-            is_complete = await task.complete_aio()
+        if already_seen:
+            # Wait for the original discoverer to finish appending this
+            # task to pending_registrations before returning. Otherwise a
+            # parent further up our chain would append ahead of the dep.
+            await done_event.wait()
+            return
 
-        if is_complete:
-            async with discover_lock:
-                completion_cache.add(task.id)
-                task_states[task.id].completed = True
-                completion_events[task.id].set()
-                task_count.previously_completed += 1
-                previously_completed_tasks.append(task)
-            if not register_all:
-                # Don't recurse into deps — they're already built. Append
-                # to pending_registrations (leaf in post-order).
-                pending_registrations.append(task)
-                return
+        # ``static_deps`` is only assigned in the else-branch above, but
+        # pyright can't infer the control flow; pull it back from the
+        # state we just stored.
+        static_deps = task_states[task.id].static_deps
 
-        # Task not complete (or register_all) — recurse into deps first
-        # (post-order). TaskGroup waits for all children to finish before
-        # this body continues, so all child appends to pending_registrations
-        # land before our own append below.
-        async with asyncio.TaskGroup() as tg:
-            for dep in static_deps:
-                tg.create_task(discover(dep))
+        try:
+            # Check completion outside lock (I/O bound, use semaphore to limit concurrency)
+            async with discover_semaphore:
+                is_complete = await task.complete_aio()
 
-        # Append self after children — preserves post-order within subtree.
-        pending_registrations.append(task)
+            if is_complete:
+                async with discover_lock:
+                    completion_cache.add(task.id)
+                    task_states[task.id].completed = True
+                    completion_events[task.id].set()
+                    task_count.previously_completed += 1
+                    previously_completed_tasks.append(task)
+                if not register_all:
+                    # Don't recurse into deps — they're already built.
+                    # Append to pending_registrations (leaf in post-order).
+                    pending_registrations.append(task)
+                    return
+
+            # Task not complete (or register_all) — recurse into deps
+            # first (post-order). TaskGroup waits for all children to
+            # finish before this body continues, so all child appends to
+            # pending_registrations land before our own append below.
+            async with asyncio.TaskGroup() as tg:
+                for dep in static_deps:
+                    tg.create_task(discover(dep))
+
+            # Append self after children — preserves post-order within
+            # subtree.
+            pending_registrations.append(task)
+        finally:
+            # Always set so any sibling fast-path waiters can proceed,
+            # even when this discover() raised. (TaskGroup will propagate
+            # the failure to siblings via cancellation, but we don't want
+            # waiters to deadlock on a never-set event before that
+            # cancellation reaches them.)
+            done_event.set()
 
     async def flush_pending_registrations() -> None:
         """Bulk-register every task accumulated since the last flush.
 
         Called after each discover-walk (initial walk and each dynamic-deps
-        walk). On bulk-call failure: ``warn`` mode logs and continues —
-        the per-task retry inside ``submit_with_lock`` will pick up the
-        slack as tasks become runnable. ``raise`` mode propagates.
+        walk). Chunks ``batch`` into ``_BULK_REGISTER_CHUNK_SIZE``-sized
+        slices to stay within the API's per-call cap and to keep each
+        transaction bounded. On chunk failure: ``warn`` mode logs and
+        stops processing further chunks — the per-task retry inside
+        ``submit_with_lock`` picks up the slack as tasks become runnable.
+        ``raise`` mode propagates.
         """
         if not pending_registrations:
             return
@@ -640,23 +690,30 @@ async def build_aio(
         # event loop tick can't accidentally re-register these tasks.
         batch = list(pending_registrations)
         pending_registrations.clear()
-        try:
-            await registry.task_register_bulk_aio(build_id, batch)
-        except Exception as reg_err:
-            # Include up to 5 task IDs in the warning so debugging is
-            # possible without dumping a 1000-id list into logs.
-            ids_preview = ", ".join(str(t.id) for t in batch[:5])
-            if len(batch) > 5:
-                ids_preview += f", +{len(batch) - 5} more"
-            handle_registry_error(
-                reg_err,
-                f"Failed to bulk-register {len(batch)} tasks during discovery "
-                f"(ids: {ids_preview})",
-                on_registry_failure,
-            )
-            return
-        for t in batch:
-            task_states[t.id].registered = True
+
+        for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
+            chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
+            try:
+                await registry.task_register_bulk_aio(build_id, chunk)
+            except Exception as reg_err:
+                # Include up to 5 task IDs in the warning so debugging is
+                # possible without dumping a 1000-id list into logs.
+                ids_preview = ", ".join(str(t.id) for t in chunk[:5])
+                if len(chunk) > 5:
+                    ids_preview += f", +{len(chunk) - 5} more"
+                total_chunks = (
+                    len(batch) + _BULK_REGISTER_CHUNK_SIZE - 1
+                ) // _BULK_REGISTER_CHUNK_SIZE
+                this_chunk = (chunk_start // _BULK_REGISTER_CHUNK_SIZE) + 1
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to bulk-register chunk {this_chunk}/{total_chunks} "
+                    f"({len(chunk)} tasks; ids: {ids_preview})",
+                    on_registry_failure,
+                )
+                return
+            for t in chunk:
+                task_states[t.id].registered = True
 
     # Mark previously completed tasks as complete in the registry. Registration
     # already happened inline in discover() above; we still need to fire
