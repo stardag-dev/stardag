@@ -32,14 +32,22 @@ In v0.6.0:
 
 ```
 [Discovery walks the DAG locally — collecting tasks in post-order]
-[ONE HTTP call: POST /builds/{id}/tasks/bulk with [leaf-1, leaf-2, ..., parent]]
+[Bulk-register: chunks of 50 tasks per POST, gzipped on the wire]
 [UI immediately shows the full DAG, in stable post-order]
 [Build runs — each task already exists in the registry]
 ```
 
 For large fan-out DAGs (think: a `for chunk in chunks: yield Process(chunk)`
 yielding 500 chunks), this is the difference between 500 sequential
-HTTP round-trips and one bulk POST.
+HTTP round-trips and 10 bulk POSTs. The chunk size of 50 is deliberately
+well under the API's 1000 hard cap — keeps DB transactions short, keeps
+request bodies friendly even with fat task specs, and limits the blast
+radius of a chunk-level failure in `warn` mode.
+
+Request bodies above 1KB are gzipped before sending — bulk payloads
+with repeated JSON structure compress 5–10× typically — and the server
+transparently decompresses via a new `GZipRequestMiddleware`. Old SDKs
+keep sending plain JSON; the middleware passes them through unchanged.
 
 ### Compatibility — the short version
 

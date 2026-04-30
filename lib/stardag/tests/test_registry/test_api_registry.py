@@ -2,9 +2,227 @@
 
 from __future__ import annotations
 
+import gzip
+import json
 
 from stardag.exceptions import APIError, NotFoundError
-from stardag.registry._api_registry import _is_route_not_found
+from stardag.registry._api_registry import (
+    _GZIP_REQUEST_THRESHOLD_BYTES,
+    _is_route_not_found,
+    _maybe_gzip_json_body,
+)
+
+
+class TestMaybeGzipJsonBody:
+    """Decision boundary for the gzip-on-request behaviour."""
+
+    def test_none_body_returns_no_content(self):
+        content, headers = _maybe_gzip_json_body(None)
+        assert content is None
+        assert headers == {}
+
+    def test_small_body_is_not_gzipped(self):
+        body = {"task_id": "x", "task_name": "y"}
+        content, headers = _maybe_gzip_json_body(body)
+        assert content is not None
+        assert len(content) < _GZIP_REQUEST_THRESHOLD_BYTES
+        assert headers == {"Content-Type": "application/json"}
+        # Round-trips as JSON without decompression.
+        assert json.loads(content) == body
+
+    def test_large_body_is_gzipped(self):
+        # Build a body well above the threshold with repeated structure
+        # (representative of bulk-register payloads).
+        body = {
+            "tasks": [
+                {
+                    "task_id": f"task-{i:08d}",
+                    "task_namespace": "demo.namespace",
+                    "task_name": "RepeatedTask",
+                    "task_data": {"index": i, "label": "x" * 32},
+                    "dependency_task_ids": [],
+                }
+                for i in range(50)
+            ]
+        }
+        content, headers = _maybe_gzip_json_body(body)
+        assert content is not None
+        assert headers["Content-Type"] == "application/json"
+        assert headers["Content-Encoding"] == "gzip"
+        # Decompresses back to the original JSON.
+        assert json.loads(gzip.decompress(content)) == body
+        # And actually saved bytes — repeated keys/structure should
+        # compress well below the original.
+        original_bytes = json.dumps(body, separators=(",", ":")).encode()
+        assert len(content) < len(original_bytes) // 2, (
+            f"Expected at least 2x compression on a structured bulk "
+            f"payload; got {len(original_bytes)} -> {len(content)}"
+        )
+
+    def test_threshold_exact_boundary(self):
+        # Construct a payload whose serialised size is exactly at the
+        # threshold to verify the strict-less-than boundary
+        # (``< threshold`` => raw, ``>= threshold`` => gzipped).
+        # The ``key`` value is sized so the final dump hits the boundary.
+        target = _GZIP_REQUEST_THRESHOLD_BYTES
+        # ``{"k":"<padding>"}``: braces+quotes+colon+commas = 8 bytes
+        # of overhead (no commas here, just `{"k":""}` = 8 bytes).
+        padding_len = target - len('{"k":""}')
+        body = {"k": "x" * padding_len}
+        encoded = json.dumps(body, separators=(",", ":")).encode()
+        assert len(encoded) == target, "size-control assumption broke"
+        content, headers = _maybe_gzip_json_body(body)
+        # At the threshold we DO compress.
+        assert headers.get("Content-Encoding") == "gzip"
+        assert content is not None and gzip.decompress(content) == encoded
+
+
+class TestAPIRegistryGzipsWireFormat:
+    """End-to-end check that ``APIRegistry`` *actually* emits gzipped
+    bytes on the wire for bulk-register payloads — not just that the
+    helper function would, if invoked. Uses ``httpx.MockTransport`` to
+    capture the outgoing request before it hits the network.
+    """
+
+    def _make_registry_and_capture(self):
+        """Build an APIRegistry whose sync httpx client points at a
+        MockTransport that records every outgoing request. Returns
+        (registry, captured_requests_list)."""
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            # Realistic bulk-register response shape (one TaskResponse per
+            # task in payload), enough for APIRegistry to consider the
+            # call successful.
+            decompressed_body = (
+                gzip.decompress(request.content)
+                if request.headers.get("content-encoding") == "gzip"
+                else request.content
+            )
+            payload = json.loads(decompressed_body)
+            tasks = payload.get("tasks", [])
+            from uuid import uuid4
+
+            return httpx.Response(
+                201,
+                json={
+                    "tasks": [
+                        {
+                            "id": str(uuid4()),
+                            "task_id": t["task_id"],
+                            "environment_id": "00000000-0000-0000-0000-000000000003",
+                            "task_namespace": t.get("task_namespace", ""),
+                            "task_name": t["task_name"],
+                            "task_data": t["task_data"],
+                            "version": None,
+                            "output_uri": None,
+                            "created_at": "2026-04-30T00:00:00+00:00",
+                            "is_phantom": False,
+                        }
+                        for t in tasks
+                    ]
+                },
+            )
+
+        # Instantiate APIRegistry with explicit creds so it doesn't
+        # depend on environment variables. Override the inner httpx
+        # client with our MockTransport-backed one.
+        registry = APIRegistry(
+            api_url="http://test.invalid",
+            api_key="test-key",
+        )
+        registry._client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            auth=registry._auth,
+        )
+        return registry, captured
+
+    def _make_fake_task(self, task_id: str, task_data: dict):
+        """Produce an object that ``_get_task_data_for_registration``
+        accepts. Avoids spinning up a real Task subclass — we only need
+        the fields the helper reads."""
+        from uuid import uuid4
+
+        class _Fake:
+            id = uuid4()
+            version = ""
+
+            def __init__(self, tid, td):
+                self._tid = tid
+                self._td = td
+
+            def get_namespace(self):
+                return "test"
+
+            def get_name(self):
+                return "FakeTask"
+
+            def model_dump(self, mode="json"):
+                return self._td
+
+            def requires(self):
+                return ()
+
+        f = _Fake(task_id, task_data)
+        # ``_get_task_data_for_registration`` reads ``task.id`` for the
+        # outgoing ``task_id`` field, so override it to a deterministic
+        # value rather than the random UUID.
+        # (We pass the random UUID through; the test only checks gzip
+        # behaviour, not the resulting string.)
+        return f
+
+    def test_large_bulk_register_uses_gzip_on_wire(self):
+        registry, captured = self._make_registry_and_capture()
+
+        # 50 tasks × ~150 bytes serialised each ≈ 7.5KB > 1KB threshold.
+        tasks = [
+            self._make_fake_task(
+                f"big-task-{i:04d}",
+                {"index": i, "label": "x" * 64, "extra": "padding-" * 8},
+            )
+            for i in range(50)
+        ]
+        registry.task_register_bulk(
+            build_id=__import__("uuid").UUID("00000000-0000-0000-0000-000000000001"),
+            tasks=tasks,  # type: ignore[arg-type]
+        )
+
+        assert len(captured) == 1
+        request = captured[0]
+        assert request.headers.get("content-encoding") == "gzip", (
+            f"Expected Content-Encoding: gzip on big bulk request; "
+            f"headers were {dict(request.headers)}"
+        )
+        # Decompressed body round-trips back to JSON with all 50 tasks.
+        decoded = json.loads(gzip.decompress(request.content))
+        assert len(decoded["tasks"]) == 50
+
+    def test_small_single_register_does_not_gzip(self):
+        registry, captured = self._make_registry_and_capture()
+
+        task = self._make_fake_task("small-task", {"x": 1})
+        registry.task_register(
+            build_id=__import__("uuid").UUID("00000000-0000-0000-0000-000000000001"),
+            task=task,  # type: ignore[arg-type]
+        )
+
+        assert len(captured) == 1
+        request = captured[0]
+        # Tiny payload — gzip overhead would be a net loss, so no
+        # Content-Encoding header.
+        assert "content-encoding" not in {k.lower() for k in request.headers.keys()}, (
+            f"Did not expect gzip on a single small task; headers were "
+            f"{dict(request.headers)}"
+        )
+        # Body is plain JSON (not gzip-prefixed bytes).
+        decoded = json.loads(request.content)
+        assert "task_id" in decoded
+        assert decoded["task_name"] == "FakeTask"
 
 
 class TestIsRouteNotFound:

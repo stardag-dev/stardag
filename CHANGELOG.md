@@ -33,9 +33,17 @@ notes; the bullets below are the per-component summary.
   before the edge insert.
 - **Bulk register**: build engines now collapse the discovered tasks
   into a single `task_register_bulk(_aio)` call per discover walk
-  (initial + each dynamic-deps yield), chunked at 1000 tasks per HTTP
-  request. For large fan-out DAGs this is a dramatic reduction in HTTP
-  round-trips. Per-task fallback on 404 (older API deployments).
+  (initial + each dynamic-deps yield), chunked at 50 tasks per HTTP
+  request (well under the API's 1000 hard cap so DB transactions stay
+  short and request bodies stay friendly even with fat task specs).
+  For large fan-out DAGs this is a dramatic reduction in HTTP
+  round-trips — a 5000-task DAG goes from 5000 individual POSTs to
+  100 bulk POSTs. Per-task fallback on 404 (older API deployments).
+- **Gzipped request bodies on the wire**: JSON request bodies above 1KB
+  are gzipped client-side before sending; bulk-register payloads with
+  repeated structure compress 5–10× typically. The server's new
+  `GZipRequestMiddleware` decompresses transparently — old SDKs and
+  non-gzipped requests pass through unchanged.
 - **`build_fail(_aio)` now emitted on discovery error**: if a task's
   `requires()` / `complete()` raises during discovery, the registry
   receives `build_fail` rather than the build being left RUNNING
@@ -76,6 +84,12 @@ notes; the bullets below are the per-component summary.
   phantom-creation in `_reconcile_dependency_edges`). Deduplicates by
   `task_id`, keeping the first occurrence. Same TASK_PENDING /
   TASK_REFERENCED event semantics as the single-task endpoint.
+- **`GZipRequestMiddleware`**: ASGI middleware that decompresses
+  incoming `Content-Encoding: gzip` request bodies before route
+  handlers parse them. Pass-through for non-gzipped requests so old
+  SDK versions, direct `curl` callers, and non-bulk endpoints keep
+  working unchanged. Returns 400 on malformed gzip so clients see a
+  clear error rather than a downstream parse failure.
 - **`is_phantom` on `TaskResponse` / `TaskWithStatusResponse`**: the
   flag has existed on the `Task` model for a while; it's now exposed
   in the response so the UI (and other consumers) can distinguish

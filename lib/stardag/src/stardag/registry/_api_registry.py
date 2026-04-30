@@ -1,10 +1,12 @@
 """API-based registry that communicates with the stardag-api service."""
 
 import asyncio
+import gzip
+import json as _json
 import logging
 import time
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
@@ -50,6 +52,41 @@ _MAX_RETRY_WAIT = 60  # Cap wait time at 60 seconds
 # this is mostly a defensive check for direct external callers of
 # ``APIRegistry``.
 _MAX_BULK_REGISTER_TASKS = 1000
+
+# Threshold above which JSON request bodies are gzipped before sending.
+# Below this, gzip's headers + per-call CPU make compression a net loss;
+# above it, repeated keys / structure in our payloads (especially
+# ``task_register_bulk``) compress 5–10×, so the wire savings dominate.
+# The server transparently decompresses via ``GZipRequestMiddleware``.
+_GZIP_REQUEST_THRESHOLD_BYTES = 1024
+
+
+def _maybe_gzip_json_body(
+    body: object,
+) -> tuple[bytes | None, dict[str, str]]:
+    """Serialize a JSON body and gzip it when worthwhile.
+
+    Returns a ``(content_bytes, extra_headers)`` pair suitable for httpx's
+    ``content=`` + ``headers=`` kwargs:
+
+    - ``body is None`` -> ``(None, {})`` (caller skips the JSON body
+      entirely).
+    - body small (< ``_GZIP_REQUEST_THRESHOLD_BYTES``) -> raw JSON bytes
+      + ``Content-Type: application/json``.
+    - body big -> gzipped JSON bytes + ``Content-Type`` and
+      ``Content-Encoding: gzip``.
+
+    Always serialises with ``separators=(",", ":")`` so the size
+    threshold doesn't depend on whitespace.
+    """
+    if body is None:
+        return None, {}
+    encoded = _json.dumps(body, separators=(",", ":")).encode("utf-8")
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if len(encoded) < _GZIP_REQUEST_THRESHOLD_BYTES:
+        return encoded, headers
+    headers["Content-Encoding"] = "gzip"
+    return gzip.compress(encoded), headers
 
 
 def _is_route_not_found(err: NotFoundError) -> bool:
@@ -265,12 +302,22 @@ class APIRegistry(RegistryABC):
     ) -> httpx.Response:
         """Make a sync HTTP request with automatic rate-limit retry.
 
+        JSON bodies above ``_GZIP_REQUEST_THRESHOLD_BYTES`` are gzipped
+        before sending; the server's ``GZipRequestMiddleware`` handles
+        the decode transparently.
+
         Rate limit 429s (RATE_LIMIT error_code) are retried with backoff
         respecting the Retry-After header. Quota 429s (24h limits) are
         raised immediately as QuotaExceededError.
         """
+        content, body_headers = _maybe_gzip_json_body(json)
+        request_kwargs: dict[str, Any] = {"params": params}
+        if content is not None:
+            request_kwargs["content"] = content
+            request_kwargs["headers"] = body_headers
+
         for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-            response = self.client.request(method, url, json=json, params=params)
+            response = self.client.request(method, url, **request_kwargs)
             try:
                 self._handle_response_error(response, operation)
                 return response
@@ -305,14 +352,22 @@ class APIRegistry(RegistryABC):
     ) -> httpx.Response:
         """Make an async HTTP request with automatic rate-limit retry.
 
+        JSON bodies above ``_GZIP_REQUEST_THRESHOLD_BYTES`` are gzipped
+        before sending; the server's ``GZipRequestMiddleware`` handles
+        the decode transparently.
+
         Rate limit 429s (RATE_LIMIT error_code) are retried with backoff
         respecting the Retry-After header. Quota 429s (24h limits) are
         raised immediately as QuotaExceededError.
         """
+        content, body_headers = _maybe_gzip_json_body(json)
+        request_kwargs: dict[str, Any] = {"params": params}
+        if content is not None:
+            request_kwargs["content"] = content
+            request_kwargs["headers"] = body_headers
+
         for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-            response = await self.async_client.request(
-                method, url, json=json, params=params
-            )
+            response = await self.async_client.request(method, url, **request_kwargs)
             try:
                 self._handle_response_error(response, operation)
                 return response

@@ -51,10 +51,12 @@ from stardag.registry import RegistryABC, registry_provider
 logger = logging.getLogger(__name__)
 
 
-# Maximum number of tasks per ``task_register_bulk[_aio]`` call. Matches
-# the Stardag API server's per-call cap; we chunk ``pending_registrations``
-# accordingly to stay within it for large fan-out DAGs.
-_BULK_REGISTER_CHUNK_SIZE = 1000
+# Number of tasks the build engine sends per ``task_register_bulk[_aio]``
+# HTTP call. Deliberately well under the API's hard cap (1000) — see
+# the matching constant in ``_concurrent.py`` for rationale (smaller DB
+# transactions, fewer warn-mode losses, friendlier compressed body
+# sizes for fat task specs).
+_BULK_REGISTER_CHUNK_SIZE = 50
 
 
 # ---------------------------------------------------------------------------
