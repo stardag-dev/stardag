@@ -6,6 +6,114 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.6.0 — Discover-time task registration & bulk register
+
+The build engine now registers every task with the registry as it's
+discovered (in post-order DFS), in a single bulk HTTP call per discover
+walk. The full DAG appears in the UI immediately rather than appearing
+leaves-first as tasks become runnable, and the table view stays in a
+stable order across refreshes.
+
+### What changed in your build runs
+
+Before v0.6.0:
+
+```
+[Discovery walks the DAG locally]
+[Build runs]
+   leaf-1 starts → registry sees leaf-1 for the first time
+   leaf-2 starts → registry sees leaf-2 for the first time
+   ...
+   parent starts → registry sees parent
+[UI shows tasks appearing in execution order, often leaves-first]
+```
+
+In v0.6.0:
+
+```
+[Discovery walks the DAG locally — collecting tasks in post-order]
+[ONE HTTP call: POST /builds/{id}/tasks/bulk with [leaf-1, leaf-2, ..., parent]]
+[UI immediately shows the full DAG, in stable post-order]
+[Build runs — each task already exists in the registry]
+```
+
+For large fan-out DAGs (think: a `for chunk in chunks: yield Process(chunk)`
+yielding 500 chunks), this is the difference between 500 sequential
+HTTP round-trips and one bulk POST.
+
+### Compatibility — the short version
+
+- **Old SDK ↔ new server**: works unchanged. The per-task
+  `POST /builds/{id}/tasks` endpoint hasn't changed semantics, and the
+  new `is_phantom` field on responses is silently ignored by old
+  Pydantic models.
+- **New SDK ↔ old server**: works. The SDK calls the new bulk endpoint
+  first; on a 404 ("missing route") it falls back to per-task
+  registration with a warning. You lose the per-discover single-call
+  perf win until the API is upgraded, but builds keep working.
+- **You can deploy in either order.** Server-first is recommended so
+  early SDK upgraders immediately get the bulk-call optimisation.
+
+### Migration: direct callers of `APIRegistry.task_start[_aio]`
+
+> **Skip this section** if you only build via `build()`, `build_aio()`,
+> `build_sequential()`, or `build_sequential_aio()`. The build engines
+> are updated and shield you from the contract change.
+
+`APIRegistry.task_start[_aio]` no longer auto-calls `task_register[_aio]`
+before emitting the start event. The `/start` endpoint is now pure — it
+returns 404 if the task hasn't been registered.
+
+```python
+# v0.5.9 and earlier — task_start_aio auto-registered.
+await registry.task_start_aio(build_id, task)
+
+# v0.6.0 — you must register first.
+await registry.task_register_aio(build_id, task)
+await registry.task_start_aio(build_id, task)
+```
+
+If you subclass `RegistryABC` directly: no migration needed — your
+subclass continues to work as before. The default
+`RegistryABC.task_register_bulk[_aio]` falls back to looping
+`task_register[_aio]` per task, so you don't need to override it
+unless your backend has an efficient batch path.
+
+### Behaviour notes (most users won't notice)
+
+- **Sequential build registers in post-order DFS** (leaves before
+  parents) where it previously used pre-order. Visible only in the
+  registry / UI ordering, not in any API.
+- **`build_fail(_aio)` now emitted when discovery raises.** If a
+  task's `requires()` or `complete()` throws during discovery (rare),
+  the build is now properly marked failed in the registry instead of
+  being left in RUNNING state forever.
+- **Phantom rows are filtered out of the build task table in the UI.**
+  These auto-created placeholder rows used to flash up briefly between
+  parent and child registration; they no longer occur in normal
+  operation (post-order ensures deps register first), but if one
+  legitimately exists — e.g. a build crashed mid-discover and left
+  orphan rows — the UI hides it from the table. The DAG view still
+  renders it.
+
+### Also in this release
+
+- **New `RegistryABC.task_register_bulk[_aio]` method** with a default
+  loop-`task_register` implementation. `APIRegistry` overrides it to
+  POST `/tasks/bulk`. Custom registries get the loop default for free
+  but can override for batched backends.
+- **`is_phantom` exposed on `TaskResponse`** so other API consumers
+  can distinguish placeholder rows from real registered tasks.
+- **Discover-walk race fix in concurrent build**: when two siblings
+  shared a dep (diamond DAG), the fast-path
+  `if task.id in task_states: return` could let one sibling's parent
+  append to the registration order ahead of the still-in-flight dep,
+  re-introducing the phantom window. The fast-path now awaits a
+  per-task `discover_done` event, ensuring deps always register
+  before parents even under sibling concurrency.
+
+---
+
 ## v0.5.9 — Dynamic deps visible in the DAG view
 
 Dynamically-yielded dependencies now register as graph edges in the Registry,
