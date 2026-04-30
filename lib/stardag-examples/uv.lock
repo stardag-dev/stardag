@@ -1235,6 +1235,7 @@ dependencies = [
     { name = "griffecli" },
     { name = "griffelib" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/04/56/28a0accac339c164b52a92c6cfc45a903acc0c174caa5c1713803467b533/griffe-2.0.0.tar.gz", hash = "sha256:c68979cd8395422083a51ea7cf02f9c119d889646d99b7b656ee43725de1b80f", size = 293906, upload-time = "2026-03-23T21:06:53.402Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8b/94/ee21d41e7eb4f823b94603b9d40f86d3c7fde80eacc2c3c71845476dddaa/griffe-2.0.0-py3-none-any.whl", hash = "sha256:5418081135a391c3e6e757a7f3f156f1a1a746cc7b4023868ff7d5e2f9a980aa", size = 5214, upload-time = "2026-02-09T19:09:44.105Z" },
 ]
@@ -1247,6 +1248,7 @@ dependencies = [
     { name = "colorama" },
     { name = "griffelib" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/a4/f8/2e129fd4a86e52e58eefe664de05e7d502decf766e7316cc9e70fdec3e18/griffecli-2.0.0.tar.gz", hash = "sha256:312fa5ebb4ce6afc786356e2d0ce85b06c1c20d45abc42d74f0cda65e159f6ef", size = 56213, upload-time = "2026-03-23T21:06:54.8Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e6/ed/d93f7a447bbf7a935d8868e9617cbe1cadf9ee9ee6bd275d3040fbf93d60/griffecli-2.0.0-py3-none-any.whl", hash = "sha256:9f7cd9ee9b21d55e91689358978d2385ae65c22f307a63fb3269acf3f21e643d", size = 9345, upload-time = "2026-02-09T19:09:42.554Z" },
 ]
@@ -1255,6 +1257,7 @@ wheels = [
 name = "griffelib"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/06/eccbd311c9e2b3ca45dbc063b93134c57a1ccc7607c5e545264ad092c4a9/griffelib-2.0.0.tar.gz", hash = "sha256:e504d637a089f5cab9b5daf18f7645970509bf4f53eda8d79ed71cce8bd97934", size = 166312, upload-time = "2026-03-23T21:06:55.954Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/51/c936033e16d12b627ea334aaaaf42229c37620d0f15593456ab69ab48161/griffelib-2.0.0-py3-none-any.whl", hash = "sha256:01284878c966508b6d6f1dbff9b6fa607bc062d8261c5c7253cb285b06422a7f", size = 142004, upload-time = "2026-02-09T19:09:40.561Z" },
 ]
@@ -3883,7 +3886,7 @@ wheels = [
 
 [[package]]
 name = "stardag"
-version = "0.4.0"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -3896,9 +3899,9 @@ dependencies = [
     { name = "typer" },
     { name = "uuid6" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2c/a1/23a0dc05b2f18a4e6a8e3e2067f7950c46efde7651c16ae36fafd3dd7f0e/stardag-0.4.0.tar.gz", hash = "sha256:da93c11d8a16185f40ed44d615d7a6f34f640907bf85548a387855c571bbb172", size = 421744, upload-time = "2026-03-06T09:27:53.794Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/26/68/cc4f9f1186326fb6c4d37258a0ef73b3bb5452183958a3c63d045b6a2012/stardag-0.6.0.tar.gz", hash = "sha256:1dc2885b8447f59aea9f20fdd65a324d6d63a2c8be04030da881f5ec15e85336", size = 480086, upload-time = "2026-04-30T11:37:50.526Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/d1/c5362080dfe5b61d84ee54eb25560ee566c856f23271a285bec30ac20154/stardag-0.4.0-py3-none-any.whl", hash = "sha256:2e0cc62761568654ce02cb8dd40193b8d4f303e770c0a4182acb489686a5f5dd", size = 147983, upload-time = "2026-03-06T09:27:52.213Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/b8/17dd604b6aec545a0437cc070c26ce04063286ea533c4d0c85c07d726cbf/stardag-0.6.0-py3-none-any.whl", hash = "sha256:4bdf110eeba49c55282104f2f1b0c4e5d45763b4c322cb0e7dc78b256aea8ac0", size = 178167, upload-time = "2026-04-30T11:37:48.873Z" },
 ]
 
 [[package]]
