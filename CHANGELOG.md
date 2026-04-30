@@ -6,7 +6,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
-## [0.6.0] — Discover-time task registration + bulk register endpoint
+## [0.6.0] — 2026-04-30
 
 End-to-end overhaul of how tasks reach the registry during a build,
 motivated by "tasks don't appear in the UI in the order they're
