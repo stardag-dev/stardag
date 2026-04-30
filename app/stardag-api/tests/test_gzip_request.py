@@ -128,6 +128,62 @@ async def test_malformed_gzip_returns_400(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_gzip_bomb_aborts_with_413(client: AsyncClient, monkeypatch):
+    """Streaming decompression must abort the moment the decompressed
+    output crosses the cap — without first allocating the full output.
+    A small compressed body that inflates to >cap returns 413."""
+    from stardag_api.middleware import gzip_request as gzip_mw
+
+    # Lower the cap so the test stays fast and obvious.
+    monkeypatch.setattr(gzip_mw, "_MAX_DECOMPRESSED_BYTES", 1024)
+
+    # 100 KB of zeros compresses to ~100 bytes — small compressed,
+    # 100× the configured decompressed cap.
+    bomb = gzip.compress(b"\x00" * (100 * 1024))
+    assert len(bomb) < 1024, "bomb should be small compressed"
+
+    response = await client.post(
+        "/api/v1/builds",
+        content=bomb,
+        headers={
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        },
+    )
+    assert response.status_code == 413
+    assert "decompressed" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_oversized_compressed_body_rejected(client: AsyncClient, monkeypatch):
+    """If the compressed input itself exceeds the cap we reject before
+    spending CPU on decompression. First line of defence."""
+    from stardag_api.middleware import gzip_request as gzip_mw
+
+    monkeypatch.setattr(gzip_mw, "_MAX_COMPRESSED_BYTES", 256)
+
+    # gzip.compress on random-ish bytes won't compress well; we just
+    # need the *compressed* output to exceed 256 B. Use repeated random
+    # garbage that gzip can't deflate efficiently.
+    import os
+
+    body = os.urandom(2048)  # ~2 KB; gzip overhead keeps it >256 B.
+    payload = gzip.compress(body)
+    assert len(payload) > 256
+
+    response = await client.post(
+        "/api/v1/builds",
+        content=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        },
+    )
+    assert response.status_code == 413
+    assert "compressed" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
 async def test_gzipped_single_task_register(client: AsyncClient):
     """Even single-task POST works under gzip — the middleware doesn't
     care which route the request is for, just whether the body is

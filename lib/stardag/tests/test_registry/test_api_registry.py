@@ -145,14 +145,18 @@ class TestAPIRegistryGzipsWireFormat:
     def _make_fake_task(self, task_id: str, task_data: dict):
         """Produce an object that ``_get_task_data_for_registration``
         accepts. Avoids spinning up a real Task subclass — we only need
-        the fields the helper reads."""
+        the fields the helper reads. ``id`` is set per-instance so a
+        batch of fake tasks has 50 distinct UUIDs (otherwise a class-
+        attribute UUID would make the bulk gzip test silently exercise
+        50 *identical* tasks, which is not the realistic payload we
+        want to compress)."""
         from uuid import uuid4
 
         class _Fake:
-            id = uuid4()
             version = ""
 
             def __init__(self, tid, td):
+                self.id = uuid4()
                 self._tid = tid
                 self._td = td
 
@@ -168,13 +172,7 @@ class TestAPIRegistryGzipsWireFormat:
             def requires(self):
                 return ()
 
-        f = _Fake(task_id, task_data)
-        # ``_get_task_data_for_registration`` reads ``task.id`` for the
-        # outgoing ``task_id`` field, so override it to a deterministic
-        # value rather than the random UUID.
-        # (We pass the random UUID through; the test only checks gzip
-        # behaviour, not the resulting string.)
-        return f
+        return _Fake(task_id, task_data)
 
     def test_large_bulk_register_uses_gzip_on_wire(self):
         registry, captured = self._make_registry_and_capture()
@@ -198,9 +196,14 @@ class TestAPIRegistryGzipsWireFormat:
             f"Expected Content-Encoding: gzip on big bulk request; "
             f"headers were {dict(request.headers)}"
         )
-        # Decompressed body round-trips back to JSON with all 50 tasks.
+        # Decompressed body round-trips back to JSON with all 50 tasks,
+        # each carrying a distinct task_id (UUID per-instance — proves
+        # we're really compressing a batch of unique tasks, not 50
+        # copies of one).
         decoded = json.loads(gzip.decompress(request.content))
         assert len(decoded["tasks"]) == 50
+        sent_ids = {t["task_id"] for t in decoded["tasks"]}
+        assert len(sent_ids) == 50
 
     def test_small_single_register_does_not_gzip(self):
         registry, captured = self._make_registry_and_capture()

@@ -440,8 +440,11 @@ async def test_bulk_register_upgrades_existing_phantoms(client: AsyncClient):
     assert upgraded["task_namespace"] == "real"
     assert upgraded["task_name"] == "RealTask"
 
-    # Verify via list endpoint that the upgraded task is now visible (it
-    # has a TASK_PENDING event from the bulk register).
+    # Verify via list endpoint that the upgraded task is now visible
+    # (the bulk register associates it with this build via a
+    # TASK_REFERENCED event — the row already existed as a phantom, so
+    # `task_already_existed=True` and the endpoint emits REFERENCED,
+    # not PENDING).
     listed = (await client.get(f"/api/v1/builds/{build_id}/tasks")).json()
     listed_target = [t for t in listed if t["task_id"] == "phantom-target"]
     assert len(listed_target) == 1
@@ -450,8 +453,10 @@ async def test_bulk_register_upgrades_existing_phantoms(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_bulk_register_empty_array_returns_200_empty(client: AsyncClient):
-    """Empty bulk request is a no-op — returns empty array, no error."""
+async def test_bulk_register_empty_array_returns_201_empty(client: AsyncClient):
+    """Empty bulk request is a no-op — returns 201 with an empty
+    ``tasks`` array. (201 because the endpoint advertises ``status_code=201``;
+    the server doesn't bother distinguishing "0 created" from "N created".)"""
     response = await client.post("/api/v1/builds", json={})
     build_id = response.json()["id"]
     response = await client.post(
