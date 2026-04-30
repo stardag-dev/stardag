@@ -47,10 +47,15 @@ _RETRY_CONFIG = Retry(
 _MAX_RATE_LIMIT_RETRIES = 5
 _MAX_RETRY_WAIT = 60  # Cap wait time at 60 seconds
 
-# Maximum number of tasks per ``task_register_bulk[_aio]`` HTTP call.
-# Mirrors the server's per-call cap; the build engine chunks above this so
-# this is mostly a defensive check for direct external callers of
-# ``APIRegistry``.
+# Hard cap on tasks per ``task_register_bulk[_aio]`` HTTP call. Mirrors
+# the server's per-call cap.
+#
+# **Asymmetry intentional**: the build engine's
+# ``_BULK_REGISTER_CHUNK_SIZE`` (50) is the *working* size — small
+# enough to keep DB transactions short and request bodies friendly.
+# The 1000 here is the *defensive* ceiling for direct external callers
+# of ``APIRegistry`` who haven't been told about the lower working
+# size. Don't reduce this thinking 50 is the real limit — it isn't.
 _MAX_BULK_REGISTER_TASKS = 1000
 
 # Threshold above which JSON request bodies are gzipped before sending.

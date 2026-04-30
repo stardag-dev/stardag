@@ -582,6 +582,177 @@ async def test_bulk_register_referenced_event_for_existing_task(
 
 
 @pytest.mark.asyncio
+async def test_bulk_register_creates_phantom_for_unknown_upstream(
+    client: AsyncClient,
+):
+    """Edges referencing a task that's neither in this batch nor in
+    the DB trigger phantom creation (the documented safety hatch).
+    Explicit test that the bulk path emits exactly one phantom for the
+    unknown upstream, not multiple/none."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Two real tasks both depending on an unknown ``orphan-up`` —
+    # deliberately not present in the batch and not pre-registered.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk",
+        json={
+            "tasks": [
+                {
+                    "task_id": "child-a",
+                    "task_namespace": "",
+                    "task_name": "ChildA",
+                    "task_data": {},
+                    "dependency_task_ids": ["orphan-up"],
+                },
+                {
+                    "task_id": "child-b",
+                    "task_namespace": "",
+                    "task_name": "ChildB",
+                    "task_data": {},
+                    "dependency_task_ids": ["orphan-up"],
+                },
+            ]
+        },
+    )
+    assert response.status_code == 201
+
+    # Inspect the build's graph: both children should point at one
+    # phantom upstream node (not two — the reconcile must dedupe across
+    # the batch).
+    graph = (
+        await client.get(f"/api/v1/builds/{build_id}/graph?upstream_depth=1")
+    ).json()
+    upstream_nodes = [n for n in graph["nodes"] if n["task_id"] == "orphan-up"]
+    assert len(upstream_nodes) == 1, (
+        f"Expected exactly one phantom row for orphan-up; saw "
+        f"{[n['task_id'] for n in upstream_nodes]}"
+    )
+    edges_to_orphan = [
+        e for e in graph["edges"] if e["source"] == upstream_nodes[0]["id"]
+    ]
+    assert len(edges_to_orphan) == 2
+
+
+@pytest.mark.asyncio
+async def test_bulk_register_array_order_maps_to_list_order(
+    client: AsyncClient,
+):
+    """The whole point of the post-order array contract: array order in
+    POST /tasks/bulk maps directly to the order the UI sees on
+    GET /tasks. Single-task path's stable-order test isn't enough — the
+    bulk path needs its own assertion."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Deliberately non-alphabetical input order: parent registered last
+    # (post-order DFS) — the SDK does this for every batch.
+    expected_order = ["leaf-z", "leaf-a", "leaf-m", "parent"]
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk",
+        json={
+            "tasks": [
+                {
+                    "task_id": tid,
+                    "task_namespace": "",
+                    "task_name": tid,
+                    "task_data": {},
+                    # parent depends on all three leaves; we ordered
+                    # them deliberately to make sure the API doesn't
+                    # quietly reorder by dep relationship.
+                    "dependency_task_ids": (
+                        ["leaf-z", "leaf-a", "leaf-m"] if tid == "parent" else []
+                    ),
+                }
+                for tid in expected_order
+            ]
+        },
+    )
+    assert response.status_code == 201
+    assert [t["task_id"] for t in response.json()["tasks"]] == expected_order
+
+    # And the user-visible list endpoint preserves it.
+    listed = (await client.get(f"/api/v1/builds/{build_id}/tasks")).json()
+    assert [t["task_id"] for t in listed] == expected_order
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bulk_registers_overlapping_tasks(
+    client: AsyncClient,
+):
+    """Two concurrent bulk POSTs into the same environment with
+    overlapping task IDs must succeed without deadlocking. We sort the
+    SELECT FOR UPDATE by task_id to enforce a deterministic lock-
+    acquisition order; this test exercises that path with two clients
+    that would otherwise be primed for AABB / BBAA lock interleavings.
+    """
+    import asyncio
+
+    # Two builds in the same environment.
+    b1 = (await client.post("/api/v1/builds", json={})).json()["id"]
+    b2 = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    # Pre-register a couple of cached tasks both batches will
+    # re-reference (this triggers the FOR UPDATE lock path on both
+    # sides).
+    for tid in ("shared-x", "shared-y"):
+        await client.post(
+            f"/api/v1/builds/{b1}/tasks",
+            json={
+                "task_id": tid,
+                "task_namespace": "",
+                "task_name": tid,
+                "task_data": {},
+            },
+        )
+
+    # Build A bulk-registers in shared-x, shared-y order; build B in
+    # the reverse order. Without sorted FOR UPDATE acquisition, this
+    # is the classic AABB / BBAA deadlock setup.
+    payload_a = {
+        "tasks": [
+            {
+                "task_id": "shared-x",
+                "task_namespace": "",
+                "task_name": "shared-x",
+                "task_data": {},
+            },
+            {
+                "task_id": "shared-y",
+                "task_namespace": "",
+                "task_name": "shared-y",
+                "task_data": {},
+            },
+        ]
+    }
+    payload_b = {
+        "tasks": [
+            {
+                "task_id": "shared-y",
+                "task_namespace": "",
+                "task_name": "shared-y",
+                "task_data": {},
+            },
+            {
+                "task_id": "shared-x",
+                "task_namespace": "",
+                "task_name": "shared-x",
+                "task_data": {},
+            },
+        ]
+    }
+    a_resp, b_resp = await asyncio.gather(
+        client.post(f"/api/v1/builds/{b1}/tasks/bulk", json=payload_a),
+        client.post(f"/api/v1/builds/{b2}/tasks/bulk", json=payload_b),
+    )
+    assert a_resp.status_code == 201
+    assert b_resp.status_code == 201
+    # Both succeeded → no deadlock. (On SQLite, FOR UPDATE is a no-op,
+    # so this test is mainly meaningful when CI runs against Postgres,
+    # where ``Test Python (stardag-api on Postgres)`` exercises it.)
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_in_build_orders_by_per_build_first_event(
     client: AsyncClient,
 ):

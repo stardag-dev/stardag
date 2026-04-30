@@ -1,5 +1,6 @@
 """Build management routes - primary interface for SDK."""
 
+from datetime import timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -1013,6 +1014,17 @@ async def register_tasks_bulk(
             )
         )
 
+    # Auth/build check first — a probe with a bogus build_id mustn't
+    # consume rate-limit budget or fingerprint the workspace's 24h
+    # creation limits via timing or error type.
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+    if build.environment_id != auth.environment_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this environment"
+        )
+
     # Each (post-dedup) task produces exactly one event in this build.
     _raise_if_limit_exceeded(
         await check_entity_creation_limit(
@@ -1024,27 +1036,26 @@ async def register_tasks_bulk(
         )
     )
 
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-    if build.environment_id != auth.environment_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this environment"
-        )
-
     # Pre-query which task_ids already exist in this environment so the
-    # 24h tasks limit only counts brand-new task creations. The previous
-    # ``amount=len(tasks_in)`` over-counted: a build that re-references
-    # all-cached tasks would burn the limit even though it creates 0 new
-    # Task rows.
-    existing_ids_result = await db.execute(
-        select(Task.task_id)
+    # 24h tasks limit only counts brand-new task creations.
+    #
+    # Note: this estimate is computed without ``FOR UPDATE`` and may
+    # diverge from the actual new-task count if a concurrent transaction
+    # inserts the same ``task_id`` between this SELECT and the bulk
+    # INSERT below. In that race we'd skip the limit check for what
+    # turns out to be 0 new rows — strictly an under-counting of the
+    # actual writes, never an over-counting, so the guard rail stays
+    # safe.
+    existing_tasks_result = await db.execute(
+        select(Task)
         .where(Task.environment_id == build.environment_id)
         .where(Task.task_id.in_([t.task_id for t in tasks_in]))
     )
-    already_existing_ids = {row[0] for row in existing_ids_result.all()}
+    existing_tasks: dict[str, Task] = {
+        t.task_id: t for t in existing_tasks_result.scalars().all()
+    }
     new_task_count_estimate = sum(
-        1 for t in tasks_in if t.task_id not in already_existing_ids
+        1 for t in tasks_in if t.task_id not in existing_tasks
     )
     if new_task_count_estimate:
         _raise_if_limit_exceeded(
@@ -1057,24 +1068,58 @@ async def register_tasks_bulk(
             )
         )
 
-    responses: list[TaskResponse] = []
-    new_task_count = 0
-
-    for t in tasks_in:
-        # Mirror the single-task register flow: select-with-lock to avoid
-        # racing apply_event_to_task on the denormalised latest_* columns
-        # against another writer on the same task.
-        result = await db.execute(
+    # Lock existing rows in **sorted task_id order** so that two
+    # concurrent bulk calls hitting overlapping cached tasks acquire
+    # locks in the same order and can't deadlock on each other. We only
+    # need FOR UPDATE on rows we'll mutate (phantom upgrades) or on rows
+    # whose denormalised ``latest_*`` columns ``apply_event_to_task``
+    # touches — i.e., existing rows. Brand-new rows are inserted
+    # without a competing writer, no lock needed.
+    if existing_tasks:
+        sorted_existing_ids = sorted(existing_tasks.keys())
+        await db.execute(
             select(Task)
             .where(Task.environment_id == build.environment_id)
-            .where(Task.task_id == t.task_id)
+            .where(Task.task_id.in_(sorted_existing_ids))
+            .order_by(Task.task_id.asc())
             .with_for_update()
         )
-        db_task = result.scalar_one_or_none()
-        task_already_existed = db_task is not None
 
-        if not db_task:
+    # Phase 1: insert new tasks + upgrade phantoms in-memory.
+    # Maintain ``pk_by_task_id`` so we can resolve dependency_task_ids
+    # in Python without per-task SELECTs, and keep ORM instances in
+    # ``db_task_by_task_id`` so we can apply events to them after
+    # flushing.
+    now = utc_now()
+    pk_by_task_id: dict[str, UUID] = {t_id: t.id for t_id, t in existing_tasks.items()}
+    db_task_by_task_id: dict[str, Task] = dict(existing_tasks)
+
+    new_task_count = 0
+    for t in tasks_in:
+        if t.task_id in existing_tasks:
+            db_task = existing_tasks[t.task_id]
+            if db_task.is_phantom:
+                # Phantom upgrade: real task data overrides the
+                # ``tid[:12]`` placeholder. Note that we deliberately do
+                # *not* reset latest_status_at / latest_status_event_id
+                # here — the apply_event_to_task(TASK_PENDING) call
+                # below refreshes them via the
+                # ``latest_status == PENDING`` branch in
+                # services/status.py:101. If that branch ever gains a
+                # phantom-upgrade short-circuit, this needs an explicit
+                # reset.
+                db_task.task_namespace = t.task_namespace
+                db_task.task_name = t.task_name
+                db_task.task_data = t.task_data
+                db_task.version = t.version
+                db_task.output_uri = t.output_uri
+                db_task.is_phantom = False
+        else:
+            # Pre-generate the UUID7 PK so we can resolve dep edges
+            # below without an extra round-trip after flush.
+            new_pk = generate_uuid7()
             db_task = Task(
+                id=new_pk,
                 task_id=t.task_id,
                 environment_id=build.environment_id,
                 task_namespace=t.task_namespace,
@@ -1084,35 +1129,142 @@ async def register_tasks_bulk(
                 output_uri=t.output_uri,
             )
             db.add(db_task)
-            await db.flush()  # Make visible to subsequent SELECTs in this txn
+            pk_by_task_id[t.task_id] = new_pk
+            db_task_by_task_id[t.task_id] = db_task
             new_task_count += 1
-        elif db_task.is_phantom:
-            db_task.task_namespace = t.task_namespace
-            db_task.task_name = t.task_name
-            db_task.task_data = t.task_data
-            db_task.version = t.version
-            db_task.output_uri = t.output_uri
-            db_task.is_phantom = False
 
-        await _reconcile_dependency_edges(
-            db=db,
-            environment_id=build.environment_id,
-            downstream_task_pk=db_task.id,
-            upstream_task_ids=t.dependency_task_ids,
-            is_dynamic=False,
-        )
-
-        event = Event(
-            build_id=build_id,
-            task_id=db_task.id,
-            event_type=EventType.TASK_REFERENCED
-            if task_already_existed
-            else EventType.TASK_PENDING,
-        )
-        db.add(event)
+    # Single flush: SQLAlchemy with asyncpg batches INSERTs of the same
+    # entity type into one round-trip when their primary keys are
+    # client-generated (which our UUID7 PKs are). For a 1000-task batch
+    # this is the difference between 1000 sequential round-trips and
+    # one ``executemany``.
+    if new_task_count:
         await db.flush()
-        apply_event_to_task(db_task, event)
 
+    # Phase 2: bulk-reconcile dependency edges.
+    # Collect all upstream task_ids referenced anywhere in the batch.
+    all_upstream_ids: set[str] = set()
+    for t in tasks_in:
+        all_upstream_ids.update(t.dependency_task_ids)
+    # Subtract task_ids already in our map (in-batch deps + pre-existing).
+    unknown_upstream_ids = all_upstream_ids - set(pk_by_task_id.keys())
+    if unknown_upstream_ids:
+        # Look up unknown upstreams in DB — they may be tasks that
+        # exist in the env but weren't part of this batch.
+        unknown_lookup_result = await db.execute(
+            select(Task.id, Task.task_id)
+            .where(Task.environment_id == build.environment_id)
+            .where(Task.task_id.in_(unknown_upstream_ids))
+        )
+        for pk, t_id in unknown_lookup_result.all():
+            pk_by_task_id[t_id] = pk
+        still_unknown = unknown_upstream_ids - set(pk_by_task_id.keys())
+        if still_unknown:
+            # Safety hatch: edges referencing a task not in the batch
+            # *and* not in the DB. Phantom-create. With the SDK's
+            # post-order discover walk this should not happen in normal
+            # operation; documented in ``_reconcile_dependency_edges``.
+            phantom_rows = [
+                {
+                    "id": generate_uuid7(),
+                    "task_id": tid,
+                    "environment_id": build.environment_id,
+                    "task_namespace": "",
+                    "task_name": tid[:12],
+                    "task_data": {},
+                    "is_phantom": True,
+                    "created_at": now,
+                    "latest_status": TaskStatus.PENDING,
+                    "latest_waiting_for_lock": False,
+                }
+                for tid in still_unknown
+            ]
+            await db.execute(
+                pg_insert(Task)
+                .values(phantom_rows)
+                .on_conflict_do_nothing(constraint="uq_task_environment_taskid")
+            )
+            # Re-fetch (ON CONFLICT DO NOTHING + RETURNING only returns
+            # rows we inserted; a concurrent writer may have created
+            # the row first and we still need its PK).
+            refetch_result = await db.execute(
+                select(Task.id, Task.task_id)
+                .where(Task.environment_id == build.environment_id)
+                .where(Task.task_id.in_(still_unknown))
+            )
+            for pk, t_id in refetch_result.all():
+                pk_by_task_id[t_id] = pk
+
+    # Build edge rows for the whole batch and bulk-insert in one shot.
+    edge_rows: list[dict[str, object]] = []
+    for t in tasks_in:
+        if not t.dependency_task_ids:
+            continue
+        downstream_pk = pk_by_task_id[t.task_id]
+        # Deduplicate within a single task's dep list (the schema
+        # constraint allows it, but emitting duplicates is wasteful).
+        seen_in_task: set[str] = set()
+        for upstream_id in t.dependency_task_ids:
+            if upstream_id in seen_in_task:
+                continue
+            seen_in_task.add(upstream_id)
+            edge_rows.append(
+                {
+                    "id": generate_uuid7(),
+                    "upstream_task_id": pk_by_task_id[upstream_id],
+                    "downstream_task_id": downstream_pk,
+                    "is_dynamic": False,
+                    "created_at": now,
+                }
+            )
+    if edge_rows:
+        await db.execute(
+            pg_insert(TaskDependency)
+            .values(edge_rows)
+            .on_conflict_do_nothing(constraint="uq_task_dependency_edge")
+        )
+
+    # Phase 3: bulk-insert events with explicit per-event timestamps so
+    # that ``list_tasks_in_build`` can order tasks by per-build first
+    # event in array order. (The endpoint joins against
+    # ``min(events.created_at)`` — if every event in this batch shared
+    # one timestamp, ordering would fall to ``Task.id``, which is
+    # unstable for re-referenced cached tasks whose UUID7 came from an
+    # earlier build.)
+    events: list[Event] = []
+    for i, t in enumerate(tasks_in):
+        already_existed = t.task_id in existing_tasks
+        events.append(
+            Event(
+                id=generate_uuid7(),
+                build_id=build_id,
+                task_id=pk_by_task_id[t.task_id],
+                event_type=EventType.TASK_REFERENCED
+                if already_existed
+                else EventType.TASK_PENDING,
+                created_at=now + timedelta(microseconds=i),
+            )
+        )
+    if events:
+        db.add_all(events)
+        # Apply event semantics in Python on the in-memory ORM rows —
+        # ``apply_event_to_task`` reads only fields we set above
+        # (event_type, created_at, id, build_id, error_message,
+        # event_metadata) and mutates the Task ORM in-place. No DB
+        # round-trip needed.
+        for t, ev in zip(tasks_in, events):
+            apply_event_to_task(db_task_by_task_id[t.task_id], ev)
+
+    # One final flush + commit at the end. Earlier flushes (just the
+    # task INSERT batch) populated the rows we need to FK against.
+    await db.commit()
+
+    # Build responses in array order from the (now-flushed) ORM
+    # instances. Refresh ensures ``created_at`` is populated for newly
+    # inserted rows (server-default would have applied at flush time).
+    responses: list[TaskResponse] = []
+    for t in tasks_in:
+        db_task = db_task_by_task_id[t.task_id]
         responses.append(
             TaskResponse(
                 id=db_task.id,
@@ -1124,10 +1276,9 @@ async def register_tasks_bulk(
                 version=db_task.version,
                 output_uri=db_task.output_uri,
                 created_at=db_task.created_at,
+                is_phantom=db_task.is_phantom,
             )
         )
-
-    await db.commit()
 
     # Update entity-count cache for in-process limit tracking.
     for _ in range(len(tasks_in)):
