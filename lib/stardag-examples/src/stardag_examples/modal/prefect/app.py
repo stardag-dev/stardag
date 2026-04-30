@@ -13,9 +13,13 @@ image = (
     .add_local_python_source("stardag_examples")
 )
 
+# v0.5.5+: ``builder_type="prefect"`` is gone. Use the
+# ``PrefectBuilder`` class re-exported from
+# ``stardag.integration.modal`` (or subclass ``Builder`` for custom
+# logic).
 app = sd_modal.StardagApp(
     "stardag_examples-prefect",
-    builder_type="prefect",  # NOTE: prefect builder
+    build_function=sd_modal.PrefectBuilder(),
     builder_settings=sd_modal.FunctionSettings(
         image=image,
         secrets=[

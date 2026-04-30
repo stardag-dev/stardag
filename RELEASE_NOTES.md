@@ -37,12 +37,29 @@ In v0.6.0:
 [Build runs — each task already exists in the registry]
 ```
 
-For large fan-out DAGs (think: a `for chunk in chunks: yield Process(chunk)`
-yielding 500 chunks), this is the difference between 500 sequential
-HTTP round-trips and 10 bulk POSTs. The chunk size of 50 is deliberately
-well under the API's 1000 hard cap — keeps DB transactions short, keeps
+For large fan-out DAGs — think a parent whose
+
+```python
+def requires(self):
+    return [Process(chunk=c) for c in self.chunks]
+```
+
+declares 500 deps — this is the difference between 500 sequential
+HTTP round-trips at task-start time (the v0.5.x behaviour) and 10
+bulk POSTs during discover (the v0.6.0 behaviour, registering all 500
+deps + the parent up front). The chunk size of 50 is deliberately well
+under the API's 1000 hard cap — keeps DB transactions short, keeps
 request bodies friendly even with fat task specs, and limits the blast
 radius of a chunk-level failure in `warn` mode.
+
+> **Note**: dynamic deps yielded _one at a time_ from `run()` /
+> `run_aio()` (`for chunk in chunks: yield Process(chunk)`) are still
+> sequential — each yield blocks until the yielded dep completes
+> before the generator advances. Bulk register only batches what's
+> already in `requires()` (or what's yielded as a single list /
+> tuple in one go: `yield [Process(c) for c in chunks]`). The DAG
+> shape determines the batch shape; v0.6.0 just stops paying N
+> round-trips to register the deps it can already see.
 
 Request bodies above 1KB are gzipped before sending — bulk payloads
 with repeated JSON structure compress 5–10× typically — and the server

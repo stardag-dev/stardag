@@ -164,7 +164,16 @@ def main() -> None:
     """Run the artifacts demo."""
     # Load configuration
     config = load_config()
-    print("Configuration loaded. Running against Registry at:", config.api.url)
+    # ``config.registry`` is None in offline mode; the artifacts demo
+    # requires a registry, so fail fast with a helpful message.
+    if config.registry is None:
+        raise RuntimeError(
+            "This demo requires a Stardag Registry. "
+            "Configure one via `stardag config set registry <url>` or "
+            "set STARDAG_API_URL."
+        )
+    registry_url = config.registry.url
+    print("Configuration loaded. Running against Registry at:", registry_url)
 
     # Create a simple DAG:
     # DataCollector -> AnalysisReport
@@ -183,9 +192,9 @@ def main() -> None:
     print(f"\nResult: {result}")
 
     ui_url = None
-    if config.api.url == "http://localhost:8000":
+    if registry_url == "http://localhost:8000":
         ui_url = "http://localhost:3000"
-    elif config.api.url == "https://api.stardag.com":
+    elif registry_url == "https://api.stardag.com":
         ui_url = "https://app.stardag.com"
 
     if ui_url:
