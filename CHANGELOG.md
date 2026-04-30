@@ -6,6 +6,121 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.6.0] — Discover-time task registration + bulk register endpoint
+
+End-to-end overhaul of how tasks reach the registry during a build,
+motivated by "tasks don't appear in the UI in the order they're
+discovered, sometimes only after they finish executing." See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v060) for the full story and migration
+notes; the bullets below are the per-component summary.
+([#133](https://github.com/stardag-dev/stardag/pull/133))
+
+### SDK
+
+#### New behaviour
+
+- **Discover-time registration**: every task discovered during the build
+  walk is now registered with the registry _before_ any task starts
+  executing. The full DAG appears in the UI immediately rather than
+  leaves-first as tasks become runnable. Applies to both `build` /
+  `build_aio` and `build_sequential` / `build_sequential_aio`.
+- **Post-order discovery walk**: `discover()` recurses into static deps
+  first and only registers the parent once every child has registered.
+  Eliminates the brief phantom-row window where the UI used to flash up
+  `tid[:12]`-style placeholder names between parent and child
+  registration. Same trick on the dynamic-dep path: `discover(dep)`
+  runs before `task_add_dependencies(_aio)` so the dep row exists
+  before the edge insert.
+- **Bulk register**: build engines now collapse the discovered tasks
+  into a single `task_register_bulk(_aio)` call per discover walk
+  (initial + each dynamic-deps yield), chunked at 50 tasks per HTTP
+  request (well under the API's 1000 hard cap so DB transactions stay
+  short and request bodies stay friendly even with fat task specs).
+  For large fan-out DAGs this is a dramatic reduction in HTTP
+  round-trips — a 5000-task DAG goes from 5000 individual POSTs to
+  100 bulk POSTs. Per-task fallback on 404 (older API deployments).
+- **Gzipped request bodies on the wire**: JSON request bodies above 1KB
+  are gzipped client-side before sending; bulk-register payloads with
+  repeated structure compress 5–10× typically. The server's new
+  `GZipRequestMiddleware` decompresses transparently — old SDKs and
+  non-gzipped requests pass through unchanged.
+- **`build_fail(_aio)` now emitted on discovery error**: if a task's
+  `requires()` / `complete()` raises during discovery, the registry
+  receives `build_fail` rather than the build being left RUNNING
+  forever.
+
+#### Breaking changes
+
+- **`APIRegistry.task_start[_aio]` no longer auto-calls
+  `task_register[_aio]`.** The contract is now "register first"
+  everywhere — `/start` is a pure event endpoint. Internal callers
+  (build engines, Prefect integration) are updated. External callers
+  that used `task_start_aio` directly without first calling
+  `task_register_aio` will now hit a 404 from `/start`. Migration:
+  add the explicit `await registry.task_register_aio(build_id, task)`
+  call before `task_start_aio`.
+- **Sequential build registers tasks in post-order DFS** (deps before
+  parents) where it previously used pre-order. Concurrent build is
+  approximately post-order — siblings still interleave but every
+  task's deps are guaranteed to register before it. Visible via the
+  UI / registry only; no API breakage.
+
+#### Compatibility
+
+- **Backwards compatible with the old Registry API**: the SDK's
+  `task_register_bulk(_aio)` catches the FastAPI "missing route" 404
+  and falls back to per-task `task_register(_aio)`, mirroring the
+  pattern from `task_add_dependencies`. Existing
+  `task_register(_aio)`, `task_start(_aio)`, etc. endpoints are
+  unchanged.
+
+### API
+
+#### New features
+
+- **New endpoint `POST /builds/{build_id}/tasks/bulk`**: registers up
+  to 1000 tasks in a single transaction, processing the array in order
+  so within-batch dep references resolve to existing rows (no
+  phantom-creation in `_reconcile_dependency_edges`). Deduplicates by
+  `task_id`, keeping the first occurrence. Same TASK_PENDING /
+  TASK_REFERENCED event semantics as the single-task endpoint.
+  Optional `?id_only=true` query param returns only `{id, task_id}`
+  per task instead of the full `TaskResponse` (~10× smaller
+  response — the SDK passes this since it doesn't read the response).
+- **`GZipRequestMiddleware`**: ASGI middleware that decompresses
+  incoming `Content-Encoding: gzip` request bodies before route
+  handlers parse them. Pass-through for non-gzipped requests so old
+  SDK versions, direct `curl` callers, and non-bulk endpoints keep
+  working unchanged. Returns 400 on malformed gzip so clients see a
+  clear error rather than a downstream parse failure.
+- **`is_phantom` on `TaskResponse` / `TaskWithStatusResponse`**: the
+  flag has existed on the `Task` model for a while; it's now exposed
+  in the response so the UI (and other consumers) can distinguish
+  placeholder rows from real registered tasks.
+- **`GET /builds/{id}/tasks` orders by per-build first event**:
+  joins against `events` filtered to this build and orders by
+  `min(events.created_at), Task.id`. Re-referenced tasks now appear
+  at the position where they were _first seen in this build_, not
+  where they were first ever inserted in the environment. Previously
+  unordered (DB insertion order, effectively arbitrary).
+
+#### Behaviour change
+
+- **Phantom-creation in `_reconcile_dependency_edges` is now a safety
+  hatch**: with the SDK's post-order discover walk + the bulk
+  endpoint's in-array ordering, every dep `task_id` resolves to an
+  existing row in normal operation. Phantom-creation only triggers
+  when a build crashes mid-discover, when an out-of-band caller
+  registers an edge before its upstream task, or when an older SDK is
+  used. Documented inline.
+
+### UI
+
+- **Phantom rows hidden from the build's task table** and the "X tasks"
+  counter. They still render in the DAG view (dropping nodes there
+  would leave dangling edges). Reads `is_phantom` from the API's
+  `TaskResponse`.
+
 ## `app/stardag-api|ui` only — 2026-04-28
 
 > App (API + UI) changes only — no SDK release. Deployed continuously

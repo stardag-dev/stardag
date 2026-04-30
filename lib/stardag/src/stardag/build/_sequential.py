@@ -51,6 +51,14 @@ from stardag.registry import RegistryABC, registry_provider
 logger = logging.getLogger(__name__)
 
 
+# Number of tasks the build engine sends per ``task_register_bulk[_aio]``
+# HTTP call. Deliberately well under the API's hard cap (1000) — see
+# the matching constant in ``_concurrent.py`` for rationale (smaller DB
+# transactions, fewer warn-mode losses, friendlier compressed body
+# sizes for fat task specs).
+_BULK_REGISTER_CHUNK_SIZE = 50
+
+
 # ---------------------------------------------------------------------------
 # Pure helper functions shared by both sync and async build variants.
 # These contain no I/O and are safe to call from any context.
@@ -134,6 +142,10 @@ def build_sequential(
 
     This is intended primarily for debugging and testing.
 
+    Tasks are registered with the registry as they are discovered (in
+    deterministic DFS order from the roots), so the full DAG appears in the
+    UI immediately rather than progressively as tasks become runnable.
+
     Task execution policy:
     - Sync-only tasks: run via `run()`
     - Async-only tasks: run via `asyncio.run(run_aio())`. (Does not work if called
@@ -180,9 +192,88 @@ def build_sequential(
     # Discover all tasks, stopping at already-complete tasks
     all_tasks: dict[UUID, BaseTask] = {}
     previously_completed_tasks: list[BaseTask] = []
+    # Tasks already registered with the registry. Tracked so the per-task
+    # retry path inside _run_task_sequential / lock-failure handling
+    # doesn't double-register.
+    registered_tasks: set[UUID] = set()
+    # Tasks accumulated during the current discover() walk (post-order)
+    # awaiting the bulk-register call. Cleared by
+    # ``flush_pending_registrations()``.
+    pending_registrations: list[BaseTask] = []
+
+    # Start or resume build *before* discovery so we have a build_id to
+    # register tasks against.
+    if resume_build_id is not None:
+        build_id = resume_build_id
+    else:
+        build_id = registry.build_start(root_tasks=tasks_list)
+
+    def register_task_once(task: BaseTask) -> None:
+        """Register a single task (used as a fallback retry path).
+
+        The happy path uses ``flush_pending_registrations`` to bulk-
+        register every task collected during a discover walk. This per-
+        task fallback exists for the lock-failure branch and for
+        ``_run_task_sequential`` when discover-time registration was
+        skipped or failed in ``warn`` mode.
+        """
+        if task.id in registered_tasks:
+            return
+        try:
+            registry.task_register(build_id, task)
+            registered_tasks.add(task.id)
+        except Exception as reg_err:
+            handle_registry_error(
+                reg_err,
+                f"Failed to register task {task.id}",
+                on_registry_failure,
+            )
+
+    def flush_pending_registrations() -> None:
+        """Bulk-register every task accumulated since the last flush.
+
+        Called after each discover walk (initial walk and any runtime
+        walk triggered by dynamic deps). Chunks the batch into
+        ``_BULK_REGISTER_CHUNK_SIZE``-sized slices to stay within the
+        API's per-call cap. On chunk failure: ``warn`` mode logs and
+        stops processing further chunks; the per-task retry inside
+        ``_run_task_sequential`` falls back to per-task register as
+        tasks become runnable. ``raise`` mode propagates.
+        """
+        if not pending_registrations:
+            return
+        batch = list(pending_registrations)
+        pending_registrations.clear()
+
+        for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
+            chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
+            try:
+                registry.task_register_bulk(build_id, chunk)
+            except Exception as reg_err:
+                ids_preview = ", ".join(str(t.id) for t in chunk[:5])
+                if len(chunk) > 5:
+                    ids_preview += f", +{len(chunk) - 5} more"
+                total_chunks = (
+                    len(batch) + _BULK_REGISTER_CHUNK_SIZE - 1
+                ) // _BULK_REGISTER_CHUNK_SIZE
+                this_chunk = (chunk_start // _BULK_REGISTER_CHUNK_SIZE) + 1
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to bulk-register chunk {this_chunk}/{total_chunks} "
+                    f"({len(chunk)} tasks; ids: {ids_preview})",
+                    on_registry_failure,
+                )
+                return
+            for t in chunk:
+                registered_tasks.add(t.id)
 
     def discover(task: BaseTask) -> None:
-        """Recursively discover tasks, stopping at already-complete tasks."""
+        """Recursively discover tasks, stopping at already-complete tasks.
+
+        Discovery only collects into ``pending_registrations`` (post-order
+        — deps first, parents last). The actual bulk-register call fires
+        via ``flush_pending_registrations()`` after the walk.
+        """
         if task.id in all_tasks:
             return
         all_tasks[task.id] = task
@@ -194,48 +285,44 @@ def build_sequential(
             task_count.previously_completed += 1
             previously_completed_tasks.append(task)
             if not register_all:
-                # Don't recurse into deps - they're already built
+                # Don't recurse into deps - they're already built. Append
+                # to pending_registrations (leaf in post-order).
+                pending_registrations.append(task)
                 return
 
-        # Task not complete (or register_all) - recurse into dependencies
+        # Task not complete (or register_all) — recurse into deps first
+        # (post-order), so when we register this task its deps already
+        # exist in the API.
         for dep in flatten_task_struct(task.requires()):
             discover(dep)
 
-    for root in tasks_list:
-        discover(root)
+        # All deps are registered. Append self after children — preserves
+        # post-order within the subtree.
+        pending_registrations.append(task)
 
-    # Start or resume build
-    if resume_build_id is not None:
-        build_id = resume_build_id
-    else:
-        build_id = registry.build_start(root_tasks=tasks_list)
+    # Mark previously-completed tasks as complete in the registry. Registration
+    # already happened inline in discover(); we still need to fire
+    # task_complete so they appear COMPLETED rather than PENDING — and to
+    # self-heal tasks left in "Started" state from a previous build that
+    # crashed (their target exists, so they are complete, but the registry
+    # still shows them as running).
+    completed_previously_completed_count = 0
 
-    # Register previously completed tasks so they appear in the build's task list.
-    # We also call task_complete to mark them as done — otherwise they remain in
-    # PENDING state in the registry (e.g. WrapperTasks that are complete because
-    # their deps are complete, but were never explicitly run).
-    registered_previously_completed_count = 0
+    def mark_pending_previously_completed() -> None:
+        """Send task_complete for any previously-completed tasks not yet marked.
 
-    def register_pending_previously_completed() -> None:
-        """Register and complete any previously-completed tasks not yet sent to the registry.
-
-        Drains ``previously_completed_tasks`` starting from the last registered
-        index. Called both for the initial bulk registration and after any
-        runtime ``discover()`` call that might newly surface a complete task
-        (e.g. the static dep of a dynamically yielded task).
+        Drains ``previously_completed_tasks`` starting from the last marked
+        index. Called both for the initial bulk pass and after any runtime
+        ``discover()`` call that might newly surface a complete task (e.g. the
+        static dep of a dynamically yielded task).
         """
-        nonlocal registered_previously_completed_count
-        while registered_previously_completed_count < len(previously_completed_tasks):
-            pc_task = previously_completed_tasks[registered_previously_completed_count]
-            registered_previously_completed_count += 1
-            try:
-                registry.task_register(build_id, pc_task)
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to register previously completed task {pc_task.id}",
-                    on_registry_failure,
-                )
+        nonlocal completed_previously_completed_count
+        while completed_previously_completed_count < len(previously_completed_tasks):
+            pc_task = previously_completed_tasks[completed_previously_completed_count]
+            completed_previously_completed_count += 1
+            if pc_task.id not in registered_tasks:
+                # Registration failed in `warn` mode; can't mark complete
+                # against a row that was never written.
                 continue
             try:
                 registry.task_complete(build_id, pc_task)
@@ -246,17 +333,17 @@ def build_sequential(
                     on_registry_failure,
                 )
 
-    register_pending_previously_completed()
-
     def runtime_discover(task: BaseTask) -> None:
         """``discover()`` wrapper used after the initial registration pass.
 
-        Registers any previously-completed tasks that ``discover()`` surfaces
-        at runtime (e.g. when processing a dynamically yielded task's
-        ``requires()`` chain).
+        Walks ``discover()`` (collecting newly-found tasks into
+        ``pending_registrations``), bulk-registers them, then sends
+        task_complete for any previously-completed tasks the walk
+        surfaced.
         """
         discover(task)
-        register_pending_previously_completed()
+        flush_pending_registrations()
+        mark_pending_previously_completed()
 
     def acquire_lock_sync(task: BaseTask) -> LockAcquisitionResult:
         """Acquire lock synchronously with retry/backoff."""
@@ -322,6 +409,21 @@ def build_sequential(
             held_locks.discard(task_id)
 
     try:
+        # Discover all tasks. If discover() raises (e.g. requires() /
+        # complete() throws), the outer except below emits build_fail so
+        # the build doesn't get stuck in RUNNING state.
+        for root in tasks_list:
+            discover(root)
+
+        # Bulk-register every discovered task in one HTTP call. Order is
+        # post-order so the API resolves dependency_task_ids without
+        # phantom-creating any rows.
+        flush_pending_registrations()
+
+        # Mark previously-completed tasks as complete now that registration
+        # has landed.
+        mark_pending_previously_completed()
+
         # Build in topological order
         while True:
             ready_task = _find_ready_task(all_tasks, completion_cache, failed_cache)
@@ -349,9 +451,11 @@ def build_sequential(
                     error = RuntimeError(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
+                    # Ensure the task row exists before failing it (no-op if
+                    # registration succeeded during discovery; retry if it
+                    # failed in `warn` mode).
+                    register_task_once(ready_task)
                     try:
-                        # Register first so the registry has a task row to fail
-                        registry.task_register(build_id, ready_task)
                         registry.task_fail(build_id, ready_task, str(error))
                     except Exception as reg_err:
                         handle_registry_error(
@@ -377,6 +481,7 @@ def build_sequential(
                     registry,
                     dual_run_default,
                     runtime_discover,
+                    register_task_once,
                     task_count,
                     on_registry_failure,
                 )
@@ -430,6 +535,7 @@ def _run_task_sequential(
     registry: RegistryABC,
     dual_run_default: Literal["sync", "async"],
     discover: Callable[[BaseTask], None],
+    register_task_once: Callable[[BaseTask], None],
     task_count: TaskCount | None = None,
     on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
@@ -456,13 +562,26 @@ def _run_task_sequential(
                 registry,
                 dual_run_default,
                 discover,
+                register_task_once,
                 task_count,
                 on_registry_failure,
             )
             if task_count is not None:
                 task_count.succeeded += 1
 
-    registry.task_start(build_id, task)
+    # The task should already be registered (during discover), but retry once
+    # if discover-time registration failed in `warn` mode. We still wrap
+    # /start in handle_registry_error so a 404 (registration didn't land) or
+    # a transient blip doesn't hard-fail the build in `warn` mode.
+    register_task_once(task)
+    try:
+        registry.task_start(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to start task {task.id}",
+            on_registry_failure,
+        )
 
     has_run = _has_custom_run(task)
     has_run_aio = _has_custom_run_aio(task)
@@ -491,8 +610,33 @@ def _run_task_sequential(
                 yielded = next(gen)
                 dynamic_deps = flatten_task_struct(yielded)
 
-                # Record yielded deps as edges so the DAG view shows them
-                # (static deps are recorded via task_register).
+                # Discover and build dynamic deps FIRST. discover() runtime
+                # wrapper recurses into requires() and post-order-registers
+                # everything in the subtree, so by the time we record the
+                # edge below, every upstream row already exists in the API
+                # and _reconcile_dependency_edges doesn't have to
+                # phantom-create anything.
+                for dep in dynamic_deps:
+                    discover(dep)
+
+                    if dep.id not in completion_cache:
+                        _run_task_sequential(
+                            dep,
+                            completion_cache,
+                            all_tasks,
+                            build_id,
+                            registry,
+                            dual_run_default,
+                            discover,
+                            register_task_once,
+                            task_count,
+                            on_registry_failure,
+                        )
+                        if task_count is not None:
+                            task_count.succeeded += 1
+
+                # Now record yielded deps as edges so the DAG view shows
+                # them (static deps are recorded via task_register).
                 if dynamic_deps:
                     try:
                         registry.task_add_dependencies(
@@ -505,36 +649,18 @@ def _run_task_sequential(
                             on_registry_failure,
                         )
 
-                # Discover and build dynamic deps using the same discover()
-                # function used for static deps, so task_count.discovered
-                # is properly incremented and sub-deps are fully recursed.
-                for dep in dynamic_deps:
-                    # discover() is the runtime wrapper from build_sequential: it
-                    # recurses into requires(), and registers any previously-complete
-                    # tasks it surfaces (so they appear in the build's task list even
-                    # though they were first seen after the initial registration pass).
-                    discover(dep)
-
-                    if dep.id not in completion_cache:
-                        _run_task_sequential(
-                            dep,
-                            completion_cache,
-                            all_tasks,
-                            build_id,
-                            registry,
-                            dual_run_default,
-                            discover,
-                            task_count,
-                            on_registry_failure,
-                        )
-                        if task_count is not None:
-                            task_count.succeeded += 1
-
             except StopIteration:
                 break
 
     completion_cache.add(task.id)
-    registry.task_complete(build_id, task)
+    try:
+        registry.task_complete(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to complete task {task.id}",
+            on_registry_failure,
+        )
 
     # Upload artifacts if any
     try:
@@ -563,6 +689,10 @@ async def build_sequential_aio(
     """Async API for building tasks sequentially.
 
     This is intended primarily for debugging and testing.
+
+    Tasks are registered with the registry as they are discovered (in
+    deterministic DFS order from the roots), so the full DAG appears in the
+    UI immediately rather than progressively as tasks become runnable.
 
     Task execution policy:
     - Sync-only tasks: runs *blocking* via `run()` in main event loop if
@@ -610,9 +740,80 @@ async def build_sequential_aio(
     # Discover all tasks, stopping at already-complete tasks
     all_tasks: dict[UUID, BaseTask] = {}
     previously_completed_tasks: list[BaseTask] = []
+    # Tasks already registered with the registry. Tracked so per-task
+    # fallback retry paths don't double-register.
+    registered_tasks: set[UUID] = set()
+    # Tasks accumulated during the current discover() walk (post-order),
+    # awaiting bulk registration. Cleared by flush_pending_registrations_aio.
+    pending_registrations: list[BaseTask] = []
+
+    # Start or resume build *before* discovery so we have a build_id to
+    # register tasks against.
+    if resume_build_id is not None:
+        build_id = resume_build_id
+    else:
+        build_id = await registry.build_start_aio(root_tasks=tasks_list)
+
+    async def register_task_once_aio(task: BaseTask) -> None:
+        """Register a single task (per-task fallback retry path).
+
+        Used by ``_run_task_sequential_aio`` when discover-time bulk
+        registration was skipped or failed in ``warn`` mode.
+        """
+        if task.id in registered_tasks:
+            return
+        try:
+            await registry.task_register_aio(build_id, task)
+            registered_tasks.add(task.id)
+        except Exception as reg_err:
+            handle_registry_error(
+                reg_err,
+                f"Failed to register task {task.id}",
+                on_registry_failure,
+            )
+
+    async def flush_pending_registrations_aio() -> None:
+        """Bulk-register every task collected since the last flush.
+
+        Chunks the batch into ``_BULK_REGISTER_CHUNK_SIZE``-sized slices
+        to stay within the API's per-call cap. Stops on first chunk
+        failure (per-task retry inside ``_run_task_sequential_aio``
+        handles the rest in ``warn`` mode).
+        """
+        if not pending_registrations:
+            return
+        batch = list(pending_registrations)
+        pending_registrations.clear()
+
+        for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
+            chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
+            try:
+                await registry.task_register_bulk_aio(build_id, chunk)
+            except Exception as reg_err:
+                ids_preview = ", ".join(str(t.id) for t in chunk[:5])
+                if len(chunk) > 5:
+                    ids_preview += f", +{len(chunk) - 5} more"
+                total_chunks = (
+                    len(batch) + _BULK_REGISTER_CHUNK_SIZE - 1
+                ) // _BULK_REGISTER_CHUNK_SIZE
+                this_chunk = (chunk_start // _BULK_REGISTER_CHUNK_SIZE) + 1
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to bulk-register chunk {this_chunk}/{total_chunks} "
+                    f"({len(chunk)} tasks; ids: {ids_preview})",
+                    on_registry_failure,
+                )
+                return
+            for t in chunk:
+                registered_tasks.add(t.id)
 
     async def discover(task: BaseTask) -> None:
-        """Recursively discover tasks, stopping at already-complete tasks."""
+        """Recursively discover tasks, stopping at already-complete tasks.
+
+        Discovery only collects into ``pending_registrations`` in
+        post-order (deps first, parents last). The bulk-register call
+        fires via ``flush_pending_registrations_aio()`` after the walk.
+        """
         if task.id in all_tasks:
             return
         all_tasks[task.id] = task
@@ -624,48 +825,40 @@ async def build_sequential_aio(
             task_count.previously_completed += 1
             previously_completed_tasks.append(task)
             if not register_all:
-                # Don't recurse into deps - they're already built
+                # Don't recurse into deps - they're already built. Append
+                # to pending_registrations (leaf in post-order).
+                pending_registrations.append(task)
                 return
 
-        # Task not complete (or register_all) - recurse into dependencies
+        # Task not complete (or register_all) — recurse into deps first
+        # (post-order), so by the time the bulk register call processes
+        # this task its deps are already in the array (and thus in the DB).
         for dep in flatten_task_struct(task.requires()):
             await discover(dep)
 
-    for root in tasks_list:
-        await discover(root)
+        # Append self after children — preserves post-order within subtree.
+        pending_registrations.append(task)
 
-    # Start or resume build
-    if resume_build_id is not None:
-        build_id = resume_build_id
-    else:
-        build_id = await registry.build_start_aio(root_tasks=tasks_list)
+    # Mark previously-completed tasks as complete in the registry. Registration
+    # already happened inline in discover(); we still need to fire
+    # task_complete_aio so they appear COMPLETED rather than PENDING.
+    completed_previously_completed_count = 0
 
-    # Register previously completed tasks so they appear in the build's task list.
-    # We also call task_complete_aio to mark them as done — otherwise they remain in
-    # PENDING state in the registry (e.g. WrapperTasks that are complete because
-    # their deps are complete, but were never explicitly run).
-    registered_previously_completed_count = 0
+    async def mark_pending_previously_completed_aio() -> None:
+        """Send task_complete for any previously-completed tasks not yet marked.
 
-    async def register_pending_previously_completed_aio() -> None:
-        """Register and complete previously-completed tasks not yet sent to the registry.
-
-        Drains ``previously_completed_tasks`` starting from the last registered
-        index. Called for the initial bulk registration and after any runtime
+        Drains ``previously_completed_tasks`` starting from the last marked
+        index. Called for the initial bulk pass and after any runtime
         ``discover()`` call that might surface a new complete task (e.g. the
         static dep of a dynamically yielded task).
         """
-        nonlocal registered_previously_completed_count
-        while registered_previously_completed_count < len(previously_completed_tasks):
-            pc_task = previously_completed_tasks[registered_previously_completed_count]
-            registered_previously_completed_count += 1
-            try:
-                await registry.task_register_aio(build_id, pc_task)
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to register previously completed task {pc_task.id}",
-                    on_registry_failure,
-                )
+        nonlocal completed_previously_completed_count
+        while completed_previously_completed_count < len(previously_completed_tasks):
+            pc_task = previously_completed_tasks[completed_previously_completed_count]
+            completed_previously_completed_count += 1
+            if pc_task.id not in registered_tasks:
+                # Registration failed in `warn` mode; skip task_complete since
+                # the API row doesn't exist.
                 continue
             try:
                 await registry.task_complete_aio(build_id, pc_task)
@@ -676,17 +869,17 @@ async def build_sequential_aio(
                     on_registry_failure,
                 )
 
-    await register_pending_previously_completed_aio()
-
     async def runtime_discover_aio(task: BaseTask) -> None:
         """``discover()`` wrapper used after the initial registration pass.
 
-        Registers any previously-completed tasks that ``discover()`` surfaces
-        at runtime (e.g. when processing a dynamically yielded task's
-        ``requires()`` chain).
+        Walks ``discover()`` (collecting newly-found tasks into
+        ``pending_registrations``), bulk-registers them, then sends
+        task_complete for any previously-completed tasks the walk
+        surfaced.
         """
         await discover(task)
-        await register_pending_previously_completed_aio()
+        await flush_pending_registrations_aio()
+        await mark_pending_previously_completed_aio()
 
     async def acquire_lock_aio(task: BaseTask) -> LockAcquisitionResult:
         """Acquire lock asynchronously with retry/backoff."""
@@ -754,6 +947,19 @@ async def build_sequential_aio(
             held_locks.discard(task_id)
 
     try:
+        # Discover all tasks. If discover() raises (e.g. requires() /
+        # complete_aio() throws), the outer except below emits
+        # build_fail_aio so the build doesn't get stuck in RUNNING state.
+        for root in tasks_list:
+            await discover(root)
+
+        # Bulk-register every discovered task in one HTTP call.
+        await flush_pending_registrations_aio()
+
+        # Mark previously-completed tasks as complete now that registration
+        # has landed.
+        await mark_pending_previously_completed_aio()
+
         # Build in topological order
         while True:
             ready_task = _find_ready_task(all_tasks, completion_cache, failed_cache)
@@ -781,9 +987,11 @@ async def build_sequential_aio(
                     error = RuntimeError(
                         f"Failed to acquire lock: {lock_result.error_message}"
                     )
+                    # Ensure the task row exists before failing it (no-op if
+                    # registration succeeded during discovery; retry if it
+                    # failed in `warn` mode).
+                    await register_task_once_aio(ready_task)
                     try:
-                        # Register first so the registry has a task row to fail
-                        await registry.task_register_aio(build_id, ready_task)
                         await registry.task_fail_aio(build_id, ready_task, str(error))
                     except Exception as reg_err:
                         handle_registry_error(
@@ -809,6 +1017,7 @@ async def build_sequential_aio(
                     registry,
                     sync_run_default,
                     runtime_discover_aio,
+                    register_task_once_aio,
                     task_count,
                     on_registry_failure,
                 )
@@ -884,6 +1093,7 @@ async def _run_task_sequential_aio(
     registry: RegistryABC,
     sync_run_default: Literal["thread", "blocking"],
     discover: Callable[[BaseTask], Awaitable[None]],
+    register_task_once_aio: Callable[[BaseTask], Awaitable[None]],
     task_count: TaskCount | None = None,
     on_registry_failure: OnRegistryFailure = "raise",
 ) -> None:
@@ -901,13 +1111,26 @@ async def _run_task_sequential_aio(
                 registry,
                 sync_run_default,
                 discover,
+                register_task_once_aio,
                 task_count,
                 on_registry_failure,
             )
             if task_count is not None:
                 task_count.succeeded += 1
 
-    await registry.task_start_aio(build_id, task)
+    # The task should already be registered (during discover), but retry once
+    # if discover-time registration failed in `warn` mode. We still wrap
+    # /start in handle_registry_error so a 404 (registration didn't land) or
+    # a transient blip doesn't hard-fail the build in `warn` mode.
+    await register_task_once_aio(task)
+    try:
+        await registry.task_start_aio(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to start task {task.id}",
+            on_registry_failure,
+        )
 
     has_run = _has_custom_run(task)
     has_run_aio = _has_custom_run_aio(task)
@@ -934,7 +1157,31 @@ async def _run_task_sequential_aio(
     async for yielded in _iter_dynamic_deps(result):
         dynamic_deps = flatten_task_struct(yielded)
 
-        # Record yielded deps as edges so the DAG view shows them
+        # Discover and build dynamic deps FIRST. discover() is the runtime
+        # wrapper that recurses into requires() and post-order-registers
+        # everything in the subtree, so the upstream rows already exist in
+        # the API by the time we record the edge below — no phantom
+        # creation in _reconcile_dependency_edges.
+        for dep in dynamic_deps:
+            await discover(dep)
+
+            if dep.id not in completion_cache:
+                await _run_task_sequential_aio(
+                    dep,
+                    completion_cache,
+                    all_tasks,
+                    build_id,
+                    registry,
+                    sync_run_default,
+                    discover,
+                    register_task_once_aio,
+                    task_count,
+                    on_registry_failure,
+                )
+                if task_count is not None:
+                    task_count.succeeded += 1
+
+        # Now record yielded deps as edges so the DAG view shows them
         # (static deps are recorded via task_register).
         if dynamic_deps:
             try:
@@ -948,30 +1195,15 @@ async def _run_task_sequential_aio(
                     on_registry_failure,
                 )
 
-        # discover() is the runtime wrapper from build_sequential_aio: it
-        # recurses into requires(), and registers any previously-complete
-        # tasks it surfaces (so they appear in the build's task list even
-        # though they were first seen after the initial registration pass).
-        for dep in dynamic_deps:
-            await discover(dep)
-
-            if dep.id not in completion_cache:
-                await _run_task_sequential_aio(
-                    dep,
-                    completion_cache,
-                    all_tasks,
-                    build_id,
-                    registry,
-                    sync_run_default,
-                    discover,
-                    task_count,
-                    on_registry_failure,
-                )
-                if task_count is not None:
-                    task_count.succeeded += 1
-
     completion_cache.add(task.id)
-    await registry.task_complete_aio(build_id, task)
+    try:
+        await registry.task_complete_aio(build_id, task)
+    except Exception as reg_err:
+        handle_registry_error(
+            reg_err,
+            f"Failed to complete task {task.id}",
+            on_registry_failure,
+        )
 
     # Upload artifacts if any
     try:

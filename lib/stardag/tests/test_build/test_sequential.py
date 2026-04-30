@@ -1208,3 +1208,733 @@ class TestDynamicDepEdgesRegistryAio:
         assert (dyn.id, parent.id) in tracking.dynamic_dep_edges, (
             f"Dynamic edge not reported; saw: {tracking.dynamic_dep_edges}"
         )
+
+
+# ============================================================================
+# Test: Discover-time task registration
+#
+# All discovered tasks must be registered with the registry before any task
+# starts executing (so the full DAG is visible in the UI immediately, not
+# leaves-first as tasks become runnable). Sequential build must register in
+# deterministic DFS order from the roots.
+# ============================================================================
+
+
+class OrderedTrackingRegistry(NoOpRegistry):
+    """A NoOpRegistry that records the order of every lifecycle call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, UUID]] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    def task_start(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+    def task_fail(self, build_id: UUID, task, error_message=None) -> None:
+        self.calls.append(("task_fail", task.id))
+
+    async def task_register_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    async def task_start_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+
+    async def task_complete_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+    async def task_fail_aio(self, build_id: UUID, task, error_message=None) -> None:
+        self.calls.append(("task_fail", task.id))
+
+
+class TestDiscoverTimeRegistrationSequential:
+    """Sequential build registers all discovered tasks before any task starts."""
+
+    def test_all_tasks_registered_before_any_start(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Every discovered task should be registered before the first task_start."""
+        tracking = OrderedTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="reg_leaf_a")
+        leaf_b = SyncOnlyTask(name="reg_leaf_b")
+        root = SyncOnlyTask(name="reg_root", deps=(leaf_a, leaf_b))
+
+        summary = build_sequential([root], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        first_start_idx = next(
+            i for i, (m, _) in enumerate(tracking.calls) if m == "task_start"
+        )
+        prefix = tracking.calls[:first_start_idx]
+        registered_before_start = {tid for m, tid in prefix if m == "task_register"}
+
+        assert {leaf_a.id, leaf_b.id, root.id}.issubset(registered_before_start), (
+            f"Expected all 3 tasks registered before first task_start; "
+            f"prefix calls: {prefix}"
+        )
+
+    def test_each_task_registered_exactly_once(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """task_register must be called exactly once per task per build (no
+        duplicate-from-task_start_aio noise)."""
+        tracking = OrderedTrackingRegistry()
+
+        leaf = SyncOnlyTask(name="once_leaf")
+        root = SyncOnlyTask(name="once_root", deps=(leaf,))
+
+        build_sequential([root], registry=tracking)
+
+        for task in (leaf, root):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1, (
+                f"Expected exactly 1 task_register for {task.id}, got {register_calls}"
+            )
+
+    def test_registration_order_is_post_order_dfs(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Sequential build registers in post-order DFS: leaves first, then
+        their parents. This ensures every dep already exists in the registry
+        by the time its parent is registered, so the API never has to
+        phantom-create a dep row.
+        """
+        tracking = OrderedTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="dfs_leaf_a")
+        leaf_b = SyncOnlyTask(name="dfs_leaf_b")
+        root = SyncOnlyTask(name="dfs_root", deps=(leaf_a, leaf_b))
+
+        build_sequential([root], registry=tracking)
+
+        register_order = [tid for m, tid in tracking.calls if m == "task_register"]
+        # Post-order DFS: leaf_a, leaf_b, root.
+        assert register_order == [leaf_a.id, leaf_b.id, root.id], (
+            f"Expected post-order DFS (leaves before parents); got {register_order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_tasks_registered_before_start_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+
+        leaf = SyncOnlyTask(name="aio_leaf")
+        root = SyncOnlyTask(name="aio_root", deps=(leaf,))
+
+        await build_sequential_aio([root], registry=tracking)
+
+        first_start_idx = next(
+            i for i, (m, _) in enumerate(tracking.calls) if m == "task_start"
+        )
+        prefix = tracking.calls[:first_start_idx]
+        registered_before_start = {tid for m, tid in prefix if m == "task_register"}
+        assert {leaf.id, root.id}.issubset(registered_before_start)
+
+    @pytest.mark.asyncio
+    async def test_each_task_registered_exactly_once_aio(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+        leaf = SyncOnlyTask(name="once_leaf_aio")
+        root = SyncOnlyTask(name="once_root_aio", deps=(leaf,))
+        await build_sequential_aio([root], registry=tracking)
+        for task in (leaf, root):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1
+
+    def test_dynamic_deps_registered_when_discovered(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Tasks first discovered through a dynamic-deps yield must also be
+        registered (and only once)."""
+        tracking = OrderedTrackingRegistry()
+
+        dyn = DynamicDepsTask(value="dyn_reg")
+        orchestrator = DynamicDepsTask(value="orch_reg", dynamic_deps=(dyn,))
+
+        summary = build_sequential([orchestrator], registry=tracking)
+        assert summary.status == BuildExitStatus.SUCCESS
+
+        for task in (orchestrator, dyn):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1, (
+                f"Expected exactly 1 task_register for {task.id}, got {register_calls}"
+            )
+
+
+@pytest.mark.parametrize(
+    "build_aio_fn",
+    [build_aio, build_sequential_aio],
+    ids=["concurrent", "sequential"],
+)
+class TestDiscoverTimeRegistrationAio:
+    """Both async builds register every discovered task once, before any
+    task starts. Concurrent build doesn't guarantee a deterministic order
+    between siblings, but parents-before-deps holds and start-after-register
+    holds for every task."""
+
+    @pytest.mark.asyncio
+    async def test_all_registered_before_any_start(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+        leaf_a = SyncOnlyTask(name=f"common_a_{build_aio_fn.__name__}")
+        leaf_b = SyncOnlyTask(name=f"common_b_{build_aio_fn.__name__}")
+        root = SyncOnlyTask(
+            name=f"common_root_{build_aio_fn.__name__}", deps=(leaf_a, leaf_b)
+        )
+        await build_aio_fn([root], registry=tracking)
+
+        first_start_idx = next(
+            i for i, (m, _) in enumerate(tracking.calls) if m == "task_start"
+        )
+        prefix = tracking.calls[:first_start_idx]
+        registered_before_start = {tid for m, tid in prefix if m == "task_register"}
+        assert {leaf_a.id, leaf_b.id, root.id}.issubset(registered_before_start)
+
+    @pytest.mark.asyncio
+    async def test_each_task_registered_exactly_once(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        tracking = OrderedTrackingRegistry()
+        leaf = SyncOnlyTask(name=f"once_leaf_{build_aio_fn.__name__}")
+        root = SyncOnlyTask(name=f"once_root_{build_aio_fn.__name__}", deps=(leaf,))
+        await build_aio_fn([root], registry=tracking)
+        for task in (leaf, root):
+            register_calls = [
+                c for c in tracking.calls if c == ("task_register", task.id)
+            ]
+            assert len(register_calls) == 1, (
+                f"Expected exactly 1 task_register for {task.id}, got {register_calls}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_previously_completed_registered_in_discover(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Previously-completed tasks should also be registered exactly once
+        and never get task_start."""
+        # Pre-build to make the task previously-complete.
+        pre = SyncOnlyTask(name=f"pre_{build_aio_fn.__name__}")
+        await build_aio_fn([pre], registry=NoOpRegistry())
+        assert pre.complete()
+
+        tracking = OrderedTrackingRegistry()
+        await build_aio_fn([pre], registry=tracking)
+
+        register_calls = [c for c in tracking.calls if c == ("task_register", pre.id)]
+        complete_calls = [c for c in tracking.calls if c == ("task_complete", pre.id)]
+        start_calls = [c for c in tracking.calls if c == ("task_start", pre.id)]
+        assert len(register_calls) == 1
+        assert len(complete_calls) == 1
+        assert start_calls == []
+
+
+# ============================================================================
+# Test: Bulk register
+#
+# Build engine should emit one bulk-register call per discover walk
+# instead of N per-task calls. Verifies the registration order within the
+# batch is post-order (deps before parents), so the API never has to
+# phantom-create a row.
+# ============================================================================
+
+
+class BulkTrackingRegistry(NoOpRegistry):
+    """A registry that records bulk_register batches *and* per-task calls."""
+
+    def __init__(self) -> None:
+        self.bulk_batches: list[list[UUID]] = []
+        self.per_task_register_calls: list[UUID] = []
+        self.task_complete_calls: list[UUID] = []
+        self.task_start_calls: list[UUID] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.per_task_register_calls.append(task.id)
+
+    async def task_register_aio(self, build_id: UUID, task) -> None:
+        self.per_task_register_calls.append(task.id)
+
+    def task_register_bulk(self, build_id: UUID, tasks) -> None:
+        self.bulk_batches.append([t.id for t in tasks])
+
+    async def task_register_bulk_aio(self, build_id: UUID, tasks) -> None:
+        self.bulk_batches.append([t.id for t in tasks])
+
+    def task_start(self, build_id: UUID, task) -> None:
+        self.task_start_calls.append(task.id)
+
+    async def task_start_aio(self, build_id: UUID, task) -> None:
+        self.task_start_calls.append(task.id)
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.task_complete_calls.append(task.id)
+
+    async def task_complete_aio(self, build_id: UUID, task) -> None:
+        self.task_complete_calls.append(task.id)
+
+
+class TestBulkRegister:
+    """Verify the build engine batches discover-time registrations."""
+
+    def test_sequential_emits_one_bulk_call_for_static_dag(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="bulk_seq_leaf_a")
+        leaf_b = SyncOnlyTask(name="bulk_seq_leaf_b")
+        root = SyncOnlyTask(name="bulk_seq_root", deps=(leaf_a, leaf_b))
+
+        build_sequential([root], registry=registry)
+
+        # Exactly one bulk batch with all three tasks. No per-task
+        # task_register calls (would mean the bulk path fell through).
+        assert len(registry.bulk_batches) == 1, registry.bulk_batches
+        assert set(registry.bulk_batches[0]) == {leaf_a.id, leaf_b.id, root.id}
+        assert registry.per_task_register_calls == []
+
+    def test_sequential_bulk_order_is_post_order(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="po_leaf_a")
+        leaf_b = SyncOnlyTask(name="po_leaf_b")
+        root = SyncOnlyTask(name="po_root", deps=(leaf_a, leaf_b))
+
+        build_sequential([root], registry=registry)
+
+        order = registry.bulk_batches[0]
+        # Leaves come before the root. Within siblings the SDK preserves
+        # the order returned by ``flatten_task_struct(requires())``.
+        assert order == [leaf_a.id, leaf_b.id, root.id], (
+            f"Expected post-order DFS, got {order}"
+        )
+
+    @pytest.mark.parametrize(
+        "build_aio_fn",
+        [build_aio, build_sequential_aio],
+        ids=["concurrent", "sequential"],
+    )
+    @pytest.mark.asyncio
+    async def test_aio_emits_one_bulk_call_for_static_dag(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+        leaf_a = SyncOnlyTask(name=f"bulk_aio_la_{build_aio_fn.__name__}")
+        leaf_b = SyncOnlyTask(name=f"bulk_aio_lb_{build_aio_fn.__name__}")
+        root = SyncOnlyTask(
+            name=f"bulk_aio_root_{build_aio_fn.__name__}", deps=(leaf_a, leaf_b)
+        )
+
+        await build_aio_fn([root], registry=registry)
+
+        # One bulk call covering the whole DAG. The concurrent build may
+        # interleave sibling subtrees but each subtree is post-order, so
+        # parents always come after their deps within the batch.
+        assert len(registry.bulk_batches) == 1
+        batch = registry.bulk_batches[0]
+        assert set(batch) == {leaf_a.id, leaf_b.id, root.id}
+        # Root comes after both leaves regardless of sibling interleaving.
+        leaf_indices = [batch.index(leaf_a.id), batch.index(leaf_b.id)]
+        assert batch.index(root.id) > max(leaf_indices)
+        assert registry.per_task_register_calls == []
+
+    def test_dynamic_deps_trigger_separate_bulk_call(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Each dynamic-deps yield triggers its own bulk-register call so
+        the new tasks are registered before the edge is recorded."""
+        registry = BulkTrackingRegistry()
+
+        dyn = DynamicDepsTask(value="dyn_bulk")
+        orchestrator = DynamicDepsTask(value="orch_bulk", dynamic_deps=(dyn,))
+
+        build_sequential([orchestrator], registry=registry)
+
+        # First batch: orchestrator (root has no static deps so it's the
+        # only thing in the initial walk). Second batch: dyn (yielded at
+        # runtime). At least 2 separate bulk calls.
+        assert len(registry.bulk_batches) >= 2, registry.bulk_batches
+        first_batch_ids = set(registry.bulk_batches[0])
+        assert orchestrator.id in first_batch_ids
+        # dyn must show up in some later batch.
+        dyn_in_later_batch = any(dyn.id in batch for batch in registry.bulk_batches[1:])
+        assert dyn_in_later_batch, (
+            f"dyn task not found in any post-initial batch: {registry.bulk_batches}"
+        )
+
+
+class TestConcurrentDiscoverRaceFreedom:
+    """The concurrent discover walk used a fast-path
+    ``if task.id in task_states: return`` that could let a sibling
+    discoverer for a shared dep return *before* the original discoverer
+    appended that dep to ``pending_registrations`` — letting a parent
+    append ahead of its dep and re-introducing phantom-creation. Fixed
+    by waiting on a per-task ``discover_done`` event in the fast-path.
+
+    A diamond DAG (parent → mid_a, mid_b; mid_a, mid_b → leaf) exercises
+    this: both mid_a and mid_b race on ``discover(leaf)``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_diamond_dag_orders_shared_dep_before_all_parents(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf = SyncOnlyTask(name="diamond_leaf")
+        mid_a = SyncOnlyTask(name="diamond_mid_a", deps=(leaf,))
+        mid_b = SyncOnlyTask(name="diamond_mid_b", deps=(leaf,))
+        parent = SyncOnlyTask(name="diamond_parent", deps=(mid_a, mid_b))
+
+        await build_aio([parent], registry=registry)
+
+        assert len(registry.bulk_batches) == 1
+        order = registry.bulk_batches[0]
+        positions = {tid: i for i, tid in enumerate(order)}
+
+        # Shared dep must appear before *both* its parents, even when
+        # they're discovered concurrently and one of them hits the
+        # fast-path on the second discover(leaf) call.
+        assert positions[leaf.id] < positions[mid_a.id]
+        assert positions[leaf.id] < positions[mid_b.id]
+        # Parent comes last.
+        assert positions[parent.id] == len(order) - 1
+
+
+class TestBulkRegisterChunking:
+    """Discovery batches over the API cap must be chunked into
+    <=cap-sized bulk calls — otherwise the server 400s and we silently
+    fall back to per-task registration in warn mode (defeating the
+    bulk-register optimisation).
+    """
+
+    def test_sequential_chunks_large_batch(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch,
+    ):
+        """Force chunking by lowering the chunk constant to 3, build a
+        DAG of 7 tasks, assert 3 chunked bulk calls of sizes 3, 3, 1."""
+        from stardag.build import _sequential
+
+        monkeypatch.setattr(_sequential, "_BULK_REGISTER_CHUNK_SIZE", 3)
+
+        registry = BulkTrackingRegistry()
+        leaves = [SyncOnlyTask(name=f"chunk_leaf_{i}") for i in range(6)]
+        root = SyncOnlyTask(name="chunk_root", deps=tuple(leaves))
+
+        build_sequential([root], registry=registry)
+
+        # 7 tasks total → 3 chunks at chunk_size=3 (3+3+1).
+        chunk_sizes = [len(b) for b in registry.bulk_batches]
+        assert chunk_sizes == [3, 3, 1], (
+            f"Expected chunks of [3, 3, 1]; got {chunk_sizes}"
+        )
+        # All tasks accounted for, in post-order — root last.
+        flat = [tid for chunk in registry.bulk_batches for tid in chunk]
+        assert set(flat) == {root.id, *(leaf.id for leaf in leaves)}
+        assert flat[-1] == root.id
+
+    @pytest.mark.asyncio
+    async def test_concurrent_chunks_large_batch(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        monkeypatch,
+    ):
+        from stardag.build import _concurrent
+
+        monkeypatch.setattr(_concurrent, "_BULK_REGISTER_CHUNK_SIZE", 3)
+
+        registry = BulkTrackingRegistry()
+        leaves = [SyncOnlyTask(name=f"async_chunk_leaf_{i}") for i in range(6)]
+        root = SyncOnlyTask(name="async_chunk_root", deps=tuple(leaves))
+
+        await build_aio([root], registry=registry)
+
+        chunk_sizes = [len(b) for b in registry.bulk_batches]
+        assert chunk_sizes == [3, 3, 1], chunk_sizes
+        flat = [tid for chunk in registry.bulk_batches for tid in chunk]
+        assert set(flat) == {root.id, *(leaf.id for leaf in leaves)}
+        # Root must come after every leaf even with concurrent sibling
+        # interleaving.
+        leaf_positions = [flat.index(leaf.id) for leaf in leaves]
+        assert flat.index(root.id) > max(leaf_positions)
+
+
+class TestNoPhantomsHappyPath:
+    """In normal operation (post-order discover + bulk register) every
+    task is registered with its real data before any edge referencing it
+    is emitted. The simplest way to verify this is to see that
+    ``dependency_task_ids`` only ever contains ids for tasks that
+    appeared *earlier* in the same bulk batch — so the API resolves them
+    without phantom creation.
+    """
+
+    def test_bulk_array_orders_deps_before_parents(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BulkTrackingRegistry()
+
+        leaf_a = SyncOnlyTask(name="np_leaf_a")
+        leaf_b = SyncOnlyTask(name="np_leaf_b")
+        mid = SyncOnlyTask(name="np_mid", deps=(leaf_a,))
+        root = SyncOnlyTask(name="np_root", deps=(mid, leaf_b))
+
+        build_sequential([root], registry=registry)
+
+        order = registry.bulk_batches[0]
+        # For every task in the batch, all of its *registration-time*
+        # deps must appear earlier in the array.
+        positions = {tid: i for i, tid in enumerate(order)}
+        for task in (leaf_a, leaf_b, mid, root):
+            for dep in task.deps:
+                assert positions[dep.id] < positions[task.id], (
+                    f"Dep {dep.id} should appear before {task.id} in bulk order; "
+                    f"got positions {positions}"
+                )
+
+
+# ============================================================================
+# Test: Discover-time registration error handling
+# ============================================================================
+
+
+class FailOnStartRegistry(NoOpRegistry):
+    """Always 404s task_start (e.g. registration didn't land in warn mode)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, UUID]] = []
+
+    def task_register(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    def task_start(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+        raise ConnectionError("would-be 404 on /start")
+
+    def task_complete(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+    async def task_register_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_register", task.id))
+
+    async def task_start_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_start", task.id))
+        raise ConnectionError("would-be 404 on /start")
+
+    async def task_complete_aio(self, build_id: UUID, task) -> None:
+        self.calls.append(("task_complete", task.id))
+
+
+class TestDiscoverTimeRegistrationErrorHandling:
+    """In `warn` mode, registry hiccups during discover-time registration —
+    or the resulting 404 from /start when registration didn't land — must
+    not abort the build. The task still executes locally."""
+
+    def test_warn_mode_tolerates_start_failure_sequential(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = FailOnStartRegistry()
+        task = SyncOnlyTask(name="warn_start_seq")
+        summary = build_sequential(
+            [task], registry=registry, on_registry_failure="warn"
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+        # Task ran (so its target exists) and the build didn't blow up.
+        assert task.complete()
+
+    def test_raise_mode_propagates_start_failure_sequential(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = FailOnStartRegistry()
+        task = SyncOnlyTask(name="raise_start_seq")
+        with pytest.raises(ConnectionError, match="would-be 404"):
+            build_sequential([task], registry=registry, on_registry_failure="raise")
+
+    @pytest.mark.parametrize(
+        "build_aio_fn",
+        [build_aio, build_sequential_aio],
+        ids=["concurrent", "sequential"],
+    )
+    @pytest.mark.asyncio
+    async def test_warn_mode_tolerates_start_failure_aio(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = FailOnStartRegistry()
+        task = SyncOnlyTask(name=f"warn_start_aio_{build_aio_fn.__name__}")
+        summary = await build_aio_fn(
+            [task], registry=registry, on_registry_failure="warn"
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+
+    def test_warn_mode_skips_start_when_registration_failed_concurrent(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Concurrent build: when discover-time register fails (and the
+        retry inside submit_with_lock also fails), task_start_aio should
+        be skipped rather than 404-ing the build."""
+
+        class AlwaysFailRegisterRegistry(NoOpRegistry):
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, UUID]] = []
+
+            def task_register(self, build_id, task) -> None:
+                self.calls.append(("task_register", task.id))
+                raise ConnectionError("register down")
+
+            def task_start(self, build_id, task) -> None:
+                self.calls.append(("task_start", task.id))
+
+            def task_complete(self, build_id, task) -> None:
+                self.calls.append(("task_complete", task.id))
+
+            async def task_register_aio(self, build_id, task) -> None:
+                self.calls.append(("task_register", task.id))
+                raise ConnectionError("register down")
+
+            async def task_start_aio(self, build_id, task) -> None:
+                self.calls.append(("task_start", task.id))
+
+            async def task_complete_aio(self, build_id, task) -> None:
+                self.calls.append(("task_complete", task.id))
+
+        registry = AlwaysFailRegisterRegistry()
+        task = SyncOnlyTask(name="skip_start_concurrent")
+        summary = build([task], registry=registry, on_registry_failure="warn")
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+        # No start event should have been attempted — registration never
+        # landed, so /start would have 404'd.
+        start_calls = [c for c in registry.calls if c[0] == "task_start"]
+        assert start_calls == [], (
+            f"Expected /start to be skipped when registration didn't land; "
+            f"got {registry.calls}"
+        )
+
+
+# ============================================================================
+# Test: build_fail emitted when discover() raises
+# ============================================================================
+
+
+class _FailingRequiresTask(SyncOnlyTask):
+    """A task whose requires() raises, simulating a discovery-time crash."""
+
+    def requires(self):
+        raise RuntimeError("requires() exploded during discovery")
+
+
+class BuildFailTrackingRegistry(NoOpRegistry):
+    def __init__(self) -> None:
+        self.build_started_with: UUID | None = None
+        self.build_failed_with: UUID | None = None
+        self.build_completed_with: UUID | None = None
+
+    def build_start(self, root_tasks=None, description=None):
+        from uuid import uuid4
+
+        self.build_started_with = uuid4()
+        return self.build_started_with
+
+    async def build_start_aio(self, root_tasks=None, description=None):
+        return self.build_start(root_tasks, description)
+
+    def build_fail(self, build_id, error_message=None):
+        self.build_failed_with = build_id
+
+    async def build_fail_aio(self, build_id, error_message=None):
+        self.build_fail(build_id, error_message)
+
+    def build_complete(self, build_id):
+        self.build_completed_with = build_id
+
+    async def build_complete_aio(self, build_id):
+        self.build_complete(build_id)
+
+    def task_register(self, build_id, task):
+        pass
+
+    async def task_register_aio(self, build_id, task):
+        pass
+
+
+class TestDiscoveryFailureBuildFail:
+    """If discovery raises, build_fail must reach the registry — otherwise
+    the build is left RUNNING forever."""
+
+    def test_sequential_emits_build_fail_when_discover_raises(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BuildFailTrackingRegistry()
+        with pytest.raises(RuntimeError, match="requires.*exploded"):
+            build_sequential([_FailingRequiresTask(name="boom")], registry=registry)
+        assert registry.build_started_with is not None
+        assert registry.build_failed_with == registry.build_started_with
+        assert registry.build_completed_with is None
+
+    @pytest.mark.parametrize(
+        "build_aio_fn",
+        [build_aio, build_sequential_aio],
+        ids=["concurrent", "sequential"],
+    )
+    @pytest.mark.asyncio
+    async def test_aio_emits_build_fail_when_discover_raises(
+        self,
+        build_aio_fn,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        registry = BuildFailTrackingRegistry()
+        # build_aio's TaskGroup wraps the RuntimeError in an ExceptionGroup;
+        # build_sequential_aio re-raises directly. Both subclass `Exception`,
+        # so a single Exception catch works on Python 3.10+ without
+        # name-resolving BaseExceptionGroup at parse time.
+        with pytest.raises(Exception):
+            await build_aio_fn(
+                [_FailingRequiresTask(name=f"boom_{build_aio_fn.__name__}")],
+                registry=registry,
+            )
+        assert registry.build_started_with is not None
+        assert registry.build_failed_with == registry.build_started_with
+        assert registry.build_completed_with is None

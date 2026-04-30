@@ -117,6 +117,10 @@ class _PrefectTaskRunWrapper:
             - Generator: Task has dynamic deps and is suspended (in-process).
             - TaskStruct: Task has dynamic deps but completed (cross-process).
         """
+        # Register before starting — the /start endpoint requires the task
+        # to exist in the build, and as of the discover-time-registration
+        # change `task_start_aio` no longer auto-registers.
+        await self.registry.task_register_aio(self.build_id, task)
         await self.registry.task_start_aio(self.build_id, task)
 
         if self.before_run_callback is not None:

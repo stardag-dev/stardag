@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.auth.tokens import get_token_manager
 from stardag_api.config import settings
+from stardag_api.middleware import GZipRequestMiddleware
 from stardag_api.routes import (
     auth_router,
     builds_router,
@@ -37,6 +38,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Decompress incoming gzipped request bodies (the SDK's bulk-register path
+# gzips bodies above ~1KB to keep large batches manageable on the wire).
+# Pass-through for non-gzipped requests so existing SDK versions and
+# direct callers keep working unchanged.
+app.add_middleware(GZipRequestMiddleware)
 
 # Auth routes - included twice with different prefixes:
 # - No prefix: JWKS at /.well-known/jwks.json (standard location)

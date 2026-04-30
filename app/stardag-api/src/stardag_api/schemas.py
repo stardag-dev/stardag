@@ -144,6 +144,21 @@ class TaskCreate(BaseModel):
     dependency_task_ids: list[str] = []  # task_ids of upstream dependencies
 
 
+class TaskBulkCreate(BaseModel):
+    """Schema for bulk-registering multiple tasks to a build.
+
+    Tasks are processed in array order in a single transaction. Order
+    matters: with the SDK's post-order discover, deps appear earlier in
+    the array than parents, so when a parent's dependency_task_ids resolve
+    they find existing rows (no phantom-creation in
+    _reconcile_dependency_edges). The endpoint deduplicates by ``task_id``
+    keeping the first occurrence, so callers don't pay event-emission
+    cost for accidental duplicates within a single batch.
+    """
+
+    tasks: list[TaskCreate]
+
+
 class TaskResponse(BaseModel):
     """Schema for task response."""
 
@@ -158,6 +173,43 @@ class TaskResponse(BaseModel):
     version: str | None
     output_uri: str | None = None
     created_at: datetime
+    # True for placeholder rows auto-created by ``_reconcile_dependency_edges``
+    # when an edge points at a not-yet-registered task. With the SDK's
+    # post-order discover walk this is rare; UI treats phantoms as
+    # incomplete/registering rows.
+    is_phantom: bool = False
+
+
+class TaskBulkResponse(BaseModel):
+    """Full response from a bulk task registration.
+
+    Returned when ``id_only=false`` (the default) — each task in the
+    response carries its complete state (task_data, namespace, etc.),
+    matching the single-task ``register_task`` shape.
+    """
+
+    tasks: list[TaskResponse]
+
+
+class BulkTaskIdRef(BaseModel):
+    """Slim id-only reference to a registered task in a bulk response."""
+
+    id: UUID
+    task_id: str
+
+
+class TaskBulkIdOnlyResponse(BaseModel):
+    """Lightweight response from a bulk task registration.
+
+    Returned when ``?id_only=true``. Contains only the
+    (database PK ↔ task_id) mapping — no task_data, no namespace, no
+    timestamps. Saves bandwidth + serialisation cost when the caller
+    (e.g. the SDK's build engine) doesn't need the full state echoed
+    back. For a 50-task batch with rich task_data this is the
+    difference between ~50 KB and ~3 KB on the wire.
+    """
+
+    tasks: list[BulkTaskIdRef]
 
 
 class AddDependenciesRequest(BaseModel):

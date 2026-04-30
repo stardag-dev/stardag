@@ -1,10 +1,12 @@
 """API-based registry that communicates with the stardag-api service."""
 
 import asyncio
+import gzip
+import json as _json
 import logging
 import time
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
@@ -44,6 +46,52 @@ _RETRY_CONFIG = Retry(
 # Rate limit retry configuration
 _MAX_RATE_LIMIT_RETRIES = 5
 _MAX_RETRY_WAIT = 60  # Cap wait time at 60 seconds
+
+# Hard cap on tasks per ``task_register_bulk[_aio]`` HTTP call. Mirrors
+# the server's per-call cap.
+#
+# **Asymmetry intentional**: the build engine's
+# ``_BULK_REGISTER_CHUNK_SIZE`` (50) is the *working* size — small
+# enough to keep DB transactions short and request bodies friendly.
+# The 1000 here is the *defensive* ceiling for direct external callers
+# of ``APIRegistry`` who haven't been told about the lower working
+# size. Don't reduce this thinking 50 is the real limit — it isn't.
+_MAX_BULK_REGISTER_TASKS = 1000
+
+# Threshold above which JSON request bodies are gzipped before sending.
+# Below this, gzip's headers + per-call CPU make compression a net loss;
+# above it, repeated keys / structure in our payloads (especially
+# ``task_register_bulk``) compress 5–10×, so the wire savings dominate.
+# The server transparently decompresses via ``GZipRequestMiddleware``.
+_GZIP_REQUEST_THRESHOLD_BYTES = 1024
+
+
+def _maybe_gzip_json_body(
+    body: object,
+) -> tuple[bytes | None, dict[str, str]]:
+    """Serialize a JSON body and gzip it when worthwhile.
+
+    Returns a ``(content_bytes, extra_headers)`` pair suitable for httpx's
+    ``content=`` + ``headers=`` kwargs:
+
+    - ``body is None`` -> ``(None, {})`` (caller skips the JSON body
+      entirely).
+    - body small (< ``_GZIP_REQUEST_THRESHOLD_BYTES``) -> raw JSON bytes
+      + ``Content-Type: application/json``.
+    - body big -> gzipped JSON bytes + ``Content-Type`` and
+      ``Content-Encoding: gzip``.
+
+    Always serialises with ``separators=(",", ":")`` so the size
+    threshold doesn't depend on whitespace.
+    """
+    if body is None:
+        return None, {}
+    encoded = _json.dumps(body, separators=(",", ":")).encode("utf-8")
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if len(encoded) < _GZIP_REQUEST_THRESHOLD_BYTES:
+        return encoded, headers
+    headers["Content-Encoding"] = "gzip"
+    return gzip.compress(encoded), headers
 
 
 def _is_route_not_found(err: NotFoundError) -> bool:
@@ -259,12 +307,22 @@ class APIRegistry(RegistryABC):
     ) -> httpx.Response:
         """Make a sync HTTP request with automatic rate-limit retry.
 
+        JSON bodies above ``_GZIP_REQUEST_THRESHOLD_BYTES`` are gzipped
+        before sending; the server's ``GZipRequestMiddleware`` handles
+        the decode transparently.
+
         Rate limit 429s (RATE_LIMIT error_code) are retried with backoff
         respecting the Retry-After header. Quota 429s (24h limits) are
         raised immediately as QuotaExceededError.
         """
+        content, body_headers = _maybe_gzip_json_body(json)
+        request_kwargs: dict[str, Any] = {"params": params}
+        if content is not None:
+            request_kwargs["content"] = content
+            request_kwargs["headers"] = body_headers
+
         for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-            response = self.client.request(method, url, json=json, params=params)
+            response = self.client.request(method, url, **request_kwargs)
             try:
                 self._handle_response_error(response, operation)
                 return response
@@ -299,14 +357,22 @@ class APIRegistry(RegistryABC):
     ) -> httpx.Response:
         """Make an async HTTP request with automatic rate-limit retry.
 
+        JSON bodies above ``_GZIP_REQUEST_THRESHOLD_BYTES`` are gzipped
+        before sending; the server's ``GZipRequestMiddleware`` handles
+        the decode transparently.
+
         Rate limit 429s (RATE_LIMIT error_code) are retried with backoff
         respecting the Retry-After header. Quota 429s (24h limits) are
         raised immediately as QuotaExceededError.
         """
+        content, body_headers = _maybe_gzip_json_body(json)
+        request_kwargs: dict[str, Any] = {"params": params}
+        if content is not None:
+            request_kwargs["content"] = content
+            request_kwargs["headers"] = body_headers
+
         for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
-            response = await self.async_client.request(
-                method, url, json=json, params=params
-            )
+            response = await self.async_client.request(method, url, **request_kwargs)
             try:
                 self._handle_response_error(response, operation)
                 return response
@@ -418,6 +484,51 @@ class APIRegistry(RegistryABC):
             operation=f"Register task {task.id}",
         )
 
+    def task_register_bulk(self, build_id: UUID, tasks: Sequence["BaseTask"]) -> None:
+        """Bulk-register tasks via the ``/tasks/bulk`` endpoint.
+
+        Falls back to per-task ``task_register`` if the API doesn't
+        support the endpoint (older deployments) — same backwards-compat
+        pattern as ``task_add_dependencies``.
+
+        Raises ``ValueError`` if the batch exceeds
+        ``_MAX_BULK_REGISTER_TASKS`` (mirrors the server cap). The build
+        engine chunks above this method; external callers of
+        ``APIRegistry`` get an explicit client-side error rather than a
+        400 from the server.
+
+        Passes ``?id_only=true`` so the server returns only the
+        ``{id, task_id}`` mapping rather than echoing back full
+        ``TaskResponse`` rows we'd discard anyway. Cuts response size
+        by ~10× for batches with rich task_data.
+        """
+        if not tasks:
+            return
+        if len(tasks) > _MAX_BULK_REGISTER_TASKS:
+            raise ValueError(
+                f"task_register_bulk supports at most {_MAX_BULK_REGISTER_TASKS} "
+                f"tasks per call (got {len(tasks)}). Chunk the input on the "
+                f"caller side."
+            )
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
+                json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
+                params={**self._get_params(), "id_only": "true"},
+                operation=f"Bulk-register {len(tasks)} tasks",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /tasks/bulk; "
+                "falling back to per-task registration. "
+                "Upgrade the Registry API for batched registration."
+            )
+            for t in tasks:
+                self.task_register(build_id, t)
+
     def _get_event_params(self) -> dict[str, str]:
         """Get query params for event endpoints, including commit_hash."""
         params = self._get_params()
@@ -428,10 +539,12 @@ class APIRegistry(RegistryABC):
         return params
 
     def task_start(self, build_id: UUID, task: "BaseTask") -> None:
-        """Mark a task as started."""
-        # Ensure task is registered first
-        self.task_register(build_id, task)
+        """Mark a task as started.
 
+        Caller must have already registered the task (via ``task_register`` or
+        as a side effect of a parent's static-deps reconciliation). The /start
+        endpoint will 404 otherwise.
+        """
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
@@ -753,10 +866,58 @@ class APIRegistry(RegistryABC):
             operation=f"Register task {task.id}",
         )
 
-    async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version - mark a task as started."""
-        await self.task_register_aio(build_id, task)
+    async def task_register_bulk_aio(
+        self, build_id: UUID, tasks: Sequence["BaseTask"]
+    ) -> None:
+        """Async bulk-register via ``/tasks/bulk`` (one HTTP call instead of N).
 
+        Falls back to per-task ``task_register_aio`` if the API doesn't
+        support the endpoint (older deployments).
+
+        Raises ``ValueError`` if the batch exceeds
+        ``_MAX_BULK_REGISTER_TASKS`` (mirrors the server cap). The build
+        engine chunks above this method; external callers get an
+        explicit client-side error rather than a 400 from the server.
+
+        Passes ``?id_only=true`` so the server returns only the
+        ``{id, task_id}`` mapping rather than echoing full ``TaskResponse``
+        rows that we discard. Cuts response size by ~10× for batches
+        with rich task_data.
+        """
+        if not tasks:
+            return
+        if len(tasks) > _MAX_BULK_REGISTER_TASKS:
+            raise ValueError(
+                f"task_register_bulk_aio supports at most {_MAX_BULK_REGISTER_TASKS} "
+                f"tasks per call (got {len(tasks)}). Chunk the input on the "
+                f"caller side."
+            )
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
+                json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
+                params={**self._get_params(), "id_only": "true"},
+                operation=f"Bulk-register {len(tasks)} tasks",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /tasks/bulk; "
+                "falling back to per-task registration. "
+                "Upgrade the Registry API for batched registration."
+            )
+            for t in tasks:
+                await self.task_register_aio(build_id, t)
+
+    async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
+        """Async version - mark a task as started.
+
+        Caller must have already registered the task (via ``task_register_aio``
+        or as a side effect of a parent's static-deps reconciliation). The
+        /start endpoint will 404 otherwise.
+        """
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",

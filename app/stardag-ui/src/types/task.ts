@@ -70,6 +70,10 @@ export interface Task {
   status_build_id?: string;
   // Git commit hash from the event that determined the current status
   commit_hash?: string | null;
+  // True for placeholder rows the API auto-creates when an edge points at
+  // a not-yet-registered task (legacy/safety-hatch path; with the SDK's
+  // post-order discover this is rare). UI hides phantoms from list views.
+  is_phantom?: boolean;
 }
 
 export interface TaskListResponse {
