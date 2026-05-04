@@ -192,6 +192,158 @@ def test_cached_remote_filesystem_target(tmp_path: Path):
     assert cache_path.read_text() == "test"
 
 
+def test_cached_remote_filesystem_upload_is_crash_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A crash mid-cache-copy must not leave a partial file at the final
+    cache path. Subsequent reads short-circuit on ``cache_path.exists()``
+    without verifying length, so a partial entry would silently return
+    truncated bytes — the upload path must publish atomically (write to
+    a temp file, then rename) just like the download path does."""
+    from stardag.target import _base as base_module
+
+    rfs_base = InMemoryRemoteFileSystem()
+    cache_root = tmp_path / "cache"
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(cache_root))
+    uri = "in-memory://bucket/key"
+
+    source = tmp_path / "source.txt"
+    source.write_text("the full payload")
+
+    real_copy = base_module.shutil.copy
+
+    def partial_then_fail(src, dst):
+        # Simulate a crash partway through the copy: write some bytes,
+        # then raise. Without atomicity, ``dst == cache_path`` would now
+        # contain truncated content.
+        with open(src, "rb") as fin, open(dst, "wb") as fout:
+            fout.write(fin.read(4))  # partial
+        raise OSError("simulated mid-copy crash")
+
+    monkeypatch.setattr(base_module.shutil, "copy", partial_then_fail)
+
+    with pytest.raises(OSError, match="simulated mid-copy crash"):
+        rfs.upload(source, uri)
+
+    # The wrapped upload still succeeded (it ran before the cache copy).
+    assert rfs_base.uri_to_bytes[uri] == b"the full payload"
+
+    # No partial entry at the final cache path → next read will be served
+    # from the wrapped RFS (atomic download), repopulating the cache cleanly.
+    cache_path = rfs.get_cache_path(uri)
+    assert not cache_path.exists()
+
+    # And no leftover tmp files cluttering the cache directory.
+    leftovers = list(cache_path.parent.glob("*.tmp-*"))
+    assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"
+
+    # Sanity: clearing the failure injection and reading via the cached RFS
+    # works — the wrapped RFS still has the file, atomic download repopulates.
+    monkeypatch.setattr(base_module.shutil, "copy", real_copy)
+    with RemoteFileTarget(uri=uri, rfs=rfs).open("r") as f:
+        assert f.read() == "the full payload"
+    assert cache_path.read_text() == "the full payload"
+
+
+def test_cached_remote_filesystem_upload_ok_remove_publish_failure_is_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The ``ok_remove=True`` branch publishes via a single direct
+    ``Path.replace`` call (atomic on POSIX via rename(2), atomic on
+    Windows via MoveFileEx with REPLACE_EXISTING). If that replace fails
+    (e.g., EXDEV across filesystems, or any other reason — simulated
+    here), ``cache_path`` must not exist and the wrapped remote upload
+    must still have succeeded (it runs before the cache publish step).
+    Guards against a future regression to a non-atomic write path."""
+    from stardag.target import _base as base_module
+
+    rfs_base = InMemoryRemoteFileSystem()
+    cache_root = tmp_path / "cache"
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(cache_root))
+    uri = "in-memory://bucket/key"
+
+    source = tmp_path / "source.txt"
+    source.write_text("payload")
+
+    cache_path = rfs.get_cache_path(uri)
+    real_replace = base_module.Path.replace
+
+    def fail_only_cache_publish(self, target):
+        if Path(target) == cache_path:
+            raise OSError("simulated replace failure")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(base_module.Path, "replace", fail_only_cache_publish)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        rfs.upload(source, uri, ok_remove=True)
+
+    # Wrapped upload still ran before the cache publish step.
+    assert rfs_base.uri_to_bytes[uri] == b"payload"
+
+    # No entry at the final cache path; no tmp files (none should have
+    # been created — ok_remove=True bypasses the tmp helper).
+    assert not cache_path.exists()
+    leftovers = list(cache_path.parent.glob("*.tmp-*"))
+    assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"
+
+
+def test_cached_remote_filesystem_upload_refreshes_existing_cache_entry(
+    tmp_path: Path,
+):
+    """Re-uploading the same URI must replace the cache entry — exercises
+    the overwrite semantics of ``Path.replace`` (cross-platform: rename(2)
+    on POSIX, ``MoveFileEx REPLACE_EXISTING`` on Windows). Plain
+    ``Path.rename`` would error here on Windows, breaking cache refresh."""
+    rfs_base = InMemoryRemoteFileSystem()
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(tmp_path / "cache"))
+    uri = "in-memory://bucket/key"
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
+
+    with target.open("w") as f:
+        f.write("first")
+    cache_path = rfs.get_cache_path(uri)
+    assert cache_path.read_text() == "first"
+
+    with target.open("w") as f:
+        f.write("second")
+
+    assert cache_path.read_text() == "second"
+    assert rfs_base.uri_to_bytes[uri] == b"second"
+
+
+async def test_cached_remote_filesystem_upload_aio_is_crash_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Async equivalent of the sync atomicity test."""
+    from stardag.target import _base as base_module
+
+    rfs_base = InMemoryRemoteFileSystem()
+    cache_root = tmp_path / "cache"
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(cache_root))
+    uri = "in-memory://bucket/key"
+
+    source = tmp_path / "source.txt"
+    source.write_text("the full payload")
+
+    def partial_then_fail(src, dst):
+        with open(src, "rb") as fin, open(dst, "wb") as fout:
+            fout.write(fin.read(4))
+        raise OSError("simulated mid-copy crash")
+
+    monkeypatch.setattr(base_module.shutil, "copy", partial_then_fail)
+
+    with pytest.raises(OSError, match="simulated mid-copy crash"):
+        await rfs.upload_aio(source, uri)
+
+    # Wrapped upload succeeded; cache is clean (no partial entry, no tmp).
+    assert rfs_base.uri_to_bytes[uri] == b"the full payload"
+    cache_path = rfs.get_cache_path(uri)
+    assert not cache_path.exists()
+    leftovers = list(cache_path.parent.glob("*.tmp-*"))
+    assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"
+
+
 def test_directory_target(tmp_path: Path):
     dir_target = DirectoryTarget(uri=str(tmp_path / "test"), prototype=LocalFileTarget)
     assert not dir_target.exists()
