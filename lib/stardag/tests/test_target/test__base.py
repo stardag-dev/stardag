@@ -245,13 +245,16 @@ def test_cached_remote_filesystem_upload_is_crash_atomic(
     assert cache_path.read_text() == "the full payload"
 
 
-def test_cached_remote_filesystem_upload_ok_remove_is_crash_atomic(
+def test_cached_remote_filesystem_upload_ok_remove_rename_failure_is_safe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The ``ok_remove=True`` branch must also publish atomically. We
-    inject a failure on the *final* rename (tmp → cache_path) — without
-    the temp-file pattern there'd be no tmp at all and the source rename
-    would have already gone straight to ``cache_path``."""
+    """The ``ok_remove=True`` branch publishes via a single direct rename
+    (POSIX-atomic on same FS), bypassing the tmp-file helper. If that
+    rename fails (e.g., EXDEV across filesystems, or any other reason —
+    simulated here), ``cache_path`` must not exist. Atomicity here is a
+    POSIX guarantee on ``rename(2)``, not something we orchestrate; this
+    test guards against a future regression to a non-atomic write path
+    (e.g., switching to ``shutil.move``) for the rename branch."""
     from stardag.target import _base as base_module
 
     rfs_base = InMemoryRemoteFileSystem()
@@ -265,17 +268,18 @@ def test_cached_remote_filesystem_upload_ok_remove_is_crash_atomic(
     cache_path = rfs.get_cache_path(uri)
     real_rename = base_module.Path.rename
 
-    def fail_only_final_publish(self, target):
+    def fail_only_cache_publish(self, target):
         if Path(target) == cache_path:
-            raise OSError("simulated final-rename crash")
+            raise OSError("simulated rename failure")
         return real_rename(self, target)
 
-    monkeypatch.setattr(base_module.Path, "rename", fail_only_final_publish)
+    monkeypatch.setattr(base_module.Path, "rename", fail_only_cache_publish)
 
-    with pytest.raises(OSError, match="simulated final-rename crash"):
+    with pytest.raises(OSError, match="simulated rename failure"):
         rfs.upload(source, uri, ok_remove=True)
 
-    # No partial entry at the final cache path; tmp was cleaned up.
+    # No entry at the final cache path; no tmp files (none should have
+    # been created by the rename branch).
     assert not cache_path.exists()
     leftovers = list(cache_path.parent.glob("*.tmp-*"))
     assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"

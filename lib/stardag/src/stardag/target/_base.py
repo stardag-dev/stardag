@@ -1076,15 +1076,20 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
     def upload(self, source: Path, uri: str, ok_remove: bool = False):
         self.wrapped.upload(source, uri, ok_remove=False)
         # NOTE only cache the file if the upload was successful!
-
-        def _populate_from_source(tmp: Path) -> None:
-            if ok_remove:
-                # NOTE faster to rename than to copy!
-                source.rename(tmp)
-            else:
+        cache_path = self.get_cache_path(uri)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        if ok_remove:
+            # POSIX rename(2) is atomic on the same filesystem — cache_path
+            # is never observed in a partial state. No temp-file hop needed.
+            # (Cross-FS rename raises EXDEV; cache_path stays untouched.)
+            source.rename(cache_path)
+        else:
+            # shutil.copy is not crash-atomic — route through tmp+rename so
+            # an interrupted copy never publishes a partial cache entry.
+            def _populate(tmp: Path) -> None:
                 shutil.copy(source, tmp)
 
-        _publish_to_cache_atomically(self.get_cache_path(uri), _populate_from_source)
+            _publish_to_cache_atomically(cache_path, _populate)
 
     def enter_readable_proxy_path(self, uri: str) -> Path:
         cache_path = self.get_cache_path(uri)
@@ -1122,16 +1127,17 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
     async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
         """Async upload with cache update."""
         await self.wrapped.upload_aio(source, uri, ok_remove=False)
+        cache_path = self.get_cache_path(uri)
+        await aiofiles.os.makedirs(cache_path.parent, exist_ok=True)
+        if ok_remove:
+            # rename(2) is atomic — see upload() for rationale.
+            await aiofiles.os.rename(source, cache_path)
+        else:
 
-        async def _populate_from_source(tmp: Path) -> None:
-            if ok_remove:
-                await aiofiles.os.rename(source, tmp)
-            else:
+            async def _populate(tmp: Path) -> None:
                 shutil.copy(source, tmp)  # Local copy is fast, keep sync
 
-        await _publish_to_cache_atomically_aio(
-            self.get_cache_path(uri), _populate_from_source
-        )
+            await _publish_to_cache_atomically_aio(cache_path, _populate)
 
     async def enter_readable_proxy_path_aio(self, uri: str) -> Path:
         """Async version returns cached path."""
