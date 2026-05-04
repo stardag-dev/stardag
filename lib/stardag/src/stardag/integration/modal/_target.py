@@ -8,6 +8,8 @@ import aiofiles
 import modal
 from modal.exception import NotFoundError, ResourceExhaustedError
 from modal.volume import FileEntryType
+from pydantic import ValidationError
+from pydantic_settings import SettingsConfigDict
 from tenacity import (
     before_sleep_log,
     retry,
@@ -17,13 +19,50 @@ from tenacity import (
 )
 
 from stardag.integration.modal._config import modal_config_provider
-from stardag.target import LocalFileTarget, RemoteFileSystemABC, RemoteFileTarget
+from stardag.target import (
+    CachedRemoteFileSystem,
+    CachedRemoteFileSystemConfig,
+    LocalFileTarget,
+    RemoteFileSystemABC,
+    RemoteFileTarget,
+)
 from stardag.utils.resource_provider import resource_provider
 
 logger = logging.getLogger(__name__)
 
 MODAL_VOLUME_URI_PREFIX = "modalvol://"
 VOLUME_MOUNT_PATH_PREFIX = "/mnt/stardag-volumes"
+
+
+class ModalVolumeCacheConfig(CachedRemoteFileSystemConfig):
+    """Local-disk cache config for the Modal-volume RemoteFileSystem.
+
+    Caching wraps the API-based ``ModalVolumeRemoteFileSystem`` only — when a
+    volume is locally mounted (running on Modal, or via
+    ``STARDAG_MODAL_VOLUME_MOUNTS`` / the auto-mount path), ``get_modal_target``
+    returns a ``ModalMountedVolumeFileTarget`` that bypasses the RFS entirely
+    and is therefore unaffected by these settings.
+
+    Caching is **opt-in** via ``STARDAG_TARGET_MODALVOL_CACHE_ROOT``: ``root``
+    has no default. Modal volume names are only unique within a
+    ``(workspace, environment)`` pair (unlike S3 bucket names which are
+    globally unique), so a default cache root would silently collide across
+    workspaces/environments — the cache is keyed by URI alone, and the same
+    ``modalvol://<name>/...`` URI can resolve to different content under
+    different credentials. Forcing the user to set the root makes the
+    workspace/environment scoping a deliberate choice — e.g.
+    ``STARDAG_TARGET_MODALVOL_CACHE_ROOT=~/.stardag/cache/modalvol/<workspace>/<environment>/``,
+    or use ``root_by_prefix`` to map specific volumes to dedicated cache
+    directories.
+    """
+
+    # NOTE inherited ``root: str`` is required (no default) — set
+    # STARDAG_TARGET_MODALVOL_CACHE_ROOT to enable caching.
+
+    model_config = SettingsConfigDict(
+        env_prefix="stardag_target_modalvol_cache_",
+        env_nested_delimiter="__",
+    )
 
 
 def get_default_volume_mount_path(volume_name: str) -> Path:
@@ -257,8 +296,29 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
             batch.put_file(source, in_volume_path)
 
 
+def _get_modal_volume_cache_config() -> ModalVolumeCacheConfig | None:
+    """Return cache config if STARDAG_TARGET_MODALVOL_CACHE_ROOT is set,
+    else None. Caching is opt-in via that env var; ``root`` has no default
+    (see ``ModalVolumeCacheConfig`` docstring for why)."""
+    try:
+        return ModalVolumeCacheConfig()  # type: ignore[call-arg]
+    except ValidationError:
+        return None
+
+
+def _init_modal_volume_file_system() -> RemoteFileSystemABC:
+    file_system: RemoteFileSystemABC = ModalVolumeRemoteFileSystem()
+    cache_config = _get_modal_volume_cache_config()
+    if cache_config is not None:
+        file_system = CachedRemoteFileSystem(
+            wrapped=file_system,
+            **cache_config.model_dump(),
+        )
+    return file_system
+
+
 modal_volume_rfs_provider = resource_provider(
-    RemoteFileSystemABC, ModalVolumeRemoteFileSystem
+    RemoteFileSystemABC, _init_modal_volume_file_system
 )
 
 
