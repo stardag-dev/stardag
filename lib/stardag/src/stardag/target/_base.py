@@ -973,6 +973,46 @@ class InMemoryRemoteFileSystem(RemoteFileSystemABC):
             self.uri_to_bytes[uri] = await f.read()
 
 
+def _publish_to_cache_atomically(
+    cache_path: Path,
+    populate: typing.Callable[[Path], None],
+) -> None:
+    """Write to ``cache_path`` via a tmp-then-rename pattern so concurrent
+    readers (and crash recovery) never observe a partial file at the final
+    path.
+
+    ``populate(tmp_path)`` is called with a sibling temp path and must
+    write the final contents there. On success the temp is atomically
+    renamed onto ``cache_path``. On any failure (``populate`` raising,
+    rename failing, etc.) the temp is unlinked and ``cache_path`` is
+    untouched — so a subsequent reader sees either the previous cache
+    state or no cache file at all, never a partial one.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
+    try:
+        populate(tmp_cache_path)
+        tmp_cache_path.rename(cache_path)
+    finally:
+        if tmp_cache_path.exists():
+            tmp_cache_path.unlink()
+
+
+async def _publish_to_cache_atomically_aio(
+    cache_path: Path,
+    populate: typing.Callable[[Path], typing.Awaitable[None]],
+) -> None:
+    """Async variant of :func:`_publish_to_cache_atomically`."""
+    await aiofiles.os.makedirs(cache_path.parent, exist_ok=True)
+    tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
+    try:
+        await populate(tmp_cache_path)
+        await aiofiles.os.rename(tmp_cache_path, cache_path)
+    finally:
+        if await aiofiles.os.path.exists(tmp_cache_path):
+            await aiofiles.os.remove(tmp_cache_path)
+
+
 class CachedRemoteFileSystemConfig(BaseSettings):
     root: str
     root_by_prefix: typing.Dict[str, str] = {}
@@ -1036,13 +1076,15 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
     def upload(self, source: Path, uri: str, ok_remove: bool = False):
         self.wrapped.upload(source, uri, ok_remove=False)
         # NOTE only cache the file if the upload was successful!
-        cache_path = self.get_cache_path(uri)
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        if ok_remove:
-            # NOTE faster to rename than to copy!
-            source.rename(cache_path)
-        else:
-            shutil.copy(source, cache_path)
+
+        def _populate_from_source(tmp: Path) -> None:
+            if ok_remove:
+                # NOTE faster to rename than to copy!
+                source.rename(tmp)
+            else:
+                shutil.copy(source, tmp)
+
+        _publish_to_cache_atomically(self.get_cache_path(uri), _populate_from_source)
 
     def enter_readable_proxy_path(self, uri: str) -> Path:
         cache_path = self.get_cache_path(uri)
@@ -1055,14 +1097,9 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
         pass
 
     def _load_to_cache_atomically(self, uri: str, cache_path: Path):
-        tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
-        tmp_cache_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.wrapped.download(uri, tmp_cache_path)
-            tmp_cache_path.rename(cache_path)  # type: ignore
-        finally:
-            if tmp_cache_path.exists():
-                tmp_cache_path.unlink()
+        _publish_to_cache_atomically(
+            cache_path, lambda tmp: self.wrapped.download(uri, tmp)
+        )
 
     # Async implementations
 
@@ -1085,12 +1122,16 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
     async def upload_aio(self, source: Path, uri: str, ok_remove: bool = False) -> None:
         """Async upload with cache update."""
         await self.wrapped.upload_aio(source, uri, ok_remove=False)
-        cache_path = self.get_cache_path(uri)
-        await aiofiles.os.makedirs(cache_path.parent, exist_ok=True)
-        if ok_remove:
-            await aiofiles.os.rename(source, cache_path)
-        else:
-            shutil.copy(source, cache_path)
+
+        async def _populate_from_source(tmp: Path) -> None:
+            if ok_remove:
+                await aiofiles.os.rename(source, tmp)
+            else:
+                shutil.copy(source, tmp)  # Local copy is fast, keep sync
+
+        await _publish_to_cache_atomically_aio(
+            self.get_cache_path(uri), _populate_from_source
+        )
 
     async def enter_readable_proxy_path_aio(self, uri: str) -> Path:
         """Async version returns cached path."""
@@ -1105,14 +1146,9 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
 
     async def _load_to_cache_atomically_aio(self, uri: str, cache_path: Path) -> None:
         """Async atomic download to cache."""
-        tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
-        await aiofiles.os.makedirs(tmp_cache_path.parent, exist_ok=True)
-        try:
-            await self.wrapped.download_aio(uri, tmp_cache_path)
-            await aiofiles.os.rename(tmp_cache_path, cache_path)
-        finally:
-            if await aiofiles.os.path.exists(tmp_cache_path):
-                await aiofiles.os.remove(tmp_cache_path)
+        await _publish_to_cache_atomically_aio(
+            cache_path, lambda tmp: self.wrapped.download_aio(uri, tmp)
+        )
 
 
 class DirectoryTarget(FileSystemTarget):

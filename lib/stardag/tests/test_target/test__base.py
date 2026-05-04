@@ -192,6 +192,127 @@ def test_cached_remote_filesystem_target(tmp_path: Path):
     assert cache_path.read_text() == "test"
 
 
+def test_cached_remote_filesystem_upload_is_crash_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A crash mid-cache-copy must not leave a partial file at the final
+    cache path. Subsequent reads short-circuit on ``cache_path.exists()``
+    without verifying length, so a partial entry would silently return
+    truncated bytes — the upload path must publish atomically (write to
+    a temp file, then rename) just like the download path does."""
+    from stardag.target import _base as base_module
+
+    rfs_base = InMemoryRemoteFileSystem()
+    cache_root = tmp_path / "cache"
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(cache_root))
+    uri = "in-memory://bucket/key"
+
+    source = tmp_path / "source.txt"
+    source.write_text("the full payload")
+
+    real_copy = base_module.shutil.copy
+
+    def partial_then_fail(src, dst):
+        # Simulate a crash partway through the copy: write some bytes,
+        # then raise. Without atomicity, ``dst == cache_path`` would now
+        # contain truncated content.
+        with open(src, "rb") as fin, open(dst, "wb") as fout:
+            fout.write(fin.read(4))  # partial
+        raise OSError("simulated mid-copy crash")
+
+    monkeypatch.setattr(base_module.shutil, "copy", partial_then_fail)
+
+    with pytest.raises(OSError, match="simulated mid-copy crash"):
+        rfs.upload(source, uri)
+
+    # The wrapped upload still succeeded (it ran before the cache copy).
+    assert rfs_base.uri_to_bytes[uri] == b"the full payload"
+
+    # No partial entry at the final cache path → next read will be served
+    # from the wrapped RFS (atomic download), repopulating the cache cleanly.
+    cache_path = rfs.get_cache_path(uri)
+    assert not cache_path.exists()
+
+    # And no leftover tmp files cluttering the cache directory.
+    leftovers = list(cache_path.parent.glob("*.tmp-*"))
+    assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"
+
+    # Sanity: clearing the failure injection and reading via the cached RFS
+    # works — the wrapped RFS still has the file, atomic download repopulates.
+    monkeypatch.setattr(base_module.shutil, "copy", real_copy)
+    with RemoteFileTarget(uri=uri, rfs=rfs).open("r") as f:
+        assert f.read() == "the full payload"
+    assert cache_path.read_text() == "the full payload"
+
+
+def test_cached_remote_filesystem_upload_ok_remove_is_crash_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The ``ok_remove=True`` branch must also publish atomically. We
+    inject a failure on the *final* rename (tmp → cache_path) — without
+    the temp-file pattern there'd be no tmp at all and the source rename
+    would have already gone straight to ``cache_path``."""
+    from stardag.target import _base as base_module
+
+    rfs_base = InMemoryRemoteFileSystem()
+    cache_root = tmp_path / "cache"
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(cache_root))
+    uri = "in-memory://bucket/key"
+
+    source = tmp_path / "source.txt"
+    source.write_text("payload")
+
+    cache_path = rfs.get_cache_path(uri)
+    real_rename = base_module.Path.rename
+
+    def fail_only_final_publish(self, target):
+        if Path(target) == cache_path:
+            raise OSError("simulated final-rename crash")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(base_module.Path, "rename", fail_only_final_publish)
+
+    with pytest.raises(OSError, match="simulated final-rename crash"):
+        rfs.upload(source, uri, ok_remove=True)
+
+    # No partial entry at the final cache path; tmp was cleaned up.
+    assert not cache_path.exists()
+    leftovers = list(cache_path.parent.glob("*.tmp-*"))
+    assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"
+
+
+async def test_cached_remote_filesystem_upload_aio_is_crash_atomic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Async equivalent of the sync atomicity test."""
+    from stardag.target import _base as base_module
+
+    rfs_base = InMemoryRemoteFileSystem()
+    cache_root = tmp_path / "cache"
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(cache_root))
+    uri = "in-memory://bucket/key"
+
+    source = tmp_path / "source.txt"
+    source.write_text("the full payload")
+
+    def partial_then_fail(src, dst):
+        with open(src, "rb") as fin, open(dst, "wb") as fout:
+            fout.write(fin.read(4))
+        raise OSError("simulated mid-copy crash")
+
+    monkeypatch.setattr(base_module.shutil, "copy", partial_then_fail)
+
+    with pytest.raises(OSError, match="simulated mid-copy crash"):
+        await rfs.upload_aio(source, uri)
+
+    # Wrapped upload succeeded; cache is clean (no partial entry, no tmp).
+    assert rfs_base.uri_to_bytes[uri] == b"the full payload"
+    cache_path = rfs.get_cache_path(uri)
+    assert not cache_path.exists()
+    leftovers = list(cache_path.parent.glob("*.tmp-*"))
+    assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"
+
+
 def test_directory_target(tmp_path: Path):
     dir_target = DirectoryTarget(uri=str(tmp_path / "test"), prototype=LocalFileTarget)
     assert not dir_target.exists()
