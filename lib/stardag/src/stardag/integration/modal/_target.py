@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -101,59 +102,54 @@ def _get_volume(volume_name: str) -> modal.Volume:
     return modal.Volume.from_name(volume_name)
 
 
-# --- Lazy volume reload with cooldown ---
-
-VOLUME_RELOAD_COOLDOWN_SECONDS = 5.0
-"""Minimum seconds between consecutive reloads of the same volume.
-
-Prevents thundering-herd reloads when many targets on the same volume are
-checked in quick succession (e.g. 1000 exists() calls during discovery).
-"""
+# --- Lazy volume reload with singleflight coalescing ---
+#
+# A reload only flushes writes that landed before it was issued. The previous
+# implementation imposed a fixed cooldown between reloads to suppress thundering
+# herds on bursty discovery scans, but as a side-effect it could also suppress
+# a reload that was actually needed to observe a write committed during the
+# cooldown window — leading to false negatives from exists()/_open() up to
+# ``cooldown`` seconds wide.
+#
+# This implementation drops the cooldown and instead coalesces concurrent
+# callers onto a single in-flight reload via per-volume locks. After the
+# in-flight reload completes, *all* contending callers observe its result —
+# no caller is ever told "stale view, but I won't reload for you". Sequential
+# callers each pay the reload cost (fine: they want fresh state), but a
+# burst of N concurrent callers still produces only one reload.
 
 _volume_last_reload: dict[str, float] = {}
+_volume_reload_locks: dict[str, threading.Lock] = {}
 _volume_reload_aio_locks: dict[str, asyncio.Lock] = {}
 
 
-def _maybe_reload_volume(volume_name: str) -> bool:
-    """Reload a volume if the cooldown has expired (sync).
+def _ensure_fresh_volume(volume_name: str) -> None:
+    """Ensure the local view of the volume reflects writes committed before
+    this call started. Concurrent calls coalesce onto one reload."""
+    started = time.monotonic()
+    # Fast path: a reload completed at-or-after we started → already fresh.
+    if _volume_last_reload.get(volume_name, 0.0) >= started:
+        return
+    lock = _volume_reload_locks.setdefault(volume_name, threading.Lock())
+    with lock:
+        # Re-check inside the lock: another caller may have just reloaded.
+        if _volume_last_reload.get(volume_name, 0.0) >= started:
+            return
+        _get_volume(volume_name).reload()
+        _volume_last_reload[volume_name] = time.monotonic()
 
-    Returns True if a reload was performed, False if skipped due to cooldown.
-    """
-    now = time.monotonic()
-    if now - _volume_last_reload.get(volume_name, 0.0) < VOLUME_RELOAD_COOLDOWN_SECONDS:
-        return False
-    _get_volume(volume_name).reload()
-    _volume_last_reload[volume_name] = time.monotonic()
-    return True
 
-
-async def _maybe_reload_volume_aio(volume_name: str) -> bool:
-    """Reload a volume if the cooldown has expired (async).
-
-    Uses a per-volume lock to prevent concurrent reloads when many async
-    exists_aio() calls miss simultaneously.
-
-    Returns True if a reload was performed, False if skipped.
-    """
-    # Fast path: skip if recently reloaded (no lock needed)
-    now = time.monotonic()
-    if now - _volume_last_reload.get(volume_name, 0.0) < VOLUME_RELOAD_COOLDOWN_SECONDS:
-        return False
-
-    # Acquire per-volume lock to serialize reloads
-    if volume_name not in _volume_reload_aio_locks:
-        _volume_reload_aio_locks[volume_name] = asyncio.Lock()
-    async with _volume_reload_aio_locks[volume_name]:
-        # Re-check after acquiring lock — another coroutine may have reloaded
-        now = time.monotonic()
-        if (
-            now - _volume_last_reload.get(volume_name, 0.0)
-            < VOLUME_RELOAD_COOLDOWN_SECONDS
-        ):
-            return False
+async def _ensure_fresh_volume_aio(volume_name: str) -> None:
+    """Async variant of :func:`_ensure_fresh_volume`."""
+    started = time.monotonic()
+    if _volume_last_reload.get(volume_name, 0.0) >= started:
+        return
+    lock = _volume_reload_aio_locks.setdefault(volume_name, asyncio.Lock())
+    async with lock:
+        if _volume_last_reload.get(volume_name, 0.0) >= started:
+            return
         await _get_volume(volume_name).reload.aio()
         _volume_last_reload[volume_name] = time.monotonic()
-        return True
 
 
 class ModalMountedVolumeFileTarget(LocalFileTarget):
@@ -196,28 +192,32 @@ class ModalMountedVolumeFileTarget(LocalFileTarget):
     def exists(self) -> bool:
         if self.path.exists():
             return True
-        if _maybe_reload_volume(self._volume_name):
-            return self.path.exists()
-        return False
+        _ensure_fresh_volume(self._volume_name)
+        return self.path.exists()
 
     async def exists_aio(self) -> bool:
         if self.path.exists():
             return True
-        if await _maybe_reload_volume_aio(self._volume_name):
-            return self.path.exists()
-        return False
+        await _ensure_fresh_volume_aio(self._volume_name)
+        return self.path.exists()
 
     def _open(self, mode):  # type: ignore[override]
         try:
             return super()._open(mode)
         except FileNotFoundError:
-            if mode in ("r", "rb") and _maybe_reload_volume(self._volume_name):
+            if mode in ("r", "rb"):
+                _ensure_fresh_volume(self._volume_name)
                 return super()._open(mode)
             raise
 
     def _open_aio(self, mode):  # type: ignore[override]
+        # NOTE _open_aio is sync (returns an async context manager), so we
+        # must use the sync reload helper. This briefly blocks the event
+        # loop on a cache miss; acceptable given the alternative (returning
+        # a custom CM that awaits the reload before opening) is significantly
+        # more invasive.
         if mode in ("r", "rb") and not self.path.exists():
-            _maybe_reload_volume(self._volume_name)
+            _ensure_fresh_volume(self._volume_name)
         return super()._open_aio(mode)
 
 
