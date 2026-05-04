@@ -1,23 +1,30 @@
-"""Tests for the optional disk-cache wrapper around ModalVolumeRemoteFileSystem.
+"""Round-trip tests for the optional disk-cache wrapper around
+``ModalVolumeRemoteFileSystem``.
 
-These tests run locally (no `modal.Function`) — caching only applies to the
-API-based ``RemoteFileTarget`` path used outside Modal. Auth + a real
-``stardag-testing`` volume are required, mirroring ``test__target.py``.
+These tests hit the **real** Modal API and create/delete files on a
+pre-existing ``stardag-testing`` volume in whichever
+``(workspace, environment)`` is currently active for your local Modal
+credentials. They run locally (no ``modal.Function``) — caching only
+applies to the API-based ``RemoteFileTarget`` path used outside Modal.
+Pure configuration wiring is covered (without Modal auth) by
+``test__target_cache_config.py``.
 
 .. warning::
-    These tests hit the **real** Modal API and create/delete files on a real
-    volume in whichever ``(workspace, environment)`` is currently active for
-    your local Modal credentials. The caller is responsible for ensuring an
-    appropriate profile/environment is selected before running — e.g. a
-    personal/dev workspace, *not* a shared or production-adjacent one. Check
-    with ``modal profile current`` and switch with
+    The caller is responsible for ensuring an appropriate
+    profile/environment is selected before running — e.g. a personal/dev
+    workspace, *not* a shared or production-adjacent one. Check with
+    ``modal profile current`` and switch with
     ``modal profile activate <profile>`` if needed. The ``stardag-testing``
-    volume is auto-created on first run if missing.
+    volume must already exist in the active workspace/environment; these
+    tests deliberately do **not** auto-create it (test discovery should
+    not mutate external state). Create it once with
+    ``modal volume create stardag-testing`` if you intend to run these
+    tests locally.
 
 TODO: harden the setup so these tests can run in CI — pin to a dedicated
 test workspace/environment via ``MODAL_PROFILE`` / ``MODAL_ENVIRONMENT``,
-provision credentials as a CI secret, and gate on those being set instead
-of skipping silently on missing auth.
+provision credentials as a CI secret, and gate on those being set
+instead of skipping silently on missing auth/volume.
 """
 
 import asyncio
@@ -32,20 +39,27 @@ VOLUME_NAME = "stardag-testing"
 
 try:
     import modal
-    from modal.exception import AuthError
+    from modal.exception import AuthError, NotFoundError
 
     from stardag.integration import modal as sd_modal
     from stardag.integration.modal._target import (
         ModalVolumeRemoteFileSystem,
-        _init_modal_volume_file_system,
         modal_volume_rfs_provider,
     )
 
     try:
-        VOLUME = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+        VOLUME = modal.Volume.from_name(VOLUME_NAME)
         VOLUME.listdir("/")
     except AuthError:
         pytest.skip("Skipping modal tests (not authenticated)", allow_module_level=True)
+    except NotFoundError:
+        pytest.skip(
+            f"Skipping modal cache round-trip tests: volume {VOLUME_NAME!r} "
+            "not found in the active Modal workspace/environment. Create it "
+            f"with `modal volume create {VOLUME_NAME}` (in a personal/dev "
+            "workspace — not a shared one) before running these tests.",
+            allow_module_level=True,
+        )
 
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
@@ -57,25 +71,6 @@ def reset_rfs_provider():
     modal_volume_rfs_provider.clear()
     yield
     modal_volume_rfs_provider.clear()
-
-
-# ---------------------------------------------------------------------------
-# Wiring: USE_CACHE env var toggles the wrapper.
-# ---------------------------------------------------------------------------
-
-
-def test_init_unwrapped_when_use_cache_unset(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("STARDAG_TARGET_MODALVOL_USE_CACHE", raising=False)
-    fs = _init_modal_volume_file_system()
-    assert isinstance(fs, ModalVolumeRemoteFileSystem)
-    assert not isinstance(fs, CachedRemoteFileSystem)
-
-
-def test_init_wrapped_when_use_cache_set(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("STARDAG_TARGET_MODALVOL_USE_CACHE", "true")
-    fs = _init_modal_volume_file_system()
-    assert isinstance(fs, CachedRemoteFileSystem)
-    assert isinstance(fs.wrapped, ModalVolumeRemoteFileSystem)
 
 
 # ---------------------------------------------------------------------------
