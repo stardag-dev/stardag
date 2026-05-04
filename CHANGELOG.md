@@ -6,6 +6,63 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-05
+
+Patch release covering the Modal-volume integration. No breaking changes;
+`pip install -U stardag` is sufficient. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v061--modal-volume-disk-cache-opt-in-and-reload-staleness-fix)
+for details and the cache-config recipe.
+
+### SDK
+
+#### New features
+
+- **Optional local-disk cache for `modalvol://` targets**: when a Modal
+  volume is _not_ mounted locally (i.e. running outside Modal),
+  `RemoteFileTarget`-backed reads and writes can now be transparently
+  cached on local disk via a `CachedRemoteFileSystem` wrapper, mirroring
+  the existing S3 integration. **Opt-in via
+  `STARDAG_TARGET_MODALVOL_CACHE_ROOT`** — there is intentionally no
+  default cache root, because Modal volume names are only unique within
+  a `(workspace, environment)` pair (unlike S3's globally-unique bucket
+  names) and a default would silently collide across profiles. When the
+  volume _is_ mounted (running on Modal, or via
+  `STARDAG_MODAL_VOLUME_MOUNTS` / the auto-mount path),
+  `get_modal_target` continues to return a `ModalMountedVolumeFileTarget`
+  that bypasses the RFS entirely — caching is automatically inactive on
+  Modal workers.
+  ([#135](https://github.com/stardag-dev/stardag/pull/135))
+
+#### Bug fixes
+
+- **Fix volume-reload staleness in `ModalMountedVolumeFileTarget`**:
+  the previous lazy-reload path imposed a 5-second cooldown between
+  reloads of the same volume to prevent thundering-herd reloads during
+  discovery. As a side-effect, that cooldown could also suppress a
+  reload that was _needed_ — e.g. a write committed at T+4 was
+  invisible to an `exists()` check at T+4.5 if the last reload happened
+  at T. Worst-case observable staleness: up to 5 seconds. The cooldown
+  is replaced with per-volume singleflight coalescing (`threading.Lock`
+  for sync, `asyncio.Lock` for async), and bookkeeping records the
+  reload's _issue_ time (not its completion time) so a caller that
+  started during another's in-flight reload correctly triggers a fresh
+  reload of its own. The original thundering-herd protection during
+  concurrent async discovery is preserved by the lock alone.
+  ([#136](https://github.com/stardag-dev/stardag/pull/136))
+- **Cross-loop safety for the async reload lock**: `asyncio.Lock`
+  instances are bound to the running event loop at acquire-time. The
+  cache is now keyed by `(volume_name, id(running_loop))`, so a fresh
+  `asyncio.run()` gets its own lock instance instead of reusing one
+  bound to a now-closed loop. ([#136](https://github.com/stardag-dev/stardag/pull/136))
+- **Crash-atomic `CachedRemoteFileSystem.upload(_aio)`**: cache-write
+  paths now publish via tmp-then-`replace` (mirroring the existing
+  download paths), so a crash mid-`shutil.copy` can never leave a
+  partial file at the final cache path. Uses `Path.replace` /
+  `aiofiles.os.replace` for the atomic publish, which also lets cache
+  refresh (re-uploading the same URI) work cross-platform — plain
+  `rename` would fail to overwrite on Windows.
+  ([#138](https://github.com/stardag-dev/stardag/pull/138))
+
 ## [0.6.0] — 2026-04-30
 
 End-to-end overhaul of how tasks reach the registry during a build,
