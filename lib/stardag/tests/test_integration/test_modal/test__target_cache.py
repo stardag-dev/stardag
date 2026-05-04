@@ -3,6 +3,21 @@
 These tests run locally (no `modal.Function`) — caching only applies to the
 API-based ``RemoteFileTarget`` path used outside Modal. Auth + a real
 ``stardag-testing`` volume are required, mirroring ``test__target.py``.
+
+.. warning::
+    These tests hit the **real** Modal API and create/delete files on a real
+    volume in whichever ``(workspace, environment)`` is currently active for
+    your local Modal credentials. The caller is responsible for ensuring an
+    appropriate profile/environment is selected before running — e.g. a
+    personal/dev workspace, *not* a shared or production-adjacent one. Check
+    with ``modal profile current`` and switch with
+    ``modal profile activate <profile>`` if needed. The ``stardag-testing``
+    volume is auto-created on first run if missing.
+
+TODO: harden the setup so these tests can run in CI — pin to a dedicated
+test workspace/environment via ``MODAL_PROFILE`` / ``MODAL_ENVIRONMENT``,
+provision credentials as a CI secret, and gate on those being set instead
+of skipping silently on missing auth.
 """
 
 import asyncio
