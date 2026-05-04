@@ -245,16 +245,16 @@ def test_cached_remote_filesystem_upload_is_crash_atomic(
     assert cache_path.read_text() == "the full payload"
 
 
-def test_cached_remote_filesystem_upload_ok_remove_rename_failure_is_safe(
+def test_cached_remote_filesystem_upload_ok_remove_publish_failure_is_safe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """The ``ok_remove=True`` branch publishes via a single direct rename
-    (POSIX-atomic on same FS), bypassing the tmp-file helper. If that
-    rename fails (e.g., EXDEV across filesystems, or any other reason —
-    simulated here), ``cache_path`` must not exist. Atomicity here is a
-    POSIX guarantee on ``rename(2)``, not something we orchestrate; this
-    test guards against a future regression to a non-atomic write path
-    (e.g., switching to ``shutil.move``) for the rename branch."""
+    """The ``ok_remove=True`` branch publishes via a single direct
+    ``Path.replace`` call (atomic on POSIX via rename(2), atomic on
+    Windows via MoveFileEx with REPLACE_EXISTING). If that replace fails
+    (e.g., EXDEV across filesystems, or any other reason — simulated
+    here), ``cache_path`` must not exist and the wrapped remote upload
+    must still have succeeded (it runs before the cache publish step).
+    Guards against a future regression to a non-atomic write path."""
     from stardag.target import _base as base_module
 
     rfs_base = InMemoryRemoteFileSystem()
@@ -266,23 +266,50 @@ def test_cached_remote_filesystem_upload_ok_remove_rename_failure_is_safe(
     source.write_text("payload")
 
     cache_path = rfs.get_cache_path(uri)
-    real_rename = base_module.Path.rename
+    real_replace = base_module.Path.replace
 
     def fail_only_cache_publish(self, target):
         if Path(target) == cache_path:
-            raise OSError("simulated rename failure")
-        return real_rename(self, target)
+            raise OSError("simulated replace failure")
+        return real_replace(self, target)
 
-    monkeypatch.setattr(base_module.Path, "rename", fail_only_cache_publish)
+    monkeypatch.setattr(base_module.Path, "replace", fail_only_cache_publish)
 
-    with pytest.raises(OSError, match="simulated rename failure"):
+    with pytest.raises(OSError, match="simulated replace failure"):
         rfs.upload(source, uri, ok_remove=True)
 
+    # Wrapped upload still ran before the cache publish step.
+    assert rfs_base.uri_to_bytes[uri] == b"payload"
+
     # No entry at the final cache path; no tmp files (none should have
-    # been created by the rename branch).
+    # been created — ok_remove=True bypasses the tmp helper).
     assert not cache_path.exists()
     leftovers = list(cache_path.parent.glob("*.tmp-*"))
     assert leftovers == [], f"unexpected tmp files left behind: {leftovers}"
+
+
+def test_cached_remote_filesystem_upload_refreshes_existing_cache_entry(
+    tmp_path: Path,
+):
+    """Re-uploading the same URI must replace the cache entry — exercises
+    the overwrite semantics of ``Path.replace`` (cross-platform: rename(2)
+    on POSIX, ``MoveFileEx REPLACE_EXISTING`` on Windows). Plain
+    ``Path.rename`` would error here on Windows, breaking cache refresh."""
+    rfs_base = InMemoryRemoteFileSystem()
+    rfs = CachedRemoteFileSystem(wrapped=rfs_base, root=str(tmp_path / "cache"))
+    uri = "in-memory://bucket/key"
+    target = RemoteFileTarget(uri=uri, rfs=rfs)
+
+    with target.open("w") as f:
+        f.write("first")
+    cache_path = rfs.get_cache_path(uri)
+    assert cache_path.read_text() == "first"
+
+    with target.open("w") as f:
+        f.write("second")
+
+    assert cache_path.read_text() == "second"
+    assert rfs_base.uri_to_bytes[uri] == b"second"
 
 
 async def test_cached_remote_filesystem_upload_aio_is_crash_atomic(

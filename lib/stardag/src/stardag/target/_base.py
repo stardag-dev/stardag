@@ -977,22 +977,24 @@ def _publish_to_cache_atomically(
     cache_path: Path,
     populate: typing.Callable[[Path], None],
 ) -> None:
-    """Write to ``cache_path`` via a tmp-then-rename pattern so concurrent
+    """Write to ``cache_path`` via a tmp-then-replace pattern so concurrent
     readers (and crash recovery) never observe a partial file at the final
     path.
 
     ``populate(tmp_path)`` is called with a sibling temp path and must
     write the final contents there. On success the temp is atomically
-    renamed onto ``cache_path``. On any failure (``populate`` raising,
-    rename failing, etc.) the temp is unlinked and ``cache_path`` is
-    untouched — so a subsequent reader sees either the previous cache
-    state or no cache file at all, never a partial one.
+    moved onto ``cache_path`` via ``Path.replace``, which overwrites any
+    existing entry — supports cache refresh on POSIX *and* Windows (plain
+    ``rename`` won't overwrite on Windows). On any failure (``populate``
+    raising, replace failing, etc.) the temp is unlinked and
+    ``cache_path`` is untouched — so a subsequent reader sees either the
+    previous cache state or no cache file at all, never a partial one.
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
     try:
         populate(tmp_cache_path)
-        tmp_cache_path.rename(cache_path)
+        tmp_cache_path.replace(cache_path)
     finally:
         if tmp_cache_path.exists():
             tmp_cache_path.unlink()
@@ -1007,7 +1009,7 @@ async def _publish_to_cache_atomically_aio(
     tmp_cache_path = cache_path.with_suffix(f".tmp-{uuid6.uuid7()}")
     try:
         await populate(tmp_cache_path)
-        await aiofiles.os.rename(tmp_cache_path, cache_path)
+        await aiofiles.os.replace(tmp_cache_path, cache_path)
     finally:
         if await aiofiles.os.path.exists(tmp_cache_path):
             await aiofiles.os.remove(tmp_cache_path)
@@ -1079,13 +1081,16 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
         cache_path = self.get_cache_path(uri)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         if ok_remove:
-            # POSIX rename(2) is atomic on the same filesystem — cache_path
-            # is never observed in a partial state. No temp-file hop needed.
-            # (Cross-FS rename raises EXDEV; cache_path stays untouched.)
-            source.rename(cache_path)
+            # ``replace`` is atomic on the same filesystem (rename(2) on
+            # POSIX, MoveFileEx with REPLACE_EXISTING on Windows) — and
+            # unlike plain ``rename`` it overwrites an existing
+            # cache_path so cache refreshes work cross-platform.
+            # (Cross-FS rename still raises EXDEV; cache_path stays
+            # untouched in that case.)
+            source.replace(cache_path)
         else:
-            # shutil.copy is not crash-atomic — route through tmp+rename so
-            # an interrupted copy never publishes a partial cache entry.
+            # shutil.copy is not crash-atomic — route through tmp+replace
+            # so an interrupted copy never publishes a partial cache entry.
             def _populate(tmp: Path) -> None:
                 shutil.copy(source, tmp)
 
@@ -1130,8 +1135,9 @@ class CachedRemoteFileSystem(RemoteFileSystemABC):
         cache_path = self.get_cache_path(uri)
         await aiofiles.os.makedirs(cache_path.parent, exist_ok=True)
         if ok_remove:
-            # rename(2) is atomic — see upload() for rationale.
-            await aiofiles.os.rename(source, cache_path)
+            # See upload() — replace is atomic on POSIX and overwrite-safe
+            # on Windows.
+            await aiofiles.os.replace(source, cache_path)
         else:
 
             async def _populate(tmp: Path) -> None:
