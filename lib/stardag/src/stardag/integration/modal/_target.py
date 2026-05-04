@@ -104,7 +104,7 @@ def _get_volume(volume_name: str) -> modal.Volume:
 
 # --- Lazy volume reload with singleflight coalescing ---
 #
-# A reload only flushes writes that landed before it was issued. The previous
+# A reload only flushes writes that landed before it was *issued*. The previous
 # implementation imposed a fixed cooldown between reloads to suppress thundering
 # herds on bursty discovery scans, but as a side-effect it could also suppress
 # a reload that was actually needed to observe a write committed during the
@@ -117,39 +117,63 @@ def _get_volume(volume_name: str) -> modal.Volume:
 # no caller is ever told "stale view, but I won't reload for you". Sequential
 # callers each pay the reload cost (fine: they want fresh state), but a
 # burst of N concurrent callers still produces only one reload.
+#
+# We track the time at which the most recent reload was *issued* (not when
+# it completed): a reload only covers writes ≤ its issue time, so a caller
+# that started after another's reload was issued must trigger a fresh
+# reload of its own to observe writes that may have landed in between. The
+# timestamp is published only after the reload completes, so a coalesced
+# waiter that observes it is also guaranteed that the reload data is
+# locally visible (not just in-flight).
 
-_volume_last_reload: dict[str, float] = {}
+_volume_last_reload_issued: dict[str, float] = {}
 _volume_reload_locks: dict[str, threading.Lock] = {}
-_volume_reload_aio_locks: dict[str, asyncio.Lock] = {}
+# Per-loop async lock cache: asyncio.Lock instances are bound to the running
+# event loop at acquire-time, so a Lock created in one loop must not be
+# reused in another (e.g., across consecutive ``asyncio.run()`` calls).
+# Keyed by ``(volume_name, id(loop))`` — entries from closed loops are
+# bounded in number (one per closed loop that touched a given volume) and
+# harmless beyond a small memory footprint.
+_volume_reload_aio_locks: dict[tuple[str, int], asyncio.Lock] = {}
 
 
 def _ensure_fresh_volume(volume_name: str) -> None:
     """Ensure the local view of the volume reflects writes committed before
     this call started. Concurrent calls coalesce onto one reload."""
     started = time.monotonic()
-    # Fast path: a reload completed at-or-after we started → already fresh.
-    if _volume_last_reload.get(volume_name, 0.0) >= started:
+    # Fast path: a reload was issued at-or-after we started → covers us.
+    if _volume_last_reload_issued.get(volume_name, 0.0) >= started:
         return
     lock = _volume_reload_locks.setdefault(volume_name, threading.Lock())
     with lock:
         # Re-check inside the lock: another caller may have just reloaded.
-        if _volume_last_reload.get(volume_name, 0.0) >= started:
+        if _volume_last_reload_issued.get(volume_name, 0.0) >= started:
             return
+        # Capture issue time *before* the reload runs; publish *after* it
+        # completes so the timestamp simultaneously means "issued at T" and
+        # "data is locally visible". A concurrent caller in the fast path
+        # that observes the timestamp can therefore trust both properties.
+        issued_at = time.monotonic()
         _get_volume(volume_name).reload()
-        _volume_last_reload[volume_name] = time.monotonic()
+        _volume_last_reload_issued[volume_name] = issued_at
 
 
 async def _ensure_fresh_volume_aio(volume_name: str) -> None:
     """Async variant of :func:`_ensure_fresh_volume`."""
     started = time.monotonic()
-    if _volume_last_reload.get(volume_name, 0.0) >= started:
+    if _volume_last_reload_issued.get(volume_name, 0.0) >= started:
         return
-    lock = _volume_reload_aio_locks.setdefault(volume_name, asyncio.Lock())
+    # Key the lock by (volume, current loop) so that a fresh ``asyncio.run()``
+    # gets its own lock instance instead of reusing one bound to a now-closed
+    # loop.
+    lock_key = (volume_name, id(asyncio.get_running_loop()))
+    lock = _volume_reload_aio_locks.setdefault(lock_key, asyncio.Lock())
     async with lock:
-        if _volume_last_reload.get(volume_name, 0.0) >= started:
+        if _volume_last_reload_issued.get(volume_name, 0.0) >= started:
             return
+        issued_at = time.monotonic()
         await _get_volume(volume_name).reload.aio()
-        _volume_last_reload[volume_name] = time.monotonic()
+        _volume_last_reload_issued[volume_name] = issued_at
 
 
 class ModalMountedVolumeFileTarget(LocalFileTarget):

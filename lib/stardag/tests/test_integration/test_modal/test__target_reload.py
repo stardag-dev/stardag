@@ -92,7 +92,7 @@ class _FakeVolume:
 @pytest.fixture(autouse=True)
 def reset_volume_reload_state(monkeypatch: pytest.MonkeyPatch):
     """Reset the module-level reload bookkeeping before every test."""
-    monkeypatch.setattr(modal_target, "_volume_last_reload", {})
+    monkeypatch.setattr(modal_target, "_volume_last_reload_issued", {})
     monkeypatch.setattr(modal_target, "_volume_reload_locks", {})
     monkeypatch.setattr(modal_target, "_volume_reload_aio_locks", {})
 
@@ -124,9 +124,16 @@ def test_ensure_fresh_volume_reloads_each_sequential_call(
 def test_ensure_fresh_volume_concurrent_callers_coalesce_and_see_fresh_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """N concurrent threads → 1 reload. Every thread observes a side-effect
-    set during that reload after the helper returns (proves no caller bails
-    out on a pre-reload view)."""
+    """N concurrent threads → significantly fewer than N reloads, and every
+    thread observes a side-effect set during a reload (no caller bails out
+    on a pre-reload view).
+
+    Note: with issue-time bookkeeping (a reload only covers writes ≤ its
+    issue time), perfect coalescing requires every waiter's ``started`` to
+    be ≤ the lock-holder's issue time. Threads that captured ``started``
+    after the lock-holder's reload was issued correctly trigger a fresh
+    reload of their own — so we only assert "much less than N" reloads,
+    not exactly 1. The strict invariant is the side-effect observation."""
     flag = threading.Event()
     fake = _FakeVolume(sync_reload_side_effect=flag.set)
     monkeypatch.setattr(modal_target, "_get_volume", lambda _name: fake)
@@ -146,7 +153,10 @@ def test_ensure_fresh_volume_concurrent_callers_coalesce_and_see_fresh_state(
     for t in threads:
         t.join()
 
-    assert fake.reload_count == 1, "singleflight should coalesce to one reload"
+    assert fake.reload_count < n_threads, (
+        f"singleflight should coalesce most callers; saw {fake.reload_count} "
+        f"reloads for {n_threads} threads"
+    )
     assert all(saw_flag), "every caller should observe post-reload state on return"
 
 
@@ -173,8 +183,8 @@ def test_ensure_fresh_volume_aio_reloads_each_sequential_call(
 def test_ensure_fresh_volume_aio_concurrent_callers_coalesce_and_see_fresh_state(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Async equivalent of the sync coalescing test: 20 concurrent coroutines
-    → 1 reload, all of them observe the side-effect on return."""
+    """Async equivalent of the sync coalescing test: significantly fewer
+    reloads than callers, and every caller observes the side-effect."""
     state = {"flag": False}
 
     def flip():
@@ -194,5 +204,69 @@ def test_ensure_fresh_volume_aio_concurrent_callers_coalesce_and_see_fresh_state
 
     results = asyncio.run(_run())
 
-    assert fake.aio_reload_count == 1, "singleflight should coalesce to one reload"
+    assert fake.aio_reload_count < n, (
+        f"singleflight should coalesce most callers; saw {fake.aio_reload_count} "
+        f"reloads for {n} coroutines"
+    )
     assert all(results), "every caller should observe post-reload state on return"
+
+
+# ---------------------------------------------------------------------------
+# Contract: bookkeeping records issue time, not completion time.
+# ---------------------------------------------------------------------------
+
+
+def test_volume_last_reload_records_issue_time_not_completion_time(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A Modal volume reload only flushes writes committed before it was
+    *issued*, so a caller starting after another's reload was issued (but
+    before it completed) must not falsely short-circuit on it. Verified by
+    observing that the bookkeeping timestamp is recorded close to the
+    reload's start, not its end."""
+    reload_delay = 0.1
+    fake = _FakeVolume(sync_reload_delay=reload_delay)
+    monkeypatch.setattr(modal_target, "_get_volume", lambda _name: fake)
+
+    before = time.monotonic()
+    modal_target._ensure_fresh_volume("v")
+    after = time.monotonic()
+
+    issued_at = modal_target._volume_last_reload_issued.get("v")
+    assert issued_at is not None
+    assert before <= issued_at, "issue time must be after the call started"
+    # If the timestamp recorded *completion* it would land near ``after``.
+    # Allow generous slack but require it to be much closer to ``before``
+    # than to ``after``.
+    assert issued_at < after - reload_delay / 2, (
+        f"timestamp {issued_at} looks like completion time, not issue time "
+        f"(call window: {before}..{after}, reload delay: {reload_delay}s)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-loop safety: cached asyncio.Lock instances are loop-affine.
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_fresh_volume_aio_works_across_event_loops(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``asyncio.Lock`` instances are bound to the running event loop at
+    acquire-time. Stardag uses ``asyncio.run()`` in places, which creates a
+    fresh loop each call — a Lock cached at module scope from a previous
+    loop must not be reused, otherwise acquiring it can deadlock or raise
+    ``RuntimeError``."""
+    fake = _FakeVolume()
+    monkeypatch.setattr(modal_target, "_get_volume", lambda _name: fake)
+
+    async def _check():
+        await modal_target._ensure_fresh_volume_aio("v")
+
+    asyncio.run(_check())
+    # Force the second call to take the lock (clear the freshness timestamp).
+    modal_target._volume_last_reload_issued.clear()
+    # If the lock from the first loop were reused, this would raise / hang.
+    asyncio.run(_check())
+
+    assert fake.aio_reload_count == 2
