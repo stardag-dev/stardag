@@ -6,6 +6,124 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.6.1 — Modal-volume disk cache (opt-in) and reload-staleness fix
+
+A small, Modal-focused patch release. Two changes, both isolated to the
+`stardag.integration.modal` integration. No breaking changes.
+
+### New: optional local-disk cache for `modalvol://` targets
+
+When you read a `modalvol://<name>/<path>` target _outside_ Modal — i.e.
+from your laptop or another machine where the volume isn't mounted —
+`get_modal_target` already falls back to an API-based `RemoteFileTarget`
+that calls Modal's volume API for every read. For workflows that
+re-read the same outputs repeatedly during local development, that's
+slow and rate-limit-prone.
+
+You can now wrap that path with a local-disk cache, mirroring the S3
+integration's `STARDAG_TARGET_S3_*` knobs:
+
+```bash
+export STARDAG_TARGET_MODALVOL_CACHE_ROOT=~/.stardag/cache/modalvol/<workspace>/<env>/
+```
+
+Setting this env var is the **sole toggle** — there is no separate
+"use cache" flag and no default root. Once set, every API-based read
+populates a local cache file under that root; subsequent reads of the
+same URI skip the API entirely. On write, the file is uploaded to the
+volume first and then published into the cache atomically via a
+tmp-file plus `Path.replace`, so a crash during cache population can
+never leave a partial entry at the final cache path. Cache refresh
+(re-uploading the same URI) works on POSIX and Windows.
+
+When the volume _is_ mounted (running on Modal, or via
+`STARDAG_MODAL_VOLUME_MOUNTS` / the auto-mount path),
+`get_modal_target` continues to return a
+`ModalMountedVolumeFileTarget` that bypasses the RFS entirely — caching
+is automatically inactive on Modal workers, no extra configuration
+needed.
+
+#### Why no default cache root?
+
+Unlike S3 bucket names, **Modal volume names are only unique within a
+`(workspace, environment)` pair**. The same `modalvol://my-vol/foo` URI
+can resolve to different content depending on which Modal profile is
+active. Because the cache keys entries by URI alone, a default like
+`~/.stardag/cache/modalvol/` would silently mix or overwrite cache
+files across workspaces and environments — returning stale or
+cross-tenant data after a `modal profile activate` switch.
+
+Forcing you to set the root makes the workspace/environment scoping a
+deliberate choice. Recommended pattern: include the workspace and
+environment in the path, e.g.
+`STARDAG_TARGET_MODALVOL_CACHE_ROOT=~/.stardag/cache/modalvol/<workspace>/<env>/`.
+For per-volume scoping, use `STARDAG_TARGET_MODALVOL_CACHE_ROOT_BY_PREFIX`
+to map specific `modalvol://` prefixes to dedicated cache directories.
+
+#### Full env-var surface
+
+| Env var                                                  | Purpose                                                                                        |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `STARDAG_TARGET_MODALVOL_CACHE_ROOT`                     | Sole toggle; absolute path where cache files live. Caching is enabled iff this is set.         |
+| `STARDAG_TARGET_MODALVOL_CACHE_ROOT_BY_PREFIX`           | JSON dict mapping `modalvol://...` prefixes to per-prefix cache roots.                         |
+| `STARDAG_TARGET_MODALVOL_CACHE_ALLOW_CACHE_CHECK_EXISTS` | Whether `exists()` may answer from the cache without round-tripping to Modal (default `true`). |
+
+### Fix: volume-reload staleness in `ModalMountedVolumeFileTarget`
+
+When a Modal volume _is_ mounted locally,
+`ModalMountedVolumeFileTarget` reads files via the local filesystem
+(fast, no API calls). To pick up writes committed by other workers, it
+calls `volume.reload()` lazily on read-miss. Since v0.5.x, the SDK
+imposed a 5-second per-volume cooldown between consecutive reloads to
+prevent thundering-herd reloads during a 1000-task discovery scan.
+
+The cooldown had a side-effect that we'd like to apologize for: it
+could also suppress a reload that was _needed_. Concretely, if worker
+A committed a file at T+4 and worker B called `exists()` on it at
+T+4.5, B would skip the reload (cooldown not yet expired since the
+last one at T) and incorrectly report the file as missing. Worst-case
+observable staleness: up to one full cooldown window (5 seconds).
+Producer/consumer polling and tight inter-worker handoff patterns
+were the most affected.
+
+This release replaces the cooldown with per-volume **singleflight
+coalescing**: the original thundering-herd protection is preserved
+(N concurrent `exists_aio()` callers still produce only one reload),
+but a caller that arrives _after_ the in-flight reload was issued is
+no longer suppressed — it correctly triggers a fresh reload of its own
+to cover writes that may have landed in between.
+
+#### What this means in practice
+
+- Async discovery scans (the canonical thundering-herd case): unchanged
+  — still ~1 reload per concurrent burst.
+- Producer/consumer signalling: writes are now visible on the very next
+  poll instead of after up to a 5-second wait.
+- Sequential bursts of `exists()` calls on missing files (rare in
+  practice — `ModalMountedVolumeFileTarget` is used inside Modal where
+  the build engine is async) will reload per call instead of every 5s.
+  If this turns out to bite, a small cooldown can be reintroduced on
+  top of the new "always re-check" caller contract without
+  reintroducing the original bug.
+
+#### Also: cross-loop safety for the async reload lock
+
+`asyncio.Lock` instances are bound to the running event loop at
+acquire-time. The lock cache is now keyed by
+`(volume_name, id(running_loop))`, so a fresh `asyncio.run()` gets its
+own lock instance instead of reusing one bound to a now-closed loop —
+fixes a latent `RuntimeError`/deadlock for code that calls
+`asyncio.run()` repeatedly.
+
+### Migration
+
+None — both changes are backwards-compatible. `pip install -U stardag`
+is sufficient. To opt in to caching, set
+`STARDAG_TARGET_MODALVOL_CACHE_ROOT` to a workspace/environment-scoped
+path of your choice.
+
+---
+
 ## v0.6.0 — Discover-time task registration & bulk register
 
 The build engine now registers every task with the registry as it's
