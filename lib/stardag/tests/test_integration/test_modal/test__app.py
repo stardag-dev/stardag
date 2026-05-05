@@ -468,7 +468,7 @@ class TestModalExecutorCancel:
             await asyncio.sleep(3)
             t0 = time.monotonic()
             submit_fut.cancel()
-            with pytest.raises((asyncio.CancelledError, Exception)):
+            with pytest.raises(asyncio.CancelledError):
                 await submit_fut
             elapsed = time.monotonic() - t0
             assert elapsed < self.CANCEL_TIMEOUT_S, (
@@ -506,7 +506,7 @@ class TestModalExecutorCancel:
             t0 = time.monotonic()
             await executor.cancel(task)
             submit_fut.cancel()  # also cancel the wrapping future
-            with pytest.raises((asyncio.CancelledError, Exception)):
+            with pytest.raises(asyncio.CancelledError):
                 await submit_fut
             elapsed = time.monotonic() - t0
             assert elapsed < self.CANCEL_TIMEOUT_S, (

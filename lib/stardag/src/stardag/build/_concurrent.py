@@ -1129,42 +1129,85 @@ async def build_aio(
         return await task_executor.submit(task)
 
     async def cancel_pending_in_flight() -> None:
-        """Cancel any in-flight ``pending_futures`` and emit ``task_cancel``.
+        """Cancel any still-running ``pending_futures`` and emit ``task_cancel``.
 
         Called when escalating FAIL_FAST after the first failure, so
         sibling tasks running concurrently (e.g. on Modal) terminate
         promptly instead of being abandoned. Idempotent — safe to call
-        multiple times. The asyncio cancel is what propagates into the
-        executor (e.g. Modal's remote-call cancel); the explicit
-        ``task_executor.cancel`` hook is for executors that need extra
-        teardown (default no-op).
+        multiple times.
+
+        Race-aware: the awaits inside ``process_result`` (registry calls,
+        artifact upload) can let other futures finish in the same loop
+        iteration. Those already-done futures are processed normally so
+        their actual outcome is recorded — only the futures still
+        running get cancel-marked.
+
+        The asyncio cancel is what propagates into the executor (e.g.
+        Modal's remote-call cancel); the explicit ``task_executor.cancel``
+        hook is for executors that need extra teardown (default no-op).
         """
         if not pending_futures:
             return
         snapshot = dict(pending_futures)
         pending_futures.clear()
-        cancelled_tasks: list[BaseTask] = [task_states[tid].task for tid in snapshot]
-        for fut in snapshot.values():
-            fut.cancel()
+
+        # Split: futures that already completed while process_result was
+        # awaiting (treat as their actual outcome) vs still-running ones
+        # (cancel and mark TASK_CANCELLED).
+        completed_tids: list[UUID] = []
+        running_tids: list[UUID] = []
+        for tid, fut in snapshot.items():
+            if fut.done():
+                completed_tids.append(tid)
+            else:
+                running_tids.append(tid)
+
+        for tid in completed_tids:
+            executing.discard(tid)
+            done_task = task_states[tid].task
+            try:
+                done_result = snapshot[tid].result()
+            except Exception as e:
+                done_result = TaskExecutionError(
+                    exception=e,
+                    traceback="".join(tb_module.format_exception(e)),
+                )
+            await process_result(done_task, done_result)
+
+        if not running_tids:
+            return
+
+        cancelled_tasks: list[BaseTask] = [
+            task_states[tid].task for tid in running_tids
+        ]
+        for tid in running_tids:
+            snapshot[tid].cancel()
         for cancel_task in cancelled_tasks:
             try:
                 await task_executor.cancel(cancel_task)
             except Exception as e:
                 logger.warning(f"Executor cancel failed for {cancel_task.id}: {e}")
         # Drain so cancelled futures don't dangle.
-        await asyncio.gather(*snapshot.values(), return_exceptions=True)
-        executing.clear()
+        await asyncio.gather(
+            *(snapshot[tid] for tid in running_tids), return_exceptions=True
+        )
+        for tid in running_tids:
+            executing.discard(tid)
         for cancel_task in cancelled_tasks:
             await release_lock_for_task(cancel_task, completed=False)
-            try:
-                await registry.task_cancel_aio(build_id, cancel_task)
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to mark task {cancel_task.id} as cancelled",
-                    on_registry_failure,
-                )
             state = task_states[cancel_task.id]
+            # Only call /cancel when the task was successfully registered;
+            # otherwise the endpoint 404s (warn-mode tolerates registration
+            # failures). Mirrors the guard pattern around /start, /resume.
+            if state.registered:
+                try:
+                    await registry.task_cancel_aio(build_id, cancel_task)
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to mark task {cancel_task.id} as cancelled",
+                        on_registry_failure,
+                    )
             if state.exception is None:
                 state.exception = asyncio.CancelledError(
                     "Cancelled by build engine in FAIL_FAST mode"

@@ -228,9 +228,13 @@ class TaskExecutorABC(ABC):
         that need explicit teardown beyond asyncio cooperation (e.g.
         cancelling a tracked remote handle).
 
-        Note: thread-pool and process-pool work cannot be reliably killed
-        from Python — the build will exit promptly but the underlying
-        thread/subprocess may continue to completion.
+        Effectiveness depends on the executor and how it implements
+        ``teardown()``. For example, ``HybridConcurrentTaskExecutor``
+        cannot reliably terminate thread- or process-pool work from
+        Python, AND its ``teardown()`` calls ``shutdown(wait=True)`` —
+        so the build will block until the underlying thread/subprocess
+        finishes. Async-only tasks and Modal calls do propagate the
+        cancellation cooperatively and unblock the build promptly.
         """
         pass
 

@@ -415,6 +415,63 @@ class TestFailFastCancelAndSkip:
         assert recording_registry.has_call("task_fail_aio", failing.id)
 
     @pytest.mark.asyncio
+    async def test_fail_fast_processes_sibling_done_during_fail_handling(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Race fix: a sibling that completes WHILE the failing task's
+        process_result is awaiting registry calls must be recorded as
+        completed, not silently treated as CANCELLED by
+        ``cancel_pending_in_flight``.
+
+        We trigger the race by stalling ``task_fail_aio`` long enough for
+        a short-running sibling to finish. After the for-loop breaks on
+        ``fail_fast_triggered``, ``cancel_pending_in_flight`` sees the
+        sibling's future as already-done — the race fix processes its
+        actual result instead of cancelling it.
+        """
+        from tests.test_build.conftest import RecordingRegistry
+
+        class StallingFailRegistry(RecordingRegistry):
+            async def task_fail_aio(self, build_id, task, error_message=None):
+                # Long enough for the success leaf (0.05s sleep) to finish.
+                await asyncio.sleep(0.2)
+                await super().task_fail_aio(build_id, task, error_message)
+
+        class ShortAsyncTask(Task[str]):
+            name: str
+
+            async def run_aio(self):
+                await asyncio.sleep(0.05)
+                self._save("ok")
+
+        class ImmediateFailingTask(Task[str]):
+            async def run_aio(self):
+                # Yield once so the wait awakes promptly with this in done.
+                await asyncio.sleep(0)
+                raise ValueError("Intentional failure")
+
+        registry = StallingFailRegistry()
+        success = ShortAsyncTask(name="finish-during-fail-handling")
+        failure = ImmediateFailingTask()
+
+        with pytest.raises(ValueError, match="Intentional failure"):
+            await build_aio(
+                [success, failure],
+                registry=registry,
+                fail_mode=FailMode.FAIL_FAST,
+            )
+
+        assert registry.has_call("task_complete_aio", success.id), (
+            "Sibling that completed during fail-handling must be "
+            "recorded as completed, not cancelled. "
+            f"Calls: {[c[0] for c in registry.calls]}"
+        )
+        assert not registry.has_call("task_cancel_aio", success.id), (
+            "Already-done sibling must not be marked CANCELLED"
+        )
+
+    @pytest.mark.asyncio
     async def test_fail_fast_records_sibling_completion_in_same_batch(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
