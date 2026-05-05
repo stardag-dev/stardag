@@ -6,6 +6,56 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-05
+
+`FailMode.FAIL_FAST` now actually fails fast: in-flight sibling tasks
+are cancelled (rather than silently abandoned) and tasks blocked by a
+failed dependency emit `TASK_SKIPPED` rather than staying `PENDING`
+forever. No client-code changes — `pip install -U stardag` is
+sufficient. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v070--fail_fast-actually-fails-fast-explicit-skipped-status-for-blocked-tasks)
+for details.
+([#139](https://github.com/stardag-dev/stardag/pull/139))
+
+### SDK
+
+#### New behaviour
+
+- **FAIL_FAST cancels in-flight siblings.** Asyncio cancel propagates
+  into `modal.Function.remote.aio` and terminates the remote
+  container; each cancelled task fires `TASK_CANCELLED` and releases
+  any global lock it held. Previously the build re-raised in place,
+  abandoning Modal calls (containers kept running and billing; registry
+  left them stuck in `RUNNING`).
+- **Tasks blocked by failed deps emit `TASK_SKIPPED`** (both
+  `FAIL_FAST` and `CONTINUE`). A fixed-point walk after the loop emits
+  per-task skip events for transitively blocked downstream work.
+- **Sibling completions in the same `asyncio.wait` `done` batch as a
+  failure are no longer lost** — `process_result` defers FAIL_FAST
+  escalation until the batch finishes, so sibling
+  `task_complete_aio`/`task_fail_aio` events still land.
+
+#### New public API (additive; default no-op for existing implementations)
+
+- `TaskExecutorABC.cancel(task)` — optional best-effort cancel hook.
+  `RoutedTaskExecutor.cancel` routes to the matching child.
+- `RegistryABC.task_skip` / `task_skip_aio`.
+- `TaskCount.cancelled` and `TaskCount.skipped`; rendered by
+  `BuildSummary.__repr__` when non-zero.
+
+### Registry API
+
+- **New `POST /api/v1/builds/{build_id}/tasks/{task_id}/skip`** —
+  emits `TASK_SKIPPED`, mirroring the existing `/cancel` route.
+
+### Compatibility
+
+New SDK against an older Registry API (no `/skip` route): degrades
+gracefully via the existing `_is_route_not_found` pattern (warning
+logged, blocked tasks stay `PENDING` — pre-0.7.0 observable
+behaviour). Older SDK against the new API: unaffected (additive
+endpoint only).
+
 ## [0.6.1] — 2026-05-05
 
 Patch release covering the Modal-volume integration. No breaking changes;
