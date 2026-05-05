@@ -6,6 +6,46 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.7.1 — Multi-root builds and `build_kwargs` on `StardagApp`
+
+Two additive changes to `stardag.integration.modal`, plus one renamed
+parameter for consistency with `stardag.build()`.
+
+### What changed
+
+- **Multi-root `build_spawn` / `build_remote`.** Both methods now accept
+  either a single `BaseTask` or a `Sequence[BaseTask]`, matching what
+  `Builder.__call__` and `stardag.build()` already supported.
+- **`build_kwargs` passthrough.** `BuildFunction`, `Builder.__call__` /
+  `Builder.build`, `PrefectBuilder.build`, and
+  `StardagApp.build_spawn` / `build_remote` all gained a new
+  `build_kwargs: dict[str, Any] | None` argument. The default `Builder`
+  splats it into `stardag.build(...)`:
+
+  ```python
+  stardag_app.build_remote(
+      task,
+      build_kwargs={"fail_mode": FailMode.CONTINUE},
+  )
+  ```
+
+  `Builder.build` rejects reserved keys (`tasks`, `task_executor`) with
+  `TypeError`.
+
+### Breaking changes
+
+- **`build_spawn` / `build_remote`'s first parameter is renamed
+  `task` → `tasks`.** Motivated by consistency with `stardag.build()` and
+  the existing `Builder` entry points. Positional callers
+  (`build_spawn(my_task)`) are unaffected; only callers using the keyword
+  form (`build_spawn(task=my_task)`) need to update.
+- **`BuildFunction` protocol gained a 4th parameter, `build_kwargs=None`.**
+  Custom build functions passed to `StardagApp(build_function=...)`, and
+  `Builder` subclasses overriding `build()`, must accept it (default to
+  `None`).
+
+---
+
 ## v0.7.0 — FAIL_FAST actually fails fast; explicit SKIPPED status for blocked tasks
 
 Two related fixes to the build loop's failure handling. No breaking

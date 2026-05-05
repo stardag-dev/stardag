@@ -39,7 +39,9 @@ class TestStardagAppCustomFunctions:
     def test_custom_build_function(self):
         """Custom build_function is stored."""
 
-        def my_build(tasks, worker_selector, app_name) -> BuildSummary:  # type: ignore[empty-body]
+        def my_build(
+            tasks, worker_selector, app_name, build_kwargs=None
+        ) -> BuildSummary:  # type: ignore[empty-body]
             ...
 
         app = StardagApp(
@@ -103,7 +105,9 @@ class TestStardagAppCustomFunctions:
 
         calls = []
 
-        def my_build(tasks, worker_selector, app_name) -> BuildSummary:  # type: ignore[empty-body]
+        def my_build(
+            tasks, worker_selector, app_name, build_kwargs=None
+        ) -> BuildSummary:  # type: ignore[empty-body]
             calls.append(("build", tasks, app_name))
 
         app = StardagApp(
@@ -132,8 +136,48 @@ class TestStardagAppCustomFunctions:
 
         assert inspect.isfunction(registered_fns["build"])
         # Calling it delegates to my_build
-        registered_fns["build"]("task", "selector", "app")
+        registered_fns["build"]("task", "selector", "app", None)
         assert calls == [("build", "task", "app")]
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_finalize_wrapper_forwards_build_kwargs_as_keyword(self, mock_volumes):
+        """The Modal wrapper forwards ``build_kwargs`` to the user's build_fn
+        as a keyword arg, so custom functions with keyword-only build_kwargs
+        are also supported."""
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+
+        captured: dict = {}
+
+        # build_kwargs is keyword-only — would TypeError if forwarded
+        # positionally. (This deliberately diverges from BuildFunction's
+        # exact protocol signature, which has build_kwargs positional-or-
+        # keyword; the test verifies the wrapper supports either shape.)
+        def my_build(tasks, worker_selector, app_name, *, build_kwargs=None):
+            captured["build_kwargs"] = build_kwargs
+
+        app = StardagApp(
+            "test-app",
+            build_function=my_build,  # type: ignore[arg-type]
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+        registered_fns: dict = {}
+
+        def capture_function(**kwargs):
+            name = kwargs.get("name", "unknown")
+
+            def decorator(fn):
+                registered_fns[name] = fn
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        app.finalize()
+
+        registered_fns["build"]("task", "selector", "app", {"fail_mode": "x"})
+        assert captured["build_kwargs"] == {"fail_mode": "x"}
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
     def test_finalize_registers_run_wrapper_for_all_workers(self, mock_volumes):
@@ -224,7 +268,9 @@ class TestBuilderAndRunnerProtocols:
     def test_plain_function_satisfies_build_function(self):
         """A plain function with matching signature satisfies BuildFunction."""
 
-        def my_build(tasks, worker_selector, app_name) -> BuildSummary:  # type: ignore[empty-body]
+        def my_build(
+            tasks, worker_selector, app_name, build_kwargs=None
+        ) -> BuildSummary:  # type: ignore[empty-body]
             ...
 
         fn: BuildFunction = my_build
@@ -255,7 +301,7 @@ class TestBuilderOrchestration:
             def setup(self, tasks):
                 calls.append("setup")
 
-            def build(self, tasks, task_executor):
+            def build(self, tasks, task_executor, build_kwargs=None):
                 calls.append("build")
                 return mock_summary
 
@@ -275,7 +321,7 @@ class TestBuilderOrchestration:
             def setup(self, tasks):
                 calls.append("setup")
 
-            def build(self, tasks, task_executor):
+            def build(self, tasks, task_executor, build_kwargs=None):
                 calls.append("build")
                 raise RuntimeError("boom")
 
@@ -299,7 +345,7 @@ class TestBuilderOrchestration:
             def setup(self, tasks):
                 pass
 
-            def build(self, tasks, task_executor):
+            def build(self, tasks, task_executor, build_kwargs=None):
                 return mock_summary
 
             def teardown(self, tasks, summary_or_exception):
@@ -373,3 +419,177 @@ class TestRunnerOrchestration:
         runner(MagicMock())
 
         assert received["exception"] is None
+
+
+# ---------------------------------------------------------------------------
+# Builder.build_kwargs forwarding
+# ---------------------------------------------------------------------------
+
+
+class TestBuilderBuildKwargs:
+    """Builder forwards ``build_kwargs`` to ``stardag.build``."""
+
+    def test_default_build_forwards_build_kwargs(self, monkeypatch):
+        from stardag.build import FailMode
+        from stardag.integration.modal import _app as modal_app_module
+
+        captured: dict = {}
+
+        def fake_build(tasks, **kwargs):
+            captured["tasks"] = tasks
+            captured["kwargs"] = kwargs
+            return None
+
+        monkeypatch.setattr(modal_app_module, "build", fake_build)
+
+        builder = modal_app_module.Builder()
+        executor = MagicMock()
+        root = MagicMock()
+        builder.build(
+            root,
+            executor,
+            build_kwargs={
+                "fail_mode": FailMode.CONTINUE,
+                "register_all": True,
+            },
+        )
+        assert captured["tasks"] is root
+        assert captured["kwargs"]["task_executor"] is executor
+        assert captured["kwargs"]["fail_mode"] == FailMode.CONTINUE
+        assert captured["kwargs"]["register_all"] is True
+
+    def test_default_build_no_build_kwargs(self, monkeypatch):
+        """Backwards-compat: omitting build_kwargs still works."""
+        from stardag.integration.modal import _app as modal_app_module
+
+        captured: dict = {}
+
+        def fake_build(tasks, **kwargs):
+            captured["kwargs"] = kwargs
+            return None
+
+        monkeypatch.setattr(modal_app_module, "build", fake_build)
+
+        builder = modal_app_module.Builder()
+        builder.build(MagicMock(), MagicMock())
+        # Only task_executor — no leaked kwargs from a None build_kwargs.
+        assert set(captured["kwargs"].keys()) == {"task_executor"}
+
+    @pytest.mark.parametrize("reserved_key", ["tasks", "task_executor"])
+    def test_default_build_rejects_reserved_keys(self, reserved_key):
+        builder = Builder()
+        with pytest.raises(TypeError, match=reserved_key):
+            builder.build(MagicMock(), MagicMock(), build_kwargs={reserved_key: "x"})
+
+    def test_call_forwards_build_kwargs_to_build(self):
+        """Builder.__call__ passes build_kwargs through to Builder.build()."""
+        captured: dict = {}
+
+        class CapturingBuilder(Builder):
+            def build(self, tasks, task_executor, build_kwargs=None):
+                captured["tasks"] = tasks
+                captured["build_kwargs"] = build_kwargs
+                return None
+
+        builder = CapturingBuilder()
+        root = MagicMock()
+        builder(
+            root,
+            lambda t: "default",
+            "test-app",
+            build_kwargs={"fail_mode": "FAIL_FAST"},
+        )
+        assert captured["tasks"] is root
+        assert captured["build_kwargs"] == {"fail_mode": "FAIL_FAST"}
+
+    def test_call_default_build_kwargs_is_none(self):
+        """When build_kwargs is omitted, Builder.build receives None."""
+        captured: dict = {}
+
+        class CapturingBuilder(Builder):
+            def build(self, tasks, task_executor, build_kwargs=None):
+                captured["build_kwargs"] = build_kwargs
+                return None
+
+        builder = CapturingBuilder()
+        builder(MagicMock(), lambda t: "default", "test-app")
+        assert captured["build_kwargs"] is None
+
+
+# ---------------------------------------------------------------------------
+# StardagApp.build_spawn / build_remote dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestStardagAppBuildSpawnRemote:
+    """build_spawn / build_remote forward tasks (single or sequence) and
+    build_kwargs to the remote Modal function."""
+
+    def _make_app(self):
+        return StardagApp(
+            "test-spawn-remote-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+    def _patch_function_from_name(self, monkeypatch):
+        """Patch modal.Function.from_name to return a recording stub."""
+        captured: dict = {}
+
+        class _Stub:
+            def spawn(self, **kwargs):
+                captured["op"] = "spawn"
+                captured["kwargs"] = kwargs
+                return "spawn-handle"
+
+            def remote(self, **kwargs):
+                captured["op"] = "remote"
+                captured["kwargs"] = kwargs
+                return "remote-result"
+
+        monkeypatch.setattr(
+            modal.Function, "from_name", staticmethod(lambda **_: _Stub())
+        )
+        return captured
+
+    def test_build_remote_single_task(self, monkeypatch):
+        captured = self._patch_function_from_name(monkeypatch)
+        app = self._make_app()
+        root = MagicMock()
+
+        result = app.build_remote(root)
+
+        assert result == "remote-result"
+        assert captured["op"] == "remote"
+        assert captured["kwargs"]["tasks"] is root
+        assert captured["kwargs"]["app_name"] == app.name
+        assert captured["kwargs"]["build_kwargs"] is None
+
+    def test_build_remote_sequence_of_tasks(self, monkeypatch):
+        captured = self._patch_function_from_name(monkeypatch)
+        app = self._make_app()
+        roots = [MagicMock(), MagicMock()]
+
+        app.build_remote(roots)
+
+        assert captured["kwargs"]["tasks"] is roots
+
+    def test_build_remote_forwards_build_kwargs(self, monkeypatch):
+        captured = self._patch_function_from_name(monkeypatch)
+        app = self._make_app()
+
+        app.build_remote(MagicMock(), build_kwargs={"fail_mode": "CONTINUE"})
+
+        assert captured["kwargs"]["build_kwargs"] == {"fail_mode": "CONTINUE"}
+
+    def test_build_spawn_sequence_and_build_kwargs(self, monkeypatch):
+        captured = self._patch_function_from_name(monkeypatch)
+        app = self._make_app()
+        roots = [MagicMock(), MagicMock()]
+
+        result = app.build_spawn(roots, build_kwargs={"register_all": True})
+
+        assert result == "spawn-handle"
+        assert captured["op"] == "spawn"
+        assert captured["kwargs"]["tasks"] is roots
+        assert captured["kwargs"]["build_kwargs"] == {"register_all": True}
