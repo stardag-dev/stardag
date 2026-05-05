@@ -360,6 +360,36 @@ class TestBuildAio:
 # ============================================================================
 
 
+from tests.test_build.conftest import RecordingRegistry  # noqa: E402
+
+
+class _GatedFailRegistry(RecordingRegistry):
+    """RecordingRegistry that gates ``task_fail_aio`` on caller-controlled events.
+
+    Used by the race regression test to deterministically place a sibling's
+    completion inside ``cancel_pending_in_flight``'s race window without
+    relying on wall-clock timing. Tests set ``fail_aio_entered_event`` /
+    ``fail_aio_can_proceed_event`` on the instance, then arrange for one
+    task to await the entered event and another task's ``run_aio`` to set
+    the can-proceed event after the first finishes its work.
+    """
+
+    fail_aio_entered_event: asyncio.Event | None = None
+    fail_aio_can_proceed_event: asyncio.Event | None = None
+
+    async def task_fail_aio(
+        self,
+        build_id,
+        task,
+        error_message: str | None = None,
+    ) -> None:
+        if self.fail_aio_entered_event is not None:
+            self.fail_aio_entered_event.set()
+        if self.fail_aio_can_proceed_event is not None:
+            await self.fail_aio_can_proceed_event.wait()
+        await super().task_fail_aio(build_id, task, error_message)
+
+
 class TestFailFastCancelAndSkip:
     """Tests for FAIL_FAST cancellation of in-flight siblings and the
     transitive ``TASK_SKIPPED`` emission for blocked tasks."""
@@ -424,34 +454,42 @@ class TestFailFastCancelAndSkip:
         completed, not silently treated as CANCELLED by
         ``cancel_pending_in_flight``.
 
-        We trigger the race by stalling ``task_fail_aio`` long enough for
-        a short-running sibling to finish. After the for-loop breaks on
-        ``fail_fast_triggered``, ``cancel_pending_in_flight`` sees the
-        sibling's future as already-done — the race fix processes its
-        actual result instead of cancelling it.
+        Event-gated (no wall-clock dependency): the registry's
+        ``task_fail_aio`` blocks on ``fail_aio_can_proceed_event``; the
+        sibling's ``run_aio`` waits for ``fail_aio_entered_event``, runs
+        its work while ``process_result`` is suspended inside
+        ``task_fail_aio``, then unblocks ``task_fail_aio``. After the
+        for-loop breaks on ``fail_fast_triggered``,
+        ``cancel_pending_in_flight`` sees the sibling's future as
+        already-done — the race fix processes its actual result instead
+        of cancelling it.
         """
-        from tests.test_build.conftest import RecordingRegistry
-
-        class StallingFailRegistry(RecordingRegistry):
-            async def task_fail_aio(self, build_id, task, error_message=None):
-                # Long enough for the success leaf (0.05s sleep) to finish.
-                await asyncio.sleep(0.2)
-                await super().task_fail_aio(build_id, task, error_message)
+        registry = _GatedFailRegistry()
+        registry.fail_aio_entered_event = asyncio.Event()
+        registry.fail_aio_can_proceed_event = asyncio.Event()
 
         class ShortAsyncTask(Task[str]):
             name: str
 
             async def run_aio(self):
-                await asyncio.sleep(0.05)
+                # Wait until /fail starts processing the failing sibling —
+                # we are now inside the race window: process_result is
+                # suspended in task_fail_aio, and we're about to put
+                # ourselves in cancel_pending_in_flight's already-done
+                # bucket.
+                assert registry.fail_aio_entered_event is not None
+                await registry.fail_aio_entered_event.wait()
                 self._save("ok")
+                # Let task_fail_aio finish so the build can break out.
+                assert registry.fail_aio_can_proceed_event is not None
+                registry.fail_aio_can_proceed_event.set()
 
         class ImmediateFailingTask(Task[str]):
             async def run_aio(self):
-                # Yield once so the wait awakes promptly with this in done.
+                # Yield once so asyncio.wait awakes with this in done first.
                 await asyncio.sleep(0)
                 raise ValueError("Intentional failure")
 
-        registry = StallingFailRegistry()
         success = ShortAsyncTask(name="finish-during-fail-handling")
         failure = ImmediateFailingTask()
 
@@ -668,6 +706,69 @@ class TestFailFastCancelAndSkip:
         text = repr(summary)
         assert "Cancelled: 1" in text
         assert "Skipped: 2" in text
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_releases_lock_for_cancelled_task(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """FAIL_FAST cancel path releases a held global lock with completed=False.
+
+        Locks an in-flight task via the global concurrency lock manager,
+        then triggers a fail-fast on a sibling. Asserts the slow task's
+        lock is released and that the release is recorded as not-completed
+        (so external observers see the slot freed without a completion
+        record).
+        """
+
+        class SlowAsyncTask(Task[str]):
+            name: str
+
+            async def run_aio(self):
+                await asyncio.sleep(5)
+                self._save("done")
+
+        class FailingAsyncTask(Task[str]):
+            async def run_aio(self):
+                await asyncio.sleep(0)
+                raise ValueError("Intentional failure")
+
+        slow = SlowAsyncTask(name="slow-locked")
+        failing = FailingAsyncTask()
+
+        lock_manager = MockGlobalLockManager()
+        lock_manager.set_result(
+            str(slow.id),
+            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
+        )
+        lock_manager.set_result(
+            str(failing.id),
+            LockAcquisitionResult(status=LockAcquisitionStatus.ACQUIRED, acquired=True),
+        )
+
+        with pytest.raises(ValueError, match="Intentional failure"):
+            await build_aio(
+                [slow, failing],
+                registry=noop_registry,
+                fail_mode=FailMode.FAIL_FAST,
+                global_lock_manager=lock_manager,
+                global_lock_config=GlobalLockConfig(enabled=True),
+            )
+
+        slow_releases = [
+            (tid, completed)
+            for (tid, completed) in lock_manager.releases
+            if tid == str(slow.id)
+        ]
+        assert slow_releases, (
+            f"Expected lock release for cancelled slow task; got "
+            f"releases: {lock_manager.releases}"
+        )
+        assert all(completed is False for (_, completed) in slow_releases), (
+            f"Cancelled task lock must be released with completed=False; "
+            f"got: {slow_releases}"
+        )
 
 
 # ============================================================================

@@ -480,16 +480,22 @@ class TestModalExecutorCancel:
             await executor.teardown()
 
     @pytest.mark.asyncio
-    async def test_executor_cancel_method_terminates_remote_call(
+    async def test_executor_cancel_method_callable_during_in_flight(
         self, isolated_modal_target_root
     ):
-        """``ModalTaskExecutor.cancel(task)`` terminates the in-flight call.
+        """``ModalTaskExecutor.cancel(task)`` is callable on an in-flight task.
 
-        Today this collapses to the ABC's no-op default — cancellation
-        works via ``asyncio.Task.cancel`` of the wrapping future. If a
-        future revision adds an explicit FunctionCall.cancel path to
-        ModalTaskExecutor (see TODO in its docstring), this test
-        becomes the primary safeguard for that path.
+        This is a placeholder regression-detector. Today
+        ``executor.cancel`` collapses to the ABC's no-op default — the
+        actual termination work happens in the asyncio.cancel below. If
+        a future revision adds an explicit FunctionCall.cancel path to
+        ModalTaskExecutor (see TODO in its docstring), the test guards
+        against breaking *both* paths.
+
+        Note: this test cannot distinguish "executor.cancel did the
+        work" from "asyncio.cancel did the work" today. Once the
+        explicit-cancel path lands, drop the ``submit_fut.cancel()`` line
+        below to make this assertion specific.
         """
         import asyncio
         import time
