@@ -6,6 +6,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-05-05
+
+Modal: `StardagApp.build_spawn` / `build_remote` now accept multiple root
+tasks (`Sequence[BaseTask] | BaseTask`) and a new `build_kwargs` dict
+forwarded to `stardag.build(...)`. **Breaking**: first parameter renamed
+`task` → `tasks` for consistency with `stardag.build()` and
+`Builder.__call__`; the `BuildFunction` protocol gains a 4th
+`build_kwargs=None` parameter (custom implementations must accept it).
+See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v071--multi-root-builds-and-build_kwargs-on-stardagapp)
+for the migration.
+([#140](https://github.com/stardag-dev/stardag/pull/140))
+
 ## [0.7.0] — 2026-05-05
 
 `FailMode.FAIL_FAST` now actually fails fast: in-flight sibling tasks
