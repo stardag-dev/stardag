@@ -642,13 +642,31 @@ class APIRegistry(RegistryABC):
         )
 
     def task_skip(self, build_id: UUID, task: "BaseTask") -> None:
-        """Skip a task whose dependency failed or was cancelled."""
-        self._request(
-            "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/skip",
-            params=self._get_event_params(),
-            operation=f"Skip task {task.id}",
-        )
+        """Skip a task whose dependency failed or was cancelled.
+
+        Backward-compat: an older Registry API that lacks the ``/skip``
+        endpoint returns FastAPI's default 404 with the generic
+        ``"Not Found"`` detail. We swallow that specific response with a
+        warning so a new SDK against an old API doesn't fail builds on
+        every fail-fast / blocked-dep path. All other 404s (e.g.
+        ``"Build not found"``) re-raise normally.
+        """
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/skip",
+                params=self._get_event_params(),
+                operation=f"Skip task {task.id}",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /skip; task %s will "
+                "remain PENDING in the registry. Upgrade the Registry API "
+                "to see SKIPPED status for tasks blocked by failed deps.",
+                task.id,
+            )
 
     def task_waiting_for_lock(
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
@@ -1021,13 +1039,26 @@ class APIRegistry(RegistryABC):
         )
 
     async def task_skip_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version - skip a task whose dep failed or was cancelled."""
-        await self._arequest(
-            "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/skip",
-            params=self._get_event_params(),
-            operation=f"Skip task {task.id}",
-        )
+        """Async version - skip a task whose dep failed or was cancelled.
+
+        See :meth:`task_skip` for the backward-compat 404 handling.
+        """
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/skip",
+                params=self._get_event_params(),
+                operation=f"Skip task {task.id}",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /skip; task %s will "
+                "remain PENDING in the registry. Upgrade the Registry API "
+                "to see SKIPPED status for tasks blocked by failed deps.",
+                task.id,
+            )
 
     async def task_waiting_for_lock_aio(
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
