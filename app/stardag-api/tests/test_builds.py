@@ -214,6 +214,39 @@ async def test_fail_task_in_build(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_skip_task_in_build(client: AsyncClient):
+    """Test skipping a task whose dependency failed."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "skip-task-123",
+        "task_namespace": "",
+        "task_name": "TestTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+
+    response = await client.post(f"/api/v1/builds/{build_id}/tasks/skip-task-123/skip")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task_id"] == "skip-task-123"
+    assert data["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_skip_unknown_task_returns_404(client: AsyncClient):
+    """Test that skipping an unregistered task returns 404."""
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/never-registered/skip"
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_in_build(client: AsyncClient):
     """Test listing all tasks in a build."""
     # Create a build

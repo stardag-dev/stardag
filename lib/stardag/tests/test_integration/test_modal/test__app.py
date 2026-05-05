@@ -34,10 +34,12 @@ try:
         StardagApp,
         get_default_volume_mount_path,
     )
+    from stardag.integration.modal._app import ModalTaskExecutor
     from stardag.integration.modal._config import with_stardag_on_image
     from stardag.testing.modal._tasks import (
         AsyncDoubleTask,
         AsyncDynamicRangeSumTask,
+        SleepTask,
         SyncDynamicRangeSumTask,
         make_range,
         sum_list,
@@ -427,3 +429,94 @@ class TestEndToEndDynamicDepsBuild:
         )
         assert root.target().exists()
         assert root.target().load() == sum(range(limit))
+
+
+class TestModalExecutorCancel:
+    """Real-Modal verification that cancelling the asyncio future awaiting
+    ``ModalTaskExecutor.submit`` actually terminates the remote container —
+    rather than letting it run to completion (and bill) while the build
+    has already failed-fast.
+
+    Each test sleeps a long-running task on Modal, then triggers cancel.
+    If propagation is broken, the test would block for ``SleepTask.seconds``;
+    the assertion catches that with an upper-bound elapsed-time check.
+    """
+
+    SLEEP_SECONDS = 60
+    # Generous upper bound: ~3s to start + a few s for Modal to confirm
+    # cancellation. Significantly less than SLEEP_SECONDS so the failure
+    # mode is unambiguous.
+    CANCEL_TIMEOUT_S = 20
+
+    @pytest.mark.asyncio
+    async def test_cancel_propagates_to_remote_container(
+        self, isolated_modal_target_root
+    ):
+        """Cancelling the asyncio future stops the remote SleepTask."""
+        import asyncio
+        import time
+
+        executor = ModalTaskExecutor(
+            modal_app_name=TEST_APP_NAME,
+            worker_selector=lambda t: "default",
+        )
+        await executor.setup()
+        try:
+            task = SleepTask(seconds=self.SLEEP_SECONDS)
+            submit_fut = asyncio.create_task(executor.submit(task))
+            # Give Modal a moment to spawn the container and start the task.
+            await asyncio.sleep(3)
+            t0 = time.monotonic()
+            submit_fut.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await submit_fut
+            elapsed = time.monotonic() - t0
+            assert elapsed < self.CANCEL_TIMEOUT_S, (
+                f"Cancel propagation took {elapsed:.1f}s — Modal likely did "
+                f"not cancel the remote container (would have run for "
+                f"{self.SLEEP_SECONDS}s)"
+            )
+        finally:
+            await executor.teardown()
+
+    @pytest.mark.asyncio
+    async def test_executor_cancel_method_callable_during_in_flight(
+        self, isolated_modal_target_root
+    ):
+        """``ModalTaskExecutor.cancel(task)`` is callable on an in-flight task.
+
+        This is a placeholder regression-detector. Today
+        ``executor.cancel`` collapses to the ABC's no-op default — the
+        actual termination work happens in the asyncio.cancel below. If
+        a future revision adds an explicit FunctionCall.cancel path to
+        ModalTaskExecutor (see TODO in its docstring), the test guards
+        against breaking *both* paths.
+
+        Note: this test cannot distinguish "executor.cancel did the
+        work" from "asyncio.cancel did the work" today. Once the
+        explicit-cancel path lands, drop the ``submit_fut.cancel()`` line
+        below to make this assertion specific.
+        """
+        import asyncio
+        import time
+
+        executor = ModalTaskExecutor(
+            modal_app_name=TEST_APP_NAME,
+            worker_selector=lambda t: "default",
+        )
+        await executor.setup()
+        try:
+            task = SleepTask(seconds=self.SLEEP_SECONDS)
+            submit_fut = asyncio.create_task(executor.submit(task))
+            await asyncio.sleep(3)
+            t0 = time.monotonic()
+            await executor.cancel(task)
+            submit_fut.cancel()  # also cancel the wrapping future
+            with pytest.raises(asyncio.CancelledError):
+                await submit_fut
+            elapsed = time.monotonic() - t0
+            assert elapsed < self.CANCEL_TIMEOUT_S, (
+                f"executor.cancel() did not terminate the call: {elapsed:.1f}s"
+            )
+        finally:
+            await executor.teardown()

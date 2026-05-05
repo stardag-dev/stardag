@@ -6,6 +6,62 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.7.0 — FAIL_FAST actually fails fast; explicit SKIPPED status for blocked tasks
+
+Two related fixes to the build loop's failure handling. No breaking
+changes — `pip install -U stardag` is sufficient. The behaviour change
+matters mainly if you've been running `FailMode.FAIL_FAST` builds with
+long-running tasks in flight (Modal worker calls, slow async tasks):
+those will now exit promptly on the first failure instead of silently
+abandoning the remote calls or blocking on in-flight work to drain.
+
+### What changed
+
+**FAIL_FAST cancels in-flight siblings.** When a task fails, the build
+loop processes the rest of the current `asyncio.wait` batch first (so
+sibling completions land), then cancels every remaining
+`pending_futures` entry. asyncio cancellation propagates into
+`modal.Function.remote.aio` and Modal terminates the remote container.
+Each cancelled task gets a `TASK_CANCELLED` event and any global lock
+it held is released with `completed=False`. Previously the build
+re-raised in place — the asyncio cancel never reached the executor,
+Modal containers kept running and billing, and the registry left them
+stuck in `RUNNING`.
+
+**Tasks blocked by a failed dep emit `TASK_SKIPPED`.** A fixed-point
+walk after the build loop emits `task_skip_aio` for any task whose
+dependency failed or was cancelled, including transitive descendants.
+Applies to both `FAIL_FAST` and `CONTINUE`. Previously they stayed
+`PENDING` in the registry forever.
+
+### New API surface (additive)
+
+For users writing custom executors or registries:
+
+- `TaskExecutorABC.cancel(task)` — optional best-effort cancel hook.
+  Default no-op. Override for executor-specific termination beyond
+  asyncio cooperation. `HybridConcurrentTaskExecutor`'s thread/process
+  pools rely on the asyncio.cancel of the wrapping future and the
+  inherited no-op (Python can't reliably terminate threads/subprocesses
+  anyway, and the existing `teardown(wait=True)` will still block
+  until they finish).
+- `RegistryABC.task_skip` / `task_skip_aio` — default no-op. The
+  `APIRegistry` impl POSTs to a new `/skip` route.
+- `TaskCount.cancelled` and `TaskCount.skipped` — new outcome counters
+  on `BuildSummary.task_count`, rendered by `__repr__` when non-zero.
+
+### Rollout
+
+The new SDK degrades gracefully against older Registry APIs that lack
+the `/skip` route (the SDK swallows the FastAPI default 404 with a
+warning — same pattern as `/dependencies`; blocked tasks stay
+`PENDING`, matching pre-0.7.0 observable behaviour). Older SDKs are
+compatible with the new API since `/skip` is additive. No coordination
+required, but the natural sequence is: deploy the API first, then bump
+the SDK.
+
+---
+
 ## v0.6.1 — Modal-volume disk cache (opt-in) and reload-staleness fix
 
 A small, Modal-focused patch release. Two changes, both isolated to the

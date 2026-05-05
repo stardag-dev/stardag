@@ -74,3 +74,21 @@ class AsyncDynamicRangeSumTask(sd.Task[int]):
         yield range_task
         values = await range_task.load_aio()
         await self._save_aio(sum(values))
+
+
+class SleepTask(sd.Task[int]):
+    """Long-sleeping sync task — used to verify Modal cancel propagation.
+
+    The build engine cancels the asyncio future awaiting
+    ``worker_function.remote.aio``. Modal translates that cancellation
+    into a remote-call cancel; if it didn't, this task would block for
+    ``seconds`` and the test would time out.
+    """
+
+    seconds: int = 60
+
+    def run(self) -> None:
+        import time
+
+        time.sleep(self.seconds)
+        self._save(self.seconds)

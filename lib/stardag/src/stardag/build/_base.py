@@ -43,11 +43,20 @@ class TaskCount:
     previously_completed: int = 0
     succeeded: int = 0
     failed: int = 0
+    # In-flight tasks terminated by the build engine (e.g. fail-fast siblings).
+    cancelled: int = 0
+    # Tasks that never started because a dependency failed or was cancelled.
+    skipped: int = 0
 
     @property
     def pending(self) -> int:
         return (
-            self.discovered - self.previously_completed - self.succeeded - self.failed
+            self.discovered
+            - self.previously_completed
+            - self.succeeded
+            - self.failed
+            - self.cancelled
+            - self.skipped
         )
 
 
@@ -92,6 +101,10 @@ class BuildSummary:
                 f"  Failed: {tc.failed}",
             ]
         )
+        if tc.cancelled > 0:
+            lines.append(f"  Cancelled: {tc.cancelled}")
+        if tc.skipped > 0:
+            lines.append(f"  Skipped: {tc.skipped}")
         if tc.pending > 0:
             lines.append(f"  Pending: {tc.pending}")
         if self.error:
@@ -205,6 +218,26 @@ class TaskExecutorABC(ABC):
         """Teardown any resources used by the task executor."""
         ...
 
+    async def cancel(self, task: BaseTask) -> None:
+        """Best-effort cancel an in-flight task.
+
+        Default: no-op. The build loop also calls ``asyncio.Task.cancel()``
+        on the future wrapping ``submit()``, which propagates as
+        ``asyncio.CancelledError`` into cooperative awaitables (async
+        tasks, ``modal.Function.remote.aio``). Override this for executors
+        that need explicit teardown beyond asyncio cooperation (e.g.
+        cancelling a tracked remote handle).
+
+        Effectiveness depends on the executor and how it implements
+        ``teardown()``. For example, ``HybridConcurrentTaskExecutor``
+        cannot reliably terminate thread- or process-pool work from
+        Python, AND its ``teardown()`` calls ``shutdown(wait=True)`` —
+        so the build will block until the underlying thread/subprocess
+        finishes. Async-only tasks and Modal calls do propagate the
+        cancellation cooperatively and unblock the build promptly.
+        """
+        pass
+
 
 # Type variable for executor routing keys
 ExecutorKeyT = TypeVar("ExecutorKeyT")
@@ -265,6 +298,14 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         """Teardown all child executors."""
         for executor in self.executors.values():
             await executor.teardown()
+
+    async def cancel(self, task: BaseTask) -> None:
+        """Route cancel to the executor that owns the task."""
+        key = self.router(task)
+        executor = self.executors.get(key)
+        if executor is None:
+            return
+        await executor.cancel(task)
 
 
 # =============================================================================
