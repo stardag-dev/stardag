@@ -1471,9 +1471,23 @@ async def cancel_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
 ):
-    """Cancel a task within a build."""
+    """Cancel a task within a build (by user, or by the build engine)."""
     return await _create_task_event(
         build_id, task_id, EventType.TASK_CANCELLED, db, auth, commit_hash=commit_hash
+    )
+
+
+@router.post("/{build_id}/tasks/{task_id}/skip", response_model=TaskEventResponse)
+async def skip_task(
+    build_id: UUID,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
+):
+    """Skip a task that won't run (e.g. its dependency failed)."""
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_SKIPPED, db, auth, commit_hash=commit_hash
     )
 
 

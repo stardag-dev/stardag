@@ -48,6 +48,17 @@ from stardag.registry import RegistryABC, registry_provider
 logger = logging.getLogger(__name__)
 
 
+class _SkippedSentinel(Exception):
+    """Marker placed on TaskExecutionState.exception for skipped tasks.
+
+    Skipped tasks never executed (a dep failed or was cancelled). Setting
+    a sentinel exception lets ``find_ready_tasks`` and the skip-emission
+    fixed-point loop treat them like other terminal-state tasks without
+    confusing them with real failures (which contribute to BuildSummary.error).
+    Never raised — purely a state marker.
+    """
+
+
 # Number of tasks the build engine sends per ``task_register_bulk_aio``
 # HTTP call. Deliberately well under the API's hard cap (1000) so that
 # (a) DB transactions on the server stay short and don't contend with
@@ -549,6 +560,11 @@ async def build_aio(
     task_count = TaskCount()
     completion_cache: set[UUID] = set()
     error: BaseException | None = None
+    # Set when any task fails (or its lock acquisition fails). The main
+    # loop processes the whole batch first, then breaks out if FAIL_FAST.
+    # Lifting the raise out of process_result keeps sibling completions in
+    # the same wait-batch from being silently dropped.
+    fail_fast_triggered: bool = False
 
     # Task execution states
     task_states: dict[UUID, TaskExecutionState] = {}
@@ -751,8 +767,14 @@ async def build_aio(
         | TaskStruct
         | None,
     ):
-        """Process a single task result (including lock acquisition results)."""
-        nonlocal error
+        """Process a single task result (including lock acquisition results).
+
+        Never raises in FAIL_FAST mode — sets ``fail_fast_triggered`` so the
+        main loop can finish processing the current ``done`` batch first
+        (otherwise sibling completions in the same batch would be lost) and
+        then escalate.
+        """
+        nonlocal error, fail_fast_triggered
         state = task_states[task.id]
 
         # Handle lock acquisition results (lock was not acquired)
@@ -773,7 +795,7 @@ async def build_aio(
                 task_count.failed += 1
                 error = state.exception
                 if fail_mode == FailMode.FAIL_FAST:
-                    raise state.exception
+                    fail_fast_triggered = True
             return
 
         # Handle normal task execution results
@@ -792,7 +814,7 @@ async def build_aio(
             task_count.failed += 1
             error = result.exception
             if fail_mode == FailMode.FAIL_FAST:
-                raise result.exception
+                fail_fast_triggered = True
 
         elif isinstance(result, BaseException):
             # Backward compat: custom executor returned a bare exception
@@ -809,7 +831,7 @@ async def build_aio(
             task_count.failed += 1
             error = result
             if fail_mode == FailMode.FAIL_FAST:
-                raise result
+                fail_fast_triggered = True
 
         elif result is None:
             # Task completed - release lock (completed) and notify registry
@@ -1106,6 +1128,81 @@ async def build_aio(
         # Execute the task via the executor
         return await task_executor.submit(task)
 
+    async def cancel_pending_in_flight() -> None:
+        """Cancel any in-flight ``pending_futures`` and emit ``task_cancel``.
+
+        Called when escalating FAIL_FAST after the first failure, so
+        sibling tasks running concurrently (e.g. on Modal) terminate
+        promptly instead of being abandoned. Idempotent — safe to call
+        multiple times. The asyncio cancel is what propagates into the
+        executor (e.g. Modal's remote-call cancel); the explicit
+        ``task_executor.cancel`` hook is for executors that need extra
+        teardown (default no-op).
+        """
+        if not pending_futures:
+            return
+        snapshot = dict(pending_futures)
+        pending_futures.clear()
+        cancelled_tasks: list[BaseTask] = [task_states[tid].task for tid in snapshot]
+        for fut in snapshot.values():
+            fut.cancel()
+        for cancel_task in cancelled_tasks:
+            try:
+                await task_executor.cancel(cancel_task)
+            except Exception as e:
+                logger.warning(f"Executor cancel failed for {cancel_task.id}: {e}")
+        # Drain so cancelled futures don't dangle.
+        await asyncio.gather(*snapshot.values(), return_exceptions=True)
+        executing.clear()
+        for cancel_task in cancelled_tasks:
+            await release_lock_for_task(cancel_task, completed=False)
+            try:
+                await registry.task_cancel_aio(build_id, cancel_task)
+            except Exception as reg_err:
+                handle_registry_error(
+                    reg_err,
+                    f"Failed to mark task {cancel_task.id} as cancelled",
+                    on_registry_failure,
+                )
+            state = task_states[cancel_task.id]
+            if state.exception is None:
+                state.exception = asyncio.CancelledError(
+                    "Cancelled by build engine in FAIL_FAST mode"
+                )
+            task_count.cancelled += 1
+
+    async def emit_skips_for_blocked_tasks() -> None:
+        """Emit ``task_skip_aio`` for tasks blocked by failed/cancelled deps.
+
+        Iterates to a fixed point so transitive descendants are also
+        skipped. Idempotent: tasks already marked with ``state.exception``
+        are filtered out, so re-calling is a no-op.
+        """
+        while True:
+            skipped_this_pass = 0
+            for state in task_states.values():
+                if state.completed or state.exception is not None:
+                    continue
+                blocked = any(
+                    task_states[dep.id].exception is not None for dep in state.all_deps
+                )
+                if not blocked:
+                    continue
+                if state.registered:
+                    try:
+                        await registry.task_skip_aio(build_id, state.task)
+                    except Exception as reg_err:
+                        handle_registry_error(
+                            reg_err,
+                            f"Failed to mark task {state.task.id} as skipped",
+                            on_registry_failure,
+                        )
+                state.exception = _SkippedSentinel()
+                task_count.skipped += 1
+                skipped_this_pass += 1
+            if skipped_this_pass == 0:
+                return
+
     try:
         # Discover all tasks from roots concurrently. Inline-registration
         # makes the full DAG appear in the registry/UI immediately. If any
@@ -1202,6 +1299,12 @@ async def build_aio(
                     )
                 await process_result(task, result)
 
+            # Stop scheduling once any task has flagged FAIL_FAST escalation.
+            # Sibling completions in this same `done` batch were already
+            # processed above so their task_complete_aio events landed.
+            if fail_fast_triggered and fail_mode == FailMode.FAIL_FAST:
+                break
+
             # Check for exit-early condition: all remaining tasks waiting for locks
             if global_lock_config.exit_early_when_all_locked:
                 remaining_tasks = [
@@ -1232,6 +1335,20 @@ async def build_aio(
                             error=None,
                         )
 
+        # If FAIL_FAST escalated, terminate in-flight siblings before
+        # finalising. asyncio.cancel propagates CancelledError into
+        # cooperative awaitables (e.g. Modal's remote.aio), so remote
+        # containers stop billing rather than being abandoned. Skips
+        # are emitted for any task whose deps include a failed/cancelled
+        # task — covers both modes (no-op when nothing is blocked).
+        if fail_fast_triggered and fail_mode == FailMode.FAIL_FAST:
+            await cancel_pending_in_flight()
+        await emit_skips_for_blocked_tasks()
+
+        # FAIL_FAST: re-enter the outer except so build_fail_aio fires.
+        if error is not None and fail_mode == FailMode.FAIL_FAST:
+            raise error
+
         await registry.build_complete_aio(build_id)
         return BuildSummary(
             status=BuildExitStatus.SUCCESS
@@ -1243,6 +1360,15 @@ async def build_aio(
         )
 
     except Exception as e:
+        # Cancel any in-flight (covers exceptions raised mid-loop) and
+        # emit skips before recording the build failure. Both helpers
+        # are idempotent so it's safe even when reached via the
+        # FAIL_FAST escalation path that already called them.
+        try:
+            await cancel_pending_in_flight()
+            await emit_skips_for_blocked_tasks()
+        except Exception as cleanup_err:
+            logger.warning(f"Error during build cleanup: {cleanup_err}")
         await registry.build_fail_aio(build_id, str(e))
         if fail_mode == FailMode.FAIL_FAST:
             raise

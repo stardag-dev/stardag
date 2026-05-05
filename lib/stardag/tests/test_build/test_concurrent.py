@@ -18,13 +18,17 @@ from stardag import Task, auto_namespace
 from stardag._core.base_task import _has_custom_run_aio
 from stardag.build import (
     BuildExitStatus,
+    BuildSummary,
     DefaultExecutionModeSelector,
     FailMode,
     GlobalLockConfig,
     HybridConcurrentTaskExecutor,
     LockAcquisitionResult,
     LockAcquisitionStatus,
+    RoutedTaskExecutor,
+    TaskCount,
     TaskExecutionError,
+    TaskExecutorABC,
     build,
     build_aio,
 )
@@ -349,6 +353,264 @@ class TestBuildAio:
 
         with pytest.raises(ValueError, match="Intentional failure"):
             await build_aio([task], registry=noop_registry)
+
+
+# ============================================================================
+# Test: FAIL_FAST cancellation + skip-propagation semantics
+# ============================================================================
+
+
+class TestFailFastCancelAndSkip:
+    """Tests for FAIL_FAST cancellation of in-flight siblings and the
+    transitive ``TASK_SKIPPED`` emission for blocked tasks."""
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_cancels_in_flight_siblings(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry,
+    ):
+        """FAIL_FAST: a slow in-flight sibling is cancelled with task_cancel_aio.
+
+        Without this behavior, the slow sibling would either run to
+        completion (FAIL_FAST being a lie) or be silently abandoned
+        (registry stuck in RUNNING). We assert (a) the build returns
+        promptly rather than waiting for the 5-second sleep and
+        (b) the slow task got task_cancel_aio fired against it.
+        """
+
+        class SlowAsyncTask(Task[str]):
+            name: str
+
+            async def run_aio(self):
+                await asyncio.sleep(5)
+                self._save("done")
+
+        class FailingAsyncTask(Task[str]):
+            async def run_aio(self):
+                # Yield once so we hit the wait point and Slow is in flight.
+                await asyncio.sleep(0)
+                raise ValueError("Intentional failure")
+
+        slow = SlowAsyncTask(name="slow")
+        failing = FailingAsyncTask()
+
+        t0 = time.monotonic()
+        with pytest.raises(ValueError, match="Intentional failure"):
+            await build_aio(
+                [slow, failing],
+                registry=recording_registry,
+                fail_mode=FailMode.FAIL_FAST,
+            )
+        elapsed = time.monotonic() - t0
+
+        # If we waited for slow to complete, this would be ~5s.
+        assert elapsed < 2.0, (
+            f"FAIL_FAST took {elapsed:.2f}s — cancellation did not kick in"
+        )
+        assert recording_registry.has_call("task_cancel_aio", slow.id), (
+            f"Expected task_cancel_aio for slow task; got calls: "
+            f"{[c[0] for c in recording_registry.calls]}"
+        )
+        assert recording_registry.has_call("task_fail_aio", failing.id)
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_records_sibling_completion_in_same_batch(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry,
+    ):
+        """FAIL_FAST: a sibling that succeeds in the same wait batch as a
+        failure still has its task_complete_aio recorded.
+
+        Pre-fix, ``process_result`` raised in-place inside the
+        ``for async_task in done:`` loop, so any sibling further along in
+        ``done`` had its result silently discarded. We gate both tasks on
+        the same asyncio.Event so they finish in the same loop tick and
+        land in the same wait batch.
+        """
+        gate = asyncio.Event()
+
+        class GatedSuccess(Task[str]):
+            async def run_aio(self):
+                await gate.wait()
+                self._save("ok")
+
+        class GatedFailure(Task[str]):
+            async def run_aio(self):
+                await gate.wait()
+                raise ValueError("Intentional failure")
+
+        success = GatedSuccess()
+        failure = GatedFailure()
+
+        async def trigger():
+            # Wait for both leaves to be submitted+blocked on gate.
+            await asyncio.sleep(0.05)
+            gate.set()
+
+        trigger_fut = asyncio.create_task(trigger())
+        try:
+            with pytest.raises(ValueError, match="Intentional failure"):
+                await build_aio(
+                    [success, failure],
+                    registry=recording_registry,
+                    fail_mode=FailMode.FAIL_FAST,
+                )
+        finally:
+            await trigger_fut
+
+        assert recording_registry.has_call("task_complete_aio", success.id), (
+            "Sibling completion in same `done` batch must not be lost"
+        )
+        assert recording_registry.has_call("task_fail_aio", failure.id)
+
+    @pytest.mark.asyncio
+    async def test_continue_mode_does_not_cancel_siblings(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry,
+    ):
+        """CONTINUE: an in-flight sibling is allowed to run to completion."""
+
+        class ShortAsyncTask(Task[str]):
+            name: str
+
+            async def run_aio(self):
+                await asyncio.sleep(0.1)
+                self._save("done")
+
+        class FailingAsyncTask(Task[str]):
+            async def run_aio(self):
+                await asyncio.sleep(0)
+                raise ValueError("Intentional failure")
+
+        sibling = ShortAsyncTask(name="sibling")
+        failing = FailingAsyncTask()
+
+        summary = await build_aio(
+            [sibling, failing],
+            registry=recording_registry,
+            fail_mode=FailMode.CONTINUE,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert sibling.complete()
+        assert recording_registry.has_call("task_complete_aio", sibling.id)
+        assert not recording_registry.has_call("task_cancel_aio", sibling.id), (
+            "CONTINUE must not cancel in-flight siblings"
+        )
+
+    @pytest.mark.asyncio
+    async def test_skips_emitted_for_transitively_blocked_tasks_continue(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry,
+    ):
+        """CONTINUE: tasks transitively blocked by a failure get TASK_SKIPPED."""
+        leaf = FailingTask(error_message="leaf fails")
+        mid = SyncOnlyTask(name="mid", deps=(leaf,))
+        root = SyncOnlyTask(name="root", deps=(mid,))
+
+        summary = await build_aio(
+            [root],
+            registry=recording_registry,
+            fail_mode=FailMode.CONTINUE,
+        )
+
+        assert summary.status == BuildExitStatus.FAILURE
+        assert summary.task_count.failed == 1
+        assert summary.task_count.skipped == 2, (
+            f"Expected 2 skipped (mid+root), got {summary.task_count}"
+        )
+        assert recording_registry.has_call("task_skip_aio", mid.id)
+        assert recording_registry.has_call("task_skip_aio", root.id)
+        assert recording_registry.has_call("task_fail_aio", leaf.id)
+
+    @pytest.mark.asyncio
+    async def test_skips_emitted_in_fail_fast_mode_too(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry,
+    ):
+        """FAIL_FAST: blocked downstream tasks are still marked SKIPPED before the build is failed."""
+        leaf = FailingTask(error_message="leaf fails")
+        mid = SyncOnlyTask(name="mid-ff", deps=(leaf,))
+        root = SyncOnlyTask(name="root-ff", deps=(mid,))
+
+        with pytest.raises(ValueError, match="leaf fails"):
+            await build_aio(
+                [root],
+                registry=recording_registry,
+                fail_mode=FailMode.FAIL_FAST,
+            )
+
+        # Skip events fire BEFORE build_fail_aio so the registry is
+        # coherent at the moment the build is marked failed.
+        method_seq = [m for (m, _, _) in recording_registry.calls]
+        skip_idx = method_seq.index("task_skip_aio")
+        fail_idx = method_seq.index("build_fail_aio")
+        assert skip_idx < fail_idx, (
+            f"task_skip_aio must precede build_fail_aio; got order: {method_seq}"
+        )
+        assert recording_registry.has_call("task_skip_aio", mid.id)
+        assert recording_registry.has_call("task_skip_aio", root.id)
+
+    @pytest.mark.asyncio
+    async def test_routed_executor_cancel_routes_correctly(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        noop_registry,
+    ):
+        """RoutedTaskExecutor.cancel must dispatch to the routed child only."""
+
+        class _FakeExecutor(TaskExecutorABC):
+            def __init__(self, label: str) -> None:
+                self.label = label
+                self.cancelled: list = []
+
+            async def submit(self, task):
+                return None
+
+            async def setup(self):
+                pass
+
+            async def teardown(self):
+                pass
+
+            async def cancel(self, task):
+                self.cancelled.append(task)
+
+        task_a = SyncOnlyTask(name="to_a")
+        task_b = SyncOnlyTask(name="to_b")
+        a = _FakeExecutor("a")
+        b = _FakeExecutor("b")
+        routed = RoutedTaskExecutor(
+            executors={"a": a, "b": b},
+            router=lambda task: "a" if task.id == task_a.id else "b",
+        )
+
+        await routed.cancel(task_a)
+        await routed.cancel(task_b)
+
+        assert a.cancelled == [task_a]
+        assert b.cancelled == [task_b]
+
+    def test_build_summary_repr_includes_cancelled_skipped(self):
+        """BuildSummary repr renders the new counters when non-zero."""
+        summary = BuildSummary(
+            status=BuildExitStatus.FAILURE,
+            task_count=TaskCount(
+                discovered=5,
+                succeeded=1,
+                failed=1,
+                cancelled=1,
+                skipped=2,
+            ),
+        )
+        text = repr(summary)
+        assert "Cancelled: 1" in text
+        assert "Skipped: 2" in text
 
 
 # ============================================================================

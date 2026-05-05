@@ -641,6 +641,15 @@ class APIRegistry(RegistryABC):
             operation=f"Cancel task {task.id}",
         )
 
+    def task_skip(self, build_id: UUID, task: "BaseTask") -> None:
+        """Skip a task whose dependency failed or was cancelled."""
+        self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/skip",
+            params=self._get_event_params(),
+            operation=f"Skip task {task.id}",
+        )
+
     def task_waiting_for_lock(
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
     ) -> None:
@@ -1009,6 +1018,15 @@ class APIRegistry(RegistryABC):
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
             params=self._get_event_params(),
             operation=f"Cancel task {task.id}",
+        )
+
+    async def task_skip_aio(self, build_id: UUID, task: "BaseTask") -> None:
+        """Async version - skip a task whose dep failed or was cancelled."""
+        await self._arequest(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/skip",
+            params=self._get_event_params(),
+            operation=f"Skip task {task.id}",
         )
 
     async def task_waiting_for_lock_aio(

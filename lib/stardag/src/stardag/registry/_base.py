@@ -242,11 +242,25 @@ class RegistryABC(metaclass=abc.ABCMeta):
     def task_cancel(self, build_id: UUID, task: "BaseTask") -> None:
         """Cancel a task.
 
-        Called when a task is explicitly cancelled by the user.
+        Called when a task is cancelled — by the user, or by the build
+        engine when terminating in-flight siblings on a fail-fast failure.
 
         Args:
             build_id: The build UUID returned by build_start.
             task: The task to cancel.
+        """
+        pass
+
+    def task_skip(self, build_id: UUID, task: "BaseTask") -> None:
+        """Mark a task as skipped.
+
+        Called when a task will not run because a dependency failed or
+        was cancelled. Distinct from ``task_cancel``: skipped tasks
+        never started executing.
+
+        Args:
+            build_id: The build UUID returned by build_start.
+            task: The task to skip.
         """
         pass
 
@@ -373,6 +387,10 @@ class RegistryABC(metaclass=abc.ABCMeta):
     async def task_cancel_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_cancel."""
         self.task_cancel(build_id, task)
+
+    async def task_skip_aio(self, build_id: UUID, task: "BaseTask") -> None:
+        """Async version of task_skip."""
+        self.task_skip(build_id, task)
 
     async def task_waiting_for_lock_aio(
         self, build_id: UUID, task: "BaseTask", lock_owner: str | None = None
