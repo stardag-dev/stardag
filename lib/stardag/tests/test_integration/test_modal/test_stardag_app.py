@@ -140,6 +140,46 @@ class TestStardagAppCustomFunctions:
         assert calls == [("build", "task", "app")]
 
     @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_finalize_wrapper_forwards_build_kwargs_as_keyword(self, mock_volumes):
+        """The Modal wrapper forwards ``build_kwargs`` to the user's build_fn
+        as a keyword arg, so custom functions with keyword-only build_kwargs
+        are also supported."""
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+
+        captured: dict = {}
+
+        # build_kwargs is keyword-only — would TypeError if forwarded
+        # positionally. (This deliberately diverges from BuildFunction's
+        # exact protocol signature, which has build_kwargs positional-or-
+        # keyword; the test verifies the wrapper supports either shape.)
+        def my_build(tasks, worker_selector, app_name, *, build_kwargs=None):
+            captured["build_kwargs"] = build_kwargs
+
+        app = StardagApp(
+            "test-app",
+            build_function=my_build,  # type: ignore[arg-type]
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+        registered_fns: dict = {}
+
+        def capture_function(**kwargs):
+            name = kwargs.get("name", "unknown")
+
+            def decorator(fn):
+                registered_fns[name] = fn
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        app.finalize()
+
+        registered_fns["build"]("task", "selector", "app", {"fail_mode": "x"})
+        assert captured["build_kwargs"] == {"fail_mode": "x"}
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
     def test_finalize_registers_run_wrapper_for_all_workers(self, mock_volumes):
         """finalize() registers run wrappers for all workers."""
         mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})

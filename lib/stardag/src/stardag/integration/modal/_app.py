@@ -380,8 +380,17 @@ class BuildFunction(typing.Protocol):
     """Protocol for the function registered as the Modal "build" function.
 
     This function is called remotely on Modal to orchestrate a DAG build.
-    It receives the root task, a worker selector, and the Modal app name,
-    then coordinates task execution across Modal worker functions.
+    It receives one or more root tasks, a worker selector, the Modal app
+    name, and an optional ``build_kwargs`` dict, then coordinates task
+    execution across Modal worker functions.
+
+    Args (of ``__call__``):
+        tasks: A single root ``BaseTask`` or a sequence of root tasks.
+        worker_selector: Function picking a worker name per task.
+        app_name: Name of the Modal app hosting the worker functions.
+        build_kwargs: Optional dict of extra kwargs forwarded to the
+            underlying build engine (the default ``Builder`` splats them
+            into :func:`stardag.build`). ``None`` means "no extra kwargs".
 
     The default implementation (``Builder``) creates a ``ModalTaskExecutor``
     and calls ``stardag.build()``. Custom implementations can subclass
@@ -712,7 +721,12 @@ class PrefectBuilder(Builder):
             task = tasks[0]
 
         flow_kwargs = dict(build_kwargs or {})
+        # ``task`` is reserved because the flow is invoked as
+        # ``_flow(...)(task, ...)`` below — letting the user pass another
+        # ``task`` via build_kwargs would surface as a confusing
+        # "got multiple values for argument 'task'" TypeError.
         for reserved in (
+            "task",
             "task_executor",
             "before_run_callback",
             "on_complete_callback",
@@ -946,7 +960,7 @@ class StardagApp:
             app_name: str,
             build_kwargs: dict[str, typing.Any] | None = None,
         ) -> BuildSummary | None:
-            return build_fn(tasks, worker_selector, app_name, build_kwargs)
+            return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
 
         run_fn = self._run_function
 
