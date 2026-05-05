@@ -398,6 +398,7 @@ class BuildFunction(typing.Protocol):
         tasks: typing.Sequence[BaseTask] | BaseTask,
         worker_selector: WorkerSelector,
         app_name: str,
+        build_kwargs: dict[str, typing.Any] | None = None,
     ) -> BuildSummary | None: ...
 
 
@@ -479,6 +480,7 @@ class Builder(BuildFunction):
         tasks: typing.Sequence[BaseTask] | BaseTask,
         worker_selector: WorkerSelector,
         app_name: str,
+        build_kwargs: dict[str, typing.Any] | None = None,
     ) -> BuildSummary | None:
         """Core build logic to orchestrate the DAG build."""
         modal_executor = ModalTaskExecutor(
@@ -491,7 +493,7 @@ class Builder(BuildFunction):
 
         try:
             self.setup(tasks)
-            summary = self.build(tasks, modal_executor)
+            summary = self.build(tasks, modal_executor, build_kwargs=build_kwargs)
             summary_or_exception = summary
             return summary
         except Exception as exception:
@@ -504,9 +506,21 @@ class Builder(BuildFunction):
         self,
         tasks: typing.Sequence[BaseTask] | BaseTask,
         task_executor: ModalTaskExecutor,
+        build_kwargs: dict[str, typing.Any] | None = None,
     ) -> BuildSummary | None:
-        """Default build logic using stardag.build() with the ModalTaskExecutor."""
-        return build(tasks, task_executor=task_executor)
+        """Default build logic using stardag.build() with the ModalTaskExecutor.
+
+        ``build_kwargs`` are forwarded to :func:`stardag.build` (e.g. ``fail_mode``,
+        ``register_all``, ``global_lock_config``). Conflicting keys (``tasks``,
+        ``task_executor``) are reserved and rejected.
+        """
+        kwargs = dict(build_kwargs or {})
+        for reserved in ("tasks", "task_executor"):
+            if reserved in kwargs:
+                raise TypeError(
+                    f"build_kwargs must not contain reserved key '{reserved}'"
+                )
+        return build(tasks, task_executor=task_executor, **kwargs)
 
 
 class Runner(RunFunction):
@@ -677,6 +691,7 @@ class PrefectBuilder(Builder):
         self,
         tasks: typing.Sequence[BaseTask] | BaseTask,
         task_executor: ModalTaskExecutor,
+        build_kwargs: dict[str, typing.Any] | None = None,
     ) -> BuildSummary | None:
         if prefect_build_flow is None:
             raise ImportError("Prefect is not installed")
@@ -696,6 +711,17 @@ class PrefectBuilder(Builder):
                 )
             task = tasks[0]
 
+        flow_kwargs = dict(build_kwargs or {})
+        for reserved in (
+            "task_executor",
+            "before_run_callback",
+            "on_complete_callback",
+        ):
+            if reserved in flow_kwargs:
+                raise TypeError(
+                    f"build_kwargs must not contain reserved key '{reserved}'"
+                )
+
         async def _run():
             await _flow.with_options(
                 name=f"stardag-build-{task.get_namespace()}:{task.get_name()}"
@@ -706,6 +732,7 @@ class PrefectBuilder(Builder):
                 on_complete_callback=(
                     self.on_complete_callback or upload_task_on_complete_artifacts
                 ),
+                **flow_kwargs,
             )
 
         asyncio.run(_run())
@@ -917,8 +944,9 @@ class StardagApp:
             tasks: typing.Sequence[BaseTask] | BaseTask,
             worker_selector: WorkerSelector,
             app_name: str,
+            build_kwargs: dict[str, typing.Any] | None = None,
         ) -> BuildSummary | None:
-            return build_fn(tasks, worker_selector, app_name)
+            return build_fn(tasks, worker_selector, app_name, build_kwargs)
 
         run_fn = self._run_function
 
@@ -969,7 +997,11 @@ class StardagApp:
         )
 
     def build_spawn(
-        self, task: BaseTask, worker_selector: WorkerSelector | None = None
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        worker_selector: WorkerSelector | None = None,
+        *,
+        build_kwargs: dict[str, typing.Any] | None = None,
     ):
         """Spawn a build job on a deployed Modal app (non-blocking).
 
@@ -977,15 +1009,19 @@ class StardagApp:
         a new execution. Use this for fire-and-forget builds.
 
         Args:
-            task: The root task to build.
+            tasks: A single root task or a sequence of root tasks to build.
             worker_selector: Optional override for worker selection.
+            build_kwargs: Optional kwargs forwarded to the remote build function
+                (e.g. ``{"fail_mode": FailMode.CONTINUE}``). The
+                default ``Builder`` passes these to :func:`stardag.build`.
 
         Returns:
             A Modal FunctionCall handle for the spawned build.
 
         Example:
             handle = stardag_app.build_spawn(my_task)
-            # Build is running in the background
+            # Or multiple roots:
+            handle = stardag_app.build_spawn([task_a, task_b])
             # Optionally wait for result:
             result = handle.get()
         """
@@ -994,13 +1030,18 @@ class StardagApp:
             name="build",
         )
         return build_function.spawn(
-            tasks=task,
+            tasks=tasks,
             worker_selector=worker_selector or self.worker_selector,
             app_name=self.name,
+            build_kwargs=build_kwargs,
         )
 
     def build_remote(
-        self, task: BaseTask, worker_selector: WorkerSelector | None = None
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        worker_selector: WorkerSelector | None = None,
+        *,
+        build_kwargs: dict[str, typing.Any] | None = None,
     ):
         """Run a build on a deployed Modal app (blocking).
 
@@ -1008,24 +1049,29 @@ class StardagApp:
         it synchronously. Use this when you need to wait for the build result.
 
         Args:
-            task: The root task to build.
+            tasks: A single root task or a sequence of root tasks to build.
             worker_selector: Optional override for worker selection.
+            build_kwargs: Optional kwargs forwarded to the remote build function
+                (e.g. ``{"fail_mode": FailMode.CONTINUE}``). The
+                default ``Builder`` passes these to :func:`stardag.build`.
 
         Returns:
             The result of the build.
 
         Example:
             result = stardag_app.build_remote(my_task)
-            print(f"Build completed: {result}")
+            # Or multiple roots:
+            result = stardag_app.build_remote([task_a, task_b])
         """
         build_function = modal.Function.from_name(
             app_name=self.name,
             name="build",
         )
         return build_function.remote(
-            tasks=task,
+            tasks=tasks,
             worker_selector=worker_selector or self.worker_selector,
             app_name=self.name,
+            build_kwargs=build_kwargs,
         )
 
     def local_entrypoint(self, *args, **kwargs):

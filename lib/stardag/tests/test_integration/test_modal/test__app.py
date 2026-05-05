@@ -321,6 +321,27 @@ class TestEndToEndBuild:
         assert root.target().exists()
         assert root.target().load() == 10  # sum(range(5)) = 0+1+2+3+4
 
+    def test_build_remote_multiple_roots(self, isolated_modal_target_root):
+        """build_remote accepts a sequence of root tasks (not just one)."""
+        from stardag.build._base import BuildSummary
+
+        # Two independent roots — distinct limits so no shared deps and so
+        # task IDs don't collide with other tests' make_range(...) outputs.
+        root_a = sum_list(values=make_range(limit=3))
+        root_b = sum_list(values=make_range(limit=4))
+        assert not root_a.target().exists()
+        assert not root_b.target().exists()
+
+        result = stardag_app.build_remote([root_a, root_b])
+
+        assert isinstance(result, BuildSummary)
+        # 4 tasks: 2× make_range, 2× sum_list (each pair has different params)
+        assert result.task_count.succeeded == 4, (
+            f"Expected 4 succeeded, got {result.task_count}"
+        )
+        assert root_a.target().load() == sum(range(3))  # 3
+        assert root_b.target().load() == sum(range(4))  # 6
+
 
 @pytest.fixture
 def isolated_modal_target_root():
