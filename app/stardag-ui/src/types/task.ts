@@ -5,6 +5,7 @@ export type TaskStatus =
   | "suspended"
   | "completed"
   | "failed"
+  | "skipped"
   | "cancelled";
 export type BuildStatus =
   | "pending"
@@ -36,6 +37,12 @@ export interface Build {
   completed_at: string | null;
   // User who triggered the status change (for manual overrides)
   status_triggered_by_user: StatusTriggeredByUser | null;
+  // True iff the latest build-level event is BUILD_RESUMED — set when
+  // the SDK reused this build via sd.build(resume_build_id=...). Used
+  // by the UI to render "running (resumed)" instead of plain "running".
+  // Optional in the type so older API responses (without the field)
+  // deserialize without runtime errors.
+  is_resumed?: boolean;
 }
 
 export interface BuildListResponse {

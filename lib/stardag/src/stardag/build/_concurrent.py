@@ -601,6 +601,18 @@ async def build_aio(
     if resume_build_id is not None:
         build_id = resume_build_id
         logger.info(f"Resuming build: {build_id}")
+        # Emit a BUILD_RESUMED event so the registry flips a previously
+        # terminal build back to RUNNING and the UI surfaces "running
+        # (resumed)". On older registry servers this is a no-op (the
+        # endpoint 404s and APIRegistry swallows it with a warning).
+        try:
+            await registry.build_resume_aio(build_id)
+        except Exception as reg_err:
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark build {build_id} as resumed",
+                on_registry_failure,
+            )
     else:
         build_id = await registry.build_start_aio(root_tasks=tasks)
         logger.info(f"Started build: {build_id}")

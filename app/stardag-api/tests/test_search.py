@@ -117,6 +117,32 @@ async def test_deep_keys_in_key_suggestions(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_status_values_includes_all_filterable_statuses(client: AsyncClient):
+    """The status autocomplete returns every status users can filter on.
+
+    Previously only {pending, running, completed, failed} were exposed,
+    so suspended / skipped / cancelled were undiscoverable in the
+    search-bar autocomplete. Pin the full set so future additions to
+    TaskStatus on the API side don't silently drift.
+    """
+    resp = await client.get(
+        "/api/v1/tasks/search/values",
+        params={"key": "status"},
+    )
+    assert resp.status_code == 200
+    values = {v["value"] for v in resp.json()["values"]}
+    assert values == {
+        "pending",
+        "running",
+        "suspended",
+        "completed",
+        "failed",
+        "skipped",
+        "cancelled",
+    }
+
+
+@pytest.mark.asyncio
 async def test_sort_by_core_field(client: AsyncClient):
     """Sorting by core fields (task_name) works."""
     await _create_task(client, "sort-a", {"v": 1})

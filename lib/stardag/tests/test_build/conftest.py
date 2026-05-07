@@ -60,6 +60,14 @@ class RecordingRegistry(NoOpRegistry):
         self._record("build_start_aio")
         return bid
 
+    async def build_resume_aio(self, build_id: UUID) -> None:
+        self._record("build_resume_aio")
+        await super().build_resume_aio(build_id)
+
+    def build_resume(self, build_id: UUID) -> None:
+        self._record("build_resume")
+        super().build_resume(build_id)
+
     async def build_complete_aio(self, build_id: UUID) -> None:
         self._record("build_complete_aio")
         await super().build_complete_aio(build_id)

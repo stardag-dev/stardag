@@ -424,6 +424,37 @@ class APIRegistry(RegistryABC):
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
 
+    def build_resume(self, build_id: UUID) -> None:
+        """Mark an existing build as resumed.
+
+        Emits a BUILD_RESUMED event server-side so a build that previously
+        terminated (FAILED / COMPLETED / CANCELLED / EXIT_EARLY) flips
+        back to RUNNING. The endpoint is new in the post-resume API; on
+        older servers the request 404s with FastAPI's missing-route body,
+        which we swallow with a warning so the SDK keeps working against
+        an un-upgraded registry. Resource-level 404s (build does not
+        exist) are re-raised.
+        """
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/resume",
+                params=self._get_event_params(),
+                operation="Resume build",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /builds/%s/resume; "
+                "the resumed build will keep its previous status in the "
+                "registry until you upgrade the API. Build will still run "
+                "to completion locally.",
+                build_id,
+            )
+            return
+        logger.info(f"Resumed build: {build_id}")
+
     def build_complete(self, build_id: UUID) -> None:
         """Mark a build as completed."""
         self._request(
@@ -832,6 +863,31 @@ class APIRegistry(RegistryABC):
         build_id = UUID(data["id"])
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
+
+    async def build_resume_aio(self, build_id: UUID) -> None:
+        """Async version - mark an existing build as resumed.
+
+        See :meth:`build_resume` for the backward-compat 404 handling.
+        """
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/resume",
+                params=self._get_event_params(),
+                operation="Resume build",
+            )
+        except NotFoundError as e:
+            if not _is_route_not_found(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /builds/%s/resume; "
+                "the resumed build will keep its previous status in the "
+                "registry until you upgrade the API. Build will still run "
+                "to completion locally.",
+                build_id,
+            )
+            return
+        logger.info(f"Resumed build: {build_id}")
 
     async def build_complete_aio(self, build_id: UUID) -> None:
         """Async version - mark a build as completed."""

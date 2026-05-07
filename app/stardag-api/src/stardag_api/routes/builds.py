@@ -5,7 +5,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +81,23 @@ def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
 
 
 # --- Helpers ---
+
+
+async def _touch_build_last_active(db: AsyncSession, build_id: UUID) -> None:
+    """Bump ``Build.last_active_at`` to now in the current transaction.
+
+    Called from every code path that emits an Event for a build (build- or
+    task-level), so the list-builds endpoint can sort by activity recency.
+    A resumed build (BUILD_RESUMED) thereby jumps to the top of the
+    "Home" list even if its ``created_at`` is old.
+
+    Issues a single UPDATE — for the bulk task-register path this is one
+    extra statement per call, not one per task. The caller is expected to
+    commit the surrounding transaction; we don't commit here.
+    """
+    await db.execute(
+        update(Build).where(Build.id == build_id).values(last_active_at=utc_now())
+    )
 
 
 async def _get_triggered_by_user(
@@ -195,6 +212,7 @@ async def _create_task_event(
     # event into apply_event_to_task. The whole bundle commits atomically.
     await db.flush()
     apply_event_to_task(db_task, event)
+    await _touch_build_last_active(db, build_id)
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
@@ -262,9 +280,13 @@ async def create_build(
     record_entity_created(auth.workspace_id, "events")
 
     # Build response with derived status
-    status, started_at, completed_at, triggered_by_id = await get_build_status(
-        db, db_build.id
-    )
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, db_build.id)
     triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
@@ -280,6 +302,7 @@ async def create_build(
         started_at=started_at,
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
     )
 
 
@@ -306,8 +329,12 @@ async def list_builds(
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
+    # Sort by last_active_at so a resumed build (BUILD_RESUMED touches
+    # this column) jumps back to the top of the list. Falls back to
+    # created_at for builds that have had no activity yet (column is
+    # initialized to created_at on insert, so the fallback is implicit).
     result = await db.execute(
-        query.order_by(Build.created_at.desc())
+        query.order_by(Build.last_active_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -316,9 +343,13 @@ async def list_builds(
     # Build responses with derived status
     build_responses = []
     for build in builds:
-        status, started_at, completed_at, triggered_by_id = await get_build_status(
-            db, build.id
-        )
+        (
+            status,
+            started_at,
+            completed_at,
+            triggered_by_id,
+            is_resumed,
+        ) = await get_build_status(db, build.id)
         triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
         build_responses.append(
             BuildResponse(
@@ -334,6 +365,7 @@ async def list_builds(
                 started_at=started_at,
                 completed_at=completed_at,
                 status_triggered_by_user=triggered_by_user,
+                is_resumed=is_resumed,
             )
         )
 
@@ -365,9 +397,13 @@ async def get_build(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    status, started_at, completed_at, triggered_by_id = await get_build_status(
-        db, build.id
-    )
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
     triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
@@ -383,6 +419,7 @@ async def get_build(
         started_at=started_at,
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
     )
 
 
@@ -438,13 +475,18 @@ async def complete_build(
         event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
     db.add(event)
+    await _touch_build_last_active(db, build_id)
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
 
-    status, started_at, completed_at, triggered_by_id = await get_build_status(
-        db, build.id
-    )
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
     triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
@@ -460,6 +502,7 @@ async def complete_build(
         started_at=started_at,
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
     )
 
 
@@ -505,13 +548,18 @@ async def fail_build(
         event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
     db.add(event)
+    await _touch_build_last_active(db, build_id)
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
 
-    status, started_at, completed_at, triggered_by_id = await get_build_status(
-        db, build.id
-    )
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
     triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
@@ -527,6 +575,7 @@ async def fail_build(
         started_at=started_at,
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
     )
 
 
@@ -569,13 +618,18 @@ async def cancel_build(
         event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
     db.add(event)
+    await _touch_build_last_active(db, build_id)
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
 
-    status, started_at, completed_at, triggered_by_id = await get_build_status(
-        db, build.id
-    )
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
     triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
@@ -591,6 +645,7 @@ async def cancel_build(
         started_at=started_at,
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
     )
 
 
@@ -629,13 +684,18 @@ async def exit_early(
         event_metadata=_build_event_metadata(commit_hash),
     )
     db.add(event)
+    await _touch_build_last_active(db, build_id)
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
 
-    status, started_at, completed_at, triggered_by_id = await get_build_status(
-        db, build.id
-    )
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
     triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
 
     return BuildResponse(
@@ -651,6 +711,80 @@ async def exit_early(
         started_at=started_at,
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
+    )
+
+
+@router.post("/{build_id}/resume", response_model=BuildResponse)
+async def resume_build(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
+):
+    """Mark an existing build as resumed.
+
+    Called by the SDK when ``sd.build(resume_build_id=...)`` reuses an
+    existing build that may have already terminated. Emits a
+    ``BUILD_RESUMED`` event so ``get_build_status`` flips the build back
+    to RUNNING and the UI shows a "running (resumed)" affordance.
+
+    Args:
+        commit_hash: Optional git commit hash of the resuming run.
+    """
+    # Limit checks
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    _raise_if_limit_exceeded(
+        await check_entity_creation_limit(
+            db, auth.workspace_id, "events", limits_settings
+        )
+    )
+
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+
+    # Verify build belongs to authenticated environment
+    if build.environment_id != auth.environment_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this environment"
+        )
+
+    event = Event(
+        build_id=build_id,
+        task_id=None,
+        event_type=EventType.BUILD_RESUMED,
+        event_metadata=_build_event_metadata(commit_hash),
+    )
+    db.add(event)
+    await _touch_build_last_active(db, build_id)
+    await db.commit()
+
+    record_entity_created(auth.workspace_id, "events")
+
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
+
+    return BuildResponse(
+        id=build.id,
+        environment_id=build.environment_id,
+        user_id=build.user_id,
+        name=build.name,
+        description=build.description,
+        commit_hash=build.commit_hash,
+        root_task_ids=build.root_task_ids,
+        created_at=build.created_at,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
     )
 
 
@@ -918,6 +1052,7 @@ async def register_task(
     await db.flush()
     apply_event_to_task(db_task, event)
 
+    await _touch_build_last_active(db, build_id)
     await db.commit()
     await db.refresh(db_task)
 
@@ -1267,6 +1402,7 @@ async def register_tasks_bulk(
         # round-trip needed.
         for t, ev in zip(tasks_in, events):
             apply_event_to_task(db_task_by_task_id[t.task_id], ev)
+        await _touch_build_last_active(db, build_id)
 
     # One final flush + commit at the end. Earlier flushes (just the
     # task INSERT batch) populated the rows we need to FK against.

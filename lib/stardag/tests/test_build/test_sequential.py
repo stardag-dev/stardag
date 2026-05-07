@@ -69,6 +69,38 @@ class TestBuildSequential:
         assert dag.complete()
         assert dag.target().load() == expected_output
 
+    def test_resume_build_id_calls_build_resume(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Sequential resume fires build_resume (not build_start).
+
+        Mirrors the concurrent test for the sync code path. Verifies that
+        the regression fix (silent reuse → explicit BUILD_RESUMED event)
+        applies to build_sequential as well.
+        """
+        from tests.test_build.conftest import RecordingRegistry
+
+        recording_registry = RecordingRegistry()
+        existing_build_id = UUID("66666666-7777-8888-9999-aaaaaaaaaaaa")
+        task = SyncOnlyTask(name="resumed-task-seq")
+
+        summary = build_sequential(
+            [task],
+            registry=recording_registry,
+            resume_build_id=existing_build_id,
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert summary.build_id == existing_build_id
+
+        method_calls = [c[0] for c in recording_registry.calls]
+        assert "build_resume" in method_calls, (
+            f"Expected build_resume fired on resume; got {method_calls}"
+        )
+        assert "build_start" not in method_calls, (
+            "build_start must NOT fire when resuming"
+        )
+
     def test_uses_registry_provider_when_registry_not_passed(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],

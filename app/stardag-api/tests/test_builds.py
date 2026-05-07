@@ -111,6 +111,91 @@ async def test_fail_build(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_resume_build_after_failure(client: AsyncClient):
+    """Resuming a failed build flips its status back to running.
+
+    Reproduces the bug we fixed: previously, sd.build(resume_build_id=...)
+    silently reused the build_id but never told the registry — so a build
+    that had previously emitted BUILD_FAILED kept showing as failed in the
+    UI even though the SDK was actively running tasks under it again.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    # Build fails
+    await client.post(f"/api/v1/builds/{build_id}/fail")
+    response = await client.get(f"/api/v1/builds/{build_id}")
+    assert response.json()["status"] == "failed"
+    assert response.json()["is_resumed"] is False
+
+    # Now resume — this is what the SDK fires on sd.build(resume_build_id=...)
+    response = await client.post(f"/api/v1/builds/{build_id}/resume")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "running"
+    assert data["completed_at"] is None  # cleared by BUILD_RESUMED replay
+    assert data["is_resumed"] is True
+
+
+@pytest.mark.asyncio
+async def test_resume_build_complete_clears_resumed_flag(client: AsyncClient):
+    """A resumed build that subsequently completes shows is_resumed=False.
+
+    Once a terminal event lands after BUILD_RESUMED, the resumed-flag
+    semantic is gone — get_build_status only flags is_resumed when the
+    most recent build-level event is BUILD_RESUMED.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    await client.post(f"/api/v1/builds/{build_id}/fail")
+    await client.post(f"/api/v1/builds/{build_id}/resume")
+    await client.post(f"/api/v1/builds/{build_id}/complete")
+
+    response = await client.get(f"/api/v1/builds/{build_id}")
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["is_resumed"] is False
+
+
+@pytest.mark.asyncio
+async def test_resume_build_not_found(client: AsyncClient):
+    """Resume on a non-existent build returns 404 (resource-not-found)."""
+    fake_uuid = "00000000-0000-0000-0000-000000000099"
+    response = await client.post(f"/api/v1/builds/{fake_uuid}/resume")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_list_builds_orders_resumed_first(client: AsyncClient):
+    """A resumed build jumps to the top of the list (sorted by last_active_at).
+
+    Without this, the resumed build would stay buried at its original
+    created_at position — the whole UX point of the fix.
+    """
+    # Create three builds, each becomes "older" in created_at terms
+    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_c = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    # Default order (by last_active_at desc, populated from created_at):
+    response = await client.get(
+        "/api/v1/builds", params={"environment_id": DEFAULT_ENVIRONMENT_ID_STR}
+    )
+    ids = [b["id"] for b in response.json()["builds"]]
+    assert ids[:3] == [build_c, build_b, build_a]
+
+    # Resume the oldest — it should jump to the top.
+    await client.post(f"/api/v1/builds/{build_a}/resume")
+
+    response = await client.get(
+        "/api/v1/builds", params={"environment_id": DEFAULT_ENVIRONMENT_ID_STR}
+    )
+    ids = [b["id"] for b in response.json()["builds"]]
+    assert ids[0] == build_a, f"Expected resumed build at top, got {ids}"
+
+
+@pytest.mark.asyncio
 async def test_register_task_to_build(client: AsyncClient):
     """Test registering a task within a build."""
     # Create a build

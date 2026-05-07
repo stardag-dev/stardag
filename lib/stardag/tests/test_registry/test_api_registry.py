@@ -421,3 +421,108 @@ class TestTaskSkip404Swallow:
                 build_id=UUID("00000000-0000-0000-0000-000000000001"),
                 task=task,  # type: ignore[arg-type]
             )
+
+
+class TestBuildResume404Swallow:
+    """``build_resume`` / ``build_resume_aio`` follow the same backward-
+    compat 404 pattern as ``task_skip``: an old API that does not yet
+    expose the ``/builds/{id}/resume`` route returns FastAPI's default
+    ``Not Found`` body, which the SDK swallows with a warning so resumed
+    builds keep working (just without the registry-side status flip).
+    Genuine app-level 404s (e.g. unknown build_id) still propagate.
+    """
+
+    def _make_registry_and_handler(self, response_factory):
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        registry._client = httpx.Client(
+            transport=httpx.MockTransport(response_factory),
+            auth=registry._auth,
+        )
+        return registry
+
+    @staticmethod
+    def _inject_async_mock(registry, response_factory):
+        import asyncio
+        import httpx
+
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(response_factory),
+            auth=registry._auth,
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+
+    def test_sync_route_missing_404_is_swallowed(self, caplog):
+        """Old API: detail == 'Not Found' → warn + return, no exception."""
+        import httpx
+        import logging
+        from uuid import UUID
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        registry = self._make_registry_and_handler(handler)
+
+        with caplog.at_level(logging.WARNING):
+            registry.build_resume(UUID("00000000-0000-0000-0000-000000000001"))
+
+        assert any(
+            "does not support POST" in rec.message and "/resume" in rec.message
+            for rec in caplog.records
+        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
+
+    def test_sync_app_level_404_propagates(self):
+        """New API: detail == 'Build not found' → raise NotFoundError."""
+        import httpx
+        from uuid import UUID
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Build not found"})
+
+        registry = self._make_registry_and_handler(handler)
+
+        with pytest.raises(NotFoundError):
+            registry.build_resume(UUID("00000000-0000-0000-0000-000000000001"))
+
+    @pytest.mark.asyncio
+    async def test_aio_route_missing_404_is_swallowed(self, caplog):
+        """Async path: detail == 'Not Found' → warn + return."""
+        import httpx
+        import logging
+        from uuid import UUID
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        registry = self._make_registry_and_handler(handler)
+        self._inject_async_mock(registry, handler)
+
+        with caplog.at_level(logging.WARNING):
+            await registry.build_resume_aio(
+                UUID("00000000-0000-0000-0000-000000000001")
+            )
+
+        assert any(
+            "does not support POST" in rec.message and "/resume" in rec.message
+            for rec in caplog.records
+        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
+
+    @pytest.mark.asyncio
+    async def test_aio_app_level_404_propagates(self):
+        """Async path: app-level 404 propagates."""
+        import httpx
+        from uuid import UUID
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Build not found"})
+
+        registry = self._make_registry_and_handler(handler)
+        self._inject_async_mock(registry, handler)
+
+        with pytest.raises(NotFoundError):
+            await registry.build_resume_aio(
+                UUID("00000000-0000-0000-0000-000000000001")
+            )
