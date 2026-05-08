@@ -188,25 +188,30 @@ def cache_environment_id(
     save_id_cache(cache)
 
 
-def get_cached_workspace_slug(registry: str, workspace_id: str) -> str | None:
-    """Reverse lookup: cached workspace slug for a given UUID."""
-    cache = load_id_cache()
-    for slug, ws_id in cache.workspaces.get(registry, {}).items():
-        if ws_id == workspace_id:
-            return slug
-    return None
+def get_cached_slugs(
+    registry: str,
+    workspace_id: str | None,
+    environment_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Reverse lookup: cached (workspace_slug, environment_slug) for the given UUIDs.
 
-
-def get_cached_environment_slug(
-    registry: str, workspace_id: str, environment_id: str
-) -> str | None:
-    """Reverse lookup: cached environment slug for a given UUID."""
+    Loads the id-cache once. Returns ``(None, None)`` for inputs without a cache hit.
+    """
     cache = load_id_cache()
-    envs = cache.environments.get(registry, {}).get(workspace_id, {})
-    for slug, env_id in envs.items():
-        if env_id == environment_id:
-            return slug
-    return None
+    ws_slug: str | None = None
+    if workspace_id:
+        for slug, ws_id in cache.workspaces.get(registry, {}).items():
+            if ws_id == workspace_id:
+                ws_slug = slug
+                break
+    env_slug: str | None = None
+    if workspace_id and environment_id:
+        envs = cache.environments.get(registry, {}).get(workspace_id, {})
+        for slug, env_id in envs.items():
+            if env_id == environment_id:
+                env_slug = slug
+                break
+    return ws_slug, env_slug
 
 
 def _looks_like_uuid(value: str) -> bool:

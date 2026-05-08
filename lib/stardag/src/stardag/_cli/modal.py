@@ -30,13 +30,11 @@ from rich.console import Console
 
 from stardag._cli._helpers import get_authenticated_client
 from stardag._cli.credentials import (
+    list_registries,
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
 )
-from stardag.config.cache import (
-    get_cached_environment_slug,
-    get_cached_workspace_slug,
-)
+from stardag.config.cache import get_cached_slugs
 from stardag.config.loader import clear_config_cache, get_config
 from stardag.integration.modal import StardagApp
 
@@ -63,31 +61,44 @@ stardag_api_key_app = typer.Typer(help="Manage Stardag API keys in Modal")
 app.add_typer(stardag_api_key_app, name="stardag-api-key")
 
 
+def _registry_name_for_url(api_url: str | None) -> str | None:
+    """Look up the configured registry name for a given URL.
+
+    The id-cache is keyed by registry *name* (the TOML key under ``[registry.<name>]``)
+    rather than URL, so we reverse-lookup the name from the URL the resolved IDs were
+    fetched against. Returns ``None`` if no registry with a matching URL is configured
+    (e.g. STARDAG_API_URL is set without a corresponding TOML entry).
+    """
+    if not api_url:
+        return None
+    target = api_url.rstrip("/")
+    for name, url in list_registries().items():
+        if url.rstrip("/") == target:
+            return name
+    return None
+
+
 def _resolve_display_slugs(
+    api_url: str | None,
     workspace_id: str | None,
     environment_id: str | None,
 ) -> tuple[str | None, str | None]:
-    """Reverse-lookup workspace/environment slugs for the given UUIDs.
+    """Reverse-lookup workspace/environment slugs for the resolved UUIDs.
 
     Why: the resolved UUIDs may come from env vars or a custom config_provider
     override and have no relation to the active profile's TOML slugs. Reading
     `prof["environment"]` could display a slug for a totally different env
-    than the resolved UUID.
+    than the resolved UUID. We also can't trust ``get_config().context.registry_name``
+    because callers like ``deploy(--profile foo)`` and ``stardag_api_key_create``
+    resolve IDs under a temporarily-overridden profile, then restore the env
+    before this function runs — leaving ``get_config()`` pointing at the
+    *active* profile, which may use a different registry. Pin the registry to
+    the URL the IDs were actually resolved against.
     """
-    config = get_config()
-    registry_name = config.context.registry_name
+    registry_name = _registry_name_for_url(api_url)
     if not registry_name:
         return None, None
-
-    ws_slug = (
-        get_cached_workspace_slug(registry_name, workspace_id) if workspace_id else None
-    )
-    env_slug = (
-        get_cached_environment_slug(registry_name, workspace_id, environment_id)
-        if workspace_id and environment_id
-        else None
-    )
-    return ws_slug, env_slug
+    return get_cached_slugs(registry_name, workspace_id, environment_id)
 
 
 def _print_stardag_context(env_vars: dict[str, str]) -> None:
@@ -98,7 +109,9 @@ def _print_stardag_context(env_vars: dict[str, str]) -> None:
     ws_id = env_vars.get("STARDAG_WORKSPACE_ID", "N/A")
     env_id = env_vars.get("STARDAG_ENVIRONMENT_ID", "N/A")
 
-    ws_slug, env_slug = _resolve_display_slugs(ws_id, env_id)
+    ws_slug, env_slug = _resolve_display_slugs(
+        env_vars.get("STARDAG_API_URL"), ws_id, env_id
+    )
 
     console.print(f"[dim]  Registry: {registry}[/dim]")
 
@@ -296,7 +309,7 @@ def stardag_api_key_create(
         if api_key_name is None:
             api_key_name = f"modal-{modal_env or 'default'}"
 
-        ws_slug, env_slug = _resolve_display_slugs(ws_id, env_id)
+        ws_slug, env_slug = _resolve_display_slugs(api_url, ws_id, env_id)
         ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
         env_display = f"{env_id} ({env_slug})" if env_slug else env_id
 
