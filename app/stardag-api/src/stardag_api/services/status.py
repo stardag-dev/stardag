@@ -146,6 +146,13 @@ async def get_build_status(
             status = BuildStatus.RUNNING
             started_at = event.created_at
             status_triggered_by_user_id = None  # Not user-triggered
+            # Reset is_resumed so the flag stays consistent with its
+            # documented semantic (latest build-level event is
+            # BUILD_RESUMED). The SDK never emits BUILD_STARTED after a
+            # BUILD_RESUMED in normal flow, but the replay shouldn't rely
+            # on event ordering — admin/manual event inserts could
+            # produce any sequence.
+            is_resumed = False
         elif event.event_type == EventType.BUILD_RESUMED:
             # Treat like BUILD_STARTED, but flip the is_resumed flag and
             # clear completed_at so the UI doesn't keep showing a stale
