@@ -70,11 +70,20 @@ class Build(Base, TimestampMixin):
         default=list,
     )
 
-    # Bumped on every event creation that targets this build (build- or
-    # task-level). Drives the "Home" / list-builds ordering so that a
-    # resumed build (BUILD_RESUMED) jumps to the top instead of staying
-    # buried at its created_at position. See _touch_build_last_active in
-    # routes/builds.py.
+    # Bumped on build-level lifecycle events only (BUILD_RESUMED,
+    # BUILD_COMPLETED, BUILD_FAILED, BUILD_CANCELLED, BUILD_EXIT_EARLY) —
+    # initial creation sets it via DEFAULT. Task events do NOT touch this
+    # column, so the per-task hot path is free of contention on the build
+    # row.
+    #
+    # This column drives the "Home" / list-builds ordering: a resumed
+    # build (BUILD_RESUMED) jumps to the top instead of staying buried at
+    # its original ``created_at`` position. The trade-off vs touching on
+    # every task event is that a long-running build won't bump position
+    # while it's mid-execution — but its ``status=running`` badge already
+    # signals activity, and "most recent lifecycle change" is a cleaner
+    # sort key than "any event in the build's subtree." See
+    # ``_touch_build_last_active`` in ``routes/builds.py``.
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utc_now,

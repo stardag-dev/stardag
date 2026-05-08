@@ -160,10 +160,18 @@ async def test_resume_build_complete_clears_resumed_flag(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_resume_build_not_found(client: AsyncClient):
-    """Resume on a non-existent build returns 404 (resource-not-found)."""
+    """Resume on a non-existent build returns 404 with a resource-level body.
+
+    The SDK's missing-route fallback (APIRegistry.build_resume_aio)
+    distinguishes FastAPI's default ``{"detail": "Not Found"}`` (route
+    doesn't exist on this server) from app-level 404s like the one this
+    test exercises. Pinning the response body here keeps that contract
+    explicit on the API side.
+    """
     fake_uuid = "00000000-0000-0000-0000-000000000099"
     response = await client.post(f"/api/v1/builds/{fake_uuid}/resume")
     assert response.status_code == 404
+    assert response.json()["detail"] == "Build not found"
 
 
 @pytest.mark.asyncio
@@ -172,20 +180,32 @@ async def test_list_builds_orders_resumed_first(client: AsyncClient):
 
     Without this, the resumed build would stay buried at its original
     created_at position — the whole UX point of the fix.
+
+    A small ``asyncio.sleep`` between creates guarantees distinct
+    ``last_active_at`` timestamps even on coarse-resolution CI clocks
+    where back-to-back ``utc_now()`` calls can collide. The pre-resume
+    ordering assertion uses a set membership check so it doesn't depend
+    on ``Build.id.desc()`` (the UUID7 tiebreaker) for builds that did
+    happen to tie.
     """
-    # Create three builds, each becomes "older" in created_at terms
+    import asyncio
+
     build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await asyncio.sleep(0.005)
     build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await asyncio.sleep(0.005)
     build_c = (await client.post("/api/v1/builds", json={})).json()["id"]
 
-    # Default order (by last_active_at desc, populated from created_at):
     response = await client.get(
         "/api/v1/builds", params={"environment_id": DEFAULT_ENVIRONMENT_ID_STR}
     )
     ids = [b["id"] for b in response.json()["builds"]]
+    assert set(ids[:3]) == {build_a, build_b, build_c}
+    # Newest first when timestamps are distinct.
     assert ids[:3] == [build_c, build_b, build_a]
 
     # Resume the oldest — it should jump to the top.
+    await asyncio.sleep(0.005)
     await client.post(f"/api/v1/builds/{build_a}/resume")
 
     response = await client.get(

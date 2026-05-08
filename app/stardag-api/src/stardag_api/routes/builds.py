@@ -86,14 +86,17 @@ def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
 async def _touch_build_last_active(db: AsyncSession, build_id: UUID) -> None:
     """Bump ``Build.last_active_at`` to now in the current transaction.
 
-    Called from every code path that emits an Event for a build (build- or
-    task-level), so the list-builds endpoint can sort by activity recency.
-    A resumed build (BUILD_RESUMED) thereby jumps to the top of the
-    "Home" list even if its ``created_at`` is old.
+    Called only from the five build-level lifecycle endpoints
+    (``/resume``, ``/complete``, ``/fail``, ``/cancel``, ``/exit-early``)
+    — task events deliberately do NOT call this. Touching on every task
+    event would issue an ``UPDATE builds`` against the same row from
+    every concurrent task worker, serialising on a row-level exclusive
+    lock and bloating ``builds`` with MVCC versions. Confining the touch
+    to lifecycle events caps it at ≤ 5 UPDATEs per build lifetime, with
+    no contention.
 
-    Issues a single UPDATE — for the bulk task-register path this is one
-    extra statement per call, not one per task. The caller is expected to
-    commit the surrounding transaction; we don't commit here.
+    The caller is expected to commit the surrounding transaction; we
+    don't commit here.
     """
     await db.execute(
         update(Build).where(Build.id == build_id).values(last_active_at=utc_now())
@@ -212,7 +215,6 @@ async def _create_task_event(
     # event into apply_event_to_task. The whole bundle commits atomically.
     await db.flush()
     apply_event_to_task(db_task, event)
-    await _touch_build_last_active(db, build_id)
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
@@ -330,11 +332,12 @@ async def list_builds(
     total = total_result.scalar() or 0
 
     # Sort by last_active_at so a resumed build (BUILD_RESUMED touches
-    # this column) jumps back to the top of the list. Falls back to
-    # created_at for builds that have had no activity yet (column is
-    # initialized to created_at on insert, so the fallback is implicit).
+    # this column) jumps back to the top of the list. ``Build.id`` is a
+    # UUID7 (time-sortable) so it's a stable tiebreaker for builds that
+    # share a timestamp — without it, paginating across a tie can yield
+    # duplicates or skips.
     result = await db.execute(
-        query.order_by(Build.last_active_at.desc())
+        query.order_by(Build.last_active_at.desc(), Build.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -1052,7 +1055,6 @@ async def register_task(
     await db.flush()
     apply_event_to_task(db_task, event)
 
-    await _touch_build_last_active(db, build_id)
     await db.commit()
     await db.refresh(db_task)
 
@@ -1402,7 +1404,6 @@ async def register_tasks_bulk(
         # round-trip needed.
         for t, ev in zip(tasks_in, events):
             apply_event_to_task(db_task_by_task_id[t.task_id], ev)
-        await _touch_build_last_active(db, build_id)
 
     # One final flush + commit at the end. Earlier flushes (just the
     # task INSERT batch) populated the rows we need to FK against.
