@@ -6,6 +6,28 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-05-08
+
+`stardag modal deploy` and `stardag modal stardag-api-key create` now
+display the slug that actually corresponds to the resolved
+workspace/environment UUID. Previously the slug was read from the active
+CLI profile's TOML, which could be unrelated to the resolved UUID when
+env vars or a custom `config_provider` override the IDs — producing
+misleading lines pairing the resolved UUID with a slug from an unrelated
+profile. No client-code changes — `pip install -U stardag` is
+sufficient. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v073--correct-slug-display-in-stardag-modal-cli)
+for details.
+
+### SDK
+
+- **`stardag/_cli/modal.py`**: replaced `_get_profile_slugs` with
+  `_resolve_display_slugs`, which reverse-looks up the slug from the
+  resolved UUID via the id-cache. Slug is omitted when no cache hit
+  rather than guessing from the active profile.
+- **`stardag/config/cache.py`**: added `get_cached_workspace_slug` and
+  `get_cached_environment_slug` (UUID → slug reverse lookups).
+
 ## [0.7.2] — 2026-05-08
 
 `sd.build(resume_build_id=...)` now fires a `BUILD_RESUMED` event so
