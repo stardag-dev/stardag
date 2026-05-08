@@ -6,6 +6,74 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-05-08
+
+`sd.build(resume_build_id=...)` now fires a `BUILD_RESUMED` event so
+resumed builds flip back to **running (resumed)** in the UI and jump to
+the top of the Home list, instead of silently keeping their previous
+terminal status. No client-code changes — `pip install -U stardag` is
+sufficient. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v072--build-resume-status-fix-and-skipped-ui-polish)
+for details.
+([#141](https://github.com/stardag-dev/stardag/pull/141))
+
+### SDK
+
+- **`RegistryABC.build_resume` / `build_resume_aio`** added (default
+  no-op for older registry backends). `build`, `build_aio`,
+  `build_sequential`, `build_sequential_aio` call it whenever
+  `resume_build_id` is set, immediately after adopting the existing
+  build id. `APIRegistry` swallows the missing-route 404 from older
+  servers via the existing `_is_route_not_found` pattern (warning
+  logged, build runs to completion locally).
+
+### Registry API
+
+- **New `EventType.BUILD_RESUMED`** + **`POST
+/api/v1/builds/{build_id}/resume`** endpoint, mirroring the existing
+  `/complete` / `/fail` / `/cancel` shape. Status replay treats
+  `BUILD_RESUMED` like `BUILD_STARTED` (flips status to `RUNNING`,
+  clears `completed_at`) and exposes a derived `is_resumed: bool` flag
+  on `BuildResponse` — true while the latest build-level event is
+  `BUILD_RESUMED`, cleared by any subsequent terminal or
+  `BUILD_STARTED` event.
+- **New `Build.last_active_at` column** (Alembic migration backfills
+  from `created_at`). Touched only on build-level lifecycle events
+  (`BUILD_RESUMED` / `BUILD_COMPLETED` / `BUILD_FAILED` /
+  `BUILD_CANCELLED` / `BUILD_EXIT_EARLY`) — task events deliberately
+  skip this write to avoid row-lock contention against the build row
+  under high task concurrency. `GET /builds` now sorts by
+  `(last_active_at desc, id desc)` so resumed builds rise to the top
+  while `Build.id` (UUID7) keeps pagination stable across timestamp
+  ties.
+- **`/tasks/search/values?key=status`** autocomplete returns the full
+  filterable status set (was hardcoded to `pending`/`running`/
+  `completed`/`failed`; now includes `suspended`/`skipped`/`cancelled`).
+  `unregistered` is still excluded — it's an internal phantom-row
+  marker, not a status users filter on.
+
+### UI
+
+- **"running (resumed)" badge** in `BuildStatusBadge` (Home list and
+  build-view breadcrumb) when the API reports `is_resumed`.
+- **`skipped` task status** added to `TaskStatus` (was previously
+  unhandled). Renders in **amber** across `StatusBadge`, the DAG node
+  border (`TaskNode`), and the Task Explorer table — was effectively
+  near-invisible black-on-dark-blue before. The build-view status
+  filter dropdown also gained the missing **Skipped** and
+  **Cancelled** options.
+
+### Compatibility
+
+- **New SDK against an older Registry API** (no `/resume` route):
+  degrades gracefully via `_is_route_not_found`. The build still runs
+  to completion locally; the registry-side status flip is the only
+  thing missing until the API is upgraded.
+- **Older SDK against the new API**: unaffected. The new SDK call is
+  additive, and `last_active_at` is initialised on insert by the column
+  default plus bumped by the new build-level handlers, so list
+  ordering is correct without SDK cooperation.
+
 ## [0.7.1] — 2026-05-05
 
 Modal: `StardagApp.build_spawn` / `build_remote` now accept multiple root

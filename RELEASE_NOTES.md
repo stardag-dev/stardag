@@ -6,6 +6,50 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.7.2 — Build resume status fix and SKIPPED UI polish
+
+Fixes a UX bug where `sd.build(resume_build_id=...)` silently reused the
+build id without notifying the registry — so a build that previously
+terminated (`failed` / `cancelled` / `completed` / `exit_early`) kept
+showing its old terminal status while the SDK actively ran tasks under
+it again. The SDK now fires a `BUILD_RESUMED` event immediately after
+adopting the resumed id, so the registry flips the build back to
+`running` and the UI surfaces a **"running (resumed)"** badge with the
+build pinned to the top of the Home list.
+
+**No client-code changes** — `pip install -U stardag` is sufficient.
+
+### What changed in the SDK
+
+- `RegistryABC.build_resume` / `build_resume_aio` (default no-op)
+  added. `build`, `build_aio`, `build_sequential`, and
+  `build_sequential_aio` invoke it whenever `resume_build_id` is set.
+- `APIRegistry.build_resume[_aio]` posts to
+  `POST /api/v1/builds/{build_id}/resume`. Older registry servers that
+  don't expose this route return FastAPI's default `Not Found` body;
+  the SDK swallows that with a warning (same `_is_route_not_found`
+  pattern used by `task_skip` and `add_dependencies`) so resumed builds
+  still run to completion against an un-upgraded registry — only the
+  status-flip in the UI is missing in that combination.
+
+### Compatibility
+
+| SDK / API combination               | Behaviour                                                                                                                                              |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| New SDK + new API (≥ 0.7.2 on both) | Resumed build flips to `running (resumed)` and rises to top of Home list.                                                                              |
+| New SDK + old API                   | SDK fires `build_resume[_aio]` → 404 → swallowed with a warning. Build runs to completion; UI shows the old terminal status until the API is upgraded. |
+| Old SDK + new API                   | Unchanged behaviour. The new API additions (`/resume`, `last_active_at`, `is_resumed`) are additive.                                                   |
+
+### Drive-by UI polish
+
+The same release also fixes `TaskStatus = "skipped"` rendering across
+the UI — previously near-invisible (black-on-dark-blue) on the
+build-view task table and missing from the build-view status filter
+dropdown. These are UI-only changes and don't affect the SDK; see
+[CHANGELOG.md](CHANGELOG.md#072--2026-05-08) for the full list.
+
+---
+
 ## v0.7.1 — Multi-root builds and `build_kwargs` on `StardagApp`
 
 Two additive changes to `stardag.integration.modal`, plus one renamed
