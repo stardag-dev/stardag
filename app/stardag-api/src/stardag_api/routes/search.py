@@ -879,13 +879,20 @@ async def get_value_suggestions(
     """
     environment_id = auth.environment_id
 
-    # Handle status specially (no caching needed - static values)
+    # Handle status specially (no caching needed - static values).
+    # Keep this list in sync with TaskStatus on the API side and the
+    # TaskStatus type on the UI side. "unregistered" is intentionally
+    # excluded — it's an internal phantom-row marker, not a status users
+    # filter on.
     if key == "status":
         values = [
             ValueSuggestion(value="pending"),
             ValueSuggestion(value="running"),
+            ValueSuggestion(value="suspended"),
             ValueSuggestion(value="completed"),
             ValueSuggestion(value="failed"),
+            ValueSuggestion(value="skipped"),
+            ValueSuggestion(value="cancelled"),
         ]
         if prefix:
             values = [v for v in values if v.value.startswith(prefix)]

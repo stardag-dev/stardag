@@ -74,6 +74,23 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         return UUID("00000000-0000-0000-0000-000000000000")
 
+    def build_resume(self, build_id: UUID) -> None:
+        """Mark an existing build as resumed.
+
+        Called when ``sd.build(resume_build_id=...)`` reuses an existing
+        build (potentially in a terminal state) instead of starting a new
+        one. The registry should record a BUILD_RESUMED event so the
+        build flips back to RUNNING and the UI can surface a
+        "running (resumed)" affordance.
+
+        Default implementation is a no-op so older registry backends
+        keep working unchanged.
+
+        Args:
+            build_id: The build UUID being resumed.
+        """
+        pass
+
     def build_complete(self, build_id: UUID) -> None:
         """Mark a build as completed successfully.
 
@@ -315,6 +332,10 @@ class RegistryABC(metaclass=abc.ABCMeta):
     ) -> UUID:
         """Async version of build_start."""
         return self.build_start(root_tasks, description)
+
+    async def build_resume_aio(self, build_id: UUID) -> None:
+        """Async version of build_resume."""
+        self.build_resume(build_id)
 
     async def build_complete_aio(self, build_id: UUID) -> None:
         """Async version of build_complete."""

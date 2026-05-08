@@ -278,7 +278,9 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       { label: "Builds", onClick: onBack },
       {
         label: build?.name ?? buildId.slice(0, 8),
-        detail: build ? <BuildStatusBadge status={build.status} /> : undefined,
+        detail: build ? (
+          <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
+        ) : undefined,
       },
     ];
     if (selectedTask) {

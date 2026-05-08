@@ -8,13 +8,34 @@ const STATUS_STYLES: Record<string, string> = {
   pending: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400",
 };
 
-export function BuildStatusBadge({ status }: { status: string }) {
+export function BuildStatusBadge({
+  status,
+  isResumed = false,
+}: {
+  status: string;
+  // True when the build's RUNNING state was triggered by a BUILD_RESUMED
+  // event (sd.build resume_build_id flow). Used to render
+  // "running (resumed)" in place of plain "running".
+  isResumed?: boolean;
+}) {
   const style = STATUS_STYLES[status] ?? STATUS_STYLES.pending;
-  const label = status === "exit_early" ? "exited early" : status;
+  let label: string;
+  if (status === "exit_early") {
+    label = "exited early";
+  } else if (status === "running" && isResumed) {
+    label = "running (resumed)";
+  } else {
+    label = status;
+  }
+  const title =
+    status === "running" && isResumed
+      ? "Build was resumed via sd.build(resume_build_id=...)"
+      : undefined;
 
   return (
     <span
       className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${style}`}
+      title={title}
     >
       {label}
     </span>

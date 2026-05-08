@@ -12,6 +12,9 @@ interface StatusBadgeProps {
   onStatusBuildClick?: (buildId: string) => void;
 }
 
+// Skipped uses amber (warmer than pending's yellow) to be visible against
+// dark-blue table rows where it previously rendered near-invisible black-
+// on-dark, while staying distinct from pending which is plain yellow.
 const statusStyles: Record<TaskStatus, string> = {
   unregistered:
     "bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400 border border-dashed border-gray-400 dark:border-gray-500",
@@ -20,6 +23,7 @@ const statusStyles: Record<TaskStatus, string> = {
   suspended: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
   completed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
   failed: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
+  skipped: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
   cancelled: "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-300",
 };
 
@@ -34,6 +38,8 @@ const statusStylesMuted: Record<TaskStatus, string> = {
   completed:
     "bg-green-100/50 text-green-800/60 dark:bg-green-900/20 dark:text-green-400/50",
   failed: "bg-red-100/50 text-red-800/60 dark:bg-red-900/20 dark:text-red-400/50",
+  skipped:
+    "bg-amber-100/50 text-amber-800/60 dark:bg-amber-900/20 dark:text-amber-400/50",
   cancelled:
     "bg-gray-100/50 text-gray-800/60 dark:bg-gray-900/20 dark:text-gray-400/50",
 };

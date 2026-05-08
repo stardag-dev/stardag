@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, Index, JSON, String, Text, Uuid
+from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text, Uuid
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
+from stardag_api.models.base import Base, TimestampMixin, generate_uuid7, utc_now
 
 if TYPE_CHECKING:
     from stardag_api.models.event import Event
@@ -27,6 +28,11 @@ class Build(Base, TimestampMixin):
     __tablename__ = "builds"
     __table_args__ = (
         Index("ix_builds_environment_created", "environment_id", "created_at"),
+        Index(
+            "ix_builds_environment_last_active",
+            "environment_id",
+            "last_active_at",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -62,6 +68,26 @@ class Build(Base, TimestampMixin):
         JSON().with_variant(JSONB(), "postgresql"),
         nullable=False,
         default=list,
+    )
+
+    # Bumped on build-level lifecycle events only (BUILD_RESUMED,
+    # BUILD_COMPLETED, BUILD_FAILED, BUILD_CANCELLED, BUILD_EXIT_EARLY) —
+    # initial creation sets it via DEFAULT. Task events do NOT touch this
+    # column, so the per-task hot path is free of contention on the build
+    # row.
+    #
+    # This column drives the "Home" / list-builds ordering: a resumed
+    # build (BUILD_RESUMED) jumps to the top instead of staying buried at
+    # its original ``created_at`` position. The trade-off vs touching on
+    # every task event is that a long-running build won't bump position
+    # while it's mid-execution — but its ``status=running`` badge already
+    # signals activity, and "most recent lifecycle change" is a cleaner
+    # sort key than "any event in the build's subtree." See
+    # ``_touch_build_last_active`` in ``routes/builds.py``.
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        nullable=False,
     )
 
     # Relationships

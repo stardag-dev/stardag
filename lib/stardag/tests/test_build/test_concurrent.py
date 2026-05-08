@@ -166,6 +166,41 @@ class TestBuildAio:
         assert task.target().load()["mode"] == "sync"
 
     @pytest.mark.asyncio
+    async def test_resume_build_id_calls_build_resume(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Passing resume_build_id fires build_resume_aio (not build_start_aio).
+
+        Regression: previously the SDK silently reused the build_id with
+        no registry call, so a previously-failed build kept showing as
+        FAILED in the UI even while the SDK ran tasks under it.
+        """
+        from tests.test_build.conftest import RecordingRegistry
+
+        recording_registry = RecordingRegistry()
+        existing_build_id = UUID("11111111-2222-3333-4444-555555555555")
+        task = SyncOnlyTask(name="resumed-task")
+
+        summary = await build_aio(
+            [task],
+            registry=recording_registry,
+            resume_build_id=existing_build_id,
+        )
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert summary.build_id == existing_build_id, (
+            "Resume should preserve the supplied build_id"
+        )
+
+        method_calls = [c[0] for c in recording_registry.calls]
+        assert "build_resume_aio" in method_calls, (
+            f"Expected build_resume_aio fired on resume; got {method_calls}"
+        )
+        assert "build_start_aio" not in method_calls, (
+            "build_start_aio must NOT fire when resuming"
+        )
+
+    @pytest.mark.asyncio
     async def test_dynamic_deps(
         self,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],

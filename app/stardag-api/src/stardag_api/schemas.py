@@ -118,6 +118,12 @@ class BuildResponse(BaseModel):
     completed_at: datetime | None = None
     # User who triggered the status change (for manual overrides)
     status_triggered_by_user: StatusTriggeredByUser | None = None
+    # True if the most-recent build-level event is BUILD_RESUMED — i.e.
+    # the build was picked up via sd.build(resume_build_id=...) after
+    # finishing/failing. UI surfaces this as "running (resumed)".
+    # Defaulted to False so older API responses (pre-resume support)
+    # deserialize cleanly into clients that expect the field.
+    is_resumed: bool = False
 
 
 class BuildListResponse(BaseModel):

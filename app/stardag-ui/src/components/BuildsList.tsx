@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchBuilds } from "../api/tasks";
 import { useBreadcrumb } from "../context/BreadcrumbContext";
 import { useEnvironment } from "../context/EnvironmentContext";
-import type { Build, BuildStatus } from "../types/task";
+import type { Build } from "../types/task";
+import { BuildStatusBadge } from "./BuildStatusBadge";
 
 interface BuildsListProps {
   onSelectBuild: (buildId: string) => void;
@@ -26,21 +27,6 @@ function formatRelativeTime(dateString: string): string {
   if (diffHours < 24) return `${diffHours}h ago`;
   if (diffDays < 7) return `${diffDays}d ago`;
   return date.toLocaleDateString();
-}
-
-function getBuildStatusStyle(status: BuildStatus): string {
-  switch (status) {
-    case "completed":
-      return "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300";
-    case "failed":
-      return "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300";
-    case "running":
-      return "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300";
-    case "cancelled":
-      return "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-300";
-    default:
-      return "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300";
-  }
 }
 
 function formatDuration(startedAt: string | null, completedAt: string | null): string {
@@ -184,13 +170,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
             >
               {/* Status indicator */}
               <div className="flex-shrink-0">
-                <span
-                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${getBuildStatusStyle(
-                    build.status,
-                  )}`}
-                >
-                  {build.status}
-                </span>
+                <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
               </div>
 
               {/* Build info */}

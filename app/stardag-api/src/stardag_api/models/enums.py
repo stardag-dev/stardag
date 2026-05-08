@@ -49,6 +49,9 @@ class EventType(str, enum.Enum):
 
     # Build events
     BUILD_STARTED = "build_started"
+    BUILD_RESUMED = (
+        "build_resumed"  # Existing build picked up by sd.build(resume_build_id=...)
+    )
     BUILD_COMPLETED = "build_completed"
     BUILD_FAILED = "build_failed"
     BUILD_CANCELLED = "build_cancelled"

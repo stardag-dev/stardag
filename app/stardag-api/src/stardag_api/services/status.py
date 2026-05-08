@@ -112,11 +112,18 @@ def apply_event_to_task(task: Task, event: Event) -> None:
 
 async def get_build_status(
     db: AsyncSession, build_id: UUID
-) -> tuple[BuildStatus, datetime | None, datetime | None, str | None]:
+) -> tuple[BuildStatus, datetime | None, datetime | None, str | None, bool]:
     """Get derived build status from events.
 
     Returns:
-        Tuple of (status, started_at, completed_at, status_triggered_by_user_id)
+        Tuple of (status, started_at, completed_at,
+                  status_triggered_by_user_id, is_resumed).
+
+    ``is_resumed`` is True iff the build has at least one BUILD_RESUMED
+    event AND that event is more recent than any terminal event — i.e. the
+    build was picked up again after finishing/failing and is currently
+    treated as RUNNING under the resume semantics. The UI uses this to
+    surface a "running (resumed)" affordance.
     """
     # Get build-level events (task_id is NULL)
     result = await db.execute(
@@ -131,6 +138,7 @@ async def get_build_status(
     started_at: datetime | None = None
     completed_at: datetime | None = None
     status_triggered_by_user_id: str | None = None
+    is_resumed = False
 
     # Process events from oldest to newest to build final state
     for event in reversed(events):
@@ -138,9 +146,27 @@ async def get_build_status(
             status = BuildStatus.RUNNING
             started_at = event.created_at
             status_triggered_by_user_id = None  # Not user-triggered
+            # Reset is_resumed so the flag stays consistent with its
+            # documented semantic (latest build-level event is
+            # BUILD_RESUMED). The SDK never emits BUILD_STARTED after a
+            # BUILD_RESUMED in normal flow, but the replay shouldn't rely
+            # on event ordering — admin/manual event inserts could
+            # produce any sequence.
+            is_resumed = False
+        elif event.event_type == EventType.BUILD_RESUMED:
+            # Treat like BUILD_STARTED, but flip the is_resumed flag and
+            # clear completed_at so the UI doesn't keep showing a stale
+            # "completed at" from the previous terminal event.
+            status = BuildStatus.RUNNING
+            completed_at = None
+            status_triggered_by_user_id = None
+            is_resumed = True
+            # Don't overwrite started_at — the build started when it first
+            # started; resume is a separate concept.
         elif event.event_type == EventType.BUILD_COMPLETED:
             status = BuildStatus.COMPLETED
             completed_at = event.created_at
+            is_resumed = False
             # Check if this was user-triggered (manual override)
             status_triggered_by_user_id = (
                 event.event_metadata.get("triggered_by_user_id")
@@ -150,6 +176,7 @@ async def get_build_status(
         elif event.event_type == EventType.BUILD_FAILED:
             status = BuildStatus.FAILED
             completed_at = event.created_at
+            is_resumed = False
             status_triggered_by_user_id = (
                 event.event_metadata.get("triggered_by_user_id")
                 if event.event_metadata
@@ -158,6 +185,7 @@ async def get_build_status(
         elif event.event_type == EventType.BUILD_CANCELLED:
             status = BuildStatus.CANCELLED
             completed_at = event.created_at
+            is_resumed = False
             status_triggered_by_user_id = (
                 event.event_metadata.get("triggered_by_user_id")
                 if event.event_metadata
@@ -166,9 +194,10 @@ async def get_build_status(
         elif event.event_type == EventType.BUILD_EXIT_EARLY:
             status = BuildStatus.EXIT_EARLY
             completed_at = event.created_at
+            is_resumed = False
             status_triggered_by_user_id = None  # Not user-triggered
 
-    return status, started_at, completed_at, status_triggered_by_user_id
+    return status, started_at, completed_at, status_triggered_by_user_id, is_resumed
 
 
 async def get_task_status_in_build(

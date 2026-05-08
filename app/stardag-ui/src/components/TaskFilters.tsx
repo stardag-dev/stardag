@@ -33,6 +33,8 @@ export function TaskFilters({
         <option value="suspended">Suspended</option>
         <option value="completed">Completed</option>
         <option value="failed">Failed</option>
+        <option value="skipped">Skipped</option>
+        <option value="cancelled">Cancelled</option>
       </select>
     </>
   );

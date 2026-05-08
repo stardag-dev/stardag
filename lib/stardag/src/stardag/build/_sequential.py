@@ -205,6 +205,17 @@ def build_sequential(
     # register tasks against.
     if resume_build_id is not None:
         build_id = resume_build_id
+        # Emit a BUILD_RESUMED event so the registry flips a previously
+        # terminal build back to RUNNING. On older registry servers this
+        # is a no-op (the endpoint 404s and APIRegistry swallows it).
+        try:
+            registry.build_resume(build_id)
+        except Exception as reg_err:
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark build {build_id} as resumed",
+                on_registry_failure,
+            )
     else:
         build_id = registry.build_start(root_tasks=tasks_list)
 
@@ -751,6 +762,17 @@ async def build_sequential_aio(
     # register tasks against.
     if resume_build_id is not None:
         build_id = resume_build_id
+        # Emit a BUILD_RESUMED event so the registry flips a previously
+        # terminal build back to RUNNING. On older registry servers this
+        # is a no-op (the endpoint 404s and APIRegistry swallows it).
+        try:
+            await registry.build_resume_aio(build_id)
+        except Exception as reg_err:
+            handle_registry_error(
+                reg_err,
+                f"Failed to mark build {build_id} as resumed",
+                on_registry_failure,
+            )
     else:
         build_id = await registry.build_start_aio(root_tasks=tasks_list)
 
