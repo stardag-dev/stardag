@@ -188,6 +188,27 @@ def cache_environment_id(
     save_id_cache(cache)
 
 
+def get_cached_workspace_slug(registry: str, workspace_id: str) -> str | None:
+    """Reverse lookup: cached workspace slug for a given UUID."""
+    cache = load_id_cache()
+    for slug, ws_id in cache.workspaces.get(registry, {}).items():
+        if ws_id == workspace_id:
+            return slug
+    return None
+
+
+def get_cached_environment_slug(
+    registry: str, workspace_id: str, environment_id: str
+) -> str | None:
+    """Reverse lookup: cached environment slug for a given UUID."""
+    cache = load_id_cache()
+    envs = cache.environments.get(registry, {}).get(workspace_id, {})
+    for slug, env_id in envs.items():
+        if env_id == environment_id:
+            return slug
+    return None
+
+
 def _looks_like_uuid(value: str) -> bool:
     """Check if a string looks like a UUID."""
     uuid_pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"

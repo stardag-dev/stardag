@@ -30,10 +30,12 @@ from rich.console import Console
 
 from stardag._cli._helpers import get_authenticated_client
 from stardag._cli.credentials import (
-    get_active_profile,
-    list_profiles,
     resolve_environment_slug_to_id,
     resolve_workspace_slug_to_id,
+)
+from stardag.config.cache import (
+    get_cached_environment_slug,
+    get_cached_workspace_slug,
 )
 from stardag.config.loader import clear_config_cache, get_config
 from stardag.integration.modal import StardagApp
@@ -61,37 +63,34 @@ stardag_api_key_app = typer.Typer(help="Manage Stardag API keys in Modal")
 app.add_typer(stardag_api_key_app, name="stardag-api-key")
 
 
-def _get_profile_slugs(
-    profile_name: str | None,
-    workspace_id: str | None = None,
-    environment_id: str | None = None,
+def _resolve_display_slugs(
+    workspace_id: str | None,
+    environment_id: str | None,
 ) -> tuple[str | None, str | None]:
-    """Get workspace and environment slugs from a profile.
+    """Reverse-lookup workspace/environment slugs for the given UUIDs.
 
-    Returns (workspace_slug, environment_slug) where slug is None if
-    the profile value matches the resolved ID (i.e. it's already a UUID).
+    Why: the resolved UUIDs may come from env vars or a custom config_provider
+    override and have no relation to the active profile's TOML slugs. Reading
+    `prof["environment"]` could display a slug for a totally different env
+    than the resolved UUID.
     """
-    if not profile_name:
-        profile_name_resolved, _ = get_active_profile()
-        profile_name = profile_name_resolved
-
-    if not profile_name:
+    config = get_config()
+    registry_name = config.context.registry_name
+    if not registry_name:
         return None, None
 
-    profiles = list_profiles()
-    prof = profiles.get(profile_name)
-    if not prof:
-        return None, None
-
-    ws_slug = prof["workspace"] if prof["workspace"] != workspace_id else None
-    env_slug = prof["environment"] if prof["environment"] != environment_id else None
+    ws_slug = (
+        get_cached_workspace_slug(registry_name, workspace_id) if workspace_id else None
+    )
+    env_slug = (
+        get_cached_environment_slug(registry_name, workspace_id, environment_id)
+        if workspace_id and environment_id
+        else None
+    )
     return ws_slug, env_slug
 
 
-def _print_stardag_context(
-    env_vars: dict[str, str],
-    profile_name: str | None = None,
-) -> None:
+def _print_stardag_context(env_vars: dict[str, str]) -> None:
     """Print stardag context info (registry, workspace, environment, target roots)."""
     import json
 
@@ -99,7 +98,7 @@ def _print_stardag_context(
     ws_id = env_vars.get("STARDAG_WORKSPACE_ID", "N/A")
     env_id = env_vars.get("STARDAG_ENVIRONMENT_ID", "N/A")
 
-    ws_slug, env_slug = _get_profile_slugs(profile_name, ws_id, env_id)
+    ws_slug, env_slug = _resolve_display_slugs(ws_id, env_id)
 
     console.print(f"[dim]  Registry: {registry}[/dim]")
 
@@ -297,7 +296,7 @@ def stardag_api_key_create(
         if api_key_name is None:
             api_key_name = f"modal-{modal_env or 'default'}"
 
-        ws_slug, env_slug = _get_profile_slugs(stardag_profile, ws_id, env_id)
+        ws_slug, env_slug = _resolve_display_slugs(ws_id, env_id)
         ws_display = f"{ws_id} ({ws_slug})" if ws_slug else ws_id
         env_display = f"{env_id} ({env_slug})" if env_slug else env_id
 
@@ -561,7 +560,7 @@ def deploy(
             console.print(f"[cyan]Using stardag profile: {profile}[/cyan]")
             env_vars = get_profile_env_vars(profile)
             if env_vars:
-                _print_stardag_context(env_vars, profile)
+                _print_stardag_context(env_vars)
                 extra_secrets.append(
                     modal.Secret.from_dict(dict(env_vars))  # type: ignore[arg-type]
                 )

@@ -6,6 +6,28 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.7.3 — Correct slug display in `stardag modal` CLI
+
+Fixes a misleading display in `stardag modal deploy` and
+`stardag modal stardag-api-key create` where the workspace/environment
+slug printed alongside the resolved UUID could come from a different
+profile than the one whose IDs were actually used. The CLI now
+reverse-looks up the slug from the resolved UUID via the id-cache, or
+omits it when no cache entry exists.
+
+This typically affected setups that override `STARDAG_WORKSPACE_ID` /
+`STARDAG_ENVIRONMENT_ID` via env vars or a custom `config_provider`
+default factory while leaving an unrelated profile active — for example
+hypothetical output like
+`Environment: <env-a-uuid> (env-b-slug)`, where the UUID resolves to
+environment A but the slug is read from a profile pointing at
+environment B. The deployed bytes were already correct; only the
+printed slug was wrong.
+
+**No client-code changes** — `pip install -U stardag` is sufficient.
+
+---
+
 ## v0.7.2 — Build resume status fix and SKIPPED UI polish
 
 Fixes a UX bug where `sd.build(resume_build_id=...)` silently reused the
