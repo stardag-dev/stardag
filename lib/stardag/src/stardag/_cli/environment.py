@@ -75,10 +75,11 @@ def _handle_api_error(response: httpx.Response, resource: str = "resource") -> N
             err=True,
         )
     elif response.status_code == 403:
-        typer.echo(
-            f"Error: Permission denied. Admin role or higher is required to modify {resource}.",
-            err=True,
-        )
+        try:
+            detail = response.json().get("detail", "Permission denied")
+        except ValueError:
+            detail = "Permission denied"
+        typer.echo(f"Error: {detail}", err=True)
     elif response.status_code == 404:
         typer.echo(f"Error: {resource.capitalize()} not found.", err=True)
     elif response.status_code == 409:
