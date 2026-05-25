@@ -40,6 +40,10 @@ class LimitsSettings(BaseSettings):
     max_dependency_ids_per_task: Annotated[int, Field(ge=1)] | None = None
     max_artifacts_per_task: Annotated[int, Field(ge=1)] | None = None
 
+    # Tenancy quotas (enforced in routes/workspaces.py)
+    max_workspaces_per_user: Annotated[int, Field(ge=1)] | None = None
+    max_environments_per_workspace: Annotated[int, Field(ge=1)] | None = None
+
     # Cache TTL for DB count queries (seconds)
     entity_count_cache_ttl: Annotated[int, Field(ge=1)] = 60
 

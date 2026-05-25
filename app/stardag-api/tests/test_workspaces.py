@@ -1,5 +1,6 @@
 """Tests for workspace management routes."""
 
+from unittest.mock import patch
 from uuid import UUID
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from stardag_api.auth.dependencies import get_current_user_flexible, get_token
 from stardag_api.auth.tokens import InternalTokenPayload
 from stardag_api.db import get_db
+from stardag_api.limits import LimitsSettings
 from stardag_api.main import app
 from stardag_api.models import Environment, Workspace, WorkspaceMember, User
 from stardag_api.models.enums import WorkspaceRole
@@ -213,6 +215,61 @@ async def test_create_workspace_duplicate_slug(
             )
 
         assert response.status_code == 409
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_create_workspace_quota(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """`limits_settings.max_workspaces_per_user` enforces a per-user cap."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_current_user_flexible():
+        return test_user
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user_flexible] = (
+        override_get_current_user_flexible
+    )
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # None (default): cap is not enforced — two creates succeed.
+            with patch(
+                "stardag_api.routes.workspaces.limits_settings",
+                LimitsSettings(max_workspaces_per_user=None),
+            ):
+                r1 = await client.post(
+                    "/api/v1/ui/workspaces",
+                    json={"name": "Free 1", "slug": "free-1"},
+                )
+                r2 = await client.post(
+                    "/api/v1/ui/workspaces",
+                    json={"name": "Free 2", "slug": "free-2"},
+                )
+                assert r1.status_code == 201
+                assert r2.status_code == 201
+
+            # Cap of 1: the user already owns two workspaces with
+            # created_by_id set above, so the next create must return 403.
+            with patch(
+                "stardag_api.routes.workspaces.limits_settings",
+                LimitsSettings(max_workspaces_per_user=1),
+            ):
+                r3 = await client.post(
+                    "/api/v1/ui/workspaces",
+                    json={"name": "Capped", "slug": "capped"},
+                )
+                assert r3.status_code == 403
+                assert "at most 1 workspaces" in r3.json()["detail"]
     finally:
         app.dependency_overrides.clear()
 
@@ -467,6 +524,59 @@ async def test_create_environment(
         data = response.json()
         assert data["name"] == "New Environment"
         assert data["slug"] == "new-environment"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_create_environment_quota(
+    async_engine, test_user: User, test_workspace_with_owner: Workspace
+):
+    """`limits_settings.max_environments_per_workspace` enforces the cap."""
+    async_session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    mock_token = _create_mock_internal_token(
+        user_id=test_user.id,
+        workspace_id=test_workspace_with_owner.id,
+    )
+
+    async def override_get_db():
+        async with async_session_maker() as session:
+            yield session
+
+    async def override_get_token():
+        return mock_token
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_token] = override_get_token
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # None (default): cap is not enforced. The fixture already
+            # created one "default" environment in this workspace.
+            with patch(
+                "stardag_api.routes.workspaces.limits_settings",
+                LimitsSettings(max_environments_per_workspace=None),
+            ):
+                r1 = await client.post(
+                    f"/api/v1/ui/workspaces/{test_workspace_with_owner.id}/environments",
+                    json={"name": "Two", "slug": "two"},
+                )
+                assert r1.status_code == 201
+
+            # Cap of 2: the workspace now has 2 environments (default + Two),
+            # so the next create must return 403.
+            with patch(
+                "stardag_api.routes.workspaces.limits_settings",
+                LimitsSettings(max_environments_per_workspace=2),
+            ):
+                r2 = await client.post(
+                    f"/api/v1/ui/workspaces/{test_workspace_with_owner.id}/environments",
+                    json={"name": "Three", "slug": "three"},
+                )
+                assert r2.status_code == 403
+                assert "at most 2 environments" in r2.json()["detail"]
     finally:
         app.dependency_overrides.clear()
 

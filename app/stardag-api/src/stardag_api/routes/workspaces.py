@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from stardag_api.auth import get_current_user, get_current_user_flexible
+from stardag_api.config import limits_settings
 from stardag_api.db import get_db
 from stardag_api.models import (
     Invite,
@@ -231,10 +232,11 @@ async def create_workspace(
         )
     )
     workspace_count = workspace_count_result.scalar() or 0
-    if workspace_count >= Workspace.MAX_WORKSPACES_PER_USER:
+    max_workspaces = limits_settings.max_workspaces_per_user
+    if max_workspaces is not None and workspace_count >= max_workspaces:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"You can create at most {Workspace.MAX_WORKSPACES_PER_USER} workspaces",
+            detail=f"You can create at most {max_workspaces} workspaces",
         )
 
     # Check if slug is taken
@@ -760,10 +762,11 @@ async def create_environment(
         )
     )
     environment_count = environment_count_result.scalar() or 0
-    if environment_count >= Workspace.MAX_ENVIRONMENTS_PER_WORKSPACE:
+    max_environments = limits_settings.max_environments_per_workspace
+    if max_environments is not None and environment_count >= max_environments:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Workspace can have at most {Workspace.MAX_ENVIRONMENTS_PER_WORKSPACE} environments",
+            detail=f"Workspace can have at most {max_environments} environments",
         )
 
     # Check if slug exists in this workspace
