@@ -118,7 +118,18 @@ class StardagBaseModel(BaseModel):
             maybe_stardag_field = _get_annotation(field, StardagField)
             if maybe_stardag_field is not None:
                 stardag_field: StardagField = maybe_stardag_field
-                if stardag_field.compat_default == value or stardag_field.hash_exclude:
+                # Compare the *raw* Python value (not the already-serialized
+                # `value`) against compat_default. The serialized form differs
+                # from the Python value for enums (-> .value), tuples (-> list),
+                # and fields with custom/hash-only serializers, so comparing the
+                # serialized value would silently fail to drop the field for
+                # those types. Using getattr(self, name) is also symmetric with
+                # _check_add_compatibility_defaults, which injects the raw
+                # compat_default on the validate side.
+                if (
+                    stardag_field.compat_default is not _UNSET
+                    and getattr(self, name) == stardag_field.compat_default
+                ) or stardag_field.hash_exclude:
                     continue
 
             out[name] = value
