@@ -205,7 +205,7 @@ class ModelWithHashExclude(StardagBaseModel):
     b: int
 
 
-class Color(enum.StrEnum):
+class Color(str, enum.Enum):  # `str, Enum` for Python 3.10 (StrEnum is 3.11+)
     RED = "red"
     GREEN = "green"
 
