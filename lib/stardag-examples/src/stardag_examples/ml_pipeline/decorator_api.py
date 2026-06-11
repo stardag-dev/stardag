@@ -25,6 +25,7 @@ base_task = partial(sd.task, version="0")
 def dump(
     date: datetime.date = base.utc_today(),
     snapshot_slug: str = "default",
+    seed: int | None = None,
 ) -> pd.DataFrame:
     """Dump data.
 
@@ -32,11 +33,13 @@ def dump(
         date: The date of the dump.
         snapshot_slug: The slug for the dump. If you want to create multiple dumps
             for the same date, this must be used to differentiate them.
+        seed: Optional seed for reproducible data generation. Defaults to a
+            time-based seed (a fresh export each run).
     """
     if not date == base.utc_today():
         raise ValueError("Date must be today")
 
-    data = base.generate_data()
+    data = base.generate_data(seed=seed)
     return data
 
 
@@ -99,8 +102,8 @@ def metrics(
     return base.get_metrics(dataset, predictions)
 
 
-def get_metrics_dag():
-    dataset_ = dataset(dump=dump(), params=base.ProcessParams())
+def get_metrics_dag(seed: int | None = None):
+    dataset_ = dataset(dump=dump(seed=seed), params=base.ProcessParams())
     train_filter = base.DatasetFilter(
         random_partition=base.RandomPartition(
             num_buckets=3,

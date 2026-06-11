@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import json
 import logging
 import pickle
@@ -23,6 +24,7 @@ Segment = Literal["X", "Y", "Z"]
 def generate_data(
     num_samples: int = 1000,
     segment_flip_probs: tuple[float, float, float] = (0.1, 0.2, 0.3),
+    seed: int | None = None,
 ) -> pd.DataFrame:
     """Simulates export from a *mutable* data source.
     Returns data frame with index of UUIDs and columns:
@@ -34,10 +36,18 @@ def generate_data(
     - Segment "X": p(random flip) = 0.1
     - Segment "Y": p(random flip) = 0.2
     - Segment "Z": p(random flip) = 0.3
+
+    Args:
+        seed: If given, the output (including the UUID index) is fully
+            reproducible. If ``None`` (the default), a time-based seed is used so
+            each export yields fresh data — simulating a mutable source.
     """
 
-    # set seed based on current time
-    np.random.seed(int((pd.Timestamp.now().timestamp() * 1e6) % 2**32))
+    if seed is None:
+        # Time-based seed: simulates a mutable source that yields fresh data on
+        # every export. Pass an explicit `seed` for reproducible output.
+        seed = int((pd.Timestamp.now().timestamp() * 1e6) % 2**32)
+    np.random.seed(seed)
 
     logger.info("Generating data...")
     df = pd.DataFrame(
@@ -46,7 +56,10 @@ def generate_data(
             "category": np.random.choice(["A", "B", "C"], num_samples),
             "segment": np.random.choice(["X", "Y", "Z"], num_samples),
         },
-        index=[str(uuid.uuid4()) for _ in range(num_samples)],  # type: ignore
+        # Derive UUIDs from the seeded RNG (not uuid.uuid4, which draws from OS
+        # entropy) so the index — and therefore the RandomPartition split — is
+        # reproducible under `seed`.
+        index=[str(uuid.UUID(bytes=np.random.bytes(16))) for _ in range(num_samples)],  # type: ignore
     )
     # add random target flip
     df["_target_flip"] = 0
@@ -89,6 +102,16 @@ def process_data(df: pd.DataFrame, params: ProcessParams):
     return df
 
 
+def _stable_bucket(key: str, num_buckets: int) -> int:
+    """Map a string key to a bucket reproducibly across processes.
+
+    `hash(str)` is randomised per-process via PYTHONHASHSEED, which made the
+    train/test split non-deterministic; a content hash keeps it stable.
+    """
+    digest = hashlib.sha256(key.encode()).digest()
+    return int.from_bytes(digest[:8], "big") % num_buckets
+
+
 class RandomPartition(BaseModel):
     num_buckets: int
     include_buckets: tuple[int, ...]
@@ -111,7 +134,7 @@ class DatasetFilter(BaseModel):
             rp: RandomPartition = self.random_partition
             dataset = dataset[  # type: ignore
                 dataset.index.map(
-                    lambda x: hash(x + rp.seed_salt) % rp.num_buckets
+                    lambda x: _stable_bucket(x + rp.seed_salt, rp.num_buckets)
                     in rp.include_buckets
                 )
             ]
