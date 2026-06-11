@@ -6,6 +6,76 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.8.0 — `compat_default` compares the raw Python value
+
+Fixes `StardagField(compat_default=...)` so it works for all field types.
+The hash-mode drop now compares a field's **raw Python value** against
+`compat_default`, instead of the already-serialized value.
+
+`compat_default` exists so adding a field with a backward-compatible default
+keeps existing task IDs/hashes unchanged: in hash-mode serialization, a field
+whose value equals its `compat_default` is dropped from the hash dump. But the
+drop previously compared `compat_default` against the _serialized_ field value.
+For any field whose serialized form differs from its Python value — enums
+(→ `.value`), tuples (→ lists), or a field with a custom/hash-only serializer —
+the comparison failed even at the default, so the field was **not** dropped and
+the hash changed anyway. The feature silently no-opped for those types.
+
+It now compares the raw value (`getattr(self, name)`), which works for every
+type and is symmetric with the compat-validation path (which already injects
+the raw `compat_default`).
+
+### Breaking change
+
+Task IDs/hashes can change for any model that uses `compat_default` on a
+non-trivially-serialized field (enum, tuple, custom serializer). Fields with
+serialization-invariant types (`int`, `bool`, `str`, plain `float`) are
+unaffected. There are two cases:
+
+- **You worked around the bug by passing the serialized form** (e.g.
+  `compat_default=["red"]` for a `tuple[Color, ...]` field). That no longer
+  matches the raw value, so the field stops being dropped — switch to the
+  natural Python form to restore the old hashes (see migration below).
+- **You passed the natural form and it silently did nothing.** Adding the field
+  had already shifted your task IDs. With the fix the field is now correctly
+  dropped, shifting them again — back to the pre-field values you originally
+  intended.
+
+If either applies and you need to keep already-materialised outputs reachable,
+re-pin via `__version__` or rebuild the affected tasks.
+
+### Migration
+
+Supply `compat_default` in the field's **natural, validated Python form** — the
+value the field holds after validation, not its serialized form:
+
+```python
+import enum
+from typing import Annotated
+import stardag as sd
+
+class Color(str, enum.Enum):
+    RED = "red"
+
+class Config(sd.Task[None]):
+    # before (serialized-form workaround — no longer drops the field):
+    colors: Annotated[
+        tuple[Color, ...], sd.StardagField(compat_default=["red"])
+    ] = (Color.RED,)
+
+    # after (natural Python form — drops the field at its default):
+    colors: Annotated[
+        tuple[Color, ...], sd.StardagField(compat_default=(Color.RED,))
+    ] = (Color.RED,)
+```
+
+Note `compat_default` must be **idempotent under validation**: if validation
+coerces it (e.g. `[1, 2]` → `(1, 2)` for a `tuple[int, ...]` field), pass the
+coerced form (`(1, 2)`), or the serialize-side equality check fails and the
+field is not dropped.
+
+---
+
 ## v0.7.3 — Correct slug display in `stardag modal` CLI
 
 Fixes a misleading display in `stardag modal deploy` and
