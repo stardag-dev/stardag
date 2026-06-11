@@ -6,6 +6,30 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-06-11
+
+Behaviour fix to `StardagField(compat_default=...)` that can change task
+IDs/hashes for fields with non-trivially-serialized types. See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v080--compat_default-compares-the-raw-python-value)
+for the migration guide.
+
+### SDK
+
+- **`stardag/base_model.py`**: `StardagField(compat_default=...)`'s hash-mode
+  drop now compares the field's **raw Python value** against `compat_default`
+  instead of the already-serialized value. Previously the feature silently
+  no-opped for any field whose serialized form differs from its Python value —
+  enums (→ `.value`), tuples (→ lists), or fields with a custom/hash-only
+  serializer — so adding such a field with a compat default still changed
+  existing task IDs/hashes. The comparison is now symmetric with the
+  compat-validation path (which also uses the raw value): `compat_default` is
+  supplied in its natural validated Python form rather than the serialized
+  form. **Breaking** for the affected types — see the migration guide.
+  ([#146](https://github.com/stardag-dev/stardag/issues/146),
+  [#147](https://github.com/stardag-dev/stardag/pull/147))
+- Documented `StardagField.compat_default` / `hash_exclude` (previously a
+  `TODO` docstring).
+
 ## [0.7.3] — 2026-05-08
 
 `stardag modal deploy` and `stardag modal stardag-api-key create` now

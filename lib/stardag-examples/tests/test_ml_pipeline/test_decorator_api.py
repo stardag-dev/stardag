@@ -12,7 +12,9 @@ except ImportError:
 
 @pytest.mark.skipif(pd is None, reason="pandas is not installed")
 def test_build_metrics_dag(default_in_memory_fs_target):
-    metrics = get_metrics_dag()
+    # Fixed seed -> reproducible data, partition split, and metrics (regardless
+    # of PYTHONHASHSEED), so the f1 assertion below is deterministic.
+    metrics = get_metrics_dag(seed=0)
     assert isinstance(metrics._serializer, JSONSerializer)
     assert metrics.target().uri.endswith(".json")
     assert metrics.target().uri.startswith(
@@ -25,4 +27,5 @@ def test_build_metrics_dag(default_in_memory_fs_target):
     assert metrics.target().exists()
     metrics_dict = metrics.target().load()
     assert set(metrics_dict.keys()) == {"accuracy", "precision", "recall", "f1"}
-    assert metrics_dict["f1"] > 0.50  # TODO fix seeds!
+    # f1 ≈ 0.64 with seed=0; assert a safe lower bound (better than random).
+    assert metrics_dict["f1"] > 0.55

@@ -1,7 +1,8 @@
-from typing import Annotated, Type
+import enum
+from typing import Annotated, Any, Type
 
 import pytest
-from pydantic import ValidationError
+from pydantic import ValidationError, WrapSerializer
 
 from stardag.base_model import (
     CONTEXT_MODE_KEY,
@@ -204,6 +205,37 @@ class ModelWithHashExclude(StardagBaseModel):
     b: int
 
 
+class Color(str, enum.Enum):  # `str, Enum` for Python 3.10 (StrEnum is 3.11+)
+    RED = "red"
+    GREEN = "green"
+
+
+class ModelWithEnumTupleCompatDefault(StardagBaseModel):
+    """Enum-tuple field whose serialized form (list of strings) differs from
+    its Python value (tuple of enums). See issue #146."""
+
+    colors: Annotated[tuple[Color, ...], StardagField(compat_default=(Color.RED,))] = (
+        Color.RED,
+    )
+
+
+def _hash_serialize(value: Any, handler, info):
+    """Hash-only custom serializer producing a form != the Python value."""
+    if info.context and info.context.get(CONTEXT_MODE_KEY) == "hash":
+        return f"<{value}>"
+    return handler(value)
+
+
+Canonical = Annotated[float, WrapSerializer(_hash_serialize)]
+
+
+class ModelWithCustomSerializerCompatDefault(StardagBaseModel):
+    """Field with a hash-only custom serializer; the serialized form
+    (``"<0.0>"``) differs from the Python value (``0.0``). See issue #146."""
+
+    weight: Annotated[Canonical, StardagField(compat_default=0.0)] = 0.0
+
+
 @pytest.mark.parametrize(
     "description,instance,mode,expected",
     [
@@ -236,6 +268,47 @@ class ModelWithHashExclude(StardagBaseModel):
             ModelWithHashExclude(a=5, b=10),
             "hash",
             {"b": 10},
+        ),
+        # Enum-tuple compat default (issue #146): serialized form is a list of
+        # strings, but the field is at its compat default -> dropped in hash
+        # mode, kept (serialized) otherwise.
+        (
+            "enum-tuple compat default no mode at default",
+            ModelWithEnumTupleCompatDefault(colors=(Color.RED,)),
+            None,
+            {"colors": ["red"]},
+        ),
+        (
+            "enum-tuple compat default hash mode at default",
+            ModelWithEnumTupleCompatDefault(colors=(Color.RED,)),
+            "hash",
+            {},
+        ),
+        (
+            "enum-tuple compat default hash mode not at default",
+            ModelWithEnumTupleCompatDefault(colors=(Color.GREEN,)),
+            "hash",
+            {"colors": ["green"]},
+        ),
+        # Custom hash-only serializer compat default (issue #146): serialized
+        # form ("<0.0>") differs from the Python value (0.0).
+        (
+            "custom serializer compat default no mode at default",
+            ModelWithCustomSerializerCompatDefault(weight=0.0),
+            None,
+            {"weight": 0.0},
+        ),
+        (
+            "custom serializer compat default hash mode at default",
+            ModelWithCustomSerializerCompatDefault(weight=0.0),
+            "hash",
+            {},
+        ),
+        (
+            "custom serializer compat default hash mode not at default",
+            ModelWithCustomSerializerCompatDefault(weight=1.5),
+            "hash",
+            {"weight": "<1.5>"},
         ),
     ],
 )

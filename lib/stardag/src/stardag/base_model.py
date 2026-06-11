@@ -37,10 +37,25 @@ _UNSET = object()
 
 @dataclass(frozen=True)
 class StardagField:
-    """TODO"""
+    """Per-field annotation controlling hash-mode serialization and compat
+    validation. Attach via ``Annotated[T, StardagField(...)]``."""
 
     compat_default: Any = _UNSET
+    """Backward-compatible default. In compat-validation mode a missing field is
+    populated with this value; in hash-mode serialization a field whose value
+    equals this is dropped from the hash dump, so adding the field doesn't change
+    existing hashes / task identities.
+
+    Supply it in the field's *natural, validated Python form* — i.e. what the
+    field holds after validation, not its serialized form. Both the validate and
+    serialize sides compare against this raw value, so a non-idempotent input
+    (e.g. ``[1, 2]`` for a ``tuple[int, ...]`` field, which validation coerces to
+    ``(1, 2)``) would fail the serialize-side equality check and silently not be
+    dropped.
+    """
     hash_exclude: bool = False
+    """Drop this field from the hash dump entirely (e.g. runtime-only params that
+    must not affect the task identity)."""
 
 
 class StardagBaseModel(BaseModel):
@@ -118,7 +133,19 @@ class StardagBaseModel(BaseModel):
             maybe_stardag_field = _get_annotation(field, StardagField)
             if maybe_stardag_field is not None:
                 stardag_field: StardagField = maybe_stardag_field
-                if stardag_field.compat_default == value or stardag_field.hash_exclude:
+                # Compare the *raw* Python value (not the already-serialized
+                # `value`) against compat_default. The serialized form differs
+                # from the Python value for enums (-> .value), tuples (-> list),
+                # and fields with custom/hash-only serializers, so comparing the
+                # serialized value would silently fail to drop the field for
+                # those types. Using getattr(self, name) is also symmetric with
+                # _check_add_compatibility_defaults, which injects the raw
+                # compat_default on the validate side. hash_exclude is checked
+                # first to short-circuit before the attribute read.
+                if stardag_field.hash_exclude or (
+                    stardag_field.compat_default is not _UNSET
+                    and getattr(self, name) == stardag_field.compat_default
+                ):
                     continue
 
             out[name] = value
