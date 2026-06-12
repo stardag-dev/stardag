@@ -538,7 +538,7 @@ def deploy(
     # Import modal dependencies now that we know modal is available
     import modal
     from modal.cli.utils import stream_app_logs
-    from modal.environments import ensure_env
+    from modal.config import config as modal_config
     from modal.output import enable_output
     from modal.runner import deploy_app
 
@@ -547,8 +547,12 @@ def deploy(
     # Parse the app reference
     file_or_module, object_path = _parse_app_ref(app_ref)
 
-    # Ensure environment is set (this affects lookups)
-    env = ensure_env(env)
+    # Ensure environment is set (this affects lookups). Inlined equivalent of
+    # modal's `ensure_env`, which is no longer publicly importable in
+    # modal >= 1.4.3 (moved to the private `modal._environments` module).
+    if env is not None:
+        modal_config.override_locally("environment", env)
+    env = modal_config.get("environment")
 
     # Import the module
     try:

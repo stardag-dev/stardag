@@ -6,6 +6,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **`stardag/_cli/modal.py`**: Fix `stardag modal deploy` crashing with
+  `ImportError: cannot import name 'ensure_env' from 'modal.environments'` on
+  modal >= 1.4.3, where `ensure_env` moved to a private module. The small
+  environment-resolution logic is now inlined using modal's public config API,
+  avoiding any dependency on modal-internal modules.
+  ([#148](https://github.com/stardag-dev/stardag/issues/148))
+
 ## [0.8.0] — 2026-06-11
 
 Behaviour fix to `StardagField(compat_default=...)` that can change task
