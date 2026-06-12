@@ -6,6 +6,28 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.8.1 — Fix `stardag modal deploy` on modal >= 1.4.3
+
+Fixes `stardag modal deploy` crashing at import time when the installed
+`modal` SDK is >= 1.4.3:
+
+```
+ImportError: cannot import name 'ensure_env' from 'modal.environments'
+```
+
+modal 1.4.3 moved `ensure_env` into a private module
+(`modal._environments`) without a public re-export. The CLI now inlines
+the small environment-resolution logic using modal's public config API
+instead, removing the dependency on modal internals. Behaviour is
+identical across the full supported modal range (`modal>=1.0.0`).
+
+If you pinned `modal==1.4.2` as a workaround, you can remove the pin
+after upgrading.
+
+**No client-code changes** — `pip install -U stardag` is sufficient.
+
+---
+
 ## v0.8.0 — `compat_default` compares the raw Python value
 
 Fixes `StardagField(compat_default=...)` so it works for all field types.
