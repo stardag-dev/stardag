@@ -20,6 +20,9 @@ client-code changes required.
   avoiding any dependency on modal-internal modules.
   ([#148](https://github.com/stardag-dev/stardag/issues/148),
   [#150](https://github.com/stardag-dev/stardag/pull/150))
+- Dev lockfile: bump modal 1.3.3 → 1.5.0 so CI continuously tests against a
+  modal version affected by the import breakage. The supported range is
+  unchanged (`modal>=1.0.0`).
 
 ## [0.8.0] — 2026-06-11
 
