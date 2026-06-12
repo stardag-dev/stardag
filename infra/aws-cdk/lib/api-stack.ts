@@ -201,14 +201,14 @@ export class ApiStack extends cdk.Stack {
         EMAIL_APP_URL: `https://${config.uiDomain}`,
         // SaaS guardrails (rate limits and entity creation limits)
         LIMITS_MAX_TASK_DATA_BYTES: "102400",
-        LIMITS_MAX_ASSET_BODY_BYTES: "1048576",
+        LIMITS_MAX_ARTIFACT_BODY_BYTES: "1048576",
         LIMITS_MAX_REQUESTS_PER_MINUTE: "300",
         LIMITS_MAX_BUILDS_PER_WORKSPACE_24H: "200",
         LIMITS_MAX_TASKS_PER_WORKSPACE_24H: "10000",
         LIMITS_MAX_EVENTS_PER_WORKSPACE_24H: "50000",
-        LIMITS_MAX_ASSETS_PER_WORKSPACE_24H: "1000",
+        LIMITS_MAX_ARTIFACTS_PER_WORKSPACE_24H: "1000",
         LIMITS_MAX_DEPENDENCY_IDS_PER_TASK: "500",
-        LIMITS_MAX_ASSETS_PER_TASK: "10",
+        LIMITS_MAX_ARTIFACTS_PER_TASK: "10",
         LIMITS_MAX_WORKSPACES_PER_USER: "3",
         LIMITS_MAX_ENVIRONMENTS_PER_WORKSPACE: "15",
         // Worker count is read by the Dockerfile CMD; keep undefined here
