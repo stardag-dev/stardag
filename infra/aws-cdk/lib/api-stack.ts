@@ -209,6 +209,8 @@ export class ApiStack extends cdk.Stack {
         LIMITS_MAX_ASSETS_PER_WORKSPACE_24H: "1000",
         LIMITS_MAX_DEPENDENCY_IDS_PER_TASK: "500",
         LIMITS_MAX_ASSETS_PER_TASK: "10",
+        LIMITS_MAX_WORKSPACES_PER_USER: "3",
+        LIMITS_MAX_ENVIRONMENTS_PER_WORKSPACE: "15",
         // Worker count is read by the Dockerfile CMD; keep undefined here
         // to fall through to the image's default (sized for 1 vCPU).
         ...(apiGunicornWorkers ? { GUNICORN_WORKERS: apiGunicornWorkers } : {}),

@@ -25,10 +25,6 @@ class Workspace(Base, TimestampMixin):
 
     __tablename__ = "workspaces"
 
-    # Limits
-    MAX_WORKSPACES_PER_USER = 3
-    MAX_ENVIRONMENTS_PER_WORKSPACE = 6
-
     id: Mapped[UUID] = mapped_column(
         Uuid,
         primary_key=True,
