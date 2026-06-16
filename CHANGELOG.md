@@ -6,6 +6,21 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **`stardag/build`**: Add build-level concurrency limits for task execution
+  via a new `ConcurrencyConfig` accepted by `build` / `build_aio`. Supports an
+  overall cap (`max_concurrent_tasks`) and named limits mapped to tasks through
+  a callback (`limits={"request-to-service-x": 10}` with a `key_selector`); a
+  task may be subject to multiple named limits at once. Enforced uniformly
+  across all executors (local, Modal, routed) by gating the executor submit
+  call. The slot is released while a task is suspended on its own dynamic deps
+  and re-acquired on resume (unlike the global lock, which is held across
+  suspension), and composes with the global concurrency lock.
+  `ConcurrencyLimiter` is a protocol seam for a future global, server-configured
+  limiter. Local to a single build for now.
+  ([#151](https://github.com/stardag-dev/stardag/pull/151))
+
 ## [0.8.1] — 2026-06-12
 
 Compatibility fix for `stardag modal deploy` on modal >= 1.4.3. No

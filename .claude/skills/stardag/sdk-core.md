@@ -241,6 +241,42 @@ sd.build(task, global_lock_config=GlobalLockConfig(enabled=True))
 
 Requires a configured Registry API connection.
 
+### Concurrency Limits
+
+Throttle how many tasks **execute** concurrently in a build, independent of the
+executor (applies uniformly to local, Modal, and routed executors). Two knobs,
+combinable:
+
+```python
+from stardag.build import ConcurrencyConfig
+
+sd.build(
+    task,
+    concurrency_config=ConcurrencyConfig(
+        max_concurrent_tasks=8,                       # overall cap (optional)
+        limits={"request-to-service-x": 10},          # named limits
+        # Map each task to its limit name(s); None = unlimited.
+        key_selector=lambda t: (
+            "request-to-service-x" if isinstance(t, ServiceXTask) else None
+        ),
+    ),
+)
+```
+
+- **`max_concurrent_tasks`**: overall cap on simultaneously executing tasks.
+  Composes with (is the min of) any executor-internal worker limits.
+- **`limits` + `key_selector`**: per-group caps. `key_selector` may return
+  `None`, a single name, or a sequence of names (a task can be subject to
+  several limits at once). Returning a name not present in `limits` raises
+  `ValueError`. Limit values must be `>= 1`.
+- A slot is held only while a task is _actively executing_: it is released when
+  a task suspends on its own dynamic deps and re-acquired on resume (unlike the
+  global lock, which is held across suspension).
+- These limits are currently **build-local**. The `ConcurrencyLimiter` protocol
+  is the seam for a future registry-backed/global implementation configured
+  from the Stardag API/UI — passing `concurrency_limiter=...` overrides
+  `concurrency_config`.
+
 ### Build Behavior
 
 1. Discovers all dependencies recursively from root task(s)
