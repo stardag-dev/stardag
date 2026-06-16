@@ -6,6 +6,67 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.9.0 — Build concurrency limits & per-task Modal env overrides
+
+Two additive features, both backward compatible. **No client-code changes
+required** — `pip install -U stardag` is sufficient.
+
+### Build-level concurrency limits
+
+`build` / `build_aio` now accept a `ConcurrencyConfig` to bound how many tasks
+run at once. It supports an overall cap and named limits applied to tasks via a
+callback:
+
+```python
+from stardag.build import ConcurrencyConfig
+
+build(
+    tasks,
+    concurrency_config=ConcurrencyConfig(
+        max_concurrent_tasks=32,
+        limits={"request-to-service-x": 10},
+        key_selector=lambda task: (
+            ["request-to-service-x"] if needs_service_x(task) else []
+        ),
+    ),
+)
+```
+
+A task may be subject to several named limits at once. Limits are enforced
+uniformly across all executors (local, Modal, routed) by gating the executor
+submit call, and compose with the global concurrency lock. A task's slot is
+released while it is suspended on its own dynamic dependencies and re-acquired
+on resume (unlike the global lock, which is held across suspension).
+`ConcurrencyLimiter` is a protocol seam for a future global, server-configured
+limiter; for now limits are local to a single build.
+
+### Per-task environment overrides for the Modal integration
+
+A `WorkerSelector` can now return a `(worker_name, env_overrides)` tuple in
+addition to a bare worker name, where `env_overrides` is a `dict[str, str]`:
+
+```python
+def select(task):
+    if is_heavy(task):
+        return "gpu", {"NUM_WORKERS": "16"}
+    return "default"
+
+stardag_app = StardagApp(..., worker_selector=select)
+```
+
+The overrides are set in the worker container's environment around the task's
+`run` call and restored afterwards — handy for tuning task-specific execution
+knobs (worker/thread counts, batch sizes, library env vars) on a per-task
+basis without deploying a separate worker. `Runner.__call__` gained an optional
+`env_overrides` parameter for this. The `RunFunction` protocol's required
+signature is unchanged: existing custom run functions written against the
+`(task)`-only signature keep working, with overrides applied to the process
+environment around the call. Separately, `ModalTaskExecutor` now caches the
+per-worker `modal.Function.from_name` handle instead of recreating it on every
+submitted task.
+
+---
+
 ## v0.8.1 — Fix `stardag modal deploy` on modal >= 1.4.3
 
 Fixes `stardag modal deploy` crashing at import time when the installed

@@ -4,7 +4,7 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.9.0] — 2026-06-16
 
 ### SDK
 
@@ -20,6 +20,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `ConcurrencyLimiter` is a protocol seam for a future global, server-configured
   limiter. Local to a single build for now.
   ([#151](https://github.com/stardag-dev/stardag/pull/151))
+- **`stardag/integration/modal`**: A `WorkerSelector` may now return a
+  `(worker_name, env_overrides)` tuple in addition to a bare worker name (new
+  `WorkerSelection` type). When provided, `env_overrides` is a
+  `dict[str, str]` of environment variables set temporarily around the task's
+  `run` call inside the Modal worker and restored afterwards — e.g. to tune
+  task-specific execution knobs (worker/thread counts, batch sizes, library
+  env vars). `Runner.__call__` gained an optional `env_overrides`
+  parameter; the `RunFunction` protocol's required signature is unchanged, so
+  existing `(task)`-only run functions keep working (overrides are applied to
+  the environment around the call for them). Also caches the per-worker
+  `modal.Function.from_name` lookup in `ModalTaskExecutor` instead of
+  recreating the handle on every submit. Backward compatible.
+  ([#152](https://github.com/stardag-dev/stardag/pull/152))
 
 ## [0.8.1] — 2026-06-12
 
