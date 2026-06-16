@@ -407,13 +407,6 @@ class ModalTaskExecutor(TaskExecutorABC):
                 self.worker_selector(task)
             )
             worker_function = self._get_worker_function(worker_name)
-            if worker_function is None:
-                exc = ValueError(f"Worker function '{worker_name}' not found")
-                return TaskExecutionError(
-                    exception=exc,
-                    traceback="".join(tb_module.format_exception(exc)),
-                )
-
             res = await worker_function.remote.aio(task, env_overrides=env_overrides)
             return res
         except Exception as e:
@@ -498,14 +491,15 @@ class RunFunction(typing.Protocol):
     Args (of ``__call__``):
         task: The task instance to execute.
 
-    Implementations *may* additionally accept an optional keyword-only-style
-    ``env_overrides: dict[str, str] | None`` parameter. When the
-    ``worker_selector`` returns ``(worker_name, env_overrides)`` (see
-    :data:`WorkerSelection`), the framework forwards those overrides to run
-    functions that accept the parameter; for run functions written against the
-    older ``(task)``-only signature the framework instead applies the overrides
-    to the process environment around the call. The default :class:`Runner`
-    accepts ``env_overrides`` and applies them around its ``run`` call.
+    Implementations *may* additionally accept an optional
+    ``env_overrides: dict[str, str] | None`` keyword argument (the framework
+    always forwards it by keyword). When the ``worker_selector`` returns
+    ``(worker_name, env_overrides)`` (see :data:`WorkerSelection`), the
+    framework forwards those overrides to run functions that accept the
+    parameter; for run functions written against the older ``(task)``-only
+    signature the framework instead applies the overrides to the process
+    environment around the call. The default :class:`Runner` accepts
+    ``env_overrides`` and applies them around its ``run`` call.
     """
 
     def __call__(self, task: BaseTask) -> None | TaskStruct: ...
@@ -519,7 +513,7 @@ class _RunFunctionWithEnv(typing.Protocol):
     """
 
     def __call__(
-        self, task: BaseTask, env_overrides: dict[str, str] | None = None
+        self, task: BaseTask, *, env_overrides: dict[str, str] | None = None
     ) -> None | TaskStruct: ...
 
 
@@ -652,7 +646,7 @@ class Runner(RunFunction):
             logger.error(f"Task {repr(task)} raised an exception: {repr(exception)}")
 
     def __call__(
-        self, task: BaseTask, env_overrides: dict[str, str] | None = None
+        self, task: BaseTask, *, env_overrides: dict[str, str] | None = None
     ) -> None | TaskStruct:
         """Core logic to execute a single task.
 
@@ -1068,7 +1062,7 @@ class StardagApp:
         run_fn_accepts_env = _callable_accepts_env_overrides(run_fn)
 
         def _modal_run(
-            task: BaseTask, env_overrides: dict[str, str] | None = None
+            task: BaseTask, *, env_overrides: dict[str, str] | None = None
         ) -> typing.Any:
             if run_fn_accepts_env:
                 run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)

@@ -119,6 +119,14 @@ class TestRunnerEnvOverrides:
         assert runner(task) is None
         assert task.target().load() == [0, 1, 2]
 
+    def test_env_overrides_is_keyword_only(
+        self, runner: Runner, default_in_memory_fs_target
+    ):
+        # ``env_overrides`` must be passed by keyword (the framework always
+        # forwards it that way); a positional second arg is a TypeError.
+        with pytest.raises(TypeError):
+            runner(make_range(limit=1), {"X": "1"})  # type: ignore[call-arg]
+
     def test_overrides_restored_even_on_exception(
         self, runner: Runner, default_in_memory_fs_target, monkeypatch
     ):

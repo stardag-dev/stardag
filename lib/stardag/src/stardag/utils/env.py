@@ -2,6 +2,8 @@ import os
 from collections.abc import Mapping
 from contextlib import contextmanager
 
+__all__ = ["temp_env_vars"]
+
 
 @contextmanager
 def temp_env_vars(name_value: Mapping[str, str | None]):
