@@ -1500,17 +1500,17 @@ def build(
         return asyncio.run(
             build_aio(
                 tasks,
-                task_executor,
-                fail_mode,
-                registry,
-                max_concurrent_discover,
-                global_lock_manager,
-                global_lock_config,
-                resume_build_id,
-                register_all,
-                on_registry_failure,
-                concurrency_config,
-                concurrency_limiter,
+                task_executor=task_executor,
+                fail_mode=fail_mode,
+                registry=registry,
+                max_concurrent_discover=max_concurrent_discover,
+                global_lock_manager=global_lock_manager,
+                global_lock_config=global_lock_config,
+                resume_build_id=resume_build_id,
+                register_all=register_all,
+                on_registry_failure=on_registry_failure,
+                concurrency_config=concurrency_config,
+                concurrency_limiter=concurrency_limiter,
             )
         )
     except RuntimeError as e:

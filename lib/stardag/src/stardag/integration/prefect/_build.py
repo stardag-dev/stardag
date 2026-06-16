@@ -213,6 +213,15 @@ async def build_aio(
 
     Returns:
         Dict mapping task IDs to Prefect futures
+
+    Note:
+        This is a distinct, Prefect-orchestrated build path — not a wrapper
+        around :func:`stardag.build.build_aio`. Concurrency is governed by
+        Prefect's task runners, so the core build's ``concurrency_config`` /
+        ``concurrency_limiter`` (and other core-only options) are intentionally
+        not accepted here; passing them raises ``TypeError``. Configure
+        concurrency via Prefect (e.g. task-runner settings or global concurrency
+        limits) instead.
     """
     # Normalize input to list
     if isinstance(tasks, BaseTask):
