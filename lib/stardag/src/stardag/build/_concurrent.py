@@ -43,6 +43,11 @@ from stardag.build._base import (
     TaskExecutorABC,
     handle_registry_error,
 )
+from stardag.build._concurrency import (
+    ConcurrencyConfig,
+    ConcurrencyLimiter,
+    build_concurrency_limiter,
+)
 from stardag.registry import RegistryABC, registry_provider
 
 logger = logging.getLogger(__name__)
@@ -492,6 +497,8 @@ async def build_aio(
     resume_build_id: UUID | None = None,
     register_all: bool = False,
     on_registry_failure: OnRegistryFailure = "raise",
+    concurrency_config: ConcurrencyConfig | None = None,
+    concurrency_limiter: ConcurrencyLimiter | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -527,6 +534,14 @@ async def build_aio(
             for performance — skipping complete subgraphs avoids unnecessary I/O.
         on_registry_failure: How to handle registry call failures. "raise" (default)
             propagates the exception; "warn" logs a warning and continues.
+        concurrency_config: Build-local concurrency limiting — an overall cap
+            (``max_concurrent_tasks``) and/or named limits mapped to tasks via
+            a callback. Applied to every executor by gating the executor
+            ``submit`` call. Ignored if ``concurrency_limiter`` is given.
+        concurrency_limiter: An explicit ConcurrencyLimiter (e.g. a custom or
+            future registry-backed/global implementation). Takes precedence
+            over ``concurrency_config``. When neither is set, no throttle is
+            applied (zero overhead).
 
     Returns:
         BuildSummary with status, task counts, and build_id
@@ -553,6 +568,13 @@ async def build_aio(
     if global_lock_config is None:
         global_lock_config = GlobalLockConfig()
     lock_selector: GlobalLockSelector = DefaultGlobalLockSelector(global_lock_config)
+
+    # Resolve the concurrency limiter (explicit limiter > config > no-op). The
+    # LocalConcurrencyLimiter builds its semaphores here, inside the running
+    # build loop, so they bind to the correct event loop.
+    limiter: ConcurrencyLimiter = build_concurrency_limiter(
+        concurrency_config, concurrency_limiter
+    )
 
     # Track locks held by this build for manual release
     held_locks: set[str] = set()
@@ -1096,49 +1118,56 @@ async def build_aio(
             # Lock acquired - track it for release later
             held_locks.add(task_id_str)
 
-        # Now we have the lock (or locking wasn't needed)
-        # Start the task in registry. The task was already registered during
-        # discover; if registration failed in `warn` mode we retry once here so
-        # the /start endpoint doesn't 404.
-        if not state.started:
-            if not state.registered:
-                try:
-                    await registry.task_register_aio(build_id, task)
-                    state.registered = True
-                except Exception as reg_err:
-                    handle_registry_error(
-                        reg_err,
-                        f"Failed to register task {task.id} before start",
-                        on_registry_failure,
-                    )
-            # Skip /start if registration never succeeded — the endpoint
-            # would 404 and that hard-fails the build even in `warn` mode.
-            if state.registered:
-                try:
-                    await registry.task_start_aio(build_id, task)
-                    state.started = True
-                except Exception as reg_err:
-                    handle_registry_error(
-                        reg_err,
-                        f"Failed to start task {task.id}",
-                        on_registry_failure,
-                    )
-        elif state.dynamic_deps:
-            # Task was suspended waiting for dynamic deps, now resuming. Same
-            # warn-mode protection: no point firing /resume if registration
-            # never landed.
-            if state.registered:
-                try:
-                    await registry.task_resume_aio(build_id, task)
-                except Exception as reg_err:
-                    handle_registry_error(
-                        reg_err,
-                        f"Failed to resume task {task.id}",
-                        on_registry_failure,
-                    )
+        # Now we have the lock (or locking wasn't needed). Acquire a
+        # concurrency slot before marking the task started/executing so the
+        # registry/UI reflects actual execution (a task queued behind the limit
+        # is not shown as "started"). The slot is acquired *after* the global
+        # lock so tasks don't burn execution slots while blocked on a
+        # distributed lock, and released automatically on every exit path
+        # (completion, failure, cancellation, dynamic-deps suspension).
+        async with limiter.slot(task):
+            # Start the task in registry. The task was already registered during
+            # discover; if registration failed in `warn` mode we retry once here
+            # so the /start endpoint doesn't 404.
+            if not state.started:
+                if not state.registered:
+                    try:
+                        await registry.task_register_aio(build_id, task)
+                        state.registered = True
+                    except Exception as reg_err:
+                        handle_registry_error(
+                            reg_err,
+                            f"Failed to register task {task.id} before start",
+                            on_registry_failure,
+                        )
+                # Skip /start if registration never succeeded — the endpoint
+                # would 404 and that hard-fails the build even in `warn` mode.
+                if state.registered:
+                    try:
+                        await registry.task_start_aio(build_id, task)
+                        state.started = True
+                    except Exception as reg_err:
+                        handle_registry_error(
+                            reg_err,
+                            f"Failed to start task {task.id}",
+                            on_registry_failure,
+                        )
+            elif state.dynamic_deps:
+                # Task was suspended waiting for dynamic deps, now resuming. Same
+                # warn-mode protection: no point firing /resume if registration
+                # never landed.
+                if state.registered:
+                    try:
+                        await registry.task_resume_aio(build_id, task)
+                    except Exception as reg_err:
+                        handle_registry_error(
+                            reg_err,
+                            f"Failed to resume task {task.id}",
+                            on_registry_failure,
+                        )
 
-        # Execute the task via the executor
-        return await task_executor.submit(task)
+            # Execute the task via the executor
+            return await task_executor.submit(task)
 
     async def cancel_pending_in_flight() -> None:
         """Cancel any still-running ``pending_futures`` and emit ``task_cancel``.
@@ -1454,6 +1483,8 @@ def build(
     resume_build_id: UUID | None = None,
     register_all: bool = False,
     on_registry_failure: OnRegistryFailure = "raise",
+    concurrency_config: ConcurrencyConfig | None = None,
+    concurrency_limiter: ConcurrencyLimiter | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -1478,6 +1509,8 @@ def build(
                 resume_build_id,
                 register_all,
                 on_registry_failure,
+                concurrency_config,
+                concurrency_limiter,
             )
         )
     except RuntimeError as e:
@@ -1491,6 +1524,8 @@ def build(
 
 
 __all__ = [
+    "ConcurrencyConfig",
+    "ConcurrencyLimiter",
     "DefaultExecutionModeSelector",
     "ExecutionMode",
     "ExecutionModeSelector",

@@ -39,4 +39,5 @@ Mostly for testing and debugging, there is also `sd.build_sequential` and `sd.bu
     - How concurrency is achieved via asyncio, threads and or processes
     - Transfer of execution (e.g. -> Modal)
     - Global concurrency lock
+    - Concurrency limits (overall and named, via `ConcurrencyConfig`)
     - ...

@@ -20,6 +20,10 @@ Global concurrency locking:
 - GlobalConcurrencyLockManager: Protocol for distributed lock implementations
 - LockHandle: Protocol for lock handles (async context manager)
 - GlobalLockConfig: Configuration for global locking behavior
+
+Granular concurrency limiting:
+- ConcurrencyConfig: Overall and named limits on concurrently executing tasks
+- ConcurrencyLimiter: Protocol for custom/distributed limiters
 """
 
 from stardag.build._base import (
@@ -39,6 +43,13 @@ from stardag.build._base import (
     TaskCount,
     TaskExecutionError,
     TaskExecutorABC,
+)
+from stardag.build._concurrency import (
+    ConcurrencyConfig,
+    ConcurrencyKeySelector,
+    ConcurrencyLimiter,
+    LocalConcurrencyLimiter,
+    NoOpConcurrencyLimiter,
 )
 from stardag.build._concurrent import (
     DefaultExecutionModeSelector,
@@ -73,6 +84,12 @@ __all__ = [
     "LockAcquisitionStatus",
     "LockHandle",
     "OnRegistryFailure",
+    # Granular concurrency limiting
+    "ConcurrencyConfig",
+    "ConcurrencyKeySelector",
+    "ConcurrencyLimiter",
+    "LocalConcurrencyLimiter",
+    "NoOpConcurrencyLimiter",
     # Task executors
     "HybridConcurrentTaskExecutor",
     "RoutedTaskExecutor",
