@@ -56,6 +56,7 @@ from stardag.integration.modal._target import (
     get_volume_name_and_path,
 )
 from stardag.registry._base import get_git_commit_hash
+from stardag.utils.env import temp_env_vars
 
 try:
     from stardag.integration.prefect import (
@@ -286,13 +287,61 @@ class FunctionSettings(typing.TypedDict, total=False):
 # --- Worker selector ---
 
 
-WorkerSelector = typing.Callable[[BaseTask], str]
-"""Type for functions that select which worker to use for a task."""
+WorkerSelection = typing.Union[str, tuple[str, dict[str, str]]]
+"""Return type of a :data:`WorkerSelector`.
+
+Either a worker name (``str``), or a ``(worker_name, env_overrides)`` tuple
+where ``env_overrides`` is a dict of environment variables to set temporarily
+around the task's ``run`` call inside the worker container (e.g. to tune
+task-specific execution knobs such as worker/thread counts or batch sizes).
+See :meth:`Runner.__call__`.
+"""
+
+WorkerSelector = typing.Callable[[BaseTask], WorkerSelection]
+"""Type for functions that select which worker to use for a task.
+
+A selector returns either a worker name, or a ``(worker_name, env_overrides)``
+tuple (see :data:`WorkerSelection`).
+"""
 
 
-def _default_worker_selector(task: BaseTask) -> str:
+def _normalize_worker_selection(
+    selection: WorkerSelection,
+) -> tuple[str, dict[str, str] | None]:
+    """Split a :data:`WorkerSelection` into ``(worker_name, env_overrides)``.
+
+    Accepts either a bare worker name or a ``(worker_name, env_overrides)``
+    tuple and always returns the two-tuple form (``env_overrides`` is ``None``
+    when the selector returned a bare name).
+    """
+    if isinstance(selection, tuple):
+        worker_name, env_overrides = selection
+        return worker_name, env_overrides
+    return selection, None
+
+
+def _default_worker_selector(task: BaseTask) -> WorkerSelection:
     """Default worker selector - always returns 'default'."""
     return "default"
+
+
+def _callable_accepts_env_overrides(fn: typing.Callable[..., typing.Any]) -> bool:
+    """Whether ``fn`` accepts an ``env_overrides`` argument.
+
+    Used to stay backward-compatible with custom ``RunFunction`` implementations
+    written against the older ``(task)``-only signature (before the optional
+    ``env_overrides`` parameter was added).
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    for param in signature.parameters.values():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == "env_overrides":
+            return True
+    return False
 
 
 # --- Task executor ---
@@ -334,15 +383,30 @@ class ModalTaskExecutor(TaskExecutorABC):
         """
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
+        # Cache of worker name -> modal.Function. ``modal.Function.from_name``
+        # returns a lazy handle (no network call until invoked), but it is
+        # invoked on every ``submit`` so we memoize it per worker name to avoid
+        # recreating the handle for every task.
+        self._worker_functions: dict[str, modal.Function] = {}
 
-    async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
-        """Execute task on Modal."""
-        try:
-            worker_name = self.worker_selector(task)
+    def _get_worker_function(self, worker_name: str) -> modal.Function:
+        """Return the (memoized) ``modal.Function`` handle for a worker."""
+        worker_function = self._worker_functions.get(worker_name)
+        if worker_function is None:
             worker_function = modal.Function.from_name(
                 app_name=self.modal_app_name,
                 name=f"worker_{worker_name}",
             )
+            self._worker_functions[worker_name] = worker_function
+        return worker_function
+
+    async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
+        """Execute task on Modal."""
+        try:
+            worker_name, env_overrides = _normalize_worker_selection(
+                self.worker_selector(task)
+            )
+            worker_function = self._get_worker_function(worker_name)
             if worker_function is None:
                 exc = ValueError(f"Worker function '{worker_name}' not found")
                 return TaskExecutionError(
@@ -350,7 +414,7 @@ class ModalTaskExecutor(TaskExecutorABC):
                     traceback="".join(tb_module.format_exception(exc)),
                 )
 
-            res = await worker_function.remote.aio(task)
+            res = await worker_function.remote.aio(task, env_overrides=env_overrides)
             return res
         except Exception as e:
             return TaskExecutionError(
@@ -430,9 +494,33 @@ class RunFunction(typing.Protocol):
     Any module-level code in the module where a custom run function is
     defined will execute inside the Modal container before the function is
     called — use this for container-level setup (imports, config, etc.).
+
+    Args (of ``__call__``):
+        task: The task instance to execute.
+
+    Implementations *may* additionally accept an optional keyword-only-style
+    ``env_overrides: dict[str, str] | None`` parameter. When the
+    ``worker_selector`` returns ``(worker_name, env_overrides)`` (see
+    :data:`WorkerSelection`), the framework forwards those overrides to run
+    functions that accept the parameter; for run functions written against the
+    older ``(task)``-only signature the framework instead applies the overrides
+    to the process environment around the call. The default :class:`Runner`
+    accepts ``env_overrides`` and applies them around its ``run`` call.
     """
 
     def __call__(self, task: BaseTask) -> None | TaskStruct: ...
+
+
+class _RunFunctionWithEnv(typing.Protocol):
+    """Internal protocol for run functions that accept ``env_overrides``.
+
+    Used to type the call site that forwards selector-provided environment
+    overrides (see :class:`StardagApp.finalize`'s ``_modal_run`` wrapper).
+    """
+
+    def __call__(
+        self, task: BaseTask, env_overrides: dict[str, str] | None = None
+    ) -> None | TaskStruct: ...
 
 
 # --- Default build/run implementations, with overridable methods ---
@@ -563,18 +651,28 @@ class Runner(RunFunction):
         if exception:
             logger.error(f"Task {repr(task)} raised an exception: {repr(exception)}")
 
-    def __call__(self, task: BaseTask) -> None | TaskStruct:
+    def __call__(
+        self, task: BaseTask, env_overrides: dict[str, str] | None = None
+    ) -> None | TaskStruct:
         """Core logic to execute a single task.
 
         Returns ``None`` when the task completed, or a ``TaskStruct`` of
         dynamic dependencies that were not yet complete (idempotent
         re-execution pattern — see ``run``).
+
+        Args:
+            task: The task instance to execute.
+            env_overrides: Optional environment variable overrides (selected by
+                the ``worker_selector`` — see :data:`WorkerSelection`). When
+                provided, they are set temporarily around the ``run`` call and
+                the previous environment is restored afterwards.
         """
         result: None | TaskStruct = None
         exception: Exception | None = None
         try:
             self.setup(task)
-            result = self.run(task)
+            with temp_env_vars(env_overrides or {}):
+                result = self.run(task)
         except Exception as e:
             exception = e
             raise
@@ -963,9 +1061,20 @@ class StardagApp:
             return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
 
         run_fn = self._run_function
+        # The ``RunFunction`` protocol gained an optional ``env_overrides``
+        # parameter. Older custom run functions implemented the protocol with a
+        # bare ``(task)`` signature, so only forward ``env_overrides`` to those
+        # that accept it; otherwise apply the overrides in the wrapper.
+        run_fn_accepts_env = _callable_accepts_env_overrides(run_fn)
 
-        def _modal_run(task: BaseTask) -> typing.Any:
-            return run_fn(task)
+        def _modal_run(
+            task: BaseTask, env_overrides: dict[str, str] | None = None
+        ) -> typing.Any:
+            if run_fn_accepts_env:
+                run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
+                return run_fn_with_env(task, env_overrides=env_overrides)
+            with temp_env_vars(env_overrides or {}):
+                return run_fn(task)
 
         # Create builder function
         builder_settings = self._prepare_function_settings(
