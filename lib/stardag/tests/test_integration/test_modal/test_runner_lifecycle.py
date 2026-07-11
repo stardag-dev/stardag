@@ -185,3 +185,27 @@ class TestReporterCreate:
         reporter = _WorkerLifecycleReporter.create(make_range(limit=1), None)
         assert reporter is not None
         assert reporter.build_id == build_id
+
+
+class TestReportingRunsInsideEnvOverrides:
+    def test_reporting_sees_env_overrides(
+        self, recording_registry, fake_call_id, default_in_memory_fs_target
+    ):
+        """Lifecycle reporting runs inside the env-overrides context, so
+        overrides carrying environment-sensitive config apply to reporting
+        exactly as they do to run()."""
+        import os
+
+        seen: dict[str, str | None] = {}
+        original_record = recording_registry._record
+
+        def observing_record(method, **extra):
+            seen[method] = os.environ.get("MY_TEST_OVERRIDE")
+            return original_record(method, **extra)
+
+        recording_registry._record = observing_record
+        env = {**_env(uuid4()), "MY_TEST_OVERRIDE": "applied"}
+
+        Runner()(make_range(limit=3), env_overrides=env)
+
+        assert seen == {"task_start": "applied", "task_complete": "applied"}

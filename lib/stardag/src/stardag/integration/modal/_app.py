@@ -868,9 +868,9 @@ class _WorkerLifecycleReporter:
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
         try:
             fn()
-        except Exception as e:
-            logger.error(
-                f"Worker lifecycle report ({what}) failed for task {self.task.id}: {e}"
+        except Exception:
+            logger.exception(
+                f"Worker lifecycle report ({what}) failed for task {self.task.id}"
             )
 
     def started(self) -> None:
@@ -977,31 +977,41 @@ class Runner(RunFunction):
                 the previous environment is restored afterwards.
         """
         # getattr: tolerate subclasses overriding __init__ without super()
-        reporter = (
-            _WorkerLifecycleReporter.create(task, env_overrides)
-            if getattr(self, "report_lifecycle", True)
-            else None
-        )
         result: None | TaskStruct = None
         exception: Exception | None = None
         try:
             self.setup(task)
-            if reporter is not None:
-                reporter.started()
+            # All lifecycle reporting happens inside the env-overrides
+            # context, so overrides carrying environment-sensitive config
+            # apply to reporting exactly as they do to run(). (Caveat:
+            # stardag's config/registry providers cache on first access —
+            # registry connection settings should come from the container's
+            # process environment, i.e. deployment secrets, not overrides.)
             with temp_env_vars(env_overrides or {}):
-                result = self.run(task)
+                # getattr: tolerate subclasses overriding __init__ w/o super()
+                reporter = (
+                    _WorkerLifecycleReporter.create(task, env_overrides)
+                    if getattr(self, "report_lifecycle", True)
+                    else None
+                )
+                if reporter is not None:
+                    reporter.started()
+                try:
+                    result = self.run(task)
+                except Exception as e:
+                    if reporter is not None:
+                        reporter.failed(e)
+                    raise
+                if reporter is not None:
+                    if result is None:
+                        reporter.completed()
+                    else:
+                        reporter.suspended()
         except Exception as e:
             exception = e
-            if reporter is not None:
-                reporter.failed(e)
             raise
         finally:
             self.teardown(task, exception)
-        if reporter is not None:
-            if result is None:
-                reporter.completed()
-            else:
-                reporter.suspended()
         return result
 
     def run(self, task: BaseTask) -> None | TaskStruct:
