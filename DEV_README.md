@@ -83,6 +83,31 @@ tox -e stardag-ui
 tox -e stardag-py311,stardag-examples-py311,stardag-api-py311
 ```
 
+#### Live Modal tests
+
+Modal integration tests come in two tiers. The unit tier (default) uses fakes
+and needs no credentials. Modules marked `modal_live` hit a real Modal
+workspace (deploy test apps, create volumes, run containers):
+
+```bash
+cd lib/stardag
+
+# Unit tier only
+uv run pytest tests/test_integration/test_modal -m "not modal_live"
+
+# Live tier — requires Modal credentials; use a personal/dev profile!
+STARDAG_MODAL_TEST_PROFILE=<your-dev-profile> \
+  uv run pytest tests/test_integration/test_modal -m modal_live
+```
+
+Gating (see `stardag.testing.modal.live_modal_guard`):
+
+- `STARDAG_MODAL_LIVE_TESTS`: `auto` (default: run if authenticated, else
+  skip), `1` (require: fail instead of skip — for CI), `0` (always skip).
+- `STARDAG_MODAL_TEST_PROFILE`: if set, live tests are skipped unless the
+  active Modal profile matches. Recommended to always set this locally, so
+  live tests can never run against a shared/production workspace by accident.
+
 ### Linting & Formatting
 
 ```bash

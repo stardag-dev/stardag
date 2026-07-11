@@ -732,6 +732,12 @@ async def resume_build(
     ``BUILD_RESUMED`` event so ``get_build_status`` flips the build back
     to RUNNING and the UI shows a "running (resumed)" affordance.
 
+    A build with no recorded activity beyond its ``BUILD_STARTED`` event
+    is "fresh" — attaching to it is not a resume (e.g. a build id minted
+    at the trigger point handed to the first orchestrator invocation).
+    In that case no ``BUILD_RESUMED`` event is recorded, so the build's
+    first run doesn't show as resumed.
+
     Args:
         commit_hash: Optional git commit hash of the resuming run.
     """
@@ -753,17 +759,27 @@ async def resume_build(
             status_code=403, detail="Build does not belong to this environment"
         )
 
-    event = Event(
-        build_id=build_id,
-        task_id=None,
-        event_type=EventType.BUILD_RESUMED,
-        event_metadata=_build_event_metadata(commit_hash),
-    )
-    db.add(event)
-    await _touch_build_last_active(db, build_id)
-    await db.commit()
+    has_activity = (
+        await db.execute(
+            select(Event.id)
+            .where(Event.build_id == build_id)
+            .where(Event.event_type != EventType.BUILD_STARTED)
+            .limit(1)
+        )
+    ).first() is not None
 
-    record_entity_created(auth.workspace_id, "events")
+    if has_activity:
+        event = Event(
+            build_id=build_id,
+            task_id=None,
+            event_type=EventType.BUILD_RESUMED,
+            event_metadata=_build_event_metadata(commit_hash),
+        )
+        db.add(event)
+        await _touch_build_last_active(db, build_id)
+        await db.commit()
+
+        record_entity_created(auth.workspace_id, "events")
 
     (
         status,

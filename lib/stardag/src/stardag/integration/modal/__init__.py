@@ -2,6 +2,7 @@ from stardag.integration.modal._app import (
     Builder,
     BuildFailedError,
     BuildFunction,
+    BuildTriggerResult,
     FinalizeResult,
     FunctionSettings,
     PrefectBuilder,
@@ -27,6 +28,7 @@ from stardag.integration.modal._target import (
 __all__ = [
     "BuildFailedError",
     "BuildFunction",
+    "BuildTriggerResult",
     "RunFunction",
     "StardagApp",
     "Builder",

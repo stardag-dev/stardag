@@ -42,6 +42,7 @@ import os
 import pathlib
 import traceback as tb_module
 import typing
+from uuid import UUID
 
 import modal
 
@@ -55,7 +56,11 @@ from stardag.integration.modal._target import (
     get_default_volume_mount_path,
     get_volume_name_and_path,
 )
-from stardag.registry._base import get_git_commit_hash
+from stardag.registry._base import (
+    NoOpRegistry,
+    get_git_commit_hash,
+    registry_provider,
+)
 from stardag.utils.env import temp_env_vars
 
 try:
@@ -242,6 +247,22 @@ class FinalizeResult(typing.NamedTuple):
 
 
 # --- Function settings ---
+
+
+class BuildTriggerResult(typing.NamedTuple):
+    """Result of :meth:`StardagApp.build_trigger`.
+
+    Attributes:
+        build_id: The registry build id minted (or reused) at the trigger
+            point. Pass it back to ``build_trigger(..., build_id=...)`` to
+            re-attach/resume the same build.
+        function_call: The Modal ``FunctionCall`` handle for the spawned
+            build function invocation. Call ``.get()`` to block on the
+            result if needed.
+    """
+
+    build_id: UUID
+    function_call: typing.Any
 
 
 class FunctionSettings(typing.TypedDict, total=False):
@@ -1152,6 +1173,87 @@ class StardagApp:
             app_name=self.name,
             build_kwargs=build_kwargs,
         )
+
+    def build_trigger(
+        self,
+        tasks: typing.Sequence[BaseTask] | BaseTask,
+        worker_selector: WorkerSelector | None = None,
+        *,
+        build_kwargs: dict[str, typing.Any] | None = None,
+        build_id: UUID | None = None,
+        description: str | None = None,
+    ) -> BuildTriggerResult:
+        """Trigger a build with a registry build id minted at the trigger point.
+
+        Unlike :meth:`build_spawn` — where the build id is created *inside*
+        the Modal build container — this method first creates (or reuses) the
+        build in the registry from the calling process, then spawns the
+        deployed build function with ``resume_build_id`` set to it. As a
+        result:
+
+        - Any restart of the build function (Modal retry after preemption, a
+          manual re-trigger with the returned ``build_id``) **resumes the
+          same build** instead of creating a new one: already-completed task
+          targets are detected during discovery and skipped.
+        - The build appears in the registry immediately, before the Modal
+          container has started.
+
+        Set ``retries`` in the app's ``builder_settings`` to let Modal
+        automatically re-run (and thereby resume) the build function after
+        infrastructure failures.
+
+        Requires registry credentials in the calling process (the active
+        stardag profile), in addition to Modal credentials. If no registry is
+        configured, use :meth:`build_spawn` instead.
+
+        Args:
+            tasks: A single root task or a sequence of root tasks to build.
+            worker_selector: Optional override for worker selection.
+            build_kwargs: Optional kwargs forwarded to the remote build
+                function (must not contain ``resume_build_id``; it is set by
+                this method).
+            build_id: Existing build id to re-attach to (e.g. from a previous
+                ``build_trigger`` call). If None, a new build is created.
+            description: Optional description for the new build (ignored when
+                ``build_id`` is given).
+
+        Returns:
+            BuildTriggerResult with the ``build_id`` and the spawned Modal
+            ``FunctionCall`` handle.
+        """
+        merged_kwargs = dict(build_kwargs or {})
+        if "resume_build_id" in merged_kwargs:
+            raise TypeError(
+                "build_kwargs must not contain 'resume_build_id'; pass "
+                "build_id=... to build_trigger instead"
+            )
+
+        if build_id is None:
+            registry = registry_provider.get()
+            if isinstance(registry, NoOpRegistry):
+                raise RuntimeError(
+                    "build_trigger requires a configured registry to mint the "
+                    "build id at the trigger point (run 'stardag auth login' "
+                    "or configure an API key). Use build_spawn to trigger a "
+                    "build without local registry credentials."
+                )
+            task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
+            build_id = registry.build_start(
+                root_tasks=task_list, description=description
+            )
+        merged_kwargs["resume_build_id"] = build_id
+
+        build_function = modal.Function.from_name(
+            app_name=self.name,
+            name="build",
+        )
+        function_call = build_function.spawn(
+            tasks=tasks,
+            worker_selector=worker_selector or self.worker_selector,
+            app_name=self.name,
+            build_kwargs=merged_kwargs,
+        )
+        return BuildTriggerResult(build_id=build_id, function_call=function_call)
 
     def build_remote(
         self,

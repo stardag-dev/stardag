@@ -26,7 +26,6 @@ ROOT_DEFAULT = "stardag/root/default"
 
 try:
     import modal
-    from modal.exception import AuthError
 
     from stardag.integration.modal import (
         VOLUME_MOUNT_PATH_PREFIX,
@@ -36,6 +35,7 @@ try:
     )
     from stardag.integration.modal._app import ModalTaskExecutor
     from stardag.integration.modal._config import with_stardag_on_image
+    from stardag.testing.modal import live_modal_guard
     from stardag.testing.modal._tasks import (
         AsyncDoubleTask,
         AsyncDynamicRangeSumTask,
@@ -45,15 +45,12 @@ try:
         sum_list,
     )
 
-    # check if logged in and volume exists
-    try:
-        _volume_check = modal.Volume.from_name(VOLUME_NAME)
-        _volume_check.listdir("/")
-    except AuthError:
-        pytest.skip("Skipping modal tests (not authenticated)", allow_module_level=True)
+    live_modal_guard(VOLUME_NAME)
 
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
+
+pytestmark = pytest.mark.modal_live
 
 
 # --- Module-level app setup (also used as Modal deploy entrypoint) ---

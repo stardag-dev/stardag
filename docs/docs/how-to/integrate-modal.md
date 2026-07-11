@@ -356,6 +356,50 @@ If you connected to the Stardag Registry, you can also click the latest build to
 
 ![modal-poc dag in the Registry UI](https://github.com/user-attachments/assets/08e2d3b1-17f5-4b3d-b6ed-1b91c8a3f968)
 
+### Restart-safe triggering with `build_trigger` (recommended with Registry)
+
+With `build_spawn`, the registry build id is created _inside_ the Modal build
+container — if that container is restarted (preemption, timeout, a Modal-level
+retry), the new invocation starts a **new** build in the registry.
+
+When you use the Stardag Registry, prefer `build_trigger`: it creates the
+build in the registry from the calling process first, then passes the build id
+to the build function as `resume_build_id`. Any restart of the build function
+then _resumes_ the same build — tasks whose outputs already exist are detected
+during discovery and skipped:
+
+```{.python notest}
+result = app.build_trigger(root_task)
+print(result.build_id)       # registry build id, minted at the trigger point
+result.function_call.get()   # optionally block on the Modal build function
+```
+
+Re-triggering with the same build id re-attaches to the build (e.g. after a
+failure, or to bring a preempted build back up):
+
+```{.python notest}
+app.build_trigger(root_task, build_id=result.build_id)
+```
+
+To let Modal restart the build function automatically after infrastructure
+failures (and thereby auto-resume the build), configure retries on the
+builder:
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image, retries=2),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+)
+```
+
+Note that `build_trigger` requires registry credentials in the calling process
+(the active stardag profile), in addition to Modal credentials — unlike
+`build_spawn`, which only needs Modal credentials locally. Also note that
+tasks that were _mid-execution_ when the build function died are re-executed
+from scratch on resume; only tasks whose outputs were fully written are
+skipped.
+
 <!-- TODO below needs significant cleanup.
 ## Running the `stardag-examples` Examples
 

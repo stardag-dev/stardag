@@ -4,6 +4,37 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **`stardag/integration/modal`**: New `StardagApp.build_trigger()` — triggers
+  a build with the registry build id minted at the trigger point and passed to
+  the Modal build function as `resume_build_id`. Restarts of the build
+  function (Modal retries after preemption, or re-triggering with the returned
+  `build_id`) resume the same build instead of creating a new one:
+  already-completed task outputs are detected during discovery and skipped.
+  Returns a `BuildTriggerResult(build_id, function_call)`. Requires registry
+  credentials in the calling process; `build_spawn` remains available for
+  Modal-credentials-only triggering.
+- **`stardag/testing/modal`**: New `live_modal_guard()` centralizes gating of
+  live-Modal tests, controlled by `STARDAG_MODAL_LIVE_TESTS`
+  (`auto`/`1`/`0`) and an optional `STARDAG_MODAL_TEST_PROFILE` safety guard
+  (skip unless the active Modal profile matches — protects shared/production
+  workspaces from accidental test runs). Live test modules are now marked
+  `modal_live`, so `pytest -m "not modal_live"` runs the pure unit tier. A new
+  live-semantics test module pins the Modal platform behaviors stardag relies
+  on (detached spawned calls, `FunctionCall.from_id` re-attach, call-id
+  stability across retries, cancellation).
+
+### Registry API
+
+- `POST /builds/{id}/resume` no longer records a `BUILD_RESUMED` event for a
+  "fresh" build (no activity beyond `BUILD_STARTED`), so attaching to a
+  trigger-minted build id on the first run doesn't display the build as
+  resumed. Real resumes (any task activity or terminal state) are recorded as
+  before.
+
 ## [0.9.0] — 2026-06-16
 
 ### SDK

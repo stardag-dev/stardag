@@ -86,3 +86,6 @@ known_local_folder = ["stardag"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "src/stardag", "../../USER_GUIDE.md"]
 asyncio_mode = "auto"
+markers = [
+    "modal_live: hits a real Modal workspace (gated by STARDAG_MODAL_LIVE_TESTS / STARDAG_MODAL_TEST_PROFILE; see stardag.testing.modal)",
+]

@@ -8,7 +8,9 @@ except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
+from stardag import BaseTask
 from stardag.build._base import BuildSummary
 from stardag.integration.modal import (
     Builder,
@@ -19,6 +21,7 @@ from stardag.integration.modal import (
     StardagApp,
 )
 from stardag.integration.modal._app import _default_build, _default_run
+from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 
 def _make_image() -> modal.Image:
@@ -532,28 +535,8 @@ class TestStardagAppBuildSpawnRemote:
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
 
-    def _patch_function_from_name(self, monkeypatch):
-        """Patch modal.Function.from_name to return a recording stub."""
-        captured: dict = {}
-
-        class _Stub:
-            def spawn(self, **kwargs):
-                captured["op"] = "spawn"
-                captured["kwargs"] = kwargs
-                return "spawn-handle"
-
-            def remote(self, **kwargs):
-                captured["op"] = "remote"
-                captured["kwargs"] = kwargs
-                return "remote-result"
-
-        monkeypatch.setattr(
-            modal.Function, "from_name", staticmethod(lambda **_: _Stub())
-        )
-        return captured
-
-    def test_build_remote_single_task(self, monkeypatch):
-        captured = self._patch_function_from_name(monkeypatch)
+    def test_build_remote_single_task(self, modal_function_stub):
+        captured = modal_function_stub
         app = self._make_app()
         root = MagicMock()
 
@@ -565,8 +548,8 @@ class TestStardagAppBuildSpawnRemote:
         assert captured["kwargs"]["app_name"] == app.name
         assert captured["kwargs"]["build_kwargs"] is None
 
-    def test_build_remote_sequence_of_tasks(self, monkeypatch):
-        captured = self._patch_function_from_name(monkeypatch)
+    def test_build_remote_sequence_of_tasks(self, modal_function_stub):
+        captured = modal_function_stub
         app = self._make_app()
         roots = [MagicMock(), MagicMock()]
 
@@ -574,16 +557,16 @@ class TestStardagAppBuildSpawnRemote:
 
         assert captured["kwargs"]["tasks"] is roots
 
-    def test_build_remote_forwards_build_kwargs(self, monkeypatch):
-        captured = self._patch_function_from_name(monkeypatch)
+    def test_build_remote_forwards_build_kwargs(self, modal_function_stub):
+        captured = modal_function_stub
         app = self._make_app()
 
         app.build_remote(MagicMock(), build_kwargs={"fail_mode": "CONTINUE"})
 
         assert captured["kwargs"]["build_kwargs"] == {"fail_mode": "CONTINUE"}
 
-    def test_build_spawn_sequence_and_build_kwargs(self, monkeypatch):
-        captured = self._patch_function_from_name(monkeypatch)
+    def test_build_spawn_sequence_and_build_kwargs(self, modal_function_stub):
+        captured = modal_function_stub
         app = self._make_app()
         roots = [MagicMock(), MagicMock()]
 
@@ -593,3 +576,111 @@ class TestStardagAppBuildSpawnRemote:
         assert captured["op"] == "spawn"
         assert captured["kwargs"]["tasks"] is roots
         assert captured["kwargs"]["build_kwargs"] == {"register_all": True}
+
+
+# ---------------------------------------------------------------------------
+# StardagApp.build_trigger
+# ---------------------------------------------------------------------------
+
+
+class TestStardagAppBuildTrigger:
+    """build_trigger mints the build id at the trigger point and passes it
+    to the remote build function as ``resume_build_id``, so restarts of the
+    build function resume the same build."""
+
+    def _make_app(self):
+        return StardagApp(
+            "test-trigger-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+    def test_mints_build_id_and_injects_resume_build_id(self, modal_function_stub):
+        captured = modal_function_stub
+        app = self._make_app()
+        root = MagicMock(spec=BaseTask)
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+
+        with registry_provider.override(registry):
+            result = app.build_trigger(root, description="a build")
+
+        registry.build_start.assert_called_once_with(
+            root_tasks=[root], description="a build"
+        )
+        assert result.build_id == build_id
+        assert result.function_call == "spawn-handle"
+        assert captured["op"] == "spawn"
+        assert captured["kwargs"]["tasks"] is root
+        assert captured["kwargs"]["build_kwargs"] == {"resume_build_id": build_id}
+
+    def test_sequence_of_roots_passed_as_list_to_registry(self, modal_function_stub):
+        app = self._make_app()
+        roots = [MagicMock(spec=BaseTask), MagicMock(spec=BaseTask)]
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+
+        with registry_provider.override(registry):
+            app.build_trigger(roots)
+
+        registry.build_start.assert_called_once_with(root_tasks=roots, description=None)
+
+    def test_explicit_build_id_skips_registry(self, modal_function_stub):
+        captured = modal_function_stub
+        app = self._make_app()
+        build_id = uuid4()
+
+        # NoOpRegistry active — must not be consulted (and must not raise)
+        with registry_provider.override(NoOpRegistry()):
+            result = app.build_trigger(MagicMock(spec=BaseTask), build_id=build_id)
+
+        assert result.build_id == build_id
+        assert captured["kwargs"]["build_kwargs"] == {"resume_build_id": build_id}
+
+    def test_merges_build_kwargs(self, modal_function_stub):
+        captured = modal_function_stub
+        app = self._make_app()
+        build_id = uuid4()
+
+        with registry_provider.override(NoOpRegistry()):
+            app.build_trigger(
+                MagicMock(spec=BaseTask),
+                build_id=build_id,
+                build_kwargs={"register_all": True},
+            )
+
+        assert captured["kwargs"]["build_kwargs"] == {
+            "register_all": True,
+            "resume_build_id": build_id,
+        }
+
+    def test_raises_without_registry(self, modal_function_stub):
+        app = self._make_app()
+
+        with registry_provider.override(NoOpRegistry()):
+            with pytest.raises(RuntimeError, match="requires a configured registry"):
+                app.build_trigger(MagicMock(spec=BaseTask))
+
+    def test_rejects_resume_build_id_in_build_kwargs(self, modal_function_stub):
+        app = self._make_app()
+
+        with pytest.raises(TypeError, match="resume_build_id"):
+            app.build_trigger(
+                MagicMock(spec=BaseTask),
+                build_id=uuid4(),
+                build_kwargs={"resume_build_id": uuid4()},
+            )
+
+    def test_does_not_mutate_caller_build_kwargs(self, modal_function_stub):
+        app = self._make_app()
+        caller_kwargs: dict = {"register_all": True}
+
+        with registry_provider.override(NoOpRegistry()):
+            app.build_trigger(
+                MagicMock(spec=BaseTask),
+                build_id=uuid4(),
+                build_kwargs=caller_kwargs,
+            )
+
+        assert caller_kwargs == {"register_all": True}
