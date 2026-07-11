@@ -59,6 +59,12 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_waiting_for_lock = False
         if event_commit is not None:
             task.latest_commit_hash = event_commit
+        # Executor ref of this start (detached execution re-attach). Set or
+        # *cleared* on every start so a non-detached run can't leave a stale
+        # ref from an earlier detached one behind.
+        metadata = event.event_metadata or {}
+        task.latest_executor = metadata.get("executor")
+        task.latest_executor_ref = metadata.get("executor_ref")
     elif et == EventType.TASK_RESUMED:
         task.latest_status = TaskStatus.RUNNING
         task.latest_status_at = event.created_at

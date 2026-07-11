@@ -198,10 +198,20 @@ class TaskBulkResponse(BaseModel):
 
 
 class BulkTaskIdRef(BaseModel):
-    """Slim id-only reference to a registered task in a bulk response."""
+    """Slim id-only reference to a registered task in a bulk response.
+
+    Also carries the task's current (global) execution state so the SDK's
+    build engine learns — with zero extra roundtrips — whether a task is
+    already RUNNING with a re-attachable detached execution (see
+    ``latest_executor_ref`` on the Task model). The executor fields are
+    only meaningful when ``latest_status`` is RUNNING.
+    """
 
     id: UUID
     task_id: str
+    latest_status: TaskStatus | None = None
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
 
 
 class TaskBulkIdOnlyResponse(BaseModel):

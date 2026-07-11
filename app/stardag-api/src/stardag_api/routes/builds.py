@@ -1434,14 +1434,18 @@ async def register_tasks_bulk(
         record_entity_created(auth.workspace_id, "tasks")
 
     if id_only:
-        # Slim path — caller (typically the SDK) doesn't read the
-        # response body, so save the per-task column reads + JSON
-        # serialisation. Echo only the (id ↔ task_id) mapping.
+        # Slim path — echo the (id ↔ task_id) mapping plus the current
+        # global status/executor-ref so the SDK's build engine can
+        # re-attach to detached executions that are still running (no
+        # task_data, namespace or timestamps).
         return TaskBulkIdOnlyResponse(
             tasks=[
                 BulkTaskIdRef(
-                    id=db_task_by_task_id[t.task_id].id,
+                    id=(db_task := db_task_by_task_id[t.task_id]).id,
                     task_id=t.task_id,
+                    latest_status=db_task.latest_status,
+                    latest_executor=db_task.latest_executor,
+                    latest_executor_ref=db_task.latest_executor_ref,
                 )
                 for t in tasks_in
             ]
@@ -1474,10 +1478,34 @@ async def start_task(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
+    executor: str | None = None,
+    executor_ref: str | None = None,
 ):
-    """Mark a task as started within a build."""
+    """Mark a task as started within a build.
+
+    Args:
+        executor: Name of the execution backend running the task (e.g.
+            ``"modal"``) for detached executions.
+        executor_ref: Backend-specific reference to the detached execution
+            (e.g. a Modal function call id). Recorded in the event metadata
+            and denormalised onto the task so a resumed build can re-attach
+            to a still-running execution instead of re-executing.
+    """
+    extra_metadata: dict | None = None
+    if executor is not None or executor_ref is not None:
+        extra_metadata = {}
+        if executor is not None:
+            extra_metadata["executor"] = executor
+        if executor_ref is not None:
+            extra_metadata["executor_ref"] = executor_ref
     return await _create_task_event(
-        build_id, task_id, EventType.TASK_STARTED, db, auth, commit_hash=commit_hash
+        build_id,
+        task_id,
+        EventType.TASK_STARTED,
+        db,
+        auth,
+        commit_hash=commit_hash,
+        extra_metadata=extra_metadata,
     )
 
 

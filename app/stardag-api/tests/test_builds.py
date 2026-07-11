@@ -900,8 +900,11 @@ async def test_bulk_register_id_only_returns_slim_response(client: AsyncClient):
     )
     assert response.status_code == 201
     body = response.json()
-    # Slim shape — exactly id + task_id, nothing else.
-    assert {tuple(t.keys()) for t in body["tasks"]} == {("id", "task_id")}
+    # Slim shape — id + task_id + execution state for re-attach; no
+    # task_data / namespace / timestamps.
+    assert {tuple(t.keys()) for t in body["tasks"]} == {
+        ("id", "task_id", "latest_status", "latest_executor", "latest_executor_ref")
+    }
     assert [t["task_id"] for t in body["tasks"]] == [
         "slim-task-0",
         "slim-task-1",
@@ -1438,3 +1441,81 @@ async def test_add_task_dependencies_unknown_task_returns_404(client: AsyncClien
         json={"upstream_task_ids": ["u1"], "is_dynamic": True},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_start_task_with_executor_ref(client: AsyncClient):
+    """Executor refs on /start are recorded and surfaced for re-attach.
+
+    The ref lands in the TASK_STARTED event metadata and the denormalised
+    task columns, and a subsequent bulk registration (e.g. a resumed
+    build's discovery pass) gets it back in the slim response so the build
+    engine can re-attach to the detached execution.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "detached-task",
+        "task_namespace": "",
+        "task_name": "DetachedTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/detached-task/start",
+        params={"executor": "modal", "executor_ref": "fc-123abc"},
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "running"
+
+    # A resumed build's bulk registration sees the running execution's ref.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk?id_only=true",
+        json={"tasks": [task_data]},
+    )
+    assert response.status_code == 201
+    ref = response.json()["tasks"][0]
+    assert ref["task_id"] == "detached-task"
+    assert ref["latest_status"] == "running"
+    assert ref["latest_executor"] == "modal"
+    assert ref["latest_executor_ref"] == "fc-123abc"
+
+    # The event metadata carries the ref too (event-sourced ground truth).
+    events = (await client.get(f"/api/v1/builds/{build_id}/events")).json()
+    started = [e for e in events if e["event_type"] == "task_started"]
+    assert len(started) == 1
+
+
+@pytest.mark.asyncio
+async def test_start_task_without_ref_clears_stale_executor_ref(client: AsyncClient):
+    """A TASK_STARTED without executor info clears a previously recorded ref.
+
+    Guards against a resumed build re-attaching to a stale function call
+    from an earlier detached run after the task was restarted non-detached.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "restarted-task",
+        "task_namespace": "",
+        "task_name": "RestartedTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/restarted-task/start",
+        params={"executor": "modal", "executor_ref": "fc-old"},
+    )
+    # Restarted without a detached ref (e.g. local executor this time).
+    await client.post(f"/api/v1/builds/{build_id}/tasks/restarted-task/start")
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/bulk?id_only=true",
+        json={"tasks": [task_data]},
+    )
+    ref = response.json()["tasks"][0]
+    assert ref["latest_status"] == "running"
+    assert ref["latest_executor"] is None
+    assert ref["latest_executor_ref"] is None
