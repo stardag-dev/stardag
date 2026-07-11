@@ -27,6 +27,24 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `RegisteredTaskInfo` (current global status + executor ref) used by the
   build engine for re-attach. Custom `RegistryABC` implementations with the
   old signatures keep working (refs are dropped gracefully).
+- **`stardag/integration/modal`: worker-side lifecycle reporting.** The
+  default `Runner` now reports the task's lifecycle from inside the worker —
+  TASK_STARTED (carrying the worker's own function call id as executor ref),
+  TASK_COMPLETED + artifact upload, TASK_SUSPENDED (dynamic deps), and
+  TASK_FAILED — whenever the executor forwarded a build id (via the
+  `STARDAG_BUILD_ID` env override; no worker signature change, older
+  deployed workers are unaffected) and the container has registry
+  credentials. Events therefore land even if the build orchestrator dies
+  mid-task, and each re-invocation records a fresh re-attachable ref. The
+  build engine suppresses its own completed/suspended/resumed reporting for
+  such tasks (`TaskExecutorABC.reports_lifecycle` seam), keeping started
+  (immediate detached-spawn re-attachability) and failed (fallback for
+  workers that die before reporting) — duplicate events are tolerated by
+  the event-sourced status derivation. Opt out with
+  `ModalTaskExecutor(worker_reports_lifecycle=False)` (required when driving
+  an app deployed with an older stardag from a newer local SDK) or
+  `Runner(report_lifecycle=False)`. New `stardag.build.get_current_build_id()`
+  exposes the ambient build id inside `build[_aio]()`.
 
 - **`stardag/integration/modal`**: New `StardagApp.build_trigger()` — triggers
   a build with the registry build id minted at the trigger point and passed to

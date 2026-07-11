@@ -43,6 +43,7 @@ from stardag.build._base import (
     TaskCount,
     TaskExecutionError,
     DetachedHandle,
+    get_current_build_id,
     TaskExecutorABC,
 )
 from stardag.build._concurrency import (
@@ -96,6 +97,7 @@ __all__ = [
     "RoutedTaskExecutor",
     "TaskExecutionError",
     "DetachedHandle",
+    "get_current_build_id",
     "TaskExecutorABC",
     # Build functions
     "build",

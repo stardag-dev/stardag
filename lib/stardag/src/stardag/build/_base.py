@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import traceback as tb_module
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 import logging
@@ -23,6 +24,20 @@ logger = logging.getLogger(__name__)
 
 # Type alias for the on_registry_failure parameter
 OnRegistryFailure = Literal["warn", "raise"]
+
+# Build id of the enclosing build_aio() call. Set for the duration of a
+# build so components invoked from within it (e.g. executors forwarding the
+# build id to self-reporting remote workers) can access it without threading
+# it through every signature.
+current_build_id_var: ContextVar[UUID | None] = ContextVar(
+    "stardag_current_build_id", default=None
+)
+
+
+def get_current_build_id() -> UUID | None:
+    """Return the build id of the enclosing ``build[_aio]()`` call, if any."""
+    return current_build_id_var.get()
+
 
 # =============================================================================
 # Data Structures
@@ -270,6 +285,22 @@ class TaskExecutorABC(ABC):
         """
         pass
 
+    def reports_lifecycle(self, task: BaseTask) -> bool:
+        """Whether the *execution side* reports this task's lifecycle events.
+
+        When True, the build engine does not emit TASK_COMPLETED /
+        TASK_SUSPENDED / TASK_RESUMED events or upload artifacts for the
+        task — the worker executing it reports those itself (e.g. the Modal
+        ``Runner``), which also survives an orchestrator crash mid-task.
+        The engine still emits TASK_STARTED at submission (immediate
+        re-attachability of detached spawns) and TASK_FAILED as a fallback
+        (the worker may die before reporting); duplicate events are
+        tolerated by the registry's event-sourced status derivation.
+
+        Default: False — the engine reports everything, as before.
+        """
+        return False
+
     # -------------------------------------------------------------------------
     # Optional detached-execution surface
     # -------------------------------------------------------------------------
@@ -384,6 +415,13 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         if executor is None:
             return
         await executor.cancel(task)
+
+    def reports_lifecycle(self, task: BaseTask) -> bool:
+        """Route to the owning executor's lifecycle-reporting mode."""
+        executor = self.executors.get(self.router(task))
+        if executor is None:
+            return False
+        return executor.reports_lifecycle(task)
 
     def supports_detached(self, task: BaseTask) -> bool:
         """Route to the owning executor's detached support."""

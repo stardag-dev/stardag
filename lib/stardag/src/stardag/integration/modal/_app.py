@@ -53,6 +53,7 @@ from stardag.build import (
     DetachedHandle,
     TaskExecutionError,
     TaskExecutorABC,
+    get_current_build_id,
 )
 from stardag.build._base import BuildSummary
 from stardag.config import clear_config_cache, config_provider, load_config
@@ -376,6 +377,16 @@ def _callable_accepts_env_overrides(fn: typing.Callable[..., typing.Any]) -> boo
 MODAL_EXECUTOR_NAME = "modal"
 """Executor name recorded with detached executions (see DetachedHandle)."""
 
+STARDAG_BUILD_ID_ENV = "STARDAG_BUILD_ID"
+"""Env var through which the build id reaches Modal workers.
+
+Injected into ``env_overrides`` by :class:`ModalTaskExecutor` (so it is also
+set as a process env var around the task's run) and read by
+:class:`Runner` to report the task's lifecycle events from inside the
+worker. Riding on ``env_overrides`` keeps the worker function signature
+unchanged — older deployed workers simply apply it as a harmless env var.
+"""
+
 
 class ModalTaskExecutor(TaskExecutorABC):
     """Task executor that sends tasks to Modal for remote execution.
@@ -411,6 +422,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         modal_app_name: str,
         worker_selector: WorkerSelector,
         detached: bool = True,
+        worker_reports_lifecycle: bool = True,
     ):
         """Initialize Modal executor.
 
@@ -420,10 +432,19 @@ class ModalTaskExecutor(TaskExecutorABC):
             detached: Execute tasks as detached spawned function calls
                 (restart-safe, re-attachable, explicitly cancellable).
                 False restores the legacy blocking ``remote`` calls.
+            worker_reports_lifecycle: Whether the deployed workers report the
+                task lifecycle (started/completed/suspended/failed events +
+                artifacts) themselves via the default :class:`Runner`. When
+                True the build engine skips its own completed/suspended/
+                resumed reporting for Modal-routed tasks. Set False when
+                driving an app deployed with an older stardag version whose
+                workers don't self-report, or when using a custom
+                ``run_function`` without lifecycle reporting.
         """
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
         self.detached = detached
+        self.worker_reports_lifecycle = worker_reports_lifecycle
         # Cache of worker name -> modal.Function. ``modal.Function.from_name``
         # returns a lazy handle (no network call until invoked), but it is
         # invoked on every ``submit`` so we memoize it per worker name to avoid
@@ -445,13 +466,36 @@ class ModalTaskExecutor(TaskExecutorABC):
             self._worker_functions[worker_name] = worker_function
         return worker_function
 
+    def _prepare_invocation(
+        self, task: BaseTask
+    ) -> tuple[modal.Function, dict[str, str] | None]:
+        """Resolve the worker function and env overrides for a task.
+
+        When ``worker_reports_lifecycle`` and an enclosing build is active,
+        the build id is injected as the ``STARDAG_BUILD_ID`` env override so
+        the worker-side :class:`Runner` can report lifecycle events.
+        """
+        worker_name, env_overrides = _normalize_worker_selection(
+            self.worker_selector(task)
+        )
+        worker_function = self._get_worker_function(worker_name)
+        if self.worker_reports_lifecycle:
+            build_id = get_current_build_id()
+            if build_id is not None:
+                env_overrides = {
+                    **(env_overrides or {}),
+                    STARDAG_BUILD_ID_ENV: str(build_id),
+                }
+        return worker_function, env_overrides
+
+    def reports_lifecycle(self, task: BaseTask) -> bool:
+        """Workers self-report lifecycle when enabled and a build is active."""
+        return self.worker_reports_lifecycle and get_current_build_id() is not None
+
     async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Execute task on Modal (blocking remote call)."""
         try:
-            worker_name, env_overrides = _normalize_worker_selection(
-                self.worker_selector(task)
-            )
-            worker_function = self._get_worker_function(worker_name)
+            worker_function, env_overrides = self._prepare_invocation(task)
             res = await worker_function.remote.aio(task, env_overrides=env_overrides)
             return res
         except Exception as e:
@@ -509,10 +553,7 @@ class ModalTaskExecutor(TaskExecutorABC):
 
     async def submit_detached(self, task: BaseTask) -> DetachedHandle:
         """Spawn the task on its worker function; return a re-attachable handle."""
-        worker_name, env_overrides = _normalize_worker_selection(
-            self.worker_selector(task)
-        )
-        worker_function = self._get_worker_function(worker_name)
+        worker_function, env_overrides = self._prepare_invocation(task)
         function_call = await worker_function.spawn.aio(
             task, env_overrides=env_overrides
         )
@@ -782,6 +823,100 @@ class Builder(BuildFunction):
         return build(tasks, task_executor=task_executor, **kwargs)
 
 
+class _WorkerLifecycleReporter:
+    """Reports a task's lifecycle events from inside a Modal worker.
+
+    Created by :class:`Runner` when a build id was forwarded (see
+    ``STARDAG_BUILD_ID_ENV``) and the container has a configured registry.
+    Reporting from the worker makes the events independent of the
+    orchestrator's lifetime: completion/failure land even if the build
+    function died mid-await, and each (re-)invocation's TASK_STARTED
+    carries its own function call id for re-attach.
+
+    All reporting is best-effort: a registry hiccup must never fail a task
+    whose actual work succeeded — failures are logged loudly and the
+    engine-side self-heal (target-existence check on the next build) covers
+    a lost completion event.
+    """
+
+    def __init__(self, registry: typing.Any, build_id: UUID, task: BaseTask):
+        self.registry = registry
+        self.build_id = build_id
+        self.task = task
+
+    @classmethod
+    def create(
+        cls, task: BaseTask, env_overrides: dict[str, str] | None
+    ) -> "_WorkerLifecycleReporter | None":
+        raw_build_id = (env_overrides or {}).get(
+            STARDAG_BUILD_ID_ENV
+        ) or os.environ.get(STARDAG_BUILD_ID_ENV)
+        if not raw_build_id:
+            return None
+        try:
+            build_id = UUID(raw_build_id)
+        except ValueError:
+            logger.warning(f"Invalid {STARDAG_BUILD_ID_ENV}: {raw_build_id!r}")
+            return None
+        registry = registry_provider.get()
+        # Exact-type check: only the literal do-nothing default suppresses
+        # reporting — NoOpRegistry *subclasses* may implement real behavior.
+        if type(registry) is NoOpRegistry:
+            return None
+        return cls(registry, build_id, task)
+
+    def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
+        try:
+            fn()
+        except Exception as e:
+            logger.error(
+                f"Worker lifecycle report ({what}) failed for task {self.task.id}: {e}"
+            )
+
+    def started(self) -> None:
+        def _do() -> None:
+            ref: str | None = None
+            try:
+                ref = modal.current_function_call_id()
+            except Exception:
+                pass
+            self.registry.task_start(
+                self.build_id,
+                self.task,
+                executor=MODAL_EXECUTOR_NAME,
+                executor_ref=ref,
+            )
+
+        self._guard(_do, "start")
+
+    def completed(self) -> None:
+        self._guard(
+            lambda: self.registry.task_complete(self.build_id, self.task),
+            "complete",
+        )
+
+        def _artifacts() -> None:
+            artifacts = self.task.artifacts()
+            if artifacts:
+                self.registry.task_upload_artifacts(self.build_id, self.task, artifacts)
+
+        self._guard(_artifacts, "artifacts")
+
+    def suspended(self) -> None:
+        self._guard(
+            lambda: self.registry.task_suspend(self.build_id, self.task),
+            "suspend",
+        )
+
+    def failed(self, exception: Exception) -> None:
+        self._guard(
+            lambda: self.registry.task_fail(
+                self.build_id, self.task, error_message=str(exception)
+            ),
+            "fail",
+        )
+
+
 class Runner(RunFunction):
     """Default runner implementation with overridable setup/teardown.
 
@@ -803,6 +938,18 @@ class Runner(RunFunction):
             ...
         )
     """
+
+    def __init__(self, *, report_lifecycle: bool = True):
+        """Initialize the runner.
+
+        Args:
+            report_lifecycle: Report the task's lifecycle events
+                (started/completed/suspended/failed + artifacts) to the
+                registry from inside the worker, when a build id was
+                forwarded by the executor and the container has registry
+                credentials. See :class:`_WorkerLifecycleReporter`.
+        """
+        self.report_lifecycle = report_lifecycle
 
     def setup(self, task: BaseTask) -> None:
         """Optional setup logic before the task runs."""
@@ -829,17 +976,32 @@ class Runner(RunFunction):
                 provided, they are set temporarily around the ``run`` call and
                 the previous environment is restored afterwards.
         """
+        # getattr: tolerate subclasses overriding __init__ without super()
+        reporter = (
+            _WorkerLifecycleReporter.create(task, env_overrides)
+            if getattr(self, "report_lifecycle", True)
+            else None
+        )
         result: None | TaskStruct = None
         exception: Exception | None = None
         try:
             self.setup(task)
+            if reporter is not None:
+                reporter.started()
             with temp_env_vars(env_overrides or {}):
                 result = self.run(task)
         except Exception as e:
             exception = e
+            if reporter is not None:
+                reporter.failed(e)
             raise
         finally:
             self.teardown(task, exception)
+        if reporter is not None:
+            if result is None:
+                reporter.completed()
+            else:
+                reporter.suspended()
         return result
 
     def run(self, task: BaseTask) -> None | TaskStruct:
