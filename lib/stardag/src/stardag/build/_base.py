@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import StrEnum
 import logging
-from typing import Callable, Generator, Generic, Literal, Protocol, TypeVar
+from typing import Awaitable, Callable, Generator, Generic, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
@@ -179,6 +179,32 @@ class TaskExecutionState:
 # =============================================================================
 
 
+@dataclass
+class DetachedHandle:
+    """Handle to a detached (orchestrator-independent) task execution.
+
+    A detached execution keeps running even if the process that spawned it
+    dies; the executor records enough in ``ref`` to re-attach later (e.g. a
+    Modal function call id). The build engine persists ``(executor, ref)``
+    in the registry alongside the TASK_STARTED event, so a resumed build can
+    re-attach to a still-running execution instead of re-executing the task.
+
+    Attributes:
+        executor: Name of the execution backend (e.g. ``"modal"``). Matched
+            on re-attach so a ref is only handed back to the backend that
+            created it.
+        ref: Backend-specific reference to the execution.
+        wait: Zero-arg callable returning an awaitable that resolves to the
+            task result, with the same contract as
+            :meth:`TaskExecutorABC.submit` (``None`` | ``TaskStruct`` |
+            ``TaskExecutionError``).
+    """
+
+    executor: str
+    ref: str
+    wait: Callable[[], Awaitable["None | TaskStruct | TaskExecutionError"]]
+
+
 class TaskExecutorABC(ABC):
     """Abstract base for task executors.
 
@@ -235,8 +261,60 @@ class TaskExecutorABC(ABC):
         so the build will block until the underlying thread/subprocess
         finishes. Async-only tasks and Modal calls do propagate the
         cancellation cooperatively and unblock the build promptly.
+
+        Note: for *detached* executions (``submit_detached``/``reattach``)
+        asyncio cancellation of the ``wait()`` awaitable does NOT stop the
+        remote work — executors supporting detached mode MUST override this
+        to cancel the tracked remote execution, or FAIL_FAST/user
+        cancellation will leave workers running.
         """
         pass
+
+    # -------------------------------------------------------------------------
+    # Optional detached-execution surface
+    # -------------------------------------------------------------------------
+
+    def supports_detached(self, task: BaseTask) -> bool:
+        """Whether this executor can run ``task`` as a detached execution.
+
+        Detached executions survive the orchestrator process (see
+        :class:`DetachedHandle`). Default: False — ``submit()`` is used.
+        """
+        return False
+
+    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+        """Start a detached execution of ``task`` and return its handle.
+
+        Only called when :meth:`supports_detached` returned True for the
+        task. Implementations should return as soon as the execution is
+        durably started (spawned) — the build engine records the handle's
+        ``(executor, ref)`` in the registry *before* awaiting ``wait()``.
+
+        Raises:
+            Any exception if the execution could not be started; the build
+            engine converts it into a task failure.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support detached execution"
+        )
+
+    async def reattach(
+        self, task: BaseTask, executor: str, ref: str
+    ) -> DetachedHandle | None:
+        """Re-attach to a previously started detached execution, if possible.
+
+        Called by the build engine when the registry reports the task as
+        RUNNING with a recorded ``(executor, ref)`` — typically after the
+        orchestrator was restarted, or when another build started the task.
+
+        Returns:
+            A handle whose ``wait()`` resolves to the execution's result
+            (including an execution that already finished successfully), or
+            None when re-attach isn't possible — unknown executor name,
+            execution failed/was cancelled/expired — in which case the build
+            engine falls back to normal (re-)execution.
+        """
+        return None
 
 
 # Type variable for executor routing keys
@@ -306,6 +384,35 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         if executor is None:
             return
         await executor.cancel(task)
+
+    def supports_detached(self, task: BaseTask) -> bool:
+        """Route to the owning executor's detached support."""
+        executor = self.executors.get(self.router(task))
+        if executor is None:
+            return False
+        return executor.supports_detached(task)
+
+    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+        """Route detached submission to the owning executor."""
+        key = self.router(task)
+        executor = self.executors.get(key)
+        if executor is None:
+            raise KeyError(f"No executor found for routing key: {key}")
+        return await executor.submit_detached(task)
+
+    async def reattach(
+        self, task: BaseTask, executor: str, ref: str
+    ) -> DetachedHandle | None:
+        """Route re-attach to the executor the task routes to.
+
+        The routed executor itself checks whether the recorded ``executor``
+        name matches its backend (returns None otherwise), so a ref recorded
+        by a different backend is never re-attached by the wrong one.
+        """
+        routed = self.executors.get(self.router(task))
+        if routed is None:
+            return None
+        return await routed.reattach(task, executor, ref)
 
 
 # =============================================================================
