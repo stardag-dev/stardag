@@ -50,6 +50,7 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.registry import RegistryABC, registry_provider
+from stardag.registry._base import accepts_executor_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -1107,30 +1108,29 @@ async def build_aio(
             await asyncio.sleep(current_interval)
             current_interval = min(current_interval * backoff_factor, max_interval)
 
+    # Custom RegistryABC implementations written against the pre-detached
+    # task_start_aio(build_id, task) signature can't receive executor refs.
+    # Detected once via signature inspection (not try/except TypeError, which
+    # would also mask unrelated TypeErrors raised inside an implementation).
+    registry_accepts_executor_kwargs = accepts_executor_kwargs(registry.task_start_aio)
+
     async def registry_task_start(
         task: BaseTask, handle: DetachedHandle | None
     ) -> None:
-        """Emit TASK_STARTED, with the detached-execution ref when present.
-
-        Custom ``RegistryABC`` implementations written against the
-        pre-detached ``task_start_aio(build_id, task)`` signature would
-        raise TypeError on the extra kwargs — fall back to the bare call so
-        they keep working (the ref just isn't recorded).
-        """
-        if handle is None:
+        """Emit TASK_STARTED, with the detached-execution ref when present."""
+        if handle is None or not registry_accepts_executor_kwargs:
+            if handle is not None:
+                logger.warning(
+                    f"Registry {type(registry).__name__} does not accept "
+                    "executor refs on task_start_aio; detached execution "
+                    f"{handle.ref!r} for task {task.id} will not be "
+                    "re-attachable."
+                )
             await registry.task_start_aio(build_id, task)
             return
-        try:
-            await registry.task_start_aio(
-                build_id, task, executor=handle.executor, executor_ref=handle.ref
-            )
-        except TypeError:
-            logger.warning(
-                f"Registry {type(registry).__name__} does not accept "
-                "executor refs on task_start_aio; detached execution "
-                f"{handle.ref!r} for task {task.id} will not be re-attachable."
-            )
-            await registry.task_start_aio(build_id, task)
+        await registry.task_start_aio(
+            build_id, task, executor=handle.executor, executor_ref=handle.ref
+        )
 
     async def submit_with_lock(
         task: BaseTask,

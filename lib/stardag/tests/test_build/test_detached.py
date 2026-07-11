@@ -302,3 +302,50 @@ class TestOldRegistrySignatureCompat:
         assert summary.status == BuildExitStatus.SUCCESS
         assert started == [task.id]
         assert executor.spawn_calls == [task.id]
+
+    async def test_old_sync_signature_via_default_aio_delegation(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """A registry overriding only the *sync* pre-detached task_start —
+        reached through the base class's aio→sync delegation — also keeps
+        working (refs dropped via signature inspection)."""
+        from stardag.registry import NoOpRegistry
+
+        started: list[UUID] = []
+
+        class OldSyncSignatureRegistry(NoOpRegistry):
+            def task_start(self, build_id, task):  # pyright: ignore[reportIncompatibleMethodOverride]  # old signature (deliberate)
+                started.append(task.id)
+
+        task = SyncOnlyTask(name="old-sync-registry-sig")
+        executor = FakeDetachedExecutor()
+
+        summary = await build_aio(
+            [task], task_executor=executor, registry=OldSyncSignatureRegistry()
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert started == [task.id]
+
+    async def test_type_error_inside_new_signature_registry_propagates(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """A TypeError raised *inside* a new-signature task_start_aio is a
+        real bug in the registry implementation and must propagate — the
+        old-signature compatibility is signature-inspected, not
+        caught-and-retried."""
+        from stardag.registry import NoOpRegistry
+
+        class BuggyRegistry(NoOpRegistry):
+            async def task_start_aio(
+                self, build_id, task, executor=None, executor_ref=None
+            ):
+                raise TypeError("bug inside the registry implementation")
+
+        task = SyncOnlyTask(name="buggy-registry")
+        executor = FakeDetachedExecutor()
+
+        with pytest.raises(TypeError, match="bug inside the registry"):
+            await build_aio([task], task_executor=executor, registry=BuggyRegistry())

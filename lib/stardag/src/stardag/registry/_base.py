@@ -1,6 +1,7 @@
 """Base registry classes and utilities."""
 
 import abc
+import inspect
 import os
 import subprocess
 from datetime import datetime
@@ -15,6 +16,25 @@ from stardag.utils.resource_provider import resource_provider
 if TYPE_CHECKING:
     from stardag import BaseTask
     from stardag.artifact import Artifact
+
+
+def accepts_executor_kwargs(fn: Any) -> bool:
+    """Whether a ``task_start[_aio]`` implementation accepts the
+    ``executor``/``executor_ref`` kwargs.
+
+    Signature inspection (instead of a try/except TypeError fallback, which
+    would also mask unrelated TypeErrors raised *inside* an implementation)
+    to stay compatible with custom :class:`RegistryABC` implementations
+    written against the pre-detached ``(build_id, task)`` signature.
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    params = signature.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "executor" in params and "executor_ref" in params
 
 
 class RegisteredTaskInfo(StardagBaseModel):
@@ -419,17 +439,15 @@ class RegistryABC(metaclass=abc.ABCMeta):
 
         Tolerates subclasses that override the sync ``task_start`` with the
         pre-detached ``(build_id, task)`` signature: refs are dropped for
-        those rather than raising.
+        those rather than raising (detected via signature inspection, so
+        TypeErrors raised *inside* an implementation propagate normally).
         """
-        if executor is None and executor_ref is None:
+        if (executor is None and executor_ref is None) or not accepts_executor_kwargs(
+            self.task_start
+        ):
             self.task_start(build_id, task)
             return
-        try:
-            self.task_start(
-                build_id, task, executor=executor, executor_ref=executor_ref
-            )
-        except TypeError:
-            self.task_start(build_id, task)
+        self.task_start(build_id, task, executor=executor, executor_ref=executor_ref)
 
     async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_complete."""

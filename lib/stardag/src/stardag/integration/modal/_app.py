@@ -475,6 +475,24 @@ class ModalTaskExecutor(TaskExecutorABC):
         async def wait() -> None | TaskStruct | TaskExecutionError:
             try:
                 return await function_call.get.aio()
+            except asyncio.CancelledError:
+                # The build engine cancels the awaiting future on FAIL_FAST /
+                # user cancellation. Unlike ``remote.aio``, cancelling
+                # ``get()`` does NOT stop the detached remote call — cancel
+                # it explicitly here. This must live in wait() (not only in
+                # the executor cancel() hook): the finally below pops the
+                # in-flight entry, and the asyncio cancellation typically
+                # lands before the hook runs, so the hook would find nothing.
+                # Shielded: this coroutine is already being cancelled.
+                try:
+                    await asyncio.shield(function_call.cancel.aio())
+                except Exception as cancel_err:
+                    logger.warning(
+                        f"Failed to cancel Modal function call "
+                        f"{function_call.object_id} for task {task.id} "
+                        f"during cancellation: {cancel_err}"
+                    )
+                raise
             except Exception as e:
                 return TaskExecutionError(
                     exception=e,

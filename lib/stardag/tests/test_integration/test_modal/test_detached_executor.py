@@ -29,11 +29,13 @@ class FakeFunctionCall:
         result=None,
         error: Exception | None = None,
         running: bool = False,
+        block: bool = False,
     ):
         self.object_id = object_id
         self._result = result
         self._error = error
         self._running = running
+        self._block = block
         self.cancel_count = 0
         self.get = SimpleNamespace(aio=self._get_aio)
         self.cancel = SimpleNamespace(aio=self._cancel_aio)
@@ -41,6 +43,10 @@ class FakeFunctionCall:
     async def _get_aio(self, timeout: float | None = None):
         if self._running and timeout == 0:
             raise TimeoutError("still running")
+        if self._block and timeout is None:
+            import asyncio
+
+            await asyncio.Event().wait()  # blocks until cancelled
         if self._error is not None:
             raise self._error
         return self._result
@@ -206,6 +212,27 @@ class TestCancel:
     async def test_cancel_unknown_task_is_noop(self):
         executor = _make_executor(FakeWorkerFunction(FakeFunctionCall()))
         await executor.cancel(_make_task())  # no raise
+
+    async def test_cancelling_wait_cancels_remote_call(self):
+        """asyncio cancellation of the awaiting wait() (FAIL_FAST / user
+        cancel) must cancel the detached remote call itself — the in-flight
+        entry is popped by wait()'s cleanup before the executor cancel()
+        hook runs, so wait() owns this path."""
+        import asyncio
+
+        function_call = FakeFunctionCall(object_id="fc-block", block=True)
+        executor = _make_executor(FakeWorkerFunction(function_call))
+        task = _make_task()
+        handle = await executor.submit_detached(task)
+
+        waiter = asyncio.ensure_future(handle.wait())
+        await asyncio.sleep(0)  # let it start awaiting get()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert function_call.cancel_count == 1  # remote call cancelled
+        assert task.id not in executor._in_flight
 
     async def test_cancel_failure_is_swallowed(self):
         function_call = FakeFunctionCall(object_id="fc-err", running=True)
