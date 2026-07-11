@@ -39,30 +39,21 @@ VOLUME_NAME = "stardag-testing"
 
 try:
     import modal
-    from modal.exception import AuthError, NotFoundError
 
     from stardag.integration import modal as sd_modal
     from stardag.integration.modal._target import (
         ModalVolumeRemoteFileSystem,
         modal_volume_rfs_provider,
     )
+    from stardag.testing.modal import live_modal_guard
 
-    try:
-        VOLUME = modal.Volume.from_name(VOLUME_NAME)
-        VOLUME.listdir("/")
-    except AuthError:
-        pytest.skip("Skipping modal tests (not authenticated)", allow_module_level=True)
-    except NotFoundError:
-        pytest.skip(
-            f"Skipping modal cache round-trip tests: volume {VOLUME_NAME!r} "
-            "not found in the active Modal workspace/environment. Create it "
-            f"with `modal volume create {VOLUME_NAME}` (in a personal/dev "
-            "workspace — not a shared one) before running these tests.",
-            allow_module_level=True,
-        )
+    live_modal_guard(VOLUME_NAME)
+    VOLUME = modal.Volume.from_name(VOLUME_NAME)
 
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
+
+pytestmark = pytest.mark.modal_live
 
 
 @pytest.fixture

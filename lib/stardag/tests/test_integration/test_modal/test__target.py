@@ -21,19 +21,17 @@ VOLUME_NAME = "stardag-testing"
 
 try:
     import modal
-    from modal.exception import AuthError
 
     from stardag.integration import modal as sd_modal
+    from stardag.testing.modal import live_modal_guard
 
-    # check if logged in and volume exists
-    try:
-        VOLUME = modal.Volume.from_name(VOLUME_NAME)
-        VOLUME.listdir("/")
-    except AuthError:
-        pytest.skip("Skipping modal tests (not authenticated)", allow_module_level=True)
+    live_modal_guard(VOLUME_NAME)
+    VOLUME = modal.Volume.from_name(VOLUME_NAME)
 
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
+
+pytestmark = pytest.mark.modal_live
 
 
 MOUNT_PATH = "/data"

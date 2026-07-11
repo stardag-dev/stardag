@@ -138,6 +138,63 @@ async def test_resume_build_after_failure(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_resume_fresh_build_is_noop(client: AsyncClient):
+    """Resuming a build with no activity beyond BUILD_STARTED records nothing.
+
+    This is the trigger-minted-build-id flow: the client creates the build,
+    then the first orchestrator invocation attaches to it via the resume
+    endpoint (the SDK calls resume before task discovery/registration). The
+    first run must not show as resumed.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    response = await client.post(f"/api/v1/builds/{build_id}/resume")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "running"
+    assert data["is_resumed"] is False
+
+    # No BUILD_RESUMED event was recorded
+    response = await client.get(f"/api/v1/builds/{build_id}/events")
+    event_types = [e["event_type"] for e in response.json()]
+    assert "build_resumed" not in event_types
+    assert "build_started" in event_types
+
+
+@pytest.mark.asyncio
+async def test_resume_build_with_task_activity_records_resumed(client: AsyncClient):
+    """Resuming a build that has task activity records BUILD_RESUMED.
+
+    E.g. the orchestrator was restarted mid-build (after registering/starting
+    tasks): the second invocation's resume call must flag the build as
+    resumed even though the build never reached a terminal state.
+    """
+    response = await client.post("/api/v1/builds", json={})
+    build_id = response.json()["id"]
+
+    task_data = {
+        "task_id": "resume-activity-task",
+        "task_namespace": "",
+        "task_name": "TestTask",
+        "task_data": {},
+    }
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=task_data)
+    await client.post(f"/api/v1/builds/{build_id}/tasks/resume-activity-task/start")
+
+    response = await client.post(f"/api/v1/builds/{build_id}/resume")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "running"
+    assert data["is_resumed"] is True
+
+    response = await client.get(f"/api/v1/builds/{build_id}/events")
+    event_types = [e["event_type"] for e in response.json()]
+    assert "build_resumed" in event_types
+    assert event_types.count("build_resumed") == 1
+
+
+@pytest.mark.asyncio
 async def test_resume_build_complete_clears_resumed_flag(client: AsyncClient):
     """A resumed build that subsequently completes shows is_resumed=False.
 
@@ -191,6 +248,9 @@ async def test_list_builds_orders_resumed_first(client: AsyncClient):
     import asyncio
 
     build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    # Give build_a activity so its later resume is a real resume (a fresh
+    # build's resume is a recorded-nothing no-op and wouldn't reorder).
+    await client.post(f"/api/v1/builds/{build_a}/fail")
     await asyncio.sleep(0.005)
     build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
     await asyncio.sleep(0.005)
