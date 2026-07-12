@@ -527,6 +527,16 @@ class ModalTaskExecutor(TaskExecutorABC):
         different backend, the call failed/was cancelled, or the result has
         expired. A call that already finished successfully yields a handle
         resolving immediately to its result.
+
+        Known ambiguity (accepted): Modal's ``get(timeout=0)`` poll timeout
+        raises the *builtin* ``TimeoutError`` (modal 1.5), and a task body
+        that itself raised ``TimeoutError`` re-raises the same type — such
+        a failed call classifies as still-running here. Not narrowable:
+        ``modal.exception.TimeoutError`` is not what the poll raises, and
+        ``FunctionCall.get_call_graph()`` does not reliably surface input
+        status (verified live: stays PENDING after success/cancel). The
+        re-attach path self-corrects: awaiting the returned handle's
+        ``wait()`` re-raises the failure and the task is recorded failed.
         """
         if executor != MODAL_EXECUTOR_NAME or not self.detached:
             return None
