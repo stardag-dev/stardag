@@ -44,6 +44,9 @@ class FrontierTaskRef(StardagBaseModel):
     latest_status: str
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
+    # When the current status was recorded (None on servers predating the
+    # field) — used for staleness bounds on RUNNING-without-ref tasks.
+    latest_status_at: datetime | None = None
 
 
 class BuildFrontier(StardagBaseModel):
@@ -530,6 +533,30 @@ class RegistryABC(metaclass=abc.ABCMeta):
         for task in tasks:
             await self.task_register_aio(build_id, task)
         return None
+
+    async def task_start_with_limits_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        limit_keys: Sequence[str] | None = None,
+    ) -> bool:
+        """Mark a task started under named concurrency limits (atomic acquire).
+
+        Returns False when a limit key is at capacity — the task was NOT
+        started and no event was recorded; the caller should retry later
+        (in reactive scheduling: leave the task in the frontier; a
+        slot-holder's completion wakes the scheduler).
+
+        Default implementation performs no limit enforcement: it delegates
+        to :meth:`task_start_aio` and returns True. Backends with
+        server-side limit support (the API registry) override this.
+        """
+        await self.task_start_aio(
+            build_id, task, executor=executor, executor_ref=executor_ref
+        )
+        return True
 
     async def task_start_aio(
         self,

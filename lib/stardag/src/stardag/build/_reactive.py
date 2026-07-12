@@ -37,6 +37,8 @@ import asyncio
 import logging
 import typing
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable, Sequence
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct, flatten_task_struct
@@ -49,7 +51,7 @@ from stardag.build._base import (
 )
 from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError
-from stardag.registry import BuildFrontier, RegistryABC
+from stardag.registry import BuildFrontier, FrontierTaskRef, RegistryABC
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,23 @@ class TickConfig:
     linger_seconds: float = 120.0
     poll_interval_seconds: float = 3.0
     fail_mode: FailMode = FailMode.FAIL_FAST
+    # Maps a task to the named concurrency-limit keys it runs under (see
+    # the registry's environment concurrency limits). Acquisition happens
+    # atomically at task start, before the spawn: a denied task simply
+    # stays in the frontier — a slot-holder's completion wakes the
+    # scheduler (cross-build slot releases are covered by the watchdog).
+    limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None
+    # Staleness escape hatch for RUNNING tasks WITHOUT an executor ref
+    # (e.g. a tick that crashed between limit-slot acquisition and spawn):
+    # such a task can never resolve on its own — no worker reports it, no
+    # ref can be probed — and while RUNNING it holds any concurrency-limit
+    # slots it acquired, starving those keys env-wide. Tasks older than
+    # this bound (by status timestamp) are failed. None disables. Note: a
+    # task legitimately RUNNING via an old-version orchestrator (which
+    # records no refs) in ANOTHER build could be status-failed by this —
+    # its actual execution is unaffected and its completion (sticky) still
+    # lands; generous default accordingly.
+    stale_running_no_ref_seconds: float | None = 1800.0
 
 
 class _MissingTaskRef(typing.NamedTuple):
@@ -187,6 +206,7 @@ class TickSummary:
     failed_recorded: int = 0
     cancelled_refs: int = 0
     iterations: int = 0
+    limit_denied: int = 0
 
 
 async def run_tick_aio(
@@ -247,12 +267,13 @@ async def run_tick_aio(
                         "Upgrade stardag-api to a version matching this SDK."
                     ) from e
 
-                acted = await _act_on_frontier(
+                acted, denied_this_round = await _act_on_frontier(
                     frontier,
                     build_id=build_id,
                     registry=registry,
                     task_executor=task_executor,
                     task_store=task_store,
+                    config=config,
                     summary=summary,
                 )
                 terminal = await _handle_terminal(
@@ -263,6 +284,7 @@ async def run_tick_aio(
                     task_store=task_store,
                     config=config,
                     summary=summary,
+                    denied_this_round=denied_this_round,
                 )
                 if terminal is not None:
                     summary.outcome = "terminal"
@@ -298,12 +320,20 @@ async def _act_on_frontier(
     registry: RegistryABC,
     task_executor: TaskExecutorABC,
     task_store: BuildTaskStore,
+    config: TickConfig,
     summary: TickSummary,
-) -> bool:
-    """Spawn/probe/heal the actionable tasks. Returns True if anything acted."""
+) -> tuple[bool, int]:
+    """Spawn/probe/heal the actionable tasks.
+
+    Returns ``(acted, denied_this_round)``: whether anything acted, and how
+    many tasks were denied by concurrency limits in THIS pass (used by
+    terminal detection — a cumulative count would keep suppressing the
+    stuck-build check long after the denied tasks have run).
+    """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
-        return False  # terminal handling deals with it
+        return False, 0  # terminal handling deals with it
     acted = False
+    denied_this_round = 0
     for item in frontier.actionable:
         task = task_store.load_task(item.task_id)
         if task is None:
@@ -337,9 +367,7 @@ async def _act_on_frontier(
             continue
 
         if item.latest_status in _RUNNING_STATUSES:
-            resolution = await _resolve_running(
-                item.latest_executor, item.latest_executor_ref, task, task_executor
-            )
+            resolution = await _resolve_running(item, task, task_executor, config)
             if resolution == "complete":
                 await registry.task_complete_aio(build_id, task)
                 summary.self_healed += 1
@@ -356,6 +384,28 @@ async def _act_on_frontier(
             # "leave": still running (or unprobeable) — nothing to do.
             continue
 
+        limit_keys: list[str] = (
+            list(config.limit_key_selector(task))
+            if config.limit_key_selector is not None
+            else []
+        )
+        if limit_keys:
+            # Atomic slot acquisition BEFORE spawning, so a denied task
+            # never occupies a worker. The acquiring TASK_STARTED carries
+            # no executor ref yet; the post-spawn start below re-records
+            # with the ref (duplicate starts are tolerated, and the slot
+            # is counted per task, not per start).
+            started = await registry.task_start_with_limits_aio(
+                build_id, task, limit_keys=limit_keys
+            )
+            if not started:
+                logger.info(
+                    f"Task {task.id} denied by concurrency limits "
+                    f"{limit_keys}; leaving in frontier."
+                )
+                summary.limit_denied += 1
+                denied_this_round += 1
+                continue
         try:
             handle = await task_executor.submit_detached(task)
         except Exception as e:
@@ -369,27 +419,43 @@ async def _act_on_frontier(
         )
         summary.spawned += 1
         acted = True
-    return acted
+    return acted, denied_this_round
 
 
 async def _resolve_running(
-    executor_name: str | None,
-    ref: str | None,
+    item: "FrontierTaskRef",
     task: BaseTask,
     task_executor: TaskExecutorABC,
+    config: TickConfig,
 ) -> str:
-    """Decide what to do with a RUNNING task: leave/complete/failed/respawn.
+    """Decide what to do with a RUNNING task: leave/complete/failed.
 
     Self-heal precedence: the target is the ground truth — if it exists the
     task is complete regardless of what happened to the execution (e.g. the
     worker wrote the output, then died before reporting).
     """
+    executor_name, ref = item.latest_executor, item.latest_executor_ref
     if await task.complete_aio():
         return "complete"
     if executor_name is None or ref is None:
-        # RUNNING with no ref (e.g. started by an old-version orchestrator).
-        # Can't probe: conservatively leave it; the watchdog keeps checking
-        # (and the target-exists check above eventually resolves it).
+        # RUNNING with no ref: can't probe, no worker will report. Fresh
+        # occurrences are left alone (could be the spawn-in-progress window
+        # of a live tick, or an old-version orchestrator's task), but past
+        # the staleness bound the task is failed — otherwise it never
+        # resolves and holds any concurrency-limit slots forever.
+        stale_after = config.stale_running_no_ref_seconds
+        if (
+            stale_after is not None
+            and item.latest_status_at is not None
+            and (datetime.now(timezone.utc) - item.latest_status_at).total_seconds()
+            > stale_after
+        ):
+            logger.error(
+                f"Task {task.id} has been RUNNING without an executor ref "
+                f"for over {stale_after:.0f}s; failing it (stale — likely a "
+                "scheduler crash between slot acquisition and spawn)."
+            )
+            return "failed"
         logger.warning(
             f"Task {task.id} is RUNNING without an executor ref; leaving it."
         )
@@ -421,6 +487,7 @@ async def _handle_terminal(
     task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
+    denied_this_round: int = 0,
 ) -> str | None:
     """Evaluate terminal conditions; emit build events. Returns terminal status."""
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
@@ -446,6 +513,15 @@ async def _handle_terminal(
     if roots_known and all(r.latest_status == "completed" for r in frontier.roots):
         await registry.build_complete_aio(build_id)
         return "completed"
+
+    if denied_this_round > 0:
+        # Tasks denied by concurrency limits in THIS pass are waiting for
+        # slots held possibly by OTHER builds (running == 0 here doesn't
+        # mean the env is idle) — never declare the build stuck. Scoped to
+        # the current pass: a cumulative count would keep suppressing the
+        # stuck check long after the denied tasks have run. The watchdog
+        # re-ticks periodically; same-build slot releases notify directly.
+        return None
 
     # Note: spawns within this iteration imply frontier.actionable was
     # non-empty, so this check can't misfire on the pre-spawn snapshot.

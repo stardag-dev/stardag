@@ -294,6 +294,27 @@ def _run_watchdog_sweep(
 _TICK_KWARGS_ALLOWED = ("linger_seconds", "poll_interval_seconds", "fail_mode")
 
 
+def _build_tick_config(
+    meta: dict[str, typing.Any] | None,
+    tick_kwargs: dict[str, typing.Any] | None,
+    limit_key_selector: "typing.Callable[[BaseTask], typing.Sequence[str]] | None",
+) -> TickConfig:
+    """Assemble a TickConfig for one tick invocation.
+
+    Precedence: explicit ``tick_kwargs`` (manual/ops invocations) over the
+    build's persisted meta ``tick_kwargs`` (set at trigger time — shared by
+    all ticks) over TickConfig defaults. The concurrency-limit key selector
+    is deployed-app configuration (callables can't ride in the JSON meta).
+    """
+    config_kwargs: dict[str, typing.Any] = {
+        **((meta or {}).get("tick_kwargs") or {}),
+        **(tick_kwargs or {}),
+    }
+    if "fail_mode" in config_kwargs:
+        config_kwargs["fail_mode"] = FailMode(config_kwargs["fail_mode"])
+    return TickConfig(limit_key_selector=limit_key_selector, **config_kwargs)
+
+
 def _validate_tick_kwargs(
     tick_kwargs: dict[str, typing.Any] | None,
 ) -> dict[str, typing.Any] | None:
@@ -1465,6 +1486,8 @@ class StardagApp:
         worker_selector: WorkerSelector | None = None,
         tick_settings: FunctionSettings | None = None,
         watchdog_period_minutes: int | None = None,
+        limit_key_selector: typing.Callable[[BaseTask], typing.Sequence[str]]
+        | None = None,
     ):
         """Initialize a StardagApp.
 
@@ -1515,6 +1538,13 @@ class StardagApp:
         # build_trigger(reactive=True).
         self._tick_settings = tick_settings
         self.watchdog_period_minutes = watchdog_period_minutes
+        # Maps a task to the named concurrency-limit keys it runs under in
+        # reactive scheduling (see the registry's environment concurrency
+        # limits). Deployed-app configuration — captured by the tick
+        # function at finalize() so every tick of every build applies it
+        # consistently (callables can't be persisted in the JSON build
+        # meta like the scalar tick_kwargs).
+        self.limit_key_selector = limit_key_selector
         self._is_finalized = False
 
     @property
@@ -1677,6 +1707,7 @@ class StardagApp:
         # safe to invoke at any time; no-ops on non-reactive builds.
         app_name = self.name
         default_worker_selector = self.worker_selector
+        limit_key_selector = self.limit_key_selector
 
         def _modal_tick(
             build_id: str,
@@ -1693,14 +1724,11 @@ class StardagApp:
             # Per-build tick configuration persisted at trigger time — every
             # tick (worker wake-ups and watchdog sweeps spawn with only the
             # build id) runs with the same settings. Explicit tick_kwargs
-            # (tests/manual invocations) win over persisted ones.
-            meta = task_store.read_meta() or {}
-            config_kwargs = {
-                **(meta.get("tick_kwargs") or {}),
-                **(tick_kwargs or {}),
-            }
-            if "fail_mode" in config_kwargs:
-                config_kwargs["fail_mode"] = FailMode(config_kwargs["fail_mode"])
+            # (tests/manual invocations) win over persisted ones; the limit
+            # key selector is deployed-app configuration.
+            config = _build_tick_config(
+                task_store.read_meta(), tick_kwargs, limit_key_selector
+            )
 
             executor = ModalTaskExecutor(
                 modal_app_name=app_name,
@@ -1719,7 +1747,7 @@ class StardagApp:
                     task_executor=executor,
                     lock_manager=lock_manager,
                     task_store=task_store,
-                    config=TickConfig(**config_kwargs),
+                    config=config,
                 )
             )
             logger.info(f"Tick for build {build_id}: {summary}")

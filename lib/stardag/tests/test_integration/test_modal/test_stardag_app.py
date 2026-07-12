@@ -914,3 +914,39 @@ class TestWatchdogSweep:
         from stardag.integration.modal._app import _run_watchdog_sweep
 
         _run_watchdog_sweep(NoOpRegistry(), lambda *a, **k: 1 / 0)  # no raise
+
+
+class TestBuildTickConfig:
+    """Config assembly for scheduler ticks: persisted meta shared by all
+    ticks, explicit kwargs win, app-level limit key selector injected."""
+
+    def test_meta_kwargs_applied(self):
+        from stardag.integration.modal._app import _build_tick_config
+
+        config = _build_tick_config(
+            {"tick_kwargs": {"linger_seconds": 42, "fail_mode": "continue"}},
+            None,
+            None,
+        )
+        assert config.linger_seconds == 42
+        assert config.fail_mode.value == "continue"
+        assert config.limit_key_selector is None
+
+    def test_explicit_kwargs_win_and_selector_injected(self):
+        from stardag.integration.modal._app import _build_tick_config
+
+        selector = lambda t: ["gpu"]  # noqa: E731
+        config = _build_tick_config(
+            {"tick_kwargs": {"linger_seconds": 42}},
+            {"linger_seconds": 7},
+            selector,
+        )
+        assert config.linger_seconds == 7
+        assert config.limit_key_selector is selector
+
+    def test_defaults_without_meta(self):
+        from stardag.build import TickConfig
+        from stardag.integration.modal._app import _build_tick_config
+
+        config = _build_tick_config(None, None, None)
+        assert config.linger_seconds == TickConfig().linger_seconds

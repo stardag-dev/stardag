@@ -456,8 +456,9 @@ server fails reactive triggers with a "does not support reactive
 scheduling" error); the triggering process needs registry credentials and
 access to the default target root (task objects are persisted there for
 the ticks); the global concurrency lock and build-local
-`ConcurrencyConfig` limits are not applied by ticks (Modal's per-function
-`concurrency_limit` still applies); and tasks blocked by a failure
+`ConcurrencyConfig` limits are not applied by ticks (use the
+registry-backed named limits above; Modal's per-function
+`concurrency_limit` also still applies); and tasks blocked by a failure
 currently stay pending in the UI (the build itself is failed). Builds
 cancelled from the registry UI are picked up by the next tick (within the
 watchdog period), which cancels the running Modal function calls.
@@ -473,6 +474,53 @@ Two operational notes:
 - **The watchdog sweep runs one quick scheduling pass per running build**
   (it skips the linger), so its per-period cost is one short function
   invocation plus a frontier query per running build.
+
+Named concurrency limits are enforced registry-side in reactive mode —
+across builds, not just within one. Configure caps per environment
+(`PUT /api/v1/concurrency-limits/{key}` with `{"max_concurrent": N}`) and
+tag tasks with keys on the app (deployed configuration, applied
+consistently by every scheduler tick):
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+    watchdog_period_minutes=5,
+    limit_key_selector=lambda task: ["gpu"] if needs_gpu(task) else [],
+)
+```
+
+A task denied by a limit stays pending and is retried when a slot frees
+(immediately for same-build releases; within the watchdog period for
+releases in other builds).
+
+When limits are enforced, **the watchdog is strongly recommended**
+(`watchdog_period_minutes=5`): a slot is freed by the holder reaching a
+terminal status, and the watchdog is the safety net that keeps statuses
+honest when wake-ups are lost — including the escape hatch that fails a
+task stuck RUNNING without an execution ref (default after 30 minutes,
+`TickConfig.stale_running_no_ref_seconds`), which would otherwise hold
+its slots indefinitely. Also note that limit-key tags recorded at a
+task's start persist until its next start _with_ keys — a later build
+re-running the same task id without tags briefly counts under the old
+keys while RUNNING.
+
+Server requirement: concurrency-limit enforcement (like reactive mode as
+a whole) needs a stardag-api version matching this SDK — an **older
+server silently ignores the enforcement parameters**, so upgrade the
+server before relying on limits.
+
+Requirements and current limitations: the app must be deployed with this
+stardag version (scheduler `tick` function + self-reporting workers); the
+triggering process needs registry credentials and access to the default
+target root (task objects are persisted there for the ticks); the global
+concurrency lock and build-local `ConcurrencyConfig` limits are not applied
+by ticks (use the registry-backed named limits above; Modal's per-function
+`concurrency_limit` also still applies); and tasks blocked by a failure
+currently stay pending in the UI (the build itself is failed). Builds cancelled from the registry UI are picked up by
+the next tick (within the watchdog period), which cancels the running
+Modal function calls.
 
 To opt out (legacy blocking `remote` calls), pass `detached=False`:
 

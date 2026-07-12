@@ -12,6 +12,10 @@ from stardag_api.models.enums import (
 )
 from stardag_api.models.event import Event
 from stardag_api.models.invite import Invite
+from stardag_api.models.concurrency_limit import (
+    EnvironmentConcurrencyLimit,
+    TaskLimitKey,
+)
 from stardag_api.models.lock import DistributedLock
 from stardag_api.models.workspace import Workspace
 from stardag_api.models.workspace_member import WorkspaceMember
@@ -28,6 +32,8 @@ __all__ = [
     "Build",
     "BuildStatus",
     "DistributedLock",
+    "EnvironmentConcurrencyLimit",
+    "TaskLimitKey",
     "Event",
     "EventType",
     "Invite",
