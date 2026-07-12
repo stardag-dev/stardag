@@ -90,6 +90,16 @@ class Build(Base, TimestampMixin):
         nullable=False,
     )
 
+    # Reactive-scheduler dirty flag: set by POST /builds/{id}/notify (e.g. a
+    # worker finishing a task), cleared by the scheduler tick before it
+    # computes the frontier (DELETE /builds/{id}/notify). A notify landing
+    # between clear and compute re-sets it, so the tick's linger poll picks
+    # the wake-up back up — no lost signals. NULL = no pending wake-up.
+    needs_tick_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="builds")
     user: Mapped[User | None] = relationship(back_populates="builds")

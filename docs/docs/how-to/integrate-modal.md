@@ -422,6 +422,58 @@ built with an older stardag version from a newer local SDK, pass
 `ModalTaskExecutor(worker_reports_lifecycle=False)` (or redeploy the app) so
 the build engine doesn't skip events the old workers won't send.
 
+### Reactive scheduling: no resident build function (experimental)
+
+With `build_trigger(..., reactive=True)` the build runs with **no resident
+orchestrator at all**: task discovery happens at the trigger, and the build
+is driven by short-lived scheduler _ticks_ — spawned when the build is
+triggered, whenever a worker finishes a task, and (recommended) by a
+periodic watchdog. Between ticks, nothing runs except your tasks: a
+multi-day build with a few long-running tasks costs no orchestrator
+container time, and there is no orchestrator process whose crash could
+affect the build.
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+    # Recommended with reactive mode: periodically re-check running builds
+    # (covers lost wake-ups and builds cancelled from the UI).
+    watchdog_period_minutes=5,
+)
+
+# After deploy:
+result = app.build_trigger(root_task, reactive=True)
+# Re-trigger with the same build id to wake a stalled build — or to add
+# new root tasks to the running build:
+app.build_trigger(more_tasks, build_id=result.build_id, reactive=True)
+```
+
+Requirements and current limitations: the app must be deployed with this
+stardag version — **both** the Modal app and the registry server (an older
+server fails reactive triggers with a "does not support reactive
+scheduling" error); the triggering process needs registry credentials and
+access to the default target root (task objects are persisted there for
+the ticks); the global concurrency lock and build-local
+`ConcurrencyConfig` limits are not applied by ticks (Modal's per-function
+`concurrency_limit` still applies); and tasks blocked by a failure
+currently stay pending in the UI (the build itself is failed). Builds
+cancelled from the registry UI are picked up by the next tick (within the
+watchdog period), which cancels the running Modal function calls.
+
+Two operational notes:
+
+- **Don't redeploy the app with changed task definitions while reactive
+  builds are in flight.** Task objects are persisted as pickles and loaded
+  by later ticks/workers of the same deployed app version — a mid-build
+  redeploy that changes task classes can make the stored tasks
+  unloadable (such tasks are failed by the next tick rather than
+  silently stalling; re-trigger the build after the redeploy).
+- **The watchdog sweep runs one quick scheduling pass per running build**
+  (it skips the linger), so its per-period cost is one short function
+  invocation plus a frontier query per running build.
+
 To opt out (legacy blocking `remote` calls), pass `detached=False`:
 
 ```{.python notest}

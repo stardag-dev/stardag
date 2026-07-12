@@ -8,6 +8,41 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Reactive (tick-based) build scheduling for Modal — experimental.** A
+  build can now run with **no resident orchestrator**:
+  `StardagApp.build_trigger(tasks, reactive=True)` runs discovery at the
+  trigger, persists the task objects to a per-build task store under the
+  default target root, and short-lived, idempotent scheduler **ticks**
+  (spawned by the trigger, by workers finishing tasks, and by an optional
+  periodic watchdog) drive the build: each tick fetches the build's
+  scheduling frontier from the registry, spawns ready tasks as detached
+  Modal function calls, probes running refs (leaving live ones alone,
+  self-healing completions from target existence, recording failures),
+  handles terminal states (completed / failed / externally cancelled —
+  cancelling running function calls), then lingers briefly on the build's
+  wake-up flag and exits when quiet. Long-running builds therefore cost no
+  orchestrator container time while tasks execute, and there is no
+  orchestrator to crash. Ticks are single-flighted per build via a
+  scheduler lease on the existing distributed-lock service. New public
+  surface: `stardag.build.run_tick_aio` / `TickConfig` / `TickSummary` /
+  `BuildTaskStore` / `discover_and_register_aio`,
+  `TaskExecutorABC.detached_status()` / `cancel_detached()` /
+  `DetachedExecutionStatus`, `StardagApp(watchdog_period_minutes=...,
+tick_settings=...)`. Current limitations (documented in
+  `stardag/build/_reactive.py`): requires a registry; global lock and
+  build-local concurrency limits are not applied by ticks; no TASK_SKIPPED
+  emission on failure yet; re-triggering with the same build id adds new
+  roots to an active build.
+
+### Registry API
+
+- New reactive-scheduling endpoints: `POST`/`DELETE /builds/{id}/notify`
+  (scheduler wake-up flag, new `builds.needs_tick_at` column) and
+  `GET /builds/{id}/frontier` — the build's actionable tasks (global status
+  pending/suspended/running with all upstream dependencies completed,
+  including executor refs for liveness probing), per-status counts, root
+  statuses, and build status, for scheduler ticks.
+
 - **`stardag/build` + `stardag/integration/modal`: detached task execution
   (restart-safe long-running tasks).** `ModalTaskExecutor` now spawns worker
   invocations as detached Modal function calls by default instead of holding

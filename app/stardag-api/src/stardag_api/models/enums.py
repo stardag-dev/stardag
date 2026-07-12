@@ -68,6 +68,9 @@ class EventType(str, enum.Enum):
     TASK_WAITING_FOR_LOCK = (
         "task_waiting_for_lock"  # Blocked by global lock in another build
     )
+    TASK_RETRIED = (
+        "task_retried"  # Failed/cancelled/skipped task reset to pending (retry)
+    )
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_SKIPPED = "task_skipped"

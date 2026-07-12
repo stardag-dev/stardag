@@ -37,6 +37,38 @@ def accepts_executor_kwargs(fn: Any) -> bool:
     return "executor" in params and "executor_ref" in params
 
 
+class FrontierTaskRef(StardagBaseModel):
+    """A task in a build's scheduling frontier (see :class:`BuildFrontier`)."""
+
+    task_id: str
+    latest_status: str
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
+
+
+class BuildFrontier(StardagBaseModel):
+    """Scheduling state of a build, consumed by reactive scheduler ticks.
+
+    ``actionable``: tasks with global status pending/suspended/running whose
+    upstream dependencies (static + dynamic) are all completed. The
+    scheduler partitions them: pending/suspended → spawn; running → probe
+    the detached execution ref. ``status_counts`` covers all tasks in the
+    build (terminal detection).
+    """
+
+    build_id: UUID
+    build_status: str
+    needs_tick: bool
+    root_task_ids: list[str]
+    roots: list[FrontierTaskRef]
+    status_counts: dict[str, int]
+    actionable: list[FrontierTaskRef]
+    # All RUNNING tasks in the build, including non-actionable ones (e.g.
+    # inside the dynamic-dep registration window) — cancellation targets.
+    # Defaults to empty for servers predating the field.
+    running: list[FrontierTaskRef] = []
+
+
 class RegisteredTaskInfo(StardagBaseModel):
     """Slim per-task info echoed back from a bulk task registration.
 
@@ -208,6 +240,77 @@ class RegistryABC(metaclass=abc.ABCMeta):
         for task in tasks:
             self.task_register(build_id, task)
         return None
+
+    def build_list_running(self, limit: int = 100) -> list[UUID]:
+        """List ids of builds currently in RUNNING status (most recent first).
+
+        Used by the reactive scheduler watchdog to sweep for builds that
+        may need a tick. Default: empty (no reactive-scheduling support).
+        """
+        return []
+
+    async def build_list_running_aio(self, limit: int = 100) -> list[UUID]:
+        """Async version of build_list_running."""
+        return self.build_list_running(limit)
+
+    def build_add_roots(self, build_id: UUID, root_task_ids: list[str]) -> None:
+        """Append root task ids to a build (reactive re-trigger with new roots).
+
+        Default: no-op.
+        """
+        pass
+
+    async def build_add_roots_aio(
+        self, build_id: UUID, root_task_ids: list[str]
+    ) -> None:
+        """Async version of build_add_roots."""
+        self.build_add_roots(build_id, root_task_ids)
+
+    def task_retry(self, build_id: UUID, task: "BaseTask") -> None:
+        """Reset a failed/cancelled/skipped task to pending (retry).
+
+        Backends flip only terminal-but-retryable statuses; completed and
+        running tasks are unaffected. Default: no-op.
+        """
+        pass
+
+    async def task_retry_aio(self, build_id: UUID, task: "BaseTask") -> None:
+        """Async version of task_retry."""
+        self.task_retry(build_id, task)
+
+    def build_notify(self, build_id: UUID) -> None:
+        """Set the build's scheduler wake-up flag (reactive scheduling).
+
+        Default: no-op (backends without reactive-scheduling support).
+        """
+        pass
+
+    async def build_notify_aio(self, build_id: UUID) -> None:
+        """Async version of build_notify."""
+        self.build_notify(build_id)
+
+    def build_clear_notify(self, build_id: UUID) -> None:
+        """Clear the build's scheduler wake-up flag. Default: no-op."""
+        pass
+
+    async def build_clear_notify_aio(self, build_id: UUID) -> None:
+        """Async version of build_clear_notify."""
+        self.build_clear_notify(build_id)
+
+    def build_get_frontier(self, build_id: UUID) -> BuildFrontier:
+        """Return the build's scheduling frontier (reactive scheduling).
+
+        Default: not supported — reactive scheduling requires a registry
+        backend that can compute the frontier (e.g. the API registry).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support reactive scheduling "
+            "(build_get_frontier)"
+        )
+
+    async def build_get_frontier_aio(self, build_id: UUID) -> BuildFrontier:
+        """Async version of build_get_frontier."""
+        return self.build_get_frontier(build_id)
 
     def task_start(
         self,

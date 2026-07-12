@@ -231,3 +231,128 @@ class TestReporterCreationGuard:
 
         assert result is None
         assert task.complete()  # the work still ran
+
+
+class TestReactiveWorkerBehavior:
+    """In reactive mode the worker wakes the scheduler after terminal events
+    and registers dynamically yielded deps itself (no resident orchestrator)."""
+
+    def _reactive_env(self, build_id: UUID, app_name: str = "wake-app") -> dict:
+        from stardag.integration.modal._app import (
+            STARDAG_MODAL_APP_NAME_ENV,
+            STARDAG_REACTIVE_ENV,
+        )
+
+        return {
+            **_env(build_id),
+            STARDAG_REACTIVE_ENV: "1",
+            STARDAG_MODAL_APP_NAME_ENV: app_name,
+        }
+
+    @pytest.fixture
+    def tick_spawn_stub(self, monkeypatch):
+        captured: dict = {}
+
+        class _Stub:
+            def spawn(self, **kwargs):
+                captured["spawn_kwargs"] = kwargs
+                return "tick-handle"
+
+        def from_name(**kwargs):
+            captured["from_name"] = kwargs
+            return _Stub()
+
+        monkeypatch.setattr(modal.Function, "from_name", staticmethod(from_name))
+        return captured
+
+    def test_complete_notifies_and_spawns_tick(
+        self,
+        recording_registry,
+        fake_call_id,
+        tick_spawn_stub,
+        default_in_memory_fs_target,
+    ):
+        build_id = uuid4()
+        notified: list[UUID] = []
+        recording_registry.build_notify = notified.append  # type: ignore[method-assign]
+
+        Runner()(make_range(limit=3), env_overrides=self._reactive_env(build_id))
+
+        assert notified == [build_id]
+        assert tick_spawn_stub["from_name"] == {
+            "app_name": "wake-app",
+            "name": "tick",
+        }
+        assert tick_spawn_stub["spawn_kwargs"] == {"build_id": str(build_id)}
+
+    def test_failure_also_wakes_scheduler(
+        self,
+        recording_registry,
+        fake_call_id,
+        tick_spawn_stub,
+        default_in_memory_fs_target,
+    ):
+        class Boom(Exception):
+            pass
+
+        class FailingRunner(Runner):
+            def run(self, task):
+                raise Boom("nope")
+
+        with pytest.raises(Boom):
+            FailingRunner()(
+                make_range(limit=2), env_overrides=self._reactive_env(uuid4())
+            )
+
+        assert "spawn_kwargs" in tick_spawn_stub
+
+    def test_suspend_registers_dynamic_deps_and_persists(
+        self,
+        recording_registry,
+        fake_call_id,
+        tick_spawn_stub,
+        default_in_memory_fs_target,
+    ):
+        """A dynamic-deps yield in reactive mode: the worker registers the
+        yielded deps, persists their pickles for the scheduler, records the
+        dynamic edges, suspends, and wakes the scheduler."""
+        from stardag.build import BuildTaskStore
+
+        build_id = uuid4()
+        registered_bulk: list[str] = []
+        added_edges: list[tuple[str, list[str]]] = []
+
+        async def record_bulk(b, tasks):
+            registered_bulk.extend(str(t.id) for t in tasks)
+            return None
+
+        def record_edges(b, task, upstream_tasks, is_dynamic=True):
+            added_edges.append((str(task.id), [str(u.id) for u in upstream_tasks]))
+
+        recording_registry.task_register_bulk_aio = record_bulk  # type: ignore[method-assign]
+        recording_registry.task_add_dependencies = record_edges  # type: ignore[method-assign]
+
+        parent = SyncDynamicRangeSumTask(limit=3)
+        result = Runner()(parent, env_overrides=self._reactive_env(build_id))
+
+        assert result is not None  # suspended on incomplete yielded dep
+        assert recording_registry.methods()[-2:] == ["task_start", "task_suspend"]
+        yielded_dep_id = registered_bulk[0]
+        assert len(registered_bulk) == 1
+        assert added_edges == [(str(parent.id), [yielded_dep_id])]
+        # The scheduler can rehydrate the yielded dep.
+        store = BuildTaskStore(build_id)
+        assert store.load_task(yielded_dep_id) is not None
+        # And was woken up.
+        assert tick_spawn_stub["spawn_kwargs"] == {"build_id": str(build_id)}
+
+    def test_non_reactive_does_not_wake(
+        self,
+        recording_registry,
+        fake_call_id,
+        tick_spawn_stub,
+        default_in_memory_fs_target,
+    ):
+        Runner()(make_range(limit=3), env_overrides=_env(uuid4()))
+
+        assert tick_spawn_stub == {}  # no tick spawn without reactive flag

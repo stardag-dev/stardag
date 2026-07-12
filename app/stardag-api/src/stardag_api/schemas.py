@@ -214,6 +214,54 @@ class BulkTaskIdRef(BaseModel):
     latest_executor_ref: str | None = None
 
 
+class FrontierTaskRef(BaseModel):
+    """A task in a build's scheduling frontier (see BuildFrontierResponse)."""
+
+    task_id: str
+    latest_status: TaskStatus
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
+
+
+class BuildFrontierResponse(BaseModel):
+    """Scheduling state of a build, for reactive scheduler ticks.
+
+    ``actionable`` holds the tasks a scheduler can act on: global status
+    PENDING / SUSPENDED / RUNNING with **no incomplete upstream dependency**
+    (static or dynamic edges). The scheduler partitions them client-side:
+    PENDING/SUSPENDED → spawn; RUNNING → verify the detached execution ref
+    is still live, re-spawn or self-heal completion otherwise.
+
+    ``status_counts`` covers *all* tasks referenced by the build, keyed by
+    global status value — used for terminal detection (e.g. nothing running
+    and nothing actionable).
+    """
+
+    build_id: UUID
+    build_status: BuildStatus
+    needs_tick: bool
+    root_task_ids: list[str]
+    roots: list[FrontierTaskRef]
+    status_counts: dict[str, int]
+    actionable: list[FrontierTaskRef]
+    # All RUNNING tasks in the build, including non-actionable ones (e.g.
+    # inside the dynamic-dep registration window) — cancellation targets.
+    running: list[FrontierTaskRef] = []
+
+
+class AddBuildRootsRequest(BaseModel):
+    """Root task ids to append to a build (dedup/order handled server-side)."""
+
+    root_task_ids: list[str]
+
+
+class BuildNotifyResponse(BaseModel):
+    """Response of the build notify (scheduler wake-up flag) endpoints."""
+
+    build_id: UUID
+    needs_tick: bool
+
+
 class TaskBulkIdOnlyResponse(BaseModel):
     """Lightweight response from a bulk task registration.
 
