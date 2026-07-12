@@ -92,3 +92,29 @@ class SleepTask(sd.Task[int]):
 
         time.sleep(self.seconds)
         self._save(self.seconds)
+
+
+class SleepAndSaveCallId(sd.Task[dict]):
+    """Sleep, then save the Modal function call id that executed the task.
+
+    Used by live detached-execution tests to prove that a resumed build
+    re-attached to the *original* worker invocation: the saved call id must
+    equal the executor ref recorded before the orchestrator was killed. A
+    re-executed task would save a different call id. ``salt`` makes each
+    test run's task id (and output path) unique.
+    """
+
+    sleep_seconds: float
+    salt: str
+
+    def run(self) -> None:
+        import time
+
+        time.sleep(self.sleep_seconds)
+        try:
+            import modal
+
+            call_id = modal.current_function_call_id()
+        except Exception:
+            call_id = None
+        self._save({"call_id": call_id, "salt": self.salt})

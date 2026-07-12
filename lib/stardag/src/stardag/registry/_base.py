@@ -1,6 +1,7 @@
 """Base registry classes and utilities."""
 
 import abc
+import inspect
 import os
 import subprocess
 from datetime import datetime
@@ -15,6 +16,40 @@ from stardag.utils.resource_provider import resource_provider
 if TYPE_CHECKING:
     from stardag import BaseTask
     from stardag.artifact import Artifact
+
+
+def accepts_executor_kwargs(fn: Any) -> bool:
+    """Whether a ``task_start[_aio]`` implementation accepts the
+    ``executor``/``executor_ref`` kwargs.
+
+    Signature inspection (instead of a try/except TypeError fallback, which
+    would also mask unrelated TypeErrors raised *inside* an implementation)
+    to stay compatible with custom :class:`RegistryABC` implementations
+    written against the pre-detached ``(build_id, task)`` signature.
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    params = signature.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "executor" in params and "executor_ref" in params
+
+
+class RegisteredTaskInfo(StardagBaseModel):
+    """Slim per-task info echoed back from a bulk task registration.
+
+    Carries the task's current *global* execution state (across builds) so
+    the build engine learns — with zero extra roundtrips — whether a task is
+    already RUNNING with a re-attachable detached execution. The executor
+    fields are only meaningful when ``latest_status == "running"``.
+    """
+
+    task_id: str
+    latest_status: str | None = None
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
 
 
 class TaskMetadata(StardagBaseModel):
@@ -146,7 +181,9 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def task_register_bulk(self, build_id: UUID, tasks: Sequence["BaseTask"]) -> None:
+    def task_register_bulk(
+        self, build_id: UUID, tasks: Sequence["BaseTask"]
+    ) -> list[RegisteredTaskInfo] | None:
         """Register many tasks to a build in a single call.
 
         Default implementation falls back to ``task_register`` per task —
@@ -162,16 +199,33 @@ class RegistryABC(metaclass=abc.ABCMeta):
         Args:
             build_id: The build UUID returned by build_start.
             tasks: Tasks to register, in registration order.
+
+        Returns:
+            Per-task :class:`RegisteredTaskInfo` (used by the build engine
+            to re-attach to detached executions that are still running), or
+            None when the backend doesn't provide it.
         """
         for task in tasks:
             self.task_register(build_id, task)
+        return None
 
-    def task_start(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_start(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+    ) -> None:
         """Mark a task as started/running.
 
         Called immediately before a task begins execution. The caller is
         responsible for having already registered the task in the build —
         ``task_start`` only emits the started event.
+
+        ``executor`` / ``executor_ref`` identify a detached execution (e.g.
+        executor="modal" with a Modal function call id) so a later resumed
+        build can re-attach instead of re-executing. Backends that don't
+        track them may ignore both.
 
         Args:
             build_id: The build UUID returned by build_start.
@@ -363,7 +417,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
 
     async def task_register_bulk_aio(
         self, build_id: UUID, tasks: Sequence["BaseTask"]
-    ) -> None:
+    ) -> list[RegisteredTaskInfo] | None:
         """Async version of task_register_bulk.
 
         Default implementation falls back to ``task_register_aio`` per
@@ -372,10 +426,28 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         for task in tasks:
             await self.task_register_aio(build_id, task)
+        return None
 
-    async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version of task_start."""
-        self.task_start(build_id, task)
+    async def task_start_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+    ) -> None:
+        """Async version of task_start.
+
+        Tolerates subclasses that override the sync ``task_start`` with the
+        pre-detached ``(build_id, task)`` signature: refs are dropped for
+        those rather than raising (detected via signature inspection, so
+        TypeErrors raised *inside* an implementation propagate normally).
+        """
+        if (executor is None and executor_ref is None) or not accepts_executor_kwargs(
+            self.task_start
+        ):
+            self.task_start(build_id, task)
+            return
+        self.task_start(build_id, task, executor=executor, executor_ref=executor_ref)
 
     async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_complete."""

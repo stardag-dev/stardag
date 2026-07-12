@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from stardag import BaseTask
-from stardag.registry import NoOpRegistry
+from stardag.registry import NoOpRegistry, RegisteredTaskInfo
 
 
 @pytest.fixture
@@ -33,6 +33,9 @@ class RecordingRegistry(NoOpRegistry):
     def __init__(self) -> None:
         super().__init__()
         self.calls: list[tuple[str, UUID | None, dict[str, Any]]] = []
+        # When set, returned from task_register_bulk_aio — lets tests
+        # simulate a registry reporting re-attachable detached executions.
+        self.bulk_register_response: list[RegisteredTaskInfo] | None = None
 
     def _record(
         self,
@@ -82,14 +85,27 @@ class RecordingRegistry(NoOpRegistry):
         self._record("task_register_aio", task.id)
         await super().task_register_aio(build_id, task)
 
-    async def task_register_bulk_aio(self, build_id: UUID, tasks) -> None:
+    async def task_register_bulk_aio(
+        self, build_id: UUID, tasks
+    ) -> list[RegisteredTaskInfo] | None:
         for t in tasks:
             self._record("task_register_aio", t.id, bulk=True)
         # Skip super (would emit per-task again).
+        return self.bulk_register_response
 
-    async def task_start_aio(self, build_id: UUID, task: BaseTask) -> None:
-        self._record("task_start_aio", task.id)
-        await super().task_start_aio(build_id, task)
+    async def task_start_aio(
+        self,
+        build_id: UUID,
+        task: BaseTask,
+        executor: str | None = None,
+        executor_ref: str | None = None,
+    ) -> None:
+        self._record(
+            "task_start_aio", task.id, executor=executor, executor_ref=executor_ref
+        )
+        await super().task_start_aio(
+            build_id, task, executor=executor, executor_ref=executor_ref
+        )
 
     async def task_complete_aio(self, build_id: UUID, task: BaseTask) -> None:
         self._record("task_complete_aio", task.id)

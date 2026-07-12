@@ -26,7 +26,12 @@ from stardag.exceptions import (
     RateLimitError,
     TokenExpiredError,
 )
-from stardag.registry._base import RegistryABC, TaskMetadata, get_git_commit_hash
+from stardag.registry._base import (
+    RegisteredTaskInfo,
+    RegistryABC,
+    TaskMetadata,
+    get_git_commit_hash,
+)
 from stardag.artifact import Artifact
 
 if TYPE_CHECKING:
@@ -105,6 +110,33 @@ def _is_route_not_found(err: NotFoundError) -> bool:
     apart from "this particular resource doesn't exist".
     """
     return err.detail == "Not Found"
+
+
+def _parse_bulk_register_response(payload: object) -> "list[RegisteredTaskInfo] | None":
+    """Parse the ``/tasks/bulk?id_only=true`` response into RegisteredTaskInfo.
+
+    Tolerates older servers whose slim response carries only
+    ``{id, task_id}`` — the execution-state fields then default to None and
+    the build engine simply has nothing to re-attach to.
+    """
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("tasks")
+    if not isinstance(items, list):
+        return None
+    infos: list[RegisteredTaskInfo] = []
+    for item in items:
+        if not isinstance(item, dict) or "task_id" not in item:
+            return None
+        infos.append(
+            RegisteredTaskInfo(
+                task_id=item["task_id"],
+                latest_status=item.get("latest_status"),
+                latest_executor=item.get("latest_executor"),
+                latest_executor_ref=item.get("latest_executor_ref"),
+            )
+        )
+    return infos
 
 
 class APIRegistry(RegistryABC):
@@ -515,7 +547,9 @@ class APIRegistry(RegistryABC):
             operation=f"Register task {task.id}",
         )
 
-    def task_register_bulk(self, build_id: UUID, tasks: Sequence["BaseTask"]) -> None:
+    def task_register_bulk(
+        self, build_id: UUID, tasks: Sequence["BaseTask"]
+    ) -> list[RegisteredTaskInfo] | None:
         """Bulk-register tasks via the ``/tasks/bulk`` endpoint.
 
         Falls back to per-task ``task_register`` if the API doesn't
@@ -534,7 +568,7 @@ class APIRegistry(RegistryABC):
         by ~10× for batches with rich task_data.
         """
         if not tasks:
-            return
+            return None
         if len(tasks) > _MAX_BULK_REGISTER_TASKS:
             raise ValueError(
                 f"task_register_bulk supports at most {_MAX_BULK_REGISTER_TASKS} "
@@ -542,7 +576,7 @@ class APIRegistry(RegistryABC):
                 f"caller side."
             )
         try:
-            self._request(
+            response = self._request(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
@@ -559,6 +593,8 @@ class APIRegistry(RegistryABC):
             )
             for t in tasks:
                 self.task_register(build_id, t)
+            return None
+        return _parse_bulk_register_response(response.json())
 
     def _get_event_params(self) -> dict[str, str]:
         """Get query params for event endpoints, including commit_hash."""
@@ -569,7 +605,13 @@ class APIRegistry(RegistryABC):
             pass  # Git not available, skip commit_hash
         return params
 
-    def task_start(self, build_id: UUID, task: "BaseTask") -> None:
+    def task_start(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+    ) -> None:
         """Mark a task as started.
 
         Caller must have already registered the task (via ``task_register`` or
@@ -579,9 +621,20 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_event_params(),
+            params=self._get_start_params(executor, executor_ref),
             operation=f"Start task {task.id}",
         )
+
+    def _get_start_params(
+        self, executor: str | None, executor_ref: str | None
+    ) -> dict[str, str]:
+        """Event params plus optional detached-execution reference."""
+        params = self._get_event_params()
+        if executor is not None:
+            params["executor"] = executor
+        if executor_ref is not None:
+            params["executor_ref"] = executor_ref
+        return params
 
     def task_complete(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as completed."""
@@ -951,7 +1004,7 @@ class APIRegistry(RegistryABC):
 
     async def task_register_bulk_aio(
         self, build_id: UUID, tasks: Sequence["BaseTask"]
-    ) -> None:
+    ) -> list[RegisteredTaskInfo] | None:
         """Async bulk-register via ``/tasks/bulk`` (one HTTP call instead of N).
 
         Falls back to per-task ``task_register_aio`` if the API doesn't
@@ -968,7 +1021,7 @@ class APIRegistry(RegistryABC):
         with rich task_data.
         """
         if not tasks:
-            return
+            return None
         if len(tasks) > _MAX_BULK_REGISTER_TASKS:
             raise ValueError(
                 f"task_register_bulk_aio supports at most {_MAX_BULK_REGISTER_TASKS} "
@@ -976,7 +1029,7 @@ class APIRegistry(RegistryABC):
                 f"caller side."
             )
         try:
-            await self._arequest(
+            response = await self._arequest(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/tasks/bulk",
                 json={"tasks": [_get_task_data_for_registration(t) for t in tasks]},
@@ -993,8 +1046,16 @@ class APIRegistry(RegistryABC):
             )
             for t in tasks:
                 await self.task_register_aio(build_id, t)
+            return None
+        return _parse_bulk_register_response(response.json())
 
-    async def task_start_aio(self, build_id: UUID, task: "BaseTask") -> None:
+    async def task_start_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+    ) -> None:
         """Async version - mark a task as started.
 
         Caller must have already registered the task (via ``task_register_aio``
@@ -1004,7 +1065,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_event_params(),
+            params=self._get_start_params(executor, executor_ref),
             operation=f"Start task {task.id}",
         )
 

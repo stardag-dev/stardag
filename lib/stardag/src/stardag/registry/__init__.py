@@ -15,6 +15,7 @@ from stardag.registry._api_registry import APIRegistry
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 from stardag.registry._base import (
     NoOpRegistry,
+    RegisteredTaskInfo,
     RegistryABC,
     get_git_commit_hash,
     init_registry,
@@ -28,6 +29,7 @@ from stardag.registry._lock import (
 __all__ = [
     "APIRegistry",
     "NoOpRegistry",
+    "RegisteredTaskInfo",
     "RegistryABC",
     "RegistryGlobalConcurrencyLockManager",
     "RegistryLockHandle",

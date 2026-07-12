@@ -141,6 +141,14 @@ class Task(Base, TimestampMixin):
     )
     latest_commit_hash: Mapped[str | None] = mapped_column(String(64))
 
+    # Executor reference of the most recent TASK_STARTED event (e.g.
+    # executor="modal", executor_ref=<Modal function call id>). Lets a
+    # resumed build re-attach to a detached execution that is still running
+    # instead of re-executing the task. Only meaningful while
+    # latest_status == RUNNING; set (or cleared) on every TASK_STARTED.
+    latest_executor: Mapped[str | None] = mapped_column(String(32))
+    latest_executor_ref: Mapped[str | None] = mapped_column(String(255))
+
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="tasks")
     events: Mapped[list[Event]] = relationship(

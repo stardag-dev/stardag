@@ -395,10 +395,35 @@ app = sd_modal.StardagApp(
 
 Note that `build_trigger` requires registry credentials in the calling process
 (the active stardag profile), in addition to Modal credentials — unlike
-`build_spawn`, which only needs Modal credentials locally. Also note that
-tasks that were _mid-execution_ when the build function died are re-executed
-from scratch on resume; only tasks whose outputs were fully written are
-skipped.
+`build_spawn`, which only needs Modal credentials locally.
+
+### Detached execution: running tasks survive restarts
+
+Tasks are executed as _detached_ Modal function calls by default: the worker
+invocation is spawned (not held open by a blocking call), and its function
+call id is recorded in the registry with the task's started event. When a
+build is resumed (via `resume_build_id` / `build_trigger`), tasks that are
+still running in live workers are **re-attached instead of re-executed** — a
+preempted or restarted build function does not restart your long-running
+tasks. This also applies across builds: if another build is already running
+the same task, the new build attaches to that execution rather than
+duplicating it.
+
+Detached mode also makes cancellation real: when a build fails fast or is
+cancelled, the tracked function calls are explicitly cancelled on Modal
+(with the legacy blocking mode, workers of a dead build kept running to
+completion).
+
+To opt out (legacy blocking `remote` calls), pass `detached=False`:
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    build_function=sd_modal.Builder(detached=False),
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+)
+```
 
 <!-- TODO below needs significant cleanup.
 ## Running the `stardag-examples` Examples

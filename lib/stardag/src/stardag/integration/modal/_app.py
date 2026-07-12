@@ -48,7 +48,12 @@ import modal
 
 from stardag import BaseTask, TaskStruct, build, flatten_task_struct
 from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
-from stardag.build import BuildExitStatus, TaskExecutionError, TaskExecutorABC
+from stardag.build import (
+    BuildExitStatus,
+    DetachedHandle,
+    TaskExecutionError,
+    TaskExecutorABC,
+)
 from stardag.build._base import BuildSummary
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
@@ -368,11 +373,21 @@ def _callable_accepts_env_overrides(fn: typing.Callable[..., typing.Any]) -> boo
 # --- Task executor ---
 
 
+MODAL_EXECUTOR_NAME = "modal"
+"""Executor name recorded with detached executions (see DetachedHandle)."""
+
+
 class ModalTaskExecutor(TaskExecutorABC):
     """Task executor that sends tasks to Modal for remote execution.
 
     This executor submits tasks to Modal worker functions. Use with
     RoutedTaskExecutor to route some tasks to Modal and others locally.
+
+    By default tasks are executed *detached* (``worker.spawn`` + a tracked
+    ``FunctionCall``): the worker invocation survives this process, its
+    function call id is recorded in the registry, and a resumed build
+    re-attaches to still-running workers instead of re-executing them.
+    Pass ``detached=False`` for the legacy blocking ``worker.remote`` mode.
 
     Example:
         from stardag.build import HybridConcurrentTaskExecutor, RoutedTaskExecutor
@@ -395,20 +410,29 @@ class ModalTaskExecutor(TaskExecutorABC):
         *,
         modal_app_name: str,
         worker_selector: WorkerSelector,
+        detached: bool = True,
     ):
         """Initialize Modal executor.
 
         Args:
             modal_app_name: Name of the Modal app with worker functions.
             worker_selector: Function that selects which Modal worker to use per task.
+            detached: Execute tasks as detached spawned function calls
+                (restart-safe, re-attachable, explicitly cancellable).
+                False restores the legacy blocking ``remote`` calls.
         """
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
+        self.detached = detached
         # Cache of worker name -> modal.Function. ``modal.Function.from_name``
         # returns a lazy handle (no network call until invoked), but it is
         # invoked on every ``submit`` so we memoize it per worker name to avoid
         # recreating the handle for every task.
         self._worker_functions: dict[str, modal.Function] = {}
+        # In-flight detached executions by task UUID, for explicit cancel().
+        # Asyncio cancellation of ``FunctionCall.get`` does NOT stop the
+        # remote call (unlike ``remote.aio``), so FAIL_FAST relies on this.
+        self._in_flight: dict[UUID, modal.FunctionCall] = {}
 
     def _get_worker_function(self, worker_name: str) -> modal.Function:
         """Return the (memoized) ``modal.Function`` handle for a worker."""
@@ -422,7 +446,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         return worker_function
 
     async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
-        """Execute task on Modal."""
+        """Execute task on Modal (blocking remote call)."""
         try:
             worker_name, env_overrides = _normalize_worker_selection(
                 self.worker_selector(task)
@@ -434,6 +458,117 @@ class ModalTaskExecutor(TaskExecutorABC):
             return TaskExecutionError(
                 exception=e,
                 traceback="".join(tb_module.format_exception(e)),
+            )
+
+    # --- Detached execution (spawn + re-attach + cancel) ---
+
+    def supports_detached(self, task: BaseTask) -> bool:
+        """Detached mode is per-executor (constructor flag), not per-task."""
+        return self.detached
+
+    def _make_handle(
+        self, task: BaseTask, function_call: modal.FunctionCall
+    ) -> DetachedHandle:
+        """Wrap a FunctionCall in a DetachedHandle tracking in-flight state."""
+        self._in_flight[task.id] = function_call
+
+        async def wait() -> None | TaskStruct | TaskExecutionError:
+            try:
+                return await function_call.get.aio()
+            except asyncio.CancelledError:
+                # The build engine cancels the awaiting future on FAIL_FAST /
+                # user cancellation. Unlike ``remote.aio``, cancelling
+                # ``get()`` does NOT stop the detached remote call — cancel
+                # it explicitly here. This must live in wait() (not only in
+                # the executor cancel() hook): the finally below pops the
+                # in-flight entry, and the asyncio cancellation typically
+                # lands before the hook runs, so the hook would find nothing.
+                # Shielded: this coroutine is already being cancelled.
+                try:
+                    await asyncio.shield(function_call.cancel.aio())
+                except Exception as cancel_err:
+                    logger.warning(
+                        f"Failed to cancel Modal function call "
+                        f"{function_call.object_id} for task {task.id} "
+                        f"during cancellation: {cancel_err}"
+                    )
+                raise
+            except Exception as e:
+                return TaskExecutionError(
+                    exception=e,
+                    traceback="".join(tb_module.format_exception(e)),
+                )
+            finally:
+                self._in_flight.pop(task.id, None)
+
+        return DetachedHandle(
+            executor=MODAL_EXECUTOR_NAME,
+            ref=function_call.object_id,
+            wait=wait,
+        )
+
+    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+        """Spawn the task on its worker function; return a re-attachable handle."""
+        worker_name, env_overrides = _normalize_worker_selection(
+            self.worker_selector(task)
+        )
+        worker_function = self._get_worker_function(worker_name)
+        function_call = await worker_function.spawn.aio(
+            task, env_overrides=env_overrides
+        )
+        return self._make_handle(task, function_call)
+
+    async def reattach(
+        self, task: BaseTask, executor: str, ref: str
+    ) -> DetachedHandle | None:
+        """Re-attach to a spawned function call by id, if it is still live.
+
+        Returns None (→ normal re-execution) when the ref belongs to a
+        different backend, the call failed/was cancelled, or the result has
+        expired. A call that already finished successfully yields a handle
+        resolving immediately to its result.
+
+        Known ambiguity (accepted): Modal's ``get(timeout=0)`` poll timeout
+        raises the *builtin* ``TimeoutError`` (modal 1.5), and a task body
+        that itself raised ``TimeoutError`` re-raises the same type — such
+        a failed call classifies as still-running here. Not narrowable:
+        ``modal.exception.TimeoutError`` is not what the poll raises, and
+        ``FunctionCall.get_call_graph()`` does not reliably surface input
+        status (verified live: stays PENDING after success/cancel). The
+        re-attach path self-corrects: awaiting the returned handle's
+        ``wait()`` re-raises the failure and the task is recorded failed.
+        """
+        if executor != MODAL_EXECUTOR_NAME or not self.detached:
+            return None
+        try:
+            function_call = modal.FunctionCall.from_id(ref)
+        except Exception:
+            return None
+        try:
+            result = await function_call.get.aio(timeout=0)
+        except TimeoutError:
+            # Still running (or queued) — the interesting case.
+            return self._make_handle(task, function_call)
+        except Exception:
+            # Failed, cancelled, expired result, or unknown id — re-execute.
+            return None
+
+        async def resolved() -> None | TaskStruct | TaskExecutionError:
+            return result
+
+        return DetachedHandle(executor=MODAL_EXECUTOR_NAME, ref=ref, wait=resolved)
+
+    async def cancel(self, task: BaseTask) -> None:
+        """Cancel the tracked in-flight function call for ``task``, if any."""
+        function_call = self._in_flight.pop(task.id, None)
+        if function_call is None:
+            return
+        try:
+            await function_call.cancel.aio()
+        except Exception as e:
+            logger.warning(
+                f"Failed to cancel Modal function call "
+                f"{function_call.object_id} for task {task.id}: {e}"
             )
 
     async def setup(self) -> None:
@@ -563,6 +698,17 @@ class Builder(BuildFunction):
         )
     """
 
+    def __init__(self, *, detached: bool = True):
+        """Initialize the builder.
+
+        Args:
+            detached: Execute tasks as detached spawned Modal function calls
+                (restart-safe, re-attachable on resume, explicitly
+                cancellable). False restores the legacy blocking
+                ``remote`` calls. Passed to :class:`ModalTaskExecutor`.
+        """
+        self.detached = detached
+
     def setup(self, tasks: typing.Sequence[BaseTask] | BaseTask) -> None:
         """Optional setup logic before the build starts."""
         _setup_logging()
@@ -598,6 +744,7 @@ class Builder(BuildFunction):
         modal_executor = ModalTaskExecutor(
             modal_app_name=app_name,
             worker_selector=worker_selector,
+            detached=getattr(self, "detached", True),
         )
         summary_or_exception: BuildSummary | None | Exception = BuildFailedError(
             "Unknown error during build"
@@ -806,6 +953,9 @@ class PrefectBuilder(Builder):
         before_run_callback: typing.Callable[[BaseTask], typing.Awaitable[None]]
         | None = None,
     ):
+        # Prefect's build flow drives the executor via submit() only, so
+        # detached mode has no effect there — keep the legacy behavior.
+        super().__init__(detached=False)
         self.on_complete_callback = on_complete_callback
         self.before_run_callback = before_run_callback
 

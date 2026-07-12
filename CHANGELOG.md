@@ -8,6 +8,26 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **`stardag/build` + `stardag/integration/modal`: detached task execution
+  (restart-safe long-running tasks).** `ModalTaskExecutor` now spawns worker
+  invocations as detached Modal function calls by default instead of holding
+  blocking `remote` calls: the function call id is recorded with the
+  TASK_STARTED event, and a build that is restarted (Modal retry after
+  preemption, or a `build_trigger` re-trigger with the same build id)
+  **re-attaches to still-running workers instead of re-executing them**. A
+  task's execution now survives orchestrator crashes. FAIL_FAST and user
+  cancellation explicitly cancel the tracked function calls (previously,
+  workers of a dead build kept running). Opt out with
+  `ModalTaskExecutor(detached=False)` / `Builder(detached=False)`.
+  Generic executor surface: `TaskExecutorABC.supports_detached()` /
+  `submit_detached()` / `reattach()` + `DetachedHandle`, so other execution
+  backends can implement the same semantics; `RoutedTaskExecutor` forwards.
+- **`stardag/registry`**: `task_start[_aio]` accepts optional
+  `executor`/`executor_ref`; `task_register_bulk[_aio]` returns per-task
+  `RegisteredTaskInfo` (current global status + executor ref) used by the
+  build engine for re-attach. Custom `RegistryABC` implementations with the
+  old signatures keep working (refs are dropped gracefully).
+
 - **`stardag/integration/modal`**: New `StardagApp.build_trigger()` — triggers
   a build with the registry build id minted at the trigger point and passed to
   the Modal build function as `resume_build_id`. Restarts of the build

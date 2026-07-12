@@ -30,6 +30,7 @@ from stardag.build._base import (
     BuildExitStatus,
     BuildSummary,
     DefaultGlobalLockSelector,
+    DetachedHandle,
     FailMode,
     GlobalConcurrencyLockManager,
     GlobalLockConfig,
@@ -49,6 +50,7 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.registry import RegistryABC, registry_provider
+from stardag.registry._base import accepts_executor_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -590,6 +592,12 @@ async def build_aio(
 
     # Task execution states
     task_states: dict[UUID, TaskExecutionState] = {}
+    # Re-attachable detached executions reported by the registry at
+    # registration time: task UUID -> (executor name, executor ref). A task
+    # lands here when its global status is RUNNING with a recorded ref —
+    # e.g. spawned by a previous orchestrator run that died, or by a
+    # concurrently running build. Entries are popped on first use.
+    detached_refs: dict[UUID, tuple[str, str]] = {}
     # Events for completion signaling
     completion_events: dict[UUID, asyncio.Event] = {}
     # Currently executing tasks
@@ -749,7 +757,9 @@ async def build_aio(
         for chunk_start in range(0, len(batch), _BULK_REGISTER_CHUNK_SIZE):
             chunk = batch[chunk_start : chunk_start + _BULK_REGISTER_CHUNK_SIZE]
             try:
-                await registry.task_register_bulk_aio(build_id, chunk)
+                registered_infos = await registry.task_register_bulk_aio(
+                    build_id, chunk
+                )
             except Exception as reg_err:
                 # Include up to 5 task IDs in the warning so debugging is
                 # possible without dumping a 1000-id list into logs.
@@ -769,6 +779,24 @@ async def build_aio(
                 return
             for t in chunk:
                 task_states[t.id].registered = True
+            # Collect re-attachable detached executions (task already RUNNING
+            # elsewhere with a recorded executor ref). Backends that don't
+            # report execution info return None.
+            for info in registered_infos or []:
+                if (
+                    info.latest_status == "running"
+                    and info.latest_executor is not None
+                    and info.latest_executor_ref is not None
+                ):
+                    try:
+                        task_uuid = UUID(info.task_id)
+                    except ValueError:
+                        continue
+                    if task_uuid in task_states:
+                        detached_refs[task_uuid] = (
+                            info.latest_executor,
+                            info.latest_executor_ref,
+                        )
 
     # Mark previously completed tasks as complete in the registry. Registration
     # already happened inline in discover() above; we still need to fire
@@ -1080,6 +1108,30 @@ async def build_aio(
             await asyncio.sleep(current_interval)
             current_interval = min(current_interval * backoff_factor, max_interval)
 
+    # Custom RegistryABC implementations written against the pre-detached
+    # task_start_aio(build_id, task) signature can't receive executor refs.
+    # Detected once via signature inspection (not try/except TypeError, which
+    # would also mask unrelated TypeErrors raised inside an implementation).
+    registry_accepts_executor_kwargs = accepts_executor_kwargs(registry.task_start_aio)
+
+    async def registry_task_start(
+        task: BaseTask, handle: DetachedHandle | None
+    ) -> None:
+        """Emit TASK_STARTED, with the detached-execution ref when present."""
+        if handle is None or not registry_accepts_executor_kwargs:
+            if handle is not None:
+                logger.warning(
+                    f"Registry {type(registry).__name__} does not accept "
+                    "executor refs on task_start_aio; detached execution "
+                    f"{handle.ref!r} for task {task.id} will not be "
+                    "re-attachable."
+                )
+            await registry.task_start_aio(build_id, task)
+            return
+        await registry.task_start_aio(
+            build_id, task, executor=handle.executor, executor_ref=handle.ref
+        )
+
     async def submit_with_lock(
         task: BaseTask,
     ) -> LockAcquisitionResult | TaskExecutionError | TaskStruct | None:
@@ -1126,6 +1178,38 @@ async def build_aio(
         # distributed lock, and released automatically on every exit path
         # (completion, failure, cancellation, dynamic-deps suspension).
         async with limiter.slot(task):
+            # Detached execution: first try re-attaching to a live execution
+            # recorded in the registry (from a previous orchestrator run, or
+            # a concurrently running build); otherwise spawn detached when
+            # the executor supports it for this task. Detached executions
+            # survive this process, so their (executor, ref) is recorded with
+            # the TASK_STARTED event below — before we block on the result.
+            handle: DetachedHandle | None = None
+            detached_ref = detached_refs.pop(task.id, None)
+            if detached_ref is not None:
+                ref_executor, ref = detached_ref
+                try:
+                    handle = await task_executor.reattach(task, ref_executor, ref)
+                except Exception as e:
+                    logger.warning(
+                        f"Re-attach to detached execution {ref!r} for task "
+                        f"{task.id} failed; falling back to execution: {e}"
+                    )
+                    handle = None
+                if handle is not None:
+                    logger.info(
+                        f"Re-attached to running detached execution "
+                        f"{handle.ref!r} for task {task.id}"
+                    )
+            if handle is None and task_executor.supports_detached(task):
+                try:
+                    handle = await task_executor.submit_detached(task)
+                except Exception as e:
+                    return TaskExecutionError(
+                        exception=e,
+                        traceback="".join(tb_module.format_exception(e)),
+                    )
+
             # Start the task in registry. The task was already registered during
             # discover; if registration failed in `warn` mode we retry once here
             # so the /start endpoint doesn't 404.
@@ -1144,7 +1228,7 @@ async def build_aio(
                 # would 404 and that hard-fails the build even in `warn` mode.
                 if state.registered:
                     try:
-                        await registry.task_start_aio(build_id, task)
+                        await registry_task_start(task, handle)
                         state.started = True
                     except Exception as reg_err:
                         handle_registry_error(
@@ -1155,7 +1239,9 @@ async def build_aio(
             elif state.dynamic_deps:
                 # Task was suspended waiting for dynamic deps, now resuming. Same
                 # warn-mode protection: no point firing /resume if registration
-                # never landed.
+                # never landed. (Known gap: a detached re-spawn on this path gets
+                # a fresh ref that TASK_RESUMED doesn't carry, so it isn't
+                # re-attachable until the next TASK_STARTED.)
                 if state.registered:
                     try:
                         await registry.task_resume_aio(build_id, task)
@@ -1166,7 +1252,9 @@ async def build_aio(
                             on_registry_failure,
                         )
 
-            # Execute the task via the executor
+            # Await the detached execution, or execute via the executor
+            if handle is not None:
+                return await handle.wait()
             return await task_executor.submit(task)
 
     async def cancel_pending_in_flight() -> None:
