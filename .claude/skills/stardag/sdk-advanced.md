@@ -310,12 +310,45 @@ run_as_prefect_flow(root_task)
 
 ### Modal
 
-```python
-from stardag.integration.modal import ModalExecutor
+The packaged setup is `StardagApp` (deploys a `build` function, per-worker
+`worker_<name>` functions, a reactive scheduler `tick` function, and an
+optional watchdog cron):
 
-# Execute tasks on Modal.com infrastructure
-sd.build(task, task_executor=ModalExecutor(...))
+```python
+from stardag.integration.modal import StardagApp, FunctionSettings
+
+app = StardagApp(
+    "my-app",
+    builder_settings=FunctionSettings(image=image),
+    worker_settings={"default": FunctionSettings(image=image)},
+    watchdog_period_minutes=5,          # recommended with reactive mode
+    limit_key_selector=lambda t: [],    # named concurrency-limit keys per task
+)
+
+# After `stardag modal deploy`:
+result = app.build_trigger(root_task)              # restart-safe (build id
+                                                   # minted at the trigger,
+                                                   # restarts resume)
+result = app.build_trigger(root_task, reactive=True)  # experimental: no
+                                                   # resident orchestrator —
+                                                   # scheduler ticks drive it
+app.build_spawn(root_task)                         # legacy fire-and-forget
 ```
+
+Worker executions are **detached** Modal function calls by default: they
+survive orchestrator restarts (resumed builds re-attach instead of
+re-executing), are explicitly cancellable, and workers self-report their
+lifecycle events to the registry. Low-level executor:
+`ModalTaskExecutor(modal_app_name=..., worker_selector=..., detached=True)`
+implements the `TaskExecutorABC` detached surface (`submit_detached` /
+`reattach` / `detached_status` / `cancel_detached`).
+
+Key `stardag.build` exports for the execution layer: `DetachedHandle`,
+`DetachedExecutionStatus`, `get_current_build_id`, `run_tick_aio`,
+`TickConfig`, `TickSummary`, `BuildTaskStore`, `discover_and_register_aio`.
+
+See `docs/docs/concepts/build-execution.md` and
+`docs/docs/how-to/integrate-modal.md` for the full model.
 
 ### AWS S3
 
