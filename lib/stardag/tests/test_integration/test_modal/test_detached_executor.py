@@ -246,3 +246,65 @@ class TestCancel:
         await executor.submit_detached(task)
 
         await executor.cancel(task)  # logs a warning, does not raise
+
+
+class TestBuildIdInjection:
+    """The executor forwards the ambient build id to workers via the
+    STARDAG_BUILD_ID env override, so the worker-side Runner can report
+    lifecycle events. Riding on env_overrides keeps the worker function
+    signature unchanged (older workers apply it as a harmless env var)."""
+
+    async def test_injected_inside_build_context(self):
+        from stardag.build._base import current_build_id_var
+        from stardag.integration.modal._app import STARDAG_BUILD_ID_ENV
+
+        build_id = __import__("uuid").uuid4()
+        function_call = FakeFunctionCall()
+        worker = FakeWorkerFunction(function_call)
+        executor = _make_executor(worker)
+
+        token = current_build_id_var.set(build_id)
+        try:
+            await executor.submit_detached(_make_task())
+        finally:
+            current_build_id_var.reset(token)
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides[STARDAG_BUILD_ID_ENV] == str(build_id)
+
+    async def test_not_injected_outside_build_context(self):
+        from stardag.integration.modal._app import STARDAG_BUILD_ID_ENV
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+
+        await executor.submit_detached(_make_task())
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides is None or STARDAG_BUILD_ID_ENV not in env_overrides
+
+    async def test_not_injected_when_worker_reporting_disabled(self):
+        from stardag.build._base import current_build_id_var
+        from stardag.integration.modal._app import STARDAG_BUILD_ID_ENV
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = ModalTaskExecutor(
+            modal_app_name="test-app",
+            worker_selector=lambda task: "default",
+            worker_reports_lifecycle=False,
+        )
+        executor._worker_functions["default"] = worker  # pyright: ignore[reportArgumentType]
+
+        token = current_build_id_var.set(__import__("uuid").uuid4())
+        try:
+            await executor.submit_detached(_make_task())
+            assert executor.reports_lifecycle(_make_task()) is False
+        finally:
+            current_build_id_var.reset(token)
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides is None or STARDAG_BUILD_ID_ENV not in env_overrides
+
+    async def test_reports_lifecycle_requires_build_context(self):
+        executor = _make_executor(FakeWorkerFunction(FakeFunctionCall()))
+        assert executor.reports_lifecycle(_make_task()) is False

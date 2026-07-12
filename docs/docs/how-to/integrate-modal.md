@@ -414,6 +414,14 @@ cancelled, the tracked function calls are explicitly cancelled on Modal
 (with the legacy blocking mode, workers of a dead build kept running to
 completion).
 
+Workers additionally report their own lifecycle events (started, completed
+with artifacts, suspended, failed) directly to the registry when the app has
+registry credentials — so a task's registry state stays accurate even if the
+build function dies while the task is running. If you drive a deployed app
+built with an older stardag version from a newer local SDK, pass
+`ModalTaskExecutor(worker_reports_lifecycle=False)` (or redeploy the app) so
+the build engine doesn't skip events the old workers won't send.
+
 To opt out (legacy blocking `remote` calls), pass `detached=False`:
 
 ```{.python notest}

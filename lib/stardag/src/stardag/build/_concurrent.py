@@ -31,6 +31,7 @@ from stardag.build._base import (
     BuildSummary,
     DefaultGlobalLockSelector,
     DetachedHandle,
+    current_build_id_var,
     FailMode,
     GlobalConcurrencyLockManager,
     GlobalLockConfig,
@@ -647,6 +648,11 @@ async def build_aio(
         build_id = await registry.build_start_aio(root_tasks=tasks)
         logger.info(f"Started build: {build_id}")
 
+    # Expose the build id ambiently for the duration of the build (e.g.
+    # executors forward it to self-reporting workers). Reset in the outer
+    # finally below.
+    _build_id_token = current_build_id_var.set(build_id)
+
     async def discover(task: BaseTask) -> None:
         """Recursively discover tasks, stopping at already-complete tasks.
 
@@ -896,27 +902,33 @@ async def build_aio(
                 fail_fast_triggered = True
 
         elif result is None:
-            # Task completed - release lock (completed) and notify registry
+            # Task completed - release lock (completed) and notify registry.
+            # When the worker self-reports lifecycle events, it has already
+            # emitted TASK_COMPLETED and uploaded artifacts from inside the
+            # worker (which also survives an orchestrator crash mid-await).
             await release_lock_for_task(task, completed=True)
-            try:
-                await registry.task_complete_aio(build_id, task)
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to notify registry of task {task.id} completion",
-                    on_registry_failure,
-                )
-            # Upload artifacts if any
-            try:
-                artifacts = await task.artifacts_aio()
-                if artifacts:
-                    await registry.task_upload_artifacts_aio(build_id, task, artifacts)
-            except Exception as artifact_err:
-                handle_registry_error(
-                    artifact_err,
-                    f"Failed to collect/upload artifacts for task {task.id}",
-                    on_registry_failure,
-                )
+            if not task_executor.reports_lifecycle(task):
+                try:
+                    await registry.task_complete_aio(build_id, task)
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {task.id} completion",
+                        on_registry_failure,
+                    )
+                # Upload artifacts if any
+                try:
+                    artifacts = await task.artifacts_aio()
+                    if artifacts:
+                        await registry.task_upload_artifacts_aio(
+                            build_id, task, artifacts
+                        )
+                except Exception as artifact_err:
+                    handle_registry_error(
+                        artifact_err,
+                        f"Failed to collect/upload artifacts for task {task.id}",
+                        on_registry_failure,
+                    )
             state.completed = True
             completion_cache.add(task.id)
             completion_events[task.id].set()
@@ -928,14 +940,18 @@ async def build_aio(
             dynamic_deps = flatten_task_struct(result)
 
             # Notify registry that task is suspended waiting for dynamic deps
-            try:
-                await registry.task_suspend_aio(build_id, task)
-            except Exception as reg_err:
-                handle_registry_error(
-                    reg_err,
-                    f"Failed to notify registry of task {task.id} suspension",
-                    on_registry_failure,
-                )
+            # (the worker already emitted TASK_SUSPENDED when it self-reports;
+            # dep registration/edges below stay engine-side either way — the
+            # engine must discover the full requires() subtrees anyway).
+            if not task_executor.reports_lifecycle(task):
+                try:
+                    await registry.task_suspend_aio(build_id, task)
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to notify registry of task {task.id} suspension",
+                        on_registry_failure,
+                    )
 
             # Discover any new dynamic deps FIRST (which post-order-collects
             # them and their requires() subtree into pending_registrations).
@@ -1226,6 +1242,14 @@ async def build_aio(
                         )
                 # Skip /start if registration never succeeded — the endpoint
                 # would 404 and that hard-fails the build even in `warn` mode.
+                #
+                # Even when the worker self-reports lifecycle events
+                # (reports_lifecycle), the engine still emits TASK_STARTED
+                # for detached spawns: it lands immediately (the worker's own
+                # start event only fires once its container is up, which can
+                # be minutes later under cold start) so a crash in between
+                # still leaves a re-attachable ref. Duplicate started events
+                # are tolerated by the registry.
                 if state.registered:
                     try:
                         await registry_task_start(task, handle)
@@ -1239,10 +1263,11 @@ async def build_aio(
             elif state.dynamic_deps:
                 # Task was suspended waiting for dynamic deps, now resuming. Same
                 # warn-mode protection: no point firing /resume if registration
-                # never landed. (Known gap: a detached re-spawn on this path gets
-                # a fresh ref that TASK_RESUMED doesn't carry, so it isn't
-                # re-attachable until the next TASK_STARTED.)
-                if state.registered:
+                # never landed. When the worker self-reports, skip the resume
+                # event — the worker's own TASK_STARTED re-asserts RUNNING and
+                # carries the re-invocation's fresh executor ref (making the
+                # re-spawn re-attachable, which TASK_RESUMED wouldn't).
+                if state.registered and not task_executor.reports_lifecycle(task):
                     try:
                         await registry.task_resume_aio(build_id, task)
                     except Exception as reg_err:
@@ -1552,6 +1577,7 @@ async def build_aio(
         )
 
     finally:
+        current_build_id_var.reset(_build_id_token)
         await task_executor.teardown()
 
 
