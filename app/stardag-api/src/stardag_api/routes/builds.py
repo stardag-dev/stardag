@@ -5,8 +5,9 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -27,11 +28,13 @@ from stardag_api.limits import (
 )
 from stardag_api.models import (
     Build,
+    EnvironmentConcurrencyLimit,
     Event,
     EventType,
     Task,
     TaskDependency,
     TaskArtifact,
+    TaskLimitKey,
     TaskStatus,
     User,
 )
@@ -181,8 +184,14 @@ async def _create_task_event(
     error_message: str | None = None,
     commit_hash: str | None = None,
     extra_metadata: dict | None = None,
+    limit_keys: list[str] | None = None,
 ) -> TaskEventResponse:
-    """Create a task event and return slim response."""
+    """Create a task event and return slim response.
+
+    ``limit_keys`` (TASK_STARTED only): replaces the task's recorded
+    concurrency-limit keys in the same transaction — a RUNNING task with a
+    key row occupies one slot of that key's limit.
+    """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     _raise_if_limit_exceeded(
@@ -220,6 +229,31 @@ async def _create_task_event(
     # event into apply_event_to_task. The whole bundle commits atomically.
     await db.flush()
     apply_event_to_task(db_task, event)
+    if limit_keys is not None:
+        # Replace the task's limit-key rows (only when explicitly provided —
+        # a later ref-recording re-start without keys must not clear them).
+        # ON CONFLICT DO NOTHING: two concurrent starts for the same task can
+        # both pass the delete and race the inserts (only reachable when the
+        # scheduler lease is bypassed or via manual API use) — a duplicate
+        # key is then a benign no-op instead of a 500.
+        await db.execute(delete(TaskLimitKey).where(TaskLimitKey.task_pk == db_task.id))
+        insert_stmt = (
+            sqlite_insert(TaskLimitKey)
+            if db.bind is not None and db.bind.dialect.name == "sqlite"
+            else pg_insert(TaskLimitKey)
+        )
+        await db.execute(
+            insert_stmt.values(
+                [
+                    {
+                        "id": generate_uuid7(),
+                        "task_pk": db_task.id,
+                        "key": key,
+                    }
+                    for key in dict.fromkeys(limit_keys)
+                ]
+            ).on_conflict_do_nothing()
+        )
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")
@@ -1707,6 +1741,8 @@ async def start_task(
     commit_hash: str | None = None,
     executor: str | None = None,
     executor_ref: str | None = None,
+    limit_key: Annotated[list[str] | None, Query()] = None,
+    enforce_limits: bool = False,
 ):
     """Mark a task as started within a build.
 
@@ -1717,14 +1753,37 @@ async def start_task(
             (e.g. a Modal function call id). Recorded in the event metadata
             and denormalised onto the task so a resumed build can re-attach
             to a still-running execution instead of re-executing.
+        limit_key: Named concurrency-limit keys this task runs under
+            (repeatable). Recorded so the task's RUNNING status occupies one
+            slot per key.
+        enforce_limits: Atomically check every ``limit_key`` with a
+            configured environment limit before starting: if any is at
+            capacity the start is rejected with **409** and error code
+            ``concurrency_limit_reached`` (no event recorded). The
+            environment's limit rows are locked for the duration of the
+            check, serializing concurrent acquires.
     """
+    limit_keys = list(dict.fromkeys(limit_key)) if limit_key else None
+    if enforce_limits and limit_keys:
+        denied = await _check_concurrency_limits(db, auth, task_id, limit_keys)
+        if denied:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "concurrency_limit_reached",
+                    "denied_keys": denied,
+                },
+            )
+
     extra_metadata: dict | None = None
-    if executor is not None or executor_ref is not None:
+    if executor is not None or executor_ref is not None or limit_keys:
         extra_metadata = {}
         if executor is not None:
             extra_metadata["executor"] = executor
         if executor_ref is not None:
             extra_metadata["executor_ref"] = executor_ref
+        if limit_keys:
+            extra_metadata["limit_keys"] = limit_keys
     return await _create_task_event(
         build_id,
         task_id,
@@ -1733,7 +1792,63 @@ async def start_task(
         auth,
         commit_hash=commit_hash,
         extra_metadata=extra_metadata,
+        limit_keys=limit_keys,
     )
+
+
+async def _check_concurrency_limits(
+    db: AsyncSession,
+    auth: SdkAuth,
+    task_id: str,
+    limit_keys: list[str],
+) -> list[str]:
+    """Return the limit keys that are at capacity (empty = all acquirable).
+
+    Locks the environment's limit rows FOR UPDATE so concurrent acquires
+    for the same keys serialize against each other; the lock is held until
+    the caller's transaction commits (i.e. until the TASK_STARTED event —
+    which occupies the slot — is durably recorded). Keys without a
+    configured limit are unlimited. The task being started is excluded
+    from the count, so re-starting a RUNNING task (e.g. re-recording an
+    executor ref) never self-blocks.
+    """
+    limits = (
+        (
+            await db.execute(
+                select(EnvironmentConcurrencyLimit)
+                .where(
+                    EnvironmentConcurrencyLimit.environment_id == auth.environment_id,
+                    EnvironmentConcurrencyLimit.key.in_(limit_keys),
+                )
+                # Deterministic lock order: concurrent acquires with
+                # overlapping key sets must lock rows in the same order or
+                # they can deadlock (same principle as the sorted-key
+                # acquisition in the SDK's LocalConcurrencyLimiter).
+                .order_by(EnvironmentConcurrencyLimit.key)
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    denied: list[str] = []
+    for limit in limits:
+        active = (
+            await db.execute(
+                select(func.count(func.distinct(TaskLimitKey.task_pk)))
+                .select_from(TaskLimitKey)
+                .join(Task, TaskLimitKey.task_pk == Task.id)
+                .where(
+                    TaskLimitKey.key == limit.key,
+                    Task.environment_id == auth.environment_id,
+                    Task.latest_status == TaskStatus.RUNNING,
+                    Task.task_id != task_id,
+                )
+            )
+        ).scalar_one()
+        if active >= limit.max_concurrent:
+            denied.append(limit.key)
+    return denied
 
 
 @router.post("/{build_id}/tasks/{task_id}/complete", response_model=TaskEventResponse)

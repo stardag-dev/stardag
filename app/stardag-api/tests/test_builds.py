@@ -1780,3 +1780,188 @@ async def test_frontier_reflects_cross_build_running(client: AsyncClient):
     actionable = {t["task_id"]: t for t in frontier_b["actionable"]}
     assert actionable["shared-task"]["latest_status"] == "running"
     assert actionable["shared-task"]["latest_executor_ref"] == "fc-other-build"
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_crud(client: AsyncClient):
+    response = await client.get("/api/v1/concurrency-limits")
+    assert response.status_code == 200 and response.json()["limits"] == []
+
+    response = await client.put(
+        "/api/v1/concurrency-limits/gpu", json={"max_concurrent": 2}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"key": "gpu", "max_concurrent": 2}
+
+    # upsert updates in place
+    await client.put("/api/v1/concurrency-limits/gpu", json={"max_concurrent": 3})
+    limits = (await client.get("/api/v1/concurrency-limits")).json()["limits"]
+    assert limits == [{"key": "gpu", "max_concurrent": 3}]
+
+    assert (
+        await client.put("/api/v1/concurrency-limits/bad", json={"max_concurrent": 0})
+    ).status_code == 422
+
+    assert (await client.delete("/api/v1/concurrency-limits/gpu")).status_code == 204
+    assert (await client.delete("/api/v1/concurrency-limits/gpu")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_enforced_on_start(client: AsyncClient):
+    """At-capacity keys reject enforced starts with 409; slots free when a
+    holder reaches a terminal status; unconfigured keys are unlimited."""
+    await client.put("/api/v1/concurrency-limits/db", json={"max_concurrent": 1})
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for tid in ("lim-a", "lim-b", "lim-c"):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks", json=_register_payload(tid)
+        )
+
+    # First acquire fills the single slot.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/lim-a/start",
+        params={"limit_key": ["db"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 200
+
+    # Second is denied — no event recorded, task stays pending.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/lim-b/start",
+        params={"limit_key": ["db"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "concurrency_limit_reached"
+    assert response.json()["detail"]["denied_keys"] == ["db"]
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    statuses = {t["task_id"]: t["latest_status"] for t in frontier["actionable"]}
+    assert statuses["lim-b"] == "pending"
+
+    # Unconfigured key: unlimited.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/lim-c/start",
+        params={"limit_key": ["other"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 200
+
+    # Re-starting the holder (e.g. recording an executor ref) never
+    # self-blocks.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/lim-a/start",
+        params={
+            "limit_key": ["db"],
+            "enforce_limits": "true",
+            "executor": "modal",
+            "executor_ref": "fc-1",
+        },
+    )
+    assert response.status_code == 200
+
+    # Holder completes → slot freed → the denied task can start.
+    await client.post(f"/api/v1/builds/{build_id}/tasks/lim-a/complete")
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/lim-b/start",
+        params={"limit_key": ["db"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_multi_key_all_or_nothing(client: AsyncClient):
+    """A start under several keys is denied if ANY key is at capacity, and
+    acquires no slot at all (no partial acquisition)."""
+    await client.put("/api/v1/concurrency-limits/k1", json={"max_concurrent": 1})
+    await client.put("/api/v1/concurrency-limits/k2", json={"max_concurrent": 1})
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for tid in ("mk-a", "mk-b", "mk-c"):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks", json=_register_payload(tid)
+        )
+
+    # a holds k1; b wants k1+k2 → denied on k1, must NOT occupy k2.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/mk-a/start",
+        params={"limit_key": ["k1"], "enforce_limits": "true"},
+    )
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/mk-b/start",
+        params={"limit_key": ["k1", "k2"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["denied_keys"] == ["k1"]
+
+    # k2 must still be free for c.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/mk-c/start",
+        params={"limit_key": ["k2"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_non_enforced_start_records_slots_counted_later(client: AsyncClient):
+    """limit_key without enforce_limits still records slot rows — a later
+    ENFORCED start must count them as occupied."""
+    await client.put("/api/v1/concurrency-limits/soft", json={"max_concurrent": 1})
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for tid in ("soft-a", "soft-b"):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks", json=_register_payload(tid)
+        )
+
+    # Unenforced start (e.g. a resident build tagging keys informationally).
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/soft-a/start",
+        params={"limit_key": ["soft"]},
+    )
+    assert response.status_code == 200
+
+    # Enforced start sees the slot occupied.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/soft-b/start",
+        params={"limit_key": ["soft"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 409
+
+
+async def _race_enforced_starts(client: AsyncClient) -> list[int]:
+    """Fire 6 concurrent enforced starts against a 2-slot key; return codes."""
+    import asyncio as _asyncio
+
+    await client.put("/api/v1/concurrency-limits/race", json={"max_concurrent": 2})
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    task_ids = [f"race-{i}" for i in range(6)]
+    for tid in task_ids:
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks", json=_register_payload(tid)
+        )
+    responses = await _asyncio.gather(
+        *[
+            client.post(
+                f"/api/v1/builds/{build_id}/tasks/{tid}/start",
+                params={"limit_key": ["race"], "enforce_limits": "true"},
+            )
+            for tid in task_ids
+        ]
+    )
+    return sorted(r.status_code for r in responses)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_enforced_starts_no_errors(client: AsyncClient):
+    """Concurrent enforced starts never 500 (duplicate slot-row races are
+    absorbed by ON CONFLICT DO NOTHING). The cap itself isn't asserted here:
+    SQLite's with_for_update() is a no-op, so the check-then-commit window
+    interleaves — see the Postgres test below for the serialization
+    guarantee."""
+    statuses = await _race_enforced_starts(client)
+    assert set(statuses) <= {200, 409}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_enforced_starts_respect_cap_postgres(pg_client):
+    """The FOR UPDATE serialization guarantee: concurrent enforced starts
+    never exceed the cap (exactly 2 of 6 acquire a 2-slot key). Runs on
+    the Postgres tier (skipped unless STARDAG_API_TEST_DATABASE_URL is
+    set — the Postgres CI job provides it)."""
+    statuses = await _race_enforced_starts(pg_client)
+    assert statuses == [200, 200, 409, 409, 409, 409]

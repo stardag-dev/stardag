@@ -34,6 +34,31 @@ tick_settings=...)`. Current limitations (documented in
   emission on failure yet; re-triggering with the same build id adds new
   roots to an active build.
 
+- **Registry-backed named concurrency limits (reactive scheduling).**
+  Environment-level named limits (`PUT /concurrency-limits/{key}`) cap how
+  many tasks tagged with a key may run concurrently — **across builds**,
+  which build-local `ConcurrencyConfig` semaphores never could. A task
+  occupies a slot simply by being RUNNING with the key recorded at start
+  (no leases/TTLs: status liveness is already maintained by worker
+  reporting and tick self-healing). Acquisition is atomic in the
+  task-start transaction (`/start?limit_key=...&enforce_limits=true`,
+  409 when at capacity, all-or-nothing across keys). Reactive ticks
+  acquire before spawning via a key selector configured on the deployed
+  app (`StardagApp(limit_key_selector=...)`, engine-level surface:
+  `TickConfig.limit_key_selector`) — a denied
+  task stays in the frontier and proceeds when a slot frees (same-build
+  releases wake the scheduler directly; cross-build releases are covered
+  by the watchdog). New `RegistryABC.task_start_with_limits_aio` (default:
+  no enforcement, for custom backends). Resident-mode (`build_aio`)
+  integration with the `ConcurrencyLimiter` seam is a follow-up.
+  **Requires a matching stardag-api version**: an older server ignores
+  the enforcement parameters (no error), so deploy the server before
+  relying on limits. A staleness escape hatch
+  (`TickConfig.stale_running_no_ref_seconds`, default 30 min) fails
+  tasks stuck RUNNING without an execution ref — e.g. a scheduler crash
+  between slot acquisition and spawn — so leaked slots always free; the
+  watchdog is strongly recommended when limits are enforced.
+
 ### Registry API
 
 - New reactive-scheduling endpoints: `POST`/`DELETE /builds/{id}/notify`
@@ -42,6 +67,13 @@ tick_settings=...)`. Current limitations (documented in
   pending/suspended/running with all upstream dependencies completed,
   including executor refs for liveness probing), per-status counts, root
   statuses, and build status, for scheduler ticks.
+- Named environment concurrency limits:
+  `GET`/`PUT`/`DELETE /concurrency-limits[/{key}]` (new
+  `environment_concurrency_limits` +
+  `task_limit_keys` tables) with atomic enforcement on task start (409
+  `concurrency_limit_reached`; the environment's limit rows are locked
+  while active RUNNING holders are counted, serializing concurrent
+  acquires; re-starting a RUNNING task never self-blocks).
 
 - **`stardag/build` + `stardag/integration/modal`: detached task execution
   (restart-safe long-running tasks).** `ModalTaskExecutor` now spawns worker

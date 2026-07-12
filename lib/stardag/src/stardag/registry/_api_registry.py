@@ -1190,6 +1190,37 @@ class APIRegistry(RegistryABC):
             return None
         return _parse_bulk_register_response(response.json())
 
+    async def task_start_with_limits_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        limit_keys: Sequence[str] | None = None,
+    ) -> bool:
+        """Start a task with atomic server-side concurrency-limit acquisition.
+
+        Sends ``limit_key`` (repeated) + ``enforce_limits=true``; a 409 with
+        error code ``concurrency_limit_reached`` means a key was at capacity
+        — returns False without recording anything.
+        """
+        params: dict[str, Any] = self._get_start_params(executor, executor_ref)
+        if limit_keys:
+            params["limit_key"] = list(limit_keys)
+            params["enforce_limits"] = "true"
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
+                params=params,
+                operation=f"Start task {task.id} (limits)",
+            )
+        except APIError as e:
+            if e.status_code == 409 and "concurrency_limit_reached" in (e.detail or ""):
+                return False
+            raise
+        return True
+
     async def task_start_aio(
         self,
         build_id: UUID,

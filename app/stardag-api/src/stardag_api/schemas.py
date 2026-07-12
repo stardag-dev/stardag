@@ -221,6 +221,10 @@ class FrontierTaskRef(BaseModel):
     latest_status: TaskStatus
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
+    # When the current status was recorded — lets schedulers apply
+    # staleness bounds (e.g. fail a long-RUNNING task with no executor
+    # ref, which would otherwise hold concurrency-limit slots forever).
+    latest_status_at: datetime | None = None
 
 
 class BuildFrontierResponse(BaseModel):
@@ -253,6 +257,21 @@ class AddBuildRootsRequest(BaseModel):
     """Root task ids to append to a build (dedup/order handled server-side)."""
 
     root_task_ids: list[str]
+
+
+class ConcurrencyLimitResponse(BaseModel):
+    """A named environment concurrency limit."""
+
+    key: str
+    max_concurrent: int
+
+
+class ConcurrencyLimitList(BaseModel):
+    limits: list[ConcurrencyLimitResponse]
+
+
+class ConcurrencyLimitUpsert(BaseModel):
+    max_concurrent: int = Field(ge=1)
 
 
 class BuildNotifyResponse(BaseModel):

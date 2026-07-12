@@ -9,6 +9,7 @@ instantly (simulating worker-side lifecycle reporting + wake-up).
 from __future__ import annotations
 
 import typing
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 
@@ -71,6 +72,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.needs_tick = False
         self.build_status = "running"
         self.calls: list[tuple[str, str | None]] = []
+        # Named concurrency limits: key -> cap; holders tracked per task.
+        self.limits: dict[str, int] = {}
+        self.task_limit_keys: dict[str, set[str]] = {}
+        self.status_at: dict[str, datetime] = {}
 
     # --- test setup helpers ---
 
@@ -81,11 +86,14 @@ class FakeReactiveRegistry(NoOpRegistry):
         upstreams: set[str] | None = None,
         executor: str | None = None,
         executor_ref: str | None = None,
+        status_at: "datetime | None" = None,
     ) -> None:
         self.statuses[task_id] = status
         self.upstreams.setdefault(task_id, set()).update(upstreams or set())
         if executor or executor_ref:
             self.refs[task_id] = (executor, executor_ref)
+        if status_at is not None:
+            self.status_at[task_id] = status_at
 
     # --- registry surface used by the tick ---
 
@@ -119,6 +127,31 @@ class FakeReactiveRegistry(NoOpRegistry):
             # Instant worker: completes and wakes the scheduler.
             self.statuses[tid] = "completed"
             self.needs_tick = True
+
+    async def task_start_with_limits_aio(
+        self, build_id, task, executor=None, executor_ref=None, limit_keys=None
+    ):
+        # Mirrors the API's semantics: count running holders per key against
+        # configured caps (self.limits); all-or-nothing acquisition.
+        self.calls.append(("start_with_limits", str(task.id)))
+        for key in limit_keys or []:
+            cap = self.limits.get(key)
+            if cap is None:
+                continue
+            active = sum(
+                1
+                for tid, keys in self.task_limit_keys.items()
+                if key in keys
+                and self.statuses.get(tid) == "running"
+                and tid != str(task.id)
+            )
+            if active >= cap:
+                return False
+        self.task_limit_keys[str(task.id)] = set(limit_keys or [])
+        await self.task_start_aio(
+            build_id, task, executor=executor, executor_ref=executor_ref
+        )
+        return True
 
     async def task_complete_aio(self, build_id, task):
         tid = str(task.id)
@@ -163,6 +196,7 @@ class FakeReactiveRegistry(NoOpRegistry):
                 latest_status=self.statuses[tid],
                 latest_executor=executor,
                 latest_executor_ref=executor_ref,
+                latest_status_at=self.status_at.get(tid),
             )
 
         actionable = [
@@ -789,3 +823,139 @@ class TestCancelDynamicDepWindow:
 
         assert summary.terminal_status == "cancelled"
         assert executor.cancelled_refs == ["fc-window"]
+
+
+class TestConcurrencyLimits:
+    async def test_denied_task_stays_in_frontier_no_false_deadlock(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Two tasks under a 1-slot key: only one spawns per round; a denied
+        task never triggers the stuck-build failure (the slot holder may
+        even be in another build)."""
+        a = SyncOnlyTask(name="lim-a")
+        b = SyncOnlyTask(name="lim-b")
+        root = SyncOnlyTask(name="lim-root", deps=(a, b))
+        registry, locks, executor, store = _setup([a, b, root], auto_complete=False)
+        registry.limits["one-slot"] = 1
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                limit_key_selector=lambda t: ["one-slot"]
+                if t.id in (a.id, b.id)
+                else [],
+            ),
+        )
+
+        # One acquired + spawned, one denied; build keeps waiting (no
+        # terminal failure) and the tick lingers out.
+        assert summary.spawned == 1
+        assert summary.limit_denied >= 1
+        assert summary.outcome == "lingered_out"
+        assert registry.build_status == "running"
+
+    async def test_slot_release_lets_denied_task_proceed(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """With instant workers, the whole chain completes within one tick:
+        each completion frees the slot and wakes the scheduler, which then
+        acquires it for the next task."""
+        a = SyncOnlyTask(name="rel-a")
+        b = SyncOnlyTask(name="rel-b")
+        root = SyncOnlyTask(name="rel-root", deps=(a, b))
+        registry, locks, executor, store = _setup([a, b, root])
+        registry.limits["one-slot"] = 1
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.5,
+                poll_interval_seconds=0.01,
+                limit_key_selector=lambda t: ["one-slot"],
+            ),
+        )
+
+        assert summary.outcome == "terminal"
+        assert summary.terminal_status == "completed"
+        assert summary.spawned == 3
+        assert registry.build_status == "completed"
+
+    async def test_no_selector_no_limit_calls(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        (root,) = _chain("nolim-root")
+        registry, locks, executor, store = _setup([root])
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert not any(m == "start_with_limits" for (m, _) in registry.calls)
+
+
+class TestStaleRunningNoRef:
+    async def test_stale_running_without_ref_is_failed(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The slot-leak escape hatch: a task RUNNING without an executor
+        ref past the staleness bound (scheduler crash between limit-slot
+        acquisition and spawn) is failed — it could never resolve on its
+        own, and while RUNNING it holds its concurrency-limit slots."""
+        (root,) = _chain("stale-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            status_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,  # default stale bound (1800s) < 1h age
+        )
+
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"
+
+    async def test_fresh_running_without_ref_is_left(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        (root,) = _chain("fresh-noref-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(
+            str(root.id),
+            status="running",
+            status_at=datetime.now(timezone.utc),
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.failed_recorded == 0
+        assert summary.outcome == "lingered_out"
+        assert executor.spawned == []
