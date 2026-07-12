@@ -120,7 +120,8 @@ tick(build_id):
     act: spawn pending/suspended tasks detached (recording refs)
          probe running refs — leave live ones; self-heal completions
          (target existence is ground truth); record failures
-    handle terminal states (all roots complete / failure / cancelled)
+    handle terminal states (all roots complete / failure — with blocked
+    tasks marked skipped / cancelled)
     linger briefly on the wake-up flag; exit when quiet
 ```
 

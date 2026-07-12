@@ -1077,6 +1077,26 @@ class APIRegistry(RegistryABC):
             operation=f"Retry task {task.id}",
         )
 
+    def build_skip_blocked(self, build_id: UUID) -> list[str]:
+        """Mark tasks transitively blocked by failures as skipped."""
+        response = self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/skip-blocked",
+            params=self._get_event_params(),
+            operation=f"Skip blocked tasks in build {build_id}",
+        )
+        return list(response.json().get("skipped_task_ids", []))
+
+    async def build_skip_blocked_aio(self, build_id: UUID) -> list[str]:
+        """Async version - mark blocked tasks as skipped."""
+        response = await self._arequest(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/skip-blocked",
+            params=self._get_event_params(),
+            operation=f"Skip blocked tasks in build {build_id}",
+        )
+        return list(response.json().get("skipped_task_ids", []))
+
     def build_notify(self, build_id: UUID) -> None:
         """Set the build's scheduler wake-up flag."""
         self._request(

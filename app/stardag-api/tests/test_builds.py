@@ -1965,3 +1965,64 @@ async def test_concurrent_enforced_starts_respect_cap_postgres(pg_client):
     set — the Postgres CI job provides it)."""
     statuses = await _race_enforced_starts(pg_client)
     assert statuses == [200, 200, 409, 409, 409, 409]
+
+
+@pytest.mark.asyncio
+async def test_skip_blocked_transitive_chain_and_diamond(client: AsyncClient):
+    """skip-blocked marks pending/suspended tasks transitively downstream of
+    a failure as skipped; unrelated/terminal tasks are untouched."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    # chain: bad -> mid -> top ; diamond: bad -> d1, ok -> d1
+    # unrelated: free (pending), done (completed)
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=_register_payload("bad"))
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=_register_payload("ok"))
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json=_register_payload("mid", deps=["bad"]),
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json=_register_payload("top", deps=["mid"]),
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json=_register_payload("d1", deps=["bad", "ok"]),
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("free")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("done")
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/done/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/done/complete")
+    # mid is SUSPENDED (also skippable), bad FAILED
+    await client.post(f"/api/v1/builds/{build_id}/tasks/mid/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/mid/suspend")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/bad/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/bad/fail")
+
+    response = await client.post(f"/api/v1/builds/{build_id}/skip-blocked")
+    assert response.status_code == 200
+    assert sorted(response.json()["skipped_task_ids"]) == ["d1", "mid", "top"]
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["status_counts"] == {
+        "failed": 1,
+        "skipped": 3,
+        "pending": 2,  # ok + free untouched
+        "completed": 1,
+    }
+
+    # Idempotent: nothing left to skip.
+    response = await client.post(f"/api/v1/builds/{build_id}/skip-blocked")
+    assert response.json()["skipped_task_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_skip_blocked_noop_without_failures(client: AsyncClient):
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=_register_payload("t"))
+    response = await client.post(f"/api/v1/builds/{build_id}/skip-blocked")
+    assert response.status_code == 200
+    assert response.json()["skipped_task_ids"] == []

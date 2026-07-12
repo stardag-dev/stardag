@@ -182,6 +182,29 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("build_fail", None))
         self.build_status = "failed"
 
+    async def build_skip_blocked_aio(self, build_id):
+        # Mirrors the API: pending/suspended tasks transitively downstream
+        # of a failed/cancelled/skipped task become skipped.
+        self.calls.append(("skip_blocked", None))
+        blocked = {
+            tid
+            for tid, status in self.statuses.items()
+            if status in ("failed", "cancelled", "skipped")
+        }
+        changed = True
+        while changed:
+            changed = False
+            for tid, ups in self.upstreams.items():
+                if tid not in blocked and ups & blocked:
+                    blocked.add(tid)
+                    changed = True
+        skipped = []
+        for tid in blocked:
+            if self.statuses.get(tid) in ("pending", "suspended"):
+                self.statuses[tid] = "skipped"
+                skipped.append(tid)
+        return skipped
+
     async def build_notify_aio(self, build_id):
         self.needs_tick = True
 
@@ -959,3 +982,53 @@ class TestStaleRunningNoRef:
         assert summary.failed_recorded == 0
         assert summary.outcome == "lingered_out"
         assert executor.spawned == []
+
+
+class TestSkipBlockedOnFailure:
+    async def test_fail_fast_skips_blocked_descendants(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """On a failure terminal the tick marks transitively blocked tasks
+        skipped — they no longer dangle pending while the build is failed."""
+        bad = SyncOnlyTask(name="skip-bad")
+        mid = SyncOnlyTask(name="skip-mid", deps=(bad,))
+        root = SyncOnlyTask(name="skip-root", deps=(mid,))
+        registry, locks, executor, store = _setup([bad, mid, root], auto_complete=False)
+        registry.add_task(str(bad.id), status="failed")
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,  # FAIL_FAST default
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.skipped == 2
+        assert registry.statuses[str(mid.id)] == "skipped"
+        assert registry.statuses[str(root.id)] == "skipped"
+
+    async def test_blocked_terminal_in_continue_mode_also_skips(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("skip-cont-dep", "skip-cont-root")
+        registry, locks, executor, store = _setup([dep, root], auto_complete=False)
+        registry.add_task(str(dep.id), status="failed")
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert registry.statuses[str(root.id)] == "skipped"

@@ -207,6 +207,7 @@ class TickSummary:
     cancelled_refs: int = 0
     iterations: int = 0
     limit_denied: int = 0
+    skipped: int = 0
 
 
 async def run_tick_aio(
@@ -504,6 +505,7 @@ async def _handle_terminal(
 
     if failed > 0 and config.fail_mode == FailMode.FAIL_FAST:
         await _cancel_running(frontier, build_id, task_executor, task_store, summary)
+        await _skip_blocked(registry, build_id, summary)
         await registry.build_fail_aio(
             build_id, f"{failed} task(s) failed (fail_mode=FAIL_FAST)"
         )
@@ -529,6 +531,7 @@ async def _handle_terminal(
         # Nothing runnable and nothing running: the build can't progress
         # (failed deps in CONTINUE mode, or a lost task pickle). Fail
         # rather than idle forever.
+        await _skip_blocked(registry, build_id, summary)
         await registry.build_fail_aio(
             build_id,
             "No runnable or running tasks left but roots are not complete "
@@ -537,6 +540,27 @@ async def _handle_terminal(
         return "failed"
 
     return None
+
+
+async def _skip_blocked(
+    registry: RegistryABC, build_id: UUID, summary: TickSummary
+) -> None:
+    """Mark tasks transitively blocked by failures as skipped (best-effort).
+
+    Cosmetic-but-important: without it, blocked tasks dangle PENDING in the
+    registry/UI forever while the build shows failed. Old servers without
+    the endpoint are tolerated (404 → skip silently omitted).
+    """
+    try:
+        skipped = await registry.build_skip_blocked_aio(build_id)
+        summary.skipped += len(skipped)
+    except NotFoundError:
+        logger.warning(
+            "Registry server does not support skip-blocked; tasks blocked "
+            "by the failure will remain pending."
+        )
+    except Exception as e:
+        logger.warning(f"Failed to skip blocked tasks for build {build_id}: {e}")
 
 
 async def _cancel_running(

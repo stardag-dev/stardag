@@ -281,6 +281,17 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of task_retry."""
         self.task_retry(build_id, task)
 
+    def build_skip_blocked(self, build_id: UUID) -> list[str]:
+        """Mark tasks transitively blocked by failures as skipped.
+
+        Returns the skipped task ids. Default: no-op (empty).
+        """
+        return []
+
+    async def build_skip_blocked_aio(self, build_id: UUID) -> list[str]:
+        """Async version of build_skip_blocked."""
+        return self.build_skip_blocked(build_id)
+
     def build_notify(self, build_id: UUID) -> None:
         """Set the build's scheduler wake-up flag (reactive scheduling).
 

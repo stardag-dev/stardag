@@ -458,10 +458,10 @@ access to the default target root (task objects are persisted there for
 the ticks); the global concurrency lock and build-local
 `ConcurrencyConfig` limits are not applied by ticks (use the
 registry-backed named limits above; Modal's per-function
-`concurrency_limit` also still applies); and tasks blocked by a failure
-currently stay pending in the UI (the build itself is failed). Builds
-cancelled from the registry UI are picked up by the next tick (within the
-watchdog period), which cancels the running Modal function calls.
+`concurrency_limit` also still applies). Builds cancelled from the
+registry UI are picked up by the next tick (within the watchdog period),
+which cancels the running Modal function calls; on failure, tasks
+transitively blocked by the failed task are marked skipped.
 
 Two operational notes:
 
