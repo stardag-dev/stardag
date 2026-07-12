@@ -65,6 +65,23 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         metadata = event.event_metadata or {}
         task.latest_executor = metadata.get("executor")
         task.latest_executor_ref = metadata.get("executor_ref")
+    elif et == EventType.TASK_RETRIED:
+        # Reset terminal-but-retryable statuses to PENDING (see the event
+        # scan above); sticky-COMPLETED is already handled by the early
+        # return, and RUNNING is never downgraded by a retry.
+        if task.latest_status in (
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.SKIPPED,
+        ):
+            task.latest_status = TaskStatus.PENDING
+            task.latest_status_at = event.created_at
+            task.latest_status_event_id = event.id
+            task.latest_status_build_id = event.build_id
+            task.latest_completed_at = None
+            task.latest_error_message = None
+            task.latest_executor = None
+            task.latest_executor_ref = None
     elif et == EventType.TASK_RESUMED:
         task.latest_status = TaskStatus.RUNNING
         task.latest_status_at = event.created_at
@@ -241,6 +258,19 @@ async def get_task_status_in_build(
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
             status = TaskStatus.RUNNING
+        elif event.event_type == EventType.TASK_RETRIED:
+            # Retry: reset a terminal-but-retryable status back to PENDING so
+            # the task is schedulable again (a re-trigger of a failed build,
+            # or a new build referencing a previously-failed task). No-op for
+            # completed/running — a retry never downgrades those.
+            if status in (
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.SKIPPED,
+            ):
+                status = TaskStatus.PENDING
+                completed_at = None
+                error_message = None
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass
@@ -302,6 +332,19 @@ async def get_all_task_statuses_in_build(
             status = TaskStatus.SUSPENDED
         elif event.event_type == EventType.TASK_RESUMED:
             status = TaskStatus.RUNNING
+        elif event.event_type == EventType.TASK_RETRIED:
+            # Retry: reset a terminal-but-retryable status back to PENDING so
+            # the task is schedulable again (a re-trigger of a failed build,
+            # or a new build referencing a previously-failed task). No-op for
+            # completed/running — a retry never downgrades those.
+            if status in (
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.SKIPPED,
+            ):
+                status = TaskStatus.PENDING
+                completed_at = None
+                error_message = None
         elif event.event_type == EventType.TASK_WAITING_FOR_LOCK:
             # Informational: blocked by global lock, stays PENDING
             pass

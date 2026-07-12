@@ -27,6 +27,7 @@ from stardag.exceptions import (
     TokenExpiredError,
 )
 from stardag.registry._base import (
+    BuildFrontier,
     RegisteredTaskInfo,
     RegistryABC,
     TaskMetadata,
@@ -991,6 +992,146 @@ class APIRegistry(RegistryABC):
             operation="Exit early",
         )
         logger.info(f"Build exited early: {build_id}")
+
+    def build_list_running(self, limit: int = 100) -> list[UUID]:
+        """List ids of running builds (most recently active first).
+
+        Pages through ``GET /builds`` (ordered by last_active_at desc) and
+        filters client-side on the derived status.
+        """
+        running: list[UUID] = []
+        page = 1
+        page_size = 100
+        # Bound the sweep: builds are ordered by last_active_at desc, so
+        # RUNNING builds cluster early — paging the entire history to find
+        # stragglers would make the watchdog cost grow with total build
+        # count. Truncation is logged.
+        max_pages = 10
+        while len(running) < limit:
+            response = self._request(
+                "GET",
+                f"{self.api_url}/api/v1/builds",
+                params={
+                    **self._get_params(),
+                    "page": str(page),
+                    "page_size": str(page_size),
+                },
+                operation="List builds",
+            )
+            payload = response.json()
+            builds = payload.get("builds", [])
+            for build in builds:
+                if build.get("status") == "running":
+                    running.append(UUID(build["id"]))
+                    if len(running) >= limit:
+                        break
+            if len(builds) < page_size:
+                break
+            if page >= max_pages:
+                logger.warning(
+                    f"build_list_running: stopped after {max_pages} pages "
+                    f"({page * page_size} builds scanned); older running "
+                    "builds (if any) are not included."
+                )
+                break
+            page += 1
+        return running
+
+    def build_add_roots(self, build_id: UUID, root_task_ids: list[str]) -> None:
+        """Append root task ids to a build."""
+        self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/roots",
+            json={"root_task_ids": root_task_ids},
+            params=self._get_params(),
+            operation=f"Add roots to build {build_id}",
+        )
+
+    async def build_add_roots_aio(
+        self, build_id: UUID, root_task_ids: list[str]
+    ) -> None:
+        """Async version - append root task ids to a build."""
+        await self._arequest(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/roots",
+            json={"root_task_ids": root_task_ids},
+            params=self._get_params(),
+            operation=f"Add roots to build {build_id}",
+        )
+
+    def task_retry(self, build_id: UUID, task: "BaseTask") -> None:
+        """Reset a failed/cancelled/skipped task to pending (retry)."""
+        self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/retry",
+            params=self._get_event_params(),
+            operation=f"Retry task {task.id}",
+        )
+
+    async def task_retry_aio(self, build_id: UUID, task: "BaseTask") -> None:
+        """Async version - reset a failed/cancelled/skipped task to pending."""
+        await self._arequest(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/retry",
+            params=self._get_event_params(),
+            operation=f"Retry task {task.id}",
+        )
+
+    def build_notify(self, build_id: UUID) -> None:
+        """Set the build's scheduler wake-up flag."""
+        self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/notify",
+            params=self._get_params(),
+            operation=f"Notify build {build_id}",
+        )
+
+    async def build_notify_aio(self, build_id: UUID) -> None:
+        """Async version - set the build's scheduler wake-up flag."""
+        await self._arequest(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/notify",
+            params=self._get_params(),
+            operation=f"Notify build {build_id}",
+        )
+
+    def build_clear_notify(self, build_id: UUID) -> None:
+        """Clear the build's scheduler wake-up flag."""
+        self._request(
+            "DELETE",
+            f"{self.api_url}/api/v1/builds/{build_id}/notify",
+            params=self._get_params(),
+            operation=f"Clear notify for build {build_id}",
+        )
+
+    async def build_clear_notify_aio(self, build_id: UUID) -> None:
+        """Async version - clear the build's scheduler wake-up flag."""
+        await self._arequest(
+            "DELETE",
+            f"{self.api_url}/api/v1/builds/{build_id}/notify",
+            params=self._get_params(),
+            operation=f"Clear notify for build {build_id}",
+        )
+
+    def build_get_frontier(self, build_id: UUID) -> BuildFrontier:
+        """Return the build's scheduling frontier."""
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/builds/{build_id}/frontier",
+            params=self._get_params(),
+            operation=f"Get frontier for build {build_id}",
+        )
+        return BuildFrontier.model_validate(response.json())
+
+    async def build_get_frontier_aio(self, build_id: UUID) -> BuildFrontier:
+        """Async version - return the build's scheduling frontier."""
+        response = await self._arequest(
+            "GET",
+            f"{self.api_url}/api/v1/builds/{build_id}/frontier",
+            params=self._get_params(),
+            operation=f"Get frontier for build {build_id}",
+        )
+        return BuildFrontier.model_validate(response.json())
 
     async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - register a task within a build."""

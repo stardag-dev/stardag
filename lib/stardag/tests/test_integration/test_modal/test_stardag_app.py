@@ -684,3 +684,233 @@ class TestStardagAppBuildTrigger:
             )
 
         assert caller_kwargs == {"register_all": True}
+
+
+# ---------------------------------------------------------------------------
+# StardagApp.build_trigger(reactive=True) + tick/watchdog registration
+# ---------------------------------------------------------------------------
+
+
+class TestStardagAppReactiveTrigger:
+    def _make_app(self):
+        return StardagApp(
+            "test-reactive-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+    def test_reactive_trigger_discovers_persists_and_spawns_tick(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from uuid import uuid4 as _uuid4
+
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = _uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        dep = SyncOnlyTask(name="reactive-dep")
+        root = SyncOnlyTask(name="reactive-root", deps=(dep,))
+
+        with registry_provider.override(registry):
+            result = app.build_trigger(
+                root, reactive=True, tick_kwargs={"linger_seconds": 30}
+            )
+
+        assert result.build_id == build_id
+        # First tick spawned with only the build id (config comes from the
+        # persisted meta so ALL ticks — worker wake-ups, watchdog — share it).
+        assert modal_function_stub["from_name"]["name"] == "tick"
+        assert modal_function_stub["op"] == "spawn"
+        assert modal_function_stub["kwargs"] == {"build_id": str(build_id)}
+        # Discovery registered the DAG…
+        registry.task_register_bulk_aio.assert_called()
+        # …and the task store holds the rehydratable pickles + marker.
+        store = BuildTaskStore(build_id)
+        meta = store.read_meta()
+        assert meta is not None and meta["reactive"] is True
+        assert meta["app_name"] == app.name
+        assert meta["tick_kwargs"] == {"linger_seconds": 30}
+        loaded_root = store.load_task(root.id)
+        assert loaded_root is not None and loaded_root.id == root.id
+        assert store.load_task(dep.id) is not None
+
+    def test_reactive_rejects_build_kwargs(self, modal_function_stub):
+        app = self._make_app()
+        with pytest.raises(TypeError, match="not supported with reactive"):
+            app.build_trigger(
+                MagicMock(spec=BaseTask),
+                reactive=True,
+                build_kwargs={"fail_mode": "CONTINUE"},
+            )
+
+    def test_reactive_rejects_worker_selector_override(self, modal_function_stub):
+        """Later ticks always use the app's deployed selector — a
+        per-trigger override would change routing mid-build."""
+        app = self._make_app()
+        with pytest.raises(TypeError, match="worker_selector overrides"):
+            app.build_trigger(
+                MagicMock(spec=BaseTask),
+                worker_selector=lambda t: "gpu",
+                reactive=True,
+            )
+
+    def test_reactive_rejects_non_persistable_tick_kwargs(self, modal_function_stub):
+        """tick_kwargs are persisted as JSON meta shared by all ticks —
+        callables (e.g. a limit key selector) must be configured on the
+        deployed app instead."""
+        app = self._make_app()
+        with pytest.raises(TypeError, match="Unsupported tick_kwargs"):
+            app.build_trigger(
+                MagicMock(spec=BaseTask),
+                reactive=True,
+                tick_kwargs={"limit_key_selector": lambda t: []},
+            )
+
+    def test_reactive_requires_registry(self, modal_function_stub):
+        app = self._make_app()
+        with registry_provider.override(NoOpRegistry()):
+            with pytest.raises(RuntimeError, match="requires a configured registry"):
+                app.build_trigger(
+                    MagicMock(spec=BaseTask),
+                    build_id=uuid4(),  # explicit id is NOT enough in reactive
+                    reactive=True,
+                )
+
+
+class TestFinalizeRegistersTick:
+    def _capture_app(self, **app_kwargs):
+        app = StardagApp(
+            "test-tick-registration",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            **app_kwargs,
+        )
+        registered: dict = {}
+
+        def capture_function(**kwargs):
+            def decorator(fn):
+                registered[kwargs.get("name", "unknown")] = kwargs
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        return app, registered
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_tick_registered_watchdog_off_by_default(self, mock_volumes):
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+        app, registered = self._capture_app()
+
+        result = app.finalize()
+
+        assert "tick" in registered
+        assert "tick_watchdog" not in registered
+        assert "tick" in result.functions
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_watchdog_registered_with_period(self, mock_volumes):
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+        app, registered = self._capture_app(watchdog_period_minutes=7)
+
+        result = app.finalize()
+
+        assert "tick_watchdog" in registered
+        schedule = registered["tick_watchdog"]["schedule"]
+        assert isinstance(schedule, modal.Period)
+        assert "tick_watchdog" in result.functions
+
+
+class TestReactiveRetrigger:
+    """Re-triggering an existing reactive build: resume (un-terminal),
+    append roots server-side, retry failed tasks, merge store meta."""
+
+    def _make_app(self):
+        return StardagApp(
+            "test-retrigger-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+    def test_retrigger_resumes_appends_roots_and_merges_meta(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.task_register_bulk_aio.return_value = None
+        original_root = SyncOnlyTask(name="rt-orig")
+        new_root = SyncOnlyTask(name="rt-new")
+
+        # Initial trigger persists meta with tick_kwargs.
+        with registry_provider.override(registry):
+            app.build_trigger(
+                original_root,
+                build_id=build_id,
+                reactive=True,
+                tick_kwargs={"fail_mode": "continue"},
+            )
+        # Initial trigger with an explicit id is treated as re-trigger for
+        # resume/add-roots (harmless no-ops server-side on a fresh build).
+        registry.build_resume.assert_called_with(build_id)
+
+        registry.reset_mock()
+        # Re-trigger with a NEW root and no tick_kwargs.
+        with registry_provider.override(registry):
+            app.build_trigger(new_root, build_id=build_id, reactive=True)
+
+        registry.build_resume.assert_called_once_with(build_id)
+        registry.build_add_roots.assert_called_once_with(build_id, [str(new_root.id)])
+        meta = BuildTaskStore(build_id).read_meta()
+        assert meta is not None
+        # Roots unioned; tick_kwargs preserved from the original trigger.
+        assert meta["root_task_ids"] == [str(original_root.id), str(new_root.id)]
+        assert meta["tick_kwargs"] == {"fail_mode": "continue"}
+
+
+class TestWatchdogSweep:
+    def test_sweep_ticks_each_running_build_without_linger(self):
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        build_ids = [uuid4(), uuid4()]
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_list_running.return_value = build_ids
+        ticked: list = []
+
+        def tick(build_id, tick_kwargs=None):
+            ticked.append((build_id, tick_kwargs))
+
+        _run_watchdog_sweep(registry, tick)
+
+        assert ticked == [
+            (str(build_ids[0]), {"linger_seconds": 0}),
+            (str(build_ids[1]), {"linger_seconds": 0}),
+        ]
+
+    def test_sweep_survives_individual_tick_failures(self):
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        build_ids = [uuid4(), uuid4()]
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_list_running.return_value = build_ids
+        ticked: list = []
+
+        def tick(build_id, tick_kwargs=None):
+            if build_id == str(build_ids[0]):
+                raise RuntimeError("boom")
+            ticked.append(build_id)
+
+        _run_watchdog_sweep(registry, tick)
+
+        assert ticked == [str(build_ids[1])]  # second build still swept
+
+    def test_sweep_noop_without_registry(self):
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        _run_watchdog_sweep(NoOpRegistry(), lambda *a, **k: 1 / 0)  # no raise

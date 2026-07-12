@@ -194,6 +194,23 @@ class TaskExecutionState:
 # =============================================================================
 
 
+class DetachedExecutionStatus(StrEnum):
+    """Observed state of a detached execution, by its (executor, ref).
+
+    Used by reactive scheduler ticks to decide what to do with a task the
+    registry reports as RUNNING: leave it (RUNNING), self-heal completion
+    (SUCCEEDED), record the failure (FAILED), or leave-and-warn (UNKNOWN —
+    e.g. the ref belongs to a different backend or the backend can't say;
+    conservatively treated as possibly-still-running to avoid duplicate
+    executions).
+    """
+
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class DetachedHandle:
     """Handle to a detached (orchestrator-independent) task execution.
@@ -347,6 +364,26 @@ class TaskExecutorABC(ABC):
         """
         return None
 
+    async def detached_status(
+        self, task: BaseTask, executor: str, ref: str
+    ) -> DetachedExecutionStatus:
+        """Non-blocking status probe of a detached execution.
+
+        Used by reactive scheduler ticks (which never await results — the
+        workers report their own lifecycle). Default: UNKNOWN.
+        """
+        return DetachedExecutionStatus.UNKNOWN
+
+    async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
+        """Best-effort cancel of a detached execution by its recorded ref.
+
+        Unlike :meth:`cancel` (which works on in-flight handles tracked by
+        this executor instance), this cancels an execution started by *any*
+        process — used by scheduler ticks on build failure/cancellation.
+        Default: no-op.
+        """
+        pass
+
 
 # Type variable for executor routing keys
 ExecutorKeyT = TypeVar("ExecutorKeyT")
@@ -451,6 +488,21 @@ class RoutedTaskExecutor(TaskExecutorABC, Generic[ExecutorKeyT]):
         if routed is None:
             return None
         return await routed.reattach(task, executor, ref)
+
+    async def detached_status(
+        self, task: BaseTask, executor: str, ref: str
+    ) -> DetachedExecutionStatus:
+        """Route the status probe to the executor the task routes to."""
+        routed = self.executors.get(self.router(task))
+        if routed is None:
+            return DetachedExecutionStatus.UNKNOWN
+        return await routed.detached_status(task, executor, ref)
+
+    async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
+        """Route the detached cancel to the executor the task routes to."""
+        routed = self.executors.get(self.router(task))
+        if routed is not None:
+            await routed.cancel_detached(task, executor, ref)
 
 
 # =============================================================================

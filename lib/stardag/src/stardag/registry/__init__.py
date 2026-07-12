@@ -14,6 +14,8 @@ The main classes are:
 from stardag.registry._api_registry import APIRegistry
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 from stardag.registry._base import (
+    BuildFrontier,
+    FrontierTaskRef,
     NoOpRegistry,
     RegisteredTaskInfo,
     RegistryABC,
@@ -28,6 +30,8 @@ from stardag.registry._lock import (
 
 __all__ = [
     "APIRegistry",
+    "BuildFrontier",
+    "FrontierTaskRef",
     "NoOpRegistry",
     "RegisteredTaskInfo",
     "RegistryABC",

@@ -1519,3 +1519,264 @@ async def test_start_task_without_ref_clears_stale_executor_ref(client: AsyncCli
     assert ref["latest_status"] == "running"
     assert ref["latest_executor"] is None
     assert ref["latest_executor_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_notify_build_set_and_clear(client: AsyncClient):
+    """Workers set the scheduler wake-up flag; a tick clears it."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    response = await client.post(f"/api/v1/builds/{build_id}/notify")
+    assert response.status_code == 200
+    assert response.json()["needs_tick"] is True
+
+    response = await client.get(f"/api/v1/builds/{build_id}/frontier")
+    assert response.json()["needs_tick"] is True
+
+    response = await client.delete(f"/api/v1/builds/{build_id}/notify")
+    assert response.status_code == 200
+    assert response.json()["needs_tick"] is False
+
+    response = await client.get(f"/api/v1/builds/{build_id}/frontier")
+    assert response.json()["needs_tick"] is False
+
+
+@pytest.mark.asyncio
+async def test_frontier_dependency_gating_and_counts(client: AsyncClient):
+    """The frontier only exposes tasks whose upstreams are all completed,
+    and reports per-status counts + root statuses for terminal detection."""
+    build_data = {"root_task_ids": ["frontier-root"]}
+    build_id = (await client.post("/api/v1/builds", json=build_data)).json()["id"]
+
+    # dep -> root chain
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "frontier-dep",
+            "task_namespace": "",
+            "task_name": "Dep",
+            "task_data": {},
+        },
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "frontier-root",
+            "task_namespace": "",
+            "task_name": "Root",
+            "task_data": {},
+            "dependency_task_ids": ["frontier-dep"],
+        },
+    )
+
+    # Initially only the dep is actionable (root blocked by incomplete dep).
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert [t["task_id"] for t in frontier["actionable"]] == ["frontier-dep"]
+    assert frontier["status_counts"] == {"pending": 2}
+    assert frontier["root_task_ids"] == ["frontier-root"]
+    assert frontier["roots"][0]["latest_status"] == "pending"
+    assert frontier["build_status"] == "running"
+
+    # Dep starts (with a detached ref) — still actionable (RUNNING is
+    # returned so the scheduler can verify ref liveness), root still blocked.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/frontier-dep/start",
+        params={"executor": "modal", "executor_ref": "fc-dep-1"},
+    )
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    actionable = {t["task_id"]: t for t in frontier["actionable"]}
+    assert set(actionable) == {"frontier-dep"}
+    assert actionable["frontier-dep"]["latest_status"] == "running"
+    assert actionable["frontier-dep"]["latest_executor_ref"] == "fc-dep-1"
+
+    # Dep completes — root becomes actionable.
+    await client.post(f"/api/v1/builds/{build_id}/tasks/frontier-dep/complete")
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert [t["task_id"] for t in frontier["actionable"]] == ["frontier-root"]
+    assert frontier["status_counts"] == {"completed": 1, "pending": 1}
+
+    # Root completes — nothing actionable, roots all completed.
+    await client.post(f"/api/v1/builds/{build_id}/tasks/frontier-root/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/frontier-root/complete")
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["actionable"] == []
+    assert frontier["status_counts"] == {"completed": 2}
+    assert frontier["roots"][0]["latest_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_frontier_includes_suspended_with_complete_dynamic_deps(
+    client: AsyncClient,
+):
+    """A suspended task becomes actionable once its dynamically-added deps
+    complete (dynamic edges gate exactly like static ones)."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "dyn-parent",
+            "task_namespace": "",
+            "task_name": "Parent",
+            "task_data": {},
+        },
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/dyn-parent/start")
+    # Parent yields a dynamic dep and suspends.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={
+            "task_id": "dyn-child",
+            "task_namespace": "",
+            "task_name": "Child",
+            "task_data": {},
+        },
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/dyn-parent/dependencies",
+        json={"upstream_task_ids": ["dyn-child"], "is_dynamic": True},
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/dyn-parent/suspend")
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert [t["task_id"] for t in frontier["actionable"]] == ["dyn-child"]
+
+    # Child completes → suspended parent becomes actionable for re-invocation.
+    await client.post(f"/api/v1/builds/{build_id}/tasks/dyn-child/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/dyn-child/complete")
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert [t["task_id"] for t in frontier["actionable"]] == ["dyn-parent"]
+    assert frontier["actionable"][0]["latest_status"] == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_frontier_build_not_found_and_notify_404(client: AsyncClient):
+    fake = "00000000-0000-0000-0000-000000000099"
+    assert (await client.get(f"/api/v1/builds/{fake}/frontier")).status_code == 404
+    assert (await client.post(f"/api/v1/builds/{fake}/notify")).status_code == 404
+
+
+def _register_payload(task_id: str, deps: list[str] | None = None) -> dict:
+    return {
+        "task_id": task_id,
+        "task_namespace": "",
+        "task_name": "T",
+        "task_data": {},
+        "dependency_task_ids": deps or [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_retry_task_resets_failed_to_pending(client: AsyncClient):
+    """TASK_RETRIED flips failed/cancelled/skipped back to pending (global
+    and per-build views) so the task is schedulable again."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("retry-t")
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/retry-t/start")
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/retry-t/fail",
+        params={"error_message": "boom"},
+    )
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["status_counts"] == {"failed": 1}
+
+    response = await client.post(f"/api/v1/builds/{build_id}/tasks/retry-t/retry")
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["status_counts"] == {"pending": 1}
+    assert [t["task_id"] for t in frontier["actionable"]] == ["retry-t"]
+    # Executor ref of the failed run was cleared with the retry.
+    assert frontier["actionable"][0]["latest_executor_ref"] is None
+
+
+@pytest.mark.asyncio
+async def test_retry_task_never_downgrades_completed_or_running(client: AsyncClient):
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for tid in ("retry-done", "retry-running"):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks", json=_register_payload(tid)
+        )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/retry-done/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/retry-done/complete")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/retry-running/start")
+
+    r1 = await client.post(f"/api/v1/builds/{build_id}/tasks/retry-done/retry")
+    r2 = await client.post(f"/api/v1/builds/{build_id}/tasks/retry-running/retry")
+    assert r1.json()["status"] == "completed"
+    assert r2.json()["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_add_build_roots_appends_dedup(client: AsyncClient):
+    build_id = (
+        await client.post("/api/v1/builds", json={"root_task_ids": ["r1"]})
+    ).json()["id"]
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/roots",
+        json={"root_task_ids": ["r2", "r1", "r3"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["root_task_ids"] == ["r1", "r2", "r3"]
+
+    # Frontier terminal-detection input covers the added roots.
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["root_task_ids"] == ["r1", "r2", "r3"]
+
+
+@pytest.mark.asyncio
+async def test_frontier_running_includes_non_actionable(client: AsyncClient):
+    """A RUNNING task with an incomplete upstream (dynamic-dep window) is
+    excluded from `actionable` but still listed in `running` — cancellation
+    must reach it."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("dyn-blocker")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("dyn-runner")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/dyn-runner/start",
+        params={"executor": "modal", "executor_ref": "fc-dyn"},
+    )
+    # dynamic edge lands while the task is still RUNNING
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/dyn-runner/dependencies",
+        json={"upstream_task_ids": ["dyn-blocker"], "is_dynamic": True},
+    )
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    actionable_ids = [t["task_id"] for t in frontier["actionable"]]
+    running_ids = [t["task_id"] for t in frontier["running"]]
+    assert "dyn-runner" not in actionable_ids  # blocked by incomplete upstream
+    assert running_ids == ["dyn-runner"]
+    assert frontier["running"][0]["latest_executor_ref"] == "fc-dyn"
+
+
+@pytest.mark.asyncio
+async def test_frontier_reflects_cross_build_running(client: AsyncClient):
+    """A task started by ANOTHER build shows RUNNING (with its ref) in this
+    build's frontier — the cross-build semantics the endpoint advertises."""
+    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks", json=_register_payload("shared-task")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_b}/tasks", json=_register_payload("shared-task")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks/shared-task/start",
+        params={"executor": "modal", "executor_ref": "fc-other-build"},
+    )
+
+    frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
+    actionable = {t["task_id"]: t for t in frontier_b["actionable"]}
+    assert actionable["shared-task"]["latest_status"] == "running"
+    assert actionable["shared-task"]["latest_executor_ref"] == "fc-other-build"

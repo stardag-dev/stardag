@@ -42,10 +42,19 @@ from stardag.build._base import (
     RoutedTaskExecutor,
     TaskCount,
     TaskExecutionError,
+    DetachedExecutionStatus,
     DetachedHandle,
     get_current_build_id,
     TaskExecutorABC,
 )
+from stardag.build._reactive import (
+    DiscoveryResult,
+    TickConfig,
+    TickSummary,
+    discover_and_register_aio,
+    run_tick_aio,
+)
+from stardag.build._task_store import BuildTaskStore
 from stardag.build._concurrency import (
     ConcurrencyConfig,
     ConcurrencyKeySelector,
@@ -96,6 +105,13 @@ __all__ = [
     "HybridConcurrentTaskExecutor",
     "RoutedTaskExecutor",
     "TaskExecutionError",
+    "BuildTaskStore",
+    "DetachedExecutionStatus",
+    "DiscoveryResult",
+    "TickConfig",
+    "TickSummary",
+    "discover_and_register_aio",
+    "run_tick_aio",
     "DetachedHandle",
     "get_current_build_id",
     "TaskExecutorABC",

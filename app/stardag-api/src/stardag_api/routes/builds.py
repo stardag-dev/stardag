@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from stardag_api.auth import (
     SdkAuth,
@@ -36,11 +37,15 @@ from stardag_api.models import (
 )
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.schemas import (
+    AddBuildRootsRequest,
     AddDependenciesRequest,
     AddDependenciesResponse,
     BuildCreate,
+    BuildFrontierResponse,
     BuildListResponse,
+    BuildNotifyResponse,
     BuildResponse,
+    FrontierTaskRef,
     EventResponse,
     StatusTriggeredByUser,
     BulkTaskIdRef,
@@ -804,6 +809,228 @@ async def resume_build(
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
         is_resumed=is_resumed,
+    )
+
+
+async def _get_build_checked(build_id: UUID, db: AsyncSession, auth: SdkAuth) -> Build:
+    build = await db.get(Build, build_id)
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+    if build.environment_id != auth.environment_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this environment"
+        )
+    return build
+
+
+@router.post("/{build_id}/notify", response_model=BuildNotifyResponse)
+async def notify_build(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Set the build's scheduler wake-up flag (``needs_tick_at``).
+
+    Called by workers when they finish a task (and by anything else that
+    changes the build's scheduling state). A reactive scheduler tick clears
+    the flag before computing the frontier and re-checks it while lingering,
+    so a notify landing mid-tick is never lost.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_checked(build_id, db, auth)
+    build.needs_tick_at = utc_now()
+    await db.commit()
+    return BuildNotifyResponse(build_id=build_id, needs_tick=True)
+
+
+@router.delete("/{build_id}/notify", response_model=BuildNotifyResponse)
+async def clear_build_notify(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Clear the build's scheduler wake-up flag.
+
+    Called by a scheduler tick right before it computes the frontier.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_checked(build_id, db, auth)
+    build.needs_tick_at = None
+    await db.commit()
+    return BuildNotifyResponse(build_id=build_id, needs_tick=False)
+
+
+@router.post("/{build_id}/roots", response_model=BuildResponse)
+async def add_build_roots(
+    build_id: UUID,
+    payload: AddBuildRootsRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Append root task ids to a build (deduplicated, order-preserving).
+
+    Adding roots to an active build: terminal detection (all roots
+    complete) covers the appended roots from the moment they land here.
+    Callers must register the tasks separately (bulk registration).
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_checked(build_id, db, auth)
+    existing = list(build.root_task_ids or [])
+    merged = existing + [t for t in payload.root_task_ids if t not in existing]
+    if merged != existing:
+        build.root_task_ids = merged
+        await _touch_build_last_active(db, build_id)
+        await db.commit()
+
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
+    return BuildResponse(
+        id=build.id,
+        environment_id=build.environment_id,
+        user_id=build.user_id,
+        name=build.name,
+        description=build.description,
+        commit_hash=build.commit_hash,
+        root_task_ids=build.root_task_ids,
+        created_at=build.created_at,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
+    )
+
+
+@router.get("/{build_id}/frontier", response_model=BuildFrontierResponse)
+async def get_build_frontier(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Return the build's scheduling frontier (for reactive scheduler ticks).
+
+    See :class:`BuildFrontierResponse`. Statuses are the tasks' *global*
+    denormalised statuses — a task completed or running in another build
+    counts as such here too (which is exactly what a scheduler wants:
+    don't re-run what's done, re-attach to what's running).
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    build = await _get_build_checked(build_id, db, auth)
+
+    # All tasks referenced by this build (registration/lifecycle events
+    # carry build_id; ix_events_build_task_type serves this).
+    build_task_ids = (
+        select(Event.task_id)
+        .where(Event.build_id == build_id, Event.task_id.is_not(None))
+        .distinct()
+        .scalar_subquery()
+    )
+
+    counts_rows = (
+        await db.execute(
+            select(Task.latest_status, func.count())
+            .where(Task.id.in_(build_task_ids))
+            .group_by(Task.latest_status)
+        )
+    ).all()
+    # Normalize keys to the enum *value* explicitly — str(TaskStatus.X)
+    # would silently become "TaskStatus.X" if the column ever turns
+    # Enum-typed, breaking SDK terminal detection.
+    status_counts = {
+        (status.value if isinstance(status, TaskStatus) else str(status)): count
+        for status, count in counts_rows
+    }
+
+    upstream = aliased(Task)
+    has_incomplete_upstream = (
+        select(TaskDependency.id)
+        .join(upstream, TaskDependency.upstream_task_id == upstream.id)
+        .where(
+            TaskDependency.downstream_task_id == Task.id,
+            upstream.latest_status != TaskStatus.COMPLETED,
+        )
+        .exists()
+    )
+    actionable_tasks = (
+        (
+            await db.execute(
+                select(Task)
+                .where(
+                    Task.id.in_(build_task_ids),
+                    Task.latest_status.in_(
+                        [
+                            TaskStatus.PENDING,
+                            TaskStatus.SUSPENDED,
+                            TaskStatus.RUNNING,
+                        ]
+                    ),
+                    ~has_incomplete_upstream,
+                )
+                .order_by(Task.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # ALL running tasks in the build (not just actionable ones): a RUNNING
+    # task whose freshly-registered dynamic-dep edges are incomplete drops
+    # out of `actionable` — but cancellation (fail-fast / externally
+    # cancelled build) must still reach it.
+    running_tasks = (
+        (
+            await db.execute(
+                select(Task).where(
+                    Task.id.in_(build_task_ids),
+                    Task.latest_status == TaskStatus.RUNNING,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    root_task_ids: list[str] = list(build.root_task_ids or [])
+    roots: list[Task] = []
+    if root_task_ids:
+        roots = list(
+            (
+                await db.execute(
+                    select(Task).where(
+                        Task.environment_id == auth.environment_id,
+                        Task.task_id.in_(root_task_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    build_status, _, _, _, _ = await get_build_status(db, build.id)
+
+    def _ref(t: Task) -> FrontierTaskRef:
+        return FrontierTaskRef(
+            task_id=t.task_id,
+            latest_status=t.latest_status,
+            latest_executor=t.latest_executor,
+            latest_executor_ref=t.latest_executor_ref,
+        )
+
+    return BuildFrontierResponse(
+        build_id=build_id,
+        build_status=build_status,
+        needs_tick=build.needs_tick_at is not None,
+        root_task_ids=root_task_ids,
+        roots=[_ref(t) for t in roots],
+        status_counts=status_counts,
+        actionable=[_ref(t) for t in actionable_tasks],
+        running=[_ref(t) for t in running_tasks],
     )
 
 
@@ -1669,6 +1896,28 @@ async def skip_task(
     """Skip a task that won't run (e.g. its dependency failed)."""
     return await _create_task_event(
         build_id, task_id, EventType.TASK_SKIPPED, db, auth, commit_hash=commit_hash
+    )
+
+
+@router.post("/{build_id}/tasks/{task_id}/retry", response_model=TaskEventResponse)
+async def retry_task(
+    build_id: UUID,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
+):
+    """Reset a failed/cancelled/skipped task to pending (retry).
+
+    Emits TASK_RETRIED; status derivation flips only terminal-but-
+    retryable statuses back to PENDING — completed and running tasks are
+    unaffected (the event is still recorded, making concurrent
+    trigger/retry races benign). Used by reactive triggers so a
+    re-triggered failed build (or a new build referencing a previously
+    failed task) becomes schedulable again.
+    """
+    return await _create_task_event(
+        build_id, task_id, EventType.TASK_RETRIED, db, auth, commit_hash=commit_hash
     )
 
 

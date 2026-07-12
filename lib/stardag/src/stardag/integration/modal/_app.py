@@ -50,11 +50,18 @@ from stardag import BaseTask, TaskStruct, build, flatten_task_struct
 from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
 from stardag.build import (
     BuildExitStatus,
+    BuildTaskStore,
+    FailMode,
+    DetachedExecutionStatus,
     DetachedHandle,
     TaskExecutionError,
     TaskExecutorABC,
+    TickConfig,
+    discover_and_register_aio,
     get_current_build_id,
+    run_tick_aio,
 )
+from stardag.build._base import GlobalLockConfig
 from stardag.build._base import BuildSummary
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
@@ -67,6 +74,7 @@ from stardag.registry._base import (
     get_git_commit_hash,
     registry_provider,
 )
+from stardag.registry._lock import RegistryGlobalConcurrencyLockManager
 from stardag.utils.env import temp_env_vars
 
 try:
@@ -255,6 +263,63 @@ class FinalizeResult(typing.NamedTuple):
 # --- Function settings ---
 
 
+def _run_watchdog_sweep(
+    registry: typing.Any,
+    tick: typing.Callable[..., typing.Any],
+    sweep_limit: int = 100,
+) -> None:
+    """One watchdog pass: tick every running build, without lingering.
+
+    ``linger_seconds=0`` (one frontier pass per build) is essential: the
+    sweep runs ticks sequentially in one function call — persisted linger
+    settings (default 120 s) would blow through the function timeout after
+    a couple of builds and starve the rest of the safety-net tick.
+    """
+    if type(registry) is NoOpRegistry:
+        logger.warning("Tick watchdog: no registry configured; nothing to do.")
+        return
+    running_builds = registry.build_list_running(limit=sweep_limit)
+    if len(running_builds) >= sweep_limit:
+        logger.warning(
+            f"Tick watchdog: {sweep_limit}+ running builds; only the "
+            f"{sweep_limit} most recently active are swept."
+        )
+    for running_build_id in running_builds:
+        try:
+            tick(str(running_build_id), tick_kwargs={"linger_seconds": 0})
+        except Exception:
+            logger.exception(f"Watchdog tick failed for build {running_build_id}")
+
+
+_TICK_KWARGS_ALLOWED = ("linger_seconds", "poll_interval_seconds", "fail_mode")
+
+
+def _validate_tick_kwargs(
+    tick_kwargs: dict[str, typing.Any] | None,
+) -> dict[str, typing.Any] | None:
+    """Validate + JSON-normalize reactive tick_kwargs.
+
+    They are persisted in the build's store meta (JSON) so all ticks of the
+    build share them — hence only JSON-scalar TickConfig fields are allowed
+    here. ``fail_mode`` may be passed as a FailMode and is stored as its
+    string value.
+    """
+    if not tick_kwargs:
+        return tick_kwargs
+    unknown = set(tick_kwargs) - set(_TICK_KWARGS_ALLOWED)
+    if unknown:
+        raise TypeError(
+            f"Unsupported tick_kwargs {sorted(unknown)}; allowed (JSON-"
+            f"persistable TickConfig fields): {list(_TICK_KWARGS_ALLOWED)}. "
+            "Callables like a concurrency-limit key selector belong in the "
+            "deployed app configuration, not per-trigger kwargs."
+        )
+    normalized = dict(tick_kwargs)
+    if "fail_mode" in normalized:
+        normalized["fail_mode"] = str(FailMode(normalized["fail_mode"]))
+    return normalized
+
+
 class BuildTriggerResult(typing.NamedTuple):
     """Result of :meth:`StardagApp.build_trigger`.
 
@@ -387,6 +452,21 @@ worker. Riding on ``env_overrides`` keeps the worker function signature
 unchanged — older deployed workers simply apply it as a harmless env var.
 """
 
+STARDAG_MODAL_APP_NAME_ENV = "STARDAG_MODAL_APP_NAME"
+"""Env var carrying the Modal app name to workers (reactive scheduling).
+
+Lets a worker wake the scheduler by spawning the app's ``tick`` function
+when it finishes a task. Transported like ``STARDAG_BUILD_ID``.
+"""
+
+STARDAG_REACTIVE_ENV = "STARDAG_REACTIVE"
+"""Env var flagging reactive scheduling to workers ("1" when reactive).
+
+In reactive mode the worker additionally registers dynamically yielded
+deps (with task-store persistence) and wakes the scheduler after terminal
+events — there is no resident orchestrator to do either.
+"""
+
 
 class ModalTaskExecutor(TaskExecutorABC):
     """Task executor that sends tasks to Modal for remote execution.
@@ -423,6 +503,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         worker_selector: WorkerSelector,
         detached: bool = True,
         worker_reports_lifecycle: bool = True,
+        reactive: bool = False,
     ):
         """Initialize Modal executor.
 
@@ -445,6 +526,9 @@ class ModalTaskExecutor(TaskExecutorABC):
         self.worker_selector = worker_selector
         self.detached = detached
         self.worker_reports_lifecycle = worker_reports_lifecycle
+        # Reactive scheduling: forward the app name + reactive flag so
+        # workers register their dynamic deps and wake the scheduler tick.
+        self.reactive = reactive
         # Cache of worker name -> modal.Function. ``modal.Function.from_name``
         # returns a lazy handle (no network call until invoked), but it is
         # invoked on every ``submit`` so we memoize it per worker name to avoid
@@ -488,6 +572,9 @@ class ModalTaskExecutor(TaskExecutorABC):
                     **(env_overrides or {}),
                     STARDAG_BUILD_ID_ENV: str(build_id),
                 }
+                if self.reactive:
+                    env_overrides[STARDAG_MODAL_APP_NAME_ENV] = self.modal_app_name
+                    env_overrides[STARDAG_REACTIVE_ENV] = "1"
         return worker_function, env_overrides
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
@@ -617,6 +704,45 @@ class ModalTaskExecutor(TaskExecutorABC):
             return result
 
         return DetachedHandle(executor=MODAL_EXECUTOR_NAME, ref=ref, wait=resolved)
+
+    async def detached_status(
+        self, task: BaseTask, executor: str, ref: str
+    ) -> DetachedExecutionStatus:
+        """Non-blocking probe of a spawned function call's state.
+
+        Note: an expired result (>~7 days) and an unknown id also classify
+        as FAILED — callers (scheduler ticks) check target existence first,
+        so a successfully-finished-long-ago execution is already resolved
+        as complete before this is consulted.
+
+        Known ambiguity (accepted, see also ``reattach``): the poll timeout
+        is the builtin ``TimeoutError``, indistinguishable from a task body
+        that raised ``TimeoutError`` — such a failed execution classifies
+        as RUNNING here. In practice the worker's own TASK_FAILED report
+        resolves the task first; only a registry-less worker raising
+        builtin TimeoutError hits the ambiguity.
+        """
+        if executor != MODAL_EXECUTOR_NAME or not self.detached:
+            return DetachedExecutionStatus.UNKNOWN
+        try:
+            function_call = modal.FunctionCall.from_id(ref)
+            await function_call.get.aio(timeout=0)
+        except TimeoutError:
+            return DetachedExecutionStatus.RUNNING
+        except Exception:
+            return DetachedExecutionStatus.FAILED
+        return DetachedExecutionStatus.SUCCEEDED
+
+    async def cancel_detached(self, task: BaseTask, executor: str, ref: str) -> None:
+        """Cancel a spawned function call by its recorded id."""
+        if executor != MODAL_EXECUTOR_NAME:
+            return
+        try:
+            await modal.FunctionCall.from_id(ref).cancel.aio()
+        except Exception as e:
+            logger.warning(
+                f"Failed to cancel Modal function call {ref!r} for task {task.id}: {e}"
+            )
 
     async def cancel(self, task: BaseTask) -> None:
         """Cancel the tracked in-flight function call for ``task``, if any."""
@@ -858,18 +984,29 @@ class _WorkerLifecycleReporter:
     a lost completion event.
     """
 
-    def __init__(self, registry: typing.Any, build_id: UUID, task: BaseTask):
+    def __init__(
+        self,
+        registry: typing.Any,
+        build_id: UUID,
+        task: BaseTask,
+        *,
+        reactive: bool = False,
+        app_name: str | None = None,
+    ):
         self.registry = registry
         self.build_id = build_id
         self.task = task
+        self.reactive = reactive
+        self.app_name = app_name
 
     @classmethod
     def create(
         cls, task: BaseTask, env_overrides: dict[str, str] | None
     ) -> "_WorkerLifecycleReporter | None":
-        raw_build_id = (env_overrides or {}).get(
-            STARDAG_BUILD_ID_ENV
-        ) or os.environ.get(STARDAG_BUILD_ID_ENV)
+        def _get(key: str) -> str | None:
+            return (env_overrides or {}).get(key) or os.environ.get(key)
+
+        raw_build_id = _get(STARDAG_BUILD_ID_ENV)
         if not raw_build_id:
             return None
         try:
@@ -882,7 +1019,13 @@ class _WorkerLifecycleReporter:
         # reporting — NoOpRegistry *subclasses* may implement real behavior.
         if type(registry) is NoOpRegistry:
             return None
-        return cls(registry, build_id, task)
+        return cls(
+            registry,
+            build_id,
+            task,
+            reactive=_get(STARDAG_REACTIVE_ENV) == "1",
+            app_name=_get(STARDAG_MODAL_APP_NAME_ENV),
+        )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
         try:
@@ -920,12 +1063,22 @@ class _WorkerLifecycleReporter:
                 self.registry.task_upload_artifacts(self.build_id, self.task, artifacts)
 
         self._guard(_artifacts, "artifacts")
+        self._wake_scheduler()
 
-    def suspended(self) -> None:
+    def suspended(self, task_struct: TaskStruct | None = None) -> None:
+        if self.reactive and task_struct is not None:
+            # No resident orchestrator to pick up the yielded deps: register
+            # them (with their requires() subtrees), persist their pickles
+            # for the scheduler, and record the dynamic edges — BEFORE the
+            # suspend event, so the frontier is consistent when a tick runs.
+            self._guard(
+                lambda: self._register_dynamic_deps(task_struct), "dynamic-deps"
+            )
         self._guard(
             lambda: self.registry.task_suspend(self.build_id, self.task),
             "suspend",
         )
+        self._wake_scheduler()
 
     def failed(self, exception: Exception) -> None:
         self._guard(
@@ -934,6 +1087,43 @@ class _WorkerLifecycleReporter:
             ),
             "fail",
         )
+        self._wake_scheduler()
+
+    def _register_dynamic_deps(self, task_struct: TaskStruct) -> None:
+        result = asyncio.run(
+            discover_and_register_aio(self.registry, self.build_id, task_struct)
+        )
+        store = BuildTaskStore(self.build_id)
+        store.save_tasks(result.incomplete.values())
+        deps = flatten_task_struct(task_struct)
+        self.registry.task_add_dependencies(
+            self.build_id, self.task, deps, is_dynamic=True
+        )
+
+    def _wake_scheduler(self) -> None:
+        """Reactive wake-up: flag the build dirty, then spawn a tick.
+
+        Order matters: the flag is set *before* the spawn, so if the tick
+        finds the scheduler lease held, the holder's linger re-check is
+        guaranteed to observe the wake-up.
+        """
+        if not self.reactive:
+            return
+        self._guard(lambda: self.registry.build_notify(self.build_id), "notify")
+        app_name = self.app_name
+        if app_name is None:
+            logger.warning(
+                "Reactive build without an app name — cannot spawn a "
+                "scheduler tick (relying on the watchdog)."
+            )
+            return
+
+        def _spawn_tick() -> None:
+            modal.Function.from_name(app_name=app_name, name="tick").spawn(
+                build_id=str(self.build_id)
+            )
+
+        self._guard(_spawn_tick, "tick-spawn")
 
 
 class Runner(RunFunction):
@@ -1031,7 +1221,7 @@ class Runner(RunFunction):
                     if result is None:
                         reporter.completed()
                     else:
-                        reporter.suspended()
+                        reporter.suspended(result)
         except Exception as e:
             exception = e
             raise
@@ -1273,6 +1463,8 @@ class StardagApp:
         builder_settings: FunctionSettings,
         worker_settings: dict[str, FunctionSettings],
         worker_selector: WorkerSelector | None = None,
+        tick_settings: FunctionSettings | None = None,
+        watchdog_period_minutes: int | None = None,
     ):
         """Initialize a StardagApp.
 
@@ -1316,6 +1508,13 @@ class StardagApp:
         self._run_function = run_function
         self._builder_settings = builder_settings
         self._worker_settings = worker_settings
+        # Reactive scheduling: the "tick" function's settings (defaults to
+        # builder_settings) and the optional periodic watchdog sweep that
+        # re-ticks running builds (covers lost wake-ups and externally
+        # cancelled builds). Set watchdog_period_minutes when using
+        # build_trigger(reactive=True).
+        self._tick_settings = tick_settings
+        self.watchdog_period_minutes = watchdog_period_minutes
         self._is_finalized = False
 
     @property
@@ -1472,6 +1671,86 @@ class StardagApp:
             )(_modal_run)
             function_names.append(func_name)
 
+        # Reactive scheduler tick (see stardag.build.run_tick_aio). Spawned
+        # by build_trigger(reactive=True), by workers finishing tasks, and
+        # by the optional watchdog below. Idempotent and single-flighted —
+        # safe to invoke at any time; no-ops on non-reactive builds.
+        app_name = self.name
+        default_worker_selector = self.worker_selector
+
+        def _modal_tick(
+            build_id: str,
+            tick_kwargs: dict[str, typing.Any] | None = None,
+        ) -> dict[str, typing.Any]:
+            _setup_logging()
+            import dataclasses
+            from uuid import UUID as _UUID
+
+            from stardag.build import BuildTaskStore as _BuildTaskStore
+
+            build_uuid = _UUID(build_id)
+            task_store = _BuildTaskStore(build_uuid)
+            # Per-build tick configuration persisted at trigger time — every
+            # tick (worker wake-ups and watchdog sweeps spawn with only the
+            # build id) runs with the same settings. Explicit tick_kwargs
+            # (tests/manual invocations) win over persisted ones.
+            meta = task_store.read_meta() or {}
+            config_kwargs = {
+                **(meta.get("tick_kwargs") or {}),
+                **(tick_kwargs or {}),
+            }
+            if "fail_mode" in config_kwargs:
+                config_kwargs["fail_mode"] = FailMode(config_kwargs["fail_mode"])
+
+            executor = ModalTaskExecutor(
+                modal_app_name=app_name,
+                worker_selector=default_worker_selector,
+                reactive=True,
+            )
+            lock_manager = RegistryGlobalConcurrencyLockManager(
+                # No waiting on the scheduler lease: a held lease means
+                # another tick is active and will observe the wake-up flag.
+                config=GlobalLockConfig(lock_wait_timeout_seconds=None),
+            )
+            summary = asyncio.run(
+                run_tick_aio(
+                    build_uuid,
+                    registry=registry_provider.get(),
+                    task_executor=executor,
+                    lock_manager=lock_manager,
+                    task_store=task_store,
+                    config=TickConfig(**config_kwargs),
+                )
+            )
+            logger.info(f"Tick for build {build_id}: {summary}")
+            return dataclasses.asdict(summary)
+
+        tick_settings = self._prepare_function_settings(
+            self._tick_settings or self._builder_settings,
+            extra_secrets=extra_secrets,
+            auto_volumes=auto_volumes,
+        )
+        self.modal_app.function(
+            **{**tick_settings, "name": "tick", "serialized": True}
+        )(_modal_tick)
+        function_names.append("tick")
+
+        if self.watchdog_period_minutes is not None:
+
+            def _modal_tick_watchdog() -> None:
+                _setup_logging()
+                _run_watchdog_sweep(registry_provider.get(), _modal_tick)
+
+            self.modal_app.function(
+                **{
+                    **tick_settings,
+                    "name": "tick_watchdog",
+                    "serialized": True,
+                    "schedule": modal.Period(minutes=self.watchdog_period_minutes),
+                }
+            )(_modal_tick_watchdog)
+            function_names.append("tick_watchdog")
+
         self._is_finalized = True
 
         return FinalizeResult(
@@ -1529,6 +1808,8 @@ class StardagApp:
         build_kwargs: dict[str, typing.Any] | None = None,
         build_id: UUID | None = None,
         description: str | None = None,
+        reactive: bool = False,
+        tick_kwargs: dict[str, typing.Any] | None = None,
     ) -> BuildTriggerResult:
         """Trigger a build with a registry build id minted at the trigger point.
 
@@ -1563,10 +1844,24 @@ class StardagApp:
                 ``build_trigger`` call). If None, a new build is created.
             description: Optional description for the new build (ignored when
                 ``build_id`` is given).
+            reactive: **Experimental.** Schedule the build reactively (no
+                resident orchestrator): discovery runs here at the trigger,
+                task objects are persisted to the build task store under the
+                default target root, and short-lived scheduler *ticks*
+                (spawned now, by workers finishing tasks, and by the optional
+                watchdog) drive the build — see ``stardag.build.run_tick_aio``
+                for semantics and current limitations. Requires the app to be
+                deployed with this stardag version (the ``tick`` function and
+                self-reporting workers), and registry + target-root access in
+                the calling process. Re-trigger with the returned ``build_id``
+                to wake a stalled build or add new root tasks to it.
+            tick_kwargs: Optional kwargs for the reactive ``TickConfig``
+                (e.g. ``{"linger_seconds": 30}``).
 
         Returns:
             BuildTriggerResult with the ``build_id`` and the spawned Modal
-            ``FunctionCall`` handle.
+            ``FunctionCall`` handle (the build function, or the first
+            scheduler tick when ``reactive=True``).
         """
         merged_kwargs = dict(build_kwargs or {})
         if "resume_build_id" in merged_kwargs:
@@ -1574,22 +1869,59 @@ class StardagApp:
                 "build_kwargs must not contain 'resume_build_id'; pass "
                 "build_id=... to build_trigger instead"
             )
+        if reactive and merged_kwargs:
+            raise TypeError(
+                "build_kwargs are not supported with reactive=True (there is "
+                "no resident build function); use tick_kwargs for TickConfig "
+                "options"
+            )
+        if reactive and worker_selector is not None:
+            raise TypeError(
+                "worker_selector overrides are not supported with "
+                "reactive=True: later scheduler ticks (worker wake-ups, "
+                "watchdog) always use the app's deployed worker_selector, so "
+                "a per-trigger override would change routing mid-build. "
+                "Configure the selector on StardagApp instead."
+            )
+        if reactive:
+            tick_kwargs = _validate_tick_kwargs(tick_kwargs)
 
+        registry = registry_provider.get()
+        # A configured registry is needed to mint a new build id, and always
+        # in reactive mode (discovery/registration runs at the trigger).
+        if (build_id is None or reactive) and isinstance(registry, NoOpRegistry):
+            raise RuntimeError(
+                "build_trigger requires a configured registry to mint the "
+                "build id at the trigger point (run 'stardag auth login' "
+                "or configure an API key). Use build_spawn to trigger a "
+                "build without local registry credentials."
+            )
+        task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
+        explicit_build_id = build_id is not None
         if build_id is None:
-            registry = registry_provider.get()
-            if isinstance(registry, NoOpRegistry):
-                raise RuntimeError(
-                    "build_trigger requires a configured registry to mint the "
-                    "build id at the trigger point (run 'stardag auth login' "
-                    "or configure an API key). Use build_spawn to trigger a "
-                    "build without local registry credentials."
-                )
-            task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
             build_id = registry.build_start(
                 root_tasks=task_list, description=description
             )
-        merged_kwargs["resume_build_id"] = build_id
 
+        if reactive:
+            if self.watchdog_period_minutes is None:
+                logger.warning(
+                    "Reactive build triggered on an app without a watchdog "
+                    "(watchdog_period_minutes is not set): a lost wake-up "
+                    "(e.g. a silently dead worker, or a tick killed while "
+                    "holding the scheduler lease) can stall the build until "
+                    "it is manually re-triggered. Strongly recommended: "
+                    "StardagApp(watchdog_period_minutes=5)."
+                )
+            return self._trigger_reactive(
+                task_list,
+                build_id=build_id,
+                registry=registry,
+                tick_kwargs=tick_kwargs,
+                is_retrigger=explicit_build_id,
+            )
+
+        merged_kwargs["resume_build_id"] = build_id
         build_function = modal.Function.from_name(
             app_name=self.name,
             name="build",
@@ -1600,6 +1932,71 @@ class StardagApp:
             app_name=self.name,
             build_kwargs=merged_kwargs,
         )
+        return BuildTriggerResult(build_id=build_id, function_call=function_call)
+
+    def _trigger_reactive(
+        self,
+        task_list: list[BaseTask],
+        *,
+        build_id: UUID,
+        registry: typing.Any,
+        tick_kwargs: dict[str, typing.Any] | None,
+        is_retrigger: bool,
+    ) -> BuildTriggerResult:
+        """Reactive trigger: discover + persist here, then spawn the first tick.
+
+        Re-triggering an existing build id is fully supported:
+
+        - The build is *resumed* (BUILD_RESUMED) so a terminal build —
+          including a FAILED one — becomes RUNNING again and ticks act on
+          it (they bail on terminal statuses otherwise).
+        - The passed roots are appended to the build's ``root_task_ids``
+          server-side, so terminal detection covers them (previously,
+          completion of the original roots would strand re-triggered
+          subtrees silently).
+        - Previously failed/cancelled/skipped tasks in the (re-)discovered
+          DAG are reset to pending (``retry_failed``) — the retry path for
+          reactive builds.
+        - The task-store meta is MERGED: existing ``tick_kwargs`` are kept
+          unless new ones are passed; root ids are unioned.
+
+        ``tick_kwargs`` are persisted in the build's store meta so that
+        EVERY tick — including worker wake-ups and watchdog sweeps, which
+        spawn with only the build id — runs with the same configuration.
+        """
+        root_ids = [str(t.id) for t in task_list]
+        if is_retrigger:
+            # Un-terminal the build (no-op on a fresh/running build) and
+            # register the (possibly new) roots BEFORE discovery, so a
+            # concurrent tick can't complete-and-terminal the build on the
+            # old root set while we're adding to it.
+            registry.build_resume(build_id)
+            registry.build_add_roots(build_id, root_ids)
+        discovery = asyncio.run(
+            discover_and_register_aio(
+                registry, build_id, tuple(task_list), retry_failed=True
+            )
+        )
+        store = BuildTaskStore(build_id)
+        store.save_tasks(discovery.incomplete.values())
+        existing_meta = (store.read_meta() or {}) if is_retrigger else {}
+        merged_root_ids = list(
+            dict.fromkeys([*existing_meta.get("root_task_ids", []), *root_ids])
+        )
+        store.write_meta(
+            {
+                "reactive": True,
+                "app_name": self.name,
+                "root_task_ids": merged_root_ids,
+                "tick_kwargs": (
+                    tick_kwargs
+                    if tick_kwargs is not None
+                    else existing_meta.get("tick_kwargs") or {}
+                ),
+            }
+        )
+        tick_function = modal.Function.from_name(app_name=self.name, name="tick")
+        function_call = tick_function.spawn(build_id=str(build_id))
         return BuildTriggerResult(build_id=build_id, function_call=function_call)
 
     def build_remote(
