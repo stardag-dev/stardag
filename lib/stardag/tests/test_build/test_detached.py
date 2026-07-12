@@ -349,3 +349,49 @@ class TestOldRegistrySignatureCompat:
 
         with pytest.raises(TypeError, match="bug inside the registry"):
             await build_aio([task], task_executor=executor, registry=BuggyRegistry())
+
+
+class TestWorkerReportsLifecycle:
+    """When the executor's workers self-report lifecycle events, the engine
+    suppresses its own completed-reporting but keeps started (immediate
+    detached-spawn re-attachability) and failed (fallback)."""
+
+    class ReportingExecutor(FakeDetachedExecutor):
+        def reports_lifecycle(self, task: BaseTask) -> bool:
+            return True
+
+    async def test_complete_suppressed_start_kept(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry: RecordingRegistry,
+    ):
+        task = SyncOnlyTask(name="worker-reports")
+        executor = self.ReportingExecutor()
+
+        summary = await build_aio(
+            [task], task_executor=executor, registry=recording_registry
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert task.complete()
+        methods = recording_registry.call_methods_for(task.id)
+        assert "task_start_aio" in methods  # kept: immediate ref recording
+        assert "task_complete_aio" not in methods  # worker reports it
+        assert summary.task_count.succeeded == 1  # engine bookkeeping intact
+
+    async def test_fail_still_reported_by_engine(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry: RecordingRegistry,
+    ):
+        """TASK_FAILED stays engine-side as a fallback — the worker may die
+        before reporting (spawn failure, OOM, preemption past retries)."""
+        task = SyncOnlyTask(name="worker-reports-fail")
+        executor = self.ReportingExecutor(
+            spawn_error=RuntimeError("worker never started")
+        )
+
+        with pytest.raises(RuntimeError, match="worker never started"):
+            await build_aio([task], task_executor=executor, registry=recording_registry)
+
+        assert recording_registry.has_call("task_fail_aio", task.id)
