@@ -209,3 +209,25 @@ class TestReportingRunsInsideEnvOverrides:
         Runner()(make_range(limit=3), env_overrides=env)
 
         assert seen == {"task_start": "applied", "task_complete": "applied"}
+
+
+class TestReporterCreationGuard:
+    def test_broken_reporter_creation_never_fails_the_task(
+        self, monkeypatch, default_in_memory_fs_target
+    ):
+        """The best-effort contract covers creation itself: a broken registry
+        config in the worker env must not fail a task before it runs."""
+        from stardag.integration.modal import _app as app_module
+
+        def broken_create(task, env_overrides):
+            raise RuntimeError("malformed registry config")
+
+        monkeypatch.setattr(
+            app_module._WorkerLifecycleReporter, "create", staticmethod(broken_create)
+        )
+        task = make_range(limit=3)
+
+        result = Runner()(task, env_overrides=_env(uuid4()))
+
+        assert result is None
+        assert task.complete()  # the work still ran

@@ -450,6 +450,8 @@ class ModalTaskExecutor(TaskExecutorABC):
         # invoked on every ``submit`` so we memoize it per worker name to avoid
         # recreating the handle for every task.
         self._worker_functions: dict[str, modal.Function] = {}
+        # One-time (per executor) skew-visibility log; see reports_lifecycle.
+        self._reports_lifecycle_logged = False
         # In-flight detached executions by task UUID, for explicit cancel().
         # Asyncio cancellation of ``FunctionCall.get`` does NOT stop the
         # remote call (unlike ``remote.aio``), so FAIL_FAST relies on this.
@@ -490,7 +492,24 @@ class ModalTaskExecutor(TaskExecutorABC):
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
         """Workers self-report lifecycle when enabled and a build is active."""
-        return self.worker_reports_lifecycle and get_current_build_id() is not None
+        active = self.worker_reports_lifecycle and get_current_build_id() is not None
+        if active and not self._reports_lifecycle_logged:
+            # Make the version-skew failure mode visible: nothing verifies
+            # the deployed workers actually self-report. If the app was
+            # deployed with an older stardag (or uses a custom run function
+            # without lifecycle reporting), tasks will execute fine but sit
+            # RUNNING in the registry with artifacts lost.
+            self._reports_lifecycle_logged = True
+            logger.info(
+                "Engine-side lifecycle reporting is suppressed for "
+                f"Modal-routed tasks (app {self.modal_app_name!r}): workers "
+                "are assumed to self-report started/completed/suspended/"
+                "failed events. If the deployed app predates worker "
+                "self-reporting or uses a custom run function, pass "
+                "ModalTaskExecutor(worker_reports_lifecycle=False) — "
+                "otherwise tasks will appear stuck RUNNING in the registry."
+            )
+        return active
 
     async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Execute task on Modal (blocking remote call)."""
@@ -989,11 +1008,17 @@ class Runner(RunFunction):
             # process environment, i.e. deployment secrets, not overrides.)
             with temp_env_vars(env_overrides or {}):
                 # getattr: tolerate subclasses overriding __init__ w/o super()
-                reporter = (
-                    _WorkerLifecycleReporter.create(task, env_overrides)
-                    if getattr(self, "report_lifecycle", True)
-                    else None
-                )
+                reporter: _WorkerLifecycleReporter | None = None
+                if getattr(self, "report_lifecycle", True):
+                    try:
+                        reporter = _WorkerLifecycleReporter.create(task, env_overrides)
+                    except Exception:
+                        # Best-effort contract covers creation too: a broken
+                        # registry config must not fail a task before it runs.
+                        logger.exception(
+                            "Worker lifecycle reporter creation failed; "
+                            "running without lifecycle reporting."
+                        )
                 if reporter is not None:
                     reporter.started()
                 try:
