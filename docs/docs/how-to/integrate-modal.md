@@ -497,6 +497,16 @@ Two operational notes:
   unaffected only because it passes no such callables; the
   `modal/walkthrough` example keeps its selectors in a dedicated
   `selectors.py` for exactly this reason.)
+- **Registry credentials only need to be declared on the builder.**
+  Every deployed function talks to the registry — the workers self-report
+  their lifecycle (started/completed/…), and the tick/watchdog read and
+  update build state — so all of them need the registry secret. You only
+  declare it once, in `builder_settings.secrets`: `StardagApp` propagates
+  the builder's secrets to the workers and the tick/watchdog at deploy
+  time (de-duplicated by name, so a worker that adds its own secrets still
+  gets the registry one exactly once). Requires stardag ≥ 0.10.1; before
+  that, add the registry secret to each worker's settings too, or workers
+  `401` on their lifecycle reports.
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment
