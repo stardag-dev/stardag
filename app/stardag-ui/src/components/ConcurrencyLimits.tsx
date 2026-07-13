@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   deleteConcurrencyLimit,
   evictConcurrencyLimitHolder,
@@ -49,12 +49,21 @@ export function ConcurrencyLimits() {
   // Holder task detail panel
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
+  // Stale-response guards: each async load captures an epoch at start and
+  // drops its results if a newer load (or an environment switch) has
+  // bumped it since — a slow response from a previous environment must
+  // not overwrite the current one's state.
+  const limitsEpochRef = useRef(0);
+  const holdersEpochRef = useRef(0);
+
   useEffect(() => {
     setBreadcrumb([{ label: "Concurrency Limits" }]);
     return () => setBreadcrumb([]);
   }, [setBreadcrumb]);
 
   const loadLimits = useCallback(async () => {
+    const epoch = ++limitsEpochRef.current;
+    const fresh = () => limitsEpochRef.current === epoch;
     if (!activeEnvironment?.id) {
       setLimits([]);
       setLoading(false);
@@ -63,6 +72,7 @@ export function ConcurrencyLimits() {
     setError(null);
     try {
       const fetched = await fetchConcurrencyLimits(activeEnvironment.id);
+      if (!fresh()) return;
       setLimits(fetched);
       // Holder counts per key: a holders fetch with limit=1 returns the
       // full count in `total`. Limit lists are small (admin-configured),
@@ -81,19 +91,26 @@ export function ConcurrencyLimits() {
           }
         }),
       );
+      if (!fresh()) return;
       setHolderCounts(
         Object.fromEntries(counts.filter((c): c is [string, number] => c !== null)),
       );
     } catch (err) {
+      if (!fresh()) return;
       setError(
         err instanceof Error ? err.message : "Failed to load concurrency limits",
       );
     } finally {
-      setLoading(false);
+      if (fresh()) {
+        setLoading(false);
+      }
     }
   }, [activeEnvironment?.id]);
 
   useEffect(() => {
+    // Invalidate any in-flight holders load from the previous environment
+    // (loadLimits bumps its own epoch on each call).
+    holdersEpochRef.current++;
     setLoading(true);
     setExpandedKey(null);
     setSelectedTask(null);
@@ -103,15 +120,21 @@ export function ConcurrencyLimits() {
   const loadHolders = useCallback(
     async (key: string) => {
       if (!activeEnvironment?.id) return;
+      const epoch = ++holdersEpochRef.current;
+      const fresh = () => holdersEpochRef.current === epoch;
       setHoldersLoading(true);
       try {
         const response = await fetchConcurrencyLimitHolders(key, activeEnvironment.id);
+        if (!fresh()) return;
         setHolders(response.holders);
         setHoldersTotal(response.total);
       } catch (err) {
+        if (!fresh()) return;
         setActionError(err instanceof Error ? err.message : "Failed to load holders");
       } finally {
-        setHoldersLoading(false);
+        if (fresh()) {
+          setHoldersLoading(false);
+        }
       }
     },
     [activeEnvironment?.id],

@@ -4,9 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BreadcrumbProvider } from "../context/BreadcrumbContext";
 import { ConcurrencyLimits } from "./ConcurrencyLimits";
 
+let mockEnvironmentId = "env-1";
 vi.mock("../context/EnvironmentContext", () => ({
   useEnvironment: () => ({
-    activeEnvironment: { id: "env-1", slug: "default", name: "default" },
+    activeEnvironment: {
+      id: mockEnvironmentId,
+      slug: "default",
+      name: "default",
+    },
   }),
 }));
 
@@ -56,6 +61,7 @@ function renderPage() {
 
 describe("ConcurrencyLimits", () => {
   beforeEach(() => {
+    mockEnvironmentId = "env-1";
     vi.mocked(fetchConcurrencyLimits).mockResolvedValue([
       { key: "gpu", max_concurrent: 2 },
     ]);
@@ -80,6 +86,37 @@ describe("ConcurrencyLimits", () => {
       expect(fetchConcurrencyLimitHolders).toHaveBeenCalledWith("gpu", "env-1", 1),
     );
     expect(await screen.findByText("1")).toBeInTheDocument();
+  });
+
+  it("drops stale responses from a previous environment", async () => {
+    // env-1's limits fetch resolves LATE — after the user has switched to
+    // env-2 — and must not overwrite env-2's state.
+    let resolveEnv1: (limits: { key: string; max_concurrent: number }[]) => void;
+    vi.mocked(fetchConcurrencyLimits).mockImplementation((envId: string) => {
+      if (envId === "env-1") {
+        return new Promise((resolve) => {
+          resolveEnv1 = resolve;
+        });
+      }
+      return Promise.resolve([{ key: "env2-key", max_concurrent: 3 }]);
+    });
+
+    const { rerender } = renderPage();
+    // env-1 load in flight; switch environments and re-render.
+    mockEnvironmentId = "env-2";
+    rerender(
+      <BreadcrumbProvider>
+        <ConcurrencyLimits />
+      </BreadcrumbProvider>,
+    );
+    expect(await screen.findByText("env2-key")).toBeInTheDocument();
+
+    // The slow env-1 response lands now: it must be dropped.
+    resolveEnv1!([{ key: "stale-env1-key", max_concurrent: 9 }]);
+    await waitFor(() =>
+      expect(screen.queryByText("stale-env1-key")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("env2-key")).toBeInTheDocument();
   });
 
   it("creates a limit via the form", async () => {
