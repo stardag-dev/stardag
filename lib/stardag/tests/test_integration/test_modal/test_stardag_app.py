@@ -862,9 +862,19 @@ class TestTickAppOwnership:
             {"reactive": True, "app_name": "app-a", "root_task_ids": []}
         )
 
-        result = tick(str(build_id))
+        # Patch the registry and the tick loop to assert they are never
+        # touched — otherwise the test is environment-dependent (on a dev
+        # machine with credentials configured an accidental registry call
+        # would succeed and go unnoticed).
+        with (
+            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch("stardag.integration.modal._app.run_tick_aio") as tick_aio,
+        ):
+            result = tick(str(build_id))
 
         assert result == {"outcome": "foreign_app", "owner_app": "app-a"}
+        rp.get.assert_not_called()
+        tick_aio.assert_not_called()
 
     def test_own_and_legacy_builds_proceed(self, default_in_memory_fs_target):
         """The owning app ticks its build; meta without app_name (written by
