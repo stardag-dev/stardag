@@ -49,6 +49,11 @@ __all__ = ["app", "SHARD_LIMIT_KEY", "worker_selector", "limit_key_selector"]
 # Must match local Python version for Modal serialization compatibility
 python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
+# Registry credentials, applied to every function that talks to the
+# registry — the builder, both workers (they self-report their lifecycle),
+# and the tick/watchdog (via the builder-settings fallback).
+REGISTRY_SECRETS = [modal.Secret.from_name("stardag-api-key")]
+
 # VERIFICATION BRANCH: bake the LOCAL stardag source into the image so the
 # unreleased fixes (ResourceProvider cloudpickle survival + these selectors
 # living in an importable module) ship to the containers without a PyPI
@@ -74,18 +79,24 @@ app = sd_modal.StardagApp(
     "stardag_examples-walkthrough",
     builder_settings=sd_modal.FunctionSettings(
         image=image,
-        secrets=[
-            # required for communication with registry
-            modal.Secret.from_name("stardag-api-key"),
-        ],
+        # Registry credentials. Needed on the workers too (not just the
+        # builder): since worker-side lifecycle reporting, workers report
+        # their own TASK_STARTED/COMPLETED/etc. directly to the registry,
+        # so a worker without this secret gets 401s. The tick/watchdog
+        # functions inherit the builder settings and so are covered.
+        secrets=REGISTRY_SECRETS,
         # Let Modal restart the build function after infrastructure
         # failures; with build_trigger each restart resumes the same build.
         retries=2,
     ),
     worker_settings={
-        "default": sd_modal.FunctionSettings(image=image, cpu=1),
+        "default": sd_modal.FunctionSettings(
+            image=image, cpu=1, secrets=REGISTRY_SECRETS
+        ),
         # Long-running tasks get their own worker with a generous timeout.
-        "long": sd_modal.FunctionSettings(image=image, cpu=1, timeout=1800),
+        "long": sd_modal.FunctionSettings(
+            image=image, cpu=1, timeout=1800, secrets=REGISTRY_SECRETS
+        ),
     },
     worker_selector=worker_selector,
     # Reactive-mode safety net: periodically re-check running builds
