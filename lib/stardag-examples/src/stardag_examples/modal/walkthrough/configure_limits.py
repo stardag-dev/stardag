@@ -32,7 +32,7 @@ import argparse
 import stardag as sd
 from stardag.registry import APIRegistry
 
-from stardag_examples.modal.walkthrough.app import SHARD_LIMIT_KEY
+from stardag_examples.modal.walkthrough.selectors import SHARD_LIMIT_KEY
 
 
 def set_limit(key: str, max_concurrent: int) -> None:

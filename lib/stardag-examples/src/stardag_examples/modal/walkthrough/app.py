@@ -21,6 +21,11 @@ full (new) feature set:
   worker selector this is deployed-app configuration, applied
   consistently by every scheduler tick.
 
+The selectors live in ``selectors.py`` (a package module), not here, so
+the serialized Modal functions that capture them can be deserialized in
+fresh containers — see that module's docstring. The same applies to any
+callable you pass to ``StardagApp``.
+
 Deploy with the active stardag profile (see the README):
 
     stardag modal deploy src/stardag_examples/modal/walkthrough/app.py
@@ -31,13 +36,15 @@ then trigger builds with ``main.py``.
 import sys
 
 import modal
-import stardag as sd
 import stardag.integration.modal as sd_modal
 
-# The named concurrency-limit key ProcessShard tasks run under. The cap is
-# configured per environment in the registry (see configure_limits.py and
-# the Concurrency Limits page in the UI).
-SHARD_LIMIT_KEY = "walkthrough-shards"
+from stardag_examples.modal.walkthrough.selectors import (
+    SHARD_LIMIT_KEY,
+    limit_key_selector,
+    worker_selector,
+)
+
+__all__ = ["app", "SHARD_LIMIT_KEY", "worker_selector", "limit_key_selector"]
 
 # Must match local Python version for Modal serialization compatibility
 python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -56,20 +63,6 @@ image = (
 #         *sd_modal.get_package_deps(__file__),
 #     )
 # ).add_local_python_source("stardag_examples")
-
-
-# Both selectors match on task *name* (rather than importing the task
-# classes) so this module stays a pure deployment definition.
-def worker_selector(task: sd.BaseTask) -> str:
-    if task.get_name() == "LongScan":
-        return "long"
-    return "default"
-
-
-def limit_key_selector(task: sd.BaseTask) -> list[str]:
-    if task.get_name() == "ProcessShard":
-        return [SHARD_LIMIT_KEY]
-    return []
 
 
 app = sd_modal.StardagApp(
