@@ -31,6 +31,7 @@ addition to Modal credentials — unlike ``build_spawn`` (see
 """
 
 import argparse
+import time
 from uuid import UUID
 
 from stardag_examples.modal.walkthrough.app import app
@@ -77,7 +78,12 @@ def main() -> None:
     parser.add_argument(
         "--wait",
         action="store_true",
-        help="Block until the spawned Modal function call finishes.",
+        help=(
+            "Block until the build's root task is complete. (In default "
+            "mode the spawned call IS the whole build; in reactive mode "
+            "it is only the first scheduler tick, so completion is "
+            "polled via the root task's target.)"
+        ),
     )
     args = parser.parse_args()
 
@@ -99,8 +105,16 @@ def main() -> None:
     print(f"root task:     {root.id}")
     print("Follow the build in the registry UI (Builds page).")
     if args.wait:
-        print("Waiting for the spawned function call to finish...")
-        result.function_call.get()
+        if args.reactive:
+            # The spawned call is just the FIRST tick — it exits while
+            # workers run detached. The build is done when the root task's
+            # target exists (targets are ground truth).
+            print("Waiting for the root task to complete (reactive mode)...")
+            while not root.complete():
+                time.sleep(5.0)
+        else:
+            print("Waiting for the build function to finish...")
+            result.function_call.get()
         print(f"Done. Report: {root.load()!r}")
 
 
