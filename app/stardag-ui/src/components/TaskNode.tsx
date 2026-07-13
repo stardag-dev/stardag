@@ -16,6 +16,10 @@ export interface TaskNodeData extends Record<string, unknown> {
   statusBuildId?: string;
   currentBuildId?: string;
   onStatusBuildClick?: (buildId: string) => void;
+  // Executor identity, surfaced via the node's hover tooltip only to
+  // keep DAG nodes uncluttered.
+  latestExecutor?: string | null;
+  latestExecutorRef?: string | null;
 }
 
 const statusBorderColors: Record<TaskStatus, string> = {
@@ -106,7 +110,13 @@ export function TaskNode({ data }: TaskNodeProps) {
               ? "text-gray-500 dark:text-gray-400"
               : "text-gray-900 dark:text-gray-100"
           }`}
-          title={data.label}
+          title={
+            data.latestExecutor
+              ? `${data.label}\nExecutor: ${data.latestExecutor}${
+                  data.latestExecutorRef ? ` (${data.latestExecutorRef})` : ""
+                }`
+              : data.label
+          }
         >
           {truncateLabel(data.label)}
         </span>

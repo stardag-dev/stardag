@@ -15,6 +15,7 @@ import { PendingInvites } from "./components/PendingInvites";
 import type { NavItem } from "./components/Sidebar";
 import { Sidebar } from "./components/Sidebar";
 import { TaskExplorer } from "./components/TaskExplorer";
+import { ConcurrencyLimits } from "./components/ConcurrencyLimits";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { AuthProvider, useAuth } from "./context/AuthContext";
@@ -184,6 +185,28 @@ function TaskExplorerPage({
       onToggleSidebar={onToggleSidebar}
     >
       <TaskExplorer onNavigateToBuild={onNavigateToBuild} />
+    </MainLayout>
+  );
+}
+
+// Concurrency limits admin page
+type ConcurrencyLimitsPageProps = SidebarStateProps & {
+  onNavigate: (item: NavItem) => void;
+};
+
+function ConcurrencyLimitsPage({
+  onNavigate,
+  sidebarCollapsed,
+  onToggleSidebar,
+}: ConcurrencyLimitsPageProps) {
+  return (
+    <MainLayout
+      activeNav="limits"
+      onNavigate={onNavigate}
+      sidebarCollapsed={sidebarCollapsed}
+      onToggleSidebar={onToggleSidebar}
+    >
+      <ConcurrencyLimits />
     </MainLayout>
   );
 }
@@ -570,6 +593,9 @@ function Router() {
     // Check for tasks path: /tasks, /:org/tasks, or /:org/:environment/tasks
     if (path === "/tasks" || path.endsWith("/tasks")) return "tasks";
 
+    // Concurrency limits admin: /limits (same env-scoped forms as /tasks)
+    if (path === "/limits" || path.endsWith("/limits")) return "limits";
+
     // Check for build ID in path: /builds/:id or /:org/:environment/builds/:id
     const buildMatch = path.match(/\/builds\/([^/]+)/);
     if (buildMatch) {
@@ -589,6 +615,9 @@ function Router() {
           break;
         case "tasks":
           navigateTo(`${basePath}/tasks`);
+          break;
+        case "limits":
+          navigateTo(`${basePath}/limits`);
           break;
         case "settings":
           navigateTo("/settings");
@@ -656,6 +685,15 @@ function Router() {
           <TaskExplorerPage
             onNavigate={handleNavigation}
             onNavigateToBuild={handleSelectBuild}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={handleToggleSidebar}
+          />
+        );
+
+      case "limits":
+        return (
+          <ConcurrencyLimitsPage
+            onNavigate={handleNavigation}
             sidebarCollapsed={sidebarCollapsed}
             onToggleSidebar={handleToggleSidebar}
           />

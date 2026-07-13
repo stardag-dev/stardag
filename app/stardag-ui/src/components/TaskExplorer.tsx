@@ -561,6 +561,10 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
         error_message: searchTask?.error_message ?? null,
         artifact_count: node.artifact_count,
         isFilterMatch: isPrimary && searchTaskIds.has(node.task_id),
+        // Executor identity (DAG node hover + detail panel)
+        latest_executor: searchTask?.latest_executor,
+        latest_executor_ref: searchTask?.latest_executor_ref,
+        latest_executor_metadata: searchTask?.latest_executor_metadata,
       };
     });
   }, [dagGraph, tasks, activeEnvironment?.id]);

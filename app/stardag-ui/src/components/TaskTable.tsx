@@ -1,4 +1,5 @@
 import type { Task } from "../types/task";
+import { ExecutorBadge } from "./ExecutorBadge";
 import { StatusBadge } from "./StatusBadge";
 
 interface TaskTableProps {
@@ -115,13 +116,19 @@ export function TaskTable({
                     {task.task_id.slice(0, 12)}...
                   </td>
                   <td className="px-3 py-1.5">
-                    <StatusBadge
-                      status={task.status}
-                      waitingForLock={task.waiting_for_lock}
-                      statusBuildId={task.status_build_id}
-                      currentBuildId={buildId}
-                      onStatusBuildClick={onStatusBuildClick}
-                    />
+                    <span className="inline-flex items-center gap-1.5">
+                      <StatusBadge
+                        status={task.status}
+                        waitingForLock={task.waiting_for_lock}
+                        statusBuildId={task.status_build_id}
+                        currentBuildId={buildId}
+                        onStatusBuildClick={onStatusBuildClick}
+                      />
+                      <ExecutorBadge
+                        executor={task.latest_executor}
+                        executorRef={task.latest_executor_ref}
+                      />
+                    </span>
                   </td>
                   <td className="px-3 py-1.5 text-xs text-gray-500 dark:text-gray-400">
                     {new Date(task.created_at).toLocaleString()}

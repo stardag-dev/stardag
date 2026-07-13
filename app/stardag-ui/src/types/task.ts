@@ -15,6 +15,22 @@ export type BuildStatus =
   | "cancelled"
   | "exit_early";
 
+// Descriptive metadata about the executor backend that ran a task or
+// triggered a build (recorded on TASK_STARTED / build creation events).
+// For Modal executions: {kind: "modal", app_name, workspace, environment,
+// function_name} — every key is optional (older SDKs may record a subset),
+// so consumers must handle missing fields (see utils/modalLinks.ts).
+export interface ExecutorMetadata {
+  kind?: string;
+  app_name?: string;
+  workspace?: string;
+  environment?: string;
+  function_name?: string;
+  // Build-level only: true when triggered in reactive (tick-scheduled) mode
+  reactive?: boolean;
+  [key: string]: unknown;
+}
+
 // User info for manual status triggers
 export interface StatusTriggeredByUser {
   id: string;
@@ -43,6 +59,11 @@ export interface Build {
   // Optional in the type so older API responses (without the field)
   // deserialize without runtime errors.
   is_resumed?: boolean;
+  // Executor-descriptive metadata of the trigger that created the build
+  // (e.g. the Modal app of a build_trigger call). Optional: absent on
+  // older API responses and null for builds without a recorded trigger
+  // executor.
+  executor_metadata?: ExecutorMetadata | null;
 }
 
 export interface BuildListResponse {
@@ -81,6 +102,12 @@ export interface Task {
   // a not-yet-registered task (legacy/safety-hatch path; with the SDK's
   // post-order discover this is rare). UI hides phantoms from list views.
   is_phantom?: boolean;
+  // Executor identity of the most recent TASK_STARTED event. Optional:
+  // absent on older API responses, null for tasks never started via an
+  // executor that records it.
+  latest_executor?: string | null;
+  latest_executor_ref?: string | null;
+  latest_executor_metadata?: ExecutorMetadata | null;
 }
 
 export interface TaskListResponse {
