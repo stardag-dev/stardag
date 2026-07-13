@@ -14,24 +14,25 @@ The SDK integrates with the API optionally — tasks work standalone without it.
 
 ### Key Endpoints
 
-| Endpoint                       | Method          | Purpose                              |
-| ------------------------------ | --------------- | ------------------------------------ |
-| `/api/v1/builds`               | POST            | Create a new build                   |
-| `/api/v1/builds`               | GET             | List builds with pagination          |
-| `/api/v1/builds/{id}`          | GET             | Get build details                    |
-| `/api/v1/builds/{id}/tasks`    | POST            | Register task in build               |
-| `/api/v1/tasks`                | GET             | List tasks (workspace-scoped)        |
-| `/api/v1/tasks/{id}`           | GET             | Get task details                     |
-| `/api/v1/tasks/graph`          | POST            | Get DAG graph (upstream/downstream)  |
-| `/api/v1/tasks/{id}/artifacts` | GET             | List task artifacts                  |
-| `/api/v1/tasks/{id}/events`    | GET             | Task lifecycle events                |
-| `/api/v1/tasks/{id}/metadata`  | GET             | Task metadata (for AliasTask)        |
-| `/api/v1/tasks/search`         | POST            | Full-text search with filters        |
-| `/api/v1/locks`                | POST/PUT/DELETE | Distributed lock management          |
-| `/api/v1/builds/{id}/frontier` | GET             | Scheduling frontier (reactive ticks) |
-| `/api/v1/builds/{id}/notify`   | POST/DELETE     | Scheduler wake-up flag (reactive)    |
-| `/api/v1/concurrency-limits`   | GET/PUT/DELETE  | Named env concurrency limits         |
-| `/api/v1/auth/exchange`        | POST            | OIDC token exchange                  |
+| Endpoint                                                     | Method          | Purpose                              |
+| ------------------------------------------------------------ | --------------- | ------------------------------------ |
+| `/api/v1/builds`                                             | POST            | Create a new build                   |
+| `/api/v1/builds`                                             | GET             | List builds with pagination          |
+| `/api/v1/builds/{id}`                                        | GET             | Get build details                    |
+| `/api/v1/builds/{id}/tasks`                                  | POST            | Register task in build               |
+| `/api/v1/tasks`                                              | GET             | List tasks (workspace-scoped)        |
+| `/api/v1/tasks/{id}`                                         | GET             | Get task details                     |
+| `/api/v1/tasks/graph`                                        | POST            | Get DAG graph (upstream/downstream)  |
+| `/api/v1/tasks/{id}/artifacts`                               | GET             | List task artifacts                  |
+| `/api/v1/tasks/{id}/events`                                  | GET             | Task lifecycle events                |
+| `/api/v1/tasks/{id}/metadata`                                | GET             | Task metadata (for AliasTask)        |
+| `/api/v1/tasks/search`                                       | POST            | Full-text search with filters        |
+| `/api/v1/locks`                                              | POST/PUT/DELETE | Distributed lock management          |
+| `/api/v1/builds/{id}/frontier`                               | GET             | Scheduling frontier (reactive ticks) |
+| `/api/v1/builds/{id}/notify`                                 | POST/DELETE     | Scheduler wake-up flag (reactive)    |
+| `/api/v1/concurrency-limits`                                 | GET/PUT/DELETE  | Named env concurrency limits         |
+| `/api/v1/concurrency-limits/{key}/holders[/{task_id}/evict]` | GET/POST        | Limit slot holders + admin evict     |
+| `/api/v1/auth/exchange`                                      | POST            | OIDC token exchange                  |
 
 ### Authentication Methods
 

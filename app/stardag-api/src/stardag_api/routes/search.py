@@ -694,6 +694,9 @@ async def search_tasks(
                 error_message=status_info[5] if status_info else None,
                 artifact_count=artifact_counts.get(task.id, 0),
                 artifact_data=task_artifact_data.get(task.id, {}),
+                latest_executor=task.latest_executor,
+                latest_executor_ref=task.latest_executor_ref,
+                latest_executor_metadata=task.latest_executor_metadata,
             )
         )
 

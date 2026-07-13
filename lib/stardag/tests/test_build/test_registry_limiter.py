@@ -38,7 +38,13 @@ class CountingLimitRegistry(NoOpRegistry):
         self.pending_errors: list[Exception] = []
 
     async def task_start_with_limits_aio(
-        self, build_id, task, executor=None, executor_ref=None, limit_keys=None
+        self,
+        build_id,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
+        limit_keys=None,
     ) -> bool:
         self.acquire_attempts += 1
         if self.pending_errors:

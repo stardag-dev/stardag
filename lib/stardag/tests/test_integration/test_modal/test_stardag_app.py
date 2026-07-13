@@ -607,7 +607,16 @@ class TestStardagAppBuildTrigger:
             result = app.build_trigger(root, description="a build")
 
         registry.build_start.assert_called_once_with(
-            root_tasks=[root], description="a build"
+            root_tasks=[root],
+            description="a build",
+            executor_metadata={
+                "kind": "modal",
+                "app_name": app.name,
+                "function_name": "build",
+                "reactive": False,
+                "workspace": "test-workspace",
+                "environment": "test-env",
+            },
         )
         assert result.build_id == build_id
         assert result.function_call == "spawn-handle"
@@ -624,7 +633,11 @@ class TestStardagAppBuildTrigger:
         with registry_provider.override(registry):
             app.build_trigger(roots)
 
-        registry.build_start.assert_called_once_with(root_tasks=roots, description=None)
+        assert registry.build_start.call_count == 1
+        call_kwargs = registry.build_start.call_args.kwargs
+        assert call_kwargs["root_tasks"] is not None
+        assert list(call_kwargs["root_tasks"]) == roots
+        assert call_kwargs["description"] is None
 
     def test_explicit_build_id_skips_registry(self, modal_function_stub):
         captured = modal_function_stub
@@ -995,14 +1008,26 @@ class TestReactiveRetrigger:
             )
         # Initial trigger with an explicit id is treated as re-trigger for
         # resume/add-roots (harmless no-ops server-side on a fresh build).
-        registry.build_resume.assert_called_with(build_id)
+        # The resume carries the reactive trigger's executor metadata.
+        registry.build_resume.assert_called_with(
+            build_id,
+            executor_metadata={
+                "kind": "modal",
+                "app_name": app.name,
+                "function_name": "tick",
+                "reactive": True,
+                "workspace": "test-workspace",
+                "environment": "test-env",
+            },
+        )
 
         registry.reset_mock()
         # Re-trigger with a NEW root and no tick_kwargs.
         with registry_provider.override(registry):
             app.build_trigger(new_root, build_id=build_id, reactive=True)
 
-        registry.build_resume.assert_called_once_with(build_id)
+        assert registry.build_resume.call_count == 1
+        assert registry.build_resume.call_args.args == (build_id,)
         registry.build_add_roots.assert_called_once_with(build_id, [str(new_root.id)])
         meta = BuildTaskStore(build_id).read_meta()
         assert meta is not None

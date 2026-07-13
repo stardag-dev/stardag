@@ -48,3 +48,33 @@ def modal_function_stub(monkeypatch):
 
     monkeypatch.setattr(modal.Function, "from_name", staticmethod(_from_name))
     return captured
+
+
+@pytest.fixture(autouse=True)
+def hermetic_modal_executor_metadata(monkeypatch):
+    """Keep the unit tier hermetic: pin the workspace/environment used in
+    executor metadata so no test performs the (network) Modal token
+    workspace lookup or depends on the developer's local Modal config.
+
+    Tests exercising the resolution logic itself override these
+    monkeypatches explicitly.
+    """
+    from stardag.integration.modal import _app as modal_app_module
+
+    async def _fake_workspace_aio():
+        return "test-workspace"
+
+    # The real (pre-patch) functions, for tests exercising the resolution
+    # logic itself.
+    originals = {
+        "get_modal_workspace_aio": modal_app_module._get_modal_workspace_aio,
+    }
+
+    monkeypatch.setattr(
+        modal_app_module, "_get_modal_workspace_aio", _fake_workspace_aio
+    )
+    monkeypatch.setattr(
+        modal_app_module, "_get_modal_workspace", lambda: "test-workspace"
+    )
+    monkeypatch.setattr(modal_app_module, "_get_modal_environment", lambda: "test-env")
+    return originals

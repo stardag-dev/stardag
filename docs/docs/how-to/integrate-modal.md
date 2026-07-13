@@ -422,6 +422,13 @@ built with an older stardag version from a newer local SDK, pass
 `ModalTaskExecutor(worker_reports_lifecycle=False)` (or redeploy the app) so
 the build engine doesn't skip events the old workers won't send.
 
+Modal executions also record descriptive **executor metadata** with task
+starts and triggered builds — the Modal app name, workspace, environment,
+and function name — which the Stardag UI surfaces (e.g. as deep links to
+the Modal dashboard). Resolution is automatic and best-effort (the
+workspace comes from a cached Modal token lookup); pass
+`StardagApp(modal_workspace=...)` to set the workspace name explicitly.
+
 ### Reactive scheduling: no resident build function (experimental)
 
 With `build_trigger(..., reactive=True)` the build runs with **no resident

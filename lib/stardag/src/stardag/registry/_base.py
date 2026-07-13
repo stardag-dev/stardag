@@ -18,6 +18,37 @@ if TYPE_CHECKING:
     from stardag.artifact import Artifact
 
 
+def _compute_param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
+    """(parameter names, accepts **kwargs) of ``fn``, or None if uninspectable."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    params = signature.parameters
+    has_var_keyword = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return frozenset(params), has_var_keyword
+
+
+@lru_cache(maxsize=256)
+def _cached_param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
+    return _compute_param_info(fn)
+
+
+def _param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
+    """Cached signature reflection for the accepts_* helpers.
+
+    Bound methods hash by (instance, function), so repeated lookups on the
+    same registry hit the cache. Unhashable callables fall back to direct
+    computation.
+    """
+    try:
+        return _cached_param_info(fn)
+    except TypeError:
+        return _compute_param_info(fn)
+
+
 def accepts_executor_kwargs(fn: Any) -> bool:
     """Whether a ``task_start[_aio]`` implementation accepts the
     ``executor``/``executor_ref`` kwargs.
@@ -27,14 +58,25 @@ def accepts_executor_kwargs(fn: Any) -> bool:
     to stay compatible with custom :class:`RegistryABC` implementations
     written against the pre-detached ``(build_id, task)`` signature.
     """
-    try:
-        signature = inspect.signature(fn)
-    except (TypeError, ValueError):
+    info = _param_info(fn)
+    if info is None:
         return False
-    params = signature.parameters
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    return "executor" in params and "executor_ref" in params
+    params, has_var_keyword = info
+    return has_var_keyword or ("executor" in params and "executor_ref" in params)
+
+
+def accepts_executor_metadata_kwarg(fn: Any) -> bool:
+    """Whether an implementation accepts the ``executor_metadata`` kwarg.
+
+    Same signature-inspection rationale as :func:`accepts_executor_kwargs`:
+    custom implementations written before the kwarg existed must keep
+    working — callers drop the metadata for those instead of raising.
+    """
+    info = _param_info(fn)
+    if info is None:
+        return False
+    params, has_var_keyword = info
+    return has_var_keyword or "executor_metadata" in params
 
 
 class FrontierTaskRef(StardagBaseModel):
@@ -44,6 +86,9 @@ class FrontierTaskRef(StardagBaseModel):
     latest_status: str
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
+    # Executor-descriptive metadata recorded with the latest start (e.g.
+    # Modal app/workspace/environment). None on servers predating the field.
+    latest_executor_metadata: dict[str, Any] | None = None
     # When the current status was recorded (None on servers predating the
     # field) — used for staleness bounds on RUNNING-without-ref tasks.
     latest_status_at: datetime | None = None
@@ -85,6 +130,7 @@ class RegisteredTaskInfo(StardagBaseModel):
     latest_status: str | None = None
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
+    latest_executor_metadata: dict[str, Any] | None = None
 
 
 class TaskMetadata(StardagBaseModel):
@@ -130,6 +176,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self,
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Start a new build session.
 
@@ -138,13 +185,21 @@ class RegistryABC(metaclass=abc.ABCMeta):
         Args:
             root_tasks: The root tasks being built
             description: Optional description of the build
+            executor_metadata: Optional metadata describing where/how the
+                build is executed (e.g. the Modal app/workspace/environment
+                for a triggered build). Backends that don't track it may
+                ignore it.
 
         Returns:
             Build ID (UUID) for the new build session.
         """
         return UUID("00000000-0000-0000-0000-000000000000")
 
-    def build_resume(self, build_id: UUID) -> None:
+    def build_resume(
+        self,
+        build_id: UUID,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Mark an existing build as resumed.
 
         Called when ``sd.build(resume_build_id=...)`` reuses an existing
@@ -158,6 +213,8 @@ class RegistryABC(metaclass=abc.ABCMeta):
 
         Args:
             build_id: The build UUID being resumed.
+            executor_metadata: Optional metadata describing where/how the
+                resumed build is executed (see :meth:`build_start`).
         """
         pass
 
@@ -332,6 +389,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         executor: str | None = None,
         executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Mark a task as started/running.
 
@@ -341,8 +399,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
 
         ``executor`` / ``executor_ref`` identify a detached execution (e.g.
         executor="modal" with a Modal function call id) so a later resumed
-        build can re-attach instead of re-executing. Backends that don't
-        track them may ignore both.
+        build can re-attach instead of re-executing.
+        ``executor_metadata`` optionally describes the execution backend in
+        more detail (e.g. Modal app/workspace/environment/function) for
+        surfacing in the UI. Backends that don't track them may ignore all
+        three.
 
         Args:
             build_id: The build UUID returned by build_start.
@@ -500,12 +561,36 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self,
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> UUID:
-        """Async version of build_start."""
+        """Async version of build_start.
+
+        Drops ``executor_metadata`` for sync overrides written against the
+        pre-metadata signature (detected via signature inspection).
+        """
+        if executor_metadata is not None and accepts_executor_metadata_kwarg(
+            self.build_start
+        ):
+            return self.build_start(
+                root_tasks, description, executor_metadata=executor_metadata
+            )
         return self.build_start(root_tasks, description)
 
-    async def build_resume_aio(self, build_id: UUID) -> None:
-        """Async version of build_resume."""
+    async def build_resume_aio(
+        self,
+        build_id: UUID,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Async version of build_resume.
+
+        Drops ``executor_metadata`` for sync overrides written against the
+        pre-metadata signature (detected via signature inspection).
+        """
+        if executor_metadata is not None and accepts_executor_metadata_kwarg(
+            self.build_resume
+        ):
+            self.build_resume(build_id, executor_metadata=executor_metadata)
+            return
         self.build_resume(build_id)
 
     async def build_complete_aio(self, build_id: UUID) -> None:
@@ -551,6 +636,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         executor: str | None = None,
         executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
     ) -> bool:
         """Mark a task started under named concurrency limits (atomic acquire).
@@ -565,7 +651,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         server-side limit support (the API registry) override this.
         """
         await self.task_start_aio(
-            build_id, task, executor=executor, executor_ref=executor_ref
+            build_id,
+            task,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
         )
         return True
 
@@ -575,6 +665,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         task: "BaseTask",
         executor: str | None = None,
         executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Async version of task_start.
 
@@ -582,11 +673,24 @@ class RegistryABC(metaclass=abc.ABCMeta):
         pre-detached ``(build_id, task)`` signature: refs are dropped for
         those rather than raising (detected via signature inspection, so
         TypeErrors raised *inside* an implementation propagate normally).
+        ``executor_metadata`` is likewise dropped for overrides that predate
+        the kwarg.
         """
-        if (executor is None and executor_ref is None) or not accepts_executor_kwargs(
+        if (
+            executor is None and executor_ref is None and executor_metadata is None
+        ) or not accepts_executor_kwargs(self.task_start):
+            self.task_start(build_id, task)
+            return
+        if executor_metadata is not None and accepts_executor_metadata_kwarg(
             self.task_start
         ):
-            self.task_start(build_id, task)
+            self.task_start(
+                build_id,
+                task,
+                executor=executor,
+                executor_ref=executor_ref,
+                executor_metadata=executor_metadata,
+            )
             return
         self.task_start(build_id, task, executor=executor, executor_ref=executor_ref)
 
@@ -653,6 +757,7 @@ class NoOpRegistry(RegistryABC):
         self,
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Return a placeholder build ID."""
         return UUID("00000000-0000-0000-0000-000000000000")

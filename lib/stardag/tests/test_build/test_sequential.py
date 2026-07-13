@@ -741,7 +741,12 @@ class TrackingRegistry(NoOpRegistry):
         self.calls.append(("task_register", task.id))
 
     def task_start(
-        self, build_id: UUID, task, executor=None, executor_ref=None
+        self,
+        build_id: UUID,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
 
@@ -1264,7 +1269,12 @@ class OrderedTrackingRegistry(NoOpRegistry):
         self.calls.append(("task_register", task.id))
 
     def task_start(
-        self, build_id: UUID, task, executor=None, executor_ref=None
+        self,
+        build_id: UUID,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
 
@@ -1278,7 +1288,12 @@ class OrderedTrackingRegistry(NoOpRegistry):
         self.calls.append(("task_register", task.id))
 
     async def task_start_aio(
-        self, build_id: UUID, task, executor=None, executor_ref=None
+        self,
+        build_id: UUID,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
 
@@ -1524,12 +1539,22 @@ class BulkTrackingRegistry(NoOpRegistry):
         self.bulk_batches.append([t.id for t in tasks])
 
     def task_start(
-        self, build_id: UUID, task, executor=None, executor_ref=None
+        self,
+        build_id: UUID,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
     ) -> None:
         self.task_start_calls.append(task.id)
 
     async def task_start_aio(
-        self, build_id: UUID, task, executor=None, executor_ref=None
+        self,
+        build_id: UUID,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
     ) -> None:
         self.task_start_calls.append(task.id)
 
@@ -1785,7 +1810,12 @@ class FailOnStartRegistry(NoOpRegistry):
         self.calls.append(("task_register", task.id))
 
     def task_start(
-        self, build_id: UUID, task, executor=None, executor_ref=None
+        self,
+        build_id: UUID,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
         raise ConnectionError("would-be 404 on /start")
@@ -1797,7 +1827,12 @@ class FailOnStartRegistry(NoOpRegistry):
         self.calls.append(("task_register", task.id))
 
     async def task_start_aio(
-        self, build_id: UUID, task, executor=None, executor_ref=None
+        self,
+        build_id: UUID,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
     ) -> None:
         self.calls.append(("task_start", task.id))
         raise ConnectionError("would-be 404 on /start")
@@ -1869,7 +1904,12 @@ class TestDiscoverTimeRegistrationErrorHandling:
                 raise ConnectionError("register down")
 
             def task_start(
-                self, build_id, task, executor=None, executor_ref=None
+                self,
+                build_id,
+                task,
+                executor=None,
+                executor_ref=None,
+                executor_metadata=None,
             ) -> None:
                 self.calls.append(("task_start", task.id))
 
@@ -1881,7 +1921,12 @@ class TestDiscoverTimeRegistrationErrorHandling:
                 raise ConnectionError("register down")
 
             async def task_start_aio(
-                self, build_id, task, executor=None, executor_ref=None
+                self,
+                build_id,
+                task,
+                executor=None,
+                executor_ref=None,
+                executor_metadata=None,
             ) -> None:
                 self.calls.append(("task_start", task.id))
 
@@ -1921,13 +1966,15 @@ class BuildFailTrackingRegistry(NoOpRegistry):
         self.build_failed_with: UUID | None = None
         self.build_completed_with: UUID | None = None
 
-    def build_start(self, root_tasks=None, description=None):
+    def build_start(self, root_tasks=None, description=None, executor_metadata=None):
         from uuid import uuid4
 
         self.build_started_with = uuid4()
         return self.build_started_with
 
-    async def build_start_aio(self, root_tasks=None, description=None):
+    async def build_start_aio(
+        self, root_tasks=None, description=None, executor_metadata=None
+    ):
         return self.build_start(root_tasks, description)
 
     def build_fail(self, build_id, error_message=None):

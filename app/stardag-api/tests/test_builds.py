@@ -903,7 +903,14 @@ async def test_bulk_register_id_only_returns_slim_response(client: AsyncClient):
     # Slim shape — id + task_id + execution state for re-attach; no
     # task_data / namespace / timestamps.
     assert {tuple(t.keys()) for t in body["tasks"]} == {
-        ("id", "task_id", "latest_status", "latest_executor", "latest_executor_ref")
+        (
+            "id",
+            "task_id",
+            "latest_status",
+            "latest_executor",
+            "latest_executor_ref",
+            "latest_executor_metadata",
+        )
     }
     assert [t["task_id"] for t in body["tasks"]] == [
         "slim-task-0",
@@ -2127,3 +2134,691 @@ async def test_skip_blocked_visible_to_other_builds(client: AsyncClient):
     actionable_ids = [t["task_id"] for t in frontier_b["actionable"]]
     assert "shared" not in actionable_ids
     assert frontier_b["status_counts"].get("skipped") == 1
+
+
+# ---------------------------------------------------------------------------
+# Executor metadata (task + build level)
+# ---------------------------------------------------------------------------
+
+_MODAL_METADATA = {
+    "kind": "modal",
+    "app_name": "demo-app",
+    "workspace": "acme",
+    "environment": "prod",
+    "function_name": "worker_default",
+}
+
+
+def _metadata_param(metadata: dict) -> str:
+    import json as _json
+
+    return _json.dumps(metadata)
+
+
+@pytest.mark.asyncio
+async def test_task_start_executor_metadata_round_trip(client: AsyncClient):
+    """executor_metadata on /start lands in the event metadata and is
+    denormalised to every response surface that carries executor fields."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("meta-t")
+    )
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/meta-t/start",
+        params={
+            "executor": "modal",
+            "executor_ref": "fc-meta-1",
+            "executor_metadata": _metadata_param(_MODAL_METADATA),
+        },
+    )
+    assert response.status_code == 200
+
+    # Task detail (GET /tasks/{task_id}).
+    task = (await client.get("/api/v1/tasks/meta-t")).json()
+    assert task["latest_executor"] == "modal"
+    assert task["latest_executor_ref"] == "fc-meta-1"
+    assert task["latest_executor_metadata"] == _MODAL_METADATA
+
+    # Task rows in the build.
+    rows = (await client.get(f"/api/v1/builds/{build_id}/tasks")).json()
+    assert rows[0]["latest_executor_metadata"] == _MODAL_METADATA
+
+    # Frontier refs.
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["running"][0]["latest_executor_metadata"] == _MODAL_METADATA
+
+    # Bulk-register slim refs (re-register from another build).
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    response = await client.post(
+        f"/api/v1/builds/{build_b}/tasks/bulk?id_only=true",
+        json={"tasks": [_register_payload("meta-t")]},
+    )
+    assert response.json()["tasks"][0]["latest_executor_metadata"] == _MODAL_METADATA
+
+    # Raw event metadata.
+    events = (await client.get("/api/v1/tasks/meta-t/events")).json()
+    started = [e for e in events if e["event_type"] == "task_started"]
+    assert started[0]["event_metadata"]["executor_metadata"] == _MODAL_METADATA
+
+
+@pytest.mark.asyncio
+async def test_task_start_executor_metadata_cleared_and_replaced(client: AsyncClient):
+    """Metadata follows the executor-ref semantics exactly: replaced on every
+    start (cleared by a start without it), cleared on retry."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("meta-clear")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/meta-clear/start",
+        params={
+            "executor": "modal",
+            "executor_ref": "fc-1",
+            "executor_metadata": _metadata_param(_MODAL_METADATA),
+        },
+    )
+
+    # A later start without metadata clears it (stale-metadata guard).
+    await client.post(f"/api/v1/builds/{build_id}/tasks/meta-clear/start")
+    task = (await client.get("/api/v1/tasks/meta-clear")).json()
+    assert task["latest_executor_metadata"] is None
+
+    # Replace with a different dict.
+    replacement = {"kind": "modal", "app_name": "other-app"}
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/meta-clear/start",
+        params={"executor_metadata": _metadata_param(replacement)},
+    )
+    task = (await client.get("/api/v1/tasks/meta-clear")).json()
+    assert task["latest_executor_metadata"] == replacement
+
+    # Retry clears it together with the executor ref.
+    await client.post(f"/api/v1/builds/{build_id}/tasks/meta-clear/fail")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/meta-clear/retry")
+    task = (await client.get("/api/v1/tasks/meta-clear")).json()
+    assert task["latest_executor_metadata"] is None
+
+
+@pytest.mark.asyncio
+async def test_task_start_executor_metadata_invalid_json_422(client: AsyncClient):
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("meta-bad")
+    )
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/meta-bad/start",
+        params={"executor_metadata": "{not json"},
+    )
+    assert response.status_code == 422
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/meta-bad/start",
+        params={"executor_metadata": '["not", "an", "object"]'},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_build_executor_metadata_create_and_resume(client: AsyncClient):
+    """Build-level metadata: recorded at create, kept on plain resume,
+    replaced by a resume that carries new metadata."""
+    trigger_metadata = {**_MODAL_METADATA, "function_name": "build", "reactive": False}
+    response = await client.post(
+        "/api/v1/builds", json={"executor_metadata": trigger_metadata}
+    )
+    build = response.json()
+    build_id = build["id"]
+    assert build["executor_metadata"] == trigger_metadata
+
+    # Some activity so /resume records a BUILD_RESUMED event.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("bm-t")
+    )
+
+    # Plain resume (e.g. from inside the Modal build container) keeps the
+    # stored trigger metadata.
+    resumed = (await client.post(f"/api/v1/builds/{build_id}/resume")).json()
+    assert resumed["executor_metadata"] == trigger_metadata
+
+    # A re-trigger with new metadata replaces it.
+    retrigger_metadata = {**trigger_metadata, "function_name": "tick", "reactive": True}
+    resumed = (
+        await client.post(
+            f"/api/v1/builds/{build_id}/resume",
+            params={"executor_metadata": _metadata_param(retrigger_metadata)},
+        )
+    ).json()
+    assert resumed["executor_metadata"] == retrigger_metadata
+
+    # And it sticks on subsequent reads (list + detail).
+    build = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert build["executor_metadata"] == retrigger_metadata
+    listed = (await client.get("/api/v1/builds")).json()["builds"]
+    assert [b["executor_metadata"] for b in listed if b["id"] == build_id] == [
+        retrigger_metadata
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_without_executor_metadata_defaults_null(client: AsyncClient):
+    build = (await client.post("/api/v1/builds", json={})).json()
+    assert build["executor_metadata"] is None
+
+
+# ---------------------------------------------------------------------------
+# Concurrency-limit admin: holders + evict
+# ---------------------------------------------------------------------------
+
+
+async def _start_holder(
+    client: AsyncClient, build_id: str, task_id: str, keys: list[str]
+) -> None:
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload(task_id)
+    )
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/{task_id}/start",
+        params={
+            "limit_key": keys,
+            "executor": "modal",
+            "executor_ref": f"fc-{task_id}",
+            "executor_metadata": _metadata_param(_MODAL_METADATA),
+        },
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_holders_join(client: AsyncClient):
+    """Holders = RUNNING tasks with the key recorded — multi-key tasks show
+    under every key they hold; non-RUNNING tasks are excluded."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "hold-a", ["gpu"])
+    await _start_holder(client, build_id, "hold-b", ["gpu", "db"])
+    await _start_holder(client, build_id, "hold-c", ["db"])
+    # A completed task frees its slots — must not show as a holder.
+    await client.post(f"/api/v1/builds/{build_id}/tasks/hold-c/complete")
+
+    gpu = (await client.get("/api/v1/concurrency-limits/gpu/holders")).json()
+    assert gpu["key"] == "gpu"
+    assert gpu["total"] == 2
+    assert [h["task_id"] for h in gpu["holders"]] == ["hold-a", "hold-b"]
+    holder = gpu["holders"][0]
+    assert holder["task_name"] == "T"
+    assert holder["latest_status_at"] is not None
+    assert holder["latest_executor"] == "modal"
+    assert holder["latest_executor_ref"] == "fc-hold-a"
+    assert holder["latest_executor_metadata"] == _MODAL_METADATA
+
+    db_holders = (await client.get("/api/v1/concurrency-limits/db/holders")).json()
+    assert [h["task_id"] for h in db_holders["holders"]] == ["hold-b"]
+
+    # Unknown / unconfigured key → empty, not 404 (slots can exist for
+    # keys without a configured cap).
+    empty = (await client.get("/api/v1/concurrency-limits/nope/holders")).json()
+    assert empty == {"key": "nope", "holders": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_concurrency_limit_holders_limit_param(client: AsyncClient):
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for i in range(3):
+        await _start_holder(client, build_id, f"page-{i}", ["paged"])
+
+    response = await client.get(
+        "/api/v1/concurrency-limits/paged/holders", params={"limit": 2}
+    )
+    body = response.json()
+    assert body["total"] == 3
+    assert len(body["holders"]) == 2
+    # Oldest running first (eviction candidates on top).
+    assert [h["task_id"] for h in body["holders"]] == ["page-0", "page-1"]
+
+
+@pytest.mark.asyncio
+async def test_evict_holder_frees_slot(client: AsyncClient):
+    """Evicting records TASK_FAILED (with the evictor identity) and frees
+    the slot: a subsequent enforced start succeeds."""
+    await client.put("/api/v1/concurrency-limits/ev", json={"max_concurrent": 1})
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "ev-a", ["ev"])
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("ev-b")
+    )
+
+    # Slot occupied → enforced start denied.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/ev-b/start",
+        params={"limit_key": ["ev"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 409
+
+    response = await client.post("/api/v1/concurrency-limits/ev/holders/ev-a/evict")
+    assert response.status_code == 200
+    assert response.json() == {"task_id": "ev-a", "status": "failed"}
+
+    # Failure recorded with the evictor identity (mocked auth user).
+    events = (await client.get("/api/v1/tasks/ev-a/events")).json()
+    failed = [e for e in events if e["event_type"] == "task_failed"]
+    assert len(failed) == 1
+    assert "default@localhost" in failed[0]["error_message"]
+    assert "'ev'" in failed[0]["error_message"]
+    assert failed[0]["event_metadata"]["evicted_by_user_id"] == "default-local-user"
+    assert failed[0]["event_metadata"]["concurrency_limit_key"] == "ev"
+
+    # Slot freed → the denied task can start now.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/ev-b/start",
+        params={"limit_key": ["ev"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 200
+
+    # The evicted task no longer shows as a holder.
+    holders = (await client.get("/api/v1/concurrency-limits/ev/holders")).json()
+    assert [h["task_id"] for h in holders["holders"]] == ["ev-b"]
+
+
+@pytest.mark.asyncio
+async def test_evict_holder_frees_all_keys(client: AsyncClient):
+    """Evicting via ONE key frees ALL the task's slots (normal status
+    transition semantics)."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "multi-ev", ["k-one", "k-two"])
+
+    await client.post("/api/v1/concurrency-limits/k-one/holders/multi-ev/evict")
+
+    for key in ("k-one", "k-two"):
+        holders = (await client.get(f"/api/v1/concurrency-limits/{key}/holders")).json()
+        assert holders["holders"] == []
+
+
+@pytest.mark.asyncio
+async def test_evict_holder_404_paths(client: AsyncClient):
+    """Evict is scoped to CURRENT holders of the key — not a generic
+    kill-any-task endpoint."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "n-holder", ["real-key"])
+    # A RUNNING task without the key recorded.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("n-nokey")
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/n-nokey/start")
+    # A task holding the key but no longer RUNNING.
+    await _start_holder(client, build_id, "n-done", ["real-key"])
+    await client.post(f"/api/v1/builds/{build_id}/tasks/n-done/complete")
+
+    # Unknown task id.
+    response = await client.post(
+        "/api/v1/concurrency-limits/real-key/holders/no-such-task/evict"
+    )
+    assert response.status_code == 404
+    # RUNNING but doesn't hold the key.
+    response = await client.post(
+        "/api/v1/concurrency-limits/real-key/holders/n-nokey/evict"
+    )
+    assert response.status_code == 404
+    # Holds the key but not RUNNING.
+    response = await client.post(
+        "/api/v1/concurrency-limits/real-key/holders/n-done/evict"
+    )
+    assert response.status_code == 404
+    # Right task, wrong key.
+    response = await client.post(
+        "/api/v1/concurrency-limits/other-key/holders/n-holder/evict"
+    )
+    assert response.status_code == 404
+    # The real holder is untouched by all of the above.
+    holders = (await client.get("/api/v1/concurrency-limits/real-key/holders")).json()
+    assert [h["task_id"] for h in holders["holders"]] == ["n-holder"]
+
+
+@pytest.mark.asyncio
+async def test_limits_admin_requires_auth(unauthenticated_client: AsyncClient):
+    response = await unauthenticated_client.get(
+        "/api/v1/concurrency-limits/gpu/holders"
+    )
+    assert response.status_code == 401
+    response = await unauthenticated_client.post(
+        "/api/v1/concurrency-limits/gpu/holders/some-task/evict"
+    )
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Executor metadata size cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_executor_metadata_size_cap_all_paths(client: AsyncClient):
+    """Oversized executor_metadata (> 2 KB compact JSON) is a 422 on every
+    ingest path: task start (query param), build create (body), build
+    resume (query param)."""
+    oversized = {"kind": "modal", "blob": "x" * 3000}
+
+    # Build-create body path.
+    response = await client.post(
+        "/api/v1/builds", json={"executor_metadata": oversized}
+    )
+    assert response.status_code == 422
+    assert "executor_metadata" in str(response.json()["detail"])
+
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("cap-t")
+    )
+
+    # Task-start query-param path.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/cap-t/start",
+        params={"executor_metadata": _metadata_param(oversized)},
+    )
+    assert response.status_code == 422
+
+    # Build-resume query-param path.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/resume",
+        params={"executor_metadata": _metadata_param(oversized)},
+    )
+    assert response.status_code == 422
+
+    # A dict within the cap passes on all three paths.
+    ok = dict(_MODAL_METADATA)
+    assert (
+        await client.post("/api/v1/builds", json={"executor_metadata": ok})
+    ).status_code == 201
+    assert (
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks/cap-t/start",
+            params={"executor_metadata": _metadata_param(ok)},
+        )
+    ).status_code == 200
+    assert (
+        await client.post(
+            f"/api/v1/builds/{build_id}/resume",
+            params={"executor_metadata": _metadata_param(ok)},
+        )
+    ).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Evict: build wake-up, evicted-then-completes, tenancy, admin gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_evict_sets_owning_build_needs_tick(client: AsyncClient):
+    """Eviction sets the owning build's scheduler wake-up flag in the same
+    transaction, so a reactive build observes it on the next tick instead
+    of the next watchdog sweep."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "wake-ev", ["wake"])
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["needs_tick"] is False
+
+    response = await client.post(
+        "/api/v1/concurrency-limits/wake/holders/wake-ev/evict"
+    )
+    assert response.status_code == 200
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["needs_tick"] is True
+
+
+@pytest.mark.asyncio
+async def test_evicted_then_worker_completes_sticky_completed(client: AsyncClient):
+    """Evicting a holder whose worker is actually alive: the worker's later
+    TASK_COMPLETED flips the task COMPLETED (sticky) — the documented
+    consequence of evicting a live execution."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "alive-ev", ["alive"])
+
+    response = await client.post(
+        "/api/v1/concurrency-limits/alive/holders/alive-ev/evict"
+    )
+    assert response.json() == {"task_id": "alive-ev", "status": "failed"}
+
+    # The (still-alive) worker reports completion afterwards.
+    response = await client.post(f"/api/v1/builds/{build_id}/tasks/alive-ev/complete")
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+    # Sticky-completed wins over the eviction failure and stays.
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["status_counts"] == {"completed": 1}
+    # Completed → not a holder either.
+    holders = (await client.get("/api/v1/concurrency-limits/alive/holders")).json()
+    assert holders["holders"] == []
+
+
+@pytest.fixture
+async def as_environment_b(async_engine):
+    """Context manager switching the app's auth override to a SECOND
+    environment in the same workspace (the tenancy boundary for
+    tasks/limits is the environment)."""
+    import contextlib
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from stardag_api.auth import SdkAuth, require_sdk_auth
+    from stardag_api.main import app
+    from stardag_api.models import Environment, User
+    from tests.conftest import DEFAULT_USER_ID, DEFAULT_WORKSPACE_ID
+
+    env_b_id = UUID("00000000-0000-0000-0000-00000000000b")
+    session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        session.add(
+            Environment(
+                id=env_b_id,
+                workspace_id=DEFAULT_WORKSPACE_ID,
+                name="Environment B",
+                slug="env-b",
+            )
+        )
+        await session.commit()
+
+    auth_b = SdkAuth(
+        environment=Environment(
+            id=env_b_id, workspace_id=DEFAULT_WORKSPACE_ID, name="Environment B"
+        ),
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user=User(
+            id=DEFAULT_USER_ID,
+            external_id="default-local-user",
+            email="default@localhost",
+            display_name="Default User",
+        ),
+    )
+
+    async def override_require_sdk_auth_b() -> SdkAuth:
+        return auth_b
+
+    @contextlib.contextmanager
+    def _switch():
+        previous = app.dependency_overrides[require_sdk_auth]
+        app.dependency_overrides[require_sdk_auth] = override_require_sdk_auth_b
+        try:
+            yield
+        finally:
+            app.dependency_overrides[require_sdk_auth] = previous
+
+    return _switch
+
+
+@pytest.mark.asyncio
+async def test_holders_and_evict_environment_isolation(
+    client: AsyncClient, as_environment_b
+):
+    """Holders and evict are environment-scoped: another environment's auth
+    (same workspace, same user) sees no holders for the key and cannot
+    evict them."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "iso-holder", ["iso"])
+
+    holders = (await client.get("/api/v1/concurrency-limits/iso/holders")).json()
+    assert [h["task_id"] for h in holders["holders"]] == ["iso-holder"]
+
+    with as_environment_b():
+        holders_b = (await client.get("/api/v1/concurrency-limits/iso/holders")).json()
+        assert holders_b == {"key": "iso", "holders": [], "total": 0}
+        response = await client.post(
+            "/api/v1/concurrency-limits/iso/holders/iso-holder/evict"
+        )
+        assert response.status_code == 404
+
+    # The holder in the original environment is untouched.
+    holders = (await client.get("/api/v1/concurrency-limits/iso/holders")).json()
+    assert [h["task_id"] for h in holders["holders"]] == ["iso-holder"]
+    assert (await client.get("/api/v1/tasks/iso-holder")).json()[
+        "latest_executor"
+    ] == "modal"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency-limit writes: admin gate on the user (JWT) auth path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def limits_auth_switcher(async_engine):
+    """Context-manager factory switching the app's auth override between a
+    MEMBER-role user and an API-key (machine) credential in the default
+    environment. The default ``client`` auth (OWNER-role user) is restored
+    on exit."""
+    import contextlib
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from stardag_api.auth import SdkAuth, require_sdk_auth
+    from stardag_api.main import app
+    from stardag_api.models import Environment, User, WorkspaceMember
+    from stardag_api.models.enums import WorkspaceRole
+    from tests.conftest import DEFAULT_ENVIRONMENT_ID, DEFAULT_WORKSPACE_ID
+
+    member_user_id = UUID("00000000-0000-0000-0000-0000000000ae")
+    session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        session.add(
+            User(
+                id=member_user_id,
+                external_id="member-user",
+                email="member@localhost",
+                display_name="Member User",
+            )
+        )
+        session.add(
+            WorkspaceMember(
+                workspace_id=DEFAULT_WORKSPACE_ID,
+                user_id=member_user_id,
+                role=WorkspaceRole.MEMBER,
+            )
+        )
+        await session.commit()
+
+    environment = Environment(
+        id=DEFAULT_ENVIRONMENT_ID,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        name="Default Environment",
+    )
+    member_auth = SdkAuth(
+        environment=environment,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user=User(
+            id=member_user_id,
+            external_id="member-user",
+            email="member@localhost",
+            display_name="Member User",
+        ),
+    )
+    # API-key auth context: no user attached (machine credential).
+    api_key_auth = SdkAuth(
+        environment=environment,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user=None,
+    )
+
+    @contextlib.contextmanager
+    def _as(auth: SdkAuth):
+        async def _override() -> SdkAuth:
+            return auth
+
+        previous = app.dependency_overrides[require_sdk_auth]
+        app.dependency_overrides[require_sdk_auth] = _override
+        try:
+            yield
+        finally:
+            app.dependency_overrides[require_sdk_auth] = previous
+
+    return {"member": lambda: _as(member_auth), "api_key": lambda: _as(api_key_auth)}
+
+
+@pytest.mark.asyncio
+async def test_limit_writes_admin_gated_for_users(
+    client: AsyncClient, limits_auth_switcher
+):
+    """PUT/DELETE /concurrency-limits/{key} and evict require the workspace
+    ADMIN role on the user (JWT) auth path; reads stay member-level."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "gate-holder", ["gate"])
+
+    # Admin (default client user is workspace OWNER): all writes allowed.
+    assert (
+        await client.put("/api/v1/concurrency-limits/gate", json={"max_concurrent": 2})
+    ).status_code == 200
+
+    with limits_auth_switcher["member"]():
+        # Reads stay member-level.
+        assert (await client.get("/api/v1/concurrency-limits")).status_code == 200
+        holders = await client.get("/api/v1/concurrency-limits/gate/holders")
+        assert holders.status_code == 200
+        # Writes are 403 for members.
+        response = await client.put(
+            "/api/v1/concurrency-limits/gate", json={"max_concurrent": 3}
+        )
+        assert response.status_code == 403
+        assert "admin" in response.json()["detail"].lower()
+        assert (
+            await client.delete("/api/v1/concurrency-limits/gate")
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/api/v1/concurrency-limits/gate/holders/gate-holder/evict"
+            )
+        ).status_code == 403
+
+    # Member 403s changed nothing.
+    limits = (await client.get("/api/v1/concurrency-limits")).json()["limits"]
+    assert limits == [{"key": "gate", "max_concurrent": 2}]
+
+    # API-key auth (machine credential): full access.
+    with limits_auth_switcher["api_key"]():
+        assert (
+            await client.put(
+                "/api/v1/concurrency-limits/gate", json={"max_concurrent": 5}
+            )
+        ).status_code == 200
+        assert (
+            await client.post(
+                "/api/v1/concurrency-limits/gate/holders/gate-holder/evict"
+            )
+        ).status_code == 200
+        assert (
+            await client.delete("/api/v1/concurrency-limits/gate")
+        ).status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_evict_admin_allowed_and_records_admin_identity(client: AsyncClient):
+    """The default (OWNER) user can evict — pinned separately so the admin
+    gate can't silently lock admins out."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "admin-ev", ["adm"])
+
+    response = await client.post(
+        "/api/v1/concurrency-limits/adm/holders/admin-ev/evict"
+    )
+    assert response.status_code == 200
+    assert response.json() == {"task_id": "admin-ev", "status": "failed"}

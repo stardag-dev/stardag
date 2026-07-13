@@ -15,7 +15,16 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 import logging
-from typing import Awaitable, Callable, Generator, Generic, Literal, Protocol, TypeVar
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Generator,
+    Generic,
+    Literal,
+    Protocol,
+    TypeVar,
+)
 from uuid import UUID
 
 from stardag import BaseTask, TaskStruct
@@ -230,11 +239,16 @@ class DetachedHandle:
             task result, with the same contract as
             :meth:`TaskExecutorABC.submit` (``None`` | ``TaskStruct`` |
             ``TaskExecutionError``).
+        executor_metadata: Optional backend-descriptive metadata recorded
+            with the TASK_STARTED event (e.g. the Modal
+            app/workspace/environment/function) for surfacing in the UI.
+            Best-effort — ``None`` when the executor could not resolve it.
     """
 
     executor: str
     ref: str
     wait: Callable[[], Awaitable["None | TaskStruct | TaskExecutionError"]]
+    executor_metadata: dict[str, Any] | None = None
 
 
 class TaskExecutorABC(ABC):
@@ -301,6 +315,18 @@ class TaskExecutorABC(ABC):
         cancellation will leave workers running.
         """
         pass
+
+    async def get_executor_metadata(self, task: BaseTask) -> dict[str, Any] | None:
+        """Descriptive executor metadata for executions of ``task``.
+
+        Same dict as :attr:`DetachedHandle.executor_metadata`, but
+        resolvable *without* starting anything — used to stamp
+        slot-acquiring TASK_STARTED events recorded before the actual
+        spawn, so the registry never shows a RUNNING task with blank
+        executor info in the acquire→spawn window. Best-effort; default
+        None (no metadata).
+        """
+        return None
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
         """Whether the *execution side* reports this task's lifecycle events.

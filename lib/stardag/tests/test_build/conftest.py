@@ -58,18 +58,25 @@ class RecordingRegistry(NoOpRegistry):
         self,
         root_tasks: list[BaseTask] | None = None,
         description: str | None = None,
+        executor_metadata: dict | None = None,
     ) -> UUID:
-        bid = await super().build_start_aio(root_tasks, description)
+        bid = await super().build_start_aio(
+            root_tasks, description, executor_metadata=executor_metadata
+        )
         self._record("build_start_aio")
         return bid
 
-    async def build_resume_aio(self, build_id: UUID) -> None:
+    async def build_resume_aio(
+        self, build_id: UUID, executor_metadata: dict | None = None
+    ) -> None:
         self._record("build_resume_aio")
-        await super().build_resume_aio(build_id)
+        await super().build_resume_aio(build_id, executor_metadata=executor_metadata)
 
-    def build_resume(self, build_id: UUID) -> None:
+    def build_resume(
+        self, build_id: UUID, executor_metadata: dict | None = None
+    ) -> None:
         self._record("build_resume")
-        super().build_resume(build_id)
+        super().build_resume(build_id, executor_metadata=executor_metadata)
 
     async def build_complete_aio(self, build_id: UUID) -> None:
         self._record("build_complete_aio")
@@ -99,12 +106,21 @@ class RecordingRegistry(NoOpRegistry):
         task: BaseTask,
         executor: str | None = None,
         executor_ref: str | None = None,
+        executor_metadata: dict | None = None,
     ) -> None:
         self._record(
-            "task_start_aio", task.id, executor=executor, executor_ref=executor_ref
+            "task_start_aio",
+            task.id,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
         )
         await super().task_start_aio(
-            build_id, task, executor=executor, executor_ref=executor_ref
+            build_id,
+            task,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
         )
 
     async def task_complete_aio(self, build_id: UUID, task: BaseTask) -> None:

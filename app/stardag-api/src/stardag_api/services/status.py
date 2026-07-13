@@ -61,10 +61,12 @@ def apply_event_to_task(task: Task, event: Event) -> None:
             task.latest_commit_hash = event_commit
         # Executor ref of this start (detached execution re-attach). Set or
         # *cleared* on every start so a non-detached run can't leave a stale
-        # ref from an earlier detached one behind.
+        # ref from an earlier detached one behind. The descriptive
+        # executor_metadata follows the exact same set/clear semantics.
         metadata = event.event_metadata or {}
         task.latest_executor = metadata.get("executor")
         task.latest_executor_ref = metadata.get("executor_ref")
+        task.latest_executor_metadata = metadata.get("executor_metadata")
     elif et == EventType.TASK_RETRIED:
         # Reset terminal-but-retryable statuses to PENDING (see the event
         # scan above); sticky-COMPLETED is already handled by the early
@@ -82,6 +84,7 @@ def apply_event_to_task(task: Task, event: Event) -> None:
             task.latest_error_message = None
             task.latest_executor = None
             task.latest_executor_ref = None
+            task.latest_executor_metadata = None
     elif et == EventType.TASK_RESUMED:
         task.latest_status = TaskStatus.RUNNING
         task.latest_status_at = event.created_at

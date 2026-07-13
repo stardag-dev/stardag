@@ -1,5 +1,6 @@
 """Build management routes - primary interface for SDK."""
 
+import json
 from datetime import timedelta
 from typing import Annotated
 from uuid import UUID
@@ -90,6 +91,51 @@ def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
 
 
 # --- Helpers ---
+
+
+# Size cap on the executor_metadata dict (compact-JSON byte size). It holds
+# executor identity fields only, and the blob is echoed on every task
+# list/search/frontier row — a small cap keeps abuse/mistakes from bloating
+# every read. Enforced consistently on the query-param paths (task start,
+# build resume) and the build-create body path.
+_MAX_EXECUTOR_METADATA_BYTES = 2048
+
+
+def _validate_executor_metadata_size(metadata: dict) -> None:
+    """Raise 422 when the metadata exceeds ``_MAX_EXECUTOR_METADATA_BYTES``."""
+    encoded = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _MAX_EXECUTOR_METADATA_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"executor_metadata must be at most "
+                f"{_MAX_EXECUTOR_METADATA_BYTES} bytes as compact JSON "
+                f"(got {len(encoded)})"
+            ),
+        )
+
+
+def _parse_executor_metadata_param(raw: str | None) -> dict | None:
+    """Parse the JSON-encoded ``executor_metadata`` query param.
+
+    The task-start and build-resume endpoints have no request body, so the
+    metadata dict rides as a JSON string query param (small — executor
+    identity fields only; size-capped).
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=422, detail="executor_metadata must be valid JSON"
+        )
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=422, detail="executor_metadata must be a JSON object"
+        )
+    _validate_executor_metadata_size(parsed)
+    return parsed
 
 
 async def _touch_build_last_active(db: AsyncSession, build_id: UUID) -> None:
@@ -292,6 +338,10 @@ async def create_build(
         )
     )
 
+    if build.executor_metadata is not None:
+        # Same cap as the query-param paths (task start / build resume).
+        _validate_executor_metadata_size(build.executor_metadata)
+
     # Generate memorable slug
     name = generate_build_slug()
 
@@ -303,6 +353,7 @@ async def create_build(
         description=build.description,
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
+        executor_metadata=build.executor_metadata,
     )
     db.add(db_build)
     await db.flush()  # Get the build ID
@@ -312,6 +363,9 @@ async def create_build(
         build_id=db_build.id,
         task_id=None,
         event_type=EventType.BUILD_STARTED,
+        event_metadata={"executor_metadata": build.executor_metadata}
+        if build.executor_metadata is not None
+        else None,
     )
     db.add(start_event)
 
@@ -340,6 +394,7 @@ async def create_build(
         commit_hash=db_build.commit_hash,
         root_task_ids=db_build.root_task_ids,
         created_at=db_build.created_at,
+        executor_metadata=db_build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -404,6 +459,7 @@ async def list_builds(
                 commit_hash=build.commit_hash,
                 root_task_ids=build.root_task_ids,
                 created_at=build.created_at,
+                executor_metadata=build.executor_metadata,
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,
@@ -458,6 +514,7 @@ async def get_build(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -541,6 +598,7 @@ async def complete_build(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -614,6 +672,7 @@ async def fail_build(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -684,6 +743,7 @@ async def cancel_build(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -750,6 +810,7 @@ async def exit_early(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -764,6 +825,7 @@ async def resume_build(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
+    executor_metadata: str | None = None,
 ):
     """Mark an existing build as resumed.
 
@@ -780,7 +842,15 @@ async def resume_build(
 
     Args:
         commit_hash: Optional git commit hash of the resuming run.
+        executor_metadata: Optional JSON-encoded dict describing the
+            resuming trigger's executor (e.g. Modal app/workspace). When
+            provided it replaces ``builds.executor_metadata``; when absent
+            the stored value is kept — a resume from inside a Modal build
+            container doesn't know its trigger metadata, and clearing
+            would lose it.
     """
+    parsed_executor_metadata = _parse_executor_metadata_param(executor_metadata)
+
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     _raise_if_limit_exceeded(
@@ -808,17 +878,35 @@ async def resume_build(
         )
     ).first() is not None
 
+    needs_commit = False
+    if parsed_executor_metadata is not None:
+        # Replace the stored trigger metadata even on the no-activity path
+        # below, where no BUILD_RESUMED event is recorded (a fresh build
+        # attaching at its trigger-minted id isn't a "resume"). The column
+        # update is then invisible in the event log — accepted: the column
+        # is a descriptive denormalisation of "how is this build driven",
+        # not audited state, and the metadata does appear in the event log
+        # once real activity produces a BUILD_RESUMED.
+        build.executor_metadata = parsed_executor_metadata
+        needs_commit = True
+
     if has_activity:
+        event_metadata = _build_event_metadata(commit_hash) or {}
+        if parsed_executor_metadata is not None:
+            event_metadata["executor_metadata"] = parsed_executor_metadata
         event = Event(
             build_id=build_id,
             task_id=None,
             event_type=EventType.BUILD_RESUMED,
-            event_metadata=_build_event_metadata(commit_hash),
+            event_metadata=event_metadata or None,
         )
         db.add(event)
         await _touch_build_last_active(db, build_id)
-        await db.commit()
+        needs_commit = True
 
+    if needs_commit:
+        await db.commit()
+    if has_activity:
         record_entity_created(auth.workspace_id, "events")
 
     (
@@ -839,6 +927,7 @@ async def resume_build(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -934,6 +1023,7 @@ async def add_build_roots(
         commit_hash=build.commit_hash,
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -1164,6 +1254,7 @@ async def get_build_frontier(
             latest_status=t.latest_status,
             latest_executor=t.latest_executor,
             latest_executor_ref=t.latest_executor_ref,
+            latest_executor_metadata=t.latest_executor_metadata,
         )
 
     return BuildFrontierResponse(
@@ -1459,6 +1550,10 @@ async def register_task(
         version=db_task.version,
         output_uri=db_task.output_uri,
         created_at=db_task.created_at,
+        is_phantom=db_task.is_phantom,
+        latest_executor=db_task.latest_executor,
+        latest_executor_ref=db_task.latest_executor_ref,
+        latest_executor_metadata=db_task.latest_executor_metadata,
     )
 
 
@@ -1817,6 +1912,7 @@ async def register_tasks_bulk(
                     latest_status=db_task.latest_status,
                     latest_executor=db_task.latest_executor,
                     latest_executor_ref=db_task.latest_executor_ref,
+                    latest_executor_metadata=db_task.latest_executor_metadata,
                 )
                 for t in tasks_in
             ]
@@ -1836,6 +1932,9 @@ async def register_tasks_bulk(
                 output_uri=db_task.output_uri,
                 created_at=db_task.created_at,
                 is_phantom=db_task.is_phantom,
+                latest_executor=db_task.latest_executor,
+                latest_executor_ref=db_task.latest_executor_ref,
+                latest_executor_metadata=db_task.latest_executor_metadata,
             )
             for t in tasks_in
         ]
@@ -1851,6 +1950,7 @@ async def start_task(
     commit_hash: str | None = None,
     executor: str | None = None,
     executor_ref: str | None = None,
+    executor_metadata: str | None = None,
     limit_key: Annotated[list[str] | None, Query()] = None,
     enforce_limits: bool = False,
 ):
@@ -1863,6 +1963,11 @@ async def start_task(
             (e.g. a Modal function call id). Recorded in the event metadata
             and denormalised onto the task so a resumed build can re-attach
             to a still-running execution instead of re-executing.
+        executor_metadata: Optional JSON-encoded dict describing the
+            execution backend (e.g. Modal app/workspace/environment/
+            function). Recorded in the event metadata and denormalised to
+            ``tasks.latest_executor_metadata`` with the same set/clear-on-
+            every-start semantics as ``executor_ref``.
         limit_key: Named concurrency-limit keys this task runs under
             (repeatable). Recorded so the task's RUNNING status occupies one
             slot per key.
@@ -1873,6 +1978,7 @@ async def start_task(
             environment's limit rows are locked for the duration of the
             check, serializing concurrent acquires.
     """
+    parsed_executor_metadata = _parse_executor_metadata_param(executor_metadata)
     limit_keys = list(dict.fromkeys(limit_key)) if limit_key else None
     if enforce_limits and limit_keys:
         denied = await _check_concurrency_limits(db, auth, task_id, limit_keys)
@@ -1886,12 +1992,19 @@ async def start_task(
             )
 
     extra_metadata: dict | None = None
-    if executor is not None or executor_ref is not None or limit_keys:
+    if (
+        executor is not None
+        or executor_ref is not None
+        or parsed_executor_metadata is not None
+        or limit_keys
+    ):
         extra_metadata = {}
         if executor is not None:
             extra_metadata["executor"] = executor
         if executor_ref is not None:
             extra_metadata["executor_ref"] = executor_ref
+        if parsed_executor_metadata is not None:
+            extra_metadata["executor_metadata"] = parsed_executor_metadata
         if limit_keys:
             extra_metadata["limit_keys"] = limit_keys
     return await _create_task_event(
@@ -2387,6 +2500,9 @@ async def list_tasks_in_build(
                 output_uri=task.output_uri,
                 created_at=task.created_at,
                 is_phantom=task.is_phantom,
+                latest_executor=task.latest_executor,
+                latest_executor_ref=task.latest_executor_ref,
+                latest_executor_metadata=task.latest_executor_metadata,
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,

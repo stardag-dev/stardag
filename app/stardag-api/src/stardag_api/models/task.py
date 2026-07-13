@@ -148,6 +148,15 @@ class Task(Base, TimestampMixin):
     # latest_status == RUNNING; set (or cleared) on every TASK_STARTED.
     latest_executor: Mapped[str | None] = mapped_column(String(32))
     latest_executor_ref: Mapped[str | None] = mapped_column(String(255))
+    # Executor-descriptive metadata of the most recent TASK_STARTED event
+    # (e.g. {"kind": "modal", "app_name": ..., "workspace": ...,
+    # "environment": ..., "function_name": ...}), surfaced in the UI for
+    # dashboard deep links. Same set/clear semantics as the two columns
+    # above: replaced on every TASK_STARTED, cleared on TASK_RETRIED.
+    latest_executor_metadata: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=True,
+    )
 
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="tasks")

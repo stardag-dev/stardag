@@ -43,12 +43,20 @@ class RecordingSyncRegistry(NoOpRegistry):
             raise ConnectionError(f"registry down during {method}")
         self.calls.append((method, extra))
 
-    def task_start(self, build_id, task, executor=None, executor_ref=None) -> None:
+    def task_start(
+        self,
+        build_id,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
+    ) -> None:
         self._record(
             "task_start",
             build_id=build_id,
             executor=executor,
             executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
         )
 
     def task_complete(self, build_id, task) -> None:

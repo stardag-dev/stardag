@@ -58,6 +58,7 @@ from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError
 from stardag.registry._api_registry import _is_route_not_found
 from stardag.registry import BuildFrontier, FrontierTaskRef, RegistryABC
+from stardag.registry._base import accepts_executor_metadata_kwarg
 
 logger = logging.getLogger(__name__)
 
@@ -387,6 +388,13 @@ async def _act_on_frontier(
         return False, 0  # terminal handling deals with it
     acted = False
     denied_this_round = 0
+    # Hoisted signature reflection (mirrors _concurrent.py's once-per-build
+    # check): whether the registry accepts the executor_metadata kwarg on
+    # the two start surfaces used below.
+    start_accepts_metadata = accepts_executor_metadata_kwarg(registry.task_start_aio)
+    limits_start_accepts_metadata = accepts_executor_metadata_kwarg(
+        registry.task_start_with_limits_aio
+    )
     for item in frontier.actionable:
         task = await _load_task(
             item.task_id,
@@ -451,12 +459,34 @@ async def _act_on_frontier(
         if limit_keys:
             # Atomic slot acquisition BEFORE spawning, so a denied task
             # never occupies a worker. The acquiring TASK_STARTED carries
-            # no executor ref yet; the post-spawn start below re-records
-            # with the ref (duplicate starts are tolerated, and the slot
-            # is counted per task, not per start).
-            started = await registry.task_start_with_limits_aio(
-                build_id, task, limit_keys=limit_keys
-            )
+            # no executor ref yet (there is nothing to reference), but it
+            # does carry the executor metadata when the executor can
+            # resolve it pre-spawn — otherwise a UI read in the
+            # acquire→spawn window shows a RUNNING task with blank
+            # executor info. The post-spawn start below re-records with
+            # the ref (duplicate starts are tolerated, and the slot is
+            # counted per task, not per start).
+            acquire_metadata: "dict[str, typing.Any] | None" = None
+            if limits_start_accepts_metadata:
+                try:
+                    acquire_metadata = await task_executor.get_executor_metadata(task)
+                except Exception:
+                    logger.debug(
+                        f"Executor metadata resolution failed for task "
+                        f"{task.id}; acquiring without it.",
+                        exc_info=True,
+                    )
+            if acquire_metadata is not None:
+                started = await registry.task_start_with_limits_aio(
+                    build_id,
+                    task,
+                    executor_metadata=acquire_metadata,
+                    limit_keys=limit_keys,
+                )
+            else:
+                started = await registry.task_start_with_limits_aio(
+                    build_id, task, limit_keys=limit_keys
+                )
             if not started:
                 logger.info(
                     f"Task {task.id} denied by concurrency limits "
@@ -473,9 +503,18 @@ async def _act_on_frontier(
             summary.failed_recorded += 1
             acted = True
             continue
-        await registry.task_start_aio(
-            build_id, task, executor=handle.executor, executor_ref=handle.ref
-        )
+        if handle.executor_metadata is not None and start_accepts_metadata:
+            await registry.task_start_aio(
+                build_id,
+                task,
+                executor=handle.executor,
+                executor_ref=handle.ref,
+                executor_metadata=handle.executor_metadata,
+            )
+        else:
+            await registry.task_start_aio(
+                build_id, task, executor=handle.executor, executor_ref=handle.ref
+            )
         summary.spawned += 1
         acted = True
     return acted, denied_this_round
