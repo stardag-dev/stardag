@@ -272,10 +272,10 @@ def _dedupe_secrets(secrets: list[modal.Secret]) -> list[modal.Secret]:
     once. Secrets without a usable name (e.g. ``Secret.from_dict``) fall back
     to object identity.
     """
-    seen: set = set()
+    seen: set[str | int] = set()
     result: list[modal.Secret] = []
     for secret in secrets:
-        key = getattr(secret, "name", None) or id(secret)
+        key: str | int = getattr(secret, "name", None) or id(secret)
         if key in seen:
             continue
         seen.add(key)

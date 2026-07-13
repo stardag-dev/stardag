@@ -13,10 +13,16 @@ container). Providers must instead re-initialize their resource lazily in
 the new process.
 """
 
-import cloudpickle
+import pytest
 
 from stardag.registry import RegistryABC, registry_provider
 from stardag.utils.resource_provider import resource_provider
+
+# cloudpickle isn't a core/dev dependency (it comes with the `modal`
+# extra); it's what Modal uses to serialize functions, and the bug under
+# test is specifically about surviving that. Skip cleanly when it's absent
+# rather than failing collection of the base suite.
+cloudpickle = pytest.importorskip("cloudpickle")
 
 
 def test_unset_provider_reinitializes_after_cloudpickle():
