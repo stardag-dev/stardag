@@ -9,6 +9,7 @@ This module contains:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import traceback as tb_module
@@ -1193,7 +1194,18 @@ async def build_aio(
         # lock so tasks don't burn execution slots while blocked on a
         # distributed lock, and released automatically on every exit path
         # (completion, failure, cancellation, dynamic-deps suspension).
-        async with limiter.slot(task):
+        async with contextlib.AsyncExitStack() as slot_stack:
+            try:
+                await slot_stack.enter_async_context(limiter.slot(task))
+            except Exception as e:
+                # A limiter enforcing external state can fail acquisition
+                # (e.g. the registry-backed limiter's max_wait timeout or a
+                # non-transient registry error) — that fails THIS task,
+                # never the whole build.
+                return TaskExecutionError(
+                    exception=e,
+                    traceback="".join(tb_module.format_exception(e)),
+                )
             # Detached execution: first try re-attaching to a live execution
             # recorded in the registry (from a previous orchestrator run, or
             # a concurrently running build); otherwise spawn detached when

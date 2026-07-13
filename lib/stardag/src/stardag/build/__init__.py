@@ -47,6 +47,7 @@ from stardag.build._base import (
     get_current_build_id,
     TaskExecutorABC,
 )
+from stardag.build._registry_limiter import RegistryConcurrencyLimiter
 from stardag.build._reactive import (
     DiscoveryResult,
     TickConfig,
@@ -112,6 +113,7 @@ __all__ = [
     "TickSummary",
     "discover_and_register_aio",
     "run_tick_aio",
+    "RegistryConcurrencyLimiter",
     "DetachedHandle",
     "get_current_build_id",
     "TaskExecutorABC",

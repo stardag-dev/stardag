@@ -161,15 +161,24 @@ Two mechanisms, by scope:
 
 - **Build-local** (`ConcurrencyConfig`): asyncio-semaphore limits inside
   one build process — an overall cap plus named limits via a
-  `key_selector`. Uniform across local and remote executors.
-- **Registry-backed named limits** (reactive scheduling): caps configured
+  `key_selector`. Uniform across local and remote executors. Resident
+  builds can instead enforce the registry-backed limits below by passing
+  `concurrency_limiter=RegistryConcurrencyLimiter(key_selector=...)`.
+- **Registry-backed named limits**: caps configured
   per environment in the registry
   (`PUT /api/v1/concurrency-limits/{key}`), enforced atomically when a
   task starts — **across all builds** in the environment. A task occupies
   a slot simply by being RUNNING with the key recorded; the slot frees on
-  any terminal status (no leases — status liveness is maintained by worker
-  reporting and tick self-healing). Denied tasks stay pending and proceed
-  when a slot frees.
+  any terminal status (no leases). In reactive scheduling denied tasks
+  stay pending and proceed when a slot frees, and status liveness — hence
+  slot honesty — is maintained by worker reporting and tick self-healing.
+  In resident builds the `RegistryConcurrencyLimiter` blocks-and-retries
+  the submission, but **no automatic healer exists for resident mode**: a
+  resident build killed after acquiring leaves its task RUNNING, holding
+  the slot until the task or build is explicitly failed/cancelled via the
+  API/UI. Prefer reactive scheduling for unattended limited runs. Both
+  modes share the same slots — limits hold across processes, machines
+  and scheduling modes.
 
 Infrastructure-level limits (e.g. Modal's per-function
 `concurrency_limit`) apply independently underneath either mechanism.

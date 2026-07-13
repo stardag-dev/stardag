@@ -8,6 +8,23 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Registry-backed concurrency limits for resident builds.** New
+  `stardag.build.RegistryConcurrencyLimiter` implements the
+  `ConcurrencyLimiter` seam on top of the registry's named environment
+  limits: pass a `RegistryConcurrencyLimiter(key_selector=...)` as
+  `concurrency_limiter` to `build`/`build_aio` and the named caps are
+  enforced server-side — shared with reactive builds and other resident
+  builds, across processes and machines (the "future global,
+  server-driven limiter" the seam was reserved for). Acquisition is an
+  enforced task start (slot = RUNNING status; freed on completion,
+  failure, cancellation, or dynamic-deps suspension — parity with
+  `LocalConcurrencyLimiter`); denials block-and-retry at a configurable
+  poll interval (with jitter), transient registry errors retry with
+  exponential backoff, and an optional timeout fails the task. Requires
+  a matching stardag-api version. Note: unlike reactive scheduling,
+  resident mode has no automatic healer for slots held by a crashed
+  build process — see the concurrency-limits docs.
+
 - **Pickle-free task rehydration from registry data.** New
   `stardag.task_from_registry_data(task_data, expected_task_id=...)`
   reconstructs a task instance from the payload stored at registration
