@@ -131,6 +131,9 @@ class BuildResponse(BaseModel):
     # recently resumed-with-metadata) the build. None for builds without
     # a recorded trigger executor.
     executor_metadata: dict | None = None
+    # Reactive-scheduling metadata ({"app_name", "tick_kwargs"}); None for
+    # non-reactive builds. Presence is the reactive-scheduling marker.
+    reactive_meta: dict | None = None
 
 
 class BuildListResponse(BaseModel):
@@ -267,12 +270,23 @@ class BuildFrontierResponse(BaseModel):
     # All RUNNING tasks in the build, including non-actionable ones (e.g.
     # inside the dynamic-dep registration window) — cancellation targets.
     running: list[FrontierTaskRef] = []
+    # Reactive-scheduling metadata ({"app_name", "tick_kwargs"}); None for
+    # non-reactive builds. Presence is the reactive-scheduling marker a tick
+    # reads to decide whether to drive the build (and which app owns it).
+    reactive_meta: dict | None = None
 
 
 class AddBuildRootsRequest(BaseModel):
     """Root task ids to append to a build (dedup/order handled server-side)."""
 
     root_task_ids: list[str]
+
+
+class SetReactiveMetaRequest(BaseModel):
+    """Reactive-scheduling metadata for PUT /builds/{id}/reactive-meta."""
+
+    app_name: str
+    tick_kwargs: dict = {}
 
 
 class ConcurrencyLimitResponse(BaseModel):

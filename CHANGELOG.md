@@ -4,6 +4,33 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.11.0] — Unreleased
+
+### SDK
+
+- **Reactive build metadata moved from the target root to the registry.**
+  The reactive marker, owning app name, and `tick_kwargs` used to be stored
+  in a `meta.json` on the default target root; they now live in the
+  registry (a build's `reactive_meta`, surfaced on the build frontier the
+  tick already fetches). The per-build task store is now pickle-only (task
+  _objects_ still live on the target root). Because the registry is mutable
+  — unlike a possibly-immutable target root — **a re-trigger may now update
+  `tick_kwargs`** (previously fixed at first trigger in 0.10.1). Reactive
+  scheduling now also requires a registry server new enough to support the
+  `reactive-meta` endpoint; an older server fails the reactive trigger
+  clearly (matching the existing frontier/notify version contract) rather
+  than degrading silently.
+
+### Registry API
+
+- **`reactive_meta` on builds.** New nullable `builds.reactive_meta` JSONB
+  column (`{"app_name", "tick_kwargs"}`; NULL = not reactively scheduled —
+  presence is the marker) with a `PUT /api/v1/builds/{id}/reactive-meta`
+  upsert endpoint (env-scoped, rate-limited). It is exposed on the build
+  response and on the build frontier (`GET /api/v1/builds/{id}/frontier`)
+  so a reactive scheduler tick reads the marker/owner/config in the call it
+  already makes. Additive/nullable migration (instant).
+
 ## [0.10.2] — 2026-07-14
 
 ### SDK

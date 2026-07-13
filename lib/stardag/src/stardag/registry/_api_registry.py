@@ -1193,6 +1193,62 @@ class APIRegistry(RegistryABC):
         )
         return BuildFrontier.model_validate(response.json())
 
+    def build_set_reactive_meta(
+        self,
+        build_id: UUID,
+        *,
+        app_name: str,
+        tick_kwargs: dict[str, Any],
+    ) -> None:
+        """Mark a build reactively scheduled and store its tick config (upsert)."""
+        try:
+            self._request(
+                "PUT",
+                f"{self.api_url}/api/v1/builds/{build_id}/reactive-meta",
+                json={"app_name": app_name, "tick_kwargs": tick_kwargs},
+                params=self._get_params(),
+                operation=f"Set reactive meta for build {build_id}",
+            )
+        except NotFoundError as e:
+            raise self._reactive_meta_unsupported_error(e)
+
+    async def build_set_reactive_meta_aio(
+        self,
+        build_id: UUID,
+        *,
+        app_name: str,
+        tick_kwargs: dict[str, Any],
+    ) -> None:
+        """Async version - mark a build reactively scheduled (upsert)."""
+        try:
+            await self._arequest(
+                "PUT",
+                f"{self.api_url}/api/v1/builds/{build_id}/reactive-meta",
+                json={"app_name": app_name, "tick_kwargs": tick_kwargs},
+                params=self._get_params(),
+                operation=f"Set reactive meta for build {build_id}",
+            )
+        except NotFoundError as e:
+            raise self._reactive_meta_unsupported_error(e)
+
+    @staticmethod
+    def _reactive_meta_unsupported_error(err: NotFoundError) -> Exception:
+        """Turn a missing-route 404 into a clear reactive-unsupported error.
+
+        Reactive scheduling requires a matching stardag-api version. When the
+        server predates the reactive-meta endpoint the PUT 404s with the
+        missing-route body — surface it as a clear error at the trigger (like
+        the frontier/notify contract) rather than silently degrading. A
+        resource-level 404 (build does not exist) is returned as-is.
+        """
+        if not _is_route_not_found(err):
+            return err
+        return RuntimeError(
+            "The registry server does not support reactive scheduling "
+            "(reactive-meta endpoint missing). Upgrade stardag-api to a "
+            "version matching this SDK."
+        )
+
     async def task_register_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - register a task within a build."""
         await self._arequest(

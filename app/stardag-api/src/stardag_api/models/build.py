@@ -112,6 +112,21 @@ class Build(Base, TimestampMixin):
         nullable=True,
     )
 
+    # Reactive-scheduling metadata, set by PUT /builds/{id}/reactive-meta.
+    # NULL means the build is NOT reactively scheduled — its presence is the
+    # "this build is driven by scheduler ticks" marker (a stray tick no-ops
+    # on a build with NULL here, so a resident-orchestrator build is never
+    # double-scheduled). Non-NULL holds {"app_name": <owning app>,
+    # "tick_kwargs": {...}}: the owning app drives the ticks (ownership
+    # guard) and the tick config is read from it. Surfaced on the build
+    # frontier so a scheduler tick reads it in the call it already makes.
+    # Kept off the target root (the asset store, which may be immutable)
+    # because a re-trigger must be able to update it.
+    reactive_meta: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=True,
+    )
+
     # Relationships
     environment: Mapped[Environment] = relationship(back_populates="builds")
     user: Mapped[User | None] = relationship(back_populates="builds")

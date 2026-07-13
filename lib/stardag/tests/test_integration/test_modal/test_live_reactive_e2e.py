@@ -101,6 +101,12 @@ class MiniReactiveRegistry(NoOpRegistry):
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
         self.build_status = "running"
+        # The reactive marker/owner/config now lives in the registry (not the
+        # target root); set by the trigger via build_set_reactive_meta.
+        self.reactive_meta: dict | None = None
+
+    async def build_set_reactive_meta_aio(self, build_id, *, app_name, tick_kwargs):
+        self.reactive_meta = {"app_name": app_name, "tick_kwargs": tick_kwargs}
 
     async def task_register_bulk_aio(self, build_id, tasks):
         for task in tasks:
@@ -162,6 +168,7 @@ class MiniReactiveRegistry(NoOpRegistry):
             roots=[ref(t) for t in self.root_task_ids if t in self.statuses],
             status_counts=counts,
             actionable=actionable,
+            reactive_meta=self.reactive_meta,
         )
 
 
@@ -209,10 +216,13 @@ def test_reactive_build_completes_without_resident_orchestrator():
 
     async def trigger():
         # What build_trigger(reactive=True) does: discover + register +
-        # persist + marker.
+        # persist task objects + set the reactive marker/config in the
+        # registry.
         discovery = await discover_and_register_aio(registry, build_id, task)
         store.save_tasks(discovery.incomplete.values())
-        store.write_meta({"reactive": True, "app_name": TEST_APP_NAME})
+        await registry.build_set_reactive_meta_aio(
+            build_id, app_name=TEST_APP_NAME, tick_kwargs={}
+        )
 
     asyncio.run(trigger())
 

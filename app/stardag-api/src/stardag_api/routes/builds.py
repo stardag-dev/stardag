@@ -52,6 +52,7 @@ from stardag_api.schemas import (
     BuildResponse,
     FrontierTaskRef,
     EventResponse,
+    SetReactiveMetaRequest,
     StatusTriggeredByUser,
     BulkTaskIdRef,
     TaskBulkCreate,
@@ -395,6 +396,7 @@ async def create_build(
         root_task_ids=db_build.root_task_ids,
         created_at=db_build.created_at,
         executor_metadata=db_build.executor_metadata,
+        reactive_meta=db_build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -460,6 +462,7 @@ async def list_builds(
                 root_task_ids=build.root_task_ids,
                 created_at=build.created_at,
                 executor_metadata=build.executor_metadata,
+                reactive_meta=build.reactive_meta,
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,
@@ -515,6 +518,7 @@ async def get_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -599,6 +603,7 @@ async def complete_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -673,6 +678,7 @@ async def fail_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -744,6 +750,7 @@ async def cancel_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -811,6 +818,7 @@ async def exit_early(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -928,6 +936,7 @@ async def resume_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -1024,6 +1033,72 @@ async def add_build_roots(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
+    )
+
+
+# Size cap on the reactive_meta dict (compact-JSON byte size). It holds the
+# owning app name plus a handful of JSON-scalar tick-config fields, and is
+# echoed on every build and frontier read — a small cap keeps it bounded.
+_MAX_REACTIVE_META_BYTES = 4096
+
+
+@router.put("/{build_id}/reactive-meta", response_model=BuildResponse)
+async def set_build_reactive_meta(
+    build_id: UUID,
+    payload: SetReactiveMetaRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+):
+    """Mark a build reactively scheduled and store its scheduler config.
+
+    Upsert (idempotent): called by the reactive trigger and re-trigger. The
+    stored ``{"app_name", "tick_kwargs"}`` surfaces on the build frontier as
+    ``reactive_meta`` — its presence is the "this build is reactively
+    scheduled" marker (a stray tick no-ops on a build without it), the
+    owning app drives the ticks, and the tick config is read from it. A
+    re-trigger MAY update ``tick_kwargs`` (the registry is mutable, unlike a
+    possibly-immutable target root).
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    reactive_meta = {"app_name": payload.app_name, "tick_kwargs": payload.tick_kwargs}
+    encoded = json.dumps(reactive_meta, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _MAX_REACTIVE_META_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"reactive_meta must be at most {_MAX_REACTIVE_META_BYTES} "
+                f"bytes as compact JSON (got {len(encoded)})"
+            ),
+        )
+    build = await _get_build_checked(build_id, db, auth)
+    build.reactive_meta = reactive_meta
+    await db.commit()
+
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
+    return BuildResponse(
+        id=build.id,
+        environment_id=build.environment_id,
+        user_id=build.user_id,
+        name=build.name,
+        description=build.description,
+        commit_hash=build.commit_hash,
+        root_task_ids=build.root_task_ids,
+        created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
+        reactive_meta=build.reactive_meta,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -1266,6 +1341,7 @@ async def get_build_frontier(
         status_counts=status_counts,
         actionable=[_ref(t) for t in actionable_tasks],
         running=[_ref(t) for t in running_tasks],
+        reactive_meta=build.reactive_meta,
     )
 
 

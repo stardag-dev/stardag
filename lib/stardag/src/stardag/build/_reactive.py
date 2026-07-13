@@ -20,7 +20,8 @@ cancelled from the UI).
 The tick is executor-agnostic: it only needs a :class:`TaskExecutorABC`
 with detached support. Requirements and current limitations:
 
-- A real registry (frontier computation is registry-backed).
+- A real registry (frontier computation is registry-backed; the reactive
+  marker/owner/config live in the frontier's ``reactive_meta``).
 - Task objects are rehydrated from the :class:`BuildTaskStore` — written by
   the trigger (initial discovery) and by workers (dynamic deps).
 - The global concurrency lock and build-local ``ConcurrencyConfig`` limits
@@ -231,17 +232,12 @@ async def run_tick_aio(
 
     Idempotent and safe to invoke at any time from anywhere (worker
     wake-ups, periodic watchdog, manual): single-flighted per build via the
-    scheduler lease, and a no-op for builds without a reactive task store.
+    scheduler lease, and a no-op for builds whose registry frontier carries
+    no ``reactive_meta`` (i.e. not reactively scheduled).
     """
     config = config or TickConfig()
     task_store = task_store or BuildTaskStore(build_id)
     summary = TickSummary(outcome="lingered_out")
-
-    if task_store.read_meta() is None:
-        # Not a reactively-scheduled build (e.g. resident orchestrator) —
-        # never schedule on top of it.
-        summary.outcome = "not_reactive"
-        return summary
 
     # Scheduler lease: the lock() handle auto-renews the TTL while the tick
     # lingers, and releases on exit. The manager should be configured with
@@ -275,6 +271,17 @@ async def run_tick_aio(
                         "scheduling (frontier/notify endpoints missing). "
                         "Upgrade stardag-api to a version matching this SDK."
                     ) from e
+
+                if frontier.reactive_meta is None:
+                    # Not a reactively-scheduled build (e.g. a resident-
+                    # orchestrator build, or the metadata was never set) —
+                    # never schedule on top of it. The Modal tick wrapper
+                    # short-circuits this before acquiring the lease; the
+                    # check here is the backstop for direct callers. The
+                    # marker never flips back to None mid-build, so it is
+                    # safe to re-evaluate each iteration.
+                    summary.outcome = "not_reactive"
+                    return summary
 
                 acted, denied_this_round = await _act_on_frontier(
                     frontier,

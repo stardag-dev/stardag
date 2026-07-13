@@ -316,19 +316,20 @@ _TICK_KWARGS_ALLOWED = ("linger_seconds", "poll_interval_seconds", "fail_mode")
 
 
 def _build_tick_config(
-    meta: dict[str, typing.Any] | None,
+    reactive_meta: dict[str, typing.Any] | None,
     tick_kwargs: dict[str, typing.Any] | None,
     limit_key_selector: "typing.Callable[[BaseTask], typing.Sequence[str]] | None",
 ) -> TickConfig:
     """Assemble a TickConfig for one tick invocation.
 
     Precedence: explicit ``tick_kwargs`` (manual/ops invocations) over the
-    build's persisted meta ``tick_kwargs`` (set at trigger time — shared by
-    all ticks) over TickConfig defaults. The concurrency-limit key selector
-    is deployed-app configuration (callables can't ride in the JSON meta).
+    build's ``reactive_meta`` ``tick_kwargs`` (set at trigger time in the
+    registry — shared by all ticks) over TickConfig defaults. The
+    concurrency-limit key selector is deployed-app configuration (callables
+    can't ride in the JSON reactive_meta).
     """
     config_kwargs: dict[str, typing.Any] = {
-        **((meta or {}).get("tick_kwargs") or {}),
+        **((reactive_meta or {}).get("tick_kwargs") or {}),
         **(tick_kwargs or {}),
     }
     if "fail_mode" in config_kwargs:
@@ -341,10 +342,10 @@ def _validate_tick_kwargs(
 ) -> dict[str, typing.Any] | None:
     """Validate + JSON-normalize reactive tick_kwargs.
 
-    They are persisted in the build's store meta (JSON) so all ticks of the
-    build share them — hence only JSON-scalar TickConfig fields are allowed
-    here. ``fail_mode`` may be passed as a FailMode and is stored as its
-    string value.
+    They are persisted in the build's ``reactive_meta`` in the registry
+    (JSON) so all ticks of the build share them — hence only JSON-scalar
+    TickConfig fields are allowed here. ``fail_mode`` may be passed as a
+    FailMode and is stored as its string value.
     """
     if not tick_kwargs:
         return tick_kwargs
@@ -2066,10 +2067,32 @@ class StardagApp:
             from uuid import UUID as _UUID
 
             from stardag.build import BuildTaskStore as _BuildTaskStore
+            from stardag.exceptions import NotFoundError as _NotFoundError
 
             build_uuid = _UUID(build_id)
             task_store = _BuildTaskStore(build_uuid)
-            meta = task_store.read_meta()
+            registry = registry_provider.get()
+            # The reactive marker/owner/config live in the registry (not on
+            # the target root): read them from the build frontier. Reactive
+            # scheduling against a server predating the frontier endpoint
+            # 404s — surface it clearly (matches run_tick_aio).
+            try:
+                reactive_meta = registry.build_get_frontier(build_uuid).reactive_meta
+            except _NotFoundError as e:
+                raise RuntimeError(
+                    "The registry server does not support reactive "
+                    "scheduling (frontier endpoint missing). Upgrade "
+                    "stardag-api to a version matching this SDK."
+                ) from e
+            if reactive_meta is None:
+                # Not a reactively-scheduled build (e.g. a resident-
+                # orchestrator build swept by the watchdog): never schedule
+                # on top of it, and don't even acquire the scheduler lease.
+                logger.info(
+                    f"Tick for build {build_id}: not reactively scheduled "
+                    "(no reactive_meta); skipping."
+                )
+                return {"outcome": "not_reactive"}
             # App ownership: with multiple StardagApps in one environment,
             # every app's watchdog sweeps ALL running reactive builds — but
             # only the app recorded at trigger time may drive a build.
@@ -2082,9 +2105,9 @@ class StardagApp:
             # takeover) are not dropped, and every app's watchdog sweep
             # doubles as cross-app coverage. The owner-side single-flight
             # lease collapses duplicate forwards. Explicit takeover =
-            # re-trigger from the new app (rewrites meta and re-persists
-            # the task objects under the new code).
-            owner_app = (meta or {}).get("app_name")
+            # re-trigger from the new app (updates reactive_meta and
+            # re-persists the task objects under the new code).
+            owner_app = reactive_meta.get("app_name")
             if owner_app is not None and owner_app != app_name:
                 forwarded = False
                 try:
@@ -2110,12 +2133,12 @@ class StardagApp:
                     "owner_app": owner_app,
                     "forwarded": forwarded,
                 }
-            # Per-build tick configuration persisted at trigger time — every
-            # tick (worker wake-ups and watchdog sweeps spawn with only the
-            # build id) runs with the same settings. Explicit tick_kwargs
-            # (tests/manual invocations) win over persisted ones; the limit
-            # key selector is deployed-app configuration.
-            config = _build_tick_config(meta, tick_kwargs, limit_key_selector)
+            # Per-build tick configuration persisted at trigger time in the
+            # registry — every tick (worker wake-ups and watchdog sweeps
+            # spawn with only the build id) runs with the same settings.
+            # Explicit tick_kwargs (tests/manual invocations) win over
+            # persisted ones; the limit key selector is deployed-app config.
+            config = _build_tick_config(reactive_meta, tick_kwargs, limit_key_selector)
 
             executor = ModalTaskExecutor(
                 modal_app_name=app_name,
@@ -2131,7 +2154,7 @@ class StardagApp:
             summary = asyncio.run(
                 run_tick_aio(
                     build_uuid,
-                    registry=registry_provider.get(),
+                    registry=registry,
                     task_executor=executor,
                     lock_manager=lock_manager,
                     task_store=task_store,
@@ -2409,12 +2432,15 @@ class StardagApp:
         - Previously failed/cancelled/skipped tasks in the (re-)discovered
           DAG are reset to pending (``retry_failed``) — the retry path for
           reactive builds.
-        - The task-store meta is MERGED: existing ``tick_kwargs`` are kept
-          unless new ones are passed; root ids are unioned.
+        - The reactive metadata is updated in the registry: because the
+          registry is mutable (unlike an immutable target root), a
+          re-trigger MAY now change ``tick_kwargs``; the roots live in the
+          registry too (``build_add_roots`` above).
 
-        ``tick_kwargs`` are persisted in the build's store meta so that
-        EVERY tick — including worker wake-ups and watchdog sweeps, which
-        spawn with only the build id — runs with the same configuration.
+        ``tick_kwargs`` are persisted in the build's ``reactive_meta`` in
+        the registry so that EVERY tick — including worker wake-ups and
+        watchdog sweeps, which spawn with only the build id — runs with the
+        same configuration.
         """
         root_ids = [str(t.id) for t in task_list]
         if is_retrigger:
@@ -2436,22 +2462,16 @@ class StardagApp:
         )
         store = BuildTaskStore(build_id)
         store.save_tasks(discovery.incomplete.values())
-        # Write the reactive marker/config exactly once, at the first
-        # trigger. The store lives on a target root that may be immutable,
-        # so we never rewrite it: build roots are tracked in the registry
-        # (build_add_roots above — the scheduler reads them from the
-        # frontier, never from the store), so a re-trigger needs no store
-        # mutation. NOTE: this means tick_kwargs are fixed at first
-        # trigger; changing scheduling config on re-trigger is not
-        # supported until build metadata moves to the registry.
-        if store.read_meta() is None:
-            store.write_meta(
-                {
-                    "reactive": True,
-                    "app_name": self.name,
-                    "tick_kwargs": tick_kwargs or {},
-                }
-            )
+        # Persist the reactive marker/owner/config in the registry (its
+        # presence is the "this build is reactively scheduled" marker read
+        # by every tick from the frontier). This is an upsert: because the
+        # registry is mutable — unlike a possibly-immutable target root — a
+        # re-trigger MAY update tick_kwargs. Build roots are tracked in the
+        # registry too (build_add_roots above — the scheduler reads them
+        # from the frontier).
+        registry.build_set_reactive_meta(
+            build_id, app_name=self.name, tick_kwargs=tick_kwargs or {}
+        )
         tick_function = modal.Function.from_name(app_name=self.name, name="tick")
         function_call = tick_function.spawn(build_id=str(build_id))
         return BuildTriggerResult(build_id=build_id, function_call=function_call)

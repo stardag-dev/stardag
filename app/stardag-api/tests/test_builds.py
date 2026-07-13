@@ -1663,6 +1663,92 @@ async def test_frontier_build_not_found_and_notify_404(client: AsyncClient):
     assert (await client.post(f"/api/v1/builds/{fake}/notify")).status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_non_reactive_build_has_null_reactive_meta(client: AsyncClient):
+    """A plain build is not reactively scheduled: reactive_meta is null on
+    both the build response and the frontier."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    build = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert build["reactive_meta"] is None
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["reactive_meta"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_reactive_meta_appears_on_build_and_frontier(client: AsyncClient):
+    """PUT /reactive-meta marks the build reactively scheduled; the metadata
+    is exposed on the build response and the frontier (where a tick reads
+    it). The endpoint is an idempotent upsert — a re-trigger may update
+    tick_kwargs."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    response = await client.put(
+        f"/api/v1/builds/{build_id}/reactive-meta",
+        json={"app_name": "my-app", "tick_kwargs": {"linger_seconds": 30}},
+    )
+    assert response.status_code == 200
+    assert response.json()["reactive_meta"] == {
+        "app_name": "my-app",
+        "tick_kwargs": {"linger_seconds": 30},
+    }
+
+    build = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert build["reactive_meta"] == {
+        "app_name": "my-app",
+        "tick_kwargs": {"linger_seconds": 30},
+    }
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["reactive_meta"] == {
+        "app_name": "my-app",
+        "tick_kwargs": {"linger_seconds": 30},
+    }
+
+    # Upsert: a re-trigger updates tick_kwargs (and may change the owner).
+    response = await client.put(
+        f"/api/v1/builds/{build_id}/reactive-meta",
+        json={"app_name": "my-app-2", "tick_kwargs": {"fail_mode": "continue"}},
+    )
+    assert response.status_code == 200
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["reactive_meta"] == {
+        "app_name": "my-app-2",
+        "tick_kwargs": {"fail_mode": "continue"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_reactive_meta_build_not_found(client: AsyncClient):
+    fake = "00000000-0000-0000-0000-000000000099"
+    response = await client.put(
+        f"/api/v1/builds/{fake}/reactive-meta",
+        json={"app_name": "my-app", "tick_kwargs": {}},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_reactive_meta_environment_isolation(
+    client: AsyncClient, as_environment_b
+):
+    """reactive-meta is environment-scoped: another environment's auth
+    cannot set it on this build (403)."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    with as_environment_b():
+        response = await client.put(
+            f"/api/v1/builds/{build_id}/reactive-meta",
+            json={"app_name": "my-app", "tick_kwargs": {}},
+        )
+        assert response.status_code == 403
+
+    # Untouched in the owning environment.
+    build = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert build["reactive_meta"] is None
+
+
 def _register_payload(task_id: str, deps: list[str] | None = None) -> dict:
     return {
         "task_id": task_id,

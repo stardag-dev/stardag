@@ -40,10 +40,10 @@ def test_save_tasks_skips_already_persisted(
     assert store.load_task(b.id) is not None
 
 
-def test_meta_roundtrip(
+def test_load_missing_task_returns_none(
     default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
 ):
+    # The store is pickle-only now (orchestration metadata lives in the
+    # registry); a never-persisted task id loads as None.
     store = BuildTaskStore(uuid4())
-    assert store.read_meta() is None
-    store.write_meta({"reactive": True, "app_name": "x", "tick_kwargs": {}})
-    assert store.read_meta() == {"reactive": True, "app_name": "x", "tick_kwargs": {}}
+    assert store.load_task(uuid4()) is None

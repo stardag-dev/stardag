@@ -115,6 +115,16 @@ class BuildFrontier(StardagBaseModel):
     # inside the dynamic-dep registration window) — cancellation targets.
     # Defaults to empty for servers predating the field.
     running: list[FrontierTaskRef] = []
+    # Reactive-scheduling metadata: the marker + orchestration config a tick
+    # needs, moved off the target root into the registry. None means the
+    # build is NOT reactively scheduled (a stray tick must no-op on it, so a
+    # resident-orchestrator build is never double-scheduled). Non-None holds
+    # ``{"app_name": <owning app>, "tick_kwargs": {...}}`` — the owning app
+    # drives the tick (ownership guard) and the tick config is read from it.
+    # Set via ``build_set_reactive_meta``. None also on servers predating
+    # the field (the reactive trigger fails loudly against such servers when
+    # it PUTs the reactive-meta endpoint, so a tick never observes this).
+    reactive_meta: dict[str, Any] | None = None
 
 
 class RegisteredTaskInfo(StardagBaseModel):
@@ -382,6 +392,34 @@ class RegistryABC(metaclass=abc.ABCMeta):
     async def build_get_frontier_aio(self, build_id: UUID) -> BuildFrontier:
         """Async version of build_get_frontier."""
         return self.build_get_frontier(build_id)
+
+    def build_set_reactive_meta(
+        self,
+        build_id: UUID,
+        *,
+        app_name: str,
+        tick_kwargs: dict[str, Any],
+    ) -> None:
+        """Mark a build reactively scheduled and store its tick config.
+
+        Upsert (idempotent): a re-trigger may update ``tick_kwargs``. The
+        stored metadata surfaces as ``BuildFrontier.reactive_meta`` so a
+        scheduler tick reads the marker/owner/config from the frontier it
+        already fetches. Default: no-op (backends without reactive support).
+        """
+        pass
+
+    async def build_set_reactive_meta_aio(
+        self,
+        build_id: UUID,
+        *,
+        app_name: str,
+        tick_kwargs: dict[str, Any],
+    ) -> None:
+        """Async version of build_set_reactive_meta."""
+        self.build_set_reactive_meta(
+            build_id, app_name=app_name, tick_kwargs=tick_kwargs
+        )
 
     def task_start(
         self,
