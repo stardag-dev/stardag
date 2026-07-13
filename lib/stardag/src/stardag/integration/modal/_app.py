@@ -1721,14 +1721,28 @@ class StardagApp:
 
             build_uuid = _UUID(build_id)
             task_store = _BuildTaskStore(build_uuid)
+            meta = task_store.read_meta()
+            # App ownership: with multiple StardagApps in one environment,
+            # every app's watchdog sweeps ALL running reactive builds — but
+            # only the app recorded at trigger time may drive a build.
+            # A foreign app's tick would schedule with ITS commit (its
+            # workers, its selectors) and unpickle the owning app's task
+            # store (pickle skew across commits), so it must no-op.
+            # Explicit takeover = re-trigger from the new app (rewrites
+            # meta and re-persists the task objects under the new code).
+            owner_app = (meta or {}).get("app_name")
+            if owner_app is not None and owner_app != app_name:
+                logger.info(
+                    f"Tick for build {build_id}: owned by app "
+                    f"{owner_app!r}, not {app_name!r}; skipping."
+                )
+                return {"outcome": "foreign_app", "owner_app": owner_app}
             # Per-build tick configuration persisted at trigger time — every
             # tick (worker wake-ups and watchdog sweeps spawn with only the
             # build id) runs with the same settings. Explicit tick_kwargs
             # (tests/manual invocations) win over persisted ones; the limit
             # key selector is deployed-app configuration.
-            config = _build_tick_config(
-                task_store.read_meta(), tick_kwargs, limit_key_selector
-            )
+            config = _build_tick_config(meta, tick_kwargs, limit_key_selector)
 
             executor = ModalTaskExecutor(
                 modal_app_name=app_name,

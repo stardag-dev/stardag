@@ -8,6 +8,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Reactive builds are owned by their triggering app.** With multiple
+  `StardagApp`s deployed in one environment, a scheduler tick from an
+  app that doesn't own the build (per the `app_name` recorded at trigger
+  time) now no-ops with `outcome="foreign_app"` instead of driving the
+  build with the wrong app's code — previously whichever app's watchdog
+  won the scheduler lease would tick every reactive build in the
+  environment. Same-name redeploys are unaffected; move a build to a new
+  app by re-triggering it from that app (rewrites ownership and
+  re-persists the task objects). Builds triggered by older SDK versions
+  (no recorded owner) are ticked by any app, as before.
+
 - **Registry-backed concurrency limits for resident builds.** New
   `stardag.build.RegistryConcurrencyLimiter` implements the
   `ConcurrencyLimiter` seam on top of the registry's named environment

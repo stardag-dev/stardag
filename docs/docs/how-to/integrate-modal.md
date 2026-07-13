@@ -513,6 +513,18 @@ a whole) needs a stardag-api version matching this SDK — an **older
 server silently ignores the enforcement parameters**, so upgrade the
 server before relying on limits.
 
+**App ownership.** Each reactive build is owned by the `StardagApp`
+that triggered it (`app_name` recorded in the build's store meta). With
+several apps deployed in one environment, every watchdog sweeps all
+running reactive builds — but a tick from a non-owning app no-ops with
+`outcome="foreign_app"` instead of driving the build with its own
+commit's code and selectors (and unpickling the owner's task store,
+which may not match its code). Redeploying the **same** app name is the
+normal upgrade path and unaffected. To migrate a build to a different
+app, re-trigger it from that app (`build_trigger(tasks, reactive=True,
+build_id=<existing id>)`): the re-trigger rewrites the meta and
+re-persists the task objects under the new app's code.
+
 The same named limits can be enforced from resident (non-reactive)
 builds via `stardag.build.RegistryConcurrencyLimiter` — both modes share
 the slots. Two caveats when mixing modes: a crashed _resident_ build has

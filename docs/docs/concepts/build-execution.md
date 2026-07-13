@@ -140,6 +140,12 @@ task data (`stardag.task_from_registry_data`). The
 registry never pushes or executes anything — only user-deployed code
 (which has the DAG-defining code) spawns work.
 
+Each reactive build is **owned by the app that triggered it** (recorded
+at trigger time): ticks from any other deployed app in the environment —
+typically another app's watchdog sweep — no-op instead of driving the
+build with the wrong code. Ownership moves only by an explicit
+re-trigger from the new app.
+
 Reactive scheduling is experimental and currently Modal-first — see
 [Integrate with Modal](../how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental)
 for usage, requirements and limitations.

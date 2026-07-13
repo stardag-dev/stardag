@@ -824,6 +824,87 @@ class TestFinalizeRegistersTick:
         assert "tick_watchdog" in result.functions
 
 
+class TestTickAppOwnership:
+    """Only the app recorded in the build's meta may drive its ticks."""
+
+    def _capture_tick(self, app_name: str):
+        app = StardagApp(
+            app_name,
+            builder_settings=FunctionSettings(image=MagicMock()),
+            worker_settings={"default": FunctionSettings(image=MagicMock())},
+        )
+        captured: dict = {}
+
+        def capture_function(**kwargs):
+            def decorator(fn):
+                captured[kwargs.get("name", "unknown")] = fn
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        with patch("stardag.integration.modal._app.get_target_roots_volumes") as mv:
+            mv.return_value = MagicMock(by_volume_name={}, by_root_key={})
+            app.finalize()
+        return captured["tick"]
+
+    def test_foreign_app_tick_noops(self, default_in_memory_fs_target):
+        """A tick from an app that doesn't own the build (per trigger-time
+        meta) must not drive it: a foreign app would schedule with its own
+        commit and unpickle the owner's task store (pickle skew)."""
+        from uuid import uuid4
+
+        from stardag.build import BuildTaskStore
+
+        tick = self._capture_tick("app-b")
+        build_id = uuid4()
+        BuildTaskStore(build_id).write_meta(
+            {"reactive": True, "app_name": "app-a", "root_task_ids": []}
+        )
+
+        result = tick(str(build_id))
+
+        assert result == {"outcome": "foreign_app", "owner_app": "app-a"}
+
+    def test_own_and_legacy_builds_proceed(self, default_in_memory_fs_target):
+        """The owning app ticks its build; meta without app_name (written by
+        an older SDK) is not treated as foreign."""
+        from uuid import uuid4
+
+        from stardag.build import BuildTaskStore, TickSummary
+
+        from stardag.registry import NoOpRegistry
+
+        ticked: list[str] = []
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            ticked.append(str(build_uuid))
+            return TickSummary(outcome="noop")
+
+        tick = self._capture_tick("app-a")
+        own = uuid4()
+        legacy = uuid4()
+        BuildTaskStore(own).write_meta(
+            {"reactive": True, "app_name": "app-a", "root_task_ids": []}
+        )
+        BuildTaskStore(legacy).write_meta({"reactive": True, "root_task_ids": []})
+
+        # Patch everything past the ownership guard: registry/lock-manager
+        # construction requires configured credentials (present on dev
+        # machines, absent in CI — the guard itself must not need them).
+        with (
+            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch(
+                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+            ),
+        ):
+            rp.get.return_value = NoOpRegistry()
+            assert tick(str(own))["outcome"] == "noop"
+            assert tick(str(legacy))["outcome"] == "noop"
+        assert ticked == [str(own), str(legacy)]
+
+
 class TestReactiveRetrigger:
     """Re-triggering an existing reactive build: resume (un-terminal),
     append roots server-side, retry failed tasks, merge store meta."""
