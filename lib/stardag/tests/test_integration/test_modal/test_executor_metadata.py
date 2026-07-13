@@ -125,6 +125,34 @@ class TestDetachedHandleMetadata:
             "function_name": "worker_default",
         }
 
+    async def test_failed_workspace_lookup_cached(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """A raising token lookup is cached as None: no raise reaches the
+        caller and the lookup (and its timeout) is not re-paid on every
+        task start."""
+        from stardag.integration.modal import _app as modal_app_module
+
+        real_get = hermetic_modal_executor_metadata["get_modal_workspace_aio"]
+        calls = {"n": 0}
+
+        async def _raising_lookup():
+            calls["n"] += 1
+            raise TimeoutError("modal api unreachable")
+
+        monkeypatch.setattr(
+            modal_app_module, "_lookup_modal_workspace_aio", _raising_lookup
+        )
+        monkeypatch.setattr(
+            modal_app_module,
+            "_modal_workspace_cache",
+            modal_app_module._MODAL_WORKSPACE_UNRESOLVED,
+        )
+
+        assert await real_get() is None
+        assert await real_get() is None
+        assert calls["n"] == 1  # failure cached, not retried
+
     async def test_base_metadata_resolved_once(self, monkeypatch):
         from stardag.integration.modal import _app as modal_app_module
 

@@ -64,6 +64,12 @@ def hermetic_modal_executor_metadata(monkeypatch):
     async def _fake_workspace_aio():
         return "test-workspace"
 
+    # The real (pre-patch) functions, for tests exercising the resolution
+    # logic itself.
+    originals = {
+        "get_modal_workspace_aio": modal_app_module._get_modal_workspace_aio,
+    }
+
     monkeypatch.setattr(
         modal_app_module, "_get_modal_workspace_aio", _fake_workspace_aio
     )
@@ -71,3 +77,4 @@ def hermetic_modal_executor_metadata(monkeypatch):
         modal_app_module, "_get_modal_workspace", lambda: "test-workspace"
     )
     monkeypatch.setattr(modal_app_module, "_get_modal_environment", lambda: "test-env")
+    return originals

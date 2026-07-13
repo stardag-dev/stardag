@@ -518,7 +518,14 @@ async def _get_modal_workspace_aio() -> str | None:
     """Best-effort Modal workspace name for the configured token (cached)."""
     global _modal_workspace_cache
     if _modal_workspace_cache is _MODAL_WORKSPACE_UNRESOLVED:
-        _modal_workspace_cache = await _lookup_modal_workspace_aio()
+        try:
+            _modal_workspace_cache = await _lookup_modal_workspace_aio()
+        except Exception as e:
+            # Cache the failure too: metadata is best-effort and a broken
+            # token / unreachable Modal API must neither raise into a task
+            # start nor re-pay the lookup timeout on every start.
+            _modal_workspace_cache = None
+            logger.debug(f"Modal workspace lookup failed (metadata omitted): {e}")
     return typing.cast("str | None", _modal_workspace_cache)
 
 
