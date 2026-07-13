@@ -142,9 +142,9 @@ registry never pushes or executes anything — only user-deployed code
 
 Each reactive build is **owned by the app that triggered it** (recorded
 at trigger time): ticks from any other deployed app in the environment —
-typically another app's watchdog sweep — no-op instead of driving the
-build with the wrong code. Ownership moves only by an explicit
-re-trigger from the new app.
+typically another app's watchdog sweep — forward the wake-up to the
+owner's tick instead of driving the build with the wrong code. Ownership
+moves only by an explicit re-trigger from the new app.
 
 Reactive scheduling is experimental and currently Modal-first — see
 [Integrate with Modal](../how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental)

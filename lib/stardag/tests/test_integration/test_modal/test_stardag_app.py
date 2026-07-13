@@ -848,10 +848,15 @@ class TestTickAppOwnership:
             app.finalize()
         return captured["tick"]
 
-    def test_foreign_app_tick_noops(self, default_in_memory_fs_target):
+    def test_foreign_app_tick_forwards_to_owner(
+        self, default_in_memory_fs_target, modal_function_stub
+    ):
         """A tick from an app that doesn't own the build (per trigger-time
-        meta) must not drive it: a foreign app would schedule with its own
-        commit and unpickle the owner's task store (pickle skew)."""
+        meta) must not drive it — a foreign app would schedule with its own
+        commit and unpickle the owner's task store (pickle skew) — but it
+        forwards the wake-up to the owner's tick, so e.g. a still-running
+        worker of the previous owner completing after a takeover doesn't
+        drop the wake-up."""
         from uuid import uuid4
 
         from stardag.build import BuildTaskStore
@@ -872,7 +877,48 @@ class TestTickAppOwnership:
         ):
             result = tick(str(build_id))
 
-        assert result == {"outcome": "foreign_app", "owner_app": "app-a"}
+        assert result == {
+            "outcome": "foreign_app",
+            "owner_app": "app-a",
+            "forwarded": True,
+        }
+        assert modal_function_stub["from_name"] == {
+            "app_name": "app-a",
+            "name": "tick",
+        }
+        assert modal_function_stub["op"] == "spawn"
+        assert modal_function_stub["kwargs"] == {"build_id": str(build_id)}
+        rp.get.assert_not_called()
+        tick_aio.assert_not_called()
+
+    def test_foreign_app_forward_failure_tolerated(self, default_in_memory_fs_target):
+        """Owner app deleted (orphaned build): the forward fails, the tick
+        still no-ops cleanly — logged, never raised."""
+        from uuid import uuid4
+
+        from stardag.build import BuildTaskStore
+
+        tick = self._capture_tick("app-b")
+        build_id = uuid4()
+        BuildTaskStore(build_id).write_meta(
+            {"reactive": True, "app_name": "app-gone", "root_task_ids": []}
+        )
+
+        with (
+            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch("stardag.integration.modal._app.run_tick_aio") as tick_aio,
+            patch(
+                "modal.Function.from_name",
+                side_effect=Exception("app not found"),
+            ),
+        ):
+            result = tick(str(build_id))
+
+        assert result == {
+            "outcome": "foreign_app",
+            "owner_app": "app-gone",
+            "forwarded": False,
+        }
         rp.get.assert_not_called()
         tick_aio.assert_not_called()
 
