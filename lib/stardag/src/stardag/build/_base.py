@@ -316,6 +316,18 @@ class TaskExecutorABC(ABC):
         """
         pass
 
+    async def get_executor_metadata(self, task: BaseTask) -> dict[str, Any] | None:
+        """Descriptive executor metadata for executions of ``task``.
+
+        Same dict as :attr:`DetachedHandle.executor_metadata`, but
+        resolvable *without* starting anything — used to stamp
+        slot-acquiring TASK_STARTED events recorded before the actual
+        spawn, so the registry never shows a RUNNING task with blank
+        executor info in the acquire→spawn window. Best-effort; default
+        None (no metadata).
+        """
+        return None
+
     def reports_lifecycle(self, task: BaseTask) -> bool:
         """Whether the *execution side* reports this task's lifecycle events.
 

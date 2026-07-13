@@ -1279,3 +1279,112 @@ class TestExecutorMetadataRecording:
 
         assert summary.outcome == "terminal"
         assert registry.refs[str(root.id)] == ("fake", "ref-1")
+
+
+class TestAcquiringStartExecutorMetadata:
+    """The limits-acquiring TASK_STARTED (recorded BEFORE the spawn) carries
+    the executor metadata resolvable pre-spawn, closing the acquire→spawn
+    window where a RUNNING task would otherwise show blank executor info."""
+
+    PRE_SPAWN_METADATA = {"kind": "modal", "app_name": "tick-app"}
+
+    class PreSpawnMetadataExecutor(FakeTickExecutor):
+        async def get_executor_metadata(self, task: BaseTask):
+            return TestAcquiringStartExecutorMetadata.PRE_SPAWN_METADATA
+
+    class AcquireRecordingRegistry(FakeReactiveRegistry):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.acquire_metadata: dict[str, dict | None] = {}
+
+        async def task_start_with_limits_aio(
+            self,
+            build_id,
+            task,
+            executor=None,
+            executor_ref=None,
+            executor_metadata=None,
+            limit_keys=None,
+        ):
+            self.acquire_metadata[str(task.id)] = executor_metadata
+            return await super().task_start_with_limits_aio(
+                build_id,
+                task,
+                executor=executor,
+                executor_ref=executor_ref,
+                executor_metadata=executor_metadata,
+                limit_keys=limit_keys,
+            )
+
+    async def test_acquiring_start_carries_metadata(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        (root,) = _chain("acquire-meta-root")
+        registry = self.AcquireRecordingRegistry(
+            root_task_ids=[str(root.id)], auto_complete=True
+        )
+        registry.add_task(str(root.id))
+        registry.limits["gpu"] = 1
+        store = InMemoryTaskStore(uuid4())
+        store.save_tasks([root])
+        config = TickConfig(
+            linger_seconds=0.3,
+            poll_interval_seconds=0.01,
+            limit_key_selector=lambda t: ["gpu"],
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=self.PreSpawnMetadataExecutor(),
+            lock_manager=_lock_manager(),
+            task_store=store,
+            config=config,
+        )
+
+        assert summary.spawned == 1
+        assert registry.acquire_metadata[str(root.id)] == self.PRE_SPAWN_METADATA
+
+    async def test_acquiring_start_metadata_dropped_for_legacy_registry(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A registry whose task_start_with_limits_aio predates the kwarg
+        gets the plain acquiring start — no TypeError."""
+
+        class PreMetadataLimitsRegistry(FakeReactiveRegistry):
+            async def task_start_with_limits_aio(  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
+                self, build_id, task, executor=None, executor_ref=None, limit_keys=None
+            ):
+                return await super().task_start_with_limits_aio(
+                    build_id,
+                    task,
+                    executor=executor,
+                    executor_ref=executor_ref,
+                    limit_keys=limit_keys,
+                )
+
+        (root,) = _chain("acquire-meta-legacy")
+        registry = PreMetadataLimitsRegistry(
+            root_task_ids=[str(root.id)], auto_complete=True
+        )
+        registry.add_task(str(root.id))
+        registry.limits["gpu"] = 1
+        store = InMemoryTaskStore(uuid4())
+        store.save_tasks([root])
+        config = TickConfig(
+            linger_seconds=0.3,
+            poll_interval_seconds=0.01,
+            limit_key_selector=lambda t: ["gpu"],
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=self.PreSpawnMetadataExecutor(),
+            lock_manager=_lock_manager(),
+            task_store=store,
+            config=config,
+        )
+
+        assert summary.outcome == "terminal"
+        assert summary.spawned == 1

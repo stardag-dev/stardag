@@ -14,7 +14,7 @@ resident builds have no automatic healer).
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,13 +28,17 @@ from stardag_api.limits import (
     record_entity_created,
 )
 from stardag_api.models import (
+    Build,
     EnvironmentConcurrencyLimit,
     Event,
     EventType,
     Task,
     TaskLimitKey,
     TaskStatus,
+    WorkspaceRole,
 )
+from stardag_api.models.base import utc_now
+from stardag_api.routes.workspaces import require_workspace_access
 from stardag_api.schemas import (
     ConcurrencyLimitHolder,
     ConcurrencyLimitHoldersResponse,
@@ -59,6 +63,25 @@ def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
         status_code=429,
         detail=error.model_dump(exclude_none=True),
         headers=headers or None,
+    )
+
+
+async def _require_admin_for_user_auth(db: AsyncSession, auth: SdkAuth) -> None:
+    """Gate WRITE endpoints (limit upsert/delete, evict) to workspace admins.
+
+    Applies to the JWT/UI auth path only: ``auth.user`` acts on behalf of
+    a workspace member, so mutating shared limits or evicting slot holders
+    requires the ADMIN role (same hierarchy as workspace management — see
+    ``routes/workspaces.py::require_workspace_access``; 403 with
+    "Requires admin role or higher" otherwise). API-key auth
+    (``auth.user is None``) is a machine credential scoped to the
+    environment and stays full-access — the SDK/automation path. Reads
+    (limit list, holders) stay member-level.
+    """
+    if auth.user is None:
+        return
+    await require_workspace_access(
+        db, auth.user.id, auth.workspace_id, min_role=WorkspaceRole.ADMIN
     )
 
 
@@ -96,7 +119,11 @@ async def upsert_concurrency_limit(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Create or update a named concurrency limit for the environment."""
+    """Create or update a named concurrency limit for the environment.
+
+    Write access: workspace admins (JWT path) or any API key.
+    """
+    await _require_admin_for_user_auth(db, auth)
     if payload.max_concurrent < 1:
         raise HTTPException(status_code=422, detail="max_concurrent must be at least 1")
 
@@ -144,7 +171,11 @@ async def delete_concurrency_limit(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
 ):
-    """Remove a named concurrency limit (the key becomes unlimited)."""
+    """Remove a named concurrency limit (the key becomes unlimited).
+
+    Write access: workspace admins (JWT path) or any API key.
+    """
+    await _require_admin_for_user_auth(db, auth)
     row = (
         await db.execute(
             select(EnvironmentConcurrencyLimit).where(
@@ -246,12 +277,27 @@ async def evict_concurrency_limit_holder(
     died while its tasks were RUNNING). The failure flows through the
     normal status transition, freeing ALL the task's slots — deliberately
     scoped to current holders of ``key`` (404 otherwise), NOT a generic
-    kill-any-task endpoint.
+    kill-any-task endpoint. The owning build's scheduler wake-up flag is
+    set in the same transaction so a reactive build observes the eviction
+    promptly (not just at the next watchdog sweep).
 
-    Auth: same pattern as other UI-facing mutations (build cancel etc.) —
-    API key or JWT + environment_id. The evicting identity is recorded in
-    the event metadata and error message.
+    **Only evict holders whose process you know is dead.** The server
+    cannot verify liveness — this endpoint rewrites the registry's view,
+    it does not stop anything. Evicting a task whose worker is actually
+    alive means: the cap is oversubscribed until that worker finishes; in
+    a FAIL_FAST reactive build the recorded TASK_FAILED fails the build
+    while the evicted worker keeps running — and because the task is now
+    FAILED (not RUNNING), the tick's cancellation pass will NOT cancel
+    that live execution; its eventual completion then flips the task
+    COMPLETED (sticky) after the build already failed. Coherent with
+    "targets are ground truth", but surprising if the eviction was meant
+    as a kill.
+
+    Auth: write access for workspace admins (JWT path) or any API key —
+    see ``_require_admin_for_user_auth``. The evicting identity is
+    recorded in the event metadata and error message.
     """
+    await _require_admin_for_user_auth(db, auth)
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     _raise_if_limit_exceeded(
         await check_entity_creation_limit(
@@ -306,6 +352,16 @@ async def evict_concurrency_limit_holder(
     db.add(event)
     await db.flush()
     apply_event_to_task(db_task, event)
+    # Wake the owning build's scheduler in the same transaction: a
+    # reactive build should observe the eviction on the next tick, not
+    # only at the next watchdog sweep (or never, with the watchdog off).
+    # Same semantics as POST /builds/{id}/notify — recording state, the
+    # tick spawn itself comes from workers/watchdog.
+    await db.execute(
+        update(Build)
+        .where(Build.id == db_task.latest_status_build_id)
+        .values(needs_tick_at=utc_now())
+    )
     await db.commit()
 
     record_entity_created(auth.workspace_id, "events")

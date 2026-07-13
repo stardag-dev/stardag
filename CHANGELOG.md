@@ -142,7 +142,8 @@ tick_settings=...)`. Current limitations (documented in
   `latest_executor_metadata` on task responses (detail, list rows,
   search results, build task rows, frontier refs, bulk-register refs)
   and `executor_metadata` on build responses. All additive/nullable —
-  older SDKs and servers are unaffected.
+  older SDKs and servers are unaffected. The metadata dict is capped at
+  2 KB (compact JSON, 422 above) on all ingest paths.
 - Concurrency-limits admin: new `GET /concurrency-limits/{key}/holders`
   (the RUNNING tasks currently counted against a key — task identity,
   running-since, executor fields; paginated via `limit`, oldest first)
@@ -152,7 +153,17 @@ tick_settings=...)`. Current limitations (documented in
   all its slots via the normal status transition; the evicting identity
   is recorded in the event). Closes the resident-mode slot-leak recovery
   gap: reactive builds self-heal leaked slots via scheduler ticks,
-  resident builds now have an admin path.
+  resident builds now have an admin path. Eviction also sets the owning
+  build's scheduler wake-up flag so reactive builds observe it promptly.
+- Concurrency-limit **writes are admin-gated on the user auth path**:
+  `PUT`/`DELETE /concurrency-limits/{key}` and the evict endpoint
+  require the workspace ADMIN role (or higher) when authenticated as a
+  user (JWT); API-key auth (machine credentials) keeps full access, and
+  reads (limit list, holders) stay member-level.
+- Fix: `GET /tasks`, `GET /tasks/{task_id}` and the task registration
+  responses now populate `is_phantom` (previously always the schema
+  default `false`, so placeholder rows were indistinguishable from real
+  tasks on these endpoints).
 - New `POST /builds/{id}/skip-blocked`: emits `TASK_SKIPPED` for
   pending/suspended tasks transitively downstream of a
   failed/cancelled/skipped task (recursive dependency-edge closure, one

@@ -512,20 +512,27 @@ STARDAG_MODAL_FUNCTION_NAME_ENV = "STARDAG_MODAL_FUNCTION_NAME"
 # broken token shouldn't re-pay the lookup timeout on every task).
 _MODAL_WORKSPACE_UNRESOLVED = object()
 _modal_workspace_cache: typing.Any = _MODAL_WORKSPACE_UNRESOLVED
+# Serialises cold-start lookups so a burst of concurrent starts performs
+# one network lookup instead of N parallel ones. Safe to share across
+# sequential event loops: it is never held across loop boundaries.
+_modal_workspace_lock = asyncio.Lock()
 
 
 async def _get_modal_workspace_aio() -> str | None:
     """Best-effort Modal workspace name for the configured token (cached)."""
     global _modal_workspace_cache
-    if _modal_workspace_cache is _MODAL_WORKSPACE_UNRESOLVED:
-        try:
-            _modal_workspace_cache = await _lookup_modal_workspace_aio()
-        except Exception as e:
-            # Cache the failure too: metadata is best-effort and a broken
-            # token / unreachable Modal API must neither raise into a task
-            # start nor re-pay the lookup timeout on every start.
-            _modal_workspace_cache = None
-            logger.debug(f"Modal workspace lookup failed (metadata omitted): {e}")
+    if _modal_workspace_cache is not _MODAL_WORKSPACE_UNRESOLVED:
+        return typing.cast("str | None", _modal_workspace_cache)
+    async with _modal_workspace_lock:
+        if _modal_workspace_cache is _MODAL_WORKSPACE_UNRESOLVED:
+            try:
+                _modal_workspace_cache = await _lookup_modal_workspace_aio()
+            except Exception as e:
+                # Cache the failure too: metadata is best-effort and a broken
+                # token / unreachable Modal API must neither raise into a task
+                # start nor re-pay the lookup timeout on every start.
+                _modal_workspace_cache = None
+                logger.debug(f"Modal workspace lookup failed (metadata omitted): {e}")
     return typing.cast("str | None", _modal_workspace_cache)
 
 
@@ -686,6 +693,38 @@ class ModalTaskExecutor(TaskExecutorABC):
             self._base_executor_metadata = metadata
         return self._base_executor_metadata
 
+    async def _metadata_for_worker(
+        self, worker_name: str
+    ) -> dict[str, typing.Any] | None:
+        """Base executor metadata + the worker's function name (best-effort)."""
+        try:
+            base_metadata = await self._get_base_executor_metadata()
+            if base_metadata is None:
+                return None
+            return {**base_metadata, "function_name": f"worker_{worker_name}"}
+        except Exception:
+            logger.debug("Failed to resolve Modal executor metadata", exc_info=True)
+            return None
+
+    async def get_executor_metadata(
+        self, task: BaseTask
+    ) -> dict[str, typing.Any] | None:
+        """Executor metadata for ``task`` without spawning anything.
+
+        Runs the worker selector (idempotent) to resolve the function
+        name — lets slot-acquiring TASK_STARTED events recorded before
+        the spawn carry the same metadata as the post-spawn start.
+        """
+        try:
+            worker_name, _ = _normalize_worker_selection(self.worker_selector(task))
+        except Exception:
+            logger.debug(
+                "Worker selection failed while resolving executor metadata",
+                exc_info=True,
+            )
+            return None
+        return await self._metadata_for_worker(worker_name)
+
     async def _prepare_invocation(
         self, task: BaseTask
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
@@ -701,16 +740,7 @@ class ModalTaskExecutor(TaskExecutorABC):
             self.worker_selector(task)
         )
         worker_function = self._get_worker_function(worker_name)
-        executor_metadata: dict[str, typing.Any] | None = None
-        try:
-            base_metadata = await self._get_base_executor_metadata()
-            if base_metadata is not None:
-                executor_metadata = {
-                    **base_metadata,
-                    "function_name": f"worker_{worker_name}",
-                }
-        except Exception:
-            logger.debug("Failed to resolve Modal executor metadata", exc_info=True)
+        executor_metadata = await self._metadata_for_worker(worker_name)
         if self.worker_reports_lifecycle:
             build_id = get_current_build_id()
             if build_id is not None:

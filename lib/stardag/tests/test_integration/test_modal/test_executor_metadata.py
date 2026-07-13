@@ -318,3 +318,64 @@ class TestWorkerReporterMetadata:
         )
         assert reporter.build_id == UUID(str(build_id))
         assert reporter.executor_metadata == {"kind": "modal"}
+
+
+class TestGetExecutorMetadata:
+    """`get_executor_metadata` resolves the same dict as a spawn would
+    record, without starting anything — used by reactive ticks to stamp
+    the slot-acquiring TASK_STARTED before the spawn."""
+
+    async def test_resolves_without_spawning(self):
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+
+        metadata = await executor.get_executor_metadata(_make_task())
+
+        assert metadata == {
+            **EXPECTED_BASE_METADATA,
+            "function_name": "worker_default",
+        }
+        assert worker.spawn_calls == []
+
+    async def test_selector_failure_returns_none(self):
+        def _boom_selector(task):
+            raise RuntimeError("selector blew up")
+
+        executor = ModalTaskExecutor(
+            modal_app_name="test-app", worker_selector=_boom_selector
+        )
+
+        assert await executor.get_executor_metadata(_make_task()) is None
+
+
+class TestWorkspaceLookupColdBurst:
+    async def test_parallel_cold_start_performs_one_lookup(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """Concurrent cold-start resolutions serialize on the module lock:
+        one network lookup, everyone gets the cached result."""
+        import asyncio
+
+        from stardag.integration.modal import _app as modal_app_module
+
+        real_get = hermetic_modal_executor_metadata["get_modal_workspace_aio"]
+        calls = {"n": 0}
+
+        async def _slow_lookup():
+            calls["n"] += 1
+            await asyncio.sleep(0.01)
+            return "burst-ws"
+
+        monkeypatch.setattr(
+            modal_app_module, "_lookup_modal_workspace_aio", _slow_lookup
+        )
+        monkeypatch.setattr(
+            modal_app_module,
+            "_modal_workspace_cache",
+            modal_app_module._MODAL_WORKSPACE_UNRESOLVED,
+        )
+
+        results = await asyncio.gather(*[real_get() for _ in range(10)])
+
+        assert results == ["burst-ws"] * 10
+        assert calls["n"] == 1

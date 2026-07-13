@@ -93,12 +93,34 @@ def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
 # --- Helpers ---
 
 
+# Size cap on the executor_metadata dict (compact-JSON byte size). It holds
+# executor identity fields only, and the blob is echoed on every task
+# list/search/frontier row — a small cap keeps abuse/mistakes from bloating
+# every read. Enforced consistently on the query-param paths (task start,
+# build resume) and the build-create body path.
+_MAX_EXECUTOR_METADATA_BYTES = 2048
+
+
+def _validate_executor_metadata_size(metadata: dict) -> None:
+    """Raise 422 when the metadata exceeds ``_MAX_EXECUTOR_METADATA_BYTES``."""
+    encoded = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > _MAX_EXECUTOR_METADATA_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"executor_metadata must be at most "
+                f"{_MAX_EXECUTOR_METADATA_BYTES} bytes as compact JSON "
+                f"(got {len(encoded)})"
+            ),
+        )
+
+
 def _parse_executor_metadata_param(raw: str | None) -> dict | None:
     """Parse the JSON-encoded ``executor_metadata`` query param.
 
     The task-start and build-resume endpoints have no request body, so the
     metadata dict rides as a JSON string query param (small — executor
-    identity fields only).
+    identity fields only; size-capped).
     """
     if raw is None:
         return None
@@ -112,6 +134,7 @@ def _parse_executor_metadata_param(raw: str | None) -> dict | None:
         raise HTTPException(
             status_code=422, detail="executor_metadata must be a JSON object"
         )
+    _validate_executor_metadata_size(parsed)
     return parsed
 
 
@@ -314,6 +337,10 @@ async def create_build(
             db, auth.workspace_id, "events", limits_settings
         )
     )
+
+    if build.executor_metadata is not None:
+        # Same cap as the query-param paths (task start / build resume).
+        _validate_executor_metadata_size(build.executor_metadata)
 
     # Generate memorable slug
     name = generate_build_slug()
@@ -853,6 +880,13 @@ async def resume_build(
 
     needs_commit = False
     if parsed_executor_metadata is not None:
+        # Replace the stored trigger metadata even on the no-activity path
+        # below, where no BUILD_RESUMED event is recorded (a fresh build
+        # attaching at its trigger-minted id isn't a "resume"). The column
+        # update is then invisible in the event log — accepted: the column
+        # is a descriptive denormalisation of "how is this build driven",
+        # not audited state, and the metadata does appear in the event log
+        # once real activity produces a BUILD_RESUMED.
         build.executor_metadata = parsed_executor_metadata
         needs_commit = True
 

@@ -2481,3 +2481,344 @@ async def test_limits_admin_requires_auth(unauthenticated_client: AsyncClient):
         "/api/v1/concurrency-limits/gpu/holders/some-task/evict"
     )
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Executor metadata size cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_executor_metadata_size_cap_all_paths(client: AsyncClient):
+    """Oversized executor_metadata (> 2 KB compact JSON) is a 422 on every
+    ingest path: task start (query param), build create (body), build
+    resume (query param)."""
+    oversized = {"kind": "modal", "blob": "x" * 3000}
+
+    # Build-create body path.
+    response = await client.post(
+        "/api/v1/builds", json={"executor_metadata": oversized}
+    )
+    assert response.status_code == 422
+    assert "executor_metadata" in str(response.json()["detail"])
+
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("cap-t")
+    )
+
+    # Task-start query-param path.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/cap-t/start",
+        params={"executor_metadata": _metadata_param(oversized)},
+    )
+    assert response.status_code == 422
+
+    # Build-resume query-param path.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/resume",
+        params={"executor_metadata": _metadata_param(oversized)},
+    )
+    assert response.status_code == 422
+
+    # A dict within the cap passes on all three paths.
+    ok = dict(_MODAL_METADATA)
+    assert (
+        await client.post("/api/v1/builds", json={"executor_metadata": ok})
+    ).status_code == 201
+    assert (
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks/cap-t/start",
+            params={"executor_metadata": _metadata_param(ok)},
+        )
+    ).status_code == 200
+    assert (
+        await client.post(
+            f"/api/v1/builds/{build_id}/resume",
+            params={"executor_metadata": _metadata_param(ok)},
+        )
+    ).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Evict: build wake-up, evicted-then-completes, tenancy, admin gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_evict_sets_owning_build_needs_tick(client: AsyncClient):
+    """Eviction sets the owning build's scheduler wake-up flag in the same
+    transaction, so a reactive build observes it on the next tick instead
+    of the next watchdog sweep."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "wake-ev", ["wake"])
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["needs_tick"] is False
+
+    response = await client.post(
+        "/api/v1/concurrency-limits/wake/holders/wake-ev/evict"
+    )
+    assert response.status_code == 200
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["needs_tick"] is True
+
+
+@pytest.mark.asyncio
+async def test_evicted_then_worker_completes_sticky_completed(client: AsyncClient):
+    """Evicting a holder whose worker is actually alive: the worker's later
+    TASK_COMPLETED flips the task COMPLETED (sticky) — the documented
+    consequence of evicting a live execution."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "alive-ev", ["alive"])
+
+    response = await client.post(
+        "/api/v1/concurrency-limits/alive/holders/alive-ev/evict"
+    )
+    assert response.json() == {"task_id": "alive-ev", "status": "failed"}
+
+    # The (still-alive) worker reports completion afterwards.
+    response = await client.post(f"/api/v1/builds/{build_id}/tasks/alive-ev/complete")
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+    # Sticky-completed wins over the eviction failure and stays.
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["status_counts"] == {"completed": 1}
+    # Completed → not a holder either.
+    holders = (await client.get("/api/v1/concurrency-limits/alive/holders")).json()
+    assert holders["holders"] == []
+
+
+@pytest.fixture
+async def as_environment_b(async_engine):
+    """Context manager switching the app's auth override to a SECOND
+    environment in the same workspace (the tenancy boundary for
+    tasks/limits is the environment)."""
+    import contextlib
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from stardag_api.auth import SdkAuth, require_sdk_auth
+    from stardag_api.main import app
+    from stardag_api.models import Environment, User
+    from tests.conftest import DEFAULT_USER_ID, DEFAULT_WORKSPACE_ID
+
+    env_b_id = UUID("00000000-0000-0000-0000-00000000000b")
+    session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        session.add(
+            Environment(
+                id=env_b_id,
+                workspace_id=DEFAULT_WORKSPACE_ID,
+                name="Environment B",
+                slug="env-b",
+            )
+        )
+        await session.commit()
+
+    auth_b = SdkAuth(
+        environment=Environment(
+            id=env_b_id, workspace_id=DEFAULT_WORKSPACE_ID, name="Environment B"
+        ),
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user=User(
+            id=DEFAULT_USER_ID,
+            external_id="default-local-user",
+            email="default@localhost",
+            display_name="Default User",
+        ),
+    )
+
+    async def override_require_sdk_auth_b() -> SdkAuth:
+        return auth_b
+
+    @contextlib.contextmanager
+    def _switch():
+        previous = app.dependency_overrides[require_sdk_auth]
+        app.dependency_overrides[require_sdk_auth] = override_require_sdk_auth_b
+        try:
+            yield
+        finally:
+            app.dependency_overrides[require_sdk_auth] = previous
+
+    return _switch
+
+
+@pytest.mark.asyncio
+async def test_holders_and_evict_environment_isolation(
+    client: AsyncClient, as_environment_b
+):
+    """Holders and evict are environment-scoped: another environment's auth
+    (same workspace, same user) sees no holders for the key and cannot
+    evict them."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "iso-holder", ["iso"])
+
+    holders = (await client.get("/api/v1/concurrency-limits/iso/holders")).json()
+    assert [h["task_id"] for h in holders["holders"]] == ["iso-holder"]
+
+    with as_environment_b():
+        holders_b = (await client.get("/api/v1/concurrency-limits/iso/holders")).json()
+        assert holders_b == {"key": "iso", "holders": [], "total": 0}
+        response = await client.post(
+            "/api/v1/concurrency-limits/iso/holders/iso-holder/evict"
+        )
+        assert response.status_code == 404
+
+    # The holder in the original environment is untouched.
+    holders = (await client.get("/api/v1/concurrency-limits/iso/holders")).json()
+    assert [h["task_id"] for h in holders["holders"]] == ["iso-holder"]
+    assert (await client.get("/api/v1/tasks/iso-holder")).json()[
+        "latest_executor"
+    ] == "modal"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency-limit writes: admin gate on the user (JWT) auth path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def limits_auth_switcher(async_engine):
+    """Context-manager factory switching the app's auth override between a
+    MEMBER-role user and an API-key (machine) credential in the default
+    environment. The default ``client`` auth (OWNER-role user) is restored
+    on exit."""
+    import contextlib
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from stardag_api.auth import SdkAuth, require_sdk_auth
+    from stardag_api.main import app
+    from stardag_api.models import Environment, User, WorkspaceMember
+    from stardag_api.models.enums import WorkspaceRole
+    from tests.conftest import DEFAULT_ENVIRONMENT_ID, DEFAULT_WORKSPACE_ID
+
+    member_user_id = UUID("00000000-0000-0000-0000-0000000000ae")
+    session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+    async with session_maker() as session:
+        session.add(
+            User(
+                id=member_user_id,
+                external_id="member-user",
+                email="member@localhost",
+                display_name="Member User",
+            )
+        )
+        session.add(
+            WorkspaceMember(
+                workspace_id=DEFAULT_WORKSPACE_ID,
+                user_id=member_user_id,
+                role=WorkspaceRole.MEMBER,
+            )
+        )
+        await session.commit()
+
+    environment = Environment(
+        id=DEFAULT_ENVIRONMENT_ID,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        name="Default Environment",
+    )
+    member_auth = SdkAuth(
+        environment=environment,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user=User(
+            id=member_user_id,
+            external_id="member-user",
+            email="member@localhost",
+            display_name="Member User",
+        ),
+    )
+    # API-key auth context: no user attached (machine credential).
+    api_key_auth = SdkAuth(
+        environment=environment,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        user=None,
+    )
+
+    @contextlib.contextmanager
+    def _as(auth: SdkAuth):
+        async def _override() -> SdkAuth:
+            return auth
+
+        previous = app.dependency_overrides[require_sdk_auth]
+        app.dependency_overrides[require_sdk_auth] = _override
+        try:
+            yield
+        finally:
+            app.dependency_overrides[require_sdk_auth] = previous
+
+    return {"member": lambda: _as(member_auth), "api_key": lambda: _as(api_key_auth)}
+
+
+@pytest.mark.asyncio
+async def test_limit_writes_admin_gated_for_users(
+    client: AsyncClient, limits_auth_switcher
+):
+    """PUT/DELETE /concurrency-limits/{key} and evict require the workspace
+    ADMIN role on the user (JWT) auth path; reads stay member-level."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "gate-holder", ["gate"])
+
+    # Admin (default client user is workspace OWNER): all writes allowed.
+    assert (
+        await client.put("/api/v1/concurrency-limits/gate", json={"max_concurrent": 2})
+    ).status_code == 200
+
+    with limits_auth_switcher["member"]():
+        # Reads stay member-level.
+        assert (await client.get("/api/v1/concurrency-limits")).status_code == 200
+        holders = await client.get("/api/v1/concurrency-limits/gate/holders")
+        assert holders.status_code == 200
+        # Writes are 403 for members.
+        response = await client.put(
+            "/api/v1/concurrency-limits/gate", json={"max_concurrent": 3}
+        )
+        assert response.status_code == 403
+        assert "admin" in response.json()["detail"].lower()
+        assert (
+            await client.delete("/api/v1/concurrency-limits/gate")
+        ).status_code == 403
+        assert (
+            await client.post(
+                "/api/v1/concurrency-limits/gate/holders/gate-holder/evict"
+            )
+        ).status_code == 403
+
+    # Member 403s changed nothing.
+    limits = (await client.get("/api/v1/concurrency-limits")).json()["limits"]
+    assert limits == [{"key": "gate", "max_concurrent": 2}]
+
+    # API-key auth (machine credential): full access.
+    with limits_auth_switcher["api_key"]():
+        assert (
+            await client.put(
+                "/api/v1/concurrency-limits/gate", json={"max_concurrent": 5}
+            )
+        ).status_code == 200
+        assert (
+            await client.post(
+                "/api/v1/concurrency-limits/gate/holders/gate-holder/evict"
+            )
+        ).status_code == 200
+        assert (
+            await client.delete("/api/v1/concurrency-limits/gate")
+        ).status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_evict_admin_allowed_and_records_admin_identity(client: AsyncClient):
+    """The default (OWNER) user can evict — pinned separately so the admin
+    gate can't silently lock admins out."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await _start_holder(client, build_id, "admin-ev", ["adm"])
+
+    response = await client.post(
+        "/api/v1/concurrency-limits/adm/holders/admin-ev/evict"
+    )
+    assert response.status_code == 200
+    assert response.json() == {"task_id": "admin-ev", "status": "failed"}

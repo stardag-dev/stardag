@@ -18,6 +18,37 @@ if TYPE_CHECKING:
     from stardag.artifact import Artifact
 
 
+def _compute_param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
+    """(parameter names, accepts **kwargs) of ``fn``, or None if uninspectable."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    params = signature.parameters
+    has_var_keyword = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return frozenset(params), has_var_keyword
+
+
+@lru_cache(maxsize=256)
+def _cached_param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
+    return _compute_param_info(fn)
+
+
+def _param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
+    """Cached signature reflection for the accepts_* helpers.
+
+    Bound methods hash by (instance, function), so repeated lookups on the
+    same registry hit the cache. Unhashable callables fall back to direct
+    computation.
+    """
+    try:
+        return _cached_param_info(fn)
+    except TypeError:
+        return _compute_param_info(fn)
+
+
 def accepts_executor_kwargs(fn: Any) -> bool:
     """Whether a ``task_start[_aio]`` implementation accepts the
     ``executor``/``executor_ref`` kwargs.
@@ -27,14 +58,11 @@ def accepts_executor_kwargs(fn: Any) -> bool:
     to stay compatible with custom :class:`RegistryABC` implementations
     written against the pre-detached ``(build_id, task)`` signature.
     """
-    try:
-        signature = inspect.signature(fn)
-    except (TypeError, ValueError):
+    info = _param_info(fn)
+    if info is None:
         return False
-    params = signature.parameters
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    return "executor" in params and "executor_ref" in params
+    params, has_var_keyword = info
+    return has_var_keyword or ("executor" in params and "executor_ref" in params)
 
 
 def accepts_executor_metadata_kwarg(fn: Any) -> bool:
@@ -44,14 +72,11 @@ def accepts_executor_metadata_kwarg(fn: Any) -> bool:
     custom implementations written before the kwarg existed must keep
     working — callers drop the metadata for those instead of raising.
     """
-    try:
-        signature = inspect.signature(fn)
-    except (TypeError, ValueError):
+    info = _param_info(fn)
+    if info is None:
         return False
-    params = signature.parameters
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    return "executor_metadata" in params
+    params, has_var_keyword = info
+    return has_var_keyword or "executor_metadata" in params
 
 
 class FrontierTaskRef(StardagBaseModel):
