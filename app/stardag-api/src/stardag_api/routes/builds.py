@@ -968,7 +968,20 @@ async def skip_blocked_tasks(
         .scalar_subquery()
     )
 
-    # Transitive closure downward from terminal-blocking seeds.
+    # Transitive closure downward from terminal-blocking seeds. Blockage
+    # only propagates through nodes that will themselves never complete:
+    # the seeds (failed/cancelled/skipped) and pending/suspended nodes
+    # (which this call turns skipped). A COMPLETED intermediate satisfies
+    # its downstream regardless of its own upstreams (mirroring the
+    # resident engine, which only propagates skips through tasks that
+    # themselves become skipped); RUNNING intermediates may still complete.
+    _propagating_statuses = [
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.SKIPPED,
+        TaskStatus.PENDING,
+        TaskStatus.SUSPENDED,
+    ]
     seeds = (
         select(Task.id)
         .where(
@@ -979,8 +992,11 @@ async def skip_blocked_tasks(
         )
         .cte("blocked_closure", recursive=True)
     )
-    downstream = select(TaskDependency.downstream_task_id.label("id")).join(
-        seeds, TaskDependency.upstream_task_id == seeds.c.id
+    downstream = (
+        select(TaskDependency.downstream_task_id.label("id"))
+        .join(seeds, TaskDependency.upstream_task_id == seeds.c.id)
+        .join(Task, Task.id == seeds.c.id)
+        .where(Task.latest_status.in_(_propagating_statuses))
     )
     closure = seeds.union(downstream)
 
@@ -993,6 +1009,10 @@ async def skip_blocked_tasks(
                     Task.id.in_(build_task_pks),
                     Task.latest_status.in_([TaskStatus.PENDING, TaskStatus.SUSPENDED]),
                 )
+                # Deterministic lock order (matching bulk-register's
+                # task_id ordering) so concurrent skip-blocked calls or
+                # skip-blocked vs bulk-register can't deadlock.
+                .order_by(Task.task_id.asc())
                 .with_for_update()
             )
         )

@@ -173,6 +173,11 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("add_roots", ",".join(root_task_ids)))
         self.root_task_ids += [t for t in root_task_ids if t not in self.root_task_ids]
 
+    async def task_cancel_aio(self, build_id, task):
+        tid = str(task.id)
+        self.calls.append(("cancel", tid))
+        self.statuses[tid] = "cancelled"
+
     async def task_fail_aio(self, build_id, task, error_message=None):
         tid = str(task.id)
         self.calls.append(("fail", tid))
@@ -195,11 +200,17 @@ class FakeReactiveRegistry(NoOpRegistry):
             for tid, status in self.statuses.items()
             if status in ("failed", "cancelled", "skipped")
         }
+        # Blockage only propagates through nodes that will themselves never
+        # complete (mirrors the API's CTE gate): a completed intermediate
+        # satisfies its downstream; a running one may still complete.
+        propagating = ("failed", "cancelled", "skipped", "pending", "suspended")
         changed = True
         while changed:
             changed = False
             for tid, ups in self.upstreams.items():
-                if tid not in blocked and ups & blocked:
+                if tid not in blocked and any(
+                    up in blocked and self.statuses.get(up) in propagating for up in ups
+                ):
                     blocked.add(tid)
                     changed = True
         skipped = []
@@ -1012,6 +1023,44 @@ class TestSkipBlockedOnFailure:
         assert summary.terminal_status == "failed"
         assert summary.skipped == 2
         assert registry.statuses[str(mid.id)] == "skipped"
+        assert registry.statuses[str(root.id)] == "skipped"
+
+    async def test_cancelled_branch_descendants_also_skipped(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """FAIL_FAST with a second, still-running branch: the cancel pass
+        records TASK_CANCELLED (a cancelled task must not dangle RUNNING —
+        workers killed by the executor's cancel can't self-report), so the
+        cancelled branch's descendants land in the skip closure too."""
+        bad = SyncOnlyTask(name="cb-bad")
+        long_running = SyncOnlyTask(name="cb-running")
+        downstream = SyncOnlyTask(name="cb-downstream", deps=(long_running,))
+        root = SyncOnlyTask(name="cb-root", deps=(bad, downstream))
+        registry, locks, executor, store = _setup(
+            [bad, long_running, downstream, root], auto_complete=False
+        )
+        registry.add_task(str(bad.id), status="failed")
+        registry.add_task(
+            str(long_running.id),
+            status="running",
+            executor="fake",
+            executor_ref="ref-live",
+        )
+        store.save_task(long_running)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,  # FAIL_FAST default
+        )
+
+        assert summary.terminal_status == "failed"
+        assert executor.cancelled_refs == ["ref-live"]
+        assert registry.statuses[str(long_running.id)] == "cancelled"
+        assert registry.statuses[str(downstream.id)] == "skipped"
         assert registry.statuses[str(root.id)] == "skipped"
 
     async def test_blocked_terminal_in_continue_mode_also_skips(

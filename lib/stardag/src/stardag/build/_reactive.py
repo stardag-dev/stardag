@@ -496,7 +496,7 @@ async def _handle_terminal(
         if frontier.build_status == "cancelled":
             # Cancelled externally (e.g. UI): stop the running work.
             await _cancel_running(
-                frontier, build_id, task_executor, task_store, summary
+                frontier, build_id, registry, task_executor, task_store, summary
             )
         return frontier.build_status
 
@@ -505,7 +505,9 @@ async def _handle_terminal(
     failed = counts.get("failed", 0)
 
     if failed > 0 and config.fail_mode == FailMode.FAIL_FAST:
-        await _cancel_running(frontier, build_id, task_executor, task_store, summary)
+        await _cancel_running(
+            frontier, build_id, registry, task_executor, task_store, summary
+        )
         await _skip_blocked(registry, build_id, summary)
         await registry.build_fail_aio(
             build_id, f"{failed} task(s) failed (fail_mode=FAIL_FAST)"
@@ -571,6 +573,7 @@ async def _skip_blocked(
 async def _cancel_running(
     frontier: BuildFrontier,
     build_id: UUID,
+    registry: RegistryABC,
     task_executor: TaskExecutorABC,
     task_store: BuildTaskStore,
     summary: TickSummary,
@@ -581,6 +584,13 @@ async def _cancel_running(
     dynamic-dep registration window drops out of ``actionable`` but must
     still be cancelled. Falls back to ``actionable`` for servers predating
     the field.
+
+    Each successfully cancelled execution is also recorded as
+    TASK_CANCELLED (best-effort): a worker killed by the executor's cancel
+    can't reliably self-report, and without the event the task dangles
+    RUNNING — keeping its pending descendants out of the skip-blocked
+    closure (cancelled is a seed status) and holding any concurrency-limit
+    slots forever.
     """
     running_items = frontier.running or [
         item for item in frontier.actionable if item.latest_status in _RUNNING_STATUSES
@@ -603,4 +613,11 @@ async def _cancel_running(
                 logger.warning(
                     f"Failed to cancel detached execution "
                     f"{item.latest_executor_ref!r} for task {item.task_id}: {e}"
+                )
+                continue
+            try:
+                await registry.task_cancel_aio(build_id, task)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to record cancellation of task {item.task_id}: {e}"
                 )
