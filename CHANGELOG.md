@@ -4,6 +4,30 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **Fix: reactive Modal scheduling crashed in fresh containers.** A
+  `resource_provider` (e.g. `registry_provider`) captured by a
+  `serialized=True` Modal function is cloudpickled by value; its unset
+  sentinel is a bare `object()` whose identity does not survive pickling,
+  so a deserialized provider returned that bare `object()` from `get()`.
+  In a deployed app this crashed the reactive scheduler `tick` and the
+  scheduled `tick_watchdog` (which runs cold, with no build) with
+  `AttributeError: 'object' object has no attribute 'build_list_running'`.
+  Providers now serialize without their live resource and re-initialize
+  lazily in the new process (`ResourceProvider.__getstate__`/`__setstate__`).
+- **`StardagApp` propagates the builder's secrets to workers and the
+  tick/watchdog.** Since worker-side lifecycle reporting, every deployed
+  function talks to the registry, so all of them need registry
+  credentials — but the secret is naturally declared only on the builder.
+  `finalize()` now applies the builder's declared secrets to the worker
+  functions and the tick/watchdog, de-duplicated by name (a function that
+  also declares the same secret still gets it once). Previously workers
+  `401`ed on their self-reported lifecycle events unless the secret was
+  repeated on every worker.
+
 ## [0.10.0] — 2026-07-13
 
 Modal as a first-class execution layer. A large, fully backward-compatible

@@ -793,6 +793,73 @@ class TestStardagAppReactiveTrigger:
                 )
 
 
+class TestBuilderSecretPropagation:
+    """The builder's declared secrets (e.g. registry credentials) must
+    reach the workers and the tick/watchdog — every function talks to the
+    registry since worker-side lifecycle reporting."""
+
+    def _finalize_capturing(self, builder_secrets, worker_secrets=None, **app_kwargs):
+        builder = FunctionSettings(image=_make_image(), secrets=builder_secrets)
+        worker = FunctionSettings(image=_make_image())
+        if worker_secrets is not None:
+            worker = FunctionSettings(image=_make_image(), secrets=worker_secrets)
+        app = StardagApp(
+            "test-secret-propagation",
+            builder_settings=builder,
+            worker_settings={"default": worker},
+            **app_kwargs,
+        )
+        registered: dict = {}
+
+        def capture_function(**kwargs):
+            def decorator(fn):
+                registered[kwargs.get("name", "unknown")] = kwargs
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        with patch(
+            "stardag.integration.modal._app.get_target_roots_volumes"
+        ) as mock_volumes:
+            mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+            app.finalize()
+        return registered
+
+    @staticmethod
+    def _secret_names(kwargs) -> list[str | None]:
+        return [getattr(s, "name", None) for s in (kwargs.get("secrets") or [])]
+
+    def test_builder_secret_reaches_workers_and_tick(self):
+        import modal
+
+        reg = modal.Secret.from_name("stardag-api-key")
+        registered = self._finalize_capturing([reg], watchdog_period_minutes=5)
+        for fn in ("build", "worker_default", "tick", "tick_watchdog"):
+            assert "stardag-api-key" in self._secret_names(registered[fn]), fn
+
+    def test_propagated_secret_deduped_when_worker_also_declares_it(self):
+        import modal
+
+        registered = self._finalize_capturing(
+            [modal.Secret.from_name("stardag-api-key")],
+            worker_secrets=[modal.Secret.from_name("stardag-api-key")],
+        )
+        names = self._secret_names(registered["worker_default"])
+        assert names.count("stardag-api-key") == 1
+
+    def test_worker_keeps_its_own_extra_secret(self):
+        import modal
+
+        registered = self._finalize_capturing(
+            [modal.Secret.from_name("stardag-api-key")],
+            worker_secrets=[modal.Secret.from_name("gpu-creds")],
+        )
+        names = self._secret_names(registered["worker_default"])
+        assert "stardag-api-key" in names  # propagated
+        assert "gpu-creds" in names  # own
+
+
 class TestFinalizeRegistersTick:
     def _capture_app(self, **app_kwargs):
         app = StardagApp(
