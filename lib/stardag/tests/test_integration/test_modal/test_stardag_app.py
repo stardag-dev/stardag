@@ -1052,7 +1052,7 @@ class TestReactiveRetrigger:
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
 
-    def test_retrigger_resumes_appends_roots_and_merges_meta(
+    def test_retrigger_resumes_and_appends_roots_via_registry(
         self, modal_function_stub, default_in_memory_fs_target
     ):
         from stardag.build import BuildTaskStore
@@ -1095,12 +1095,19 @@ class TestReactiveRetrigger:
 
         assert registry.build_resume.call_count == 1
         assert registry.build_resume.call_args.args == (build_id,)
+        # The new root is appended in the REGISTRY (source of truth for the
+        # scheduler frontier) — not by rewriting the store.
         registry.build_add_roots.assert_called_once_with(build_id, [str(new_root.id)])
+        # The store marker is written once, at the first trigger, and NOT
+        # rewritten on re-trigger (target roots may be immutable). It carries
+        # the reactive flag + owning app + the first trigger's tick_kwargs;
+        # roots are deliberately not stored (they live in the registry).
         meta = BuildTaskStore(build_id).read_meta()
         assert meta is not None
-        # Roots unioned; tick_kwargs preserved from the original trigger.
-        assert meta["root_task_ids"] == [str(original_root.id), str(new_root.id)]
+        assert meta["reactive"] is True
+        assert meta["app_name"] == app.name
         assert meta["tick_kwargs"] == {"fail_mode": "continue"}
+        assert "root_task_ids" not in meta
 
 
 class TestWatchdogSweep:

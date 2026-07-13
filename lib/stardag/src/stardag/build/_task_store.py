@@ -71,7 +71,16 @@ class BuildTaskStore:
     # --- task pickles ---
 
     def save_task(self, task: BaseTask) -> None:
-        with self._target(f"tasks/{task.id}.pkl").open("wb") as handle:
+        # Write-once: a task id maps to one immutable object, so an existing
+        # pickle is already correct — skip it. This keeps the store
+        # compatible with immutable/append-only target roots and lets
+        # re-triggers re-persist a DAG without overwriting (a stale pickle
+        # from a redeployed app is handled by the registry-rehydration
+        # fallback, not by overwriting here).
+        target = self._target(f"tasks/{task.id}.pkl")
+        if target.exists():
+            return
+        with target.open("wb") as handle:
             handle.write(pickle.dumps(task))
 
     def save_tasks(self, tasks: typing.Iterable[BaseTask]) -> None:
