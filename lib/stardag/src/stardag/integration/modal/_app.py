@@ -264,6 +264,25 @@ class FinalizeResult(typing.NamedTuple):
 # --- Function settings ---
 
 
+def _dedupe_secrets(secrets: list[modal.Secret]) -> list[modal.Secret]:
+    """De-duplicate Modal secrets by name, preserving order.
+
+    Named secrets (``Secret.from_name``) dedupe by name so a secret
+    propagated from the builder to a worker that also declares it is applied
+    once. Secrets without a usable name (e.g. ``Secret.from_dict``) fall back
+    to object identity.
+    """
+    seen: set[str | int] = set()
+    result: list[modal.Secret] = []
+    for secret in secrets:
+        key: str | int = getattr(secret, "name", None) or id(secret)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(secret)
+    return result
+
+
 def _run_watchdog_sweep(
     registry: typing.Any,
     tick: typing.Callable[..., typing.Any],
@@ -1778,12 +1797,14 @@ class StardagApp:
 
         Auto-mounted volumes are merged with user volumes, where user-specified
         volumes at the same mount path take precedence over auto-mounted ones.
+        Secrets are de-duplicated by name (a named secret propagated from the
+        builder plus one the function already declares should apply once).
         """
         result: dict[str, typing.Any] = dict(settings)
 
-        # Merge secrets: existing + extra
+        # Merge secrets: existing + extra, de-duplicated by name.
         existing_secrets: list[modal.Secret] = list(result.get("secrets") or [])
-        result["secrets"] = existing_secrets + extra_secrets
+        result["secrets"] = _dedupe_secrets(existing_secrets + extra_secrets)
 
         # Merge volumes: auto-mounted (lower priority) + user (higher priority)
         user_volumes = dict(result.get("volumes") or {})
@@ -1892,11 +1913,21 @@ class StardagApp:
 
         function_names = ["build"]
 
+        # Registry credentials (and any other secrets) declared on the
+        # builder are propagated to the workers and the tick/watchdog:
+        # since worker-side lifecycle reporting, every function talks to the
+        # registry, so declaring the secret once on the builder is enough.
+        # De-duplication (by name, in _prepare_function_settings) means a
+        # function that also declares the same secret still gets it once.
+        builder_secrets: list[modal.Secret] = list(
+            self._builder_settings.get("secrets") or []
+        )
+
         # Create worker functions
         for worker_name, settings in self._worker_settings.items():
             worker_settings = self._prepare_function_settings(
                 settings,
-                extra_secrets=extra_secrets,
+                extra_secrets=extra_secrets + builder_secrets,
                 auto_volumes=auto_volumes,
             )
 
@@ -2005,7 +2036,11 @@ class StardagApp:
 
         tick_settings = self._prepare_function_settings(
             self._tick_settings or self._builder_settings,
-            extra_secrets=extra_secrets,
+            # Propagate the builder's secrets here too, so custom
+            # tick_settings (which would otherwise not inherit them) still
+            # get registry credentials. Deduped when tick falls back to
+            # builder_settings.
+            extra_secrets=extra_secrets + builder_secrets,
             auto_volumes=auto_volumes,
         )
         self.modal_app.function(
@@ -2295,22 +2330,22 @@ class StardagApp:
         )
         store = BuildTaskStore(build_id)
         store.save_tasks(discovery.incomplete.values())
-        existing_meta = (store.read_meta() or {}) if is_retrigger else {}
-        merged_root_ids = list(
-            dict.fromkeys([*existing_meta.get("root_task_ids", []), *root_ids])
-        )
-        store.write_meta(
-            {
-                "reactive": True,
-                "app_name": self.name,
-                "root_task_ids": merged_root_ids,
-                "tick_kwargs": (
-                    tick_kwargs
-                    if tick_kwargs is not None
-                    else existing_meta.get("tick_kwargs") or {}
-                ),
-            }
-        )
+        # Write the reactive marker/config exactly once, at the first
+        # trigger. The store lives on a target root that may be immutable,
+        # so we never rewrite it: build roots are tracked in the registry
+        # (build_add_roots above — the scheduler reads them from the
+        # frontier, never from the store), so a re-trigger needs no store
+        # mutation. NOTE: this means tick_kwargs are fixed at first
+        # trigger; changing scheduling config on re-trigger is not
+        # supported until build metadata moves to the registry.
+        if store.read_meta() is None:
+            store.write_meta(
+                {
+                    "reactive": True,
+                    "app_name": self.name,
+                    "tick_kwargs": tick_kwargs or {},
+                }
+            )
         tick_function = modal.Function.from_name(app_name=self.name, name="tick")
         function_call = tick_function.spawn(build_id=str(build_id))
         return BuildTriggerResult(build_id=build_id, function_call=function_call)

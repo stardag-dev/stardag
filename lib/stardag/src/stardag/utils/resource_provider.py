@@ -38,6 +38,27 @@ class ResourceProvider(Generic[_ResourceType]):
     def clear(self):
         self._resource = _ResourceUnset  # type: ignore
 
+    def __getstate__(self) -> dict:
+        # A provider is a process-local handle: its resource (a registry
+        # client, config, target factory, ...) must not travel across a
+        # process/pickle boundary. This matters most when a provider is
+        # captured by a cloudpickled function — e.g. a ``serialized=True``
+        # Modal function that references ``registry_provider`` — and
+        # deserialized in a fresh container. Serialize *without* the live
+        # resource so it re-initializes lazily from the new process's own
+        # environment/config.
+        state = self.__dict__.copy()
+        state.pop("_resource", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        # Bind to THIS process's sentinel so ``get()``'s identity check
+        # treats the resource as unset. (A pickled ``object()`` sentinel
+        # deserializes to a *distinct* object, so carrying it across would
+        # make ``get()`` return the bare sentinel instead of the resource.)
+        self._resource = _ResourceUnset  # type: ignore
+
     def default_factory(self, **kwargs) -> _ResourceType:
         """Needs to be implemented by subclasses.
 

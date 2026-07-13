@@ -6,6 +6,27 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.10.1 — Modal reactive scheduling bug fixes
+
+A bug-fix release for reactive Modal scheduling (shipped in 0.10.0).
+**SDK-only — no API change, no migration, no server upgrade.** Run
+`pip install -U stardag` and **redeploy your Modal app** so its image
+picks up the fixes.
+
+- **Reactive ticks / watchdog no longer crash in fresh containers.** A
+  resource provider captured by a serialized Modal function (e.g. the
+  scheduler `tick` / `tick_watchdog`) now re-initializes correctly in the
+  container instead of returning an uninitialized sentinel.
+- **Registry credentials propagate from the builder to the workers and
+  tick/watchdog.** Declare the `stardag-api-key` secret once on
+  `builder_settings`; workers no longer `401` on their self-reported
+  lifecycle events. (Add it per-worker only if you must stay on ≤ 0.10.0.)
+- **Re-triggering a reactive build (add-roots / retry) no longer fails on
+  a no-overwrite / immutable target root.** The per-build task store is
+  write-once; build roots are tracked solely in the registry.
+
+---
+
 ## v0.10.0 — Modal as a first-class execution layer
 
 A large feature release that makes Modal a first-class execution layer:
