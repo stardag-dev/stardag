@@ -73,6 +73,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.statuses: dict[str, str] = {}
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
+        self.start_metadata: dict[str, dict | None] = {}
         self.needs_tick = False
         self.build_status = "running"
         self.calls: list[tuple[str, str | None]] = []
@@ -125,18 +126,27 @@ class FakeReactiveRegistry(NoOpRegistry):
             )
         return infos
 
-    async def task_start_aio(self, build_id, task, executor=None, executor_ref=None):
+    async def task_start_aio(
+        self, build_id, task, executor=None, executor_ref=None, executor_metadata=None
+    ):
         tid = str(task.id)
         self.calls.append(("start", tid))
         self.statuses[tid] = "running"
         self.refs[tid] = (executor, executor_ref)
+        self.start_metadata[tid] = executor_metadata
         if self.auto_complete:
             # Instant worker: completes and wakes the scheduler.
             self.statuses[tid] = "completed"
             self.needs_tick = True
 
     async def task_start_with_limits_aio(
-        self, build_id, task, executor=None, executor_ref=None, limit_keys=None
+        self,
+        build_id,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
+        limit_keys=None,
     ):
         # Mirrors the API's semantics: count running holders per key against
         # configured caps (self.limits); all-or-nothing acquisition.
@@ -156,7 +166,11 @@ class FakeReactiveRegistry(NoOpRegistry):
                 return False
         self.task_limit_keys[str(task.id)] = set(limit_keys or [])
         await self.task_start_aio(
-            build_id, task, executor=executor, executor_ref=executor_ref
+            build_id,
+            task,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
         )
         return True
 
@@ -1196,3 +1210,72 @@ class TestRehydrationFallback:
 
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
+
+
+class TestExecutorMetadataRecording:
+    """The post-spawn ref-recording start carries the handle's
+    executor_metadata (and drops it for pre-metadata registries)."""
+
+    class MetadataTickExecutor(FakeTickExecutor):
+        METADATA = {"kind": "modal", "app_name": "tick-app"}
+
+        async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+            handle = await super().submit_detached(task)
+            return DetachedHandle(
+                executor=handle.executor,
+                ref=handle.ref,
+                wait=handle.wait,
+                executor_metadata=self.METADATA,
+            )
+
+    async def test_post_spawn_start_carries_handle_metadata(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        (root,) = _chain("meta-root")
+        registry, locks, _, store = _setup([root])
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=self.MetadataTickExecutor(),
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.spawned == 1
+        assert registry.start_metadata[str(root.id)] == (
+            self.MetadataTickExecutor.METADATA
+        )
+
+    async def test_metadata_dropped_for_pre_metadata_registry(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A registry whose task_start_aio predates the executor_metadata
+        kwarg still gets the ref-recording start — no TypeError."""
+
+        class PreMetadataRegistry(FakeReactiveRegistry):
+            async def task_start_aio(  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
+                self, build_id, task, executor=None, executor_ref=None
+            ):
+                await super().task_start_aio(
+                    build_id, task, executor=executor, executor_ref=executor_ref
+                )
+
+        (root,) = _chain("meta-legacy-root")
+        registry = PreMetadataRegistry(root_task_ids=[str(root.id)], auto_complete=True)
+        registry.add_task(str(root.id))
+        store = InMemoryTaskStore(uuid4())
+        store.save_tasks([root])
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=self.MetadataTickExecutor(),
+            lock_manager=_lock_manager(),
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.outcome == "terminal"
+        assert registry.refs[str(root.id)] == ("fake", "ref-1")

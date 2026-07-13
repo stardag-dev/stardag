@@ -58,6 +58,7 @@ from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError
 from stardag.registry._api_registry import _is_route_not_found
 from stardag.registry import BuildFrontier, FrontierTaskRef, RegistryABC
+from stardag.registry._base import accepts_executor_metadata_kwarg
 
 logger = logging.getLogger(__name__)
 
@@ -473,9 +474,20 @@ async def _act_on_frontier(
             summary.failed_recorded += 1
             acted = True
             continue
-        await registry.task_start_aio(
-            build_id, task, executor=handle.executor, executor_ref=handle.ref
-        )
+        if handle.executor_metadata is not None and accepts_executor_metadata_kwarg(
+            registry.task_start_aio
+        ):
+            await registry.task_start_aio(
+                build_id,
+                task,
+                executor=handle.executor,
+                executor_ref=handle.ref,
+                executor_metadata=handle.executor_metadata,
+            )
+        else:
+            await registry.task_start_aio(
+                build_id, task, executor=handle.executor, executor_ref=handle.ref
+            )
         summary.spawned += 1
         acted = True
     return acted, denied_this_round

@@ -90,6 +90,18 @@ class Build(Base, TimestampMixin):
         nullable=False,
     )
 
+    # Executor-descriptive metadata of the trigger that created (or most
+    # recently resumed-with-metadata) the build, e.g. {"kind": "modal",
+    # "app_name": ..., "workspace": ..., "environment": ...,
+    # "function_name": ..., "reactive": ...}. Set from BuildCreate /
+    # the resume endpoint; kept (not cleared) on resumes that don't carry
+    # metadata — the in-container SDK resume of a Modal-triggered build
+    # doesn't know its trigger metadata.
+    executor_metadata: Mapped[dict | None] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"),
+        nullable=True,
+    )
+
     # Reactive-scheduler dirty flag: set by POST /builds/{id}/notify (e.g. a
     # worker finishing a task), cleared by the scheduler tick before it
     # computes the frontier (DELETE /builds/{id}/notify). A notify landing

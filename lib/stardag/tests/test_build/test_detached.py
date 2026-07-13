@@ -340,7 +340,12 @@ class TestOldRegistrySignatureCompat:
 
         class BuggyRegistry(NoOpRegistry):
             async def task_start_aio(
-                self, build_id, task, executor=None, executor_ref=None
+                self,
+                build_id,
+                task,
+                executor=None,
+                executor_ref=None,
+                executor_metadata=None,
             ):
                 raise TypeError("bug inside the registry implementation")
 
@@ -395,3 +400,67 @@ class TestWorkerReportsLifecycle:
             await build_aio([task], task_executor=executor, registry=recording_registry)
 
         assert recording_registry.has_call("task_fail_aio", task.id)
+
+
+class MetadataDetachedExecutor(FakeDetachedExecutor):
+    """FakeDetachedExecutor whose handles carry executor metadata."""
+
+    METADATA = {"kind": "fake", "app_name": "meta-app", "workspace": "acme"}
+
+    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+        handle = await super().submit_detached(task)
+        return DetachedHandle(
+            executor=handle.executor,
+            ref=handle.ref,
+            wait=handle.wait,
+            executor_metadata=self.METADATA,
+        )
+
+
+class TestExecutorMetadataOnStart:
+    async def test_handle_metadata_recorded_on_start(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        recording_registry: RecordingRegistry,
+    ):
+        """A detached handle's executor_metadata rides on the TASK_STARTED
+        call together with the (executor, ref)."""
+        task = SyncOnlyTask(name="detached-meta")
+        executor = MetadataDetachedExecutor()
+
+        summary = await build_aio(
+            [task], task_executor=executor, registry=recording_registry
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        extra = _start_call_extras(recording_registry, task.id)
+        assert extra["executor"] == FAKE_EXECUTOR_NAME
+        assert extra["executor_metadata"] == MetadataDetachedExecutor.METADATA
+
+    async def test_metadata_dropped_for_pre_metadata_registry(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """A registry whose task_start_aio predates the executor_metadata
+        kwarg still receives the start (with ref) — no TypeError."""
+        from stardag.registry import NoOpRegistry
+
+        starts: list[dict] = []
+
+        class PreMetadataRegistry(NoOpRegistry):
+            async def task_start_aio(  # pyright: ignore[reportIncompatibleMethodOverride]  # old signature (deliberate)
+                self, build_id, task, executor=None, executor_ref=None
+            ) -> None:
+                starts.append({"executor": executor, "executor_ref": executor_ref})
+
+        task = SyncOnlyTask(name="detached-meta-legacy")
+        executor = MetadataDetachedExecutor()
+
+        summary = await build_aio(
+            [task], task_executor=executor, registry=PreMetadataRegistry()
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert starts == [
+            {"executor": FAKE_EXECUTOR_NAME, "executor_ref": f"spawned-{task.id}"}
+        ]

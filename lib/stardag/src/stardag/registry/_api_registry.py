@@ -135,6 +135,7 @@ def _parse_bulk_register_response(payload: object) -> "list[RegisteredTaskInfo] 
                 latest_status=item.get("latest_status"),
                 latest_executor=item.get("latest_executor"),
                 latest_executor_ref=item.get("latest_executor_ref"),
+                latest_executor_metadata=item.get("latest_executor_metadata"),
             )
         )
     return infos
@@ -437,13 +438,18 @@ class APIRegistry(RegistryABC):
         self,
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Start a new build and return its ID."""
-        build_data = {
+        build_data: dict[str, Any] = {
             "commit_hash": get_git_commit_hash(),
             "root_task_ids": [str(task.id) for task in (root_tasks or [])],
             "description": description,
         }
+        if executor_metadata is not None:
+            # Only included when present — older servers ignore unknown
+            # body fields anyway, but this keeps the payload minimal.
+            build_data["executor_metadata"] = executor_metadata
 
         response = self._request(
             "POST",
@@ -457,7 +463,11 @@ class APIRegistry(RegistryABC):
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
 
-    def build_resume(self, build_id: UUID) -> None:
+    def build_resume(
+        self,
+        build_id: UUID,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Mark an existing build as resumed.
 
         Emits a BUILD_RESUMED event server-side so a build that previously
@@ -468,11 +478,16 @@ class APIRegistry(RegistryABC):
         an un-upgraded registry. Resource-level 404s (build does not
         exist) are re-raised.
         """
+        params = self._get_event_params()
+        if executor_metadata is not None:
+            params["executor_metadata"] = _json.dumps(
+                executor_metadata, separators=(",", ":")
+            )
         try:
             self._request(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/resume",
-                params=self._get_event_params(),
+                params=params,
                 operation="Resume build",
             )
         except NotFoundError as e:
@@ -612,6 +627,7 @@ class APIRegistry(RegistryABC):
         task: "BaseTask",
         executor: str | None = None,
         executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Mark a task as started.
 
@@ -622,19 +638,31 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_start_params(executor, executor_ref),
+            params=self._get_start_params(executor, executor_ref, executor_metadata),
             operation=f"Start task {task.id}",
         )
 
     def _get_start_params(
-        self, executor: str | None, executor_ref: str | None
+        self,
+        executor: str | None,
+        executor_ref: str | None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> dict[str, str]:
-        """Event params plus optional detached-execution reference."""
+        """Event params plus optional detached-execution reference.
+
+        ``executor_metadata`` rides as a JSON-encoded query param (the
+        start endpoint has no body); older servers ignore the unknown
+        param, so no version gating is needed.
+        """
         params = self._get_event_params()
         if executor is not None:
             params["executor"] = executor
         if executor_ref is not None:
             params["executor_ref"] = executor_ref
+        if executor_metadata is not None:
+            params["executor_metadata"] = _json.dumps(
+                executor_metadata, separators=(",", ":")
+            )
         return params
 
     def task_complete(self, build_id: UUID, task: "BaseTask") -> None:
@@ -898,13 +926,16 @@ class APIRegistry(RegistryABC):
         self,
         root_tasks: list["BaseTask"] | None = None,
         description: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Async version - start a new build and return its ID."""
-        build_data = {
+        build_data: dict[str, Any] = {
             "commit_hash": get_git_commit_hash(),
             "root_task_ids": [str(task.id) for task in (root_tasks or [])],
             "description": description,
         }
+        if executor_metadata is not None:
+            build_data["executor_metadata"] = executor_metadata
 
         response = await self._arequest(
             "POST",
@@ -918,16 +949,25 @@ class APIRegistry(RegistryABC):
         logger.info(f"Started build: {data['name']} (ID: {build_id})")
         return build_id
 
-    async def build_resume_aio(self, build_id: UUID) -> None:
+    async def build_resume_aio(
+        self,
+        build_id: UUID,
+        executor_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Async version - mark an existing build as resumed.
 
         See :meth:`build_resume` for the backward-compat 404 handling.
         """
+        params = self._get_event_params()
+        if executor_metadata is not None:
+            params["executor_metadata"] = _json.dumps(
+                executor_metadata, separators=(",", ":")
+            )
         try:
             await self._arequest(
                 "POST",
                 f"{self.api_url}/api/v1/builds/{build_id}/resume",
-                params=self._get_event_params(),
+                params=params,
                 operation="Resume build",
             )
         except NotFoundError as e:
@@ -1216,6 +1256,7 @@ class APIRegistry(RegistryABC):
         task: "BaseTask",
         executor: str | None = None,
         executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
     ) -> bool:
         """Start a task with atomic server-side concurrency-limit acquisition.
@@ -1224,7 +1265,9 @@ class APIRegistry(RegistryABC):
         error code ``concurrency_limit_reached`` means a key was at capacity
         — returns False without recording anything.
         """
-        params: dict[str, Any] = self._get_start_params(executor, executor_ref)
+        params: dict[str, Any] = self._get_start_params(
+            executor, executor_ref, executor_metadata
+        )
         if limit_keys:
             params["limit_key"] = list(limit_keys)
             params["enforce_limits"] = "true"
@@ -1247,6 +1290,7 @@ class APIRegistry(RegistryABC):
         task: "BaseTask",
         executor: str | None = None,
         executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
     ) -> None:
         """Async version - mark a task as started.
 
@@ -1257,7 +1301,7 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_start_params(executor, executor_ref),
+            params=self._get_start_params(executor, executor_ref, executor_metadata),
             operation=f"Start task {task.id}",
         )
 

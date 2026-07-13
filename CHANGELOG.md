@@ -8,6 +8,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Executor metadata for Modal executions.** Task starts and triggered
+  builds now record a descriptive `executor_metadata` dict — for Modal
+  the kind, app name, workspace, environment, and function name (plus a
+  `reactive` flag at the build level) — surfaced by the UI as Modal
+  dashboard deep links. Resolution is lazy, cached, and best-effort
+  (workspace via a Modal token lookup; a failure never fails or delays a
+  start); override with `StardagApp(modal_workspace=...)` or
+  `ModalTaskExecutor(modal_workspace=...)`. Worker self-reported starts
+  carry the same dict (forwarded via `STARDAG_MODAL_*` env overrides).
+  Registry surface: optional `executor_metadata` on `task_start[_aio]`,
+  `task_start_with_limits_aio`, `build_start[_aio]` and
+  `build_resume[_aio]`, plus `DetachedHandle.executor_metadata`; custom
+  `RegistryABC` implementations with the old signatures keep working
+  (the metadata is dropped gracefully).
 - **Reactive builds are owned by their triggering app.** With multiple
   `StardagApp`s deployed in one environment, a scheduler tick from an
   app that doesn't own the build (per the `app_name` recorded at trigger
@@ -117,6 +131,28 @@ tick_settings=...)`. Current limitations (documented in
 
 ### Registry API
 
+- Executor metadata: task starts accept a JSON `executor_metadata` query
+  param (recorded in the `TASK_STARTED` event metadata, denormalised to
+  the new nullable `tasks.latest_executor_metadata` column with the same
+  set/clear-on-every-start semantics as `latest_executor_ref`); build
+  creation accepts an `executor_metadata` body field and
+  `POST /builds/{id}/resume` a JSON query param (new nullable
+  `builds.executor_metadata` column — kept on resumes that don't carry
+  metadata). Exposed as `latest_executor` / `latest_executor_ref` /
+  `latest_executor_metadata` on task responses (detail, list rows,
+  search results, build task rows, frontier refs, bulk-register refs)
+  and `executor_metadata` on build responses. All additive/nullable —
+  older SDKs and servers are unaffected.
+- Concurrency-limits admin: new `GET /concurrency-limits/{key}/holders`
+  (the RUNNING tasks currently counted against a key — task identity,
+  running-since, executor fields; paginated via `limit`, oldest first)
+  and `POST /concurrency-limits/{key}/holders/{task_id}/evict` (records
+  `TASK_FAILED` for a task that is currently RUNNING **and** holds the
+  key — 404 otherwise, deliberately not a generic kill endpoint — freeing
+  all its slots via the normal status transition; the evicting identity
+  is recorded in the event). Closes the resident-mode slot-leak recovery
+  gap: reactive builds self-heal leaked slots via scheduler ticks,
+  resident builds now have an admin path.
 - New `POST /builds/{id}/skip-blocked`: emits `TASK_SKIPPED` for
   pending/suspended tasks transitively downstream of a
   failed/cancelled/skipped task (recursive dependency-edge closure, one

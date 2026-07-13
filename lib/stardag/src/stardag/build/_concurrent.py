@@ -52,7 +52,10 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.registry import RegistryABC, registry_provider
-from stardag.registry._base import accepts_executor_kwargs
+from stardag.registry._base import (
+    accepts_executor_kwargs,
+    accepts_executor_metadata_kwarg,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1130,6 +1133,9 @@ async def build_aio(
     # Detected once via signature inspection (not try/except TypeError, which
     # would also mask unrelated TypeErrors raised inside an implementation).
     registry_accepts_executor_kwargs = accepts_executor_kwargs(registry.task_start_aio)
+    registry_accepts_executor_metadata = accepts_executor_metadata_kwarg(
+        registry.task_start_aio
+    )
 
     async def registry_task_start(
         task: BaseTask, handle: DetachedHandle | None
@@ -1144,6 +1150,17 @@ async def build_aio(
                     "re-attachable."
                 )
             await registry.task_start_aio(build_id, task)
+            return
+        # Metadata is dropped (not warned) for registries predating the
+        # kwarg — it's descriptive only, unlike the ref above.
+        if handle.executor_metadata is not None and registry_accepts_executor_metadata:
+            await registry.task_start_aio(
+                build_id,
+                task,
+                executor=handle.executor,
+                executor_ref=handle.ref,
+                executor_metadata=handle.executor_metadata,
+            )
             return
         await registry.task_start_aio(
             build_id, task, executor=handle.executor, executor_ref=handle.ref

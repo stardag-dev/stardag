@@ -89,6 +89,9 @@ class BuildCreate(BaseModel):
     commit_hash: str | None = None
     root_task_ids: list[str] = []
     description: str | None = None
+    # Executor-descriptive metadata of the trigger (e.g. the Modal
+    # app/workspace/environment of a build_trigger call).
+    executor_metadata: dict | None = None
 
 
 class StatusTriggeredByUser(BaseModel):
@@ -124,6 +127,10 @@ class BuildResponse(BaseModel):
     # Defaulted to False so older API responses (pre-resume support)
     # deserialize cleanly into clients that expect the field.
     is_resumed: bool = False
+    # Executor-descriptive metadata of the trigger that created (or most
+    # recently resumed-with-metadata) the build. None for builds without
+    # a recorded trigger executor.
+    executor_metadata: dict | None = None
 
 
 class BuildListResponse(BaseModel):
@@ -184,6 +191,13 @@ class TaskResponse(BaseModel):
     # post-order discover walk this is rare; UI treats phantoms as
     # incomplete/registering rows.
     is_phantom: bool = False
+    # Executor identity of the most recent TASK_STARTED event (set/cleared
+    # on every start — see the Task model). ``latest_executor_metadata``
+    # carries descriptive backend details (e.g. Modal app/workspace/
+    # environment/function) for UI deep links.
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
+    latest_executor_metadata: dict | None = None
 
 
 class TaskBulkResponse(BaseModel):
@@ -212,6 +226,7 @@ class BulkTaskIdRef(BaseModel):
     latest_status: TaskStatus | None = None
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
+    latest_executor_metadata: dict | None = None
 
 
 class FrontierTaskRef(BaseModel):
@@ -221,6 +236,7 @@ class FrontierTaskRef(BaseModel):
     latest_status: TaskStatus
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
+    latest_executor_metadata: dict | None = None
     # When the current status was recorded — lets schedulers apply
     # staleness bounds (e.g. fail a long-RUNNING task with no executor
     # ref, which would otherwise hold concurrency-limit slots forever).
@@ -272,6 +288,31 @@ class ConcurrencyLimitList(BaseModel):
 
 class ConcurrencyLimitUpsert(BaseModel):
     max_concurrent: int = Field(ge=1)
+
+
+class ConcurrencyLimitHolder(BaseModel):
+    """A RUNNING task currently occupying one slot of a concurrency-limit key."""
+
+    task_id: str
+    task_namespace: str
+    task_name: str
+    # When the task's RUNNING status was recorded ("running since").
+    latest_status_at: datetime | None = None
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
+    latest_executor_metadata: dict | None = None
+
+
+class ConcurrencyLimitHoldersResponse(BaseModel):
+    """Current holders of a concurrency-limit key (admin drill-down).
+
+    ``total`` is the full holder count; ``holders`` is capped by the
+    ``limit`` query param (oldest running first).
+    """
+
+    key: str
+    holders: list[ConcurrencyLimitHolder]
+    total: int
 
 
 class SkipBlockedResponse(BaseModel):
@@ -568,6 +609,11 @@ class TaskSearchResult(BaseModel):
     artifact_count: int = 0
     # Artifact data - mapping of artifact_name -> body_json (populated when artifact columns requested)
     artifact_data: dict[str, dict] = {}
+    # Executor identity + descriptive metadata of the most recent
+    # TASK_STARTED event (see TaskResponse).
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
+    latest_executor_metadata: dict | None = None
 
 
 class TaskSearchResponse(BaseModel):

@@ -75,6 +75,10 @@ async def list_tasks(
                 version=t.version,
                 output_uri=t.output_uri,
                 created_at=t.created_at,
+                is_phantom=t.is_phantom,
+                latest_executor=t.latest_executor,
+                latest_executor_ref=t.latest_executor_ref,
+                latest_executor_metadata=t.latest_executor_metadata,
             )
             for t in tasks
         ],
@@ -165,6 +169,10 @@ async def get_task(
         version=task.version,
         output_uri=task.output_uri,
         created_at=task.created_at,
+        is_phantom=task.is_phantom,
+        latest_executor=task.latest_executor,
+        latest_executor_ref=task.latest_executor_ref,
+        latest_executor_metadata=task.latest_executor_metadata,
     )
 
 

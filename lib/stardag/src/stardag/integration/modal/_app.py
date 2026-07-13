@@ -71,6 +71,7 @@ from stardag.integration.modal._target import (
 )
 from stardag.registry._base import (
     NoOpRegistry,
+    accepts_executor_metadata_kwarg,
     get_git_commit_hash,
     registry_provider,
 )
@@ -488,6 +489,74 @@ deps (with task-store persistence) and wakes the scheduler after terminal
 events — there is no resident orchestrator to do either.
 """
 
+STARDAG_MODAL_WORKSPACE_ENV = "STARDAG_MODAL_WORKSPACE"
+"""Env var carrying the resolved Modal workspace name to workers.
+
+Part of the executor-metadata channel: the orchestrator resolves the
+workspace once (token lookup or explicit override) and forwards it so the
+worker's self-reported TASK_STARTED carries the same metadata dict.
+Transported like ``STARDAG_BUILD_ID``.
+"""
+
+STARDAG_MODAL_ENVIRONMENT_ENV = "STARDAG_MODAL_ENVIRONMENT"
+"""Env var carrying the Modal environment name to workers (see
+``STARDAG_MODAL_WORKSPACE``)."""
+
+STARDAG_MODAL_FUNCTION_NAME_ENV = "STARDAG_MODAL_FUNCTION_NAME"
+"""Env var carrying the Modal function name (``worker_<name>``) to workers
+(see ``STARDAG_MODAL_WORKSPACE``)."""
+
+
+# Cache for the token-derived Modal workspace name. Resolved at most once
+# per process (including failed lookups — metadata is best-effort and a
+# broken token shouldn't re-pay the lookup timeout on every task).
+_MODAL_WORKSPACE_UNRESOLVED = object()
+_modal_workspace_cache: typing.Any = _MODAL_WORKSPACE_UNRESOLVED
+
+
+async def _get_modal_workspace_aio() -> str | None:
+    """Best-effort Modal workspace name for the configured token (cached)."""
+    global _modal_workspace_cache
+    if _modal_workspace_cache is _MODAL_WORKSPACE_UNRESOLVED:
+        _modal_workspace_cache = await _lookup_modal_workspace_aio()
+    return typing.cast("str | None", _modal_workspace_cache)
+
+
+async def _lookup_modal_workspace_aio() -> str | None:
+    from modal.config import _lookup_workspace
+    from modal.config import config as modal_config
+
+    server_url = modal_config.get("server_url")
+    token_id = modal_config.get("token_id")
+    token_secret = modal_config.get("token_secret")
+    if not (server_url and token_id and token_secret):
+        return None
+    response = await _lookup_workspace(server_url, token_id, token_secret)
+    return response.workspace_name or None
+
+
+def _get_modal_workspace() -> str | None:
+    """Sync wrapper for :func:`_get_modal_workspace_aio` (cached).
+
+    Returns None (without caching a failure) when called from inside a
+    running event loop where ``asyncio.run`` is unavailable.
+    """
+    global _modal_workspace_cache
+    if _modal_workspace_cache is not _MODAL_WORKSPACE_UNRESOLVED:
+        return typing.cast("str | None", _modal_workspace_cache)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_get_modal_workspace_aio())
+    return None
+
+
+def _get_modal_environment() -> str | None:
+    """The active Modal environment name from Modal config, if any."""
+    from modal.config import config as modal_config
+
+    return modal_config.get("environment") or None
+
 
 class ModalTaskExecutor(TaskExecutorABC):
     """Task executor that sends tasks to Modal for remote execution.
@@ -525,6 +594,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         detached: bool = True,
         worker_reports_lifecycle: bool = True,
         reactive: bool = False,
+        modal_workspace: str | None = None,
     ):
         """Initialize Modal executor.
 
@@ -542,6 +612,9 @@ class ModalTaskExecutor(TaskExecutorABC):
                 driving an app deployed with an older stardag version whose
                 workers don't self-report, or when using a custom
                 ``run_function`` without lifecycle reporting.
+            modal_workspace: Explicit Modal workspace name for the executor
+                metadata recorded with task starts (UI deep links). Default:
+                resolved once from the configured Modal token, best-effort.
         """
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
@@ -550,6 +623,12 @@ class ModalTaskExecutor(TaskExecutorABC):
         # Reactive scheduling: forward the app name + reactive flag so
         # workers register their dynamic deps and wake the scheduler tick.
         self.reactive = reactive
+        self.modal_workspace = modal_workspace
+        # Executor metadata shared by every start this executor records
+        # (per-task starts add the worker function name). Resolved lazily
+        # at the first invocation, best-effort — metadata must never fail
+        # or delay a task start beyond the one cached lookup.
+        self._base_executor_metadata: dict[str, typing.Any] | None = None
         # Cache of worker name -> modal.Function. ``modal.Function.from_name``
         # returns a lazy handle (no network call until invoked), but it is
         # invoked on every ``submit`` so we memoize it per worker name to avoid
@@ -573,30 +652,78 @@ class ModalTaskExecutor(TaskExecutorABC):
             self._worker_functions[worker_name] = worker_function
         return worker_function
 
-    def _prepare_invocation(
+    async def _get_base_executor_metadata(self) -> dict[str, typing.Any] | None:
+        """Resolve the executor metadata shared by all starts (cached).
+
+        Best-effort: resolution failures are logged at debug level and
+        yield the identity-only dict — never an exception.
+        """
+        if self._base_executor_metadata is None:
+            metadata: dict[str, typing.Any] = {
+                "kind": MODAL_EXECUTOR_NAME,
+                "app_name": self.modal_app_name,
+            }
+            try:
+                workspace = self.modal_workspace or await _get_modal_workspace_aio()
+                if workspace:
+                    metadata["workspace"] = workspace
+                environment = _get_modal_environment()
+                if environment:
+                    metadata["environment"] = environment
+            except Exception:
+                logger.debug(
+                    "Failed to resolve Modal workspace/environment for "
+                    "executor metadata",
+                    exc_info=True,
+                )
+            self._base_executor_metadata = metadata
+        return self._base_executor_metadata
+
+    async def _prepare_invocation(
         self, task: BaseTask
-    ) -> tuple[modal.Function, dict[str, str] | None]:
-        """Resolve the worker function and env overrides for a task.
+    ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
+        """Resolve the worker function, env overrides, and executor metadata.
 
         When ``worker_reports_lifecycle`` and an enclosing build is active,
         the build id is injected as the ``STARDAG_BUILD_ID`` env override so
-        the worker-side :class:`Runner` can report lifecycle events.
+        the worker-side :class:`Runner` can report lifecycle events. The
+        resolved executor metadata rides along the same channel
+        (``STARDAG_MODAL_*``) so worker self-reported starts carry it too.
         """
         worker_name, env_overrides = _normalize_worker_selection(
             self.worker_selector(task)
         )
         worker_function = self._get_worker_function(worker_name)
+        executor_metadata: dict[str, typing.Any] | None = None
+        try:
+            base_metadata = await self._get_base_executor_metadata()
+            if base_metadata is not None:
+                executor_metadata = {
+                    **base_metadata,
+                    "function_name": f"worker_{worker_name}",
+                }
+        except Exception:
+            logger.debug("Failed to resolve Modal executor metadata", exc_info=True)
         if self.worker_reports_lifecycle:
             build_id = get_current_build_id()
             if build_id is not None:
                 env_overrides = {
                     **(env_overrides or {}),
                     STARDAG_BUILD_ID_ENV: str(build_id),
+                    STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
                 }
+                if executor_metadata is not None:
+                    for env_name, key in (
+                        (STARDAG_MODAL_WORKSPACE_ENV, "workspace"),
+                        (STARDAG_MODAL_ENVIRONMENT_ENV, "environment"),
+                        (STARDAG_MODAL_FUNCTION_NAME_ENV, "function_name"),
+                    ):
+                        value = executor_metadata.get(key)
+                        if value:
+                            env_overrides[env_name] = value
                 if self.reactive:
-                    env_overrides[STARDAG_MODAL_APP_NAME_ENV] = self.modal_app_name
                     env_overrides[STARDAG_REACTIVE_ENV] = "1"
-        return worker_function, env_overrides
+        return worker_function, env_overrides, executor_metadata
 
     def reports_lifecycle(self, task: BaseTask) -> bool:
         """Workers self-report lifecycle when enabled and a build is active."""
@@ -622,7 +749,7 @@ class ModalTaskExecutor(TaskExecutorABC):
     async def submit(self, task: BaseTask) -> None | TaskStruct | TaskExecutionError:
         """Execute task on Modal (blocking remote call)."""
         try:
-            worker_function, env_overrides = self._prepare_invocation(task)
+            worker_function, env_overrides, _ = await self._prepare_invocation(task)
             res = await worker_function.remote.aio(task, env_overrides=env_overrides)
             return res
         except Exception as e:
@@ -638,7 +765,10 @@ class ModalTaskExecutor(TaskExecutorABC):
         return self.detached
 
     def _make_handle(
-        self, task: BaseTask, function_call: modal.FunctionCall
+        self,
+        task: BaseTask,
+        function_call: modal.FunctionCall,
+        executor_metadata: dict[str, typing.Any] | None = None,
     ) -> DetachedHandle:
         """Wrap a FunctionCall in a DetachedHandle tracking in-flight state."""
         self._in_flight[task.id] = function_call
@@ -676,15 +806,20 @@ class ModalTaskExecutor(TaskExecutorABC):
             executor=MODAL_EXECUTOR_NAME,
             ref=function_call.object_id,
             wait=wait,
+            executor_metadata=executor_metadata,
         )
 
     async def submit_detached(self, task: BaseTask) -> DetachedHandle:
         """Spawn the task on its worker function; return a re-attachable handle."""
-        worker_function, env_overrides = self._prepare_invocation(task)
+        (
+            worker_function,
+            env_overrides,
+            executor_metadata,
+        ) = await self._prepare_invocation(task)
         function_call = await worker_function.spawn.aio(
             task, env_overrides=env_overrides
         )
-        return self._make_handle(task, function_call)
+        return self._make_handle(task, function_call, executor_metadata)
 
     async def reattach(
         self, task: BaseTask, executor: str, ref: str
@@ -715,8 +850,12 @@ class ModalTaskExecutor(TaskExecutorABC):
         try:
             result = await function_call.get.aio(timeout=0)
         except TimeoutError:
-            # Still running (or queued) — the interesting case.
-            return self._make_handle(task, function_call)
+            # Still running (or queued) — the interesting case. Base
+            # metadata only: the worker function behind a bare ref isn't
+            # known here.
+            return self._make_handle(
+                task, function_call, await self._get_base_executor_metadata()
+            )
         except Exception:
             # Failed, cancelled, expired result, or unknown id — re-execute.
             return None
@@ -1013,12 +1152,14 @@ class _WorkerLifecycleReporter:
         *,
         reactive: bool = False,
         app_name: str | None = None,
+        executor_metadata: dict[str, typing.Any] | None = None,
     ):
         self.registry = registry
         self.build_id = build_id
         self.task = task
         self.reactive = reactive
         self.app_name = app_name
+        self.executor_metadata = executor_metadata
 
     @classmethod
     def create(
@@ -1040,12 +1181,28 @@ class _WorkerLifecycleReporter:
         # reporting — NoOpRegistry *subclasses* may implement real behavior.
         if type(registry) is NoOpRegistry:
             return None
+        app_name = _get(STARDAG_MODAL_APP_NAME_ENV)
+        # Executor metadata forwarded by the orchestrator's executor (same
+        # dict it records on its own starts). Values missing on older
+        # orchestrators are simply omitted.
+        executor_metadata: dict[str, typing.Any] = {"kind": MODAL_EXECUTOR_NAME}
+        if app_name:
+            executor_metadata["app_name"] = app_name
+        for key, env_name in (
+            ("workspace", STARDAG_MODAL_WORKSPACE_ENV),
+            ("environment", STARDAG_MODAL_ENVIRONMENT_ENV),
+            ("function_name", STARDAG_MODAL_FUNCTION_NAME_ENV),
+        ):
+            value = _get(env_name)
+            if value:
+                executor_metadata[key] = value
         return cls(
             registry,
             build_id,
             task,
             reactive=_get(STARDAG_REACTIVE_ENV) == "1",
-            app_name=_get(STARDAG_MODAL_APP_NAME_ENV),
+            app_name=app_name,
+            executor_metadata=executor_metadata,
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -1063,12 +1220,17 @@ class _WorkerLifecycleReporter:
                 ref = modal.current_function_call_id()
             except Exception:
                 pass
-            self.registry.task_start(
-                self.build_id,
-                self.task,
-                executor=MODAL_EXECUTOR_NAME,
-                executor_ref=ref,
-            )
+            kwargs: dict[str, typing.Any] = {
+                "executor": MODAL_EXECUTOR_NAME,
+                "executor_ref": ref,
+            }
+            # Dropped (not warned) for registries predating the kwarg —
+            # descriptive only, unlike the executor ref.
+            if self.executor_metadata is not None and accepts_executor_metadata_kwarg(
+                self.registry.task_start
+            ):
+                kwargs["executor_metadata"] = self.executor_metadata
+            self.registry.task_start(self.build_id, self.task, **kwargs)
 
         self._guard(_do, "start")
 
@@ -1488,6 +1650,7 @@ class StardagApp:
         watchdog_period_minutes: int | None = None,
         limit_key_selector: typing.Callable[[BaseTask], typing.Sequence[str]]
         | None = None,
+        modal_workspace: str | None = None,
     ):
         """Initialize a StardagApp.
 
@@ -1518,6 +1681,10 @@ class StardagApp:
             worker_settings: Dict of worker name to settings. Must include "default".
             worker_selector: Function to select worker for each task.
                 Defaults to always returning "default".
+            modal_workspace: Explicit Modal workspace name recorded in the
+                executor metadata of triggered builds and started tasks
+                (used by the UI for Modal dashboard deep links). Default:
+                resolved once from the configured Modal token, best-effort.
         """
         if isinstance(modal_app_or_name, str):
             self.modal_app = modal.App(name=modal_app_or_name)
@@ -1545,6 +1712,11 @@ class StardagApp:
         # consistently (callables can't be persisted in the JSON build
         # meta like the scalar tick_kwargs).
         self.limit_key_selector = limit_key_selector
+        # Explicit Modal workspace name for executor metadata (UI deep
+        # links). Default: resolved from the Modal token, best-effort.
+        # Used by build_trigger and by the tick's executor; the resident
+        # build function's executor resolves it in-container instead.
+        self.modal_workspace = modal_workspace
         self._is_finalized = False
 
     @property
@@ -1708,6 +1880,7 @@ class StardagApp:
         app_name = self.name
         default_worker_selector = self.worker_selector
         limit_key_selector = self.limit_key_selector
+        modal_workspace = self.modal_workspace
 
         def _modal_tick(
             build_id: str,
@@ -1773,6 +1946,7 @@ class StardagApp:
                 modal_app_name=app_name,
                 worker_selector=default_worker_selector,
                 reactive=True,
+                modal_workspace=modal_workspace,
             )
             lock_manager = RegistryGlobalConcurrencyLockManager(
                 # No waiting on the scheduler lease: a held lease means
@@ -1965,10 +2139,18 @@ class StardagApp:
             )
         task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
         explicit_build_id = build_id is not None
+        executor_metadata = self._build_executor_metadata(reactive=reactive)
         if build_id is None:
-            build_id = registry.build_start(
-                root_tasks=task_list, description=description
-            )
+            if accepts_executor_metadata_kwarg(registry.build_start):
+                build_id = registry.build_start(
+                    root_tasks=task_list,
+                    description=description,
+                    executor_metadata=executor_metadata,
+                )
+            else:
+                build_id = registry.build_start(
+                    root_tasks=task_list, description=description
+                )
 
         if reactive:
             if self.watchdog_period_minutes is None:
@@ -1986,6 +2168,7 @@ class StardagApp:
                 registry=registry,
                 tick_kwargs=tick_kwargs,
                 is_retrigger=explicit_build_id,
+                executor_metadata=executor_metadata,
             )
 
         merged_kwargs["resume_build_id"] = build_id
@@ -2001,6 +2184,29 @@ class StardagApp:
         )
         return BuildTriggerResult(build_id=build_id, function_call=function_call)
 
+    def _build_executor_metadata(self, *, reactive: bool) -> dict[str, typing.Any]:
+        """Build-level executor metadata for a trigger (best-effort)."""
+        metadata: dict[str, typing.Any] = {
+            "kind": MODAL_EXECUTOR_NAME,
+            "app_name": self.name,
+            "function_name": "tick" if reactive else "build",
+            "reactive": reactive,
+        }
+        try:
+            workspace = self.modal_workspace or _get_modal_workspace()
+            if workspace:
+                metadata["workspace"] = workspace
+            environment = _get_modal_environment()
+            if environment:
+                metadata["environment"] = environment
+        except Exception:
+            logger.debug(
+                "Failed to resolve Modal workspace/environment for "
+                "build executor metadata",
+                exc_info=True,
+            )
+        return metadata
+
     def _trigger_reactive(
         self,
         task_list: list[BaseTask],
@@ -2009,6 +2215,7 @@ class StardagApp:
         registry: typing.Any,
         tick_kwargs: dict[str, typing.Any] | None,
         is_retrigger: bool,
+        executor_metadata: dict[str, typing.Any] | None = None,
     ) -> BuildTriggerResult:
         """Reactive trigger: discover + persist here, then spawn the first tick.
 
@@ -2037,7 +2244,12 @@ class StardagApp:
             # register the (possibly new) roots BEFORE discovery, so a
             # concurrent tick can't complete-and-terminal the build on the
             # old root set while we're adding to it.
-            registry.build_resume(build_id)
+            if executor_metadata is not None and accepts_executor_metadata_kwarg(
+                registry.build_resume
+            ):
+                registry.build_resume(build_id, executor_metadata=executor_metadata)
+            else:
+                registry.build_resume(build_id)
             registry.build_add_roots(build_id, root_ids)
         discovery = asyncio.run(
             discover_and_register_aio(
