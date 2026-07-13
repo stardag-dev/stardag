@@ -36,6 +36,16 @@ Report
   `walkthrough-shards` named limit. The cap itself is configured in the
   registry (next section).
 
+> The two selectors are defined in `selectors.py`, not `app.py`. They are
+> captured by the serialized Modal functions (build, workers, and the
+> reactive `tick` / `tick_watchdog`), which Modal deserializes in fresh
+> containers — so any callable you pass to `StardagApp` must live in a
+> module that's importable there (i.e. part of the source added via
+> `add_local_python_source`). A selector defined in the deploy script
+> itself would deserialize to `ModuleNotFoundError: No module named 'app'`
+> on the first cold container — most visibly the scheduled watchdog tick.
+> See `selectors.py` for the full explanation.
+
 ## Prerequisites
 
 - A [Modal](https://modal.com/) account with credentials set up locally
@@ -157,7 +167,7 @@ limits (sharing slots with reactive builds) via
 import stardag as sd
 from stardag.build import RegistryConcurrencyLimiter
 
-from stardag_examples.modal.walkthrough.app import limit_key_selector
+from stardag_examples.modal.walkthrough.selectors import limit_key_selector
 from stardag_examples.modal.walkthrough.tasks import report_dag
 
 sd.build(
