@@ -4,92 +4,70 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.10.0] — 2026-07-13
 
-### UI
-
-- **Modal execution surfacing.** Tasks executed on Modal now show a
-  "⚡ Modal" badge (tooltip shows the function call ref; click to copy)
-  in the build task table, the Task Explorer, and DAG node hover. The
-  task detail panel gains an **Execution** section — executor kind, app
-  name, function name, call ref, and workspace/environment — with deep
-  links into the Modal dashboard (app page and function call). The
-  build view shows a "Modal: app-name" chip linking to the app page
-  plus a "reactive" badge for tick-scheduled builds. All Modal URL
-  patterns are centralized in `src/utils/modalLinks.ts`; links render
-  only when the recorded metadata has the required fields (older
-  servers / missing metadata degrade to plain text, never dead links).
-- **Concurrency limits admin view.** New env-scoped "Concurrency
-  Limits" sidebar page: list the environment's named limits with
-  current holder counts, create/edit/delete keys, and drill into a
-  key's holders (task detail link, running-since, executor badge,
-  Modal deep link) with an **Evict** action that fails a stuck RUNNING
-  holder to free its slots — the recovery path for slots leaked by a
-  crashed resident build process.
+Modal as a first-class execution layer. A large, fully backward-compatible
+feature release: restart-safe build triggering, detached task execution
+with re-attach, worker-side lifecycle reporting, reactive (tick-based)
+scheduling (experimental), registry-backed named concurrency limits,
+pickle-free task rehydration, and executor metadata surfaced as Modal
+dashboard deep links in the UI, plus a concurrency-limits admin surface.
+See
+[RELEASE_NOTES.md](RELEASE_NOTES.md#v0100--modal-as-a-first-class-execution-layer)
+for the SDK-user overview and upgrade notes.
 
 ### SDK
 
-- **Executor metadata for Modal executions.** Task starts and triggered
-  builds now record a descriptive `executor_metadata` dict — for Modal
-  the kind, app name, workspace, environment, and function name (plus a
-  `reactive` flag at the build level) — surfaced by the UI as Modal
-  dashboard deep links. Resolution is lazy, cached, and best-effort
-  (workspace via a Modal token lookup; a failure never fails or delays a
-  start); override with `StardagApp(modal_workspace=...)` or
-  `ModalTaskExecutor(modal_workspace=...)`. Worker self-reported starts
-  carry the same dict (forwarded via `STARDAG_MODAL_*` env overrides).
-  Registry surface: optional `executor_metadata` on `task_start[_aio]`,
-  `task_start_with_limits_aio`, `build_start[_aio]` and
-  `build_resume[_aio]`, plus `DetachedHandle.executor_metadata`; custom
-  `RegistryABC` implementations with the old signatures keep working
-  (the metadata is dropped gracefully).
-- **Reactive builds are owned by their triggering app.** With multiple
-  `StardagApp`s deployed in one environment, a scheduler tick from an
-  app that doesn't own the build (per the `app_name` recorded at trigger
-  time) now forwards the wake-up to the owner app's tick (best-effort)
-  and returns `outcome="foreign_app"` instead of driving the build with
-  the wrong app's code — previously whichever app's watchdog won the
-  scheduler lease would tick every reactive build in the environment.
-  Forwarding means wake-ups landing on the wrong app (e.g. a previous
-  owner's still-running worker finishing after a takeover) are not
-  dropped, and every app's watchdog doubles as cross-app coverage.
-  Same-name redeploys are unaffected; move a build to a new app by
-  re-triggering it from that app (rewrites ownership and re-persists the
-  task objects — new ticks only: a mid-linger tick of the old owner
-  drains first). Builds triggered by older SDK versions (no recorded
-  owner) are ticked by any app, as before.
-
-- **Registry-backed concurrency limits for resident builds.** New
-  `stardag.build.RegistryConcurrencyLimiter` implements the
-  `ConcurrencyLimiter` seam on top of the registry's named environment
-  limits: pass a `RegistryConcurrencyLimiter(key_selector=...)` as
-  `concurrency_limiter` to `build`/`build_aio` and the named caps are
-  enforced server-side — shared with reactive builds and other resident
-  builds, across processes and machines (the "future global,
-  server-driven limiter" the seam was reserved for). Acquisition is an
-  enforced task start (slot = RUNNING status; freed on completion,
-  failure, cancellation, or dynamic-deps suspension — parity with
-  `LocalConcurrencyLimiter`); denials block-and-retry at a configurable
-  poll interval (with jitter), transient registry errors retry with
-  exponential backoff, and an optional timeout fails the task. Requires
-  a matching stardag-api version. Note: unlike reactive scheduling,
-  resident mode has no automatic healer for slots held by a crashed
-  build process — see the concurrency-limits docs.
-
-- **Pickle-free task rehydration from registry data.** New
-  `stardag.task_from_registry_data(task_data, expected_task_id=...)`
-  reconstructs a task instance from the payload stored at registration
-  (`TaskMetadata.body`) via the polymorphic validator — the payload is
-  self-describing (embedded namespace/name discriminators, recursively
-  for nested `TaskLoads`/`SubClass` fields). Requirements/limits: the
-  defining module must be imported; nested task fields must use the
-  polymorphic annotations; the optional identity check guards against
-  non-round-trippable custom serializers. Reactive scheduler ticks now
-  use it as a fallback when a task's stored pickle is missing or
-  unloadable (healing the store on success) — an app redeploy with
-  compatible task definitions no longer breaks in-flight reactive
-  builds. This is also the foundation for UI-triggered task retries.
-
+- **`stardag/integration/modal`**: New `StardagApp.build_trigger()` — triggers
+  a build with the registry build id minted at the trigger point and passed to
+  the Modal build function as `resume_build_id`. Restarts of the build
+  function (Modal retries after preemption, or re-triggering with the returned
+  `build_id`) resume the same build instead of creating a new one:
+  already-completed task outputs are detected during discovery and skipped.
+  Returns a `BuildTriggerResult(build_id, function_call)`. Requires registry
+  credentials in the calling process; `build_spawn` remains available for
+  Modal-credentials-only triggering.
+  ([#154](https://github.com/stardag-dev/stardag/pull/154))
+- **`stardag/build` + `stardag/integration/modal`: detached task execution
+  (restart-safe long-running tasks).** `ModalTaskExecutor` now spawns worker
+  invocations as detached Modal function calls by default instead of holding
+  blocking `remote` calls: the function call id is recorded with the
+  TASK_STARTED event, and a build that is restarted (Modal retry after
+  preemption, or a `build_trigger` re-trigger with the same build id)
+  **re-attaches to still-running workers instead of re-executing them**. A
+  task's execution now survives orchestrator crashes. FAIL_FAST and user
+  cancellation explicitly cancel the tracked function calls (previously,
+  workers of a dead build kept running). Opt out with
+  `ModalTaskExecutor(detached=False)` / `Builder(detached=False)`.
+  Generic executor surface: `TaskExecutorABC.supports_detached()` /
+  `submit_detached()` / `reattach()` + `DetachedHandle`, so other execution
+  backends can implement the same semantics; `RoutedTaskExecutor` forwards.
+  ([#155](https://github.com/stardag-dev/stardag/pull/155))
+- **`stardag/registry`**: `task_start[_aio]` accepts optional
+  `executor`/`executor_ref`; `task_register_bulk[_aio]` returns per-task
+  `RegisteredTaskInfo` (current global status + executor ref) used by the
+  build engine for re-attach. Custom `RegistryABC` implementations with the
+  old signatures keep working (refs are dropped gracefully).
+  ([#155](https://github.com/stardag-dev/stardag/pull/155))
+- **`stardag/integration/modal`: worker-side lifecycle reporting.** The
+  default `Runner` now reports the task's lifecycle from inside the worker —
+  TASK_STARTED (carrying the worker's own function call id as executor ref),
+  TASK_COMPLETED + artifact upload, TASK_SUSPENDED (dynamic deps), and
+  TASK_FAILED — whenever the executor forwarded a build id (via the
+  `STARDAG_BUILD_ID` env override; no worker signature change, older
+  deployed workers are unaffected) and the container has registry
+  credentials. Events therefore land even if the build orchestrator dies
+  mid-task, and each re-invocation records a fresh re-attachable ref. The
+  build engine suppresses its own completed/suspended/resumed reporting for
+  such tasks (`TaskExecutorABC.reports_lifecycle` seam), keeping started
+  (immediate detached-spawn re-attachability) and failed (fallback for
+  workers that die before reporting) — duplicate events are tolerated by
+  the event-sourced status derivation. Opt out with
+  `ModalTaskExecutor(worker_reports_lifecycle=False)` (required when driving
+  an app deployed with an older stardag from a newer local SDK) or
+  `Runner(report_lifecycle=False)`. New `stardag.build.get_current_build_id()`
+  exposes the ambient build id inside `build[_aio]()`.
+  ([#161](https://github.com/stardag-dev/stardag/pull/161))
 - **Reactive (tick-based) build scheduling for Modal — experimental.** A
   build can now run with **no resident orchestrator**:
   `StardagApp.build_trigger(tasks, reactive=True)` runs discovery at the
@@ -109,17 +87,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   surface: `stardag.build.run_tick_aio` / `TickConfig` / `TickSummary` /
   `BuildTaskStore` / `discover_and_register_aio`,
   `TaskExecutorABC.detached_status()` / `cancel_detached()` /
-  `DetachedExecutionStatus`, `StardagApp(watchdog_period_minutes=...,
-tick_settings=...)`. Current limitations (documented in
-  `stardag/build/_reactive.py`): requires a registry; global lock and
-  build-local concurrency limits are not applied by ticks; no TASK_SKIPPED
-  emission on failure yet; re-triggering with the same build id adds new
-  roots to an active build.
-
+  `DetachedExecutionStatus`,
+  `StardagApp(watchdog_period_minutes=..., tick_settings=...)`. Current
+  limitations (documented in
+  `stardag/build/_reactive.py`): requires a registry; the global
+  concurrency lock and build-local `ConcurrencyConfig` limits are not
+  applied by ticks — registry-backed named limits are (see the entries
+  below). ([#157](https://github.com/stardag-dev/stardag/pull/157))
 - **Registry-backed named concurrency limits (reactive scheduling).**
-  Environment-level named limits (`PUT /concurrency-limits/{key}`) cap how
-  many tasks tagged with a key may run concurrently — **across builds**,
-  which build-local `ConcurrencyConfig` semaphores never could. A task
+  Environment-level named limits (`PUT /api/v1/concurrency-limits/{key}`) cap how
+  many tasks tagged with a key may run concurrently — **across builds**, which
+  build-local `ConcurrencyConfig` semaphores never could. A task
   occupies a slot simply by being RUNNING with the key recorded at start
   (no leases/TTLs: status liveness is already maintained by worker
   reporting and tick self-healing). Acquisition is atomic in the
@@ -132,7 +110,8 @@ tick_settings=...)`. Current limitations (documented in
   releases wake the scheduler directly; cross-build releases are covered
   by the watchdog). New `RegistryABC.task_start_with_limits_aio` (default:
   no enforcement, for custom backends). Resident-mode (`build_aio`)
-  integration with the `ConcurrencyLimiter` seam is a follow-up.
+  integration ships in this release too, via `RegistryConcurrencyLimiter`
+  (see below).
   **Requires a matching stardag-api version**: an older server ignores
   the enforcement parameters (no error), so deploy the server before
   relying on limits. A staleness escape hatch
@@ -140,122 +119,81 @@ tick_settings=...)`. Current limitations (documented in
   tasks stuck RUNNING without an execution ref — e.g. a scheduler crash
   between slot acquisition and spawn — so leaked slots always free; the
   watchdog is strongly recommended when limits are enforced.
-
+  ([#158](https://github.com/stardag-dev/stardag/pull/158))
 - Reactive scheduling: on a failure terminal, ticks now mark tasks
   transitively blocked by the failure as **skipped** (server-computed via
-  `POST /builds/{id}/skip-blocked`) — mirroring the resident engine, so
+  `POST /api/v1/builds/{id}/skip-blocked`) — mirroring the resident engine, so
   blocked tasks no longer dangle pending in the UI while the build shows
   failed. Together with the retry/roots endpoints below, reactive
   re-triggers now have a complete recovery story: failed builds can be
   re-triggered (failed tasks reset to pending) and roots added mid-build
   are covered by completion detection.
-
-### Registry API
-
-- Executor metadata: task starts accept a JSON `executor_metadata` query
-  param (recorded in the `TASK_STARTED` event metadata, denormalised to
-  the new nullable `tasks.latest_executor_metadata` column with the same
-  set/clear-on-every-start semantics as `latest_executor_ref`); build
-  creation accepts an `executor_metadata` body field and
-  `POST /builds/{id}/resume` a JSON query param (new nullable
-  `builds.executor_metadata` column — kept on resumes that don't carry
-  metadata). Exposed as `latest_executor` / `latest_executor_ref` /
-  `latest_executor_metadata` on task responses (detail, list rows,
-  search results, build task rows, frontier refs, bulk-register refs)
-  and `executor_metadata` on build responses. All additive/nullable —
-  older SDKs and servers are unaffected. The metadata dict is capped at
-  2 KB (compact JSON, 422 above) on all ingest paths.
-- Concurrency-limits admin: new `GET /concurrency-limits/{key}/holders`
-  (the RUNNING tasks currently counted against a key — task identity,
-  running-since, executor fields; paginated via `limit`, oldest first)
-  and `POST /concurrency-limits/{key}/holders/{task_id}/evict` (records
-  `TASK_FAILED` for a task that is currently RUNNING **and** holds the
-  key — 404 otherwise, deliberately not a generic kill endpoint — freeing
-  all its slots via the normal status transition; the evicting identity
-  is recorded in the event). Closes the resident-mode slot-leak recovery
-  gap: reactive builds self-heal leaked slots via scheduler ticks,
-  resident builds now have an admin path. Eviction also sets the owning
-  build's scheduler wake-up flag so reactive builds observe it promptly.
-- Concurrency-limit **writes are admin-gated on the user auth path**:
-  `PUT`/`DELETE /concurrency-limits/{key}` and the evict endpoint
-  require the workspace ADMIN role (or higher) when authenticated as a
-  user (JWT); API-key auth (machine credentials) keeps full access, and
-  reads (limit list, holders) stay member-level.
-- Fix: `GET /tasks`, `GET /tasks/{task_id}` and the task registration
-  responses now populate `is_phantom` (previously always the schema
-  default `false`, so placeholder rows were indistinguishable from real
-  tasks on these endpoints).
-- New `POST /builds/{id}/skip-blocked`: emits `TASK_SKIPPED` for
-  pending/suspended tasks transitively downstream of a
-  failed/cancelled/skipped task (recursive dependency-edge closure, one
-  transaction).
-- New `TASK_RETRIED` event + `POST /builds/{id}/tasks/{task_id}/retry`:
-  resets a failed/cancelled/skipped task to pending (never downgrades
-  completed/running) — the retry path for reactive builds.
-- New `POST /builds/{id}/roots`: append root task ids to a build
-  (deduplicated), so completion detection covers roots added to an
-  active build.
-- New reactive-scheduling endpoints: `POST`/`DELETE /builds/{id}/notify`
-  (scheduler wake-up flag, new `builds.needs_tick_at` column) and
-  `GET /builds/{id}/frontier` — the build's actionable tasks (global status
-  pending/suspended/running with all upstream dependencies completed,
-  including executor refs for liveness probing), per-status counts, root
-  statuses, and build status, for scheduler ticks.
-- Named environment concurrency limits:
-  `GET`/`PUT`/`DELETE /concurrency-limits[/{key}]` (new
-  `environment_concurrency_limits` +
-  `task_limit_keys` tables) with atomic enforcement on task start (409
-  `concurrency_limit_reached`; the environment's limit rows are locked
-  while active RUNNING holders are counted, serializing concurrent
-  acquires; re-starting a RUNNING task never self-blocks).
-
-- **`stardag/build` + `stardag/integration/modal`: detached task execution
-  (restart-safe long-running tasks).** `ModalTaskExecutor` now spawns worker
-  invocations as detached Modal function calls by default instead of holding
-  blocking `remote` calls: the function call id is recorded with the
-  TASK_STARTED event, and a build that is restarted (Modal retry after
-  preemption, or a `build_trigger` re-trigger with the same build id)
-  **re-attaches to still-running workers instead of re-executing them**. A
-  task's execution now survives orchestrator crashes. FAIL_FAST and user
-  cancellation explicitly cancel the tracked function calls (previously,
-  workers of a dead build kept running). Opt out with
-  `ModalTaskExecutor(detached=False)` / `Builder(detached=False)`.
-  Generic executor surface: `TaskExecutorABC.supports_detached()` /
-  `submit_detached()` / `reattach()` + `DetachedHandle`, so other execution
-  backends can implement the same semantics; `RoutedTaskExecutor` forwards.
-- **`stardag/registry`**: `task_start[_aio]` accepts optional
-  `executor`/`executor_ref`; `task_register_bulk[_aio]` returns per-task
-  `RegisteredTaskInfo` (current global status + executor ref) used by the
-  build engine for re-attach. Custom `RegistryABC` implementations with the
-  old signatures keep working (refs are dropped gracefully).
-- **`stardag/integration/modal`: worker-side lifecycle reporting.** The
-  default `Runner` now reports the task's lifecycle from inside the worker —
-  TASK_STARTED (carrying the worker's own function call id as executor ref),
-  TASK_COMPLETED + artifact upload, TASK_SUSPENDED (dynamic deps), and
-  TASK_FAILED — whenever the executor forwarded a build id (via the
-  `STARDAG_BUILD_ID` env override; no worker signature change, older
-  deployed workers are unaffected) and the container has registry
-  credentials. Events therefore land even if the build orchestrator dies
-  mid-task, and each re-invocation records a fresh re-attachable ref. The
-  build engine suppresses its own completed/suspended/resumed reporting for
-  such tasks (`TaskExecutorABC.reports_lifecycle` seam), keeping started
-  (immediate detached-spawn re-attachability) and failed (fallback for
-  workers that die before reporting) — duplicate events are tolerated by
-  the event-sourced status derivation. Opt out with
-  `ModalTaskExecutor(worker_reports_lifecycle=False)` (required when driving
-  an app deployed with an older stardag from a newer local SDK) or
-  `Runner(report_lifecycle=False)`. New `stardag.build.get_current_build_id()`
-  exposes the ambient build id inside `build[_aio]()`.
-
-- **`stardag/integration/modal`**: New `StardagApp.build_trigger()` — triggers
-  a build with the registry build id minted at the trigger point and passed to
-  the Modal build function as `resume_build_id`. Restarts of the build
-  function (Modal retries after preemption, or re-triggering with the returned
-  `build_id`) resume the same build instead of creating a new one:
-  already-completed task outputs are detected during discovery and skipped.
-  Returns a `BuildTriggerResult(build_id, function_call)`. Requires registry
-  credentials in the calling process; `build_spawn` remains available for
-  Modal-credentials-only triggering.
+  ([#160](https://github.com/stardag-dev/stardag/pull/160))
+- **Pickle-free task rehydration from registry data.** New
+  `stardag.task_from_registry_data(task_data, expected_task_id=...)`
+  reconstructs a task instance from the payload stored at registration
+  (`TaskMetadata.body`) via the polymorphic validator — the payload is
+  self-describing (embedded namespace/name discriminators, recursively
+  for nested `TaskLoads`/`SubClass` fields). Requirements/limits: the
+  defining module must be imported; nested task fields must use the
+  polymorphic annotations; `AliasTask` payloads are rejected (they embed
+  pickled bytes); the optional identity check guards against
+  non-round-trippable custom serializers. Reactive scheduler ticks now
+  use it as a fallback when a task's stored pickle is missing or
+  unloadable (healing the store on success) — an app redeploy with
+  compatible task definitions no longer breaks in-flight reactive
+  builds. This is also the foundation for UI-triggered task retries.
+  ([#162](https://github.com/stardag-dev/stardag/pull/162))
+- **Registry-backed concurrency limits for resident builds.** New
+  `stardag.build.RegistryConcurrencyLimiter` implements the
+  `ConcurrencyLimiter` seam on top of the registry's named environment
+  limits: pass a `RegistryConcurrencyLimiter(key_selector=...)` as
+  `concurrency_limiter` to `build`/`build_aio` and the named caps are
+  enforced server-side — shared with reactive builds and other resident
+  builds, across processes and machines (the "future global,
+  server-driven limiter" the seam was reserved for). Acquisition is an
+  enforced task start (slot = RUNNING status; freed on completion,
+  failure, cancellation, or dynamic-deps suspension — parity with
+  `LocalConcurrencyLimiter`); denials block-and-retry at a configurable
+  poll interval (with jitter), transient registry errors retry with
+  exponential backoff, and an optional timeout fails the task. Requires
+  a matching stardag-api version. Note: unlike reactive scheduling,
+  resident mode has no automatic healer for slots held by a crashed
+  build process — see the
+  [concurrency-limits docs](docs/docs/concepts/build-execution.md#concurrency-limits)
+  and the new holders/evict admin API below.
+  ([#163](https://github.com/stardag-dev/stardag/pull/163))
+- **Reactive builds are owned by their triggering app.** With multiple
+  `StardagApp`s deployed in one environment, a scheduler tick from an
+  app that doesn't own the build (per the `app_name` recorded at trigger
+  time) now forwards the wake-up to the owner app's tick (best-effort)
+  and returns `outcome="foreign_app"` instead of driving the build with
+  the wrong app's code — previously whichever app's watchdog won the
+  scheduler lease would tick every reactive build in the environment.
+  Forwarding means wake-ups landing on the wrong app (e.g. a previous
+  owner's still-running worker finishing after a takeover) are not
+  dropped, and every app's watchdog doubles as cross-app coverage.
+  Same-name redeploys are unaffected; move a build to a new app by
+  re-triggering it from that app (rewrites ownership and re-persists the
+  task objects — new ticks only: a mid-linger tick of the old owner
+  drains first). Builds triggered by older SDK versions (no recorded
+  owner) are ticked by any app, as before.
+  ([#164](https://github.com/stardag-dev/stardag/pull/164))
+- **Executor metadata for Modal executions.** Task starts and triggered
+  builds now record a descriptive `executor_metadata` dict — for Modal
+  the kind, app name, workspace, environment, and function name (plus a
+  `reactive` flag at the build level) — surfaced by the UI as Modal
+  dashboard deep links. Resolution is lazy, cached, and best-effort
+  (workspace via a Modal token lookup; a failure never fails or delays a
+  start); override with `StardagApp(modal_workspace=...)` or
+  `ModalTaskExecutor(modal_workspace=...)`. Worker self-reported starts
+  carry the same dict (forwarded via `STARDAG_MODAL_*` env overrides).
+  Registry surface: optional `executor_metadata` on `task_start[_aio]`,
+  `task_start_with_limits_aio`, `build_start[_aio]` and
+  `build_resume[_aio]`, plus `DetachedHandle.executor_metadata`; custom
+  `RegistryABC` implementations with the old signatures keep working
+  (the metadata is dropped gracefully).
+  ([#165](https://github.com/stardag-dev/stardag/pull/165))
 - **`stardag/testing/modal`**: New `live_modal_guard()` centralizes gating of
   live-Modal tests, controlled by `STARDAG_MODAL_LIVE_TESTS`
   (`auto`/`1`/`0`) and an optional `STARDAG_MODAL_TEST_PROFILE` safety guard
@@ -265,14 +203,111 @@ tick_settings=...)`. Current limitations (documented in
   live-semantics test module pins the Modal platform behaviors stardag relies
   on (detached spawned calls, `FunctionCall.from_id` re-attach, call-id
   stability across retries, cancellation).
+  ([#154](https://github.com/stardag-dev/stardag/pull/154))
 
 ### Registry API
 
-- `POST /builds/{id}/resume` no longer records a `BUILD_RESUMED` event for a
+- `POST /api/v1/builds/{id}/resume` no longer records a `BUILD_RESUMED` event for a
   "fresh" build (no activity beyond `BUILD_STARTED`), so attaching to a
   trigger-minted build id on the first run doesn't display the build as
   resumed. Real resumes (any task activity or terminal state) are recorded as
-  before.
+  before. ([#154](https://github.com/stardag-dev/stardag/pull/154))
+- New reactive-scheduling endpoints: `POST`/`DELETE /api/v1/builds/{id}/notify`
+  (scheduler wake-up flag, new `builds.needs_tick_at` column) and
+  `GET /api/v1/builds/{id}/frontier` — the build's actionable tasks (global status
+  pending/suspended/running with all upstream dependencies completed,
+  including executor refs for liveness probing), per-status counts, root
+  statuses, and build status, for scheduler ticks.
+  ([#157](https://github.com/stardag-dev/stardag/pull/157))
+- Named environment concurrency limits:
+  `GET`/`PUT`/`DELETE /api/v1/concurrency-limits[/{key}]` (new
+  `environment_concurrency_limits` +
+  `task_limit_keys` tables) with atomic enforcement on task start (409
+  `concurrency_limit_reached`; the environment's limit rows are locked
+  while active RUNNING holders are counted, serializing concurrent
+  acquires; re-starting a RUNNING task never self-blocks).
+  ([#158](https://github.com/stardag-dev/stardag/pull/158))
+- New `POST /api/v1/builds/{id}/skip-blocked`: emits `TASK_SKIPPED` for
+  pending/suspended tasks transitively downstream of a
+  failed/cancelled/skipped task (recursive dependency-edge closure, one
+  transaction). ([#160](https://github.com/stardag-dev/stardag/pull/160))
+- New `TASK_RETRIED` event + `POST /api/v1/builds/{id}/tasks/{task_id}/retry`:
+  resets a failed/cancelled/skipped task to pending (never downgrades
+  completed/running) — the retry path for reactive builds.
+  ([#160](https://github.com/stardag-dev/stardag/pull/160))
+- New `POST /api/v1/builds/{id}/roots`: append root task ids to a build
+  (deduplicated), so completion detection covers roots added to an
+  active build. ([#160](https://github.com/stardag-dev/stardag/pull/160))
+- Executor metadata: task starts accept a JSON `executor_metadata` query
+  param (recorded in the `TASK_STARTED` event metadata, denormalised to
+  the new nullable `tasks.latest_executor_metadata` column with the same
+  set/clear-on-every-start semantics as `latest_executor_ref`); build
+  creation accepts an `executor_metadata` body field and
+  `POST /api/v1/builds/{id}/resume` a JSON query param (new nullable
+  `builds.executor_metadata` column — kept on resumes that don't carry
+  metadata). Exposed as `latest_executor` / `latest_executor_ref` /
+  `latest_executor_metadata` on task responses (detail, list rows,
+  search results, build task rows, frontier refs, bulk-register refs)
+  and `executor_metadata` on build responses. All additive/nullable —
+  older SDKs and servers are unaffected. The metadata dict is capped at
+  2 KB (compact JSON, 422 above) on all ingest paths.
+  ([#165](https://github.com/stardag-dev/stardag/pull/165))
+- Concurrency-limits admin: new `GET /api/v1/concurrency-limits/{key}/holders`
+  (the RUNNING tasks currently counted against a key — task identity,
+  running-since, executor fields; paginated via `limit`, oldest first)
+  and `POST /api/v1/concurrency-limits/{key}/holders/{task_id}/evict` (records
+  `TASK_FAILED` for a task that is currently RUNNING **and** holds the
+  key — 404 otherwise, deliberately not a generic kill endpoint — freeing
+  all its slots via the normal status transition; the evicting identity
+  is recorded in the event). Closes the resident-mode slot-leak recovery
+  gap: reactive builds self-heal leaked slots via scheduler ticks,
+  resident builds now have an admin path. Eviction also sets the owning
+  build's scheduler wake-up flag so reactive builds observe it promptly.
+  ([#165](https://github.com/stardag-dev/stardag/pull/165))
+- Concurrency-limit **writes are admin-gated on the user auth path**:
+  `PUT`/`DELETE /api/v1/concurrency-limits/{key}` and the evict endpoint
+  require the workspace ADMIN role (or higher) when authenticated as a
+  user (JWT); API-key auth (machine credentials) keeps full access, and
+  reads (limit list, holders) stay member-level.
+  ([#165](https://github.com/stardag-dev/stardag/pull/165))
+- Fix: `GET /api/v1/tasks`, `GET /api/v1/tasks/{task_id}` and the task registration
+  responses now populate `is_phantom` (previously always the schema
+  default `false`, so placeholder rows were indistinguishable from real
+  tasks on these endpoints).
+  ([#165](https://github.com/stardag-dev/stardag/pull/165))
+
+### UI
+
+- **Modal execution surfacing.** Tasks executed on Modal now show a
+  "⚡ Modal" badge (tooltip shows the function call ref; click to copy)
+  in the build task table, the Task Explorer, and DAG node hover. The
+  task detail panel gains an **Execution** section — executor kind, app
+  name, function name, call ref, and workspace/environment — with deep
+  links into the Modal dashboard (app page and function call). The
+  build view shows a "Modal: app-name" chip linking to the app page
+  plus a "reactive" badge for tick-scheduled builds. All Modal URL
+  patterns are centralized in `src/utils/modalLinks.ts`; links render
+  only when the recorded metadata has the required fields (older
+  servers / missing metadata degrade to plain text, never dead links).
+  ([#166](https://github.com/stardag-dev/stardag/pull/166))
+- **Concurrency limits admin view.** New env-scoped "Concurrency
+  Limits" sidebar page: list the environment's named limits with
+  current holder counts, create/edit/delete keys, and drill into a
+  key's holders (task detail link, running-since, executor badge,
+  Modal deep link) with an **Evict** action that fails a stuck RUNNING
+  holder to free its slots — the recovery path for slots leaked by a
+  crashed resident build process.
+  ([#166](https://github.com/stardag-dev/stardag/pull/166))
+
+### Docs
+
+- Expanded the
+  [Build & Execution concepts page](docs/docs/concepts/build-execution.md)
+  with the new execution model: detached execution and re-attach,
+  worker-side lifecycle reporting, reactive scheduling, and the
+  concurrency-limit mechanisms (build-local, registry-backed named
+  limits, global lock). The bundled `stardag` agent skill is updated to
+  match. ([#159](https://github.com/stardag-dev/stardag/pull/159))
 
 ## [0.9.0] — 2026-06-16
 

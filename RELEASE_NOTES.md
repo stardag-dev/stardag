@@ -6,6 +6,184 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.10.0 — Modal as a first-class execution layer
+
+A large feature release that makes Modal a first-class execution layer:
+builds and long-running tasks survive restarts, builds can run with no
+resident orchestrator at all, concurrency limits move server-side, and
+the UI links straight into the Modal dashboard. **Fully backward
+compatible — no client-code changes required**: existing builds keep
+working unchanged after `pip install -U stardag`. The new
+server-dependent features (reactive scheduling and named
+concurrency-limit _enforcement_) additionally need a matching
+stardag-api version — if you self-host the registry, upgrade the server
+first; see [upgrade ordering](#upgrade-ordering--server-before-sdk)
+below. (On the hosted registry at stardag.com the server is already
+up to date.)
+
+The new execution model is documented in
+[Build & Execution](docs/docs/concepts/build-execution.md); the packaged
+Modal setup in
+[Integrate with Modal](docs/docs/how-to/integrate-modal.md).
+
+### Restart-safe triggering and detached execution
+
+`StardagApp.build_trigger()` triggers a deployed build with the registry
+build id minted at the trigger point:
+
+```python
+result = stardag_app.build_trigger(tasks)
+result.build_id       # registry build id — pass back to re-attach
+result.function_call  # spawned Modal FunctionCall handle
+```
+
+Any restart of the build function (a Modal retry after preemption, or
+re-triggering with the returned `build_id`) **resumes the same build**
+instead of creating a new one — already-completed task outputs are
+detected during discovery and skipped. Requires registry credentials in
+the calling process; `build_spawn` remains for Modal-credentials-only
+triggering.
+
+Task execution on Modal is now **detached by default**:
+`ModalTaskExecutor` spawns worker invocations as detached Modal function
+calls (instead of holding blocking `remote` calls) and records the
+function call id with the task's started event. A restarted build
+**re-attaches to still-running workers instead of re-executing them** —
+a task's execution survives orchestrator crashes. FAIL_FAST and user
+cancellation now explicitly cancel the tracked function calls
+(previously, workers of a dead build kept running). Opt out with
+`ModalTaskExecutor(detached=False)` / `Builder(detached=False)`.
+
+Workers also **self-report their lifecycle** from inside the worker
+container — started (with a fresh re-attachable ref), completed plus
+artifact upload, suspended (dynamic deps), failed — so registry state
+stays accurate even if the build orchestrator dies mid-task. Opt out
+with `ModalTaskExecutor(worker_reports_lifecycle=False)` (required when
+driving an app deployed with an older stardag version from a newer local
+SDK) or `Runner(report_lifecycle=False)`.
+
+### Reactive (tick-based) scheduling — experimental
+
+A build can now run with **no resident orchestrator**:
+
+```python
+stardag_app = StardagApp(
+    ...,
+    watchdog_period_minutes=5,  # optional but recommended
+)
+
+result = stardag_app.build_trigger(tasks, reactive=True)
+```
+
+Discovery runs at the trigger, and short-lived, idempotent scheduler
+**ticks** — spawned by the trigger, by workers finishing tasks, and by
+the optional periodic watchdog — drive the build: each tick spawns ready
+tasks as detached function calls, probes running refs, self-heals
+completions from target existence, and handles terminal states. While
+only long-running tasks are in flight, **nothing runs but your tasks** —
+no orchestrator container time, and no orchestrator to crash. On a
+failure terminal, tasks transitively blocked by the failure are marked
+**skipped** (mirroring the resident engine), and failed builds can be
+re-triggered with the same `build_id` (failed tasks reset to pending).
+
+Marked experimental: surface and semantics may still change. Requires a
+registry and an app deployed with this stardag version; the global
+concurrency lock and build-local `ConcurrencyConfig` limits are not
+applied by ticks (registry-backed named limits are — see below). See
+[Reactive Scheduling](docs/docs/concepts/build-execution.md#reactive-scheduling-no-resident-orchestrator)
+and the
+[Modal how-to](docs/docs/how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental).
+
+### Registry-backed named concurrency limits
+
+Environment-level named limits cap how many tasks tagged with a key may
+run concurrently — **across builds, processes and machines**, which
+build-local `ConcurrencyConfig` semaphores never could. Configure keys
+via the API (`PUT /api/v1/concurrency-limits/{key}`) or the new UI admin
+page, then attach tasks to keys:
+
+- **Reactive scheduling**: configure a key selector on the deployed app
+  — `StardagApp(limit_key_selector=lambda task: ...)`. A denied task
+  stays in the frontier and proceeds when a slot frees.
+- **Resident builds** (`build` / `build_aio`): pass the new
+  `RegistryConcurrencyLimiter` to the existing `ConcurrencyLimiter`
+  seam:
+
+```python
+from stardag.build import RegistryConcurrencyLimiter
+
+build(
+    root,
+    concurrency_limiter=RegistryConcurrencyLimiter(
+        key_selector=lambda task: ["gpu"] if needs_gpu(task) else [],
+    ),
+)
+```
+
+A task occupies a slot simply by being RUNNING with the key recorded at
+start (no leases/TTLs); acquisition is atomic in the task-start
+transaction. Both modes share the same slots. Reactive builds self-heal
+slots leaked by crashes; resident mode has no automatic healer — the new
+holders/evict admin API and UI page are the recovery path for slots held
+by a crashed resident build process. See
+[Concurrency Limits](docs/docs/concepts/build-execution.md#concurrency-limits).
+
+### Pickle-free task rehydration
+
+New `stardag.task_from_registry_data(task_data, expected_task_id=...)`
+reconstructs a task instance from the payload stored at registration —
+no pickle involved. Requirements and limits: the defining module must be
+imported (task classes register at definition time); nested task fields
+must use the polymorphic annotations (`TaskLoads` / `SubClass`, whose
+discriminators are embedded recursively); `AliasTask` payloads are
+rejected (they embed pickled bytes); the optional identity check guards
+against non-round-trippable custom serializers. Reactive scheduler ticks
+use it as a fallback when a task's stored pickle is missing or
+unloadable, so an app redeploy with compatible task definitions no
+longer breaks in-flight reactive builds.
+
+### Executor metadata and UI surfacing
+
+Tasks and builds executed on Modal now record descriptive executor
+metadata (app name, workspace, environment, function name). The UI
+surfaces it: a "⚡ Modal" badge on tasks, an **Execution** section on the
+task detail panel with deep links into the Modal dashboard, a
+"Modal: app-name" chip and "reactive" badge on builds, and a new
+env-scoped **Concurrency Limits** admin page (manage keys, inspect
+holders, evict a stuck holder). Workspace resolution is lazy and
+best-effort; override with `StardagApp(modal_workspace=...)` or
+`ModalTaskExecutor(modal_workspace=...)`.
+
+### Multiple apps per environment
+
+Reactive builds are **owned by the app that triggered them**: scheduler
+ticks from another deployed app in the same environment (typically its
+watchdog sweep) forward the wake-up to the owner app's tick instead of
+driving the build with the wrong app's code. Move a build to a new app
+by re-triggering it from that app.
+
+### Upgrade ordering — server before SDK
+
+All changes are additive — no breaking changes, and older SDKs keep
+working against a newer server. If you self-host the registry, **deploy
+the upgraded stardag-api (including its DB migrations) before relying on
+the new SDK features**:
+
+- **Named concurrency limits**: an older server silently ignores the
+  enforcement parameters (no error) — limits are only actually enforced
+  once the server is upgraded.
+- **Reactive scheduling** requires the new frontier/notify (and
+  skip-blocked, retry, roots) endpoints — a matching server version.
+- **Executor metadata** and detached re-attach degrade gracefully in
+  both directions.
+
+Mixed versions on Modal: driving an app deployed with an older stardag
+version from a newer local SDK requires
+`ModalTaskExecutor(worker_reports_lifecycle=False)` (the older deployed
+workers don't self-report their lifecycle).
+
+---
+
 ## v0.9.0 — Build concurrency limits & per-task Modal env overrides
 
 Two additive features, both backward compatible. **No client-code changes
