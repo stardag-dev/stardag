@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 
+import pytest
+
 from stardag import BaseTask, auto_namespace, flatten_task_struct
 from stardag.build import (
     BuildTaskStore,
@@ -29,6 +31,8 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
 )
+from stardag.build._reactive import TickSummary, _skip_blocked
+from stardag.exceptions import NotFoundError
 from stardag.registry import (
     BuildFrontier,
     FrontierTaskRef,
@@ -169,6 +173,11 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("add_roots", ",".join(root_task_ids)))
         self.root_task_ids += [t for t in root_task_ids if t not in self.root_task_ids]
 
+    async def task_cancel_aio(self, build_id, task):
+        tid = str(task.id)
+        self.calls.append(("cancel", tid))
+        self.statuses[tid] = "cancelled"
+
     async def task_fail_aio(self, build_id, task, error_message=None):
         tid = str(task.id)
         self.calls.append(("fail", tid))
@@ -181,6 +190,35 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def build_fail_aio(self, build_id, error_message=None):
         self.calls.append(("build_fail", None))
         self.build_status = "failed"
+
+    async def build_skip_blocked_aio(self, build_id):
+        # Mirrors the API: pending/suspended tasks transitively downstream
+        # of a failed/cancelled/skipped task become skipped.
+        self.calls.append(("skip_blocked", None))
+        blocked = {
+            tid
+            for tid, status in self.statuses.items()
+            if status in ("failed", "cancelled", "skipped")
+        }
+        # Blockage only propagates through nodes that will themselves never
+        # complete (mirrors the API's CTE gate): a completed intermediate
+        # satisfies its downstream; a running one may still complete.
+        propagating = ("failed", "cancelled", "skipped", "pending", "suspended")
+        changed = True
+        while changed:
+            changed = False
+            for tid, ups in self.upstreams.items():
+                if tid not in blocked and any(
+                    up in blocked and self.statuses.get(up) in propagating for up in ups
+                ):
+                    blocked.add(tid)
+                    changed = True
+        skipped = []
+        for tid in blocked:
+            if self.statuses.get(tid) in ("pending", "suspended"):
+                self.statuses[tid] = "skipped"
+                skipped.append(tid)
+        return skipped
 
     async def build_notify_aio(self, build_id):
         self.needs_tick = True
@@ -959,3 +997,123 @@ class TestStaleRunningNoRef:
         assert summary.failed_recorded == 0
         assert summary.outcome == "lingered_out"
         assert executor.spawned == []
+
+
+class TestSkipBlockedOnFailure:
+    async def test_fail_fast_skips_blocked_descendants(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """On a failure terminal the tick marks transitively blocked tasks
+        skipped — they no longer dangle pending while the build is failed."""
+        bad = SyncOnlyTask(name="skip-bad")
+        mid = SyncOnlyTask(name="skip-mid", deps=(bad,))
+        root = SyncOnlyTask(name="skip-root", deps=(mid,))
+        registry, locks, executor, store = _setup([bad, mid, root], auto_complete=False)
+        registry.add_task(str(bad.id), status="failed")
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,  # FAIL_FAST default
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.skipped == 2
+        assert registry.statuses[str(mid.id)] == "skipped"
+        assert registry.statuses[str(root.id)] == "skipped"
+
+    async def test_cancelled_branch_descendants_also_skipped(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """FAIL_FAST with a second, still-running branch: the cancel pass
+        records TASK_CANCELLED (a cancelled task must not dangle RUNNING —
+        workers killed by the executor's cancel can't self-report), so the
+        cancelled branch's descendants land in the skip closure too."""
+        bad = SyncOnlyTask(name="cb-bad")
+        long_running = SyncOnlyTask(name="cb-running")
+        downstream = SyncOnlyTask(name="cb-downstream", deps=(long_running,))
+        root = SyncOnlyTask(name="cb-root", deps=(bad, downstream))
+        registry, locks, executor, store = _setup(
+            [bad, long_running, downstream, root], auto_complete=False
+        )
+        registry.add_task(str(bad.id), status="failed")
+        registry.add_task(
+            str(long_running.id),
+            status="running",
+            executor="fake",
+            executor_ref="ref-live",
+        )
+        store.save_task(long_running)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,  # FAIL_FAST default
+        )
+
+        assert summary.terminal_status == "failed"
+        assert executor.cancelled_refs == ["ref-live"]
+        assert registry.statuses[str(long_running.id)] == "cancelled"
+        assert registry.statuses[str(downstream.id)] == "skipped"
+        assert registry.statuses[str(root.id)] == "skipped"
+
+    async def test_blocked_terminal_in_continue_mode_also_skips(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("skip-cont-dep", "skip-cont-root")
+        registry, locks, executor, store = _setup([dep, root], auto_complete=False)
+        registry.add_task(str(dep.id), status="failed")
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert registry.statuses[str(root.id)] == "skipped"
+
+
+class _SkipBlocked404Registry(NoOpRegistry):
+    """Registry whose skip-blocked endpoint 404s with a given detail."""
+
+    def __init__(self, detail: str):
+        super().__init__()
+        self.detail = detail
+
+    async def build_skip_blocked_aio(self, build_id) -> list[str]:
+        raise NotFoundError(
+            "Skip blocked tasks: resource not found", detail=self.detail
+        )
+
+
+class TestSkipBlockedErrorHandling:
+    async def test_missing_route_tolerated(self):
+        """Old server without the endpoint (FastAPI default 404) → skip
+        silently omitted, no raise."""
+        summary = TickSummary(outcome="noop")
+        await _skip_blocked(_SkipBlocked404Registry("Not Found"), uuid4(), summary)
+        assert summary.skipped == 0
+
+    async def test_app_level_404_reraised(self):
+        """A 404 raised inside the endpoint (e.g. build no longer exists)
+        signals a registry inconsistency and must propagate."""
+        with pytest.raises(NotFoundError):
+            await _skip_blocked(
+                _SkipBlocked404Registry("Build not found"),
+                uuid4(),
+                TickSummary(outcome="noop"),
+            )

@@ -51,6 +51,7 @@ from stardag.build._base import (
 )
 from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError
+from stardag.registry._api_registry import _is_route_not_found
 from stardag.registry import BuildFrontier, FrontierTaskRef, RegistryABC
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,7 @@ class TickSummary:
     cancelled_refs: int = 0
     iterations: int = 0
     limit_denied: int = 0
+    skipped: int = 0
 
 
 async def run_tick_aio(
@@ -494,7 +496,7 @@ async def _handle_terminal(
         if frontier.build_status == "cancelled":
             # Cancelled externally (e.g. UI): stop the running work.
             await _cancel_running(
-                frontier, build_id, task_executor, task_store, summary
+                frontier, build_id, registry, task_executor, task_store, summary
             )
         return frontier.build_status
 
@@ -503,7 +505,10 @@ async def _handle_terminal(
     failed = counts.get("failed", 0)
 
     if failed > 0 and config.fail_mode == FailMode.FAIL_FAST:
-        await _cancel_running(frontier, build_id, task_executor, task_store, summary)
+        await _cancel_running(
+            frontier, build_id, registry, task_executor, task_store, summary
+        )
+        await _skip_blocked(registry, build_id, summary)
         await registry.build_fail_aio(
             build_id, f"{failed} task(s) failed (fail_mode=FAIL_FAST)"
         )
@@ -529,6 +534,7 @@ async def _handle_terminal(
         # Nothing runnable and nothing running: the build can't progress
         # (failed deps in CONTINUE mode, or a lost task pickle). Fail
         # rather than idle forever.
+        await _skip_blocked(registry, build_id, summary)
         await registry.build_fail_aio(
             build_id,
             "No runnable or running tasks left but roots are not complete "
@@ -539,9 +545,35 @@ async def _handle_terminal(
     return None
 
 
+async def _skip_blocked(
+    registry: RegistryABC, build_id: UUID, summary: TickSummary
+) -> None:
+    """Mark tasks transitively blocked by failures as skipped (best-effort).
+
+    Cosmetic-but-important: without it, blocked tasks dangle PENDING in the
+    registry/UI forever while the build shows failed. Old servers without
+    the endpoint are tolerated (missing-route 404 → skip silently omitted);
+    app-level 404s (e.g. the build no longer exists) are re-raised — they
+    signal a registry inconsistency the tick must not paper over.
+    """
+    try:
+        skipped = await registry.build_skip_blocked_aio(build_id)
+        summary.skipped += len(skipped)
+    except NotFoundError as e:
+        if not _is_route_not_found(e):
+            raise
+        logger.warning(
+            "Registry server does not support skip-blocked; tasks blocked "
+            "by the failure will remain pending."
+        )
+    except Exception as e:
+        logger.warning(f"Failed to skip blocked tasks for build {build_id}: {e}")
+
+
 async def _cancel_running(
     frontier: BuildFrontier,
     build_id: UUID,
+    registry: RegistryABC,
     task_executor: TaskExecutorABC,
     task_store: BuildTaskStore,
     summary: TickSummary,
@@ -552,6 +584,13 @@ async def _cancel_running(
     dynamic-dep registration window drops out of ``actionable`` but must
     still be cancelled. Falls back to ``actionable`` for servers predating
     the field.
+
+    Each successfully cancelled execution is also recorded as
+    TASK_CANCELLED (best-effort): a worker killed by the executor's cancel
+    can't reliably self-report, and without the event the task dangles
+    RUNNING — keeping its pending descendants out of the skip-blocked
+    closure (cancelled is a seed status) and holding any concurrency-limit
+    slots forever.
     """
     running_items = frontier.running or [
         item for item in frontier.actionable if item.latest_status in _RUNNING_STATUSES
@@ -574,4 +613,11 @@ async def _cancel_running(
                 logger.warning(
                     f"Failed to cancel detached execution "
                     f"{item.latest_executor_ref!r} for task {item.task_id}: {e}"
+                )
+                continue
+            try:
+                await registry.task_cancel_aio(build_id, task)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to record cancellation of task {item.task_id}: {e}"
                 )

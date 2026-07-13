@@ -59,8 +59,27 @@ tick_settings=...)`. Current limitations (documented in
   between slot acquisition and spawn — so leaked slots always free; the
   watchdog is strongly recommended when limits are enforced.
 
+- Reactive scheduling: on a failure terminal, ticks now mark tasks
+  transitively blocked by the failure as **skipped** (server-computed via
+  `POST /builds/{id}/skip-blocked`) — mirroring the resident engine, so
+  blocked tasks no longer dangle pending in the UI while the build shows
+  failed. Together with the retry/roots endpoints below, reactive
+  re-triggers now have a complete recovery story: failed builds can be
+  re-triggered (failed tasks reset to pending) and roots added mid-build
+  are covered by completion detection.
+
 ### Registry API
 
+- New `POST /builds/{id}/skip-blocked`: emits `TASK_SKIPPED` for
+  pending/suspended tasks transitively downstream of a
+  failed/cancelled/skipped task (recursive dependency-edge closure, one
+  transaction).
+- New `TASK_RETRIED` event + `POST /builds/{id}/tasks/{task_id}/retry`:
+  resets a failed/cancelled/skipped task to pending (never downgrades
+  completed/running) — the retry path for reactive builds.
+- New `POST /builds/{id}/roots`: append root task ids to a build
+  (deduplicated), so completion detection covers roots added to an
+  active build.
 - New reactive-scheduling endpoints: `POST`/`DELETE /builds/{id}/notify`
   (scheduler wake-up flag, new `builds.needs_tick_at` column) and
   `GET /builds/{id}/frontier` — the build's actionable tasks (global status

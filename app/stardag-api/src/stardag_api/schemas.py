@@ -274,6 +274,13 @@ class ConcurrencyLimitUpsert(BaseModel):
     max_concurrent: int = Field(ge=1)
 
 
+class SkipBlockedResponse(BaseModel):
+    """Tasks skipped by POST /builds/{id}/skip-blocked."""
+
+    build_id: UUID
+    skipped_task_ids: list[str]
+
+
 class BuildNotifyResponse(BaseModel):
     """Response of the build notify (scheduler wake-up flag) endpoints."""
 

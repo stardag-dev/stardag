@@ -41,6 +41,7 @@ from stardag_api.models import (
 from stardag_api.models.base import generate_uuid7, utc_now
 from stardag_api.schemas import (
     AddBuildRootsRequest,
+    SkipBlockedResponse,
     AddDependenciesRequest,
     AddDependenciesResponse,
     BuildCreate,
@@ -938,6 +939,115 @@ async def add_build_roots(
         completed_at=completed_at,
         status_triggered_by_user=triggered_by_user,
         is_resumed=is_resumed,
+    )
+
+
+@router.post("/{build_id}/skip-blocked", response_model=SkipBlockedResponse)
+async def skip_blocked_tasks(
+    build_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    commit_hash: str | None = None,
+):
+    """Emit TASK_SKIPPED for tasks transitively blocked by failures.
+
+    Computes (recursive CTE over dependency edges) the pending/suspended
+    tasks in the build that are downstream of a failed/cancelled/skipped
+    task, and records TASK_SKIPPED for each in one transaction. Called by
+    reactive scheduler ticks when a build reaches a failure terminal, so
+    blocked tasks show as skipped instead of dangling pending forever —
+    mirroring the resident engine's skip emission.
+    """
+    _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
+    await _get_build_checked(build_id, db, auth)
+
+    build_task_pks = (
+        select(Event.task_id)
+        .where(Event.build_id == build_id, Event.task_id.is_not(None))
+        .distinct()
+        .scalar_subquery()
+    )
+
+    # Transitive closure downward from terminal-blocking seeds. Blockage
+    # only propagates through nodes that will themselves never complete:
+    # the seeds (failed/cancelled/skipped) and pending/suspended nodes
+    # (which this call turns skipped). A COMPLETED intermediate satisfies
+    # its downstream regardless of its own upstreams (mirroring the
+    # resident engine, which only propagates skips through tasks that
+    # themselves become skipped); RUNNING intermediates may still complete.
+    _propagating_statuses = [
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+        TaskStatus.SKIPPED,
+        TaskStatus.PENDING,
+        TaskStatus.SUSPENDED,
+    ]
+    seeds = (
+        select(Task.id)
+        .where(
+            Task.id.in_(build_task_pks),
+            Task.latest_status.in_(
+                [TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.SKIPPED]
+            ),
+        )
+        .cte("blocked_closure", recursive=True)
+    )
+    downstream = (
+        select(TaskDependency.downstream_task_id.label("id"))
+        .join(seeds, TaskDependency.upstream_task_id == seeds.c.id)
+        .join(Task, Task.id == seeds.c.id)
+        .where(Task.latest_status.in_(_propagating_statuses))
+    )
+    closure = seeds.union(downstream)
+
+    blocked_tasks = (
+        (
+            await db.execute(
+                select(Task)
+                .where(
+                    Task.id.in_(select(closure.c.id)),
+                    Task.id.in_(build_task_pks),
+                    Task.latest_status.in_([TaskStatus.PENDING, TaskStatus.SUSPENDED]),
+                )
+                # Deterministic lock order (matching bulk-register's
+                # task_id ordering) so concurrent skip-blocked calls or
+                # skip-blocked vs bulk-register can't deadlock.
+                .order_by(Task.task_id.asc())
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    if blocked_tasks:
+        _raise_if_limit_exceeded(
+            await check_entity_creation_limit(
+                db,
+                auth.workspace_id,
+                "events",
+                limits_settings,
+                amount=len(blocked_tasks),
+            )
+        )
+        metadata = _build_event_metadata(commit_hash)
+        for task in blocked_tasks:
+            event = Event(
+                build_id=build_id,
+                task_id=task.id,
+                event_type=EventType.TASK_SKIPPED,
+                event_metadata=metadata,
+            )
+            db.add(event)
+            await db.flush()
+            apply_event_to_task(task, event)
+        await db.commit()
+        for _ in blocked_tasks:
+            record_entity_created(auth.workspace_id, "events")
+
+    return SkipBlockedResponse(
+        build_id=build_id,
+        skipped_task_ids=[t.task_id for t in blocked_tasks],
     )
 
 
