@@ -25,10 +25,11 @@ with detached support. Requirements and current limitations:
   the trigger (initial discovery) and by workers (dynamic deps).
 - The global concurrency lock and build-local ``ConcurrencyConfig`` limits
   are not applied by ticks (infra-level limits, e.g. Modal per-function
-  ``concurrency_limit``, still apply). Registry-backed limits are planned.
-- On failure (FAIL_FAST) the build is failed and running executions are
-  cancelled; blocked descendants currently stay PENDING (no TASK_SKIPPED
-  emission from ticks yet).
+  ``concurrency_limit``, still apply). Registry-backed named limits *are*
+  applied, via ``TickConfig.limit_key_selector``.
+- On failure (FAIL_FAST) the build is failed, running executions are
+  cancelled, and blocked descendants are marked SKIPPED (server-computed;
+  older servers without the skip-blocked endpoint are tolerated).
 """
 
 from __future__ import annotations
