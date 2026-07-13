@@ -18,10 +18,14 @@ import { TaskDetail } from "./TaskDetail";
 
 // Env-scoped admin view for named concurrency limits: list/create/edit/
 // delete limit keys and drill into a key's current slot holders (RUNNING
-// tasks), with an evict action to recover leaked slots.
+// tasks), with an evict action to recover leaked slots. Limits and
+// holders are viewable by all workspace members; mutations (create/
+// edit/delete/evict) are workspace-admin-only, matching the server-side
+// role gate and the WorkspaceSettings gating pattern.
 export function ConcurrencyLimits() {
-  const { activeEnvironment } = useEnvironment();
+  const { activeEnvironment, activeWorkspaceRole } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
+  const isAdmin = activeWorkspaceRole === "owner" || activeWorkspaceRole === "admin";
 
   const [limits, setLimits] = useState<ConcurrencyLimit[]>([]);
   const [holderCounts, setHolderCounts] = useState<Record<string, number>>({});
@@ -66,6 +70,7 @@ export function ConcurrencyLimits() {
     const fresh = () => limitsEpochRef.current === epoch;
     if (!activeEnvironment?.id) {
       setLimits([]);
+      setHolderCounts({});
       setLoading(false);
       return;
     }
@@ -114,6 +119,11 @@ export function ConcurrencyLimits() {
     setLoading(true);
     setExpandedKey(null);
     setSelectedTask(null);
+    // Clear counts eagerly: environments can share key names, so a stale
+    // count from the previous environment must not show on the new
+    // environment's row while its own count fetch is in flight (or after
+    // it failed).
+    setHolderCounts({});
     loadLimits();
   }, [loadLimits]);
 
@@ -223,7 +233,11 @@ export function ConcurrencyLimits() {
     if (!activeEnvironment?.id) return;
     const confirmed = window.confirm(
       `Evict task "${holder.task_name}" (${holder.task_id.slice(0, 12)}...) from ` +
-        `"${key}"? The task is marked FAILED and all its slots are freed.`,
+        `"${key}"?\n\nThe task is marked FAILED and all its slots are freed — but ` +
+        `the underlying process is NOT stopped. Only evict holders whose process ` +
+        `you know is dead: evicting a live worker oversubscribes the cap, and in ` +
+        `a fail-fast reactive build the evicted-but-alive execution is the one ` +
+        `that never gets cancelled (it can still complete after the build failed).`,
     );
     if (!confirmed) return;
     setEvictingTaskId(holder.task_id);
@@ -282,41 +296,43 @@ export function ConcurrencyLimits() {
             </div>
           )}
 
-          {/* Create form */}
-          <div className="flex items-end gap-2 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800">
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">
-                Key
-              </label>
-              <input
-                type="text"
-                value={newKey}
-                onChange={(e) => setNewKey(e.target.value)}
-                placeholder="e.g. gpu"
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-              />
+          {/* Create form (workspace admins only) */}
+          {isAdmin && (
+            <div className="flex items-end gap-2 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-700 dark:bg-gray-800">
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">
+                  Key
+                </label>
+                <input
+                  type="text"
+                  value={newKey}
+                  onChange={(e) => setNewKey(e.target.value)}
+                  placeholder="e.g. gpu"
+                  className="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                />
+              </div>
+              <div className="w-32">
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">
+                  Max concurrent
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={newMax}
+                  onChange={(e) => setNewMax(e.target.value)}
+                  aria-label="Max concurrent"
+                  className="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
+                />
+              </div>
+              <button
+                onClick={handleCreate}
+                disabled={creating || !newKey.trim()}
+                className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                {creating ? "Adding..." : "Add limit"}
+              </button>
             </div>
-            <div className="w-32">
-              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400">
-                Max concurrent
-              </label>
-              <input
-                type="number"
-                min={1}
-                value={newMax}
-                onChange={(e) => setNewMax(e.target.value)}
-                aria-label="Max concurrent"
-                className="mt-1 w-full rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-900 dark:text-gray-100"
-              />
-            </div>
-            <button
-              onClick={handleCreate}
-              disabled={creating || !newKey.trim()}
-              className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-            >
-              {creating ? "Adding..." : "Add limit"}
-            </button>
-          </div>
+          )}
 
           {/* Limits table */}
           {loading ? (
@@ -341,9 +357,11 @@ export function ConcurrencyLimits() {
                     <th className="px-4 py-2 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                       Current Holders
                     </th>
-                    <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
-                      Actions
-                    </th>
+                    {isAdmin && (
+                      <th className="px-4 py-2 text-right text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                        Actions
+                      </th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-900">
@@ -351,6 +369,7 @@ export function ConcurrencyLimits() {
                     <LimitRow
                       key={limit.key}
                       limit={limit}
+                      isAdmin={isAdmin}
                       holderCount={holderCounts[limit.key]}
                       expanded={expandedKey === limit.key}
                       editing={editingKey === limit.key}
@@ -389,6 +408,8 @@ export function ConcurrencyLimits() {
 
 interface LimitRowProps {
   limit: ConcurrencyLimit;
+  // Workspace-admin mutations (edit/delete/evict) are hidden otherwise.
+  isAdmin: boolean;
   holderCount: number | undefined;
   expanded: boolean;
   editing: boolean;
@@ -410,6 +431,7 @@ interface LimitRowProps {
 
 function LimitRow({
   limit,
+  isAdmin,
   holderCount,
   expanded,
   editing,
@@ -464,7 +486,7 @@ function LimitRow({
                 Cancel
               </button>
             </div>
-          ) : (
+          ) : isAdmin ? (
             <button
               onClick={onStartEdit}
               className="rounded px-1 hover:bg-gray-100 dark:hover:bg-gray-700"
@@ -473,6 +495,8 @@ function LimitRow({
               {limit.max_concurrent}
               <span className="ml-1.5 text-xs text-gray-400">✎</span>
             </button>
+          ) : (
+            <span className="px-1">{limit.max_concurrent}</span>
           )}
         </td>
         <td className="px-4 py-2 text-sm">
@@ -497,19 +521,24 @@ function LimitRow({
             {holderCount ?? "—"}
           </button>
         </td>
-        <td className="px-4 py-2 text-right">
-          <button
-            onClick={onDelete}
-            className="rounded-md px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
-            title="Delete this limit (the key becomes unlimited)"
-          >
-            Delete
-          </button>
-        </td>
+        {isAdmin && (
+          <td className="px-4 py-2 text-right">
+            <button
+              onClick={onDelete}
+              className="rounded-md px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-900/20"
+              title="Delete this limit (the key becomes unlimited)"
+            >
+              Delete
+            </button>
+          </td>
+        )}
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={4} className="bg-gray-50 px-4 py-3 dark:bg-gray-800/50">
+          <td
+            colSpan={isAdmin ? 4 : 3}
+            className="bg-gray-50 px-4 py-3 dark:bg-gray-800/50"
+          >
             {holdersLoading ? (
               <div className="flex items-center justify-center py-4">
                 <div className="h-5 w-5 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
@@ -538,9 +567,11 @@ function LimitRow({
                       <th className="py-1 pr-4 text-left text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
                         Executor
                       </th>
-                      <th className="py-1 text-right text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
-                        Actions
-                      </th>
+                      {isAdmin && (
+                        <th className="py-1 text-right text-xs font-medium uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                          Actions
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
@@ -587,18 +618,20 @@ function LimitRow({
                               )}
                             </span>
                           </td>
-                          <td className="py-1.5 text-right">
-                            <button
-                              onClick={() => onEvict(holder)}
-                              disabled={evictingTaskId === holder.task_id}
-                              className="rounded-md bg-red-100 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50"
-                              title="Mark the task failed and free all its slots"
-                            >
-                              {evictingTaskId === holder.task_id
-                                ? "Evicting..."
-                                : "Evict"}
-                            </button>
-                          </td>
+                          {isAdmin && (
+                            <td className="py-1.5 text-right">
+                              <button
+                                onClick={() => onEvict(holder)}
+                                disabled={evictingTaskId === holder.task_id}
+                                className="rounded-md bg-red-100 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-200 disabled:opacity-50 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50"
+                                title="Mark the task failed and free all its slots"
+                              >
+                                {evictingTaskId === holder.task_id
+                                  ? "Evicting..."
+                                  : "Evict"}
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       );
                     })}

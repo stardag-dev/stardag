@@ -5,6 +5,7 @@ import { BreadcrumbProvider } from "../context/BreadcrumbContext";
 import { ConcurrencyLimits } from "./ConcurrencyLimits";
 
 let mockEnvironmentId = "env-1";
+let mockWorkspaceRole: "owner" | "admin" | "member" | null = "admin";
 vi.mock("../context/EnvironmentContext", () => ({
   useEnvironment: () => ({
     activeEnvironment: {
@@ -12,6 +13,7 @@ vi.mock("../context/EnvironmentContext", () => ({
       slug: "default",
       name: "default",
     },
+    activeWorkspaceRole: mockWorkspaceRole,
   }),
 }));
 
@@ -62,6 +64,7 @@ function renderPage() {
 describe("ConcurrencyLimits", () => {
   beforeEach(() => {
     mockEnvironmentId = "env-1";
+    mockWorkspaceRole = "admin";
     vi.mocked(fetchConcurrencyLimits).mockResolvedValue([
       { key: "gpu", max_concurrent: 2 },
     ]);
@@ -171,5 +174,94 @@ describe("ConcurrencyLimits", () => {
     );
 
     confirmSpy.mockRestore();
+  });
+
+  it("does not evict when the confirm dialog is declined", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("gpu");
+    await user.click(await screen.findByTitle("Show current slot holders"));
+    await screen.findByText("TrainModel");
+
+    await user.click(screen.getByRole("button", { name: "Evict" }));
+    expect(confirmSpy).toHaveBeenCalled();
+    expect(evictConcurrencyLimitHolder).not.toHaveBeenCalled();
+
+    confirmSpy.mockRestore();
+  });
+
+  it("surfaces an evict failure as an action error", async () => {
+    vi.mocked(evictConcurrencyLimitHolder).mockRejectedValue(
+      new Error("Failed to evict holder: Not Found"),
+    );
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText("gpu");
+    await user.click(await screen.findByTitle("Show current slot holders"));
+    await screen.findByText("TrainModel");
+
+    await user.click(screen.getByRole("button", { name: "Evict" }));
+    expect(
+      await screen.findByText("Failed to evict holder: Not Found"),
+    ).toBeInTheDocument();
+    // The holder row is still rendered and actionable after the failure.
+    expect(screen.getByRole("button", { name: "Evict" })).toBeEnabled();
+
+    confirmSpy.mockRestore();
+  });
+
+  it("does not show a previous environment's holder count for a same-named key", async () => {
+    // env-1's "gpu" has 5 holders; env-2 also has a "gpu" key but its
+    // count fetch fails — env-2's row must show the unknown marker, not 5.
+    vi.mocked(fetchConcurrencyLimitHolders).mockImplementation(
+      (_key: string, envId: string) => {
+        if (envId === "env-1") {
+          return Promise.resolve({ key: "gpu", holders: [], total: 5 });
+        }
+        return Promise.reject(new Error("count fetch failed"));
+      },
+    );
+
+    const { rerender } = renderPage();
+    expect(await screen.findByText("5")).toBeInTheDocument();
+
+    mockEnvironmentId = "env-2";
+    rerender(
+      <BreadcrumbProvider>
+        <ConcurrencyLimits />
+      </BreadcrumbProvider>,
+    );
+    // env-2's limits load (same "gpu" key) with the count fetch failing:
+    // the row must show the unknown marker, never env-1's count.
+    await waitFor(() => {
+      expect(screen.getByTitle("Show current slot holders")).toHaveTextContent("—");
+    });
+    expect(screen.queryByText("5")).not.toBeInTheDocument();
+  });
+
+  it("hides limit and holder mutations from non-admin members", async () => {
+    mockWorkspaceRole = "member";
+    const user = userEvent.setup();
+    renderPage();
+
+    // Limits and holder counts are still viewable...
+    expect(await screen.findByText("gpu")).toBeInTheDocument();
+    expect(await screen.findByText("1")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+
+    // ...but create/edit/delete are not.
+    expect(screen.queryByRole("button", { name: "Add limit" })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("e.g. gpu")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Edit max concurrency")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete" })).not.toBeInTheDocument();
+
+    // The holders drill-down still works, without the Evict action.
+    await user.click(await screen.findByTitle("Show current slot holders"));
+    expect(await screen.findByText("TrainModel")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Evict" })).not.toBeInTheDocument();
   });
 });

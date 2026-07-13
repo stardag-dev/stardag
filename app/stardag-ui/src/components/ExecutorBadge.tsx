@@ -75,14 +75,20 @@ export function BuildExecutorChips({ metadata }: BuildExecutorChipsProps) {
   if (!metadata) return null;
 
   const isModal = metadata.kind === "modal" || metadata.kind === undefined;
-  const appName = typeof metadata.app_name === "string" ? metadata.app_name : null;
+  const appName =
+    typeof metadata.app_name === "string" && metadata.app_name.length > 0
+      ? metadata.app_name
+      : null;
+  // Non-null appUrl implies a non-empty app_name (modalAppUrl requires it),
+  // so the label needs no fallback.
   const appUrl = modalAppUrl(metadata);
 
-  const modalChipLabel =
-    isModal && (appName || appUrl) ? `Modal: ${appName ?? "app"}` : null;
+  const modalChipLabel = isModal && appName ? `Modal: ${appName}` : null;
 
+  // max-w + truncate: app_name is unvalidated server-side, so an oversized
+  // value must not blow up the breadcrumb row (full label in the tooltip).
   const chipClasses =
-    "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium " +
+    "inline-flex max-w-64 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium " +
     "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300";
 
   if (!modalChipLabel && metadata.reactive !== true) return null;
@@ -97,12 +103,14 @@ export function BuildExecutorChips({ metadata }: BuildExecutorChipsProps) {
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
             className={`${chipClasses} hover:ring-1 hover:ring-emerald-400`}
-            title="Open the Modal app dashboard"
+            title={`${modalChipLabel} — open the Modal app dashboard`}
           >
-            {modalChipLabel}
+            <span className="truncate">{modalChipLabel}</span>
           </a>
         ) : (
-          <span className={chipClasses}>{modalChipLabel}</span>
+          <span className={chipClasses} title={modalChipLabel}>
+            <span className="truncate">{modalChipLabel}</span>
+          </span>
         ))}
       {metadata.reactive === true && (
         <span
