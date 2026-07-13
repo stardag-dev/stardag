@@ -465,12 +465,14 @@ transitively blocked by the failed task are marked skipped.
 
 Two operational notes:
 
-- **Don't redeploy the app with changed task definitions while reactive
-  builds are in flight.** Task objects are persisted as pickles and loaded
-  by later ticks/workers of the same deployed app version — a mid-build
-  redeploy that changes task classes can make the stored tasks
-  unloadable (such tasks are failed by the next tick rather than
-  silently stalling; re-trigger the build after the redeploy).
+- **Avoid redeploying the app with changed task definitions while
+  reactive builds are in flight.** Task objects are persisted as pickles
+  for the scheduler; if a stored pickle becomes unloadable (e.g. after a
+  redeploy), the tick falls back to **reconstructing the task from the
+  registry's stored data** — which works as long as the task class is
+  still importable and its fields are compatible (nested task fields
+  must use `sd.TaskLoads`/`sd.SubClass` annotations). Only if both paths
+  fail is the task failed by the next tick (never a silent stall).
 - **The watchdog sweep runs one quick scheduling pass per running build**
   (it skips the linger), so its per-period cost is one short function
   invocation plus a frontier query per running build.

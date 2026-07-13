@@ -48,6 +48,7 @@ from stardag._core.base_task import (
 )
 from stardag._core.decorator import Depends, task
 from stardag._core.hashable_set import HashableSet, HashSafeSetSerializer
+from stardag._core.rehydrate import TaskRehydrationError, task_from_registry_data
 from stardag._core.task import Task, get_default_relpath
 from stardag._core.validate import LoadValidator
 from stardag._core.task_loads import TaskLoads
@@ -115,6 +116,8 @@ __all__ = [
     "StardagField",
     "SubClass",
     "Task",
+    "TaskRehydrationError",
+    "task_from_registry_data",
     "TaskRef",
     "TaskLoads",
     "TaskStruct",

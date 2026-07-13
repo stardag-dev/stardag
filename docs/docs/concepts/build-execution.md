@@ -134,7 +134,9 @@ runs but your tasks**.
 
 The registry is the scheduler state (the frontier is computed from
 recorded task statuses and dependency edges); task _objects_ are
-rehydrated from a per-build task store persisted at trigger time. The
+rehydrated from a per-build task store persisted at trigger time, with a
+pickle-free fallback that reconstructs them from the registry's stored
+task data (`stardag.task_from_registry_data`). The
 registry never pushes or executes anything — only user-deployed code
 (which has the DAG-defining code) spawns work.
 
