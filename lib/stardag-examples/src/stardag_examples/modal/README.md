@@ -5,6 +5,10 @@ Run Stardag tasks on Modal's serverless infrastructure with automatic scaling, G
 Includes examples for:
 
 - **basic/** - Minimal Modal app setup
+- **walkthrough/** - Full integration walkthrough: `build_trigger` (restart-safe
+  triggering and reactive scheduling), detached execution, dynamic deps, and
+  registry-backed named concurrency limits — see
+  [walkthrough/README.md](walkthrough/README.md)
 - **ml_pipeline/** - ML pipeline on Modal
 - **prefect/** - Modal + Prefect for observability
 
