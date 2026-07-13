@@ -80,6 +80,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.limits: dict[str, int] = {}
         self.task_limit_keys: dict[str, set[str]] = {}
         self.status_at: dict[str, datetime] = {}
+        # task_id -> task_data body, served by task_get_metadata_aio
+        # (rehydration fallback); missing key -> KeyError, like a 404.
+        self.metadata_bodies: dict[str, dict] = {}
 
     # --- test setup helpers ---
 
@@ -190,6 +193,24 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def build_fail_aio(self, build_id, error_message=None):
         self.calls.append(("build_fail", None))
         self.build_status = "failed"
+
+    async def task_get_metadata_aio(self, task_id):
+        from stardag.registry._base import TaskMetadata
+
+        body = self.metadata_bodies[str(task_id)]
+        return TaskMetadata(
+            id=task_id,
+            body=body,
+            name=body.get("__name", ""),
+            namespace=body.get("__namespace", ""),
+            version=body.get("version", ""),
+            output_uri=None,
+            status=self.statuses.get(str(task_id), "pending"),
+            registered_at=None,
+            started_at=None,
+            completed_at=None,
+            error_message=None,
+        )
 
     async def build_skip_blocked_aio(self, build_id):
         # Mirrors the API: pending/suspended tasks transitively downstream
@@ -1117,3 +1138,61 @@ class TestSkipBlockedErrorHandling:
                 uuid4(),
                 TickSummary(outcome="noop"),
             )
+
+
+class TestRehydrationFallback:
+    async def test_store_miss_rehydrates_from_registry(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A task missing from the pickle store is reconstructed from the
+        registry's stored task_data and scheduled — instead of being failed."""
+        import stardag as sd
+
+        @sd.task(name="RehydrateFallbackTask")
+        def fallback_task(limit: int) -> list[int]:
+            return list(range(limit))
+
+        root = fallback_task(limit=3)
+        registry = FakeReactiveRegistry(
+            root_task_ids=[str(root.id)], auto_complete=True
+        )
+        registry.add_task(str(root.id))
+        registry.metadata_bodies[str(root.id)] = root.model_dump(mode="json")
+        store = InMemoryTaskStore(uuid4())  # empty: no pickle for the task
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=(executor := FakeTickExecutor()),
+            lock_manager=_lock_manager(),
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+        assert summary.failed_recorded == 0
+        # Healed back into the store for subsequent ticks.
+        assert store.load_task(root.id) is not None
+
+    async def test_store_miss_and_no_metadata_still_fails_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Without rehydratable data either, the stall-prevention failure
+        path is preserved."""
+        (root,) = _chain("no-rehydrate-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        store._tasks.clear()
+        # no metadata_bodies entry -> fallback raises -> task failed
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.failed_recorded == 1
+        assert summary.terminal_status == "failed"

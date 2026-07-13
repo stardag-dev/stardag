@@ -8,6 +8,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Pickle-free task rehydration from registry data.** New
+  `stardag.task_from_registry_data(task_data, expected_task_id=...)`
+  reconstructs a task instance from the payload stored at registration
+  (`TaskMetadata.body`) via the polymorphic validator — the payload is
+  self-describing (embedded namespace/name discriminators, recursively
+  for nested `TaskLoads`/`SubClass` fields). Requirements/limits: the
+  defining module must be imported; nested task fields must use the
+  polymorphic annotations; the optional identity check guards against
+  non-round-trippable custom serializers. Reactive scheduler ticks now
+  use it as a fallback when a task's stored pickle is missing or
+  unloadable (healing the store on success) — an app redeploy with
+  compatible task definitions no longer breaks in-flight reactive
+  builds. This is also the foundation for UI-triggered task retries.
+
 - **Reactive (tick-based) build scheduling for Modal — experimental.** A
   build can now run with **no resident orchestrator**:
   `StardagApp.build_trigger(tasks, reactive=True)` runs discovery at the

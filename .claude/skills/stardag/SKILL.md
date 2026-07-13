@@ -123,6 +123,8 @@ sd.get_default_relpath(task)       # Construct default task output relpath
 sd.HashableSet[T]                  # Hashable frozenset for parameters
 sd.StardagField(...)               # Field annotation (hash_exclude, etc.)
 sd.StardagBaseModel                # Base Pydantic model
+sd.task_from_registry_data(data)   # Rebuild a task from registry task_data (pickle-free)
+sd.TaskRehydrationError            # Raised when reconstruction fails
 
 # Artifacts
 from stardag.artifact import MarkdownArtifact, JSONArtifact

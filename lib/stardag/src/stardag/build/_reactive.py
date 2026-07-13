@@ -41,7 +41,12 @@ from datetime import datetime, timezone
 from typing import Callable, Sequence
 from uuid import UUID
 
-from stardag import BaseTask, TaskStruct, flatten_task_struct
+from stardag import (
+    BaseTask,
+    TaskStruct,
+    flatten_task_struct,
+    task_from_registry_data,
+)
 from stardag.build._base import (
     DetachedExecutionStatus,
     FailMode,
@@ -315,6 +320,52 @@ async def run_tick_aio(
     return summary  # unreachable: the loop above always returns
 
 
+async def _load_task(
+    task_id: str,
+    registry: RegistryABC,
+    task_store: BuildTaskStore,
+    *,
+    quiet: bool = False,
+) -> BaseTask | None:
+    """Load a task object: store pickle first, registry rehydration second.
+
+    The pickle-free fallback reconstructs the task from the registry's
+    stored ``task_data`` (see ``stardag.task_from_registry_data``) — which
+    also survives cases the pickle store can't (e.g. an app redeploy with
+    compatible task definitions invalidating stored pickles). Successful
+    rehydrations are written back to the store (best-effort: the task
+    object is already in hand, so a transient store error must not abort
+    the caller).
+
+    With ``quiet=True`` a rehydration failure logs a single warning without
+    the stack trace — for callers where a missing object is tolerated (a
+    RUNNING task resolves via its worker's self-reporting), the repeated
+    per-tick ``logger.exception`` would be noise.
+    """
+    task = task_store.load_task(task_id)
+    if task is not None:
+        return task
+    try:
+        metadata = await registry.task_get_metadata_aio(UUID(task_id))
+        task = task_from_registry_data(metadata.body, expected_task_id=task_id)
+    except Exception as e:
+        message = (
+            f"Task {task_id} is missing from the task store and could not "
+            f"be rehydrated from registry data"
+        )
+        if quiet:
+            logger.warning(f"{message}: {e}")
+        else:
+            logger.exception(f"{message}.")
+        return None
+    logger.info(f"Rehydrated task {task_id} from registry data.")
+    try:
+        task_store.save_task(task)
+    except Exception as e:
+        logger.warning(f"Failed to write rehydrated task {task_id} back: {e}")
+    return task
+
+
 async def _act_on_frontier(
     frontier: BuildFrontier,
     *,
@@ -337,19 +388,25 @@ async def _act_on_frontier(
     acted = False
     denied_this_round = 0
     for item in frontier.actionable:
-        task = task_store.load_task(item.task_id)
+        task = await _load_task(
+            item.task_id,
+            registry,
+            task_store,
+            quiet=item.latest_status in _RUNNING_STATUSES,
+        )
         if task is None:
             if item.latest_status in _RUNNING_STATUSES:
                 # Can't probe without the object, but the worker reports its
                 # own terminal events — leave it to resolve itself.
                 continue
-            # A pending/suspended task without a stored object can never be
-            # scheduled: fail it (rather than leaving it in the frontier
-            # forever, where it would block terminal detection and stall
-            # the build across endless watchdog ticks).
+            # A pending/suspended task with no stored object AND no
+            # rehydratable registry data can never be scheduled: fail it
+            # (rather than leaving it in the frontier forever, where it
+            # would block terminal detection and stall the build across
+            # endless watchdog ticks).
             logger.error(
                 f"Task {item.task_id} of build {build_id} has no stored "
-                "task object; failing it."
+                "task object and could not be rehydrated; failing it."
             )
             try:
                 from uuid import UUID as _UUID
@@ -601,7 +658,7 @@ async def _cancel_running(
             and item.latest_executor is not None
             and item.latest_executor_ref is not None
         ):
-            task = task_store.load_task(item.task_id)
+            task = await _load_task(item.task_id, registry, task_store, quiet=True)
             if task is None:
                 continue
             try:
