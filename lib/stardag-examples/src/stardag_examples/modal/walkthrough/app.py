@@ -49,20 +49,25 @@ __all__ = ["app", "SHARD_LIMIT_KEY", "worker_selector", "limit_key_selector"]
 # Must match local Python version for Modal serialization compatibility
 python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
 
-# Define the Modal image
-image = (
-    modal.Image.debian_slim(python_version=python_version)
-    .uv_sync()
-    .add_local_python_source("stardag_examples")
-)
+# VERIFICATION BRANCH: bake the LOCAL stardag source into the image so the
+# unreleased fixes (ResourceProvider cloudpickle survival + these selectors
+# living in an importable module) ship to the containers without a PyPI
+# release. Deploy with STARDAG_MODAL_LOCAL_STARDAG_SOURCE=yes (or an
+# editable/dev stardag install) so with_stardag_on_image uses local source.
+# Revert to the plain .uv_sync() image (below) before merging anything.
+image = sd_modal.with_stardag_on_image(
+    modal.Image.debian_slim(python_version=python_version).pip_install(
+        # helper to pull in all dependencies of current package (stardag-examples)
+        *sd_modal.get_package_deps(__file__),
+    )
+).add_local_python_source("stardag_examples")
 
-# Optionally use this instead to use local source for stardag itself.
-# image = sd_modal.with_stardag_on_image(
-#     modal.Image.debian_slim(python_version=python_version).pip_install(
-#         # helper to pull in all dependencies of current package (stardag-examples)
-#         *sd_modal.get_package_deps(__file__),
-#     )
-# ).add_local_python_source("stardag_examples")
+# Normal (published-stardag) image — restore this before merging:
+# image = (
+#     modal.Image.debian_slim(python_version=python_version)
+#     .uv_sync()
+#     .add_local_python_source("stardag_examples")
+# )
 
 
 app = sd_modal.StardagApp(
