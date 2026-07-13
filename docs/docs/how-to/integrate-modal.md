@@ -513,14 +513,24 @@ a whole) needs a stardag-api version matching this SDK — an **older
 server silently ignores the enforcement parameters**, so upgrade the
 server before relying on limits.
 
+The same named limits can be enforced from resident (non-reactive)
+builds via `stardag.build.RegistryConcurrencyLimiter` — both modes share
+the slots. Two caveats when mixing modes: a crashed _resident_ build has
+no automatic healer (its RUNNING task holds the slot until explicitly
+failed/cancelled via the API/UI — the worker-reporting/tick self-healing
+story above is reactive-only), and a legitimately long-running ref-less
+resident task that also appears in a concurrently ticking reactive build
+can be force-failed by that build's `stale_running_no_ref_seconds`
+escape hatch — raise the bound if you mix modes over the same long
+tasks.
+
 Requirements and current limitations: the app must be deployed with this
 stardag version (scheduler `tick` function + self-reporting workers); the
 triggering process needs registry credentials and access to the default
 target root (task objects are persisted there for the ticks); the global
 concurrency lock and build-local `ConcurrencyConfig` limits are not applied
 by ticks (use the registry-backed named limits above; Modal's per-function
-`concurrency_limit` also still applies); and tasks blocked by a failure
-currently stay pending in the UI (the build itself is failed). Builds cancelled from the registry UI are picked up by
+`concurrency_limit` also still applies). Builds cancelled from the registry UI are picked up by
 the next tick (within the watchdog period), which cancels the running
 Modal function calls.
 
