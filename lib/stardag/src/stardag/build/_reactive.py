@@ -51,6 +51,7 @@ from stardag.build._base import (
 )
 from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError
+from stardag.registry._api_registry import _is_route_not_found
 from stardag.registry import BuildFrontier, FrontierTaskRef, RegistryABC
 
 logger = logging.getLogger(__name__)
@@ -549,12 +550,16 @@ async def _skip_blocked(
 
     Cosmetic-but-important: without it, blocked tasks dangle PENDING in the
     registry/UI forever while the build shows failed. Old servers without
-    the endpoint are tolerated (404 → skip silently omitted).
+    the endpoint are tolerated (missing-route 404 → skip silently omitted);
+    app-level 404s (e.g. the build no longer exists) are re-raised — they
+    signal a registry inconsistency the tick must not paper over.
     """
     try:
         skipped = await registry.build_skip_blocked_aio(build_id)
         summary.skipped += len(skipped)
-    except NotFoundError:
+    except NotFoundError as e:
+        if not _is_route_not_found(e):
+            raise
         logger.warning(
             "Registry server does not support skip-blocked; tasks blocked "
             "by the failure will remain pending."

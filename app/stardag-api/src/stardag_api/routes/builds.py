@@ -1003,7 +1003,11 @@ async def skip_blocked_tasks(
     if blocked_tasks:
         _raise_if_limit_exceeded(
             await check_entity_creation_limit(
-                db, auth.workspace_id, "events", limits_settings
+                db,
+                auth.workspace_id,
+                "events",
+                limits_settings,
+                amount=len(blocked_tasks),
             )
         )
         metadata = _build_event_metadata(commit_hash)

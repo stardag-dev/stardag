@@ -2026,3 +2026,38 @@ async def test_skip_blocked_noop_without_failures(client: AsyncClient):
     response = await client.post(f"/api/v1/builds/{build_id}/skip-blocked")
     assert response.status_code == 200
     assert response.json()["skipped_task_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_skip_blocked_quota_check_covers_batch(client: AsyncClient):
+    """skip-blocked can emit many TASK_SKIPPED events in one call; the 24h
+    event-quota check must be performed with the full batch size, not the
+    default single-event amount (which would let a batch overshoot the
+    remaining quota)."""
+    from unittest.mock import patch
+
+    from stardag_api.limits import check_entity_creation_limit as real_check
+
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build_id}/tasks", json=_register_payload("bad"))
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("mid", deps=["bad"])
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("top", deps=["mid"])
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/bad/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/bad/fail")
+
+    checked: list[tuple[str, int]] = []
+
+    async def spy(db, workspace_id, entity_type, settings, amount=1):
+        checked.append((entity_type, amount))
+        return await real_check(db, workspace_id, entity_type, settings, amount=amount)
+
+    with patch("stardag_api.routes.builds.check_entity_creation_limit", spy):
+        response = await client.post(f"/api/v1/builds/{build_id}/skip-blocked")
+
+    assert response.status_code == 200
+    assert sorted(response.json()["skipped_task_ids"]) == ["mid", "top"]
+    assert checked == [("events", 2)]

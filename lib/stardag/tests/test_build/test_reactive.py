@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 
+import pytest
+
 from stardag import BaseTask, auto_namespace, flatten_task_struct
 from stardag.build import (
     BuildTaskStore,
@@ -29,6 +31,8 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
 )
+from stardag.build._reactive import TickSummary, _skip_blocked
+from stardag.exceptions import NotFoundError
 from stardag.registry import (
     BuildFrontier,
     FrontierTaskRef,
@@ -1032,3 +1036,35 @@ class TestSkipBlockedOnFailure:
 
         assert summary.terminal_status == "failed"
         assert registry.statuses[str(root.id)] == "skipped"
+
+
+class _SkipBlocked404Registry(NoOpRegistry):
+    """Registry whose skip-blocked endpoint 404s with a given detail."""
+
+    def __init__(self, detail: str):
+        super().__init__()
+        self.detail = detail
+
+    async def build_skip_blocked_aio(self, build_id) -> list[str]:
+        raise NotFoundError(
+            "Skip blocked tasks: resource not found", detail=self.detail
+        )
+
+
+class TestSkipBlockedErrorHandling:
+    async def test_missing_route_tolerated(self):
+        """Old server without the endpoint (FastAPI default 404) → skip
+        silently omitted, no raise."""
+        summary = TickSummary(outcome="noop")
+        await _skip_blocked(_SkipBlocked404Registry("Not Found"), uuid4(), summary)
+        assert summary.skipped == 0
+
+    async def test_app_level_404_reraised(self):
+        """A 404 raised inside the endpoint (e.g. build no longer exists)
+        signals a registry inconsistency and must propagate."""
+        with pytest.raises(NotFoundError):
+            await _skip_blocked(
+                _SkipBlocked404Registry("Build not found"),
+                uuid4(),
+                TickSummary(outcome="noop"),
+            )
