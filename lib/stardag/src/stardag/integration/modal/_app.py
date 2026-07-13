@@ -1721,14 +1721,53 @@ class StardagApp:
 
             build_uuid = _UUID(build_id)
             task_store = _BuildTaskStore(build_uuid)
+            meta = task_store.read_meta()
+            # App ownership: with multiple StardagApps in one environment,
+            # every app's watchdog sweeps ALL running reactive builds — but
+            # only the app recorded at trigger time may drive a build.
+            # A foreign app's tick would schedule with ITS commit (its
+            # workers, its selectors) and unpickle the owning app's task
+            # store (pickle skew across commits), so it must not run the
+            # tick loop itself. Instead it FORWARDS: best-effort spawn of
+            # the owner's tick, so wake-ups that land on the wrong app
+            # (e.g. a still-running worker of the previous owner after a
+            # takeover) are not dropped, and every app's watchdog sweep
+            # doubles as cross-app coverage. The owner-side single-flight
+            # lease collapses duplicate forwards. Explicit takeover =
+            # re-trigger from the new app (rewrites meta and re-persists
+            # the task objects under the new code).
+            owner_app = (meta or {}).get("app_name")
+            if owner_app is not None and owner_app != app_name:
+                forwarded = False
+                try:
+                    modal.Function.from_name(app_name=owner_app, name="tick").spawn(
+                        build_id=build_id
+                    )
+                    forwarded = True
+                except Exception as e:
+                    # Owner app deleted/renamed: the build is orphaned —
+                    # surfaced in logs; remedy is a re-trigger from a live
+                    # app (see the how-to's app-ownership section).
+                    logger.info(
+                        f"Tick for build {build_id}: could not forward to "
+                        f"owner app {owner_app!r} (deleted?): {e}"
+                    )
+                logger.info(
+                    f"Tick for build {build_id}: owned by app "
+                    f"{owner_app!r}, not {app_name!r}; "
+                    f"{'forwarded to owner' if forwarded else 'skipping'}."
+                )
+                return {
+                    "outcome": "foreign_app",
+                    "owner_app": owner_app,
+                    "forwarded": forwarded,
+                }
             # Per-build tick configuration persisted at trigger time — every
             # tick (worker wake-ups and watchdog sweeps spawn with only the
             # build id) runs with the same settings. Explicit tick_kwargs
             # (tests/manual invocations) win over persisted ones; the limit
             # key selector is deployed-app configuration.
-            config = _build_tick_config(
-                task_store.read_meta(), tick_kwargs, limit_key_selector
-            )
+            config = _build_tick_config(meta, tick_kwargs, limit_key_selector)
 
             executor = ModalTaskExecutor(
                 modal_app_name=app_name,

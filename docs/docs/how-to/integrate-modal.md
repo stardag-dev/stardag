@@ -513,6 +513,30 @@ a whole) needs a stardag-api version matching this SDK — an **older
 server silently ignores the enforcement parameters**, so upgrade the
 server before relying on limits.
 
+**App ownership.** Each reactive build is owned by the `StardagApp`
+that triggered it (`app_name` recorded in the build's store meta). With
+several apps deployed in one environment, every watchdog sweeps all
+running reactive builds — but a tick from a non-owning app never drives
+the build with its own commit's code and selectors (or unpickles the
+owner's task store, which may not match its code). Instead it
+**forwards**: it spawns the owner app's tick (best-effort) and returns
+`outcome="foreign_app"` — so wake-ups that land on the wrong app are
+not lost, and every app's watchdog doubles as cross-app coverage (the
+owner-side scheduler lease collapses duplicate forwards). Redeploying
+the **same** app name is the normal upgrade path and unaffected.
+
+To migrate a build to a different app, re-trigger it from that app
+(`build_trigger(tasks, reactive=True, build_id=<existing id>)`): the
+re-trigger rewrites the meta and re-persists the task objects under the
+new app's code. Two handoff details: ownership takes effect for _new_
+ticks — a tick of the previous owner that is mid-linger keeps driving
+the build until its linger deadline passes (bounded by its
+`linger_seconds`); and wake-ups from the previous owner's still-running
+workers reach the new owner via the forwarding above. Symptom worth
+knowing: a build not progressing while tick logs show `foreign_app`
+with failed forwards means the owning app was **deleted** — the build
+is orphaned; re-trigger it from a live app to adopt it.
+
 The same named limits can be enforced from resident (non-reactive)
 builds via `stardag.build.RegistryConcurrencyLimiter` — both modes share
 the slots. Two caveats when mixing modes: a crashed _resident_ build has
