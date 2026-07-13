@@ -27,6 +27,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   also declares the same secret still gets it once). Previously workers
   `401`ed on their self-reported lifecycle events unless the secret was
   repeated on every worker.
+- **Fix: re-triggering a reactive build crashed on an immutable/no-overwrite
+  target root.** The per-build task store rewrote its `meta.json` on every
+  re-trigger (add-roots / retry), but a target root may refuse overwrites
+  (Modal volumes raise; an immutable/object-locked S3 root would too), so
+  the re-trigger crashed with `FileExistsError`. The store is now
+  write-once: the reactive marker is written only at the first trigger, and
+  task pickles are skipped if already present. Build roots are tracked
+  solely in the registry (the scheduler reads them from the frontier), so a
+  re-trigger no longer mutates the store. Note: `tick_kwargs` are fixed at
+  first trigger until reactive build metadata moves to the registry.
 
 ## [0.10.0] — 2026-07-13
 

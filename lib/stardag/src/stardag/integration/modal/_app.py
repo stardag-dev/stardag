@@ -2330,22 +2330,22 @@ class StardagApp:
         )
         store = BuildTaskStore(build_id)
         store.save_tasks(discovery.incomplete.values())
-        existing_meta = (store.read_meta() or {}) if is_retrigger else {}
-        merged_root_ids = list(
-            dict.fromkeys([*existing_meta.get("root_task_ids", []), *root_ids])
-        )
-        store.write_meta(
-            {
-                "reactive": True,
-                "app_name": self.name,
-                "root_task_ids": merged_root_ids,
-                "tick_kwargs": (
-                    tick_kwargs
-                    if tick_kwargs is not None
-                    else existing_meta.get("tick_kwargs") or {}
-                ),
-            }
-        )
+        # Write the reactive marker/config exactly once, at the first
+        # trigger. The store lives on a target root that may be immutable,
+        # so we never rewrite it: build roots are tracked in the registry
+        # (build_add_roots above — the scheduler reads them from the
+        # frontier, never from the store), so a re-trigger needs no store
+        # mutation. NOTE: this means tick_kwargs are fixed at first
+        # trigger; changing scheduling config on re-trigger is not
+        # supported until build metadata moves to the registry.
+        if store.read_meta() is None:
+            store.write_meta(
+                {
+                    "reactive": True,
+                    "app_name": self.name,
+                    "tick_kwargs": tick_kwargs or {},
+                }
+            )
         tick_function = modal.Function.from_name(app_name=self.name, name="tick")
         function_call = tick_function.spawn(build_id=str(build_id))
         return BuildTriggerResult(build_id=build_id, function_call=function_call)
