@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { cancelTask, fetchTaskArtifacts, fetchTaskEvents } from "../api/tasks";
 import type { Task, TaskArtifact, TaskEvent, EventType } from "../types/task";
+import { modalAppUrl, modalFunctionCallUrl } from "../utils/modalLinks";
 import { ArtifactList, ExpandButton } from "./ArtifactViewer";
+import { ExecutorBadge } from "./ExecutorBadge";
 import { FullscreenModal } from "./FullscreenModal";
 import { StatusBadge } from "./StatusBadge";
 
@@ -291,6 +293,97 @@ export function TaskDetail({
                 {task.commit_hash}
               </code>
               <CopyButton text={task.commit_hash} className="flex-shrink-0" />
+            </div>
+          </div>
+        )}
+
+        {/* Execution - only when executor identity/metadata was recorded */}
+        {(task.latest_executor ||
+          task.latest_executor_ref ||
+          task.latest_executor_metadata) && (
+          <div>
+            <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
+              Execution
+            </label>
+            <div className="mt-1 space-y-1 text-sm text-gray-900 dark:text-gray-100">
+              {task.latest_executor && (
+                <div className="flex items-center gap-2">
+                  <ExecutorBadge executor={task.latest_executor} />
+                </div>
+              )}
+              {task.latest_executor_metadata?.app_name && (
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500 dark:text-gray-400">App:</span>
+                  {(() => {
+                    const appUrl = modalAppUrl(task.latest_executor_metadata);
+                    const appName = task.latest_executor_metadata?.app_name;
+                    return appUrl ? (
+                      <a
+                        href={appUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:underline dark:text-blue-400"
+                        title="Open the Modal app dashboard"
+                      >
+                        {appName}
+                      </a>
+                    ) : (
+                      <span>{appName}</span>
+                    );
+                  })()}
+                </div>
+              )}
+              {task.latest_executor_metadata?.function_name && (
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500 dark:text-gray-400">Function:</span>
+                  <span className="font-mono">
+                    {task.latest_executor_metadata.function_name}
+                  </span>
+                </div>
+              )}
+              {task.latest_executor_ref && (
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500 dark:text-gray-400">Call ref:</span>
+                  {(() => {
+                    const callUrl = modalFunctionCallUrl(
+                      task.latest_executor_metadata,
+                      task.latest_executor_ref,
+                    );
+                    return callUrl ? (
+                      <a
+                        href={callUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="truncate font-mono text-blue-600 hover:underline dark:text-blue-400"
+                        title="Open the function call in the Modal dashboard"
+                      >
+                        {task.latest_executor_ref}
+                      </a>
+                    ) : (
+                      <span className="truncate font-mono">
+                        {task.latest_executor_ref}
+                      </span>
+                    );
+                  })()}
+                  <CopyButton
+                    text={task.latest_executor_ref}
+                    className="flex-shrink-0"
+                  />
+                </div>
+              )}
+              {(task.latest_executor_metadata?.workspace ||
+                task.latest_executor_metadata?.environment) && (
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500 dark:text-gray-400">
+                    Workspace / env:
+                  </span>
+                  <span>
+                    {task.latest_executor_metadata?.workspace ?? "—"}
+                    {" / "}
+                    {task.latest_executor_metadata?.environment ?? "—"}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}

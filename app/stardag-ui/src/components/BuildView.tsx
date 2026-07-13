@@ -26,6 +26,7 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildStatusBadge } from "./BuildStatusBadge";
+import { BuildExecutorChips } from "./ExecutorBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import {
@@ -279,7 +280,10 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       {
         label: build?.name ?? buildId.slice(0, 8),
         detail: build ? (
-          <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
+          <span className="flex items-center gap-1.5">
+            <BuildStatusBadge status={build.status} isResumed={build.is_resumed} />
+            <BuildExecutorChips metadata={build.executor_metadata} />
+          </span>
         ) : undefined,
       },
     ];
@@ -346,6 +350,10 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
         // Cross-build status fields
         waiting_for_lock: fullTask?.waiting_for_lock,
         status_build_id: fullTask?.status_build_id,
+        // Executor identity (DAG node hover + detail panel)
+        latest_executor: fullTask?.latest_executor,
+        latest_executor_ref: fullTask?.latest_executor_ref,
+        latest_executor_metadata: fullTask?.latest_executor_metadata,
       };
     });
   }, [graph, allTasks, filteredTasks, nameFilter, statusFilter, build]);

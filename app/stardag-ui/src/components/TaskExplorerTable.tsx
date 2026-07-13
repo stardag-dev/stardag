@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Task, TaskStatus } from "../types/task";
 import { truncateNestedKeyToWidth } from "../utils/truncateKey";
 import type { ColumnConfig } from "./ColumnManagerModal";
+import { ExecutorBadge } from "./ExecutorBadge";
 
 export interface TaskSearchResult extends Task {
   build_id?: string;
@@ -214,12 +215,18 @@ function renderCell(
 
   if (key === "status" && typeof value === "string") {
     return (
-      <span
-        className={`rounded-full px-2 py-0.5 text-xs font-medium ${getStatusColor(
-          value as TaskStatus,
-        )}`}
-      >
-        {value}
+      <span className="inline-flex items-center gap-1.5">
+        <span
+          className={`rounded-full px-2 py-0.5 text-xs font-medium ${getStatusColor(
+            value as TaskStatus,
+          )}`}
+        >
+          {value}
+        </span>
+        <ExecutorBadge
+          executor={task.latest_executor}
+          executorRef={task.latest_executor_ref}
+        />
       </span>
     );
   }

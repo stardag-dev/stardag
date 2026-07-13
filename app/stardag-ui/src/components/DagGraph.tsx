@@ -305,6 +305,8 @@ export function DagGraph({
           statusBuildId: task?.status_build_id,
           currentBuildId: buildId,
           onStatusBuildClick,
+          latestExecutor: task?.latest_executor,
+          latestExecutorRef: task?.latest_executor_ref,
         },
       } satisfies TaskNodeType;
     });

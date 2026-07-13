@@ -6,6 +6,27 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### UI
+
+- **Modal execution surfacing.** Tasks executed on Modal now show a
+  "⚡ Modal" badge (tooltip shows the function call ref; click to copy)
+  in the build task table, the Task Explorer, and DAG node hover. The
+  task detail panel gains an **Execution** section — executor kind, app
+  name, function name, call ref, and workspace/environment — with deep
+  links into the Modal dashboard (app page and function call). The
+  build view shows a "Modal: app-name" chip linking to the app page
+  plus a "reactive" badge for tick-scheduled builds. All Modal URL
+  patterns are centralized in `src/utils/modalLinks.ts`; links render
+  only when the recorded metadata has the required fields (older
+  servers / missing metadata degrade to plain text, never dead links).
+- **Concurrency limits admin view.** New env-scoped "Concurrency
+  Limits" sidebar page: list the environment's named limits with
+  current holder counts, create/edit/delete keys, and drill into a
+  key's holders (task detail link, running-since, executor badge,
+  Modal deep link) with an **Evict** action that fails a stuck RUNNING
+  holder to free its slots — the recovery path for slots leaked by a
+  crashed resident build process.
+
 ### SDK
 
 - **Executor metadata for Modal executions.** Task starts and triggered
