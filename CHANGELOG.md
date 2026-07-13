@@ -87,14 +87,15 @@ for the SDK-user overview and upgrade notes.
   surface: `stardag.build.run_tick_aio` / `TickConfig` / `TickSummary` /
   `BuildTaskStore` / `discover_and_register_aio`,
   `TaskExecutorABC.detached_status()` / `cancel_detached()` /
-  `DetachedExecutionStatus`, `StardagApp(watchdog_period_minutes=...,
-tick_settings=...)`. Current limitations (documented in
+  `DetachedExecutionStatus`,
+  `StardagApp(watchdog_period_minutes=..., tick_settings=...)`. Current
+  limitations (documented in
   `stardag/build/_reactive.py`): requires a registry; the global
   concurrency lock and build-local `ConcurrencyConfig` limits are not
   applied by ticks — registry-backed named limits are (see the entries
   below). ([#157](https://github.com/stardag-dev/stardag/pull/157))
 - **Registry-backed named concurrency limits (reactive scheduling).**
-  Environment-level named limits (`PUT /concurrency-limits/{key}`) cap how
+  Environment-level named limits (`PUT /api/v1/concurrency-limits/{key}`) cap how
   many tasks tagged with a key may run concurrently — **across builds**, which
   build-local `ConcurrencyConfig` semaphores never could. A task
   occupies a slot simply by being RUNNING with the key recorded at start
@@ -121,7 +122,7 @@ tick_settings=...)`. Current limitations (documented in
   ([#158](https://github.com/stardag-dev/stardag/pull/158))
 - Reactive scheduling: on a failure terminal, ticks now mark tasks
   transitively blocked by the failure as **skipped** (server-computed via
-  `POST /builds/{id}/skip-blocked`) — mirroring the resident engine, so
+  `POST /api/v1/builds/{id}/skip-blocked`) — mirroring the resident engine, so
   blocked tasks no longer dangle pending in the UI while the build shows
   failed. Together with the retry/roots endpoints below, reactive
   re-triggers now have a complete recovery story: failed builds can be
@@ -206,35 +207,35 @@ tick_settings=...)`. Current limitations (documented in
 
 ### Registry API
 
-- `POST /builds/{id}/resume` no longer records a `BUILD_RESUMED` event for a
+- `POST /api/v1/builds/{id}/resume` no longer records a `BUILD_RESUMED` event for a
   "fresh" build (no activity beyond `BUILD_STARTED`), so attaching to a
   trigger-minted build id on the first run doesn't display the build as
   resumed. Real resumes (any task activity or terminal state) are recorded as
   before. ([#154](https://github.com/stardag-dev/stardag/pull/154))
-- New reactive-scheduling endpoints: `POST`/`DELETE /builds/{id}/notify`
+- New reactive-scheduling endpoints: `POST`/`DELETE /api/v1/builds/{id}/notify`
   (scheduler wake-up flag, new `builds.needs_tick_at` column) and
-  `GET /builds/{id}/frontier` — the build's actionable tasks (global status
+  `GET /api/v1/builds/{id}/frontier` — the build's actionable tasks (global status
   pending/suspended/running with all upstream dependencies completed,
   including executor refs for liveness probing), per-status counts, root
   statuses, and build status, for scheduler ticks.
   ([#157](https://github.com/stardag-dev/stardag/pull/157))
 - Named environment concurrency limits:
-  `GET`/`PUT`/`DELETE /concurrency-limits[/{key}]` (new
+  `GET`/`PUT`/`DELETE /api/v1/concurrency-limits[/{key}]` (new
   `environment_concurrency_limits` +
   `task_limit_keys` tables) with atomic enforcement on task start (409
   `concurrency_limit_reached`; the environment's limit rows are locked
   while active RUNNING holders are counted, serializing concurrent
   acquires; re-starting a RUNNING task never self-blocks).
   ([#158](https://github.com/stardag-dev/stardag/pull/158))
-- New `POST /builds/{id}/skip-blocked`: emits `TASK_SKIPPED` for
+- New `POST /api/v1/builds/{id}/skip-blocked`: emits `TASK_SKIPPED` for
   pending/suspended tasks transitively downstream of a
   failed/cancelled/skipped task (recursive dependency-edge closure, one
   transaction). ([#160](https://github.com/stardag-dev/stardag/pull/160))
-- New `TASK_RETRIED` event + `POST /builds/{id}/tasks/{task_id}/retry`:
+- New `TASK_RETRIED` event + `POST /api/v1/builds/{id}/tasks/{task_id}/retry`:
   resets a failed/cancelled/skipped task to pending (never downgrades
   completed/running) — the retry path for reactive builds.
   ([#160](https://github.com/stardag-dev/stardag/pull/160))
-- New `POST /builds/{id}/roots`: append root task ids to a build
+- New `POST /api/v1/builds/{id}/roots`: append root task ids to a build
   (deduplicated), so completion detection covers roots added to an
   active build. ([#160](https://github.com/stardag-dev/stardag/pull/160))
 - Executor metadata: task starts accept a JSON `executor_metadata` query
@@ -242,7 +243,7 @@ tick_settings=...)`. Current limitations (documented in
   the new nullable `tasks.latest_executor_metadata` column with the same
   set/clear-on-every-start semantics as `latest_executor_ref`); build
   creation accepts an `executor_metadata` body field and
-  `POST /builds/{id}/resume` a JSON query param (new nullable
+  `POST /api/v1/builds/{id}/resume` a JSON query param (new nullable
   `builds.executor_metadata` column — kept on resumes that don't carry
   metadata). Exposed as `latest_executor` / `latest_executor_ref` /
   `latest_executor_metadata` on task responses (detail, list rows,
@@ -251,10 +252,10 @@ tick_settings=...)`. Current limitations (documented in
   older SDKs and servers are unaffected. The metadata dict is capped at
   2 KB (compact JSON, 422 above) on all ingest paths.
   ([#165](https://github.com/stardag-dev/stardag/pull/165))
-- Concurrency-limits admin: new `GET /concurrency-limits/{key}/holders`
+- Concurrency-limits admin: new `GET /api/v1/concurrency-limits/{key}/holders`
   (the RUNNING tasks currently counted against a key — task identity,
   running-since, executor fields; paginated via `limit`, oldest first)
-  and `POST /concurrency-limits/{key}/holders/{task_id}/evict` (records
+  and `POST /api/v1/concurrency-limits/{key}/holders/{task_id}/evict` (records
   `TASK_FAILED` for a task that is currently RUNNING **and** holds the
   key — 404 otherwise, deliberately not a generic kill endpoint — freeing
   all its slots via the normal status transition; the evicting identity
@@ -264,12 +265,12 @@ tick_settings=...)`. Current limitations (documented in
   build's scheduler wake-up flag so reactive builds observe it promptly.
   ([#165](https://github.com/stardag-dev/stardag/pull/165))
 - Concurrency-limit **writes are admin-gated on the user auth path**:
-  `PUT`/`DELETE /concurrency-limits/{key}` and the evict endpoint
+  `PUT`/`DELETE /api/v1/concurrency-limits/{key}` and the evict endpoint
   require the workspace ADMIN role (or higher) when authenticated as a
   user (JWT); API-key auth (machine credentials) keeps full access, and
   reads (limit list, holders) stay member-level.
   ([#165](https://github.com/stardag-dev/stardag/pull/165))
-- Fix: `GET /tasks`, `GET /tasks/{task_id}` and the task registration
+- Fix: `GET /api/v1/tasks`, `GET /api/v1/tasks/{task_id}` and the task registration
   responses now populate `is_phantom` (previously always the schema
   default `false`, so placeholder rows were indistinguishable from real
   tasks on these endpoints).

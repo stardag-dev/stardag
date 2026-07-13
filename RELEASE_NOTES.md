@@ -12,9 +12,14 @@ A large feature release that makes Modal a first-class execution layer:
 builds and long-running tasks survive restarts, builds can run with no
 resident orchestrator at all, concurrency limits move server-side, and
 the UI links straight into the Modal dashboard. **Fully backward
-compatible — no client-code changes required**; `pip install -U stardag`
-is sufficient. If you self-host the registry, see
-[upgrade ordering](#upgrade-ordering--server-before-sdk) below.
+compatible — no client-code changes required**: existing builds keep
+working unchanged after `pip install -U stardag`. The new
+server-dependent features (reactive scheduling and named
+concurrency-limit _enforcement_) additionally need a matching
+stardag-api version — if you self-host the registry, upgrade the server
+first; see [upgrade ordering](#upgrade-ordering--server-before-sdk)
+below. (On the hosted registry at stardag.com the server is already
+up to date.)
 
 The new execution model is documented in
 [Build & Execution](docs/docs/concepts/build-execution.md); the packaged
