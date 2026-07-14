@@ -4,6 +4,20 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **CLI: `stardag concurrency-limits` command group for managing named
+  concurrency limits.** Wraps the registry's concurrency-limit endpoints for
+  the active profile / environment (override with `-p/--stardag-profile` and
+  `-e/--stardag-env`): `list` (with optional `--holders` counts), `set <key>
+<max_concurrent>` (upsert), `delete <key>` (`--yes` to skip confirmation),
+  `holders <key>` (RUNNING slot holders, oldest first), and `evict <key>
+<task_id>` to free leaked slots. Replaces the need for an ad-hoc script to
+  `PUT /api/v1/concurrency-limits/{key}`. Backed by new `APIRegistry`
+  `concurrency_limit_{list,set,delete,holders,evict}` methods.
+
 ## [0.10.2] — 2026-07-14
 
 ### SDK
