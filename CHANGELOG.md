@@ -4,6 +4,29 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### UI
+
+- **Stable, stop/redeploy-proof Modal function-call deep links.** The task
+  detail and concurrency-holder "View on Modal" links previously used a
+  query-param form that didn't resolve. They now build the app-id URL
+  (`.../apps/{workspace}/{env}/{app_id}?activeTab=functions&functionId=…&functionSection=calls&fcId=…`)
+  when the newly captured `app_id`/`function_id` metadata is present,
+  falling back to the deployed-app-name form and then the plain app-page
+  link. Reads the new metadata defensively, so older data without the ids
+  still gets a working, non-dead link. Pairs with the SDK change that
+  records `app_id`/`function_id` in the executor metadata.
+- **Task detail: "more details" block for Modal identifiers.** The
+  Execution section now has a collapsible list of every captured Modal
+  identifier (kind, app/function names, workspace, environment, app id,
+  function id, and the function-call ref), each click-to-copy, so a
+  reference can be reconstructed by hand if the dashboard URL format
+  drifts. Only present fields render.
+- **Sidebar: shortened the "Concurrency Limits" nav item to "Concurrency"
+  and made every nav label left-aligned and single-line (truncating with
+  an ellipsis instead of wrapping and centering).**
+
 ## [0.10.2] — 2026-07-14
 
 ### SDK

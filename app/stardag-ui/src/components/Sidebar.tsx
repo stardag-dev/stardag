@@ -46,7 +46,7 @@ export function Sidebar({
     },
     {
       id: "limits",
-      label: "Concurrency Limits",
+      label: "Concurrency",
       icon: (
         <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path
@@ -140,10 +140,19 @@ export function Sidebar({
               } ${collapsed ? "justify-center" : ""}`}
               title={collapsed ? item.label : undefined}
             >
-              <span className={isActive ? "text-blue-600 dark:text-blue-400" : ""}>
+              <span
+                className={`flex-shrink-0 ${
+                  isActive ? "text-blue-600 dark:text-blue-400" : ""
+                }`}
+              >
                 {item.icon}
               </span>
-              {!collapsed && <span>{item.label}</span>}
+              {!collapsed && (
+                // min-w-0 + truncate + text-left keep every label on a single
+                // left-aligned line (ellipsis if it can't fit), so a long
+                // label never wraps and centers like the others (see #174).
+                <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>
+              )}
             </button>
           );
         })}

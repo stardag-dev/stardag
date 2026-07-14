@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { cancelTask, fetchTaskArtifacts, fetchTaskEvents } from "../api/tasks";
-import type { Task, TaskArtifact, TaskEvent, EventType } from "../types/task";
+import type {
+  Task,
+  TaskArtifact,
+  TaskEvent,
+  EventType,
+  ExecutorMetadata,
+} from "../types/task";
 import { modalAppUrl, modalFunctionCallUrl } from "../utils/modalLinks";
 import { ArtifactList, ExpandButton } from "./ArtifactViewer";
 import { ExecutorBadge } from "./ExecutorBadge";
@@ -52,6 +58,77 @@ function CopyButton({ text, className = "" }: { text: string; className?: string
         </svg>
       )}
     </button>
+  );
+}
+
+// Collapsible "more details" block listing every captured Modal identifier
+// verbatim, each click-to-copy. Modal gives no URL-format guarantee (see
+// utils/modalLinks.ts), so surfacing the raw ids lets a user reconstruct or
+// paste a reference by hand even if the dashboard URL format drifts. Only
+// fields that are present are rendered; renders nothing when none are.
+export function ModalExecutionDetails({
+  metadata,
+  executorRef,
+}: {
+  metadata?: ExecutorMetadata | null;
+  executorRef?: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const fields: { label: string; value: string }[] = [];
+  const push = (label: string, value: unknown) => {
+    if (typeof value === "string" && value.length > 0) {
+      fields.push({ label, value });
+    }
+  };
+  push("Kind", metadata?.kind);
+  push("App name", metadata?.app_name);
+  push("Workspace", metadata?.workspace);
+  push("Environment", metadata?.environment);
+  push("Function name", metadata?.function_name);
+  push("App ID", metadata?.app_id);
+  push("Function ID", metadata?.function_id);
+  push("Function call ID", executorRef);
+
+  if (fields.length === 0) return null;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+      >
+        <svg
+          className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M9 5l7 7-7 7"
+          />
+        </svg>
+        {open ? "Hide details" : "More details"}
+      </button>
+      {open && (
+        <dl className="mt-1 space-y-1">
+          {fields.map((field) => (
+            <div key={field.label} className="flex items-center gap-1">
+              <dt className="text-gray-500 dark:text-gray-400">{field.label}:</dt>
+              <dd className="truncate font-mono" title={field.value}>
+                {field.value}
+              </dd>
+              <CopyButton text={field.value} className="flex-shrink-0" />
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
   );
 }
 
@@ -384,6 +461,10 @@ export function TaskDetail({
                   </span>
                 </div>
               )}
+              <ModalExecutionDetails
+                metadata={task.latest_executor_metadata}
+                executorRef={task.latest_executor_ref}
+              />
             </div>
           </div>
         )}

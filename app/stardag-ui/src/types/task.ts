@@ -18,14 +18,22 @@ export type BuildStatus =
 // Descriptive metadata about the executor backend that ran a task or
 // triggered a build (recorded on TASK_STARTED / build creation events).
 // For Modal executions: {kind: "modal", app_name, workspace, environment,
-// function_name} — every key is optional (older SDKs may record a subset),
-// so consumers must handle missing fields (see utils/modalLinks.ts).
+// function_name, app_id, function_id} — every key is optional (older SDKs
+// may record a subset), so consumers must handle missing fields (see
+// utils/modalLinks.ts).
 export interface ExecutorMetadata {
   kind?: string;
   app_name?: string;
   workspace?: string;
   environment?: string;
   function_name?: string;
+  // Modal object ids captured at execution time (best-effort; absent on
+  // data recorded before the SDK started capturing them). Used to build
+  // stop/redeploy-proof dashboard deep links — see utils/modalLinks.ts.
+  //   app_id      — Modal App object id, "ap-…"
+  //   function_id — Modal Function object id, "fu-…"
+  app_id?: string;
+  function_id?: string;
   // Build-level only: true when triggered in reactive (tick-scheduled) mode
   reactive?: boolean;
   [key: string]: unknown;
