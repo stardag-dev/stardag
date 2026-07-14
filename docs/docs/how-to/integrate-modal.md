@@ -500,13 +500,13 @@ Two operational notes:
 - **Every deployed function needs the registry secret** — the workers
   self-report their lifecycle (started/completed/…) and the tick/watchdog
   read and update build state, so all of them make registry calls and
-  `401` without credentials. **As of stardag 0.10.1** you declare the
-  secret once, in `builder_settings.secrets`, and `StardagApp` propagates
-  the builder's secrets to the workers and the tick/watchdog at deploy
-  time (de-duplicated by name, so a worker that adds its own secrets still
-  gets the registry one exactly once). **On stardag ≤ 0.10.0 there is no
-  propagation** — add the registry secret to every worker's settings
-  explicitly, or the workers `401`.
+  `401` without credentials. As of stardag 0.10.2 this is handled by
+  `StardagApp(stardag_api_key_secret=...)`: the named secret (default
+  `"stardag-api-key"`, created by `stardag modal stardag-api-key create`)
+  is injected into every function, so you declare it once — or just rely
+  on the default and don't declare a registry secret at all. (On stardag
+  ≤ 0.10.1 you instead had to put the secret on the builder — 0.10.1 —
+  or on every worker — 0.10.0.)
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment

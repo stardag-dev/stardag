@@ -67,16 +67,12 @@ image = (
 
 app = sd_modal.StardagApp(
     "stardag_examples-walkthrough",
+    # Registry credentials are injected into every function automatically
+    # from the `stardag-api-key` Modal secret (created via
+    # `stardag modal stardag-api-key create`) — StardagApp's default
+    # `stardag_api_key_secret`. No per-function secrets needed.
     builder_settings=sd_modal.FunctionSettings(
         image=image,
-        # Registry credentials. Declared once on the builder: StardagApp
-        # propagates the builder's secrets to the workers and tick/watchdog
-        # (all talk to the registry — workers self-report their lifecycle).
-        # Requires stardag >= 0.10.1; before that add this to each worker's
-        # settings too.
-        secrets=[
-            modal.Secret.from_name("stardag-api-key"),
-        ],
         # Let Modal restart the build function after infrastructure
         # failures; with build_trigger each restart resumes the same build.
         retries=2,
