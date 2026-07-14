@@ -579,7 +579,12 @@ async def _lookup_modal_workspace_aio() -> str | None:
     if not (server_url and token_id and token_secret):
         return None
     response = await _lookup_workspace(server_url, token_id, token_secret)
-    return response.workspace_name or None
+    # `workspace_name` is the org/display name and is empty for personal
+    # workspaces; `username` is the account slug used in dashboard URLs
+    # (what `modal token info` prints as "Workspace"). Prefer the explicit
+    # workspace name when present, else fall back to the username — else the
+    # (common) personal-workspace case resolves to nothing.
+    return response.workspace_name or response.username or None
 
 
 def _get_modal_workspace() -> str | None:

@@ -180,6 +180,51 @@ class TestDetachedHandleMetadata:
 
         assert await real_get() == "baked-workspace"
 
+    async def test_workspace_lookup_falls_back_to_username(self, monkeypatch):
+        """The Modal workspace lookup response leaves `workspace_name` empty
+        for a personal workspace; the slug lives in `username` (what
+        `modal token info` prints). The resolver must fall back to it —
+        otherwise the (common) personal-workspace case resolves to nothing
+        and UI deep links break."""
+        import types
+
+        from stardag.integration.modal import _app as modal_app_module
+
+        monkeypatch.setattr(
+            modal_app_module.modal.config,
+            "config",
+            types.SimpleNamespace(
+                get=lambda k: {
+                    "server_url": "https://api.modal.com",
+                    "token_id": "tok",
+                    "token_secret": "sec",
+                }.get(k)
+            ),
+            raising=False,
+        )
+
+        async def _fake_lookup(server_url, token_id, token_secret):
+            return types.SimpleNamespace(workspace_name="", username="andhus")
+
+        monkeypatch.setattr(
+            modal_app_module.modal.config,
+            "_lookup_workspace",
+            _fake_lookup,
+            raising=False,
+        )
+        assert await modal_app_module._lookup_modal_workspace_aio() == "andhus"
+
+        async def _fake_lookup_named(server_url, token_id, token_secret):
+            return types.SimpleNamespace(workspace_name="my-org", username="u")
+
+        monkeypatch.setattr(
+            modal_app_module.modal.config,
+            "_lookup_workspace",
+            _fake_lookup_named,
+            raising=False,
+        )
+        assert await modal_app_module._lookup_modal_workspace_aio() == "my-org"
+
     async def test_base_metadata_resolved_once(self, monkeypatch):
         from stardag.integration.modal import _app as modal_app_module
 
