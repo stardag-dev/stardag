@@ -526,6 +526,19 @@ STARDAG_MODAL_FUNCTION_NAME_ENV = "STARDAG_MODAL_FUNCTION_NAME"
 """Env var carrying the Modal function name (``worker_<name>``) to workers
 (see ``STARDAG_MODAL_WORKSPACE``)."""
 
+STARDAG_MODAL_APP_ID_ENV = "STARDAG_MODAL_APP_ID"
+"""Env var carrying the resolved Modal app id (``ap-…``) to workers.
+
+Part of the executor-metadata channel: the orchestrator resolves the app
+id once (best-effort ``modal.App.lookup``) and forwards it so the worker's
+self-reported start carries it too. Lets the UI build stable, stop/
+redeploy-proof dashboard deep links (the app-id URL form outlives a given
+deployed app version). Transported like ``STARDAG_BUILD_ID``."""
+
+STARDAG_MODAL_FUNCTION_ID_ENV = "STARDAG_MODAL_FUNCTION_ID"
+"""Env var carrying the Modal function id (``fu-…``) to workers (see
+``STARDAG_MODAL_APP_ID``)."""
+
 
 # Cache for the token-derived Modal workspace name. Resolved at most once
 # per process (including failed lookups — metadata is best-effort and a
@@ -613,6 +626,41 @@ def _get_modal_environment() -> str | None:
     from modal.config import config as modal_config
 
     return modal_config.get("environment") or None
+
+
+async def _get_modal_app_id_aio(
+    app_name: str, environment_name: str | None
+) -> str | None:
+    """Best-effort Modal app id (``ap-…``) for the deployed app.
+
+    Unlike the token workspace lookup, ``modal.App.lookup`` resolves both
+    locally and *inside a Modal container* (worker/tick/build) — which is
+    where task-level executor metadata is produced — so it needs no
+    deploy-baked env fallback. Never raises: on any failure the id is
+    omitted from the executor metadata and the failure logged at debug.
+    Resolution is cached by the once-resolved base executor metadata dict.
+    """
+    try:
+        app = await modal.App.lookup.aio(app_name, environment_name=environment_name)
+        return app.app_id
+    except Exception as e:
+        logger.debug(f"Modal app id lookup failed (metadata omitted): {e}")
+        return None
+
+
+async def _get_modal_function_id_aio(function: modal.Function) -> str | None:
+    """Best-effort Modal function id (``fu-…``) for a worker function.
+
+    Hydrates the (lazy) ``modal.Function`` handle if needed and reads
+    ``object_id``. ``hydrate`` is a no-op when already hydrated. Never
+    raises: on failure the id is omitted and the failure logged at debug.
+    """
+    try:
+        await function.hydrate.aio()
+        return function.object_id
+    except Exception as e:
+        logger.debug(f"Modal function id resolution failed (metadata omitted): {e}")
+        return None
 
 
 class ModalTaskExecutor(TaskExecutorABC):
@@ -720,6 +768,7 @@ class ModalTaskExecutor(TaskExecutorABC):
                 "kind": MODAL_EXECUTOR_NAME,
                 "app_name": self.modal_app_name,
             }
+            environment: str | None = None
             try:
                 workspace = self.modal_workspace or await _get_modal_workspace_aio()
                 if workspace:
@@ -733,18 +782,34 @@ class ModalTaskExecutor(TaskExecutorABC):
                     "executor metadata",
                     exc_info=True,
                 )
+            # App id (``ap-…``): app-wide, so it lives in the base metadata
+            # alongside workspace/environment. Resolved once and cached here
+            # (the base metadata is memoized per executor). Best-effort —
+            # _get_modal_app_id_aio never raises.
+            app_id = await _get_modal_app_id_aio(self.modal_app_name, environment)
+            if app_id:
+                metadata["app_id"] = app_id
             self._base_executor_metadata = metadata
         return self._base_executor_metadata
 
     async def _metadata_for_worker(
         self, worker_name: str
     ) -> dict[str, typing.Any] | None:
-        """Base executor metadata + the worker's function name (best-effort)."""
+        """Base executor metadata + the worker's function name/id (best-effort)."""
         try:
             base_metadata = await self._get_base_executor_metadata()
             if base_metadata is None:
                 return None
-            return {**base_metadata, "function_name": f"worker_{worker_name}"}
+            metadata = {**base_metadata, "function_name": f"worker_{worker_name}"}
+            # Function id (``fu-…``): per-worker, so it lives here alongside
+            # the function name. Best-effort — hydrate the worker handle and
+            # read object_id; _get_modal_function_id_aio never raises.
+            function_id = await _get_modal_function_id_aio(
+                self._get_worker_function(worker_name)
+            )
+            if function_id:
+                metadata["function_id"] = function_id
+            return metadata
         except Exception:
             logger.debug("Failed to resolve Modal executor metadata", exc_info=True)
             return None
@@ -797,6 +862,8 @@ class ModalTaskExecutor(TaskExecutorABC):
                         (STARDAG_MODAL_WORKSPACE_ENV, "workspace"),
                         (STARDAG_MODAL_ENVIRONMENT_ENV, "environment"),
                         (STARDAG_MODAL_FUNCTION_NAME_ENV, "function_name"),
+                        (STARDAG_MODAL_APP_ID_ENV, "app_id"),
+                        (STARDAG_MODAL_FUNCTION_ID_ENV, "function_id"),
                     ):
                         value = executor_metadata.get(key)
                         if value:
@@ -1272,6 +1339,8 @@ class _WorkerLifecycleReporter:
             ("workspace", STARDAG_MODAL_WORKSPACE_ENV),
             ("environment", STARDAG_MODAL_ENVIRONMENT_ENV),
             ("function_name", STARDAG_MODAL_FUNCTION_NAME_ENV),
+            ("app_id", STARDAG_MODAL_APP_ID_ENV),
+            ("function_id", STARDAG_MODAL_FUNCTION_ID_ENV),
         ):
             value = _get(env_name)
             if value:

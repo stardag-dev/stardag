@@ -4,6 +4,20 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **Modal executor metadata now records the app id (`app_id`, `ap-…`) and
+  worker function id (`function_id`, `fu-…`).** These ride the existing
+  executor-metadata channel (base metadata + the worker env-override
+  propagation, read back by the worker lifecycle reporter) so a worker's
+  self-reported start carries them too. They let the UI build stable
+  dashboard deep links in the app-id URL form, which keeps resolving after
+  an app version is stopped or redeployed (the deployed-app-name form does
+  not). Best-effort throughout: resolution never fails or delays a task
+  start — on any error the key is simply omitted.
+
 ## [0.10.2] — 2026-07-14
 
 ### SDK
