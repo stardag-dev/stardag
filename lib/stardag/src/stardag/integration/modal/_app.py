@@ -48,6 +48,7 @@ import modal
 
 from stardag import BaseTask, TaskStruct, build, flatten_task_struct
 from stardag._core.base_task import _has_custom_run, _has_custom_run_aio
+from stardag.exceptions import StardagError
 from stardag.build import (
     BuildExitStatus,
     BuildTaskStore,
@@ -544,14 +545,27 @@ async def _get_modal_workspace_aio() -> str | None:
         return typing.cast("str | None", _modal_workspace_cache)
     async with _modal_workspace_lock:
         if _modal_workspace_cache is _MODAL_WORKSPACE_UNRESOLVED:
-            try:
-                _modal_workspace_cache = await _lookup_modal_workspace_aio()
-            except Exception as e:
-                # Cache the failure too: metadata is best-effort and a broken
-                # token / unreachable Modal API must neither raise into a task
-                # start nor re-pay the lookup timeout on every start.
-                _modal_workspace_cache = None
-                logger.debug(f"Modal workspace lookup failed (metadata omitted): {e}")
+            # Prefer the workspace baked into the container env at deploy
+            # time. The token lookup below only works where a Modal token is
+            # configured — the local triggering/deploy process — NOT inside a
+            # Modal container (worker/tick/build), which is exactly where
+            # task-level executor metadata is produced. finalize() resolves
+            # the workspace locally and injects it as STARDAG_MODAL_WORKSPACE
+            # so containers read it here instead of failing the token lookup.
+            env_workspace = os.environ.get(STARDAG_MODAL_WORKSPACE_ENV)
+            if env_workspace:
+                _modal_workspace_cache = env_workspace
+            else:
+                try:
+                    _modal_workspace_cache = await _lookup_modal_workspace_aio()
+                except Exception as e:
+                    # Cache the failure too: metadata is best-effort and a
+                    # broken token / unreachable Modal API must neither raise
+                    # into a task start nor re-pay the lookup on every start.
+                    _modal_workspace_cache = None
+                    logger.debug(
+                        f"Modal workspace lookup failed (metadata omitted): {e}"
+                    )
     return typing.cast("str | None", _modal_workspace_cache)
 
 
@@ -577,6 +591,11 @@ def _get_modal_workspace() -> str | None:
     global _modal_workspace_cache
     if _modal_workspace_cache is not _MODAL_WORKSPACE_UNRESOLVED:
         return typing.cast("str | None", _modal_workspace_cache)
+    # The deploy-baked env works regardless of an event loop (no lookup).
+    env_workspace = os.environ.get(STARDAG_MODAL_WORKSPACE_ENV)
+    if env_workspace:
+        _modal_workspace_cache = env_workspace
+        return env_workspace
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -1707,6 +1726,7 @@ class StardagApp:
         limit_key_selector: typing.Callable[[BaseTask], typing.Sequence[str]]
         | None = None,
         modal_workspace: str | None = None,
+        stardag_api_key_secret: "modal.Secret | str | None" = "stardag-api-key",
     ):
         """Initialize a StardagApp.
 
@@ -1733,14 +1753,47 @@ class StardagApp:
                 Any module-level code in the module where this callable is
                 defined will run inside the Modal container at import time —
                 use this for worker-level setup (GPU init, library preloading).
-            builder_settings: Settings for the builder function.
-            worker_settings: Dict of worker name to settings. Must include "default".
-            worker_selector: Function to select worker for each task.
+            builder_settings: Settings for the "build" function. Each
+                function's settings are independent — nothing is propagated
+                between them, except ``stardag_api_key_secret`` (below) and
+                the deploy-time env config the CLI injects.
+            worker_settings: Dict of worker name to settings. Must include
+                "default". Fully independent per worker.
+            worker_selector: Function to select the worker name for each task.
                 Defaults to always returning "default".
+            tick_settings: Settings for the reactive-scheduling ``tick`` /
+                ``tick_watchdog`` functions. Defaults to ``builder_settings``
+                when not given.
+            watchdog_period_minutes: If set, register a scheduled watchdog
+                that periodically re-ticks running reactive builds (the
+                safety net for lost wake-ups, UI-cancelled builds, and stale
+                concurrency-limit slots). Strongly recommended when using
+                ``build_trigger(reactive=True)``. Default: no watchdog.
+            limit_key_selector: Maps a task to the named registry
+                concurrency-limit keys it runs under in reactive scheduling
+                (deployed-app configuration applied by every tick). Default:
+                no limits.
             modal_workspace: Explicit Modal workspace name recorded in the
                 executor metadata of triggered builds and started tasks
                 (used by the UI for Modal dashboard deep links). Default:
                 resolved once from the configured Modal token, best-effort.
+            stardag_api_key_secret: The Modal secret carrying the Stardag
+                Registry API key, injected into **every** function (build,
+                workers, tick, watchdog) — all of them talk to the registry
+                (workers self-report their lifecycle). Accepts a
+                ``modal.Secret``, a secret *name* (``str``, resolved lazily
+                via ``modal.Secret.from_name``), or ``None``.
+
+                The default ``"stardag-api-key"`` is the secret name created
+                by the CLI: run ``stardag modal stardag-api-key create`` to
+                mint a Stardag API key and sync it into a Modal secret of
+                that name (see the Modal how-to). With the secret in place,
+                this default works out of the box; a string is used (rather
+                than a ``modal.Secret``) so resolution is deferred to deploy
+                time. If the named secret does not exist, ``finalize()``
+                raises a clear error. Set to ``None`` if you supply the API
+                key another way (a custom secret per function, or a
+                non-secret mechanism).
         """
         if isinstance(modal_app_or_name, str):
             self.modal_app = modal.App(name=modal_app_or_name)
@@ -1773,6 +1826,18 @@ class StardagApp:
         # Used by build_trigger and by the tick's executor; the resident
         # build function's executor resolves it in-container instead.
         self.modal_workspace = modal_workspace
+        # The registry-API-key secret, injected into every function at
+        # finalize(). A string is resolved lazily to modal.Secret.from_name
+        # (default defers resolution to deploy time); its existence is
+        # validated in finalize() with a clear error. None disables it.
+        if isinstance(stardag_api_key_secret, str):
+            self._api_key_secret_name: str | None = stardag_api_key_secret
+            self.stardag_api_key_secret: "modal.Secret | None" = modal.Secret.from_name(
+                stardag_api_key_secret
+            )
+        else:
+            self._api_key_secret_name = None
+            self.stardag_api_key_secret = stardag_api_key_secret
         self._is_finalized = False
 
     @property
@@ -1867,6 +1932,49 @@ class StardagApp:
                     {"STARDAG_MODAL_VOLUME_MOUNTS": json.dumps(volume_mounts)}
                 )
             )
+        # Bake the Modal workspace into every function's env. It's needed for
+        # the UI's Modal dashboard deep links (executor metadata), but the
+        # only way to resolve it — the Modal token — exists in this deploy
+        # process, NOT in the deployed containers. Resolve it here (or use
+        # the explicit override) and propagate it so containers don't have to
+        # (and can't) look it up. Best-effort: if it can't be resolved, deep
+        # links degrade gracefully (the UI shows env only).
+        deploy_workspace = self.modal_workspace or _get_modal_workspace()
+        if deploy_workspace:
+            extra_secrets.append(
+                modal.Secret.from_dict({STARDAG_MODAL_WORKSPACE_ENV: deploy_workspace})
+            )
+        # The registry API-key secret is injected into every function (build,
+        # workers, tick, watchdog) — all of them talk to the registry. It's
+        # the ONLY secret propagated across functions; per-function
+        # `secrets` stay function-local. Validate a by-name secret's
+        # existence with a clear error (best-effort: only a definitive
+        # not-found errors out; no Modal context / auth just skips the check
+        # so offline finalize and unit tests aren't broken).
+        if self.stardag_api_key_secret is not None:
+            if self._api_key_secret_name is not None:
+                try:
+                    self.stardag_api_key_secret.hydrate()
+                except modal.exception.NotFoundError as e:
+                    raise StardagError(
+                        f"StardagApp.stardag_api_key_secret refers to a Modal "
+                        f"secret named {self._api_key_secret_name!r} that does "
+                        f"not exist in the current Modal environment. Run "
+                        f"`stardag modal stardag-api-key create` to mint a "
+                        f"Stardag API key and sync it into a Modal secret "
+                        f"named 'stardag-api-key' (the default), so the "
+                        f"deployed functions can authenticate to the "
+                        f"registry. If you supply the API key another way, or "
+                        f"set it per function, pass stardag_api_key_secret="
+                        f"None."
+                    ) from e
+                except Exception as e:  # noqa: BLE001 - best-effort validation
+                    logger.debug(
+                        f"Could not validate stardag_api_key_secret "
+                        f"{self._api_key_secret_name!r} (no Modal context?); "
+                        f"proceeding: {e}"
+                    )
+            extra_secrets.append(self.stardag_api_key_secret)
         # Wrap callables in real functions for Modal compatibility.
         # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
         # not callable class instances. The wrappers delegate to the actual callable
@@ -1913,21 +2021,11 @@ class StardagApp:
 
         function_names = ["build"]
 
-        # Registry credentials (and any other secrets) declared on the
-        # builder are propagated to the workers and the tick/watchdog:
-        # since worker-side lifecycle reporting, every function talks to the
-        # registry, so declaring the secret once on the builder is enough.
-        # De-duplication (by name, in _prepare_function_settings) means a
-        # function that also declares the same secret still gets it once.
-        builder_secrets: list[modal.Secret] = list(
-            self._builder_settings.get("secrets") or []
-        )
-
         # Create worker functions
         for worker_name, settings in self._worker_settings.items():
             worker_settings = self._prepare_function_settings(
                 settings,
-                extra_secrets=extra_secrets + builder_secrets,
+                extra_secrets=extra_secrets,
                 auto_volumes=auto_volumes,
             )
 
@@ -2034,13 +2132,12 @@ class StardagApp:
             logger.info(f"Tick for build {build_id}: {summary}")
             return dataclasses.asdict(summary)
 
+        # tick/watchdog default to builder_settings when tick_settings is
+        # not given; the api-key secret is in extra_secrets so they get
+        # registry credentials regardless of which settings apply.
         tick_settings = self._prepare_function_settings(
             self._tick_settings or self._builder_settings,
-            # Propagate the builder's secrets here too, so custom
-            # tick_settings (which would otherwise not inherit them) still
-            # get registry credentials. Deduped when tick falls back to
-            # builder_settings.
-            extra_secrets=extra_secrets + builder_secrets,
+            extra_secrets=extra_secrets,
             auto_volumes=auto_volumes,
         )
         self.modal_app.function(

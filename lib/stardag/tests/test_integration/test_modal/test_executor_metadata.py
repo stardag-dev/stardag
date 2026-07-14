@@ -153,6 +153,33 @@ class TestDetachedHandleMetadata:
         assert await real_get() is None
         assert calls["n"] == 1  # failure cached, not retried
 
+    async def test_env_workspace_preferred_over_token_lookup(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """Inside a Modal container there is no token, so the workspace is
+        baked into STARDAG_MODAL_WORKSPACE at deploy; the resolver must read
+        that env var instead of attempting (and failing) a token lookup."""
+        from stardag.integration.modal import _app as modal_app_module
+
+        real_get = hermetic_modal_executor_metadata["get_modal_workspace_aio"]
+
+        async def _must_not_be_called():
+            raise AssertionError("token lookup must not run when env is set")
+
+        monkeypatch.setattr(
+            modal_app_module, "_lookup_modal_workspace_aio", _must_not_be_called
+        )
+        monkeypatch.setattr(
+            modal_app_module,
+            "_modal_workspace_cache",
+            modal_app_module._MODAL_WORKSPACE_UNRESOLVED,
+        )
+        monkeypatch.setenv(
+            modal_app_module.STARDAG_MODAL_WORKSPACE_ENV, "baked-workspace"
+        )
+
+        assert await real_get() == "baked-workspace"
+
     async def test_base_metadata_resolved_once(self, monkeypatch):
         from stardag.integration.modal import _app as modal_app_module
 

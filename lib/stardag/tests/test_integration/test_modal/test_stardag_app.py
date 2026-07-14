@@ -793,16 +793,25 @@ class TestStardagAppReactiveTrigger:
                 )
 
 
-class TestBuilderSecretPropagation:
-    """The builder's declared secrets (e.g. registry credentials) must
-    reach the workers and the tick/watchdog — every function talks to the
-    registry since worker-side lifecycle reporting."""
+@pytest.fixture(autouse=True)
+def _mock_secret_hydrate(monkeypatch):
+    """StardagApp.finalize() validates a by-name api-key secret via
+    Secret.hydrate(); stub it so tests neither hit the network nor depend
+    on a secret actually existing. Tests exercising the missing-secret
+    error override this explicitly."""
+    monkeypatch.setattr(modal.Secret, "hydrate", lambda self, *a, **k: self)
 
-    def _finalize_capturing(self, builder_secrets, worker_secrets=None, **app_kwargs):
-        builder = FunctionSettings(image=_make_image(), secrets=builder_secrets)
-        worker = FunctionSettings(image=_make_image())
-        if worker_secrets is not None:
-            worker = FunctionSettings(image=_make_image(), secrets=worker_secrets)
+
+class TestApiKeySecretPropagation:
+    """`stardag_api_key_secret` is injected into EVERY function (all talk to
+    the registry). It is the only secret shared across functions —
+    per-function `secrets` stay function-local."""
+
+    def _finalize_capturing(
+        self, *, builder_secrets=None, worker_secrets=None, **app_kwargs
+    ):
+        builder = FunctionSettings(image=_make_image(), secrets=builder_secrets or [])
+        worker = FunctionSettings(image=_make_image(), secrets=worker_secrets or [])
         app = StardagApp(
             "test-secret-propagation",
             builder_settings=builder,
@@ -830,34 +839,76 @@ class TestBuilderSecretPropagation:
     def _secret_names(kwargs) -> list[str | None]:
         return [getattr(s, "name", None) for s in (kwargs.get("secrets") or [])]
 
-    def test_builder_secret_reaches_workers_and_tick(self):
-        import modal
-
-        reg = modal.Secret.from_name("stardag-api-key")
-        registered = self._finalize_capturing([reg], watchdog_period_minutes=5)
+    def test_default_api_key_secret_reaches_all_functions(self):
+        registered = self._finalize_capturing(watchdog_period_minutes=5)
         for fn in ("build", "worker_default", "tick", "tick_watchdog"):
             assert "stardag-api-key" in self._secret_names(registered[fn]), fn
 
-    def test_propagated_secret_deduped_when_worker_also_declares_it(self):
-        import modal
-
+    def test_explicit_secret_name_reaches_all_functions(self):
         registered = self._finalize_capturing(
-            [modal.Secret.from_name("stardag-api-key")],
-            worker_secrets=[modal.Secret.from_name("stardag-api-key")],
+            stardag_api_key_secret="my-registry-key", watchdog_period_minutes=5
         )
-        names = self._secret_names(registered["worker_default"])
-        assert names.count("stardag-api-key") == 1
+        for fn in ("build", "worker_default", "tick", "tick_watchdog"):
+            assert "my-registry-key" in self._secret_names(registered[fn]), fn
+
+    def test_none_injects_no_api_key_secret(self):
+        registered = self._finalize_capturing(stardag_api_key_secret=None)
+        for fn in ("build", "worker_default", "tick"):
+            assert "stardag-api-key" not in self._secret_names(registered[fn]), fn
+
+    def test_builder_secrets_do_not_propagate_to_workers(self):
+        # A secret declared only on the builder stays builder-local — the
+        # old "propagate all builder secrets" behavior is gone.
+        registered = self._finalize_capturing(
+            builder_secrets=[modal.Secret.from_name("build-only")]
+        )
+        assert "build-only" in self._secret_names(registered["build"])
+        assert "build-only" not in self._secret_names(registered["worker_default"])
+
+    def test_api_key_deduped_when_function_declares_it(self):
+        registered = self._finalize_capturing(
+            worker_secrets=[modal.Secret.from_name("stardag-api-key")]
+        )
+        assert (
+            self._secret_names(registered["worker_default"]).count("stardag-api-key")
+            == 1
+        )
 
     def test_worker_keeps_its_own_extra_secret(self):
-        import modal
-
         registered = self._finalize_capturing(
-            [modal.Secret.from_name("stardag-api-key")],
-            worker_secrets=[modal.Secret.from_name("gpu-creds")],
+            worker_secrets=[modal.Secret.from_name("gpu-creds")]
         )
         names = self._secret_names(registered["worker_default"])
-        assert "stardag-api-key" in names  # propagated
+        assert "stardag-api-key" in names  # injected
         assert "gpu-creds" in names  # own
+
+    def test_missing_named_secret_raises_clear_error(self, monkeypatch):
+        from stardag.exceptions import StardagError
+
+        def _raise(self, *a, **k):
+            raise modal.exception.NotFoundError("Secret 'x' not found")
+
+        monkeypatch.setattr(modal.Secret, "hydrate", _raise)
+        with pytest.raises(StardagError, match="stardag_api_key_secret"):
+            self._finalize_capturing(stardag_api_key_secret="does-not-exist")
+
+    def test_workspace_baked_into_env_at_finalize(self, monkeypatch):
+        # The Modal token exists only in the deploy process, not in
+        # containers, so finalize resolves the workspace locally (mocked to
+        # "test-workspace" by the hermetic fixture) and bakes it into the
+        # function env so container-side executor metadata has it.
+        from stardag.integration.modal._app import STARDAG_MODAL_WORKSPACE_ENV
+
+        captured: list[dict] = []
+        real_from_dict = modal.Secret.from_dict
+
+        def _record(d, **kwargs):
+            captured.append(d)
+            return real_from_dict(d, **kwargs)
+
+        monkeypatch.setattr(modal.Secret, "from_dict", staticmethod(_record))
+        self._finalize_capturing()
+        assert {STARDAG_MODAL_WORKSPACE_ENV: "test-workspace"} in captured
 
 
 class TestFinalizeRegistersTick:

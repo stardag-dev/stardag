@@ -4,6 +4,32 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **`StardagApp(stardag_api_key_secret=...)`: cleaner registry-credential
+  handling.** A single, explicitly named secret (default
+  `"stardag-api-key"`, the name `stardag modal stardag-api-key create`
+  uses) is injected into every function (build, workers, tick, watchdog) —
+  all of which talk to the registry. Accepts a `modal.Secret`, a name
+  (`str`, resolved lazily), or `None` to disable. A by-name secret that
+  doesn't exist raises a clear error at `finalize()`. **This replaces the
+  0.10.1 behavior of propagating _all_ builder-declared secrets to the
+  workers/tick** — per-function `secrets` are now function-local again;
+  only the api-key secret is shared. Declare the registry key via this
+  argument (or rely on the default) rather than putting it in
+  `builder_settings.secrets`.
+- **Fix: Modal workspace now populates executor metadata / UI dashboard
+  deep links.** The workspace was resolved from the Modal token, which
+  only exists in the local triggering/deploy process — inside a Modal
+  container (where task-level metadata is produced) the lookup returned
+  nothing, so the UI showed a blank workspace. `finalize()` now resolves
+  the workspace at deploy time and bakes it into every function's env
+  (`STARDAG_MODAL_WORKSPACE`), which the in-container resolver reads first.
+- Completed the `StardagApp.__init__` docstring (previously several
+  arguments were only described in inline comments).
+
 ## [0.10.1] — 2026-07-14
 
 ### SDK

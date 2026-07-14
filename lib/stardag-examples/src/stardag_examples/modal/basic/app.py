@@ -43,16 +43,13 @@ image = (
 # ).add_local_python_source("stardag_examples")
 
 
-# Define the StardagApp
+# Define the StardagApp. The Stardag Registry API key is injected into
+# every function from the `stardag-api-key` Modal secret automatically
+# (created via `stardag modal stardag-api-key create`); pass
+# stardag_api_key_secret=... to override, or None to disable.
 app = sd_modal.StardagApp(
     "stardag_examples-basic",
-    builder_settings=sd_modal.FunctionSettings(
-        image=image,
-        secrets=[
-            # required for communication with registry
-            modal.Secret.from_name("stardag-api-key"),
-        ],
-    ),
+    builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={
         "default": sd_modal.FunctionSettings(image=image),
     },
