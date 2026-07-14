@@ -153,6 +153,78 @@ class TestDetachedHandleMetadata:
         assert await real_get() is None
         assert calls["n"] == 1  # failure cached, not retried
 
+    async def test_env_workspace_preferred_over_token_lookup(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """Inside a Modal container there is no token, so the workspace is
+        baked into STARDAG_MODAL_WORKSPACE at deploy; the resolver must read
+        that env var instead of attempting (and failing) a token lookup."""
+        from stardag.integration.modal import _app as modal_app_module
+
+        real_get = hermetic_modal_executor_metadata["get_modal_workspace_aio"]
+
+        async def _must_not_be_called():
+            raise AssertionError("token lookup must not run when env is set")
+
+        monkeypatch.setattr(
+            modal_app_module, "_lookup_modal_workspace_aio", _must_not_be_called
+        )
+        monkeypatch.setattr(
+            modal_app_module,
+            "_modal_workspace_cache",
+            modal_app_module._MODAL_WORKSPACE_UNRESOLVED,
+        )
+        monkeypatch.setenv(
+            modal_app_module.STARDAG_MODAL_WORKSPACE_ENV, "baked-workspace"
+        )
+
+        assert await real_get() == "baked-workspace"
+
+    async def test_workspace_lookup_falls_back_to_username(self, monkeypatch):
+        """The Modal workspace lookup response leaves `workspace_name` empty
+        for a personal workspace; the slug lives in `username` (what
+        `modal token info` prints). The resolver must fall back to it —
+        otherwise the (common) personal-workspace case resolves to nothing
+        and UI deep links break."""
+        import types
+
+        from stardag.integration.modal import _app as modal_app_module
+
+        monkeypatch.setattr(
+            modal_app_module.modal.config,
+            "config",
+            types.SimpleNamespace(
+                get=lambda k: {
+                    "server_url": "https://api.modal.com",
+                    "token_id": "tok",
+                    "token_secret": "sec",
+                }.get(k)
+            ),
+            raising=False,
+        )
+
+        async def _fake_lookup(server_url, token_id, token_secret):
+            return types.SimpleNamespace(workspace_name="", username="andhus")
+
+        monkeypatch.setattr(
+            modal_app_module.modal.config,
+            "_lookup_workspace",
+            _fake_lookup,
+            raising=False,
+        )
+        assert await modal_app_module._lookup_modal_workspace_aio() == "andhus"
+
+        async def _fake_lookup_named(server_url, token_id, token_secret):
+            return types.SimpleNamespace(workspace_name="my-org", username="u")
+
+        monkeypatch.setattr(
+            modal_app_module.modal.config,
+            "_lookup_workspace",
+            _fake_lookup_named,
+            raising=False,
+        )
+        assert await modal_app_module._lookup_modal_workspace_aio() == "my-org"
+
     async def test_base_metadata_resolved_once(self, monkeypatch):
         from stardag.integration.modal import _app as modal_app_module
 

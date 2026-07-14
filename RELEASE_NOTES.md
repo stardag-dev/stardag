@@ -6,6 +6,38 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.10.2 — Modal secret & workspace ergonomics
+
+An SDK-only patch cleaning up Modal registry-credential handling and
+fixing UI dashboard deep links. No migration; `pip install -U stardag`
+and **redeploy your Modal app**.
+
+- **`StardagApp(stardag_api_key_secret=...)`** — declare the Stardag
+  Registry API-key secret once; it is injected into every deployed
+  function (all of them talk to the registry). Defaults to the
+  `"stardag-api-key"` secret that `stardag modal stardag-api-key create`
+  produces, so it works out of the box; pass a `modal.Secret`/name to
+  override, or `None` to supply the key another way. A missing by-name
+  secret now fails at deploy with a clear, actionable error.
+
+  **Behavior change from 0.10.1:** 0.10.1 propagated _every_
+  builder-declared secret to the workers/tick as a stopgap. That is
+  reverted — per-function `secrets` are function-local again, and only the
+  api-key secret is shared. If you moved the registry secret into
+  `builder_settings.secrets` for 0.10.1, you can drop it (the default
+  handles it) or pass it explicitly as `stardag_api_key_secret`.
+
+- **Modal workspace now resolves in the UI (app dashboard links).** The
+  workspace was missing from executor metadata — it was resolved from the
+  Modal token, which isn't available inside Modal containers, and the
+  lookup also ignored the personal-workspace case (the slug is the account
+  `username`). Both are fixed: the workspace is resolved at deploy time
+  (falling back to `username`) and baked into every function, so the
+  app-level Modal dashboard link works. (The per-function-call deep-link
+  URL format is a separate UI fix landing as a follow-up.)
+
+---
+
 ## v0.10.1 — Modal reactive scheduling bug fixes
 
 A bug-fix release for reactive Modal scheduling (shipped in 0.10.0).
