@@ -27,11 +27,14 @@ and **redeploy your Modal app**.
   `builder_settings.secrets` for 0.10.1, you can drop it (the default
   handles it) or pass it explicitly as `stardag_api_key_secret`.
 
-- **Modal workspace deep links now work.** The Modal dashboard links in
-  the UI (task/build executor metadata) were missing the workspace,
-  because it was resolved from the Modal token — absent inside Modal
-  containers. The workspace is now resolved at deploy time and propagated
-  to every function.
+- **Modal workspace now resolves in the UI (app dashboard links).** The
+  workspace was missing from executor metadata — it was resolved from the
+  Modal token, which isn't available inside Modal containers, and the
+  lookup also ignored the personal-workspace case (the slug is the account
+  `username`). Both are fixed: the workspace is resolved at deploy time
+  (falling back to `username`) and baked into every function, so the
+  app-level Modal dashboard link works. (The per-function-call deep-link
+  URL format is a separate UI fix landing as a follow-up.)
 
 ---
 

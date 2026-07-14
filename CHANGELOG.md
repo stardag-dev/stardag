@@ -4,7 +4,7 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.10.2] — 2026-07-14
 
 ### SDK
 
@@ -20,13 +20,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   only the api-key secret is shared. Declare the registry key via this
   argument (or rely on the default) rather than putting it in
   `builder_settings.secrets`.
-- **Fix: Modal workspace now populates executor metadata / UI dashboard
-  deep links.** The workspace was resolved from the Modal token, which
-  only exists in the local triggering/deploy process — inside a Modal
-  container (where task-level metadata is produced) the lookup returned
-  nothing, so the UI showed a blank workspace. `finalize()` now resolves
-  the workspace at deploy time and bakes it into every function's env
-  (`STARDAG_MODAL_WORKSPACE`), which the in-container resolver reads first.
+- **Fix: Modal workspace now resolves and populates executor metadata /
+  the app-level UI dashboard link.** The workspace was resolved from the
+  Modal token, which only exists in the local triggering/deploy process —
+  inside a Modal container (where task-level metadata is produced) the
+  lookup returned nothing, so the UI showed a blank workspace. Two fixes:
+  the token lookup now falls back to the account `username` (the
+  `WorkspaceNameLookupResponse.workspace_name` is empty for personal
+  workspaces), and `finalize()` resolves the workspace at deploy time and
+  bakes it into every function's env (`STARDAG_MODAL_WORKSPACE`), which the
+  in-container resolver reads first. (The per-function-call deep-link URL
+  format is a separate UI fix, tracked as a follow-up.)
 - Completed the `StardagApp.__init__` docstring (previously several
   arguments were only described in inline comments).
 
