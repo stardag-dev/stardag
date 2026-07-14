@@ -889,8 +889,13 @@ class TestApiKeySecretPropagation:
             raise modal.exception.NotFoundError("Secret 'x' not found")
 
         monkeypatch.setattr(modal.Secret, "hydrate", _raise)
-        with pytest.raises(StardagError, match="stardag_api_key_secret"):
+        with pytest.raises(StardagError) as exc:
             self._finalize_capturing(stardag_api_key_secret="does-not-exist")
+        msg = str(exc.value)
+        # Guides toward the *requested* secret name, with the --secret-name
+        # flag (the default name would omit the flag).
+        assert "does-not-exist" in msg
+        assert "--secret-name does-not-exist" in msg
 
     def test_workspace_baked_into_env_at_finalize(self, monkeypatch):
         # The Modal token exists only in the deploy process, not in

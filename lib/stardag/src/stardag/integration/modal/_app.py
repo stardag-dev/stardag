@@ -1956,13 +1956,17 @@ class StardagApp:
                 try:
                     self.stardag_api_key_secret.hydrate()
                 except modal.exception.NotFoundError as e:
+                    name = self._api_key_secret_name
+                    secret_name_flag = (
+                        "" if name == "stardag-api-key" else f" --secret-name {name}"
+                    )
                     raise StardagError(
                         f"StardagApp.stardag_api_key_secret refers to a Modal "
-                        f"secret named {self._api_key_secret_name!r} that does "
-                        f"not exist in the current Modal environment. Run "
-                        f"`stardag modal stardag-api-key create` to mint a "
-                        f"Stardag API key and sync it into a Modal secret "
-                        f"named 'stardag-api-key' (the default), so the "
+                        f"secret named {name!r} that does not exist in the "
+                        f"current Modal environment. Run "
+                        f"`stardag modal stardag-api-key create"
+                        f"{secret_name_flag}` to mint a Stardag API key and "
+                        f"sync it into a Modal secret of that name, so the "
                         f"deployed functions can authenticate to the "
                         f"registry. If you supply the API key another way, or "
                         f"set it per function, pass stardag_api_key_secret="
