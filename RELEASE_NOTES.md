@@ -6,6 +6,63 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.11.0 — Reactive build metadata in the registry
+
+Reactive scheduling now keeps its marker/owner/tick-config in the registry
+instead of a `meta.json` on the target root. This makes re-triggering work
+on immutable/append-only target roots, lets a re-trigger update
+`tick_kwargs`, and gives the server a real "RUNNING reactive builds owned by
+app X" query. Requires a matching registry server (an older server fails the
+reactive trigger with a clear error). Run `pip install -U stardag` and
+**redeploy your Modal app**.
+
+> **⚠️ Breaking for in-flight reactive builds — re-trigger them.** The
+> scheduler tick now reads the "this build is reactively scheduled" marker
+> **only** from the registry. A reactive build that was already in flight
+> when you upgrade has no registry marker (its marker lived in the old
+> target-root `meta.json`, which is no longer read), so **its ticks will
+> silently no-op and the build stalls — with no error**. This affects only
+> builds spanning the upgrade.
+>
+> **Action:** after upgrading and redeploying, re-trigger any reactive build
+> that was running across the upgrade:
+>
+> ```python
+> app.build_trigger(root_tasks, build_id=<existing_build_id>, reactive=True)
+> ```
+>
+> A re-trigger resumes the build, re-persists its task objects under the new
+> code, and writes the registry marker — after which ticks drive it normally.
+> New reactive builds triggered on this version are unaffected.
+
+- **Re-triggering updates `tick_kwargs`; a bare re-trigger preserves them.**
+  Because the config now lives in the (mutable) registry, a re-trigger that
+  passes `tick_kwargs` updates the scheduling config for all subsequent
+  ticks; a re-trigger with no explicit `tick_kwargs` leaves the stored
+  config untouched (it is not reset to defaults).
+
+- **Task store is pickle-only.** The per-build task store on the target root
+  now holds only the pickled task _objects_ (write-once, so it is compatible
+  with immutable/append-only roots); the orchestration metadata moved to the
+  registry.
+
+This release also ships two additive, non-breaking improvements:
+
+- **Stable Modal dashboard deep links.** The executor metadata now captures
+  the Modal app id (`ap-…`) and worker function id (`fu-…`), and the UI uses
+  them to build function-call links in the app-id URL form — which keep
+  resolving after an app version is stopped or redeployed (the old links did
+  not). Builds without the ids degrade gracefully to the app page, and the
+  task-detail view gained a "more details" block listing every captured
+  identifier (click-to-copy). **Redeploy your Modal app** to start emitting
+  the new ids.
+- **`stardag concurrency-limits` CLI.** Manage named concurrency limits from
+  the CLI — `list`, `set`, `delete`, `holders`, and `evict` — against the
+  active profile/environment, wrapping the registry endpoints. No more
+  hand-rolled scripts to create or inspect limits.
+
+---
+
 ## v0.10.2 — Modal secret & workspace ergonomics
 
 An SDK-only patch cleaning up Modal registry-credential handling and

@@ -450,17 +450,23 @@ app = sd_modal.StardagApp(
 
 # After deploy:
 result = app.build_trigger(root_task, reactive=True)
-# Re-trigger with the same build id to wake a stalled build — or to add
-# new root tasks to the running build:
-app.build_trigger(more_tasks, build_id=result.build_id, reactive=True)
+# Re-trigger with the same build id to wake a stalled build, to add new
+# root tasks to the running build, or to change the tick configuration:
+app.build_trigger(
+    more_tasks, build_id=result.build_id, reactive=True,
+    tick_kwargs={"linger_seconds": 60},
+)
 ```
 
 Requirements and current limitations: the app must be deployed with this
 stardag version — **both** the Modal app and the registry server (an older
 server fails reactive triggers with a "does not support reactive
 scheduling" error); the triggering process needs registry credentials and
-access to the default target root (task objects are persisted there for
-the ticks); the global concurrency lock and build-local
+access to the default target root (task _objects_ are persisted there as
+pickles for the ticks — the reactive marker, owning app, and tick config
+live in the registry, not on the target root, so re-triggering works even
+when the target root is immutable/append-only and a re-trigger may update
+`tick_kwargs`); the global concurrency lock and build-local
 `ConcurrencyConfig` limits are not applied by ticks (use the
 registry-backed named limits above; Modal's per-function
 `concurrency_limit` also still applies). Builds cancelled from the
@@ -545,7 +551,8 @@ server silently ignores the enforcement parameters**, so upgrade the
 server before relying on limits.
 
 **App ownership.** Each reactive build is owned by the `StardagApp`
-that triggered it (`app_name` recorded in the build's store meta). With
+that triggered it (`app_name` recorded in the build's reactive metadata in
+the registry, read by every tick from the build frontier). With
 several apps deployed in one environment, every watchdog sweeps all
 running reactive builds — but a tick from a non-owning app never drives
 the build with its own commit's code and selectors (or unpickles the
@@ -558,8 +565,9 @@ the **same** app name is the normal upgrade path and unaffected.
 
 To migrate a build to a different app, re-trigger it from that app
 (`build_trigger(tasks, reactive=True, build_id=<existing id>)`): the
-re-trigger rewrites the meta and re-persists the task objects under the
-new app's code. Two handoff details: ownership takes effect for _new_
+re-trigger updates the reactive metadata (owning app + tick config) in the
+registry and re-persists the task objects under the new app's code. Two
+handoff details: ownership takes effect for _new_
 ticks — a tick of the previous owner that is mid-linger keeps driving
 the build until its linger deadline passes (bounded by its
 `linger_seconds`); and wake-ups from the previous owner's still-running
@@ -582,7 +590,8 @@ tasks.
 Requirements and current limitations: the app must be deployed with this
 stardag version (scheduler `tick` function + self-reporting workers); the
 triggering process needs registry credentials and access to the default
-target root (task objects are persisted there for the ticks); the global
+target root (task _objects_ are persisted there for the ticks — the
+reactive marker/owner/tick config live in the registry); the global
 concurrency lock and build-local `ConcurrencyConfig` limits are not applied
 by ticks (use the registry-backed named limits above; Modal's per-function
 `concurrency_limit` also still applies). Builds cancelled from the registry UI are picked up by

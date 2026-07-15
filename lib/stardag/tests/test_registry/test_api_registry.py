@@ -526,3 +526,71 @@ class TestBuildResume404Swallow:
             await registry.build_resume_aio(
                 UUID("00000000-0000-0000-0000-000000000001")
             )
+
+
+class TestConcurrencyLimitPathEncoding:
+    """Concurrency-limit keys / task ids are URL-encoded per path segment.
+
+    A key created from the UI may contain ``/`` or other reserved
+    characters; interpolating it raw into the URL path would break routing
+    (a ``/`` splits into extra path segments) or hit the wrong endpoint.
+    Each embedded segment must be percent-encoded with ``safe=""`` so even
+    ``/`` is escaped.
+    """
+
+    def _make_registry_and_capture(self):
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(200, json={"ok": True, "holders": [], "total": 0})
+
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        registry._client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            auth=registry._auth,
+        )
+        return registry, captured
+
+    @staticmethod
+    def _encoded_path(request) -> str:
+        # ``url.path`` percent-decodes for display; ``raw_path`` preserves the
+        # bytes actually put on the wire (and appends the query string, which
+        # we strip here). This is what proves the segment was encoded.
+        return request.url.raw_path.decode().split("?", 1)[0]
+
+    def test_set_encodes_key_segment(self):
+        registry, captured = self._make_registry_and_capture()
+        registry.concurrency_limit_set("a/b c#d", 3)
+        assert len(captured) == 1
+        # The raw key never appears verbatim; ``/`` and other reserved chars
+        # are percent-encoded so the whole key stays a single path segment.
+        assert (
+            self._encoded_path(captured[0])
+            == "/api/v1/concurrency-limits/a%2Fb%20c%23d"
+        )
+
+    def test_delete_encodes_key_segment(self):
+        registry, captured = self._make_registry_and_capture()
+        registry.concurrency_limit_delete("a/b")
+        assert self._encoded_path(captured[0]) == "/api/v1/concurrency-limits/a%2Fb"
+
+    def test_holders_encodes_key_segment(self):
+        registry, captured = self._make_registry_and_capture()
+        registry.concurrency_limit_holders("a/b")
+        assert (
+            self._encoded_path(captured[0])
+            == "/api/v1/concurrency-limits/a%2Fb/holders"
+        )
+
+    def test_evict_encodes_both_segments(self):
+        registry, captured = self._make_registry_and_capture()
+        registry.concurrency_limit_evict("a/b", "id/1")
+        assert (
+            self._encoded_path(captured[0])
+            == "/api/v1/concurrency-limits/a%2Fb/holders/id%2F1/evict"
+        )

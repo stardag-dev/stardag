@@ -25,6 +25,12 @@ Usage:
     stardag environment target-roots remove <name> [--env <env>]
     stardag environment target-roots set <name=uri ...> [--json <json>] [--env <env>]
 
+    stardag concurrency-limits list [--holders] [-p profile] [-e env]
+    stardag concurrency-limits set <key> <max_concurrent> [-p profile] [-e env]
+    stardag concurrency-limits delete <key> [--yes] [-p profile] [-e env]
+    stardag concurrency-limits holders <key> [--limit N] [-p profile] [-e env]
+    stardag concurrency-limits evict <key> <task_id> [--yes] [-p profile] [-e env]
+
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
     stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
 
@@ -37,7 +43,7 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, config, environment
+from stardag._cli import auth, config, environment, limits
 
 # Main CLI app
 app = typer.Typer(
@@ -50,6 +56,7 @@ app = typer.Typer(
 app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
 app.add_typer(environment.app, name="environment")
+app.add_typer(limits.app, name="concurrency-limits")
 
 # Add modal subcommand only if modal is installed
 try:

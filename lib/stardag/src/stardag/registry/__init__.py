@@ -15,6 +15,7 @@ from stardag.registry._api_registry import APIRegistry
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
 from stardag.registry._base import (
     BuildFrontier,
+    BuildInfo,
     FrontierTaskRef,
     NoOpRegistry,
     RegisteredTaskInfo,
@@ -31,6 +32,7 @@ from stardag.registry._lock import (
 __all__ = [
     "APIRegistry",
     "BuildFrontier",
+    "BuildInfo",
     "FrontierTaskRef",
     "NoOpRegistry",
     "RegisteredTaskInfo",

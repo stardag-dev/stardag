@@ -7,6 +7,8 @@ const fullMetadata = {
   workspace: "my-workspace",
   environment: "staging",
   function_name: "worker_default",
+  app_id: "ap-123",
+  function_id: "fu-456",
 };
 
 function withoutKey(key: keyof typeof fullMetadata): Record<string, unknown> {
@@ -16,21 +18,36 @@ function withoutKey(key: keyof typeof fullMetadata): Record<string, unknown> {
 }
 
 describe("modalAppUrl", () => {
-  it("builds the deployed-app URL from full metadata", () => {
+  it("prefers the stable app-id URL when app_id is present", () => {
+    // app-id path form → survives an app stop/redeploy.
     expect(modalAppUrl(fullMetadata)).toBe(
+      "https://modal.com/apps/my-workspace/staging/ap-123",
+    );
+  });
+
+  it("falls back to the deployed-name URL when app_id is missing", () => {
+    // Resolves only while the app version is live, but survives without app_id.
+    expect(modalAppUrl(withoutKey("app_id"))).toBe(
       "https://modal.com/apps/my-workspace/staging/deployed/my-app",
+    );
+  });
+
+  it("still builds the stable URL when app_name is missing", () => {
+    // app_id alone is enough to address the app page.
+    expect(modalAppUrl(withoutKey("app_name"))).toBe(
+      "https://modal.com/apps/my-workspace/staging/ap-123",
     );
   });
 
   it("falls back to the 'main' environment when absent", () => {
     expect(modalAppUrl(withoutKey("environment"))).toBe(
-      "https://modal.com/apps/my-workspace/main/deployed/my-app",
+      "https://modal.com/apps/my-workspace/main/ap-123",
     );
   });
 
   it("accepts metadata without an explicit kind", () => {
     expect(modalAppUrl(withoutKey("kind"))).toBe(
-      "https://modal.com/apps/my-workspace/staging/deployed/my-app",
+      "https://modal.com/apps/my-workspace/staging/ap-123",
     );
   });
 
@@ -43,8 +60,8 @@ describe("modalAppUrl", () => {
     expect(modalAppUrl({ ...fullMetadata, workspace: "" })).toBeNull();
   });
 
-  it("returns null when app_name is missing", () => {
-    expect(modalAppUrl(withoutKey("app_name"))).toBeNull();
+  it("returns null when neither app_id nor app_name is present", () => {
+    expect(modalAppUrl({ kind: "modal", workspace: "my-workspace" })).toBeNull();
   });
 
   it("returns null for null/undefined metadata", () => {
@@ -52,7 +69,18 @@ describe("modalAppUrl", () => {
     expect(modalAppUrl(undefined)).toBeNull();
   });
 
-  it("URL-encodes path segments", () => {
+  it("URL-encodes the app-id path segment", () => {
+    expect(
+      modalAppUrl({
+        kind: "modal",
+        app_id: "ap 1/2",
+        workspace: "ws#1",
+        environment: "env 2",
+      }),
+    ).toBe("https://modal.com/apps/ws%231/env%202/ap%201%2F2");
+  });
+
+  it("URL-encodes the deployed-name path segments", () => {
     expect(
       modalAppUrl({
         kind: "modal",
@@ -65,26 +93,92 @@ describe("modalAppUrl", () => {
 });
 
 describe("modalFunctionCallUrl", () => {
-  it("appends the functionCallId query param to the app URL", () => {
-    expect(modalFunctionCallUrl(fullMetadata, "fc-abc123")).toBe(
-      "https://modal.com/apps/my-workspace/staging/deployed/my-app?functionCallId=fc-abc123",
+  it("builds the stable app-id URL when all ids are present", () => {
+    // app-id path form → survives an app stop/redeploy.
+    expect(modalFunctionCallUrl(fullMetadata, "fc-789")).toBe(
+      "https://modal.com/apps/my-workspace/staging/ap-123" +
+        "?activeTab=functions&functionId=fu-456&functionSection=calls&fcId=fc-789",
     );
   });
 
-  it("returns null without a call ref", () => {
-    expect(modalFunctionCallUrl(fullMetadata, null)).toBeNull();
-    expect(modalFunctionCallUrl(fullMetadata, undefined)).toBeNull();
-    expect(modalFunctionCallUrl(fullMetadata, "")).toBeNull();
+  it("falls back to the 'main' environment in the stable URL", () => {
+    expect(modalFunctionCallUrl(withoutKey("environment"), "fc-789")).toBe(
+      "https://modal.com/apps/my-workspace/main/ap-123" +
+        "?activeTab=functions&functionId=fu-456&functionSection=calls&fcId=fc-789",
+    );
   });
 
-  it("returns null when the app URL cannot be built", () => {
-    expect(modalFunctionCallUrl(null, "fc-abc123")).toBeNull();
-    expect(modalFunctionCallUrl({ kind: "modal" }, "fc-abc123")).toBeNull();
+  it("falls back to the deployed-name form when app_id is missing", () => {
+    // Resolves only while the app version is live, but survives without app_id.
+    expect(modalFunctionCallUrl(withoutKey("app_id"), "fc-789")).toBe(
+      "https://modal.com/apps/my-workspace/staging/deployed/my-app" +
+        "?activeTab=functions&functionId=fu-456&functionSection=calls&fcId=fc-789",
+    );
   });
 
-  it("URL-encodes the call ref", () => {
-    expect(modalFunctionCallUrl(fullMetadata, "fc a&b")).toBe(
-      "https://modal.com/apps/my-workspace/staging/deployed/my-app?functionCallId=fc%20a%26b",
+  it("falls back to the stable app-id page when function_id is missing", () => {
+    // No function_id → can't address the call, but app_id still yields the
+    // stop/redeploy-proof app page rather than the deployed-name form.
+    expect(modalFunctionCallUrl(withoutKey("function_id"), "fc-789")).toBe(
+      "https://modal.com/apps/my-workspace/staging/ap-123",
+    );
+  });
+
+  it("falls back to the deployed-name page when neither function_id nor app_id is present", () => {
+    expect(
+      modalFunctionCallUrl(
+        {
+          kind: "modal",
+          app_name: "my-app",
+          workspace: "my-workspace",
+          environment: "staging",
+        },
+        "fc-789",
+      ),
+    ).toBe("https://modal.com/apps/my-workspace/staging/deployed/my-app");
+  });
+
+  it("falls back to the stable app-id page when the call ref is missing", () => {
+    expect(modalFunctionCallUrl(fullMetadata, null)).toBe(
+      "https://modal.com/apps/my-workspace/staging/ap-123",
+    );
+    expect(modalFunctionCallUrl(fullMetadata, "")).toBe(
+      "https://modal.com/apps/my-workspace/staging/ap-123",
+    );
+  });
+
+  it("returns null when nothing usable can be built", () => {
+    expect(modalFunctionCallUrl(null, "fc-789")).toBeNull();
+    expect(modalFunctionCallUrl(undefined, "fc-789")).toBeNull();
+    // Only ids, no workspace/app_name → neither the call URL nor the app
+    // page can be built.
+    expect(
+      modalFunctionCallUrl(
+        { kind: "modal", app_id: "ap-123", function_id: "fu-456" },
+        "fc-789",
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for a non-modal kind", () => {
+    expect(modalFunctionCallUrl({ ...fullMetadata, kind: "k8s" }, "fc-789")).toBeNull();
+  });
+
+  it("URL-encodes ids and the call ref", () => {
+    expect(
+      modalFunctionCallUrl(
+        {
+          kind: "modal",
+          workspace: "ws#1",
+          environment: "env 2",
+          app_id: "ap 1/2",
+          function_id: "fu 3&4",
+        },
+        "fc a&b",
+      ),
+    ).toBe(
+      "https://modal.com/apps/ws%231/env%202/ap%201%2F2" +
+        "?activeTab=functions&functionId=fu%203%264&functionSection=calls&fcId=fc%20a%26b",
     );
   });
 });

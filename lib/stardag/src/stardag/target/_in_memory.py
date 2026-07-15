@@ -138,8 +138,7 @@ class _InMemoryBytesWritableFileSystemTargetHandle(
     def __init__(self, uri: str) -> None:
         self.uri = uri
         # Truncate on open (real "w"-mode semantics): re-writing a URI must
-        # replace its content, not append to the previous handle's writes —
-        # e.g. the reactive build task store rewrites its meta.json.
+        # replace its content, not append to the previous handle's writes.
         InMemoryFileTarget.uri_to_bytes[self.uri] = b""
 
     def write(self, data: bytes) -> None:
