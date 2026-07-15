@@ -340,6 +340,50 @@ Target roots are managed under `stardag environment target-roots`. Changes are a
 
 See `stardag environment target-roots --help` for full options (e.g. `--env` to target a specific environment).
 
+## Concurrency Limit Commands
+
+Named concurrency limits cap how many tasks tagged with a given key may run
+concurrently across all builds in an environment. The SDK tags tasks with keys;
+the cap lives server-side in the registry and is enforced atomically when a task
+starts. Manage them with `stardag concurrency-limits` (or in the registry UI:
+workspace admin → Concurrency Limits).
+
+=== "Active venv"
+
+    ```sh
+    stardag concurrency-limits list [--holders]
+    stardag concurrency-limits set <key> <max_concurrent>
+    stardag concurrency-limits delete <key> [--yes]
+    stardag concurrency-limits holders <key> [--limit N]
+    stardag concurrency-limits evict <key> <task_id> [--yes]
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run stardag concurrency-limits list [--holders]
+    uv run stardag concurrency-limits set <key> <max_concurrent>
+    uv run stardag concurrency-limits delete <key> [--yes]
+    uv run stardag concurrency-limits holders <key> [--limit N]
+    uv run stardag concurrency-limits evict <key> <task_id> [--yes]
+    ```
+
+All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
+profile / environment other than the active one.
+
+- `list` — show each key and its `max_concurrent` (`--holders` adds the current
+  holder count, one extra call per key).
+- `set` — create or update a limit (upsert; `max_concurrent` must be ≥ 1).
+- `delete` — remove a limit so the key becomes unlimited.
+- `holders` — list the RUNNING tasks currently holding slots of a key
+  (oldest-running first), with task id/name, running-since and executor.
+- `evict` — record `TASK_FAILED` for a RUNNING holder to free leaked slots.
+  Only evict holders whose process you know is dead: the server cannot verify
+  liveness, so evicting a live worker leaves the cap oversubscribed until it
+  finishes.
+
+See `stardag concurrency-limits --help` for full options.
+
 ## Environment Variables
 
 All CLI behavior can be overridden with environment variables:

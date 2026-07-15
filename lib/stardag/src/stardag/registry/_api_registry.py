@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -816,6 +817,78 @@ class APIRegistry(RegistryABC):
             operation=f"Upload artifacts for task {task.id}",
         )
         logger.debug(f"Uploaded {len(artifacts)} artifacts for task {task.id}")
+
+    # -------------------------------------------------------------------------
+    # Named concurrency limits (per-environment)
+    # -------------------------------------------------------------------------
+
+    def concurrency_limit_list(self) -> list[dict[str, Any]]:
+        """List the environment's named concurrency limits.
+
+        Returns a list of ``{"key": str, "max_concurrent": int}`` dicts,
+        ordered by key.
+        """
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/concurrency-limits",
+            params=self._get_params(),
+            operation="List concurrency limits",
+        )
+        return list(response.json().get("limits", []))
+
+    def concurrency_limit_set(self, key: str, max_concurrent: int) -> dict[str, Any]:
+        """Create or update a named concurrency limit (PUT upsert).
+
+        Returns the resulting ``{"key", "max_concurrent"}`` dict.
+        """
+        response = self._request(
+            "PUT",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}",
+            json={"max_concurrent": max_concurrent},
+            params=self._get_params(),
+            operation=f"Set concurrency limit {key!r}",
+        )
+        return response.json()
+
+    def concurrency_limit_delete(self, key: str) -> None:
+        """Delete a named concurrency limit (the key becomes unlimited)."""
+        self._request(
+            "DELETE",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}",
+            params=self._get_params(),
+            operation=f"Delete concurrency limit {key!r}",
+        )
+
+    def concurrency_limit_holders(self, key: str, limit: int = 100) -> dict[str, Any]:
+        """List the RUNNING tasks currently holding slots of ``key``.
+
+        Returns ``{"key", "holders": [...], "total": int}`` where each
+        holder carries task id/name, ``latest_status_at`` (running since)
+        and executor info. ``total`` is the full holder count (``holders``
+        is capped by ``limit``, oldest-running first).
+        """
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}/holders",
+            params={**self._get_params(), "limit": str(limit)},
+            operation=f"List holders of concurrency limit {key!r}",
+        )
+        return response.json()
+
+    def concurrency_limit_evict(self, key: str, task_id: str) -> dict[str, Any]:
+        """Evict a RUNNING slot holder of ``key`` (records TASK_FAILED).
+
+        Recovery path for slots leaked by a dead build process. Returns the
+        ``{"task_id", "status"}`` event response.
+        """
+        response = self._request(
+            "POST",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}"
+            f"/holders/{quote(task_id, safe='')}/evict",
+            params=self._get_params(),
+            operation=f"Evict {task_id} from concurrency limit {key!r}",
+        )
+        return response.json()
 
     def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
         """Get metadata for a registered task.
