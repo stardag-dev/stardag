@@ -6,6 +6,41 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.13.0 — Strict polymorphic fields: also enforced on load
+
+Follow-up to v0.12.0. A _strict_ polymorphic field — a bare concrete
+annotation like `dep: MyTask` (no `SubClass[...]`) — means exactly `MyTask`.
+v0.12.0 rejected a subclass **instance** assigned to such a field; v0.13.0
+closes the remaining gap on the **deserialize path**. Run `pip install -U stardag`.
+
+Previously, validating serialized data (e.g. via `model_validate` /
+registry rehydration) with a subclass payload at a strict field silently
+coerced it into the base type, dropping the subclass's parameters. Now an
+input dict whose `__namespace`/`__name` discriminator names anything other
+than the exact strict type raises `StrictPolymorphicTypeError`:
+
+```python
+class Parent(sd.Task[int]):
+    dep: MyTask                                    # strict: exactly MyTask
+
+Parent.model_validate({"dep": exact_MyTask_dump})       # OK
+Parent.model_validate({"dep": {"a": 1}})                # OK (plain dict → exact type)
+Parent.model_validate({"dep": child_of_MyTask_dump})    # StrictPolymorphicTypeError
+```
+
+> **⚠️ May surface latent bugs as errors.** Data that a **pre-0.12.0**
+> version already truncated into a strict field now fails loudly on load
+> instead of loading the degraded base type. This is the correct "fail loud
+> on corrupt data" behavior. If the field is meant to hold subclasses,
+> annotate it polymorphically:
+>
+> ```python
+> dep: sd.SubClass[MyTask]
+> ```
+
+Exact-type payloads, plain dicts without a discriminator, and any field
+already using `sd.SubClass[...]` / `sd.TaskLoads[...]` are unaffected.
+
 ## v0.12.0 — Stricter polymorphic field validation
 
 Task fields that hold other tasks (or any `PolymorphicRoot`) must use a
