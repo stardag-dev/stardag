@@ -14,7 +14,7 @@ the tick configuration) lives in the registry, not here — target roots may
 be configured immutable/append-only (S3 object-lock, Modal volumes refuse
 overwrites), and the registry is already the source of truth for build
 roots/status/frontier. See ``registry.build_set_reactive_meta`` and the
-``reactive_meta`` field on the build frontier.
+``reactive_app_name`` field on the build frontier.
 
 Pickles are written by the trigger (initial discovery) and by workers
 (dynamically yielded deps). They are write-once (a task id maps to one

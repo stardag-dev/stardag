@@ -131,9 +131,14 @@ class BuildResponse(BaseModel):
     # recently resumed-with-metadata) the build. None for builds without
     # a recorded trigger executor.
     executor_metadata: dict | None = None
-    # Reactive-scheduling metadata ({"app_name", "tick_kwargs"}); None for
-    # non-reactive builds. Presence is the reactive-scheduling marker.
-    reactive_meta: dict | None = None
+    # Reactive-scheduling owner: the app whose ticks drive this build. None
+    # for non-reactive builds — its presence is the reactive-scheduling
+    # marker.
+    reactive_app_name: str | None = None
+    # Reactive-scheduler tick configuration (a TickConfig kwargs dict); None
+    # for non-reactive builds (and treated as {} when the marker is set but
+    # no kwargs were given).
+    reactive_tick_kwargs: dict | None = None
 
 
 class BuildListResponse(BaseModel):
@@ -270,10 +275,14 @@ class BuildFrontierResponse(BaseModel):
     # All RUNNING tasks in the build, including non-actionable ones (e.g.
     # inside the dynamic-dep registration window) — cancellation targets.
     running: list[FrontierTaskRef] = []
-    # Reactive-scheduling metadata ({"app_name", "tick_kwargs"}); None for
-    # non-reactive builds. Presence is the reactive-scheduling marker a tick
-    # reads to decide whether to drive the build (and which app owns it).
-    reactive_meta: dict | None = None
+    # Reactive-scheduling owner: the app whose ticks drive this build. None
+    # for non-reactive builds — its presence is the marker a tick reads to
+    # decide whether to drive the build (and which app owns it).
+    reactive_app_name: str | None = None
+    # Reactive-scheduler tick configuration (a TickConfig kwargs dict); None
+    # for non-reactive builds (treated as {} when the marker is set but no
+    # kwargs were given). Read from the frontier by every tick.
+    reactive_tick_kwargs: dict | None = None
 
 
 class AddBuildRootsRequest(BaseModel):
@@ -283,10 +292,16 @@ class AddBuildRootsRequest(BaseModel):
 
 
 class SetReactiveMetaRequest(BaseModel):
-    """Reactive-scheduling metadata for PUT /builds/{id}/reactive-meta."""
+    """Reactive-scheduling metadata for PUT /builds/{id}/reactive-meta.
+
+    ``tick_kwargs`` defaults to None meaning "leave the stored config
+    untouched": a bare re-trigger (no explicit tick_kwargs) then preserves
+    the existing ones, while a re-trigger that passes tick_kwargs updates
+    them. ``app_name`` (the owner/marker) is always set.
+    """
 
     app_name: str
-    tick_kwargs: dict = {}
+    tick_kwargs: dict | None = None
 
 
 class ConcurrencyLimitResponse(BaseModel):

@@ -112,17 +112,30 @@ class Build(Base, TimestampMixin):
         nullable=True,
     )
 
-    # Reactive-scheduling metadata, set by PUT /builds/{id}/reactive-meta.
-    # NULL means the build is NOT reactively scheduled — its presence is the
-    # "this build is driven by scheduler ticks" marker (a stray tick no-ops
-    # on a build with NULL here, so a resident-orchestrator build is never
-    # double-scheduled). Non-NULL holds {"app_name": <owning app>,
-    # "tick_kwargs": {...}}: the owning app drives the ticks (ownership
-    # guard) and the tick config is read from it. Surfaced on the build
-    # frontier so a scheduler tick reads it in the call it already makes.
-    # Kept off the target root (the asset store, which may be immutable)
-    # because a re-trigger must be able to update it.
-    reactive_meta: Mapped[dict | None] = mapped_column(
+    # Reactive-scheduling owner: the name of the app whose scheduler ticks
+    # drive this build, set by PUT /builds/{id}/reactive-meta. NULL means
+    # the build is NOT reactively scheduled — its presence
+    # (``reactive_app_name IS NOT NULL``) is the "this build is driven by
+    # scheduler ticks" marker (a stray tick no-ops on a build with NULL
+    # here, so a resident-orchestrator build is never double-scheduled). The
+    # owning app drives the ticks (ownership guard). A typed column (not
+    # JSONB) so the watchdog's real query — "list RUNNING reactive builds
+    # owned by app X" — is a server-side filter (see GET /builds).
+    reactive_app_name: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+
+    # Reactive-scheduler tick configuration (a ``TickConfig`` kwargs dict,
+    # SDK-owned and evolving with it — hence JSONB, not typed columns).
+    # Read by every tick (surfaced on the build frontier) so worker
+    # wake-ups and watchdog sweeps — which spawn with only the build id —
+    # share the trigger-time config. NULL/absent is treated as ``{}``. Only
+    # meaningful when reactive_app_name is set. Kept off the target root
+    # (the asset store, which may be immutable) because a re-trigger must be
+    # able to update it.
+    reactive_tick_kwargs: Mapped[dict | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"),
         nullable=True,
     )

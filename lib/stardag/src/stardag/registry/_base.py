@@ -115,16 +115,36 @@ class BuildFrontier(StardagBaseModel):
     # inside the dynamic-dep registration window) — cancellation targets.
     # Defaults to empty for servers predating the field.
     running: list[FrontierTaskRef] = []
-    # Reactive-scheduling metadata: the marker + orchestration config a tick
-    # needs, moved off the target root into the registry. None means the
-    # build is NOT reactively scheduled (a stray tick must no-op on it, so a
-    # resident-orchestrator build is never double-scheduled). Non-None holds
-    # ``{"app_name": <owning app>, "tick_kwargs": {...}}`` — the owning app
-    # drives the tick (ownership guard) and the tick config is read from it.
-    # Set via ``build_set_reactive_meta``. None also on servers predating
-    # the field (the reactive trigger fails loudly against such servers when
-    # it PUTs the reactive-meta endpoint, so a tick never observes this).
-    reactive_meta: dict[str, Any] | None = None
+    # Reactive-scheduling marker/owner, moved off the target root into the
+    # registry. None means the build is NOT reactively scheduled (a stray
+    # tick must no-op on it, so a resident-orchestrator build is never
+    # double-scheduled). Non-None is the owning app that drives the tick
+    # (ownership guard). Set via ``build_set_reactive_meta``. None also on
+    # servers predating the field (the reactive trigger fails loudly against
+    # such servers when it PUTs the reactive-meta endpoint, so a tick never
+    # observes this).
+    reactive_app_name: str | None = None
+    # Reactive-scheduler tick configuration (a ``TickConfig`` kwargs dict);
+    # None/absent is treated as ``{}``. Read from the frontier only for the
+    # backstop marker check — the Modal tick reads it from the lighter
+    # ``build_get`` before acquiring the lease.
+    reactive_tick_kwargs: dict[str, Any] | None = None
+
+
+class BuildInfo(StardagBaseModel):
+    """Slim build record from ``build_get`` (``GET /builds/{id}``).
+
+    Carries the reactive marker/owner/config a scheduler tick's pre-lease
+    gate needs, without the cost of a full frontier computation. Extra
+    fields on the server response are ignored.
+    """
+
+    id: UUID
+    # Reactive-scheduling marker/owner (see ``BuildFrontier``). None = not
+    # reactively scheduled.
+    reactive_app_name: str | None = None
+    # Reactive-scheduler tick configuration; None/absent treated as ``{}``.
+    reactive_tick_kwargs: dict[str, Any] | None = None
 
 
 class RegisteredTaskInfo(StardagBaseModel):
@@ -393,19 +413,35 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_get_frontier."""
         return self.build_get_frontier(build_id)
 
+    def build_get(self, build_id: UUID) -> BuildInfo:
+        """Return a slim build record (``GET /builds/{id}``).
+
+        Lighter than ``build_get_frontier`` (no frontier computation): used
+        by the reactive tick's pre-lease marker/ownership gate, which only
+        needs ``reactive_app_name``/``reactive_tick_kwargs``. Default: not
+        supported.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support build_get")
+
+    async def build_get_aio(self, build_id: UUID) -> BuildInfo:
+        """Async version of build_get."""
+        return self.build_get(build_id)
+
     def build_set_reactive_meta(
         self,
         build_id: UUID,
         *,
         app_name: str,
-        tick_kwargs: dict[str, Any],
+        tick_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Mark a build reactively scheduled and store its tick config.
 
-        Upsert (idempotent): a re-trigger may update ``tick_kwargs``. The
-        stored metadata surfaces as ``BuildFrontier.reactive_meta`` so a
-        scheduler tick reads the marker/owner/config from the frontier it
-        already fetches. Default: no-op (backends without reactive support).
+        Upsert (idempotent). ``app_name`` (the marker/owner) is always set
+        and surfaces as ``reactive_app_name`` on the build/frontier. When
+        ``tick_kwargs`` is None (a bare re-trigger) the stored config is left
+        untouched — so a re-trigger with no explicit tick_kwargs preserves
+        the existing ones; passing tick_kwargs updates them. Default: no-op
+        (backends without reactive support).
         """
         pass
 
@@ -414,7 +450,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         build_id: UUID,
         *,
         app_name: str,
-        tick_kwargs: dict[str, Any],
+        tick_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Async version of build_set_reactive_meta."""
         self.build_set_reactive_meta(

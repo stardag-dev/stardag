@@ -25,9 +25,11 @@ from stardag.exceptions import (
     QuotaExceededError,
     RateLimitError,
     TokenExpiredError,
+    is_missing_route_error,
 )
 from stardag.registry._base import (
     BuildFrontier,
+    BuildInfo,
     RegisteredTaskInfo,
     RegistryABC,
     TaskMetadata,
@@ -101,16 +103,8 @@ def _maybe_gzip_json_body(
 
 
 def _is_route_not_found(err: NotFoundError) -> bool:
-    """Distinguish FastAPI's default "missing route" 404 from app-level 404s.
-
-    FastAPI serves unknown paths as ``{"detail": "Not Found"}``. Any 404
-    raised inside an endpoint (``raise HTTPException(status_code=404,
-    detail=...)``) carries a more specific detail string (e.g.
-    ``"Build not found"``), so checking the exact ``"Not Found"`` literal
-    is a reliable way to tell "endpoint doesn't exist on this server"
-    apart from "this particular resource doesn't exist".
-    """
-    return err.detail == "Not Found"
+    """Module-local alias for the shared missing-route check."""
+    return is_missing_route_error(err)
 
 
 def _parse_bulk_register_response(payload: object) -> "list[RegisteredTaskInfo] | None":
@@ -1193,19 +1187,43 @@ class APIRegistry(RegistryABC):
         )
         return BuildFrontier.model_validate(response.json())
 
+    def build_get(self, build_id: UUID) -> BuildInfo:
+        """Return a slim build record (lighter than the frontier)."""
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/builds/{build_id}",
+            params=self._get_params(),
+            operation=f"Get build {build_id}",
+        )
+        return BuildInfo.model_validate(response.json())
+
+    async def build_get_aio(self, build_id: UUID) -> BuildInfo:
+        """Async version - return a slim build record."""
+        response = await self._arequest(
+            "GET",
+            f"{self.api_url}/api/v1/builds/{build_id}",
+            params=self._get_params(),
+            operation=f"Get build {build_id}",
+        )
+        return BuildInfo.model_validate(response.json())
+
     def build_set_reactive_meta(
         self,
         build_id: UUID,
         *,
         app_name: str,
-        tick_kwargs: dict[str, Any],
+        tick_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Mark a build reactively scheduled and store its tick config (upsert)."""
+        """Mark a build reactively scheduled and store its tick config (upsert).
+
+        ``tick_kwargs=None`` (a bare re-trigger) is omitted from the request
+        so the server preserves the stored config; pass a dict to update it.
+        """
         try:
             self._request(
                 "PUT",
                 f"{self.api_url}/api/v1/builds/{build_id}/reactive-meta",
-                json={"app_name": app_name, "tick_kwargs": tick_kwargs},
+                json=self._reactive_meta_body(app_name, tick_kwargs),
                 params=self._get_params(),
                 operation=f"Set reactive meta for build {build_id}",
             )
@@ -1217,19 +1235,34 @@ class APIRegistry(RegistryABC):
         build_id: UUID,
         *,
         app_name: str,
-        tick_kwargs: dict[str, Any],
+        tick_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Async version - mark a build reactively scheduled (upsert)."""
         try:
             await self._arequest(
                 "PUT",
                 f"{self.api_url}/api/v1/builds/{build_id}/reactive-meta",
-                json={"app_name": app_name, "tick_kwargs": tick_kwargs},
+                json=self._reactive_meta_body(app_name, tick_kwargs),
                 params=self._get_params(),
                 operation=f"Set reactive meta for build {build_id}",
             )
         except NotFoundError as e:
             raise self._reactive_meta_unsupported_error(e)
+
+    @staticmethod
+    def _reactive_meta_body(
+        app_name: str, tick_kwargs: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Request body for PUT /reactive-meta; omit tick_kwargs when None.
+
+        A None ``tick_kwargs`` means "leave the stored config untouched" — a
+        bare re-trigger preserves the existing tick_kwargs rather than
+        wiping them.
+        """
+        body: dict[str, Any] = {"app_name": app_name}
+        if tick_kwargs is not None:
+            body["tick_kwargs"] = tick_kwargs
+        return body
 
     @staticmethod
     def _reactive_meta_unsupported_error(err: NotFoundError) -> Exception:

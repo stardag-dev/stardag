@@ -734,8 +734,8 @@ class TestStardagAppReactiveTrigger:
 
         assert result.build_id == build_id
         # First tick spawned with only the build id (config comes from the
-        # registry reactive_meta so ALL ticks — worker wake-ups, watchdog —
-        # share it).
+        # registry reactive_tick_kwargs so ALL ticks — worker wake-ups,
+        # watchdog — share it).
         assert modal_function_stub["from_name"]["name"] == "tick"
         assert modal_function_stub["op"] == "spawn"
         assert modal_function_stub["kwargs"] == {"build_id": str(build_id)}
@@ -963,8 +963,8 @@ class TestFinalizeRegistersTick:
 
 
 class TestTickAppOwnership:
-    """Only the app recorded in the build's reactive_meta (in the registry)
-    may drive its ticks — read from the build frontier."""
+    """Only the app recorded as the build's reactive_app_name (in the
+    registry) may drive its ticks — read via the lighter build_get."""
 
     def _capture_tick(self, app_name: str):
         app = StardagApp(
@@ -988,21 +988,18 @@ class TestTickAppOwnership:
         return captured["tick"]
 
     @staticmethod
-    def _registry_with_reactive_meta(build_id, reactive_meta):
-        """A registry whose frontier carries the given reactive_meta."""
-        from stardag.registry import BuildFrontier
+    def _registry_with_reactive_app(build_id, reactive_app_name, tick_kwargs=None):
+        """A registry whose build_get returns the given reactive marker.
+
+        ``reactive_app_name=None`` models a non-reactive build.
+        """
+        from stardag.registry import BuildInfo
 
         registry = MagicMock(spec=RegistryABC)
-        registry.build_get_frontier.return_value = BuildFrontier(
-            build_id=build_id,
-            build_status="running",
-            needs_tick=False,
-            root_task_ids=[],
-            roots=[],
-            status_counts={},
-            actionable=[],
-            running=[],
-            reactive_meta=reactive_meta,
+        registry.build_get.return_value = BuildInfo(
+            id=build_id,
+            reactive_app_name=reactive_app_name,
+            reactive_tick_kwargs=tick_kwargs,
         )
         return registry
 
@@ -1010,18 +1007,16 @@ class TestTickAppOwnership:
         self, default_in_memory_fs_target, modal_function_stub
     ):
         """A tick from an app that doesn't own the build (per the registry's
-        reactive_meta) must not drive it — a foreign app would schedule with
-        its own commit and unpickle the owner's task store (pickle skew) —
-        but it forwards the wake-up to the owner's tick, so e.g. a still-
-        running worker of the previous owner completing after a takeover
-        doesn't drop the wake-up."""
+        reactive_app_name) must not drive it — a foreign app would schedule
+        with its own commit and unpickle the owner's task store (pickle
+        skew) — but it forwards the wake-up to the owner's tick, so e.g. a
+        still-running worker of the previous owner completing after a
+        takeover doesn't drop the wake-up."""
         from uuid import uuid4
 
         tick = self._capture_tick("app-b")
         build_id = uuid4()
-        registry = self._registry_with_reactive_meta(
-            build_id, {"app_name": "app-a", "tick_kwargs": {}}
-        )
+        registry = self._registry_with_reactive_app(build_id, "app-a")
 
         # Patch the tick loop to assert it is never entered on a foreign app.
         with (
@@ -1051,9 +1046,7 @@ class TestTickAppOwnership:
 
         tick = self._capture_tick("app-b")
         build_id = uuid4()
-        registry = self._registry_with_reactive_meta(
-            build_id, {"app_name": "app-gone", "tick_kwargs": {}}
-        )
+        registry = self._registry_with_reactive_app(build_id, "app-gone")
 
         with (
             patch("stardag.integration.modal._app.registry_provider") as rp,
@@ -1074,13 +1067,13 @@ class TestTickAppOwnership:
         tick_aio.assert_not_called()
 
     def test_non_reactive_build_is_skipped(self, default_in_memory_fs_target):
-        """A build with no reactive_meta (e.g. a resident-orchestrator build
-        swept by the watchdog) is skipped before the scheduler lease."""
+        """A build with no reactive_app_name (e.g. a resident-orchestrator
+        build swept by the watchdog) is skipped before the scheduler lease."""
         from uuid import uuid4
 
         tick = self._capture_tick("app-a")
         build_id = uuid4()
-        registry = self._registry_with_reactive_meta(build_id, None)
+        registry = self._registry_with_reactive_app(build_id, None)
 
         with (
             patch("stardag.integration.modal._app.registry_provider") as rp,
@@ -1092,9 +1085,8 @@ class TestTickAppOwnership:
         assert result == {"outcome": "not_reactive"}
         tick_aio.assert_not_called()
 
-    def test_own_and_legacy_builds_proceed(self, default_in_memory_fs_target):
-        """The owning app ticks its build; reactive_meta without an app_name
-        (e.g. from a takeover-free path) is not treated as foreign."""
+    def test_own_build_proceeds(self, default_in_memory_fs_target):
+        """The owning app (reactive_app_name == this app) ticks its build."""
         from uuid import uuid4
 
         from stardag.build import TickSummary
@@ -1107,11 +1099,7 @@ class TestTickAppOwnership:
 
         tick = self._capture_tick("app-a")
         own = uuid4()
-        legacy = uuid4()
-        own_registry = self._registry_with_reactive_meta(
-            own, {"app_name": "app-a", "tick_kwargs": {}}
-        )
-        legacy_registry = self._registry_with_reactive_meta(legacy, {"tick_kwargs": {}})
+        own_registry = self._registry_with_reactive_app(own, "app-a")
 
         # Patch everything past the ownership guard: lock-manager
         # construction requires configured credentials (present on dev
@@ -1125,14 +1113,13 @@ class TestTickAppOwnership:
         ):
             rp.get.return_value = own_registry
             assert tick(str(own))["outcome"] == "noop"
-            rp.get.return_value = legacy_registry
-            assert tick(str(legacy))["outcome"] == "noop"
-        assert ticked == [str(own), str(legacy)]
+        assert ticked == [str(own)]
 
 
 class TestReactiveRetrigger:
     """Re-triggering an existing reactive build: resume (un-terminal),
-    append roots server-side, retry failed tasks, merge store meta."""
+    append roots server-side, retry failed tasks, update reactive metadata
+    in the registry (bare re-trigger preserves stored tick_kwargs)."""
 
     def _make_app(self):
         return StardagApp(
@@ -1153,7 +1140,7 @@ class TestReactiveRetrigger:
         original_root = SyncOnlyTask(name="rt-orig")
         new_root = SyncOnlyTask(name="rt-new")
 
-        # Initial trigger persists reactive_meta with tick_kwargs.
+        # Initial trigger persists the reactive marker/config with tick_kwargs.
         with registry_provider.override(registry):
             app.build_trigger(
                 original_root,
@@ -1202,6 +1189,18 @@ class TestReactiveRetrigger:
             build_id, app_name=app.name, tick_kwargs={"linger_seconds": 5}
         )
 
+        registry.reset_mock()
+        # A BARE re-trigger (no explicit tick_kwargs) must PRESERVE the
+        # stored config, not wipe it: the SDK passes tick_kwargs=None, which
+        # the server interprets as "leave the stored config untouched" (the
+        # 0.10.1 merge-semantics guarantee). Regression: a bare re-trigger
+        # used to reset tick_kwargs to {}.
+        with registry_provider.override(registry):
+            app.build_trigger(new_root, build_id=build_id, reactive=True)
+        registry.build_set_reactive_meta.assert_called_once_with(
+            build_id, app_name=app.name, tick_kwargs=None
+        )
+
 
 class TestWatchdogSweep:
     def test_sweep_ticks_each_running_build_without_linger(self):
@@ -1246,14 +1245,14 @@ class TestWatchdogSweep:
 
 
 class TestBuildTickConfig:
-    """Config assembly for scheduler ticks: persisted meta shared by all
+    """Config assembly for scheduler ticks: stored tick_kwargs shared by all
     ticks, explicit kwargs win, app-level limit key selector injected."""
 
-    def test_meta_kwargs_applied(self):
+    def test_stored_kwargs_applied(self):
         from stardag.integration.modal._app import _build_tick_config
 
         config = _build_tick_config(
-            {"tick_kwargs": {"linger_seconds": 42, "fail_mode": "continue"}},
+            {"linger_seconds": 42, "fail_mode": "continue"},
             None,
             None,
         )
@@ -1266,14 +1265,14 @@ class TestBuildTickConfig:
 
         selector = lambda t: ["gpu"]  # noqa: E731
         config = _build_tick_config(
-            {"tick_kwargs": {"linger_seconds": 42}},
+            {"linger_seconds": 42},
             {"linger_seconds": 7},
             selector,
         )
         assert config.linger_seconds == 7
         assert config.limit_key_selector is selector
 
-    def test_defaults_without_meta(self):
+    def test_defaults_without_stored_kwargs(self):
         from stardag.build import TickConfig
         from stardag.integration.modal._app import _build_tick_config
 

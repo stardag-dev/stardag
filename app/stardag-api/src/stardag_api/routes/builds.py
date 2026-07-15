@@ -1,6 +1,7 @@
 """Build management routes - primary interface for SDK."""
 
 import json
+import logging
 from datetime import timedelta
 from typing import Annotated
 from uuid import UUID
@@ -29,6 +30,7 @@ from stardag_api.limits import (
 )
 from stardag_api.models import (
     Build,
+    BuildStatus,
     EnvironmentConcurrencyLimit,
     Event,
     EventType,
@@ -73,6 +75,8 @@ from stardag_api.services.status import (
     get_all_task_global_statuses,
     get_task_status_in_build,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/builds", tags=["builds"])
 
@@ -396,7 +400,47 @@ async def create_build(
         root_task_ids=db_build.root_task_ids,
         created_at=db_build.created_at,
         executor_metadata=db_build.executor_metadata,
-        reactive_meta=db_build.reactive_meta,
+        reactive_app_name=db_build.reactive_app_name,
+        reactive_tick_kwargs=db_build.reactive_tick_kwargs,
+        status=status,
+        started_at=started_at,
+        completed_at=completed_at,
+        status_triggered_by_user=triggered_by_user,
+        is_resumed=is_resumed,
+    )
+
+
+# When a derived-status filter is applied, build status can't be filtered
+# in SQL (it's computed from events, not stored), so we scan the most-
+# recently-active candidates and filter in Python. This caps that scan so
+# the cost stays bounded; the intended use — "RUNNING reactive builds owned
+# by app X" (reactive_app_name filter) — narrows the candidate set well
+# below this. Truncation is logged.
+_STATUS_FILTER_SCAN_CAP = 500
+
+
+async def _build_to_response(db: AsyncSession, build: Build) -> BuildResponse:
+    """Assemble a BuildResponse with derived status for a build row."""
+    (
+        status,
+        started_at,
+        completed_at,
+        triggered_by_id,
+        is_resumed,
+    ) = await get_build_status(db, build.id)
+    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
+    return BuildResponse(
+        id=build.id,
+        environment_id=build.environment_id,
+        user_id=build.user_id,
+        name=build.name,
+        description=build.description,
+        commit_hash=build.commit_hash,
+        root_task_ids=build.root_task_ids,
+        created_at=build.created_at,
+        executor_metadata=build.executor_metadata,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -411,65 +455,70 @@ async def list_builds(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    reactive_app_name: Annotated[str | None, Query()] = None,
+    status: Annotated[BuildStatus | None, Query()] = None,
 ):
     """List builds in an environment.
 
     Requires authentication via API key or JWT token with environment_id.
     The environment is determined from the authentication context.
+
+    Optional filters:
+
+    - ``reactive_app_name``: only builds reactively scheduled by the named
+      app (``reactive_app_name`` column). A server-side filter — the
+      watchdog's real question is "RUNNING reactive builds owned by app X".
+    - ``status``: only builds with the given derived status (e.g.
+      ``running``). Because build status is derived from events (not a
+      column), it can't be paginated in SQL: matching candidates are scanned
+      up to a bounded cap and filtered in Python. Intended to be combined
+      with ``reactive_app_name``, which keeps the candidate set small.
     """
     environment_id = auth.environment_id
-    query = select(Build).where(Build.environment_id == environment_id)
-    count_query = (
-        select(func.count())
-        .select_from(Build)
-        .where(Build.environment_id == environment_id)
+    filters = [Build.environment_id == environment_id]
+    if reactive_app_name is not None:
+        filters.append(Build.reactive_app_name == reactive_app_name)
+
+    # Sort by last_active_at so a resumed build (BUILD_RESUMED touches this
+    # column) jumps back to the top of the list. ``Build.id`` is a UUID7
+    # (time-sortable) so it's a stable tiebreaker for builds that share a
+    # timestamp — without it, paginating across a tie can yield duplicates
+    # or skips.
+    ordered = (
+        select(Build)
+        .where(*filters)
+        .order_by(Build.last_active_at.desc(), Build.id.desc())
     )
 
-    total_result = await db.execute(count_query)
-    total = total_result.scalar() or 0
-
-    # Sort by last_active_at so a resumed build (BUILD_RESUMED touches
-    # this column) jumps back to the top of the list. ``Build.id`` is a
-    # UUID7 (time-sortable) so it's a stable tiebreaker for builds that
-    # share a timestamp — without it, paginating across a tie can yield
-    # duplicates or skips.
-    result = await db.execute(
-        query.order_by(Build.last_active_at.desc(), Build.id.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-    )
-    builds = result.scalars().all()
-
-    # Build responses with derived status
-    build_responses = []
-    for build in builds:
-        (
-            status,
-            started_at,
-            completed_at,
-            triggered_by_id,
-            is_resumed,
-        ) = await get_build_status(db, build.id)
-        triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
-        build_responses.append(
-            BuildResponse(
-                id=build.id,
-                environment_id=build.environment_id,
-                user_id=build.user_id,
-                name=build.name,
-                description=build.description,
-                commit_hash=build.commit_hash,
-                root_task_ids=build.root_task_ids,
-                created_at=build.created_at,
-                executor_metadata=build.executor_metadata,
-                reactive_meta=build.reactive_meta,
-                status=status,
-                started_at=started_at,
-                completed_at=completed_at,
-                status_triggered_by_user=triggered_by_user,
-                is_resumed=is_resumed,
-            )
+    if status is None:
+        count_query = select(func.count()).select_from(Build).where(*filters)
+        total = (await db.execute(count_query)).scalar() or 0
+        result = await db.execute(
+            ordered.offset((page - 1) * page_size).limit(page_size)
         )
+        build_responses = [
+            await _build_to_response(db, build) for build in result.scalars().all()
+        ]
+    else:
+        # Derived-status filter: scan bounded candidates, compute status,
+        # filter, then paginate the matches in Python.
+        scanned = (
+            (await db.execute(ordered.limit(_STATUS_FILTER_SCAN_CAP))).scalars().all()
+        )
+        if len(scanned) >= _STATUS_FILTER_SCAN_CAP:
+            logger.warning(
+                "list_builds status filter: scan hit the %d-candidate cap; "
+                "older matching builds (if any) are not included.",
+                _STATUS_FILTER_SCAN_CAP,
+            )
+        matched = []
+        for build in scanned:
+            response = await _build_to_response(db, build)
+            if response.status == status:
+                matched.append(response)
+        total = len(matched)
+        offset = (page - 1) * page_size
+        build_responses = matched[offset : offset + page_size]
 
     return BuildListResponse(
         builds=build_responses,
@@ -518,7 +567,8 @@ async def get_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -603,7 +653,8 @@ async def complete_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -678,7 +729,8 @@ async def fail_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -750,7 +802,8 @@ async def cancel_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -818,7 +871,8 @@ async def exit_early(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -936,7 +990,8 @@ async def resume_build(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -1033,7 +1088,8 @@ async def add_build_roots(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -1042,10 +1098,11 @@ async def add_build_roots(
     )
 
 
-# Size cap on the reactive_meta dict (compact-JSON byte size). It holds the
-# owning app name plus a handful of JSON-scalar tick-config fields, and is
-# echoed on every build and frontier read — a small cap keeps it bounded.
-_MAX_REACTIVE_META_BYTES = 4096
+# Size cap on the reactive tick_kwargs dict (compact-JSON byte size). It
+# holds a handful of JSON-scalar TickConfig fields and is echoed on every
+# build and frontier read — a small cap keeps it bounded. (app_name is a
+# separate typed column, length-capped by the model.)
+_MAX_REACTIVE_TICK_KWARGS_BYTES = 4096
 
 
 @router.put("/{build_id}/reactive-meta", response_model=BuildResponse)
@@ -1057,27 +1114,33 @@ async def set_build_reactive_meta(
 ):
     """Mark a build reactively scheduled and store its scheduler config.
 
-    Upsert (idempotent): called by the reactive trigger and re-trigger. The
-    stored ``{"app_name", "tick_kwargs"}`` surfaces on the build frontier as
-    ``reactive_meta`` — its presence is the "this build is reactively
-    scheduled" marker (a stray tick no-ops on a build without it), the
-    owning app drives the ticks, and the tick config is read from it. A
-    re-trigger MAY update ``tick_kwargs`` (the registry is mutable, unlike a
-    possibly-immutable target root).
+    Upsert (idempotent): called by the reactive trigger and re-trigger.
+    ``app_name`` (the owner/marker) is always set; its presence
+    (``reactive_app_name``, surfaced on the build frontier) is the "this
+    build is reactively scheduled" marker (a stray tick no-ops on a build
+    without it), and the owning app drives the ticks. ``tick_kwargs`` is
+    updated only when provided: a bare re-trigger (``tick_kwargs`` omitted)
+    preserves the existing config, while a re-trigger that passes it updates
+    it — the registry is mutable, unlike a possibly-immutable target root.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
-    reactive_meta = {"app_name": payload.app_name, "tick_kwargs": payload.tick_kwargs}
-    encoded = json.dumps(reactive_meta, separators=(",", ":")).encode("utf-8")
-    if len(encoded) > _MAX_REACTIVE_META_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"reactive_meta must be at most {_MAX_REACTIVE_META_BYTES} "
-                f"bytes as compact JSON (got {len(encoded)})"
-            ),
-        )
+    if payload.tick_kwargs is not None:
+        encoded = json.dumps(payload.tick_kwargs, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > _MAX_REACTIVE_TICK_KWARGS_BYTES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"tick_kwargs must be at most "
+                    f"{_MAX_REACTIVE_TICK_KWARGS_BYTES} bytes as compact JSON "
+                    f"(got {len(encoded)})"
+                ),
+            )
     build = await _get_build_checked(build_id, db, auth)
-    build.reactive_meta = reactive_meta
+    build.reactive_app_name = payload.app_name
+    # Update tick_kwargs only when explicitly provided; a bare re-trigger
+    # (tick_kwargs omitted) preserves the stored config rather than wiping it.
+    if payload.tick_kwargs is not None:
+        build.reactive_tick_kwargs = payload.tick_kwargs
     await db.commit()
 
     (
@@ -1098,7 +1161,8 @@ async def set_build_reactive_meta(
         root_task_ids=build.root_task_ids,
         created_at=build.created_at,
         executor_metadata=build.executor_metadata,
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
         status=status,
         started_at=started_at,
         completed_at=completed_at,
@@ -1341,7 +1405,8 @@ async def get_build_frontier(
         status_counts=status_counts,
         actionable=[_ref(t) for t in actionable_tasks],
         running=[_ref(t) for t in running_tasks],
-        reactive_meta=build.reactive_meta,
+        reactive_app_name=build.reactive_app_name,
+        reactive_tick_kwargs=build.reactive_tick_kwargs,
     )
 
 
