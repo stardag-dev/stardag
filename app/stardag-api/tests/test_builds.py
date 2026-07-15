@@ -1663,6 +1663,173 @@ async def test_frontier_build_not_found_and_notify_404(client: AsyncClient):
     assert (await client.post(f"/api/v1/builds/{fake}/notify")).status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_non_reactive_build_has_null_reactive_fields(client: AsyncClient):
+    """A plain build is not reactively scheduled: reactive_app_name (the
+    marker) is null on both the build response and the frontier."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    build = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert build["reactive_app_name"] is None
+    assert build["reactive_tick_kwargs"] is None
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["reactive_app_name"] is None
+    assert frontier["reactive_tick_kwargs"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_reactive_meta_appears_on_build_and_frontier(client: AsyncClient):
+    """PUT /reactive-meta marks the build reactively scheduled (sets
+    reactive_app_name); the config is exposed on the build response and the
+    frontier (where a tick reads it). The endpoint is an idempotent upsert —
+    a re-trigger may update tick_kwargs."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    response = await client.put(
+        f"/api/v1/builds/{build_id}/reactive-meta",
+        json={"app_name": "my-app", "tick_kwargs": {"linger_seconds": 30}},
+    )
+    assert response.status_code == 200
+    assert response.json()["reactive_app_name"] == "my-app"
+    assert response.json()["reactive_tick_kwargs"] == {"linger_seconds": 30}
+
+    build = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert build["reactive_app_name"] == "my-app"
+    assert build["reactive_tick_kwargs"] == {"linger_seconds": 30}
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["reactive_app_name"] == "my-app"
+    assert frontier["reactive_tick_kwargs"] == {"linger_seconds": 30}
+
+    # Upsert: a re-trigger updates tick_kwargs (and may change the owner).
+    response = await client.put(
+        f"/api/v1/builds/{build_id}/reactive-meta",
+        json={"app_name": "my-app-2", "tick_kwargs": {"fail_mode": "continue"}},
+    )
+    assert response.status_code == 200
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["reactive_app_name"] == "my-app-2"
+    assert frontier["reactive_tick_kwargs"] == {"fail_mode": "continue"}
+
+
+@pytest.mark.asyncio
+async def test_bare_retrigger_preserves_tick_kwargs(client: AsyncClient):
+    """A re-trigger with tick_kwargs omitted preserves the stored config
+    (regression: a bare PUT used to wipe it to {}); a re-trigger that passes
+    tick_kwargs updates it."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    # Initial trigger with tick_kwargs.
+    await client.put(
+        f"/api/v1/builds/{build_id}/reactive-meta",
+        json={"app_name": "my-app", "tick_kwargs": {"linger_seconds": 30}},
+    )
+
+    # Bare re-trigger (no tick_kwargs) — the stored config must survive.
+    response = await client.put(
+        f"/api/v1/builds/{build_id}/reactive-meta",
+        json={"app_name": "my-app"},
+    )
+    assert response.status_code == 200
+    assert response.json()["reactive_app_name"] == "my-app"
+    assert response.json()["reactive_tick_kwargs"] == {"linger_seconds": 30}
+
+    # Explicit tick_kwargs on re-trigger — updates the config.
+    response = await client.put(
+        f"/api/v1/builds/{build_id}/reactive-meta",
+        json={"app_name": "my-app", "tick_kwargs": {"linger_seconds": 5}},
+    )
+    assert response.status_code == 200
+    assert response.json()["reactive_tick_kwargs"] == {"linger_seconds": 5}
+
+
+@pytest.mark.asyncio
+async def test_list_builds_reactive_app_name_and_status_filter(client: AsyncClient):
+    """GET /builds?reactive_app_name=X&status=running returns only the named
+    app's reactively-scheduled builds that are currently RUNNING — the
+    watchdog's real query. (Builds are RUNNING on creation; /complete flips
+    a build to a non-running status.)"""
+    # A running reactive build owned by app-x.
+    running_x = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.put(
+        f"/api/v1/builds/{running_x}/reactive-meta",
+        json={"app_name": "app-x", "tick_kwargs": {}},
+    )
+
+    # A reactive build owned by app-x but completed (not running).
+    done_x = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.put(
+        f"/api/v1/builds/{done_x}/reactive-meta",
+        json={"app_name": "app-x", "tick_kwargs": {}},
+    )
+    await client.post(f"/api/v1/builds/{done_x}/complete")
+
+    # A running reactive build owned by a DIFFERENT app.
+    running_y = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.put(
+        f"/api/v1/builds/{running_y}/reactive-meta",
+        json={"app_name": "app-y", "tick_kwargs": {}},
+    )
+
+    # A running NON-reactive build.
+    running_plain = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    # reactive_app_name alone: both app-x reactive builds (any status).
+    resp = (
+        await client.get("/api/v1/builds", params={"reactive_app_name": "app-x"})
+    ).json()
+    assert {b["id"] for b in resp["builds"]} == {running_x, done_x}
+
+    # reactive_app_name + status=running: only the running app-x build.
+    resp = (
+        await client.get(
+            "/api/v1/builds",
+            params={"reactive_app_name": "app-x", "status": "running"},
+        )
+    ).json()
+    assert [b["id"] for b in resp["builds"]] == [running_x]
+    assert resp["total"] == 1
+
+    # status alone still filters (across all builds in the env).
+    resp = (await client.get("/api/v1/builds", params={"status": "running"})).json()
+    running_ids = {b["id"] for b in resp["builds"]}
+    assert running_x in running_ids
+    assert running_y in running_ids
+    assert running_plain in running_ids
+    assert done_x not in running_ids
+
+
+@pytest.mark.asyncio
+async def test_set_reactive_meta_build_not_found(client: AsyncClient):
+    fake = "00000000-0000-0000-0000-000000000099"
+    response = await client.put(
+        f"/api/v1/builds/{fake}/reactive-meta",
+        json={"app_name": "my-app", "tick_kwargs": {}},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_reactive_meta_environment_isolation(
+    client: AsyncClient, as_environment_b
+):
+    """reactive-meta is environment-scoped: another environment's auth
+    cannot set it on this build (403)."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    with as_environment_b():
+        response = await client.put(
+            f"/api/v1/builds/{build_id}/reactive-meta",
+            json={"app_name": "my-app", "tick_kwargs": {}},
+        )
+        assert response.status_code == 403
+
+    # Untouched in the owning environment.
+    build = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert build["reactive_app_name"] is None
+
+
 def _register_payload(task_id: str, deps: list[str] | None = None) -> dict:
     return {
         "task_id": task_id,

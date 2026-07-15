@@ -133,18 +133,22 @@ scheduling loop; when only long-running tasks remain in flight, **nothing
 runs but your tasks**.
 
 The registry is the scheduler state (the frontier is computed from
-recorded task statuses and dependency edges); task _objects_ are
-rehydrated from a per-build task store persisted at trigger time, with a
-pickle-free fallback that reconstructs them from the registry's stored
-task data (`stardag.task_from_registry_data`). The
-registry never pushes or executes anything — only user-deployed code
-(which has the DAG-defining code) spawns work.
+recorded task statuses and dependency edges, and it also carries the
+reactive marker/owner/tick config). Task _objects_ are rehydrated from a
+per-build task store persisted at trigger time, with a pickle-free fallback
+that reconstructs them from the registry's stored task data
+(`stardag.task_from_registry_data`). The store holds task _objects_ only —
+the orchestration metadata lives in the registry, so re-triggering works
+even when the target root is immutable/append-only. The registry never
+pushes or executes anything — only user-deployed code (which has the
+DAG-defining code) spawns work.
 
-Each reactive build is **owned by the app that triggered it** (recorded
-at trigger time): ticks from any other deployed app in the environment —
-typically another app's watchdog sweep — forward the wake-up to the
-owner's tick instead of driving the build with the wrong code. Ownership
-moves only by an explicit re-trigger from the new app.
+Each reactive build is **owned by the app that triggered it** (the owning
+app name is stored in the registry with the build's reactive metadata):
+ticks from any other deployed app in the environment — typically another
+app's watchdog sweep — forward the wake-up to the owner's tick instead of
+driving the build with the wrong code. Ownership moves only by an explicit
+re-trigger from the new app, which also updates the tick config.
 
 Reactive scheduling is experimental and currently Modal-first — see
 [Integrate with Modal](../how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental)

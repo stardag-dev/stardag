@@ -24,8 +24,10 @@ from stardag.build._base import current_build_id_var
 from stardag.integration.modal._app import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
+    STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
+    STARDAG_MODAL_FUNCTION_ID_ENV,
     STARDAG_MODAL_FUNCTION_NAME_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
     ModalTaskExecutor,
@@ -38,6 +40,15 @@ EXPECTED_BASE_METADATA = {
     "app_name": "test-app",
     "workspace": "test-workspace",
     "environment": "test-env",
+    "app_id": "ap-test-app",
+}
+
+# Base metadata + the per-worker fields (function name/id) — the dict a
+# worker-routed start records and forwards.
+EXPECTED_WORKER_METADATA = {
+    **EXPECTED_BASE_METADATA,
+    "function_name": "worker_default",
+    "function_id": "fu-test-fn",
 }
 
 
@@ -86,10 +97,7 @@ class TestDetachedHandleMetadata:
 
         handle = await executor.submit_detached(_make_task())
 
-        assert handle.executor_metadata == {
-            **EXPECTED_BASE_METADATA,
-            "function_name": "worker_default",
-        }
+        assert handle.executor_metadata == EXPECTED_WORKER_METADATA
 
     async def test_explicit_workspace_override_wins(self):
         worker = FakeWorkerFunction(FakeFunctionCall())
@@ -101,17 +109,34 @@ class TestDetachedHandleMetadata:
         assert handle.executor_metadata["workspace"] == "explicit-ws"
 
     async def test_resolution_failure_never_fails_the_spawn(self, monkeypatch):
-        """A broken workspace lookup degrades to identity-only metadata."""
+        """A broken metadata resolution degrades to identity-only metadata.
+
+        All four best-effort fields (workspace, environment, app id,
+        function id) fail here; the spawn still succeeds and the handle
+        carries only the identity fields the executor always knows.
+        """
         from stardag.integration.modal import _app as modal_app_module
 
         async def _boom():
             raise ConnectionError("no network")
+
+        # The id resolvers swallow their own failures and return None (the
+        # key is then omitted) — that is their contract, so simulate it.
+        async def _no_app_id(app_name, environment_name=None):
+            return None
+
+        async def _no_function_id(function):
+            return None
 
         monkeypatch.setattr(modal_app_module, "_get_modal_workspace_aio", _boom)
         monkeypatch.setattr(
             modal_app_module,
             "_get_modal_environment",
             lambda: (_ for _ in ()).throw(ConnectionError("also broken")),
+        )
+        monkeypatch.setattr(modal_app_module, "_get_modal_app_id_aio", _no_app_id)
+        monkeypatch.setattr(
+            modal_app_module, "_get_modal_function_id_aio", _no_function_id
         )
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
@@ -276,6 +301,8 @@ class TestWorkerEnvForwarding:
         assert env_overrides[STARDAG_MODAL_WORKSPACE_ENV] == "test-workspace"
         assert env_overrides[STARDAG_MODAL_ENVIRONMENT_ENV] == "test-env"
         assert env_overrides[STARDAG_MODAL_FUNCTION_NAME_ENV] == "worker_default"
+        assert env_overrides[STARDAG_MODAL_APP_ID_ENV] == "ap-test-app"
+        assert env_overrides[STARDAG_MODAL_FUNCTION_ID_ENV] == "fu-test-fn"
 
     async def test_not_forwarded_outside_build_context(self):
         worker = FakeWorkerFunction(FakeFunctionCall())
@@ -329,6 +356,8 @@ def _reporter_env(build_id) -> dict[str, str]:
         STARDAG_MODAL_WORKSPACE_ENV: "test-workspace",
         STARDAG_MODAL_ENVIRONMENT_ENV: "test-env",
         STARDAG_MODAL_FUNCTION_NAME_ENV: "worker_default",
+        STARDAG_MODAL_APP_ID_ENV: "ap-test-app",
+        STARDAG_MODAL_FUNCTION_ID_ENV: "fu-test-fn",
     }
 
 
@@ -345,10 +374,7 @@ class TestWorkerReporterMetadata:
         reporter = self._create_reporter(
             MetadataAwareRegistry(), _reporter_env(uuid4())
         )
-        assert reporter.executor_metadata == {
-            **EXPECTED_BASE_METADATA,
-            "function_name": "worker_default",
-        }
+        assert reporter.executor_metadata == EXPECTED_WORKER_METADATA
 
     def test_started_passes_metadata_to_aware_registry(self, monkeypatch):
         monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-worker-1")
@@ -361,10 +387,7 @@ class TestWorkerReporterMetadata:
             {
                 "executor": MODAL_EXECUTOR_NAME,
                 "executor_ref": "fc-worker-1",
-                "executor_metadata": {
-                    **EXPECTED_BASE_METADATA,
-                    "function_name": "worker_default",
-                },
+                "executor_metadata": EXPECTED_WORKER_METADATA,
             }
         ]
 
@@ -403,10 +426,7 @@ class TestGetExecutorMetadata:
 
         metadata = await executor.get_executor_metadata(_make_task())
 
-        assert metadata == {
-            **EXPECTED_BASE_METADATA,
-            "function_name": "worker_default",
-        }
+        assert metadata == EXPECTED_WORKER_METADATA
         assert worker.spawn_calls == []
 
     async def test_selector_failure_returns_none(self):
@@ -451,3 +471,163 @@ class TestWorkspaceLookupColdBurst:
 
         assert results == ["burst-ws"] * 10
         assert calls["n"] == 1
+
+
+class TestAppAndFunctionIdResolution:
+    """The real ``_get_modal_app_id_aio`` / ``_get_modal_function_id_aio``
+    helpers (the conftest fixture normally pins them; here we reach past the
+    pin via the ``originals`` it exposes and stub the underlying Modal API).
+    """
+
+    async def test_app_id_resolved_from_lookup(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        real = hermetic_modal_executor_metadata["get_modal_app_id_aio"]
+
+        async def _fake_lookup(name, environment_name=None):
+            assert name == "some-app"
+            assert environment_name == "some-env"
+            return SimpleNamespace(app_id="ap-live-123")
+
+        monkeypatch.setattr(
+            modal.App, "lookup", SimpleNamespace(aio=_fake_lookup), raising=False
+        )
+
+        assert await real("some-app", "some-env") == "ap-live-123"
+
+    async def test_app_id_omitted_on_failure(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        real = hermetic_modal_executor_metadata["get_modal_app_id_aio"]
+
+        async def _boom_lookup(name, environment_name=None):
+            raise ConnectionError("modal api unreachable")
+
+        monkeypatch.setattr(
+            modal.App, "lookup", SimpleNamespace(aio=_boom_lookup), raising=False
+        )
+
+        assert await real("some-app", None) is None
+
+    async def test_function_id_resolved_after_hydrate(
+        self, hermetic_modal_executor_metadata
+    ):
+        real = hermetic_modal_executor_metadata["get_modal_function_id_aio"]
+
+        class _Fn:
+            def __init__(self):
+                self.object_id = "fu-live-456"
+                self.hydrated = False
+                self.hydrate = SimpleNamespace(aio=self._hydrate)
+
+            async def _hydrate(self):
+                self.hydrated = True
+
+        fn = _Fn()
+        assert await real(fn) == "fu-live-456"
+        assert fn.hydrated
+
+    async def test_function_id_omitted_on_failure(
+        self, hermetic_modal_executor_metadata
+    ):
+        real = hermetic_modal_executor_metadata["get_modal_function_id_aio"]
+
+        class _Fn:
+            def __init__(self):
+                self.hydrate = SimpleNamespace(aio=self._hydrate)
+
+            async def _hydrate(self):
+                raise RuntimeError("cannot hydrate")
+
+        assert await real(_Fn()) is None
+
+    async def test_app_id_omitted_on_timeout(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """A hung ``modal.App.lookup`` is bounded by the short id-lookup
+        timeout — it must not stall the caller; the id is omitted."""
+        import asyncio
+
+        from stardag.integration.modal import _app as modal_app_module
+
+        real = hermetic_modal_executor_metadata["get_modal_app_id_aio"]
+        monkeypatch.setattr(modal_app_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
+
+        async def _hang(name, environment_name=None):
+            await asyncio.sleep(10)
+            return SimpleNamespace(app_id="ap-never")
+
+        monkeypatch.setattr(
+            modal.App, "lookup", SimpleNamespace(aio=_hang), raising=False
+        )
+
+        assert await real("some-app", None) is None
+
+    async def test_function_id_omitted_on_timeout(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """A hung ``Function.hydrate`` is bounded by the short id-lookup
+        timeout; the id is omitted rather than stalling the start."""
+        import asyncio
+
+        from stardag.integration.modal import _app as modal_app_module
+
+        real = hermetic_modal_executor_metadata["get_modal_function_id_aio"]
+        monkeypatch.setattr(modal_app_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
+
+        class _Fn:
+            def __init__(self):
+                self.object_id = "fu-never"
+                self.hydrate = SimpleNamespace(aio=self._hydrate)
+
+            async def _hydrate(self):
+                await asyncio.sleep(10)
+
+        assert await real(_Fn()) is None
+
+
+class TestFunctionIdCaching:
+    """Function-id resolution is cached per worker name — success *and*
+    failure — so a persistently broken/hung hydration is not re-paid on
+    every task start (the per-start re-pay the workspace-lookup fix
+    eliminated, now also for function ids)."""
+
+    async def test_resolved_function_id_cached_per_worker(self, monkeypatch):
+        from stardag.integration.modal import _app as modal_app_module
+
+        calls = {"n": 0}
+
+        async def _counting(function):
+            calls["n"] += 1
+            return "fu-counted"
+
+        monkeypatch.setattr(modal_app_module, "_get_modal_function_id_aio", _counting)
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+
+        await executor.submit_detached(_make_task())
+        await executor.submit_detached(_make_task())
+
+        assert calls["n"] == 1
+
+    async def test_failed_function_id_cached_per_worker(self, monkeypatch):
+        """A resolved-but-``None`` (failed hydration) is a resolution: it is
+        cached and not retried on the next start, and the key stays omitted."""
+        from stardag.integration.modal import _app as modal_app_module
+
+        calls = {"n": 0}
+
+        async def _failing(function):
+            calls["n"] += 1
+            return None
+
+        monkeypatch.setattr(modal_app_module, "_get_modal_function_id_aio", _failing)
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+
+        handle = await executor.submit_detached(_make_task())
+        await executor.submit_detached(_make_task())
+
+        assert calls["n"] == 1  # negative result cached, not retried
+        assert handle.executor_metadata is not None
+        assert "function_id" not in handle.executor_metadata

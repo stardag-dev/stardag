@@ -4,7 +4,73 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.11.0] — Unreleased
+
+### SDK
+
+- **Reactive build metadata moved from the target root to the registry.**
+  The reactive marker, owning app name, and `tick_kwargs` used to be stored
+  in a `meta.json` on the default target root; they now live in the
+  registry (the build's `reactive_app_name` + `reactive_tick_kwargs`,
+  surfaced on the build frontier the tick already fetches, and on the
+  lighter `GET /builds/{id}` the pre-lease gate now uses). The per-build
+  task store is now pickle-only (task _objects_ still live on the target
+  root). Because the registry is mutable — unlike a possibly-immutable
+  target root — **a re-trigger may now update `tick_kwargs`** (previously
+  fixed at first trigger in 0.10.1); a _bare_ re-trigger (no explicit
+  `tick_kwargs`) preserves the stored config. Reactive scheduling now also
+  requires a registry server new enough to support the reactive-meta
+  endpoint; an older server fails the reactive trigger clearly (matching the
+  existing frontier/notify version contract) rather than degrading silently.
+
+  **⚠️ Upgrade note:** reactive builds already in flight when you upgrade
+  across this release are **not** migrated — the tick now reads the marker
+  from the registry only, and pre-upgrade builds have no registry marker, so
+  their ticks no-op silently. **Re-trigger any in-flight reactive build**
+  (`build_trigger(..., build_id=<id>, reactive=True)`) after upgrading. See
+  RELEASE_NOTES.md.
+
+- **Modal executor metadata now records the app id (`app_id`, `ap-…`) and
+  worker function id (`function_id`, `fu-…`).** These ride the existing
+  executor-metadata channel (base metadata + the worker env-override
+  propagation, read back by the worker lifecycle reporter) so a worker's
+  self-reported start carries them too. They let the UI build stable
+  dashboard deep links in the app-id URL form, which keeps resolving after
+  an app version is stopped or redeployed (the deployed-app-name form does
+  not). Best-effort throughout: on any error the key is simply omitted rather
+  than raised, so resolution never fails a task start. The two lookups sit on
+  the critical path before `spawn`, so they can add latency — but each is
+  bounded by a short (3 s) timeout, so a slow or hung Modal API cannot stall
+  a start beyond that cap. Resolved values (including a resolved-but-missing
+  id) are cached per process, so a failing lookup is not re-paid on every
+  start.
+- **CLI: `stardag concurrency-limits` command group for managing named
+  concurrency limits.** Wraps the registry's concurrency-limit endpoints for
+  the active profile / environment (override with `-p/--stardag-profile` and
+  `-e/--stardag-env`). Subcommands: `list` (with optional `--holders` counts);
+  `set` to upsert a limit (`stardag concurrency-limits set <key> <max_concurrent>`);
+  `delete <key>` (`--yes` to skip confirmation); `holders <key>` (RUNNING slot
+  holders, oldest first); and `evict` to free leaked slots
+  (`stardag concurrency-limits evict <key> <task_id>`). Replaces the need for an
+  ad-hoc script to `PUT /api/v1/concurrency-limits/{key}`. Backed by new
+  `APIRegistry` `concurrency_limit_{list,set,delete,holders,evict}` methods.
+
+### Registry API
+
+- **Reactive-scheduling metadata on builds.** Two new nullable columns:
+  `builds.reactive_app_name` (indexed `String` — the owning app + marker;
+  NULL = not reactively scheduled, so presence
+  (`reactive_app_name IS NOT NULL`) is the marker) and
+  `builds.reactive_tick_kwargs` (JSONB — the SDK-owned `TickConfig` kwargs).
+  Set via a `PUT /api/v1/builds/{id}/reactive-meta` upsert endpoint
+  (env-scoped, rate-limited); `tick_kwargs` is only updated when provided,
+  so a bare re-trigger preserves it. Both fields are exposed on the build
+  response and the build frontier so a reactive scheduler tick reads
+  marker/owner/config in the call it already makes. `GET /api/v1/builds`
+  gains `reactive_app_name` and `status` filters (e.g.
+  `?reactive_app_name=<app>&status=running`) so "RUNNING reactive builds
+  owned by app X" — the watchdog's real question — is a server-side query.
+  Additive/nullable migration (instant).
 
 ### UI
 

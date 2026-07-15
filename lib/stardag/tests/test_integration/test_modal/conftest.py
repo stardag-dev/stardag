@@ -64,10 +64,18 @@ def hermetic_modal_executor_metadata(monkeypatch):
     async def _fake_workspace_aio():
         return "test-workspace"
 
+    async def _fake_app_id_aio(app_name, environment_name=None):
+        return "ap-test-app"
+
+    async def _fake_function_id_aio(function):
+        return "fu-test-fn"
+
     # The real (pre-patch) functions, for tests exercising the resolution
     # logic itself.
     originals = {
         "get_modal_workspace_aio": modal_app_module._get_modal_workspace_aio,
+        "get_modal_app_id_aio": modal_app_module._get_modal_app_id_aio,
+        "get_modal_function_id_aio": modal_app_module._get_modal_function_id_aio,
     }
 
     monkeypatch.setattr(
@@ -77,4 +85,11 @@ def hermetic_modal_executor_metadata(monkeypatch):
         modal_app_module, "_get_modal_workspace", lambda: "test-workspace"
     )
     monkeypatch.setattr(modal_app_module, "_get_modal_environment", lambda: "test-env")
+    # Pin the app-id / function-id resolution too, so the unit tier never
+    # attempts a real ``modal.App.lookup`` / handle hydration over the
+    # network. Tests exercising these helpers override them explicitly.
+    monkeypatch.setattr(modal_app_module, "_get_modal_app_id_aio", _fake_app_id_aio)
+    monkeypatch.setattr(
+        modal_app_module, "_get_modal_function_id_aio", _fake_function_id_aio
+    )
     return originals

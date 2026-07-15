@@ -145,6 +145,19 @@ stardag environment target-roots add KEY URI # Add target root
 stardag environment target-roots list        # List target roots
 ```
 
+### Concurrency Limits
+
+```bash
+stardag concurrency-limits list              # List named limits (--holders adds counts)
+stardag concurrency-limits set KEY N         # Upsert a limit (max_concurrent = N)
+stardag concurrency-limits delete KEY        # Remove a limit (--yes to skip confirm)
+stardag concurrency-limits holders KEY       # List RUNNING slot holders
+stardag concurrency-limits evict KEY TASK_ID # Free a leaked slot (--yes to skip confirm)
+```
+
+All accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
+non-active profile / environment.
+
 ### Modal Integration
 
 ```bash
