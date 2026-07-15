@@ -205,6 +205,15 @@ class RegistryGlobalConcurrencyLockManager:
         """
         return await self._acquire_internal(task_id, ttl_seconds=60)
 
+    async def renew(self, task_id: str, ttl_seconds: int = 60) -> bool:
+        """Renew a held lock's TTL (public wrapper over the renew endpoint).
+
+        Used by the build engine's background renewal loop so locks
+        acquired via the low-level ``acquire()`` don't expire under
+        long-running tasks.
+        """
+        return await self._renew(task_id, ttl_seconds)
+
     async def release(self, task_id: str, task_completed: bool = False) -> bool:
         """Release a lock.
 

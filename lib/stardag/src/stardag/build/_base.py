@@ -203,6 +203,24 @@ class TaskExecutionState:
 # =============================================================================
 
 
+@dataclass
+class ClaimConfig:
+    """Configuration for per-task execution claims (default exactly-once).
+
+    A claim denial with a re-attachable executor ref resolves immediately
+    (attach to the winner). The wait knobs below apply only when the
+    winning execution exposes no probeable ref (e.g. a local executor in
+    another build, or the winner's crash window between its claim and its
+    ref-recording start): the loser polls target completion and re-tries
+    the claim with backoff until ``wait_timeout_seconds``.
+    """
+
+    wait_timeout_seconds: float | None = 300.0
+    wait_initial_interval_seconds: float = 1.0
+    wait_max_interval_seconds: float = 15.0
+    wait_backoff_factor: float = 2.0
+
+
 class DetachedExecutionStatus(StrEnum):
     """Observed state of a detached execution, by its (executor, ref).
 

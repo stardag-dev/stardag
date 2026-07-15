@@ -17,6 +17,10 @@ class APIError(StardagError):
     Attributes:
         status_code: HTTP status code (if available)
         detail: Error detail message from the API
+        payload: The structured error detail (the API's ``detail`` dict)
+            when the response carried one — lets callers branch on
+            ``error_code`` and read machine-readable fields without
+            string matching.
     """
 
     def __init__(
@@ -24,9 +28,11 @@ class APIError(StardagError):
         message: str,
         status_code: int | None = None,
         detail: str | None = None,
+        payload: dict | None = None,
     ):
         self.status_code = status_code
         self.detail = detail
+        self.payload = payload
         # Build a clear message
         parts = [message]
         if status_code:

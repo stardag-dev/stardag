@@ -13,9 +13,10 @@ import contextlib
 import inspect
 import logging
 import traceback as tb_module
+import warnings
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
-from typing import AsyncGenerator, Generator, Literal, Protocol, Sequence, Union
+from typing import AsyncGenerator, Generator, Literal, Protocol, Sequence, Union, cast
 from uuid import UUID
 
 from stardag import (
@@ -30,6 +31,8 @@ from stardag._core.base_task import (
 from stardag.build._base import (
     BuildExitStatus,
     BuildSummary,
+    ClaimConfig,
+    DetachedExecutionStatus,
     DefaultGlobalLockSelector,
     DetachedHandle,
     current_build_id_var,
@@ -80,6 +83,10 @@ class _SkippedSentinel(Exception):
 # kicks in. For a 5000-task DAG it's still 100 requests instead of 5000
 # — most of the bulk-register win remains.
 _BULK_REGISTER_CHUNK_SIZE = 50
+
+# Interval between background renewals of held (deprecated) global locks —
+# half the lock service's 60s TTL. Module-level for testability.
+_LOCK_RENEWAL_INTERVAL_SECONDS = 30.0
 
 
 # =============================================================================
@@ -506,6 +513,8 @@ async def build_aio(
     on_registry_failure: OnRegistryFailure = "raise",
     concurrency_config: ConcurrencyConfig | None = None,
     concurrency_limiter: ConcurrencyLimiter | None = None,
+    claim: bool | None = None,
+    claim_config: ClaimConfig | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently using hybrid async/thread/process execution.
 
@@ -583,8 +592,55 @@ async def build_aio(
         concurrency_config, concurrency_limiter
     )
 
+    if global_lock_manager is not None or (
+        global_lock_config is not None and global_lock_config.enabled
+    ):
+        warnings.warn(
+            "The global concurrency lock is deprecated in favor of per-task "
+            "execution claims, which are enabled by default for probeable "
+            "(detached) executions when a registry is configured — see the "
+            "`claim` parameter and stardag#185. The lock remains available "
+            "for executions without probeable liveness (e.g. local "
+            "executors).",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
     # Track locks held by this build for manual release
     held_locks: set[str] = set()
+    # Background TTL-renewal tasks per held lock (the low-level acquire's
+    # 60s lease would otherwise expire under long-running tasks).
+    lock_renewals: dict[str, asyncio.Task] = {}
+
+    # --- Per-task execution claims (default exactly-once) ---
+    claim_cfg = claim_config or ClaimConfig()
+    # Claims require a registry that actually implements arbitration (the
+    # ABC default records a plain start and always reports "won") —
+    # claiming through it would only add a pointless duplicate start.
+    # Override detection doubles as graceful degradation for custom
+    # registries written before claims existed.
+    _registry_supports_claim = (
+        type(registry).task_start_claim_aio is not RegistryABC.task_start_claim_aio
+    )
+    if claim is True and not _registry_supports_claim:
+        logger.warning(
+            f"claim=True requested but {type(registry).__name__} does not "
+            "implement task_start_claim_aio — proceeding without claims."
+        )
+
+    def claim_enabled_for(task: BaseTask) -> bool:
+        """Whether to claim-start this task (see build_aio's ``claim``).
+
+        auto (None): only when the execution is probeable — a denied
+        competitor can re-attach to or probe the winner. Ref-less
+        executions (local executors) would need TTL liveness the claim
+        doesn't have; the (deprecated) global lock still covers those.
+        """
+        if claim is False or not _registry_supports_claim:
+            return False
+        if claim is True:
+            return True
+        return task_executor.supports_detached(task)
 
     task_count = TaskCount()
     completion_cache: set[UUID] = set()
@@ -1045,6 +1101,7 @@ async def build_aio(
             logger.warning(f"Failed to release lock for task {task_id}: {e}")
         finally:
             held_locks.discard(task_id)
+            _stop_lock_renewal(task_id)
 
     async def acquire_lock_with_completion_check(
         task: BaseTask,
@@ -1137,6 +1194,169 @@ async def build_aio(
         registry.task_start_aio
     )
 
+    def _start_lock_renewal(task_id_str: str) -> None:
+        """Keep the (deprecated) global lock alive under long tasks.
+
+        The engine uses the lock manager's low-level ``acquire`` (60s TTL,
+        no renewal); without this loop a task outliving the TTL silently
+        loses its lock. Managers without a public ``renew`` are left as-is.
+        """
+        renew = getattr(global_lock_manager, "renew", None)
+        if renew is None or task_id_str in lock_renewals:
+            return
+
+        async def _renewal_loop() -> None:
+            while True:
+                await asyncio.sleep(_LOCK_RENEWAL_INTERVAL_SECONDS)
+                try:
+                    renewed = await renew(task_id_str)
+                    if not renewed:
+                        logger.warning(
+                            f"Failed to renew global lock for task "
+                            f"{task_id_str}; it may have been lost."
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        f"Error renewing global lock for task {task_id_str}: {e}"
+                    )
+
+        lock_renewals[task_id_str] = asyncio.create_task(
+            _renewal_loop(), name=f"lock-renewal-{task_id_str}"
+        )
+
+    def _stop_lock_renewal(task_id_str: str) -> None:
+        renewal = lock_renewals.pop(task_id_str, None)
+        if renewal is not None:
+            renewal.cancel()
+
+    _ALREADY_COMPLETED_RESULT = LockAcquisitionResult(
+        status=LockAcquisitionStatus.ALREADY_COMPLETED, acquired=False
+    )
+
+    async def acquire_claim(
+        task: BaseTask,
+    ) -> tuple[str, DetachedHandle | LockAcquisitionResult | TaskExecutionError | None]:
+        """Claim the task's execution, resolving denials.
+
+        Returns one of:
+          - ``("granted", None)``: we won — a TASK_STARTED (without ref) is
+            recorded; caller spawns and then records the ref.
+          - ``("attach", handle)``: another live execution won — await it.
+          - ``("already_completed", LockAcquisitionResult)``: task is done
+            elsewhere; caller returns it so process_result runs the
+            eventual-consistency completion retry (same as the lock path).
+          - ``("error", TaskExecutionError)``: gave up (wait timeout).
+
+        A denial with a dead executor ref records the failure and re-tries
+        the claim immediately; a denial without a probeable ref (local
+        claimant, or the winner's claim→spawn crash window) polls target
+        completion and re-tries with backoff up to
+        ``ClaimConfig.wait_timeout_seconds``.
+        """
+        state = task_states[task.id]
+        loop = asyncio.get_event_loop()
+        start_time = loop.time()
+        interval = claim_cfg.wait_initial_interval_seconds
+        notified_waiting = False
+        try:
+            while True:
+                try:
+                    result = await registry.task_start_claim_aio(build_id, task)
+                except Exception as claim_err:
+                    # Registry hiccup on the claim itself: in `warn` mode
+                    # proceed unclaimed (pre-claim behavior) rather than
+                    # failing the task; `raise` mode propagates.
+                    handle_registry_error(
+                        claim_err,
+                        f"Claim start failed for task {task.id}",
+                        on_registry_failure,
+                    )
+                    return ("granted", None)
+                if result.started:
+                    return ("granted", None)
+                if result.denied_reason == "already_completed":
+                    return ("already_completed", _ALREADY_COMPLETED_RESULT)
+
+                # already_running: try to resolve via the winner's ref.
+                if result.executor and result.executor_ref:
+                    try:
+                        attach_handle = await task_executor.reattach(
+                            task, result.executor, result.executor_ref
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Re-attach to claimed execution "
+                            f"{result.executor_ref!r} for task {task.id} "
+                            f"failed: {e}"
+                        )
+                        attach_handle = None
+                    if attach_handle is not None:
+                        logger.info(
+                            f"Claim for task {task.id} lost — re-attached to "
+                            f"the winning execution {attach_handle.ref!r}."
+                        )
+                        return ("attach", attach_handle)
+                    probe = await task_executor.detached_status(
+                        task, result.executor, result.executor_ref
+                    )
+                    if probe == DetachedExecutionStatus.FAILED:
+                        if await task.complete_aio():
+                            return ("already_completed", _ALREADY_COMPLETED_RESULT)
+                        try:
+                            await registry.task_fail_aio(
+                                build_id,
+                                task,
+                                "Claimed execution is gone (observed by a "
+                                "competing claimant)",
+                            )
+                        except Exception as reg_err:
+                            handle_registry_error(
+                                reg_err,
+                                f"Failed to record dead claimed execution for "
+                                f"task {task.id}",
+                                on_registry_failure,
+                            )
+                        continue  # the claim should now be acquirable
+
+                # No (probeable) ref: wait for external completion, re-trying
+                # the claim with backoff.
+                if not notified_waiting:
+                    notified_waiting = True
+                    state.waiting_for_lock = True
+                    try:
+                        await registry.task_waiting_for_lock_aio(
+                            build_id, task, result.executor_ref
+                        )
+                    except Exception:
+                        logger.debug(
+                            f"Failed to record waiting state for task {task.id}",
+                            exc_info=True,
+                        )
+                if await task.complete_aio():
+                    return ("already_completed", _ALREADY_COMPLETED_RESULT)
+                timeout = claim_cfg.wait_timeout_seconds
+                if timeout is not None and loop.time() - start_time >= timeout:
+                    exc: Exception = TimeoutError(
+                        f"Timed out after {timeout}s waiting for the claimed "
+                        f"execution of task {task.id} (no re-attachable ref)"
+                    )
+                    return (
+                        "error",
+                        TaskExecutionError(
+                            exception=exc,
+                            traceback="".join(tb_module.format_exception(exc)),
+                        ),
+                    )
+                await asyncio.sleep(interval)
+                interval = min(
+                    interval * claim_cfg.wait_backoff_factor,
+                    claim_cfg.wait_max_interval_seconds,
+                )
+        finally:
+            state.waiting_for_lock = False
+
     async def registry_task_start(
         task: BaseTask, handle: DetachedHandle | None
     ) -> None:
@@ -1201,8 +1421,45 @@ async def build_aio(
                 # Lock not acquired - return the lock result for handling
                 return lock_result
 
-            # Lock acquired - track it for release later
+            # Lock acquired - track it for release later (with background
+            # TTL renewal so long tasks don't outlive the lease).
             held_locks.add(task_id_str)
+            _start_lock_renewal(task_id_str)
+
+        # Atomic execution claim (on by default for probeable executions;
+        # see build_aio's ``claim``): the claim-start happens BEFORE the
+        # concurrency slot and the spawn, so a losing racer never occupies
+        # a worker or slot — it re-attaches to the winner instead. Note the
+        # placement mirrors the global lock above and precedes the limiter
+        # deliberately: a registry-backed limiter records its own enforced
+        # start inside ``slot()``, which would otherwise deny our claim as
+        # "already running".
+        claimed = False
+        claim_handle: DetachedHandle | None = None
+        if claim_enabled_for(task) and not state.completed:
+            if not state.registered:
+                # The claim start 404s on unregistered tasks — retry the
+                # registration first (same warn-mode protection as below).
+                try:
+                    await registry.task_register_aio(build_id, task)
+                    state.registered = True
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to register task {task.id} before claim",
+                        on_registry_failure,
+                    )
+            if state.registered:
+                claim_kind, claim_value = await acquire_claim(task)
+                if claim_kind == "attach":
+                    claim_handle = cast(DetachedHandle, claim_value)
+                elif claim_kind == "already_completed":
+                    return cast(LockAcquisitionResult, claim_value)
+                elif claim_kind == "error":
+                    return cast(TaskExecutionError, claim_value)
+                else:
+                    claimed = True
+                    state.started = True
 
         # Now we have the lock (or locking wasn't needed). Acquire a
         # concurrency slot before marking the task started/executing so the
@@ -1229,9 +1486,9 @@ async def build_aio(
             # the executor supports it for this task. Detached executions
             # survive this process, so their (executor, ref) is recorded with
             # the TASK_STARTED event below — before we block on the result.
-            handle: DetachedHandle | None = None
+            handle: DetachedHandle | None = claim_handle
             detached_ref = detached_refs.pop(task.id, None)
-            if detached_ref is not None:
+            if handle is None and detached_ref is not None:
                 ref_executor, ref = detached_ref
                 try:
                     handle = await task_executor.reattach(task, ref_executor, ref)
@@ -1289,6 +1546,18 @@ async def build_aio(
                             f"Failed to start task {task.id}",
                             on_registry_failure,
                         )
+            elif claimed and handle is not None:
+                # We won the claim (whose start carried no ref — arbitration
+                # happens before the spawn): record the executor ref with a
+                # plain, tolerated-duplicate start.
+                try:
+                    await registry_task_start(task, handle)
+                except Exception as reg_err:
+                    handle_registry_error(
+                        reg_err,
+                        f"Failed to record executor ref for claimed task {task.id}",
+                        on_registry_failure,
+                    )
             elif state.dynamic_deps:
                 # Task was suspended waiting for dynamic deps, now resuming. Same
                 # warn-mode protection: no point firing /resume if registration
@@ -1296,7 +1565,11 @@ async def build_aio(
                 # event — the worker's own TASK_STARTED re-asserts RUNNING and
                 # carries the re-invocation's fresh executor ref (making the
                 # re-spawn re-attachable, which TASK_RESUMED wouldn't).
-                if state.registered and not task_executor.reports_lifecycle(task):
+                if (
+                    state.registered
+                    and not claimed
+                    and not task_executor.reports_lifecycle(task)
+                ):
                     try:
                         await registry.task_resume_aio(build_id, task)
                     except Exception as reg_err:
@@ -1607,6 +1880,9 @@ async def build_aio(
 
     finally:
         current_build_id_var.reset(_build_id_token)
+        for renewal in lock_renewals.values():
+            renewal.cancel()
+        lock_renewals.clear()
         await task_executor.teardown()
 
 
@@ -1628,6 +1904,8 @@ def build(
     on_registry_failure: OnRegistryFailure = "raise",
     concurrency_config: ConcurrencyConfig | None = None,
     concurrency_limiter: ConcurrencyLimiter | None = None,
+    claim: bool | None = None,
+    claim_config: ClaimConfig | None = None,
 ) -> BuildSummary:
     """Build tasks concurrently (sync wrapper for build_aio).
 
@@ -1654,6 +1932,8 @@ def build(
                 on_registry_failure=on_registry_failure,
                 concurrency_config=concurrency_config,
                 concurrency_limiter=concurrency_limiter,
+                claim=claim,
+                claim_config=claim_config,
             )
         )
     except RuntimeError as e:

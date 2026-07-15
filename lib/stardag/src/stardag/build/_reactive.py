@@ -182,6 +182,12 @@ class TickConfig:
     # atomically at task start, before the spawn: a denied task simply
     # stays in the frontier — a slot-holder's completion wakes the
     # scheduler (cross-build slot releases are covered by the watchdog).
+    # Per-task execution claim on the acquiring start (exactly-once across
+    # builds): a start racing an already-RUNNING task is denied and the
+    # task simply stays in the frontier — the existing RUNNING-probe
+    # partition takes over on later passes. Degrades gracefully against
+    # older servers (the claim parameter is ignored).
+    claim: bool = True
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None
     # Staleness escape hatch for RUNNING tasks WITHOUT an executor ref
     # (e.g. a tick that crashed between limit-slot acquisition and spawn):
@@ -216,6 +222,7 @@ class TickSummary:
     cancelled_refs: int = 0
     iterations: int = 0
     limit_denied: int = 0
+    claim_denied: int = 0
     skipped: int = 0
 
 
@@ -406,6 +413,12 @@ async def _act_on_frontier(
     limits_start_accepts_metadata = accepts_executor_metadata_kwarg(
         registry.task_start_with_limits_aio
     )
+    # Claim only through registries that implement arbitration (see the
+    # resident engine's identical gate) — the ABC default would just add a
+    # duplicate start. Keeps pre-claim custom registries on their old path.
+    claim_active = config.claim and (
+        type(registry).task_start_claim_aio is not RegistryABC.task_start_claim_aio
+    )
     for item in frontier.actionable:
         task = await _load_task(
             item.task_id,
@@ -467,16 +480,17 @@ async def _act_on_frontier(
             if config.limit_key_selector is not None
             else []
         )
-        if limit_keys:
-            # Atomic slot acquisition BEFORE spawning, so a denied task
-            # never occupies a worker. The acquiring TASK_STARTED carries
-            # no executor ref yet (there is nothing to reference), but it
-            # does carry the executor metadata when the executor can
-            # resolve it pre-spawn — otherwise a UI read in the
-            # acquire→spawn window shows a RUNNING task with blank
-            # executor info. The post-spawn start below re-records with
-            # the ref (duplicate starts are tolerated, and the slot is
-            # counted per task, not per start).
+        if limit_keys or claim_active:
+            # Atomic acquiring start BEFORE spawning — the execution claim
+            # (exactly-once arbitration) and any concurrency-limit slots in
+            # one transaction, so a denied task never occupies a worker.
+            # The acquiring TASK_STARTED carries no executor ref yet (there
+            # is nothing to reference), but it does carry the executor
+            # metadata when the executor can resolve it pre-spawn —
+            # otherwise a UI read in the acquire→spawn window shows a
+            # RUNNING task with blank executor info. The post-spawn start
+            # below re-records with the ref (duplicate starts are
+            # tolerated, and slots are counted per task, not per start).
             acquire_metadata: "dict[str, typing.Any] | None" = None
             if limits_start_accepts_metadata:
                 try:
@@ -487,25 +501,55 @@ async def _act_on_frontier(
                         f"{task.id}; acquiring without it.",
                         exc_info=True,
                     )
-            if acquire_metadata is not None:
-                started = await registry.task_start_with_limits_aio(
+            if claim_active:
+                claim_result = await registry.task_start_claim_aio(
                     build_id,
                     task,
                     executor_metadata=acquire_metadata,
-                    limit_keys=limit_keys,
+                    limit_keys=limit_keys or None,
                 )
+                started = claim_result.started
+                if not started:
+                    if claim_result.denied_reason == "limit":
+                        logger.info(
+                            f"Task {task.id} denied by concurrency limits "
+                            f"{limit_keys}; leaving in frontier."
+                        )
+                        summary.limit_denied += 1
+                    else:
+                        # already_running / already_completed: another
+                        # scheduler won the race (or the frontier snapshot
+                        # is stale) — the next frontier fetch reflects the
+                        # true status and the RUNNING-probe partition takes
+                        # over.
+                        logger.info(
+                            f"Claim for task {task.id} denied "
+                            f"({claim_result.denied_reason}); leaving in "
+                            "frontier."
+                        )
+                        summary.claim_denied += 1
+                    denied_this_round += 1
+                    continue
             else:
-                started = await registry.task_start_with_limits_aio(
-                    build_id, task, limit_keys=limit_keys
-                )
-            if not started:
-                logger.info(
-                    f"Task {task.id} denied by concurrency limits "
-                    f"{limit_keys}; leaving in frontier."
-                )
-                summary.limit_denied += 1
-                denied_this_round += 1
-                continue
+                if acquire_metadata is not None:
+                    started = await registry.task_start_with_limits_aio(
+                        build_id,
+                        task,
+                        executor_metadata=acquire_metadata,
+                        limit_keys=limit_keys,
+                    )
+                else:
+                    started = await registry.task_start_with_limits_aio(
+                        build_id, task, limit_keys=limit_keys
+                    )
+                if not started:
+                    logger.info(
+                        f"Task {task.id} denied by concurrency limits "
+                        f"{limit_keys}; leaving in frontier."
+                    )
+                    summary.limit_denied += 1
+                    denied_this_round += 1
+                    continue
         try:
             handle = await task_executor.submit_detached(task)
         except Exception as e:

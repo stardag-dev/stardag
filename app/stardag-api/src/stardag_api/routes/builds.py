@@ -237,12 +237,19 @@ async def _create_task_event(
     commit_hash: str | None = None,
     extra_metadata: dict | None = None,
     limit_keys: list[str] | None = None,
+    claim: bool = False,
 ) -> TaskEventResponse:
     """Create a task event and return slim response.
 
     ``limit_keys`` (TASK_STARTED only): replaces the task's recorded
     concurrency-limit keys in the same transaction — a RUNNING task with a
     key row occupies one slot of that key's limit.
+
+    ``claim`` (TASK_STARTED only): deny with 409 when the task is already
+    RUNNING or COMPLETED (see ``start_task``); evaluated on the
+    FOR-UPDATE-locked task row, and the raised HTTPException rolls back
+    the whole transaction (no event, no limit-key rows, and any
+    limit-row locks taken by the enforce_limits pre-check are released).
     """
     # Limit checks
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
@@ -259,6 +266,30 @@ async def _create_task_event(
     # COMPLETED in the other), and the last committer wins regardless of
     # COMPLETED-stickiness.
     _, db_task = await _get_build_and_task(build_id, task_id, db, auth, for_update=True)
+
+    if claim and event_type == EventType.TASK_STARTED:
+        # Atomic execution claim: at most one concurrent claiming start can
+        # win. The row is locked FOR UPDATE, so a racing claimant blocks
+        # here and re-reads the committed RUNNING status once we commit.
+        if db_task.latest_status == TaskStatus.RUNNING:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "task_already_running",
+                    "executor": db_task.latest_executor,
+                    "executor_ref": db_task.latest_executor_ref,
+                    "latest_status_at": (
+                        db_task.latest_status_at.isoformat()
+                        if db_task.latest_status_at
+                        else None
+                    ),
+                },
+            )
+        if db_task.latest_status == TaskStatus.COMPLETED:
+            raise HTTPException(
+                status_code=409,
+                detail={"error_code": "task_already_completed"},
+            )
 
     # Build event_metadata from commit_hash and any extra metadata
     event_metadata: dict | None = None
@@ -2094,6 +2125,7 @@ async def start_task(
     executor_metadata: str | None = None,
     limit_key: Annotated[list[str] | None, Query()] = None,
     enforce_limits: bool = False,
+    claim: bool = False,
 ):
     """Mark a task as started within a build.
 
@@ -2118,6 +2150,15 @@ async def start_task(
             ``concurrency_limit_reached`` (no event recorded). The
             environment's limit rows are locked for the duration of the
             check, serializing concurrent acquires.
+        claim: Atomic per-task execution claim: reject the start with
+            **409** when the task is already RUNNING (error code
+            ``task_already_running``, echoing the running execution's
+            ``executor``/``executor_ref`` so the caller can re-attach) or
+            already COMPLETED (``task_already_completed``). The check runs
+            on the FOR-UPDATE-locked task row inside the start
+            transaction, so concurrent claiming starts serialize — at most
+            one wins. A denied claim records nothing (no event, no
+            concurrency-limit slots).
     """
     parsed_executor_metadata = _parse_executor_metadata_param(executor_metadata)
     limit_keys = list(dict.fromkeys(limit_key)) if limit_key else None
@@ -2157,6 +2198,7 @@ async def start_task(
         commit_hash=commit_hash,
         extra_metadata=extra_metadata,
         limit_keys=limit_keys,
+        claim=claim,
     )
 
 
