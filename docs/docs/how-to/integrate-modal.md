@@ -487,6 +487,32 @@ Two operational notes:
 - **The watchdog sweep runs one quick scheduling pass per running build**
   (it skips the linger), so its per-period cost is one short function
   invocation plus a frontier query per running build.
+- **Define the callables you pass to `StardagApp` in an importable
+  module.** `worker_selector`, `limit_key_selector`, and any custom
+  build/run functions are captured by the serialized Modal functions
+  (build, workers, and the reactive `tick` / `tick_watchdog`), which Modal
+  deserializes in fresh containers — including the scheduled watchdog,
+  which always runs cold. A plain module-level function is pickled _by
+  reference_, so its defining module must be importable in the container:
+  put these callables in a module that is part of the source you add via
+  `add_local_python_source(...)`, **not** in a loose deploy script. A
+  selector defined directly in a script deployed by path
+  (`stardag modal deploy app.py`, which Modal loads as a top-level module
+  named `app`) fails to deserialize on the first cold container with a
+  `ModuleNotFoundError` for the `app` module. (The `modal/basic` example
+  is unaffected only because it passes no such callables; the
+  `modal/walkthrough` example keeps its selectors in a dedicated
+  `selectors.py` for exactly this reason.)
+- **Every deployed function needs the registry secret** — the workers
+  self-report their lifecycle (started/completed/…) and the tick/watchdog
+  read and update build state, so all of them make registry calls and
+  `401` without credentials. As of stardag 0.10.2 this is handled by
+  `StardagApp(stardag_api_key_secret=...)`: the named secret (default
+  `"stardag-api-key"`, created by `stardag modal stardag-api-key create`)
+  is injected into every function, so you declare it once — or just rely
+  on the default and don't declare a registry secret at all. (On stardag
+  ≤ 0.10.1 you instead had to put the secret on the builder — 0.10.1 —
+  or on every worker — 0.10.0.)
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment

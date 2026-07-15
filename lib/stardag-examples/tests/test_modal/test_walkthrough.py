@@ -6,6 +6,7 @@ package importable, not any Modal credentials.
 """
 
 import importlib.util
+import sys
 
 import pytest
 
@@ -104,3 +105,45 @@ def test_worker_and_limit_key_selectors():
 
     # The app enables the reactive-mode safety-net watchdog.
     assert walkthrough_app.app.watchdog_period_minutes == 5
+
+
+def test_selectors_are_defined_in_an_importable_container_safe_module():
+    """The selectors passed to StardagApp are captured by the serialized
+    Modal functions (build/workers/tick), which deserialize in fresh
+    containers by importing the callable's defining module. They must
+    therefore live in an importable package module — NOT in the deploy
+    script (which Modal loads as a loose top-level module named ``app``,
+    unimportable in the container) — or a cold watchdog tick crashes with
+    ``ModuleNotFoundError: No module named 'app'``. This test pins that
+    property so a future refactor can't reintroduce the crash.
+    """
+    import importlib
+
+    import cloudpickle
+
+    from stardag_examples.modal.walkthrough import selectors
+
+    for fn in (selectors.worker_selector, selectors.limit_key_selector):
+        # Defined in the dedicated package module, not the deploy script.
+        assert fn.__module__ == "stardag_examples.modal.walkthrough.selectors"
+        # ...and that module is genuinely importable (what a container does).
+        importlib.import_module(fn.__module__)
+
+    # cloudpickle a closure capturing a selector (as the tick does), then
+    # deserialize it with the selectors module absent from sys.modules —
+    # forcing a real re-import by reference, the container's code path.
+    def make_tick(selector):
+        def tick(task):
+            return selector(task)
+
+        return tick
+
+    blob = cloudpickle.dumps(make_tick(selectors.worker_selector))
+    saved = sys.modules.pop("stardag_examples.modal.walkthrough.selectors", None)
+    try:
+        restored = cloudpickle.loads(blob)
+    finally:
+        if saved is not None:
+            sys.modules["stardag_examples.modal.walkthrough.selectors"] = saved
+    scan = LongScan(source="s", sleep_seconds=0.0)
+    assert restored(scan) == "long"
