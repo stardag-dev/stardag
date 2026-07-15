@@ -133,7 +133,16 @@ export function ModalExecutionBreadcrumb({
   };
   push("app_name", metadata?.app_name, modalAppUrl(metadata));
   push("function_name", metadata?.function_name, modalFunctionUrl(metadata));
-  push("call_ref", executorRef, modalFunctionCallUrl(metadata, executorRef), true);
+  // Link the call ref ONLY to a genuine call-level URL. modalFunctionCallUrl
+  // falls back to the app page when function_id is missing (other callers,
+  // e.g. the "View on Modal" links, rely on that), but here a clickable call
+  // ref must never navigate to a coarser level — so we gate on
+  // modalFunctionUrl (function_id + resolvable app URL) being non-null and
+  // otherwise render the ref as plain text (the copy button stays either way).
+  const callUrl = modalFunctionUrl(metadata)
+    ? modalFunctionCallUrl(metadata, executorRef)
+    : null;
+  push("call_ref", executorRef, callUrl, true);
 
   if (segments.length === 0) return null;
 

@@ -108,6 +108,45 @@ describe("ModalExecutionBreadcrumb", () => {
     expect(await window.navigator.clipboard.readText()).toBe("fc-789");
   });
 
+  it("links the call ref only to a genuine call-level URL", () => {
+    // function_id present → the call ref is a real deep link to the call.
+    render(<ModalExecutionBreadcrumb metadata={fullMetadata} executorRef="fc-789" />);
+    expect(screen.getByRole("link", { name: "fc-789" })).toHaveAttribute(
+      "href",
+      "https://modal.com/apps/my-workspace/staging/ap-123" +
+        "?activeTab=functions&functionId=fu-456&functionSection=calls&fcId=fc-789",
+    );
+  });
+
+  it("renders the call ref as plain text (never linking to the app page) when function_id is missing", async () => {
+    const user = userEvent.setup();
+    // app_name/app_id resolvable but NO function_id: modalFunctionCallUrl
+    // would fall back to the app page, which must not become a clickable call
+    // ref. It renders as plain text but keeps its copy button.
+    render(
+      <ModalExecutionBreadcrumb
+        metadata={{
+          kind: "modal",
+          workspace: "my-workspace",
+          environment: "staging",
+          app_name: "my-app",
+          app_id: "ap-123",
+        }}
+        executorRef="fc-789"
+      />,
+    );
+    // The call ref is not a link (only the ws/env and app segments are).
+    expect(screen.queryByRole("link", { name: "fc-789" })).not.toBeInTheDocument();
+    expect(screen.getByText("fc-789")).toBeInTheDocument();
+    // Copy button still present and copies the raw fc id.
+    const copyButtons = screen.getAllByRole("button", {
+      name: /copy to clipboard/i,
+    });
+    expect(copyButtons).toHaveLength(1);
+    await user.click(copyButtons[0]);
+    expect(await window.navigator.clipboard.readText()).toBe("fc-789");
+  });
+
   it("renders nothing for an explicitly non-modal kind", () => {
     const { container } = render(
       <ModalExecutionBreadcrumb
