@@ -11,6 +11,7 @@ from stardag.polymorphic import (
     NakedPolymorphicFieldError,
     Polymorphic,
     PolymorphicRoot,
+    StrictPolymorphicTypeError,
     SubClass,
     TypeId,
 )
@@ -251,7 +252,7 @@ class TestNakedPolymorphicFieldRejection:
         with pytest.raises(NakedPolymorphicFieldError, match="SubClass"):
 
             class Canvas(PolymorphicRoot):
-                shape: Shape  # type: ignore[valid-type]  # naked abstract
+                shape: Shape  # naked abstract
 
     def test_bare_abstract_base_in_list_rejected(self):
         class Shape(PolymorphicRoot):
@@ -261,7 +262,7 @@ class TestNakedPolymorphicFieldRejection:
         with pytest.raises(NakedPolymorphicFieldError):
 
             class Canvas(PolymorphicRoot):
-                shapes: list[Shape]  # type: ignore[valid-type]
+                shapes: list[Shape]
 
     def test_bare_abstract_base_in_dict_value_rejected(self):
         class Shape(PolymorphicRoot):
@@ -271,7 +272,7 @@ class TestNakedPolymorphicFieldRejection:
         with pytest.raises(NakedPolymorphicFieldError):
 
             class Canvas(PolymorphicRoot):
-                shapes: dict[str, Shape]  # type: ignore[valid-type]
+                shapes: dict[str, Shape]
 
     def test_bare_abstract_base_in_optional_rejected(self):
         class Shape(PolymorphicRoot):
@@ -281,7 +282,7 @@ class TestNakedPolymorphicFieldRejection:
         with pytest.raises(NakedPolymorphicFieldError):
 
             class Canvas(PolymorphicRoot):
-                shape: Optional[Shape] = None  # type: ignore[valid-type]
+                shape: Optional[Shape] = None
 
     def test_stardag_abstract_marker_rejected(self):
         """Abstract bases marked only via ``__stardag_abstract__`` are caught."""
@@ -292,7 +293,7 @@ class TestNakedPolymorphicFieldRejection:
         with pytest.raises(NakedPolymorphicFieldError):
 
             class Graph(PolymorphicRoot):
-                node: Node  # type: ignore[valid-type]
+                node: Node
 
     def test_abc_base_marker_rejected(self):
         """Abstract bases marked via ``abc.ABC`` in bases are caught."""
@@ -303,7 +304,7 @@ class TestNakedPolymorphicFieldRejection:
         with pytest.raises(NakedPolymorphicFieldError):
 
             class Graph(PolymorphicRoot):
-                node: Node  # type: ignore[valid-type]
+                node: Node
 
     def test_error_is_stardag_error(self):
         assert issubclass(NakedPolymorphicFieldError, StardagError)
@@ -338,3 +339,89 @@ class TestNakedPolymorphicFieldRejection:
             a: int
             b: str = "x"
             c: list[int] = []
+
+
+# Module-level so they are proper static types usable in annotations below
+# (a concrete family: ``_Animal`` is the concrete root, ``_Dog`` a subclass).
+class _Animal(PolymorphicRoot):
+    legs: int = 4
+
+
+class _Dog(_Animal):
+    bark_volume: int = 3
+
+
+class TestStrictConcretePolymorphicField:
+    """A bare *concrete* PolymorphicRoot field is a "strict" field: it means
+    exactly that type. Passing a subclass instance would silently drop the
+    subclass's extra params on serialization (and collide identities), so it is
+    rejected at validation time — use SubClass[...] to accept subclasses.
+    """
+
+    def test_exact_type_accepted(self):
+        class Zoo(PolymorphicRoot):
+            star: _Animal  # bare concrete = strict
+
+        assert Zoo.__stardag_strict_polymorphic_fields__ == ("star",)
+        zoo = Zoo(star=_Animal(legs=4))
+        assert type(zoo.star) is _Animal
+
+    def test_subclass_instance_rejected(self):
+        class Zoo(PolymorphicRoot):
+            star: _Animal
+
+        with pytest.raises(StrictPolymorphicTypeError, match="SubClass"):
+            Zoo(star=_Dog(legs=4, bark_volume=9))
+
+    def test_subclass_in_list_rejected(self):
+        class Zoo(PolymorphicRoot):
+            animals: list[_Animal]
+
+        Zoo(animals=[_Animal(), _Animal()])  # exact types OK
+        with pytest.raises(StrictPolymorphicTypeError):
+            Zoo(animals=[_Animal(), _Dog()])
+
+    def test_subclass_in_tuple_rejected(self):
+        class Zoo(PolymorphicRoot):
+            animals: tuple[_Animal, ...] = ()
+
+        Zoo(animals=(_Animal(), _Animal()))
+        with pytest.raises(StrictPolymorphicTypeError):
+            Zoo(animals=(_Animal(), _Dog()))
+
+    def test_subclass_in_dict_value_rejected(self):
+        class Zoo(PolymorphicRoot):
+            animals: dict[str, _Animal]
+
+        Zoo(animals={"a": _Animal()})
+        with pytest.raises(StrictPolymorphicTypeError):
+            Zoo(animals={"a": _Dog()})
+
+    def test_optional_strict_none_and_exact_ok_subclass_rejected(self):
+        class Zoo(PolymorphicRoot):
+            star: Optional[_Animal] = None
+
+        Zoo(star=None)
+        Zoo(star=_Animal())
+        with pytest.raises(StrictPolymorphicTypeError):
+            Zoo(star=_Dog())
+
+    def test_subclass_annotation_accepts_subclasses(self):
+        # Container is a *registered* subclass (a family root has no __type_id__
+        # and can't be serialized directly), mirroring real usage.
+        class ZooBase(PolymorphicRoot):
+            pass
+
+        class Zoo(ZooBase):
+            star: SubClass[_Animal]
+
+        # SubClass[...] is not a strict field, so subclasses round-trip fully.
+        assert Zoo.__stardag_strict_polymorphic_fields__ == ()
+        zoo = Zoo(star=_Dog(bark_volume=7))
+        assert type(zoo.star) is _Dog
+        reloaded = Zoo.model_validate(zoo.model_dump())
+        assert type(reloaded.star) is _Dog
+        assert reloaded.star.bark_volume == 7
+
+    def test_error_is_stardag_error(self):
+        assert issubclass(StrictPolymorphicTypeError, StardagError)

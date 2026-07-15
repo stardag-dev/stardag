@@ -206,8 +206,12 @@ The same task in all three APIs:
     `dep: sd.Task[int]`, `deps: list[BaseTask]` — is rejected at
     class-definition time with `NakedPolymorphicFieldError`. Without the
     wrapper, serialization would silently drop every subclass-specific
-    parameter and loading the task back would fail. A bare *concrete* task
-    subclass is still allowed as a "strict" field (it always holds exactly
-    that type).
+    parameter and loading the task back would fail.
+
+    A bare *concrete* task class (`dep: MyTask`) is allowed, but it is a
+    **strict** field — it accepts *exactly* `MyTask`. Passing a subclass
+    instance raises `StrictPolymorphicTypeError` (it would otherwise drop the
+    subclass's extra parameters and collide task identities). Use
+    `SubClass[MyTask]` if you want the field to accept subclasses.
 
 <!-- TODO: Add more examples and patterns -->

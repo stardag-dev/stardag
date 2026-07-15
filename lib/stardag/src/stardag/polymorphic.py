@@ -5,6 +5,7 @@ import os
 import types
 import typing
 import warnings
+from collections import abc as collections_abc
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -20,7 +21,13 @@ from typing import (
     get_origin,
 )
 
-from pydantic import BaseModel, GetCoreSchemaHandler, SerializationInfo, ValidationInfo
+from pydantic import (
+    BaseModel,
+    GetCoreSchemaHandler,
+    SerializationInfo,
+    ValidationInfo,
+    model_validator,
+)
 from pydantic_core import core_schema
 
 from stardag.base_model import StardagBaseModel
@@ -345,6 +352,20 @@ class NakedPolymorphicFieldError(StardagError):
     """
 
 
+class StrictPolymorphicTypeError(StardagError):
+    """Raised when a *subclass* instance is assigned to a bare, concrete
+    ``PolymorphicRoot`` field.
+
+    A bare concrete annotation (e.g. ``child: MyTask``, without
+    ``SubClass[...]``) is a *strict* field: it means exactly ``MyTask``. If a
+    subclass instance is passed, serialization would silently drop the
+    subclass's extra parameters — and because task identity is derived from the
+    serialized form, two distinct subclass values would collapse to the same id.
+    Enforcing exact type at validation time turns that silent corruption into an
+    explicit error; use ``SubClass[MyTask]`` to accept subclasses instead.
+    """
+
+
 def _is_abstract_polymorphic(cls: type) -> bool:
     """True if ``cls`` is a ``PolymorphicRoot`` subclass that cannot be safely
     used as a *bare* field annotation because it is an abstract base.
@@ -395,6 +416,12 @@ class PolymorphicRoot(StardagBaseModel):
     # IMPORTANT: per-family registry lives on the base class
     __registry__: ClassVar[_TypeRegistry] = _TypeRegistry()
 
+    # Names of fields whose annotation contains a bare, *concrete* PolymorphicRoot
+    # (a "strict" field: exactly that type, no subclasses). Populated per class at
+    # construction time; enforced at validation time by
+    # ``_enforce_strict_polymorphic_exact_type``.
+    __stardag_strict_polymorphic_fields__: ClassVar[tuple[str, ...]] = ()
+
     if TYPE_CHECKING:
         # Optionally set on subclasses to override default namespace resolution
         __namespace__: ClassVar[str]
@@ -405,6 +432,29 @@ class PolymorphicRoot(StardagBaseModel):
         # If you ever want a deep hierarchy, you can ensure the registry is owned by the root
         # but in many cases, "cls" itself is the desired owner.
         return cls.__registry__
+
+    @model_validator(mode="after")
+    def _enforce_strict_polymorphic_exact_type(self) -> "PolymorphicRoot":
+        """Reject subclass instances assigned to bare, concrete polymorphic fields.
+
+        A bare concrete annotation is *strict* (exactly that type). Passing a
+        subclass instance would silently drop its extra parameters on
+        serialization and collide task identities, so it is rejected here — see
+        ``StrictPolymorphicTypeError``. Fields with no strict-polymorphic
+        annotation (the common case) short-circuit immediately.
+        """
+        for name in type(self).__stardag_strict_polymorphic_fields__:
+            field = type(self).model_fields[name]
+            guarded = any(isinstance(m, Polymorphic) for m in field.metadata)
+            violation = _find_strict_polymorphic_violation(
+                field.annotation, getattr(self, name), guarded
+            )
+            if violation is not None:
+                expected, actual = violation
+                raise StrictPolymorphicTypeError(
+                    _strict_polymorphic_message(type(self), name, expected, actual)
+                )
+        return self
 
     @classmethod
     def resolve(
@@ -460,12 +510,13 @@ class PolymorphicRoot(StardagBaseModel):
                     namespace_override=namespace_override,
                 )
 
-        # Reject unsafe bare abstract-polymorphic field annotations at class
-        # construction time (see NakedPolymorphicFieldError). Skip parameterized
-        # generic aliases (e.g. ``Task[int]``) — they mirror the origin class's
-        # fields, which are validated when the origin itself is defined.
+        # Validate polymorphic field annotations at class construction: reject
+        # bare *abstract* bases (NakedPolymorphicFieldError) and index bare
+        # *concrete* ("strict") fields for exact-type enforcement at validation
+        # time. Skip parameterized generic aliases (e.g. ``Task[int]``) — they
+        # mirror the origin class's fields, validated when the origin is defined.
         if not _is_parameterized_generic_alias(cls):
-            _validate_no_naked_polymorphic_fields(cls)
+            _validate_and_index_polymorphic_fields(cls)
 
     def __class_getitem__(
         cls: Type[BaseModel],
@@ -676,10 +727,9 @@ class Polymorphic:
         )
 
 
-def _find_naked_polymorphic(annotation: Any, guarded: bool) -> type | None:
-    """Return the first abstract ``PolymorphicRoot`` subclass reachable from
-    ``annotation`` that is *not* wrapped in ``Polymorphic()`` / ``SubClass[...]``,
-    or ``None`` if the annotation is safe.
+def _iter_bare_polymorphic(annotation: Any, guarded: bool) -> "typing.Iterator[type]":
+    """Yield every ``PolymorphicRoot`` subclass that appears *bare* (not wrapped
+    in ``Polymorphic()`` / ``SubClass[...]``) anywhere in ``annotation``.
 
     ``guarded`` is True when the current position is directly wrapped by a
     ``Polymorphic()`` annotation. The guard does not propagate through containers
@@ -690,22 +740,20 @@ def _find_naked_polymorphic(annotation: Any, guarded: bool) -> type | None:
         args = get_args(annotation)
         inner, extras = args[0], args[1:]
         guarded_here = guarded or any(isinstance(e, Polymorphic) for e in extras)
-        return _find_naked_polymorphic(inner, guarded_here)
+        yield from _iter_bare_polymorphic(inner, guarded_here)
+        return
 
     if isinstance(annotation, type) and issubclass(annotation, PolymorphicRoot):
-        if not guarded and _is_abstract_polymorphic(annotation):
-            return annotation
-        # Guarded, or a concrete "strict" annotation — both fine. Don't recurse
-        # into the model's own fields; those are validated on their own class.
-        return None
+        if not guarded:
+            yield annotation
+        # Don't recurse into the model's own fields; those are validated on
+        # their own class.
+        return
 
     # Container / union / other generic: recurse into type args with the guard
     # reset (a Polymorphic() cannot legally wrap a container).
     for arg in get_args(annotation):
-        found = _find_naked_polymorphic(arg, False)
-        if found is not None:
-            return found
-    return None
+        yield from _iter_bare_polymorphic(arg, False)
 
 
 def _naked_polymorphic_field_message(
@@ -727,20 +775,125 @@ def _naked_polymorphic_field_message(
     )
 
 
-def _validate_no_naked_polymorphic_fields(cls: type["PolymorphicRoot"]) -> None:
-    """Raise ``NakedPolymorphicFieldError`` if any field of ``cls`` uses an
-    abstract ``PolymorphicRoot`` subclass as a bare (non-polymorphic) annotation.
+def _validate_and_index_polymorphic_fields(cls: type["PolymorphicRoot"]) -> None:
+    """Inspect ``cls``'s fields for bare polymorphic annotations.
+
+    - Any bare *abstract* ``PolymorphicRoot`` base raises
+      ``NakedPolymorphicFieldError`` (unsafe — see the class docstring).
+    - Any bare *concrete* base marks the field as *strict*; it is recorded in
+      ``cls.__stardag_strict_polymorphic_fields__`` so that
+      ``_enforce_strict_polymorphic_exact_type`` can reject subclass instances
+      for it at validation time.
     """
+    strict_fields: list[str] = []
     for name, field in cls.model_fields.items():
         # A top-level ``SubClass[X]`` lands here as annotation ``X`` plus a
         # ``Polymorphic()`` in ``field.metadata``; treat that as guarding the
         # field's annotation.
         guarded = any(isinstance(m, Polymorphic) for m in field.metadata)
-        offending = _find_naked_polymorphic(field.annotation, guarded)
-        if offending is not None:
-            raise NakedPolymorphicFieldError(
-                _naked_polymorphic_field_message(cls, name, offending)
-            )
+        bare = list(_iter_bare_polymorphic(field.annotation, guarded))
+        if not bare:
+            continue
+        for offending in bare:
+            if _is_abstract_polymorphic(offending):
+                raise NakedPolymorphicFieldError(
+                    _naked_polymorphic_field_message(cls, name, offending)
+                )
+        # All bare occurrences are concrete -> strict field.
+        strict_fields.append(name)
+    cls.__stardag_strict_polymorphic_fields__ = tuple(strict_fields)
+
+
+def _strict_polymorphic_message(
+    cls: type, field_name: str, expected: type, actual: Any
+) -> str:
+    expected_name = getattr(expected, "__name__", str(expected))
+    actual_name = type(actual).__name__
+    return (
+        f"Field '{field_name}' on '{cls.__name__}' is a strict (non-polymorphic) "
+        f"field annotated with '{expected_name}', but got an instance of subclass "
+        f"'{actual_name}'.\n\n"
+        f"A bare concrete annotation means exactly '{expected_name}': the extra "
+        f"parameters of '{actual_name}' would be silently dropped on "
+        f"serialization, and task identity (derived from the serialized form) "
+        f"would collide with the base type. Either pass an exact '{expected_name}' "
+        f"instance, or annotate the field polymorphically to accept subclasses:\n\n"
+        f"    from stardag import SubClass\n\n"
+        f"    {field_name}: SubClass[{expected_name}]"
+    )
+
+
+def _find_strict_polymorphic_violation(
+    annotation: Any, value: Any, guarded: bool
+) -> "tuple[type, Any] | None":
+    """Return ``(expected_type, offending_value)`` if ``value`` contains a
+    subclass instance at a position where ``annotation`` declares a bare,
+    concrete ``PolymorphicRoot`` type; otherwise ``None``.
+
+    Mirrors the structure of :func:`_iter_bare_polymorphic` but walks the runtime
+    ``value`` alongside the annotation. It is best-effort for container shapes it
+    doesn't recognise (returns ``None`` rather than risking a false positive).
+    """
+    origin = get_origin(annotation)
+
+    if origin is Annotated:
+        args = get_args(annotation)
+        inner, extras = args[0], args[1:]
+        guarded_here = guarded or any(isinstance(e, Polymorphic) for e in extras)
+        return _find_strict_polymorphic_violation(inner, value, guarded_here)
+
+    if isinstance(annotation, type) and issubclass(annotation, PolymorphicRoot):
+        # ``isinstance`` (not ``==``) so a value belonging to a *different* union
+        # arm is skipped; ``type(...) is not`` flags any strict subclass.
+        if (
+            not guarded
+            and isinstance(value, annotation)
+            and type(value) is not annotation
+        ):
+            return (annotation, value)
+        return None
+
+    args = get_args(annotation)
+    if not args:
+        return None
+
+    if origin in (Union, types.UnionType):
+        for arg in args:
+            found = _find_strict_polymorphic_violation(arg, value, False)
+            if found is not None:
+                return found
+        return None
+
+    # Mapping: check keys against the first arg and values against the last.
+    if isinstance(value, collections_abc.Mapping):
+        key_ann, val_ann = args[0], args[-1]
+        for key, val in value.items():
+            found = _find_strict_polymorphic_violation(key_ann, key, False)
+            if found is not None:
+                return found
+            found = _find_strict_polymorphic_violation(val_ann, val, False)
+            if found is not None:
+                return found
+        return None
+
+    # Sequence / set-like (but not str/bytes): recurse each element.
+    if isinstance(value, collections_abc.Collection) and not isinstance(
+        value, (str, bytes)
+    ):
+        items = list(value)
+        # Fixed-length tuple (``tuple[A, B]``) -> positional; everything else
+        # (``list[X]``, ``set[X]``, ``tuple[X, ...]``) uses a single element type.
+        if origin is tuple and Ellipsis not in args and len(args) == len(items):
+            pairs = zip(args, items)
+        else:
+            pairs = ((args[0], item) for item in items)
+        for elem_ann, item in pairs:
+            found = _find_strict_polymorphic_violation(elem_ann, item, False)
+            if found is not None:
+                return found
+        return None
+
+    return None
 
 
 class _SubClass:

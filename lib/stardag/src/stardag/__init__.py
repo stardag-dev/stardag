@@ -62,7 +62,12 @@ from stardag.exceptions import (
     StardagError,
     TokenExpiredError,
 )
-from stardag.polymorphic import NakedPolymorphicFieldError, Polymorphic, SubClass
+from stardag.polymorphic import (
+    NakedPolymorphicFieldError,
+    Polymorphic,
+    StrictPolymorphicTypeError,
+    SubClass,
+)
 from stardag.registry import registry_provider
 from stardag.target import (
     DirectoryTarget,
@@ -115,6 +120,7 @@ __all__ = [
     "StardagError",
     "StardagBaseModel",
     "StardagField",
+    "StrictPolymorphicTypeError",
     "SubClass",
     "Task",
     "TaskRehydrationError",
