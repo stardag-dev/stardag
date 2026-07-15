@@ -78,27 +78,35 @@ def _resolve_registry(profile: str | None, env_override: str | None) -> APIRegis
 
         environment_id = reg.environment_id or None
         if env_override:
-            from stardag._cli.credentials import resolve_environment_slug_to_id
+            from stardag.config.cache import _looks_like_uuid
 
-            registry_name = config.context.registry_name
-            workspace_id = reg.workspace_id or None
-            user = reg.auth.user_email
-            if not registry_name or not workspace_id:
-                error_console.print(
-                    "[bold red]Cannot resolve --stardag-env without a configured "
-                    "registry and workspace.[/bold red] Pass an environment ID, or "
-                    "activate a profile."
+            if _looks_like_uuid(env_override):
+                # A raw environment ID needs no registry/workspace context to
+                # resolve — use it directly (documented alongside slugs).
+                environment_id = env_override
+            else:
+                from stardag._cli.credentials import resolve_environment_slug_to_id
+
+                registry_name = config.context.registry_name
+                workspace_id = reg.workspace_id or None
+                user = reg.auth.user_email
+                if not registry_name or not workspace_id:
+                    error_console.print(
+                        "[bold red]Cannot resolve an environment slug without a "
+                        "configured registry and workspace.[/bold red] Pass an "
+                        "environment ID, or activate a profile."
+                    )
+                    raise typer.Exit(1)
+                resolved = resolve_environment_slug_to_id(
+                    registry_name, workspace_id, env_override, user
                 )
-                raise typer.Exit(1)
-            resolved = resolve_environment_slug_to_id(
-                registry_name, workspace_id, env_override, user
-            )
-            if not resolved:
-                error_console.print(
-                    f"[bold red]Could not resolve environment: {env_override}[/bold red]"
-                )
-                raise typer.Exit(1)
-            environment_id = resolved
+                if not resolved:
+                    error_console.print(
+                        f"[bold red]Could not resolve environment: "
+                        f"{env_override}[/bold red]"
+                    )
+                    raise typer.Exit(1)
+                environment_id = resolved
 
         return APIRegistry(environment_id=environment_id)
     finally:

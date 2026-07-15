@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -848,7 +849,7 @@ class APIRegistry(RegistryABC):
         """
         response = self._request(
             "PUT",
-            f"{self.api_url}/api/v1/concurrency-limits/{key}",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}",
             json={"max_concurrent": max_concurrent},
             params=self._get_params(),
             operation=f"Set concurrency limit {key!r}",
@@ -859,7 +860,7 @@ class APIRegistry(RegistryABC):
         """Delete a named concurrency limit (the key becomes unlimited)."""
         self._request(
             "DELETE",
-            f"{self.api_url}/api/v1/concurrency-limits/{key}",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}",
             params=self._get_params(),
             operation=f"Delete concurrency limit {key!r}",
         )
@@ -874,7 +875,7 @@ class APIRegistry(RegistryABC):
         """
         response = self._request(
             "GET",
-            f"{self.api_url}/api/v1/concurrency-limits/{key}/holders",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}/holders",
             params={**self._get_params(), "limit": str(limit)},
             operation=f"List holders of concurrency limit {key!r}",
         )
@@ -888,7 +889,8 @@ class APIRegistry(RegistryABC):
         """
         response = self._request(
             "POST",
-            f"{self.api_url}/api/v1/concurrency-limits/{key}/holders/{task_id}/evict",
+            f"{self.api_url}/api/v1/concurrency-limits/{quote(key, safe='')}"
+            f"/holders/{quote(task_id, safe='')}/evict",
             params=self._get_params(),
             operation=f"Evict {task_id} from concurrency limit {key!r}",
         )
