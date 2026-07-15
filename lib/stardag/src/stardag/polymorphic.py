@@ -433,6 +433,37 @@ class PolymorphicRoot(StardagBaseModel):
         # but in many cases, "cls" itself is the desired owner.
         return cls.__registry__
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_strict_polymorphic_subclass_data(cls, data: Any) -> Any:
+        """Reject *serialized data* for a subclass assigned to a strict field.
+
+        Deserialize-path counterpart of ``_enforce_strict_polymorphic_exact_type``:
+        a strict (bare concrete) field is non-polymorphic, so pydantic would
+        coerce an input dict straight into the base type, silently discarding any
+        subclass-specific parameters (and ignoring the discriminator). We inspect
+        the *raw* input and reject a dict whose ``__namespace``/``__name``
+        discriminator resolves to a class other than the declared strict type —
+        see ``StrictPolymorphicTypeError``. Plain dicts without a discriminator
+        are left untouched (validated into the strict type as exact data).
+        """
+        if not isinstance(data, collections_abc.Mapping):
+            return data
+        for name in cls.__stardag_strict_polymorphic_fields__:
+            if name not in data:
+                continue
+            field = cls.model_fields[name]
+            guarded = any(isinstance(m, Polymorphic) for m in field.metadata)
+            violation = _find_strict_polymorphic_violation(
+                field.annotation, data[name], guarded, _strict_discriminator_leaf
+            )
+            if violation is not None:
+                expected, actual_name = violation
+                raise StrictPolymorphicTypeError(
+                    _strict_polymorphic_message(cls, name, expected, actual_name)
+                )
+        return data
+
     @model_validator(mode="after")
     def _enforce_strict_polymorphic_exact_type(self) -> "PolymorphicRoot":
         """Reject subclass instances assigned to bare, concrete polymorphic fields.
@@ -441,18 +472,20 @@ class PolymorphicRoot(StardagBaseModel):
         subclass instance would silently drop its extra parameters on
         serialization and collide task identities, so it is rejected here — see
         ``StrictPolymorphicTypeError``. Fields with no strict-polymorphic
-        annotation (the common case) short-circuit immediately.
+        annotation (the common case) short-circuit immediately. The
+        deserialize-path (raw dict) counterpart is
+        ``_reject_strict_polymorphic_subclass_data``.
         """
         for name in type(self).__stardag_strict_polymorphic_fields__:
             field = type(self).model_fields[name]
             guarded = any(isinstance(m, Polymorphic) for m in field.metadata)
             violation = _find_strict_polymorphic_violation(
-                field.annotation, getattr(self, name), guarded
+                field.annotation, getattr(self, name), guarded, _strict_instance_leaf
             )
             if violation is not None:
-                expected, actual = violation
+                expected, actual_name = violation
                 raise StrictPolymorphicTypeError(
-                    _strict_polymorphic_message(type(self), name, expected, actual)
+                    _strict_polymorphic_message(type(self), name, expected, actual_name)
                 )
         return self
 
@@ -805,34 +838,87 @@ def _validate_and_index_polymorphic_fields(cls: type["PolymorphicRoot"]) -> None
 
 
 def _strict_polymorphic_message(
-    cls: type, field_name: str, expected: type, actual: Any
+    cls: type, field_name: str, expected: type, actual_name: str
 ) -> str:
     expected_name = getattr(expected, "__name__", str(expected))
-    actual_name = type(actual).__name__
     return (
         f"Field '{field_name}' on '{cls.__name__}' is a strict (non-polymorphic) "
-        f"field annotated with '{expected_name}', but got an instance of subclass "
-        f"'{actual_name}'.\n\n"
-        f"A bare concrete annotation means exactly '{expected_name}': the extra "
-        f"parameters of '{actual_name}' would be silently dropped on "
-        f"serialization, and task identity (derived from the serialized form) "
-        f"would collide with the base type. Either pass an exact '{expected_name}' "
-        f"instance, or annotate the field polymorphically to accept subclasses:\n\n"
+        f"field annotated with '{expected_name}', but got '{actual_name}', which is "
+        f"not exactly '{expected_name}'.\n\n"
+        f"A bare concrete annotation means exactly '{expected_name}': a subclass's "
+        f"extra parameters would be silently dropped on serialization, and task "
+        f"identity (derived from the serialized form) would collide with the base "
+        f"type. Either provide exactly '{expected_name}', or annotate the field "
+        f"polymorphically to accept subclasses:\n\n"
         f"    from stardag import SubClass\n\n"
         f"    {field_name}: SubClass[{expected_name}]"
     )
 
 
-def _find_strict_polymorphic_violation(
-    annotation: Any, value: Any, guarded: bool
-) -> "tuple[type, Any] | None":
-    """Return ``(expected_type, offending_value)`` if ``value`` contains a
-    subclass instance at a position where ``annotation`` declares a bare,
-    concrete ``PolymorphicRoot`` type; otherwise ``None``.
+# A leaf check: given the declared bare-concrete type and the value at that
+# position, return the offending type-name (str) or None. Two variants below
+# handle the two ways a subclass sneaks in — a live instance (post-validation)
+# and serialized data carrying a mismatched discriminator (pre-validation).
+def _strict_instance_leaf(expected: type, value: Any) -> "str | None":
+    """Flag a live *subclass instance* assigned to a strict field.
 
-    Mirrors the structure of :func:`_iter_bare_polymorphic` but walks the runtime
-    ``value`` alongside the annotation. It is best-effort for container shapes it
-    doesn't recognise (returns ``None`` rather than risking a false positive).
+    ``isinstance`` (not ``==``) so a value belonging to a *different* union arm
+    is skipped; ``type(...) is not`` flags any strict subclass.
+    """
+    if isinstance(value, expected) and type(value) is not expected:
+        return type(value).__name__
+    return None
+
+
+def _strict_discriminator_leaf(expected: type, value: Any) -> "str | None":
+    """Flag *serialized data* (a discriminator-carrying dict) that resolves to a
+    class other than the declared strict type — the deserialize-path counterpart
+    of :func:`_strict_instance_leaf`.
+
+    A plain dict without a discriminator is left alone: it is validated into the
+    strict type as-is (exact type, no data loss). A payload is only treated as a
+    discriminator when it carries *both* ``__namespace`` and ``__name`` (matching
+    ``Polymorphic.dispatch``, which requires both).
+
+    Two mismatch cases:
+
+    - ``expected`` is registered (has ``__type_id__``): the payload's
+      ``(namespace, name)`` differs from it.
+    - ``expected`` is a *family root* (a direct ``PolymorphicRoot`` child, never
+      registered, so it has no ``__type_id__`` and cannot itself serialize with a
+      discriminator): *any* discriminator payload necessarily names a
+      (registered) subclass, so it is always a mismatch.
+    """
+    if not isinstance(value, collections_abc.Mapping):
+        return None
+    got_namespace = value.get(NAMESPACE_KEY)
+    got_name = value.get(NAME_KEY)
+    if got_namespace is None or got_name is None:
+        return None
+    expected_tid = getattr(expected, "__type_id__", None)
+    if expected_tid is None:
+        # Family-root strict type: any discriminator payload is a subclass.
+        return str(got_name)
+    if (got_namespace, got_name) != (expected_tid.namespace, expected_tid.name):
+        return str(got_name)
+    return None
+
+
+def _find_strict_polymorphic_violation(
+    annotation: Any,
+    value: Any,
+    guarded: bool,
+    leaf: "typing.Callable[[type, Any], str | None]",
+) -> "tuple[type, str] | None":
+    """Return ``(expected_type, offending_name)`` if ``leaf`` flags a value at a
+    position where ``annotation`` declares a bare, concrete ``PolymorphicRoot``
+    type; otherwise ``None``.
+
+    Mirrors the structure of :func:`_iter_bare_polymorphic` but walks ``value``
+    alongside the annotation, delegating the per-position decision to ``leaf``
+    (instance check vs. serialized-discriminator check). Best-effort for
+    container shapes it doesn't recognise (returns ``None`` rather than risking a
+    false positive).
     """
     origin = get_origin(annotation)
 
@@ -840,17 +926,13 @@ def _find_strict_polymorphic_violation(
         args = get_args(annotation)
         inner, extras = args[0], args[1:]
         guarded_here = guarded or any(isinstance(e, Polymorphic) for e in extras)
-        return _find_strict_polymorphic_violation(inner, value, guarded_here)
+        return _find_strict_polymorphic_violation(inner, value, guarded_here, leaf)
 
     if isinstance(annotation, type) and issubclass(annotation, PolymorphicRoot):
-        # ``isinstance`` (not ``==``) so a value belonging to a *different* union
-        # arm is skipped; ``type(...) is not`` flags any strict subclass.
-        if (
-            not guarded
-            and isinstance(value, annotation)
-            and type(value) is not annotation
-        ):
-            return (annotation, value)
+        if not guarded:
+            offending_name = leaf(annotation, value)
+            if offending_name is not None:
+                return (annotation, offending_name)
         return None
 
     args = get_args(annotation)
@@ -859,7 +941,7 @@ def _find_strict_polymorphic_violation(
 
     if origin in (Union, types.UnionType):
         for arg in args:
-            found = _find_strict_polymorphic_violation(arg, value, False)
+            found = _find_strict_polymorphic_violation(arg, value, False, leaf)
             if found is not None:
                 return found
         return None
@@ -868,10 +950,10 @@ def _find_strict_polymorphic_violation(
     if isinstance(value, collections_abc.Mapping):
         key_ann, val_ann = args[0], args[-1]
         for key, val in value.items():
-            found = _find_strict_polymorphic_violation(key_ann, key, False)
+            found = _find_strict_polymorphic_violation(key_ann, key, False, leaf)
             if found is not None:
                 return found
-            found = _find_strict_polymorphic_violation(val_ann, val, False)
+            found = _find_strict_polymorphic_violation(val_ann, val, False, leaf)
             if found is not None:
                 return found
         return None
@@ -888,7 +970,7 @@ def _find_strict_polymorphic_violation(
         else:
             pairs = ((args[0], item) for item in items)
         for elem_ann, item in pairs:
-            found = _find_strict_polymorphic_violation(elem_ann, item, False)
+            found = _find_strict_polymorphic_violation(elem_ann, item, False, leaf)
             if found is not None:
                 return found
         return None

@@ -351,6 +351,27 @@ class _Dog(_Animal):
     bark_volume: int = 3
 
 
+# A registered (non-root) concrete class + subclass, used to exercise the
+# deserialize path: a *registered* strict type has a ``__type_id__`` to compare
+# an input dict's discriminator against.
+class _Vehicle(PolymorphicRoot):
+    pass
+
+
+class _Car(_Vehicle):
+    wheels: int = 4
+
+
+class _SportsCar(_Car):
+    spoiler: bool = True
+
+
+def _serialized(cls: type, **fields) -> dict:
+    """Build a discriminator-carrying payload (as ``model_dump`` would) for cls."""
+    tid = cls.__type_id__  # type: ignore[attr-defined]
+    return {NAMESPACE_KEY: tid.namespace, NAME_KEY: tid.name, "version": "", **fields}
+
+
 class TestStrictConcretePolymorphicField:
     """A bare *concrete* PolymorphicRoot field is a "strict" field: it means
     exactly that type. Passing a subclass instance would silently drop the
@@ -425,3 +446,70 @@ class TestStrictConcretePolymorphicField:
 
     def test_error_is_stardag_error(self):
         assert issubclass(StrictPolymorphicTypeError, StardagError)
+
+
+class TestStrictConcretePolymorphicDeserialize:
+    """Deserialize-path counterpart to strict-field enforcement: serialized data
+    (a discriminator-carrying dict) for a *subclass* at a strict concrete field
+    is rejected, instead of being silently coerced into the base type. Plain
+    dicts without a discriminator are still validated as the exact strict type.
+    """
+
+    def test_exact_type_discriminator_dict_accepted(self):
+        class Garage(PolymorphicRoot):
+            car: _Car
+
+        garage = Garage.model_validate({"car": _serialized(_Car, wheels=4)})
+        assert type(garage.car) is _Car
+
+    def test_plain_dict_without_discriminator_accepted(self):
+        class Garage(PolymorphicRoot):
+            car: _Car
+
+        garage = Garage.model_validate({"car": {"wheels": 6}})
+        assert type(garage.car) is _Car
+        assert garage.car.wheels == 6
+
+    def test_subclass_discriminator_dict_rejected(self):
+        class Garage(PolymorphicRoot):
+            car: _Car
+
+        with pytest.raises(StrictPolymorphicTypeError, match="SubClass"):
+            Garage.model_validate(
+                {"car": _serialized(_SportsCar, wheels=4, spoiler=True)}
+            )
+
+    def test_subclass_discriminator_in_list_rejected(self):
+        class Garage(PolymorphicRoot):
+            cars: list[_Car]
+
+        Garage.model_validate({"cars": [_serialized(_Car, wheels=4)]})  # exact OK
+        with pytest.raises(StrictPolymorphicTypeError):
+            Garage.model_validate(
+                {"cars": [_serialized(_Car), _serialized(_SportsCar, spoiler=True)]}
+            )
+
+    def test_subclass_discriminator_in_optional_rejected(self):
+        class Garage(PolymorphicRoot):
+            car: Optional[_Car] = None
+
+        Garage.model_validate({"car": None})
+        Garage.model_validate({"car": _serialized(_Car)})
+        with pytest.raises(StrictPolymorphicTypeError):
+            Garage.model_validate({"car": _serialized(_SportsCar)})
+
+    def test_family_root_strict_type_rejects_subclass_discriminator(self):
+        """A concrete *family root* (direct PolymorphicRoot child) is a valid
+        strict type but has no ``__type_id__`` — a subclass discriminator payload
+        must still be rejected, not silently coerced to the root."""
+
+        class Cage(PolymorphicRoot):
+            occupant: _Animal  # _Animal is a family root (unregistered)
+
+        # Plain dict without a discriminator is coerced to the exact root type.
+        cage = Cage.model_validate({"occupant": {"legs": 4}})
+        assert type(cage.occupant) is _Animal
+
+        # A discriminator payload for a subclass is rejected.
+        with pytest.raises(StrictPolymorphicTypeError, match="SubClass"):
+            Cage.model_validate({"occupant": _serialized(_Dog, legs=4, bark_volume=2)})

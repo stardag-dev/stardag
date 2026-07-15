@@ -4,6 +4,22 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.13.0] — 2026-07-16
+
+### SDK
+
+- **Strict (bare concrete) polymorphic fields now also reject subclass data on
+  the deserialize path.** v0.12.0 rejected a subclass _instance_ assigned to a
+  strict field; it now also rejects _serialized data_ — an input dict whose
+  `__namespace`/`__name` discriminator resolves to a subclass of the declared
+  strict type — instead of silently coercing it into the base type (dropping the
+  subclass's parameters). Plain dicts without a discriminator are unaffected
+  (validated as the exact strict type). **Note:** loading data that was already
+  lossily truncated into a strict field by a pre-0.12.0 version now raises
+  `StrictPolymorphicTypeError` rather than loading the degraded base type — the
+  correct "fail loud on corrupt data" behavior; switch the field to
+  `SubClass[...]` if it should accept subclasses.
+
 ## UI Only — 2026-07-15
 
 ### UI
