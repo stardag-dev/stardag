@@ -6,7 +6,10 @@ authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.8.2",
-    "stardag>=0.4.0",
+    # The modal/walkthrough example relies on
+    # StardagApp(stardag_api_key_secret=...) to inject registry credentials
+    # into every deployed function, which landed in stardag 0.10.2.
+    "stardag>=0.10.2",
 ]
 
 [project.optional-dependencies]

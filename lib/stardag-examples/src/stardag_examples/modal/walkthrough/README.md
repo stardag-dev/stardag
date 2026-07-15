@@ -48,6 +48,9 @@ Report
 
 ## Prerequisites
 
+- **stardag >= 0.10.2.** This example relies on
+  `StardagApp(stardag_api_key_secret=...)` (its default) to inject registry
+  credentials into every deployed function, which landed in 0.10.2.
 - A [Modal](https://modal.com/) account with credentials set up locally
   (`modal token new`).
 - Stardag Registry credentials in the calling process — an active stardag
