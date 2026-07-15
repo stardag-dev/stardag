@@ -151,18 +151,17 @@ class TestErrors:
         with pytest.raises(TaskRehydrationError, match="aliased"):
             task_from_registry_data(data)
 
-    def test_plain_task_annotation_fails_clearly(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """Nested task fields with plain (non-polymorphic) annotations can't
-        reconstruct — the identity check surfaces it with a pointer to
-        TaskLoads/SubClass instead of an opaque serialization error."""
-        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+    def test_plain_task_annotation_rejected_at_definition(self):
+        """A nested task field with a plain (non-polymorphic) annotation used to
+        only fail at rehydration; it is now rejected at class-construction time,
+        so the un-reconstructable payload can never be produced in the first
+        place (see NakedPolymorphicFieldError)."""
+        from stardag import NakedPolymorphicFieldError
 
-        dep = SyncOnlyTask(name="plain-dep")
-        root = SyncOnlyTask(name="plain-root", deps=(dep,))
+        with pytest.raises(NakedPolymorphicFieldError, match="SubClass"):
 
-        with pytest.raises(TaskRehydrationError, match="TaskLoads"):
-            task_from_registry_data(
-                root.model_dump(mode="json"), expected_task_id=root.id
-            )
+            class PlainDepTask(sd.Task[int]):
+                deps: tuple[sd.Task[int], ...] = ()
+
+                def run(self):
+                    self._save(1)

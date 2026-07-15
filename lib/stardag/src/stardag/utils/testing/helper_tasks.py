@@ -6,7 +6,7 @@ import asyncio
 import time
 from typing import Any
 
-from stardag import Task, auto_namespace
+from stardag import SubClass, Task, auto_namespace
 
 auto_namespace(__name__)
 
@@ -20,7 +20,7 @@ class SyncOnlyTask(Task[dict[str, Any]]):
     """Task with only sync run()."""
 
     name: str
-    deps: tuple[Task, ...] = ()
+    deps: tuple[SubClass[Task], ...] = ()
 
     def requires(self):
         return self.deps
@@ -33,7 +33,7 @@ class AsyncOnlyTask(Task[dict[str, Any]]):
     """Task with only async run_aio()."""
 
     name: str
-    deps: tuple[Task, ...] = ()
+    deps: tuple[SubClass[Task], ...] = ()
 
     def requires(self):
         return self.deps
@@ -48,7 +48,7 @@ class DualTask(Task[dict[str, Any]]):
 
     name: str
     prefer_async: bool = True
-    deps: tuple[Task, ...] = ()
+    deps: tuple[SubClass[Task], ...] = ()
 
     def requires(self):
         return self.deps
@@ -85,7 +85,7 @@ class SlowTask(Task[dict[str, Any]]):
 
     name: str
     delay: float = 0.1
-    deps: tuple[Task, ...] = ()
+    deps: tuple[SubClass[Task], ...] = ()
 
     def requires(self):
         return self.deps
@@ -122,7 +122,7 @@ class DiamondTask(Task[str]):
 
     name: str
     test_id: str  # Unique per test to isolate task IDs
-    deps: tuple[Task, ...] = ()
+    deps: tuple[SubClass[Task], ...] = ()
 
     def requires(self):
         return self.deps

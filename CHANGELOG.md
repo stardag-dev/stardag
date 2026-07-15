@@ -6,6 +6,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **Bare abstract task-typed fields are now rejected at class-definition time.**
+  A field annotated directly with an abstract polymorphic base (e.g.
+  `child: BaseTask`, `deps: list[Task[int]]`) rather than wrapping it in
+  `SubClass[...]` / `TaskLoads[...]` used to serialize by silently dropping
+  every subclass-specific parameter and then crash on load (the payload tried
+  to instantiate the abstract base directly). Such annotations now raise
+  `NakedPolymorphicFieldError` as soon as the class is defined, with a message
+  pointing at the correct polymorphic form. Concrete (non-abstract)
+  `PolymorphicRoot`/`Task` subclasses used as strict fields are unaffected.
+
 ### UI
 
 - **Task detail "Execution" section is now a hierarchical breadcrumb.** The

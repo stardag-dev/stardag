@@ -1,3 +1,5 @@
+import abc
+import inspect
 import logging
 import os
 import types
@@ -22,6 +24,7 @@ from pydantic import BaseModel, GetCoreSchemaHandler, SerializationInfo, Validat
 from pydantic_core import core_schema
 
 from stardag.base_model import StardagBaseModel
+from stardag.exceptions import StardagError
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +332,40 @@ def _is_stardag_abstract(cls: type) -> bool:
     return cls.__dict__.get("__stardag_abstract__", False) is True
 
 
+class NakedPolymorphicFieldError(StardagError):
+    """Raised at class-construction time for an unsafe polymorphic field annotation.
+
+    A field annotated directly with an *abstract* ``PolymorphicRoot`` subclass
+    (e.g. ``child: BaseTask``) rather than wrapping it in ``SubClass[...]`` /
+    ``Annotated[..., Polymorphic()]`` is a silent data-loss trap: serialization
+    keeps only the abstract base's fields (dropping every subclass-specific
+    parameter) and deserialization then fails trying to instantiate the abstract
+    base directly. This error rejects such annotations up front rather than
+    letting them corrupt persisted data.
+    """
+
+
+def _is_abstract_polymorphic(cls: type) -> bool:
+    """True if ``cls`` is a ``PolymorphicRoot`` subclass that cannot be safely
+    used as a *bare* field annotation because it is an abstract base.
+
+    Any value assigned to such a field is necessarily a concrete subclass whose
+    extra parameters would be silently dropped on serialization; on load the
+    framework would try to instantiate the abstract base and crash. Concrete
+    ``PolymorphicRoot`` subclasses are intentionally *allowed* as bare ("strict")
+    annotations and are therefore not considered abstract here.
+    """
+    # Resolve a parameterized generic alias (e.g. ``Task[int]``) to its origin
+    # (``Task``); the abstractness markers live on the origin class.
+    meta = getattr(cls, "__pydantic_generic_metadata__", None)
+    origin = (meta.get("origin") if meta else None) or cls
+    return (
+        inspect.isabstract(origin)
+        or _is_stardag_abstract(origin)
+        or abc.ABC in getattr(origin, "__bases__", ())
+    )
+
+
 _TPolymorphicRoot = TypeVar("_TPolymorphicRoot", bound="PolymorphicRoot")
 _TBaseModel = TypeVar("_TBaseModel", bound=StardagBaseModel)
 
@@ -422,6 +459,13 @@ class PolymorphicRoot(StardagBaseModel):
                     name_override=name_override,
                     namespace_override=namespace_override,
                 )
+
+        # Reject unsafe bare abstract-polymorphic field annotations at class
+        # construction time (see NakedPolymorphicFieldError). Skip parameterized
+        # generic aliases (e.g. ``Task[int]``) — they mirror the origin class's
+        # fields, which are validated when the origin itself is defined.
+        if not _is_parameterized_generic_alias(cls):
+            _validate_no_naked_polymorphic_fields(cls)
 
     def __class_getitem__(
         cls: Type[BaseModel],
@@ -630,6 +674,73 @@ class Polymorphic:
                 return_schema=core_schema.any_schema(),
             ),
         )
+
+
+def _find_naked_polymorphic(annotation: Any, guarded: bool) -> type | None:
+    """Return the first abstract ``PolymorphicRoot`` subclass reachable from
+    ``annotation`` that is *not* wrapped in ``Polymorphic()`` / ``SubClass[...]``,
+    or ``None`` if the annotation is safe.
+
+    ``guarded`` is True when the current position is directly wrapped by a
+    ``Polymorphic()`` annotation. The guard does not propagate through containers
+    (``list``, ``dict``, unions, ...): a ``Polymorphic()`` only applies to the
+    type it directly annotates, so recursing into container args resets it.
+    """
+    if get_origin(annotation) is Annotated:
+        args = get_args(annotation)
+        inner, extras = args[0], args[1:]
+        guarded_here = guarded or any(isinstance(e, Polymorphic) for e in extras)
+        return _find_naked_polymorphic(inner, guarded_here)
+
+    if isinstance(annotation, type) and issubclass(annotation, PolymorphicRoot):
+        if not guarded and _is_abstract_polymorphic(annotation):
+            return annotation
+        # Guarded, or a concrete "strict" annotation — both fine. Don't recurse
+        # into the model's own fields; those are validated on their own class.
+        return None
+
+    # Container / union / other generic: recurse into type args with the guard
+    # reset (a Polymorphic() cannot legally wrap a container).
+    for arg in get_args(annotation):
+        found = _find_naked_polymorphic(arg, False)
+        if found is not None:
+            return found
+    return None
+
+
+def _naked_polymorphic_field_message(
+    cls: type, field_name: str, offending: type
+) -> str:
+    offending_name = getattr(offending, "__name__", str(offending))
+    return (
+        f"Field '{field_name}' on '{cls.__name__}' is annotated with the abstract "
+        f"polymorphic type '{offending_name}' without polymorphic handling.\n\n"
+        f"A bare abstract-base annotation silently drops subclass-specific "
+        f"parameters when the model is serialized, and then fails to deserialize "
+        f"(it would try to instantiate the abstract base directly). Wrap the type "
+        f"with SubClass[...] (or Annotated[..., Polymorphic()]):\n\n"
+        f"    from stardag import SubClass\n\n"
+        f"    {field_name}: SubClass[{offending_name}]\n\n"
+        f"For a container field, wrap the inner type, e.g. "
+        f"'list[SubClass[{offending_name}]]' or "
+        f"'dict[str, SubClass[{offending_name}]]'."
+    )
+
+
+def _validate_no_naked_polymorphic_fields(cls: type["PolymorphicRoot"]) -> None:
+    """Raise ``NakedPolymorphicFieldError`` if any field of ``cls`` uses an
+    abstract ``PolymorphicRoot`` subclass as a bare (non-polymorphic) annotation.
+    """
+    for name, field in cls.model_fields.items():
+        # A top-level ``SubClass[X]`` lands here as annotation ``X`` plus a
+        # ``Polymorphic()`` in ``field.metadata``; treat that as guarding the
+        # field's annotation.
+        guarded = any(isinstance(m, Polymorphic) for m in field.metadata)
+        offending = _find_naked_polymorphic(field.annotation, guarded)
+        if offending is not None:
+            raise NakedPolymorphicFieldError(
+                _naked_polymorphic_field_message(cls, name, offending)
+            )
 
 
 class _SubClass:

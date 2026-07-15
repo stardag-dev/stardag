@@ -62,7 +62,7 @@ from stardag.exceptions import (
     StardagError,
     TokenExpiredError,
 )
-from stardag.polymorphic import Polymorphic, SubClass
+from stardag.polymorphic import NakedPolymorphicFieldError, Polymorphic, SubClass
 from stardag.registry import registry_provider
 from stardag.target import (
     DirectoryTarget,
@@ -108,6 +108,7 @@ __all__ = [
     "LoadableTask",
     "LoadValidator",
     "LocalFileTarget",
+    "NakedPolymorphicFieldError",
     "namespace",
     "Polymorphic",
     "registry_provider",
