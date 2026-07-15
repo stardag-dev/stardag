@@ -540,3 +540,94 @@ class TestAppAndFunctionIdResolution:
                 raise RuntimeError("cannot hydrate")
 
         assert await real(_Fn()) is None
+
+    async def test_app_id_omitted_on_timeout(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """A hung ``modal.App.lookup`` is bounded by the short id-lookup
+        timeout — it must not stall the caller; the id is omitted."""
+        import asyncio
+
+        from stardag.integration.modal import _app as modal_app_module
+
+        real = hermetic_modal_executor_metadata["get_modal_app_id_aio"]
+        monkeypatch.setattr(modal_app_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
+
+        async def _hang(name, environment_name=None):
+            await asyncio.sleep(10)
+            return SimpleNamespace(app_id="ap-never")
+
+        monkeypatch.setattr(
+            modal.App, "lookup", SimpleNamespace(aio=_hang), raising=False
+        )
+
+        assert await real("some-app", None) is None
+
+    async def test_function_id_omitted_on_timeout(
+        self, monkeypatch, hermetic_modal_executor_metadata
+    ):
+        """A hung ``Function.hydrate`` is bounded by the short id-lookup
+        timeout; the id is omitted rather than stalling the start."""
+        import asyncio
+
+        from stardag.integration.modal import _app as modal_app_module
+
+        real = hermetic_modal_executor_metadata["get_modal_function_id_aio"]
+        monkeypatch.setattr(modal_app_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
+
+        class _Fn:
+            def __init__(self):
+                self.object_id = "fu-never"
+                self.hydrate = SimpleNamespace(aio=self._hydrate)
+
+            async def _hydrate(self):
+                await asyncio.sleep(10)
+
+        assert await real(_Fn()) is None
+
+
+class TestFunctionIdCaching:
+    """Function-id resolution is cached per worker name — success *and*
+    failure — so a persistently broken/hung hydration is not re-paid on
+    every task start (the per-start re-pay the workspace-lookup fix
+    eliminated, now also for function ids)."""
+
+    async def test_resolved_function_id_cached_per_worker(self, monkeypatch):
+        from stardag.integration.modal import _app as modal_app_module
+
+        calls = {"n": 0}
+
+        async def _counting(function):
+            calls["n"] += 1
+            return "fu-counted"
+
+        monkeypatch.setattr(modal_app_module, "_get_modal_function_id_aio", _counting)
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+
+        await executor.submit_detached(_make_task())
+        await executor.submit_detached(_make_task())
+
+        assert calls["n"] == 1
+
+    async def test_failed_function_id_cached_per_worker(self, monkeypatch):
+        """A resolved-but-``None`` (failed hydration) is a resolution: it is
+        cached and not retried on the next start, and the key stays omitted."""
+        from stardag.integration.modal import _app as modal_app_module
+
+        calls = {"n": 0}
+
+        async def _failing(function):
+            calls["n"] += 1
+            return None
+
+        monkeypatch.setattr(modal_app_module, "_get_modal_function_id_aio", _failing)
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+
+        handle = await executor.submit_detached(_make_task())
+        await executor.submit_detached(_make_task())
+
+        assert calls["n"] == 1  # negative result cached, not retried
+        assert handle.executor_metadata is not None
+        assert "function_id" not in handle.executor_metadata

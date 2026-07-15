@@ -628,6 +628,14 @@ def _get_modal_environment() -> str | None:
     return modal_config.get("environment") or None
 
 
+# Upper bound (seconds) on the best-effort Modal id lookups performed on the
+# critical path before ``spawn``. Matches the 3 s deadline Modal's own
+# ``_lookup_workspace`` gRPC call uses: a *hung* (not merely refused) Modal
+# API must not stall the first task start beyond this cap. On timeout the id
+# is treated as an ordinary best-effort failure (key omitted, debug-logged).
+_MODAL_ID_LOOKUP_TIMEOUT_SECONDS = 3.0
+
+
 async def _get_modal_app_id_aio(
     app_name: str, environment_name: str | None
 ) -> str | None:
@@ -636,12 +644,24 @@ async def _get_modal_app_id_aio(
     Unlike the token workspace lookup, ``modal.App.lookup`` resolves both
     locally and *inside a Modal container* (worker/tick/build) — which is
     where task-level executor metadata is produced — so it needs no
-    deploy-baked env fallback. Never raises: on any failure the id is
-    omitted from the executor metadata and the failure logged at debug.
-    Resolution is cached by the once-resolved base executor metadata dict.
+    deploy-baked env fallback. Never raises: on any failure (including the
+    bounded-timeout expiry) the id is omitted from the executor metadata and
+    the failure logged at debug. Bounded by ``_MODAL_ID_LOOKUP_TIMEOUT_SECONDS``
+    so a hung Modal API cannot stall a task start. Resolution is cached by the
+    once-resolved base executor metadata dict.
+
+    Caveat: with ``environment_name=None`` the lookup resolves against the
+    *config-default* Modal environment. If the app is deployed to one
+    environment but local config defaults to another that happens to hold a
+    same-named app, the id (like the ``environment`` metadata key in that same
+    scenario) will be that of the wrong app. Pass the resolved environment to
+    avoid this.
     """
     try:
-        app = await modal.App.lookup.aio(app_name, environment_name=environment_name)
+        app = await asyncio.wait_for(
+            modal.App.lookup.aio(app_name, environment_name=environment_name),
+            timeout=_MODAL_ID_LOOKUP_TIMEOUT_SECONDS,
+        )
         return app.app_id
     except Exception as e:
         logger.debug(f"Modal app id lookup failed (metadata omitted): {e}")
@@ -653,10 +673,15 @@ async def _get_modal_function_id_aio(function: modal.Function) -> str | None:
 
     Hydrates the (lazy) ``modal.Function`` handle if needed and reads
     ``object_id``. ``hydrate`` is a no-op when already hydrated. Never
-    raises: on failure the id is omitted and the failure logged at debug.
+    raises: on failure (including the bounded-timeout expiry) the id is
+    omitted and the failure logged at debug. Bounded by
+    ``_MODAL_ID_LOOKUP_TIMEOUT_SECONDS`` so a hung Modal API cannot stall a
+    task start.
     """
     try:
-        await function.hydrate.aio()
+        await asyncio.wait_for(
+            function.hydrate.aio(), timeout=_MODAL_ID_LOOKUP_TIMEOUT_SECONDS
+        )
         return function.object_id
     except Exception as e:
         logger.debug(f"Modal function id resolution failed (metadata omitted): {e}")
@@ -739,6 +764,13 @@ class ModalTaskExecutor(TaskExecutorABC):
         # invoked on every ``submit`` so we memoize it per worker name to avoid
         # recreating the handle for every task.
         self._worker_functions: dict[str, modal.Function] = {}
+        # Cache of worker name -> resolved function id (``fu-…``), best-effort.
+        # A ``None`` value is a *resolved* negative (a failed/timed-out
+        # hydration) and is kept so a persistently failing lookup is not
+        # re-paid on every task start — membership, not truthiness, marks
+        # "resolved". Mirrors the once-resolved memoization of the base
+        # metadata dict (which likewise caches a missing app id).
+        self._worker_function_ids: dict[str, str | None] = {}
         # One-time (per executor) skew-visibility log; see reports_lifecycle.
         self._reports_lifecycle_logged = False
         # In-flight detached executions by task UUID, for explicit cancel().
@@ -803,10 +835,17 @@ class ModalTaskExecutor(TaskExecutorABC):
             metadata = {**base_metadata, "function_name": f"worker_{worker_name}"}
             # Function id (``fu-…``): per-worker, so it lives here alongside
             # the function name. Best-effort — hydrate the worker handle and
-            # read object_id; _get_modal_function_id_aio never raises.
-            function_id = await _get_modal_function_id_aio(
-                self._get_worker_function(worker_name)
-            )
+            # read object_id; _get_modal_function_id_aio never raises. Cached
+            # per worker name (success *and* failure): a resolved ``None`` is
+            # kept so a broken/hung hydration is not re-attempted on every
+            # start (membership marks "resolved", not truthiness).
+            if worker_name not in self._worker_function_ids:
+                self._worker_function_ids[
+                    worker_name
+                ] = await _get_modal_function_id_aio(
+                    self._get_worker_function(worker_name)
+                )
+            function_id = self._worker_function_ids[worker_name]
             if function_id:
                 metadata["function_id"] = function_id
             return metadata
