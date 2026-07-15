@@ -7,7 +7,11 @@ import type {
   EventType,
   ExecutorMetadata,
 } from "../types/task";
-import { modalAppUrl, modalFunctionCallUrl } from "../utils/modalLinks";
+import {
+  isModalMetadata,
+  modalAppUrl,
+  modalFunctionCallUrl,
+} from "../utils/modalLinks";
 import { ArtifactList, ExpandButton } from "./ArtifactViewer";
 import { ExecutorBadge } from "./ExecutorBadge";
 import { FullscreenModal } from "./FullscreenModal";
@@ -66,6 +70,12 @@ function CopyButton({ text, className = "" }: { text: string; className?: string
 // utils/modalLinks.ts), so surfacing the raw ids lets a user reconstruct or
 // paste a reference by hand even if the dashboard URL format drifts. Only
 // fields that are present are rendered; renders nothing when none are.
+//
+// Gated to Modal executions: this block's labels ("App name", "Function ID",
+// …) are Modal-specific, so it renders only for modal metadata, for the
+// legacy kind-less case (treated as modal for back-compat), and for the
+// executorRef-only case (no metadata at all). It never renders Modal-labeled
+// fields for an explicitly non-modal kind (e.g. "k8s").
 export function ModalExecutionDetails({
   metadata,
   executorRef,
@@ -74,6 +84,8 @@ export function ModalExecutionDetails({
   executorRef?: string | null;
 }) {
   const [open, setOpen] = useState(false);
+
+  const isModal = !metadata || isModalMetadata(metadata);
 
   const fields: { label: string; value: string }[] = [];
   const push = (label: string, value: unknown) => {
@@ -90,7 +102,7 @@ export function ModalExecutionDetails({
   push("Function ID", metadata?.function_id);
   push("Function call ID", executorRef);
 
-  if (fields.length === 0) return null;
+  if (!isModal || fields.length === 0) return null;
 
   return (
     <div>

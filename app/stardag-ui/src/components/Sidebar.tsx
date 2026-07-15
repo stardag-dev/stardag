@@ -138,7 +138,10 @@ export function Sidebar({
                   ? "bg-blue-50 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300"
                   : "text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
               } ${collapsed ? "justify-center" : ""}`}
-              title={collapsed ? item.label : undefined}
+              // Always carry the full label: it's the only affordance for a
+              // collapsed item, and in the expanded sidebar it keeps a label
+              // that ellipsizes under `truncate` readable on hover (see #174).
+              title={item.label}
             >
               <span
                 className={`flex-shrink-0 ${

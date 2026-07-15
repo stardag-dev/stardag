@@ -8,7 +8,10 @@ import type { ExecutorMetadata } from "../types/task";
 // deep link here is best-effort resilience, not a contract.
 //
 // Patterns:
-//   app page (plain):
+//   app page (stable / stop+redeploy-proof — addresses the app by its id):
+//     https://modal.com/apps/{workspace}/{environment}/{app_id}
+//   app page (deployed-name form — only resolves while that app version is
+//   live, but survives when we lack the app id):
 //     https://modal.com/apps/{workspace}/{environment}/deployed/{app_name}
 //   function call (stable / stop+redeploy-proof — addresses the app by its
 //   id, so it keeps resolving after the app version is stopped/redeployed):
@@ -30,25 +33,37 @@ function nonEmptyString(value: unknown): string | null {
 // True unless the metadata explicitly records a non-modal executor kind.
 // `kind` may be absent on older SDKs, so we only bail when it's present and
 // something other than "modal".
-function isModalMetadata(metadata: ExecutorMetadata): boolean {
+export function isModalMetadata(metadata: ExecutorMetadata): boolean {
   return metadata.kind === undefined || metadata.kind === "modal";
 }
 
-// URL of the deployed Modal app's dashboard page, or null if the
-// metadata doesn't identify a Modal app (missing workspace/app_name, or
-// an explicitly non-modal kind).
+// URL of the Modal app's dashboard page, or null if the metadata doesn't
+// identify a Modal app (missing workspace + app id/name, or an explicitly
+// non-modal kind).
+//
+// Prefers the stable app-id form (survives an app stop/redeploy) when
+// `app_id` is present, and degrades to the deployed-name form (resolves
+// only while that app version is live) for older data that lacks it.
 export function modalAppUrl(
   metadata: ExecutorMetadata | null | undefined,
 ): string | null {
   if (!metadata) return null;
   if (!isModalMetadata(metadata)) return null;
   const workspace = nonEmptyString(metadata.workspace);
-  const appName = nonEmptyString(metadata.app_name);
-  if (!workspace || !appName) return null;
+  if (!workspace) return null;
   const environment = nonEmptyString(metadata.environment) ?? "main";
-  return `https://modal.com/apps/${encodeURIComponent(workspace)}/${encodeURIComponent(
-    environment,
-  )}/deployed/${encodeURIComponent(appName)}`;
+  const appId = nonEmptyString(metadata.app_id);
+  const appName = nonEmptyString(metadata.app_name);
+  const base = `https://modal.com/apps/${encodeURIComponent(
+    workspace,
+  )}/${encodeURIComponent(environment)}`;
+  if (appId) {
+    return `${base}/${encodeURIComponent(appId)}`;
+  }
+  if (appName) {
+    return `${base}/deployed/${encodeURIComponent(appName)}`;
+  }
+  return null;
 }
 
 // Shared query string for the function-call deep links (both the app-id and
@@ -68,9 +83,10 @@ function functionCallQuery(functionId: string, fcId: string): string {
 //      (survives an app stop/redeploy).
 //   2. workspace + app_name + function_id + fcId → deployed-name URL
 //      (resolves only while that app version is live).
-//   3. otherwise → the plain app-page link (or null if even that can't be
-//      built), so old data without the new ids still gets a working,
-//      non-dead link.
+//   3. otherwise → the plain app-page link (stable app-id form when we
+//      have app_id but no function_id, else the deployed-name form, else
+//      null), so old/partial data still gets the most resilient link the
+//      identifiers allow rather than a dead one.
 export function modalFunctionCallUrl(
   metadata: ExecutorMetadata | null | undefined,
   functionCallId: string | null | undefined,

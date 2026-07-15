@@ -61,6 +61,28 @@ describe("ModalExecutionDetails", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("renders nothing for an explicitly non-modal kind", () => {
+    // The block's labels ("App name", "Function ID", …) are Modal-specific,
+    // so it must not surface identifiers from a non-modal executor as Modal
+    // fields.
+    const { container } = render(
+      <ModalExecutionDetails
+        metadata={{ kind: "k8s", app_name: "some-pod", function_id: "fu-x" }}
+        executorRef="ref-1"
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("renders for kind-less metadata (legacy, treated as modal)", async () => {
+    const user = userEvent.setup();
+    render(
+      <ModalExecutionDetails metadata={{ app_name: "my-app" }} executorRef={null} />,
+    );
+    await user.click(screen.getByRole("button", { name: /more details/i }));
+    expect(screen.getByText("my-app")).toBeInTheDocument();
+  });
+
   it("renders the function call id even without any metadata", async () => {
     const user = userEvent.setup();
     render(<ModalExecutionDetails metadata={null} executorRef="fc-789" />);

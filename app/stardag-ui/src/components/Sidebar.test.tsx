@@ -19,6 +19,16 @@ describe("Sidebar", () => {
     }
   });
 
+  it("gives each nav item a title tooltip carrying the full label", () => {
+    // With single-line `truncate`, an ellipsized label must still be
+    // readable on hover — so every item carries `title={label}` (see #174).
+    render(<Sidebar activeItem="home" onNavigate={vi.fn()} />);
+    for (const label of ["Home", "Task Explorer", "Concurrency", "Settings"]) {
+      const button = screen.getByRole("button", { name: label });
+      expect(button).toHaveAttribute("title", label);
+    }
+  });
+
   it("hides labels when collapsed", () => {
     render(<Sidebar activeItem="home" onNavigate={vi.fn()} collapsed />);
     expect(screen.queryByText("Concurrency")).not.toBeInTheDocument();
