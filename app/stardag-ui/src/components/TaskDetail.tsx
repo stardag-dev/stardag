@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { cancelTask, fetchTaskArtifacts, fetchTaskEvents } from "../api/tasks";
 import type {
   Task,
@@ -10,7 +10,9 @@ import type {
 import {
   isModalMetadata,
   modalAppUrl,
+  modalEnvironmentUrl,
   modalFunctionCallUrl,
+  modalFunctionUrl,
 } from "../utils/modalLinks";
 import { ArtifactList, ExpandButton } from "./ArtifactViewer";
 import { ExecutorBadge } from "./ExecutorBadge";
@@ -65,15 +67,139 @@ function CopyButton({ text, className = "" }: { text: string; className?: string
   );
 }
 
-// Collapsible "more details" block listing every captured Modal identifier
-// verbatim, each click-to-copy. Modal gives no URL-format guarantee (see
-// utils/modalLinks.ts), so surfacing the raw ids lets a user reconstruct or
-// paste a reference by hand even if the dashboard URL format drifts. Only
-// fields that are present are rendered; renders nothing when none are.
+// Hierarchical breadcrumb for a Modal execution. Four top-level segments:
+//   [workspace / environment] / app_name / function_name / <call-ref>
+// The first segment combines workspace + environment (a bare workspace URL
+// is misleading — see modalEnvironmentUrl), rendered as one link to the
+// environment page. Absent levels are omitted (the trail starts at the first
+// level actually recorded). Every segment is a best-effort deep link into the
+// corresponding Modal dashboard level; when the URL for a level can't be
+// built (missing id — see utils/modalLinks.ts) the segment renders as plain
+// text instead, but the label still shows. The last segment (the fc-… call
+// ref) also gets a click-to-copy button.
 //
-// Gated to Modal executions: this block's labels ("App name", "Function ID",
-// …) are Modal-specific, so it renders only for modal metadata, for the
-// legacy kind-less case (treated as modal for back-compat), and for the
+// Wrapping: each top-level segment plus its trailing " /" separator is one
+// `whitespace-nowrap` unit, and the only breakable whitespace sits *between*
+// units — so a line can wrap only right after a top-level slash, never
+// mid-segment and never before the slash (the workspace/environment pair
+// stays glued as one unit). The container uses `pl-4 -indent-4` for a hanging
+// indent (first line flush, wrapped continuation lines indented ~1rem). The
+// anchors/segments stay `display:inline` so the block's text-indent applies
+// to them; only the trailing copy button (on the last line) is inline-block.
+//
+// Gated to Modal executions (reuses isModalMetadata): renders for modal
+// metadata, the legacy kind-less case (treated as modal), and the
+// executorRef-only case (no metadata). Renders nothing for an explicitly
+// non-modal kind, or when there is genuinely nothing to show.
+export function ModalExecutionBreadcrumb({
+  metadata,
+  executorRef,
+}: {
+  metadata?: ExecutorMetadata | null;
+  executorRef?: string | null;
+}) {
+  const isModal = !metadata || isModalMetadata(metadata);
+  if (!isModal) return null;
+
+  // A segment's label is one or more parts joined by a muted " / " (only the
+  // workspace/environment segment has two parts); the whole label links to
+  // `url` when present, else renders as plain text.
+  type Segment = { key: string; parts: string[]; url: string | null; copy?: boolean };
+  const segments: Segment[] = [];
+
+  const nonEmpty = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+
+  // Combined workspace / environment segment. Links to the environment page
+  // only when both are present; with just one, that half is plain text (a
+  // workspace-only URL would be misleading).
+  const workspace = nonEmpty(metadata?.workspace);
+  const environment = nonEmpty(metadata?.environment);
+  if (workspace && environment) {
+    segments.push({
+      key: "workspace_env",
+      parts: [workspace, environment],
+      url: modalEnvironmentUrl(metadata),
+    });
+  } else if (environment) {
+    segments.push({ key: "workspace_env", parts: [environment], url: null });
+  } else if (workspace) {
+    segments.push({ key: "workspace_env", parts: [workspace], url: null });
+  }
+
+  const push = (key: string, label: unknown, url: string | null, copy = false) => {
+    const value = nonEmpty(label);
+    if (value) segments.push({ key, parts: [value], url, copy });
+  };
+  push("app_name", metadata?.app_name, modalAppUrl(metadata));
+  push("function_name", metadata?.function_name, modalFunctionUrl(metadata));
+  // Link the call ref ONLY to a genuine call-level URL. modalFunctionCallUrl
+  // falls back to the app page when function_id is missing (other callers,
+  // e.g. the "View on Modal" links, rely on that), but here a clickable call
+  // ref must never navigate to a coarser level — so we gate on
+  // modalFunctionUrl (function_id + resolvable app URL) being non-null and
+  // otherwise render the ref as plain text (the copy button stays either way).
+  const callUrl = modalFunctionUrl(metadata)
+    ? modalFunctionCallUrl(metadata, executorRef)
+    : null;
+  push("call_ref", executorRef, callUrl, true);
+
+  if (segments.length === 0) return null;
+
+  const sep = <span className="text-gray-400 dark:text-gray-500"> / </span>;
+
+  return (
+    <div className="pl-4 -indent-4 font-mono leading-relaxed">
+      {segments.map((seg, i) => {
+        const isLast = i === segments.length - 1;
+        const label = seg.parts.map((part, j) => (
+          <Fragment key={j}>
+            {j > 0 && sep}
+            {part}
+          </Fragment>
+        ));
+        return (
+          <Fragment key={seg.key}>
+            {/* Segment + its trailing " /" are one non-breaking unit. */}
+            <span className="whitespace-nowrap">
+              {seg.url ? (
+                <a
+                  href={seg.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-blue-600 hover:underline dark:text-blue-400"
+                >
+                  {label}
+                </a>
+              ) : (
+                <span>{label}</span>
+              )}
+              {seg.copy && (
+                <CopyButton text={seg.parts[0]} className="ml-0.5 align-middle" />
+              )}
+              {!isLast && <span className="text-gray-400 dark:text-gray-500"> /</span>}
+            </span>
+            {/* The only breakable whitespace: sits between units. */}
+            {!isLast && " "}
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+// Collapsible "more details" block: a 2-column table of the captured Modal
+// identifiers verbatim, each value click-to-copy. Rows are grouped top-down —
+// human-readable names first (Workspace, Environment, App, Function), then a
+// hairline divider, then the raw ids (App ID, Function ID, Call ref). Modal
+// gives no URL-format guarantee (see utils/modalLinks.ts), so surfacing the
+// raw ids lets a user reconstruct or paste a reference by hand even if the
+// dashboard URL format drifts. Only present fields render; the divider shows
+// only when both groups are non-empty; renders nothing when none are.
+//
+// Gated to Modal executions: this block's labels ("App", "Function ID", …)
+// are Modal-specific, so it renders only for modal metadata, for the legacy
+// kind-less case (treated as modal for back-compat), and for the
 // executorRef-only case (no metadata at all). It never renders Modal-labeled
 // fields for an explicitly non-modal kind (e.g. "k8s").
 export function ModalExecutionDetails({
@@ -87,22 +213,46 @@ export function ModalExecutionDetails({
 
   const isModal = !metadata || isModalMetadata(metadata);
 
-  const fields: { label: string; value: string }[] = [];
-  const push = (label: string, value: unknown) => {
-    if (typeof value === "string" && value.length > 0) {
-      fields.push({ label, value });
+  const collect = (entries: [string, unknown][]) => {
+    const rows: { label: string; value: string }[] = [];
+    for (const [label, value] of entries) {
+      if (typeof value === "string" && value.length > 0) {
+        rows.push({ label, value });
+      }
     }
+    return rows;
   };
-  push("Kind", metadata?.kind);
-  push("App name", metadata?.app_name);
-  push("Workspace", metadata?.workspace);
-  push("Environment", metadata?.environment);
-  push("Function name", metadata?.function_name);
-  push("App ID", metadata?.app_id);
-  push("Function ID", metadata?.function_id);
-  push("Function call ID", executorRef);
+  // Human-readable names first, then the raw object ids.
+  const names = collect([
+    ["Workspace", metadata?.workspace],
+    ["Environment", metadata?.environment],
+    ["App", metadata?.app_name],
+    ["Function", metadata?.function_name],
+  ]);
+  const ids = collect([
+    ["App ID", metadata?.app_id],
+    ["Function ID", metadata?.function_id],
+    ["Call ref", executorRef],
+  ]);
 
-  if (!isModal || fields.length === 0) return null;
+  if (!isModal || (names.length === 0 && ids.length === 0)) return null;
+
+  const renderRow = (field: { label: string; value: string }) => (
+    <tr key={field.label}>
+      <th
+        scope="row"
+        className="whitespace-nowrap py-0.5 pr-3 align-top font-normal text-gray-500 dark:text-gray-400"
+      >
+        {field.label}
+      </th>
+      <td className="py-0.5 align-top">
+        <span className="flex items-start gap-1">
+          <span className="break-all font-mono">{field.value}</span>
+          <CopyButton text={field.value} className="flex-shrink-0" />
+        </span>
+      </td>
+    </tr>
+  );
 
   return (
     <div>
@@ -128,17 +278,19 @@ export function ModalExecutionDetails({
         {open ? "Hide details" : "More details"}
       </button>
       {open && (
-        <dl className="mt-1 space-y-1">
-          {fields.map((field) => (
-            <div key={field.label} className="flex items-center gap-1">
-              <dt className="text-gray-500 dark:text-gray-400">{field.label}:</dt>
-              <dd className="truncate font-mono" title={field.value}>
-                {field.value}
-              </dd>
-              <CopyButton text={field.value} className="flex-shrink-0" />
-            </div>
-          ))}
-        </dl>
+        <table className="mt-1 w-full text-left align-top">
+          <tbody>
+            {names.map(renderRow)}
+            {names.length > 0 && ids.length > 0 && (
+              <tr aria-hidden="true">
+                <td colSpan={2} className="py-1">
+                  <hr className="border-gray-200 dark:border-gray-700" />
+                </td>
+              </tr>
+            )}
+            {ids.map(renderRow)}
+          </tbody>
+        </table>
       )}
     </div>
   );
@@ -394,85 +546,16 @@ export function TaskDetail({
             <label className="block text-sm font-medium text-gray-500 dark:text-gray-400">
               Execution
             </label>
-            <div className="mt-1 space-y-1 text-sm text-gray-900 dark:text-gray-100">
+            <div className="mt-1 space-y-2 text-sm text-gray-900 dark:text-gray-100">
               {task.latest_executor && (
                 <div className="flex items-center gap-2">
                   <ExecutorBadge executor={task.latest_executor} />
                 </div>
               )}
-              {task.latest_executor_metadata?.app_name && (
-                <div className="flex items-center gap-1">
-                  <span className="text-gray-500 dark:text-gray-400">App:</span>
-                  {(() => {
-                    const appUrl = modalAppUrl(task.latest_executor_metadata);
-                    const appName = task.latest_executor_metadata?.app_name;
-                    return appUrl ? (
-                      <a
-                        href={appUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-600 hover:underline dark:text-blue-400"
-                        title="Open the Modal app dashboard"
-                      >
-                        {appName}
-                      </a>
-                    ) : (
-                      <span>{appName}</span>
-                    );
-                  })()}
-                </div>
-              )}
-              {task.latest_executor_metadata?.function_name && (
-                <div className="flex items-center gap-1">
-                  <span className="text-gray-500 dark:text-gray-400">Function:</span>
-                  <span className="font-mono">
-                    {task.latest_executor_metadata.function_name}
-                  </span>
-                </div>
-              )}
-              {task.latest_executor_ref && (
-                <div className="flex items-center gap-1">
-                  <span className="text-gray-500 dark:text-gray-400">Call ref:</span>
-                  {(() => {
-                    const callUrl = modalFunctionCallUrl(
-                      task.latest_executor_metadata,
-                      task.latest_executor_ref,
-                    );
-                    return callUrl ? (
-                      <a
-                        href={callUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="truncate font-mono text-blue-600 hover:underline dark:text-blue-400"
-                        title="Open the function call in the Modal dashboard"
-                      >
-                        {task.latest_executor_ref}
-                      </a>
-                    ) : (
-                      <span className="truncate font-mono">
-                        {task.latest_executor_ref}
-                      </span>
-                    );
-                  })()}
-                  <CopyButton
-                    text={task.latest_executor_ref}
-                    className="flex-shrink-0"
-                  />
-                </div>
-              )}
-              {(task.latest_executor_metadata?.workspace ||
-                task.latest_executor_metadata?.environment) && (
-                <div className="flex items-center gap-1">
-                  <span className="text-gray-500 dark:text-gray-400">
-                    Workspace / env:
-                  </span>
-                  <span>
-                    {task.latest_executor_metadata?.workspace ?? "—"}
-                    {" / "}
-                    {task.latest_executor_metadata?.environment ?? "—"}
-                  </span>
-                </div>
-              )}
+              <ModalExecutionBreadcrumb
+                metadata={task.latest_executor_metadata}
+                executorRef={task.latest_executor_ref}
+              />
               <ModalExecutionDetails
                 metadata={task.latest_executor_metadata}
                 executorRef={task.latest_executor_ref}

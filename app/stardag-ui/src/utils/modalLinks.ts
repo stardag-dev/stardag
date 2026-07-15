@@ -66,6 +66,42 @@ export function modalAppUrl(
   return null;
 }
 
+// URL of the Modal workspace+environment apps page, or null when either the
+// workspace or the environment is missing (or the executor is non-modal).
+// Unlike modalAppUrl this does NOT fall back to the "main" environment: the
+// breadcrumb segment only links when an environment was actually recorded.
+//
+// There is deliberately no workspace-only builder: a bare
+// `modal.com/apps/{workspace}` resolves to whichever environment was "latest
+// active", which is misleading — the coarsest addressable level is the
+// workspace+environment pair.
+export function modalEnvironmentUrl(
+  metadata: ExecutorMetadata | null | undefined,
+): string | null {
+  if (!metadata || !isModalMetadata(metadata)) return null;
+  const workspace = nonEmptyString(metadata.workspace);
+  const environment = nonEmptyString(metadata.environment);
+  if (!workspace || !environment) return null;
+  return `https://modal.com/apps/${encodeURIComponent(workspace)}/${encodeURIComponent(
+    environment,
+  )}`;
+}
+
+// URL scoped to a specific Modal function within its app dashboard, or null
+// when there's no function_id or no resolvable app URL. Reuses modalAppUrl
+// for the app-addressing part (stable app-id form when available, else the
+// deployed-name form), then narrows to the function via query params.
+export function modalFunctionUrl(
+  metadata: ExecutorMetadata | null | undefined,
+): string | null {
+  if (!metadata) return null;
+  const functionId = nonEmptyString(metadata.function_id);
+  if (!functionId) return null;
+  const appUrl = modalAppUrl(metadata);
+  if (!appUrl) return null;
+  return `${appUrl}?activeTab=functions&functionId=${encodeURIComponent(functionId)}`;
+}
+
 // Shared query string for the function-call deep links (both the app-id and
 // the deployed-name forms use the same params).
 function functionCallQuery(functionId: string, fcId: string): string {

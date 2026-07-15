@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { modalAppUrl, modalFunctionCallUrl } from "./modalLinks";
+import {
+  modalAppUrl,
+  modalEnvironmentUrl,
+  modalFunctionCallUrl,
+  modalFunctionUrl,
+} from "./modalLinks";
 
 const fullMetadata = {
   kind: "modal",
@@ -89,6 +94,82 @@ describe("modalAppUrl", () => {
         environment: "env 2",
       }),
     ).toBe("https://modal.com/apps/ws%231/env%202/deployed/my%20app%2Fx");
+  });
+});
+
+describe("modalEnvironmentUrl", () => {
+  it("builds the workspace+environment apps URL", () => {
+    expect(modalEnvironmentUrl(fullMetadata)).toBe(
+      "https://modal.com/apps/my-workspace/staging",
+    );
+  });
+
+  it("returns null when workspace is missing", () => {
+    expect(modalEnvironmentUrl(withoutKey("workspace"))).toBeNull();
+  });
+
+  it("returns null when environment is missing (no 'main' fallback here)", () => {
+    // Unlike modalAppUrl, the breadcrumb env segment only links when an
+    // environment was actually recorded.
+    expect(modalEnvironmentUrl(withoutKey("environment"))).toBeNull();
+  });
+
+  it("returns null for a non-modal kind", () => {
+    expect(modalEnvironmentUrl({ ...fullMetadata, kind: "k8s" })).toBeNull();
+  });
+
+  it("URL-encodes both segments", () => {
+    expect(
+      modalEnvironmentUrl({
+        kind: "modal",
+        workspace: "ws#1",
+        environment: "env 2/a",
+      }),
+    ).toBe("https://modal.com/apps/ws%231/env%202%2Fa");
+  });
+});
+
+describe("modalFunctionUrl", () => {
+  it("builds the stable app-id URL scoped to the function", () => {
+    expect(modalFunctionUrl(fullMetadata)).toBe(
+      "https://modal.com/apps/my-workspace/staging/ap-123" +
+        "?activeTab=functions&functionId=fu-456",
+    );
+  });
+
+  it("falls back to the deployed-name app URL when app_id is missing", () => {
+    expect(modalFunctionUrl(withoutKey("app_id"))).toBe(
+      "https://modal.com/apps/my-workspace/staging/deployed/my-app" +
+        "?activeTab=functions&functionId=fu-456",
+    );
+  });
+
+  it("returns null when function_id is missing", () => {
+    expect(modalFunctionUrl(withoutKey("function_id"))).toBeNull();
+  });
+
+  it("returns null when no app URL can be built (no workspace)", () => {
+    expect(modalFunctionUrl(withoutKey("workspace"))).toBeNull();
+  });
+
+  it("returns null for a non-modal kind", () => {
+    // modalAppUrl bails on non-modal kinds, so no app URL → null.
+    expect(modalFunctionUrl({ ...fullMetadata, kind: "k8s" })).toBeNull();
+  });
+
+  it("URL-encodes the function id query param", () => {
+    expect(
+      modalFunctionUrl({
+        kind: "modal",
+        workspace: "ws#1",
+        environment: "env 2",
+        app_id: "ap-1",
+        function_id: "fu 3&4",
+      }),
+    ).toBe(
+      "https://modal.com/apps/ws%231/env%202/ap-1" +
+        "?activeTab=functions&functionId=fu%203%264",
+    );
   });
 });
 

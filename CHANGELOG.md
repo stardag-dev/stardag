@@ -4,6 +4,22 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### UI
+
+- **Task detail "Execution" section is now a hierarchical breadcrumb.** The
+  previous flat label/value rows (App, Function, Call ref, Workspace / env)
+  are replaced by a breadcrumb trail: `workspace / environment` (one link to
+  the environment) then `app_name`, `function_name`, and the call ref. Each
+  present level is a best-effort deep link into the corresponding Modal
+  dashboard page (opening in a new tab), falling back to plain text when the
+  ids for that level are absent; absent levels are omitted so the trail
+  starts at the first level actually recorded. The call ref keeps its
+  click-to-copy button. The collapsible "More details" block is now a
+  2-column table — human-readable names, a divider, then the raw ids — each
+  value click-to-copy.
+
 ## [0.11.0] — 2026-07-15
 
 ### SDK
