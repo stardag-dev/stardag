@@ -50,6 +50,8 @@ const holder = {
     kind: "modal",
     app_name: "my-app",
     workspace: "my-workspace",
+    app_id: "ap-123",
+    function_id: "fu-456",
   },
 };
 
@@ -160,7 +162,8 @@ describe("ConcurrencyLimits", () => {
     expect(screen.getByText("⚡ Modal")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "View on Modal" })).toHaveAttribute(
       "href",
-      "https://modal.com/apps/my-workspace/main/deployed/my-app?functionCallId=fc-123",
+      "https://modal.com/apps/my-workspace/main/ap-123" +
+        "?activeTab=functions&functionId=fu-456&functionSection=calls&fcId=fc-123",
     );
 
     await user.click(screen.getByRole("button", { name: "Evict" }));
