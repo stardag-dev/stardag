@@ -226,9 +226,11 @@ class TestUISidebarNavigation:
         """Test that Task Explorer navigation works."""
         self._go_to_home(logged_in_page, docker_services)
 
-        task_explorer_btn = logged_in_page.get_by_text("Task Explorer").or_(
-            logged_in_page.get_by_title("Task Explorer")
-        )
+        # The nav button carries both its label text and a matching `title`
+        # tooltip, so a text/title union would double-match; the button role
+        # (accessible name from label or title) resolves it in either the
+        # expanded or collapsed sidebar.
+        task_explorer_btn = logged_in_page.get_by_role("button", name="Task Explorer")
 
         if task_explorer_btn.is_visible():
             task_explorer_btn.click()
@@ -253,9 +255,10 @@ class TestUITaskExplorer:
             state="visible", timeout=10000
         )
 
-        task_explorer_btn = page.get_by_text("Task Explorer").or_(
-            page.get_by_title("Task Explorer")
-        )
+        # Button role (accessible name from label or title) resolves cleanly;
+        # a text/title union double-matches now that the nav label also has a
+        # matching `title` tooltip.
+        task_explorer_btn = page.get_by_role("button", name="Task Explorer")
         task_explorer_btn.click()
         page.wait_for_load_state("networkidle")
 
@@ -388,9 +391,10 @@ class TestUIDAGPanel:
             state="visible", timeout=10000
         )
 
-        task_explorer_btn = page.get_by_text("Task Explorer").or_(
-            page.get_by_title("Task Explorer")
-        )
+        # Button role (accessible name from label or title) resolves cleanly;
+        # a text/title union double-matches now that the nav label also has a
+        # matching `title` tooltip.
+        task_explorer_btn = page.get_by_role("button", name="Task Explorer")
         task_explorer_btn.click()
         page.wait_for_load_state("networkidle")
         # "Task Explorer" appears in breadcrumb nav (header span, not h1)
