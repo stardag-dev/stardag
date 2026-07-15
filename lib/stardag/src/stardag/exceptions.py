@@ -148,6 +148,21 @@ class NotFoundError(APIError):
         super().__init__(message, status_code=404, detail=detail)
 
 
+def is_missing_route_error(err: "NotFoundError") -> bool:
+    """Distinguish FastAPI's default "missing route" 404 from app-level 404s.
+
+    FastAPI serves unknown paths as ``{"detail": "Not Found"}``. Any 404
+    raised inside an endpoint (``raise HTTPException(status_code=404,
+    detail=...)``) carries a more specific detail string (e.g.
+    ``"Build not found"``), so checking the exact ``"Not Found"`` literal is
+    a reliable way to tell "endpoint doesn't exist on this server" apart from
+    "this particular resource doesn't exist". Used to convert a genuine
+    missing-endpoint 404 into a clear "server too old" error without
+    misreporting a legitimate resource-level 404.
+    """
+    return getattr(err, "detail", None) == "Not Found"
+
+
 class RateLimitError(APIError):
     """Per-minute rate limit exceeded (retryable).
 

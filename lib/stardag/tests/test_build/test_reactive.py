@@ -70,6 +70,11 @@ class FakeReactiveRegistry(NoOpRegistry):
         super().__init__()
         self.root_task_ids = root_task_ids
         self.auto_complete = auto_complete
+        # The reactive marker/owner, surfaced on the frontier. Presence is
+        # the marker (defaults to a reactive build); tests set it to None to
+        # simulate a non-reactive build.
+        self.reactive_app_name: str | None = "test-app"
+        self.reactive_tick_kwargs: dict | None = {}
         self.statuses: dict[str, str] = {}
         self.upstreams: dict[str, set[str]] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
@@ -255,6 +260,14 @@ class FakeReactiveRegistry(NoOpRegistry):
                 skipped.append(tid)
         return skipped
 
+    async def build_set_reactive_meta_aio(
+        self, build_id, *, app_name, tick_kwargs=None
+    ):
+        self.calls.append(("set_reactive_meta", app_name))
+        self.reactive_app_name = app_name
+        if tick_kwargs is not None:
+            self.reactive_tick_kwargs = tick_kwargs
+
     async def build_notify_aio(self, build_id):
         self.needs_tick = True
 
@@ -295,6 +308,8 @@ class FakeReactiveRegistry(NoOpRegistry):
             running=[
                 ref(tid) for tid, status in self.statuses.items() if status == "running"
             ],
+            reactive_app_name=self.reactive_app_name,
+            reactive_tick_kwargs=self.reactive_tick_kwargs,
         )
 
 
@@ -376,18 +391,15 @@ class FakeTickExecutor(TaskExecutorABC):
 
 
 class InMemoryTaskStore(BuildTaskStore):
-    """BuildTaskStore on a dict — no target roots needed in engine tests."""
+    """BuildTaskStore on a dict — no target roots needed in engine tests.
 
-    def __init__(self, build_id: UUID, reactive: bool = True):
+    Pickle-only now: the reactive marker/owner/config live in the registry
+    (see ``FakeReactiveRegistry.reactive_meta``), not the store.
+    """
+
+    def __init__(self, build_id: UUID):
         super().__init__(build_id)
-        self._meta: dict | None = {"reactive": True} if reactive else None
         self._tasks: dict[str, BaseTask] = {}
-
-    def write_meta(self, meta):
-        self._meta = meta
-
-    def read_meta(self):
-        return self._meta
 
     def save_task(self, task: BaseTask) -> None:
         self._tasks[str(task.id)] = task
@@ -501,8 +513,10 @@ class TestTickHappyPath:
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         (root,) = _chain("not-reactive-root")
-        registry, locks, executor, _ = _setup([root])
-        store = InMemoryTaskStore(uuid4(), reactive=False)
+        registry, locks, executor, store = _setup([root])
+        # No reactive_app_name on the frontier → not a reactively-scheduled
+        # build; the tick must not act on it.
+        registry.reactive_app_name = None
 
         summary = await run_tick_aio(
             uuid4(),
@@ -515,9 +529,9 @@ class TestTickHappyPath:
 
         assert summary.outcome == "not_reactive"
         assert executor.spawned == []
-        assert (
-            typing.cast(FakeLockManager, locks).lock_names == []
-        )  # lease not attempted
+        # No scheduling happened — the tick observed reactive_meta is None on
+        # its first frontier fetch and bailed before acting.
+        assert registry.build_status == "running"
 
 
 class TestRunningTaskResolution:
@@ -733,18 +747,17 @@ class TestDiscoverAndRegister:
 
 
 class TestBuildTaskStoreRoundTrip:
-    def test_pickle_round_trip_and_meta(
+    def test_pickle_round_trip(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
+        # The store is pickle-only; the reactive marker/config live in the
+        # registry, not here.
         build_id = uuid4()
         store = BuildTaskStore(build_id)
-        assert store.read_meta() is None  # not reactive until written
 
         task = SyncOnlyTask(name="store-roundtrip")
-        store.write_meta({"reactive": True, "app_name": "test-app"})
         store.save_tasks([task])
 
-        assert store.read_meta() == {"reactive": True, "app_name": "test-app"}
         loaded = store.load_task(task.id)
         assert loaded is not None
         assert loaded.id == task.id

@@ -1,4 +1,4 @@
-"""Per-build task persistence for reactive scheduling.
+"""Per-build task object persistence for reactive scheduling.
 
 A reactive scheduler tick is a short-lived process with no memory of the
 build: it learns *which* tasks are actionable from the registry frontier,
@@ -6,23 +6,26 @@ but needs the actual task *objects* (with parameters) to spawn workers.
 ``BuildTaskStore`` persists pickled tasks per build under a target root —
 the same durable storage the build's outputs live on:
 
-    <target-root>/_stardag_builds/<build_id>/meta.json
     <target-root>/_stardag_builds/<build_id>/tasks/<task_id>.pkl
 
-The ``meta.json`` marker doubles as the "this build is reactively
-scheduled" flag: ticks (including the periodic watchdog sweep) no-op on
-builds without it, so a resident-orchestrator build is never double-
-scheduled by a stray tick.
+The store holds *only* task objects. The build's orchestration metadata
+(the "this build is reactively scheduled" marker, the owning app name, and
+the tick configuration) lives in the registry, not here — target roots may
+be configured immutable/append-only (S3 object-lock, Modal volumes refuse
+overwrites), and the registry is already the source of truth for build
+roots/status/frontier. See ``registry.build_set_reactive_meta`` and the
+``reactive_app_name`` field on the build frontier.
 
 Pickles are written by the trigger (initial discovery) and by workers
-(dynamically yielded deps). Same-deployment guarantee applies: a pickle is
-only loaded by containers of the same deployed app version that wrote it —
-the same constraint as passing tasks to workers by value.
+(dynamically yielded deps). They are write-once (a task id maps to one
+immutable object), so the store is compatible with immutable/append-only
+target roots. Same-deployment guarantee applies: a pickle is only loaded by
+containers of the same deployed app version that wrote it — the same
+constraint as passing tasks to workers by value.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import pickle
 import typing
@@ -52,21 +55,6 @@ class BuildTaskStore:
             f"{_STORE_PREFIX}/{self.build_id}/{relpath}",
             target_root_key=self.target_root_key,
         )
-
-    # --- marker (reactive-build metadata) ---
-
-    def write_meta(self, meta: dict[str, typing.Any]) -> None:
-        """Write the reactive-build marker/metadata."""
-        with self._target("meta.json").open("w") as handle:
-            handle.write(json.dumps(meta))
-
-    def read_meta(self) -> dict[str, typing.Any] | None:
-        """Read the marker; None if this build has no reactive store."""
-        target = self._target("meta.json")
-        if not target.exists():
-            return None
-        with target.open("r") as handle:
-            return json.loads(handle.read())
 
     # --- task pickles ---
 
