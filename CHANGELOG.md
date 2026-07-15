@@ -9,9 +9,10 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 ### UI
 
 - **Task detail "Execution" section: minimal Modal call-ref line.** Shows the
-  function-call id (`fc-…`) as a copyable deep link to the Modal call page;
-  the per-level app/function/environment deep links now live in the
-  collapsible "More details" table (each value linked, click-to-copy).
+  function-call id (`fc-…`) as a link to the Modal call page, with a button
+  that copies the id itself; the per-level app/function/environment deep
+  links now live in the collapsible "More details" table (each value linked,
+  with a copy-the-value button).
 
 ## [0.12.0] — 2026-07-15
 
