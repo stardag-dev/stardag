@@ -6,6 +6,61 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.12.0 — Stricter polymorphic field validation
+
+Task fields that hold other tasks (or any `PolymorphicRoot`) must use a
+polymorphic wrapper — `sd.SubClass[...]` or `sd.TaskLoads[...]` — so that the
+concrete subclass and all of its parameters round-trip through serialization.
+This release turns two long-standing silent-data-loss traps around bare
+task-typed annotations into explicit, up-front errors. Pure bug fix — but
+because it replaces silent corruption with a raised error, code that was
+already (silently) corrupting will now fail loudly. Run `pip install -U stardag`.
+
+> **⚠️ May surface latent bugs as errors.** If your task defines a field with
+> a _bare_ task/polymorphic annotation, you will now get an error instead of
+> silently losing data. The fix is to wrap the annotation. Both cases below
+> were already broken before this release (dropped parameters, colliding task
+> ids, load failures) — the error just makes that visible.
+
+**1. Bare _abstract_ base annotations are rejected at class-definition time.**
+A field annotated with an abstract base — `dep: BaseTask`, `deps: list[Task[int]]`,
+`dep: TargetTask`, etc. — now raises `NakedPolymorphicFieldError` when the class
+is defined:
+
+```python
+# Before (silently dropped subclass params, crashed on load):
+class MyTask(sd.Task[int]):
+    dep: sd.Task[int]
+
+# After — wrap it:
+class MyTask(sd.Task[int]):
+    dep: sd.SubClass[sd.Task[int]]     # keeps the concrete subclass
+    # or, if you consume the dependency's loaded output:
+    dep_value: sd.TaskLoads[int]
+```
+
+**2. Bare _concrete_ base annotations are now strict (exact-type).**
+A bare concrete annotation (`dep: MyTask`, without `SubClass[...]`) is a
+_strict_ field meaning exactly `MyTask`. Passing a **subclass instance** now
+raises `StrictPolymorphicTypeError` at construction, instead of silently
+dropping the subclass's extra parameters (which also collapsed distinct values
+to the same task id):
+
+```python
+class Parent(sd.Task[int]):
+    dep: MyTask                        # strict: exactly MyTask
+
+Parent(dep=MyTask(...))                # OK
+Parent(dep=ChildOfMyTask(...))         # StrictPolymorphicTypeError
+
+# To accept subclasses, wrap it:
+class Parent(sd.Task[int]):
+    dep: sd.SubClass[MyTask]
+```
+
+Passing an exact-type instance, and any field already using `sd.SubClass[...]`
+or `sd.TaskLoads[...]`, are unaffected.
+
 ## v0.11.0 — Reactive build metadata in the registry
 
 Reactive scheduling now keeps its marker/owner/tick-config in the registry

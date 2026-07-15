@@ -4,7 +4,28 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [Unreleased]
+## [0.12.0] — 2026-07-15
+
+### SDK
+
+- **Bare abstract task-typed fields are now rejected at class-definition time.**
+  A field annotated directly with an abstract polymorphic base (e.g.
+  `child: BaseTask`, `deps: list[Task[int]]`) rather than wrapping it in
+  `SubClass[...]` / `TaskLoads[...]` used to serialize by silently dropping
+  every subclass-specific parameter and then crash on load (the payload tried
+  to instantiate the abstract base directly). Such annotations now raise
+  `NakedPolymorphicFieldError` as soon as the class is defined, with a message
+  pointing at the correct polymorphic form.
+
+- **Bare _concrete_ task-typed fields are now strict (exact-type) at
+  validation time.** A field like `child: MyTask` (a concrete base, without
+  `SubClass[...]`) means exactly `MyTask`. Passing a _subclass_ instance
+  (`child=ChildOfMyTask(...)`) previously succeeded but silently dropped the
+  subclass's extra parameters on serialization — and, because task identity is
+  derived from the serialized form, distinct subclass values collapsed to the
+  same task id. This now raises `StrictPolymorphicTypeError` at construction,
+  directing you to `SubClass[MyTask]` if you intend to accept subclasses.
+  Passing an exact-type instance is unaffected.
 
 ### UI
 

@@ -190,4 +190,28 @@ The same task in all three APIs:
 4. **Make tasks pure** - Avoid side effects; same inputs = same outputs
 5. **Use versioning** - Bump version when logic changes significantly
 
+!!! warning "Wrap task-typed fields in `SubClass[...]` / `TaskLoads[...]`"
+
+    A field that holds another task must be annotated with a polymorphic
+    wrapper so the concrete subclass (and all its parameters) round-trips
+    through serialization:
+
+    ```python
+    class MyTask(sd.Task[int]):
+        dep: sd.SubClass[sd.Task[int]]        # ✅ keeps the concrete subclass
+        loaded: sd.TaskLoads[list[int]]       # ✅ loads the dependency's output
+    ```
+
+    Annotating a field with a *bare abstract* task base instead —
+    `dep: sd.Task[int]`, `deps: list[BaseTask]` — is rejected at
+    class-definition time with `NakedPolymorphicFieldError`. Without the
+    wrapper, serialization would silently drop every subclass-specific
+    parameter and loading the task back would fail.
+
+    A bare *concrete* task class (`dep: MyTask`) is allowed, but it is a
+    **strict** field — it accepts *exactly* `MyTask`. Passing a subclass
+    instance raises `StrictPolymorphicTypeError` (it would otherwise drop the
+    subclass's extra parameters and collide task identities). Use
+    `SubClass[MyTask]` if you want the field to accept subclasses.
+
 <!-- TODO: Add more examples and patterns -->
