@@ -4,6 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from stardag.config import (
+    DEFAULT_TARGET_ROOT_KEY,
+    StardagConfig,
+    TargetConfig,
+    config_provider,
+)
 from stardag.target import (
     InMemoryFileTarget,
     target_factory_provider,
@@ -81,3 +87,38 @@ def cleared_stardag_env_vars() -> typing.Generator[None, None, None]:
     stardag_env_vars = [var for var in os.environ if var.startswith("STARDAG_")]
     with temp_env_vars({var: None for var in stardag_env_vars}):
         yield
+
+
+@pytest.fixture(scope="function", autouse=True)
+def hermetic_config(
+    cleared_stardag_env_vars: None,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> typing.Generator[None, None, None]:
+    """Isolate every test from the developer's ambient stardag configuration.
+
+    Config is resolved not only from ``STARDAG_*`` env vars (which
+    ``cleared_stardag_env_vars`` already clears) but also from user/project
+    ``config.toml`` files and the active profile. Without this, a machine-local
+    default target root (e.g. a remote ``s3://`` / cloud-volume root) or registry
+    would leak into unit tests — most visibly into tests that build
+    ``task.target()`` without their own target-isolation fixture.
+
+    This overrides ``config_provider`` with a hermetic default — offline (no
+    registry) and a local temp target root — and rebuilds
+    ``target_factory_provider`` from it. Tests that set up their own factory
+    (``default_in_memory_fs_target``) or roots (``default_local_target_tmp_path``)
+    override on top and restore back to this hermetic baseline. Config-loader
+    tests that call ``clear_config_cache()`` and load from their own
+    monkeypatched sources are unaffected (the clear drops this override, and it
+    is re-established for the next test).
+    """
+    default_root = tmp_path_factory.mktemp("hermetic-target-root")
+    hermetic = StardagConfig(
+        registry=None,
+        target=TargetConfig(roots={DEFAULT_TARGET_ROOT_KEY: str(default_root)}),
+    )
+    with config_provider.override(hermetic):
+        # Build the factory inside the config override so it reads the hermetic
+        # roots, not a factory lazily built from ambient config earlier.
+        with target_factory_provider.override(TargetFactory()):
+            yield
