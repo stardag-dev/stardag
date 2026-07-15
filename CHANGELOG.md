@@ -4,7 +4,7 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## [0.11.0] — Unreleased
+## [0.11.0] — 2026-07-15
 
 ### SDK
 
