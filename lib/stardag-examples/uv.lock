@@ -3886,7 +3886,7 @@ wheels = [
 
 [[package]]
 name = "stardag"
-version = "0.10.2"
+version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -3899,9 +3899,9 @@ dependencies = [
     { name = "typer" },
     { name = "uuid6" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/93/6d/879aeadc97e7fab386369ef47747ef329d19b581e3289a10fcedf25c5dc1/stardag-0.10.2.tar.gz", hash = "sha256:dab07a5ae6ff203ef9f4810d727ecdd042db680e098bb4835b62c7700676a315", size = 595053, upload-time = "2026-07-14T18:52:23.754Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cf/12/42ef3c7b4c55372f3566d0def445320ef359c2e4bc90c176a87843d1e943/stardag-0.11.0.tar.gz", hash = "sha256:0d7b40513adb20db5cf8912c222577ed4276f30e928e1833376b59642d3019e3", size = 606651, upload-time = "2026-07-15T09:40:28.759Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e1/22/1adcd255fc518fca57d3d2fb52029a7b1560d39c3ba8b0d2d8d6ffdd99ab/stardag-0.10.2-py3-none-any.whl", hash = "sha256:711ccedc12b6dfe5520f6a9eafe3f5054141551f70371fd0f0fb68c24785a566", size = 237628, upload-time = "2026-07-14T18:52:22.022Z" },
+    { url = "https://files.pythonhosted.org/packages/78/93/32314e867a23c161e69c6037563e276f37c4b1ecc1b2a88edc48c9b5b37b/stardag-0.11.0-py3-none-any.whl", hash = "sha256:3d868f39e9e8a8169263681476cf620428e70a7d90a22a78438e53e56c1cf54a", size = 245472, upload-time = "2026-07-15T09:40:27.291Z" },
 ]
 
 [[package]]
