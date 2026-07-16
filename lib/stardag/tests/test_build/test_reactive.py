@@ -1401,3 +1401,161 @@ class TestAcquiringStartExecutorMetadata:
 
         assert summary.outcome == "terminal"
         assert summary.spawned == 1
+
+
+class ClaimingReactiveRegistry(FakeReactiveRegistry):
+    """FakeReactiveRegistry with real claim arbitration (API semantics).
+
+    ``claim_race_once`` simulates the cross-build race the claim closes:
+    the frontier snapshot says PENDING, but by claim time another build's
+    scheduler has already started (and instantly completed) the task.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.claim_race_once: set[str] = set()
+
+    async def task_start_claim_aio(
+        self,
+        build_id,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
+        limit_keys=None,
+    ):
+        from stardag.registry import StartClaimResult
+
+        tid = str(task.id)
+        self.calls.append(("start_claim", tid))
+        if tid in self.claim_race_once:
+            # "Another build" won this task just before us and its instant
+            # worker completed it (completion wakes our scheduler).
+            self.claim_race_once.discard(tid)
+            self.statuses[tid] = "completed"
+            self.needs_tick = True
+            return StartClaimResult(
+                started=False,
+                denied_reason="already_running",
+                executor="fake",
+                executor_ref="fc-other-build",
+            )
+        if self.statuses.get(tid) == "running":
+            executor_name, ref = self.refs.get(tid, (None, None))
+            return StartClaimResult(
+                started=False,
+                denied_reason="already_running",
+                executor=executor_name,
+                executor_ref=ref,
+            )
+        if self.statuses.get(tid) == "completed":
+            return StartClaimResult(started=False, denied_reason="already_completed")
+        started = await self.task_start_with_limits_aio(
+            build_id,
+            task,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
+            limit_keys=limit_keys,
+        )
+        if not started:
+            return StartClaimResult(started=False, denied_reason="limit")
+        return StartClaimResult(started=True)
+
+
+class TestTickClaims:
+    async def test_claim_race_lost_then_build_completes(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The tick loses the claim to 'another build' — the task stays in
+        the frontier, no duplicate spawn happens, no false stuck-failure,
+        and the build completes once the winner's completion is observed."""
+        (root,) = _chain("tick-claim-race")
+        registry = ClaimingReactiveRegistry(
+            root_task_ids=[str(root.id)], auto_complete=True
+        )
+        registry.add_task(str(root.id))
+        registry.claim_race_once.add(str(root.id))
+        store = InMemoryTaskStore(uuid4())
+        store.save_tasks([root])
+        executor = FakeTickExecutor()
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=_lock_manager(),
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.outcome == "terminal"
+        assert summary.terminal_status == "completed"
+        assert summary.claim_denied == 1
+        assert executor.spawned == []  # the duplicate spawn never happened
+        assert registry.build_status == "completed"
+
+    async def test_claims_and_limits_compose(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """With claims on, limit denials still resolve via the claim start
+        (single acquiring call) and the chain completes under a 1-slot key."""
+        a = SyncOnlyTask(name="tick-claim-a")
+        b = SyncOnlyTask(name="tick-claim-b")
+        root = SyncOnlyTask(name="tick-claim-root", deps=(a, b))
+        registry = ClaimingReactiveRegistry(
+            root_task_ids=[str(root.id)], auto_complete=True
+        )
+        for task in (a, b, root):
+            registry.add_task(
+                str(task.id),
+                upstreams={str(d.id) for d in flatten_task_struct(task.requires())},
+            )
+        registry.limits["one-slot"] = 1
+        store = InMemoryTaskStore(uuid4())
+        store.save_tasks([a, b, root])
+        executor = FakeTickExecutor()
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=_lock_manager(),
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.5,
+                poll_interval_seconds=0.01,
+                limit_key_selector=lambda t: ["one-slot"],
+            ),
+        )
+
+        assert summary.outcome == "terminal"
+        assert summary.terminal_status == "completed"
+        assert summary.spawned == 3
+        # all acquisitions went through the claiming start
+        assert any(m == "start_claim" for (m, _) in registry.calls)
+
+    async def test_claim_off_uses_legacy_limits_path(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        (root,) = _chain("tick-claim-off")
+        registry = ClaimingReactiveRegistry(
+            root_task_ids=[str(root.id)], auto_complete=True
+        )
+        registry.add_task(str(root.id))
+        store = InMemoryTaskStore(uuid4())
+        store.save_tasks([root])
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=FakeTickExecutor(),
+            lock_manager=_lock_manager(),
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3, poll_interval_seconds=0.01, claim=False
+            ),
+        )
+
+        assert summary.terminal_status == "completed"
+        assert not any(m == "start_claim" for (m, _) in registry.calls)

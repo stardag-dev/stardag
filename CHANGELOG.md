@@ -4,6 +4,41 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [0.14.0] — 2026-07-16
+
+### SDK
+
+- **Exactly-once task execution by default (execution claims,
+  [#185](https://github.com/stardag-dev/stardag/issues/185)).** Task
+  starts now carry an atomic per-task _claim_ wherever a registry with
+  claim support is configured and the execution is probeable (detached
+  Modal executions — resident and reactive): a start racing an
+  already-RUNNING task is denied with the running execution's ref echoed,
+  and the loser re-attaches to the winner instead of spawning a duplicate
+  (or self-heals an existing completion, records a provably dead winner
+  and re-claims, or waits for a ref-less winner with backoff —
+  `ClaimConfig`). This closes the cross-build both-see-PENDING race that
+  previously could run one task in two workers. Control via
+  `build(..., claim=None|True|False)` and `TickConfig.claim`; older
+  servers/custom registries degrade gracefully. Custom arbitration
+  backends implement `RegistryABC.task_start_claim_aio`
+  (`StartClaimResult`).
+- **`GlobalLockConfig` is deprecated** in favor of claims (a
+  `DeprecationWarning` is emitted when enabled). The lock remains
+  functional for executions without probeable liveness; the engine now
+  **renews held locks in the background**, fixing the 60s-TTL expiry
+  under long-running tasks. The `GlobalConcurrencyLockManager` protocol
+  itself is unchanged (it backs the reactive scheduler lease and remains
+  the registry-less escape hatch).
+
+### Registry API
+
+- `POST .../tasks/{id}/start` accepts `claim=true`: atomically deny with
+  409 `task_already_running` (echoing `executor`/`executor_ref`) or
+  `task_already_completed` inside the FOR-UPDATE start transaction. A
+  denied claim records nothing — including no concurrency-limit slots
+  (all-or-nothing with `enforce_limits`).
+
 ## [0.13.0] — 2026-07-16
 
 ### SDK

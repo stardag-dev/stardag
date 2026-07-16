@@ -2989,3 +2989,121 @@ async def test_evict_admin_allowed_and_records_admin_identity(client: AsyncClien
     )
     assert response.status_code == 200
     assert response.json() == {"task_id": "admin-ev", "status": "failed"}
+
+
+@pytest.mark.asyncio
+async def test_claim_start_denies_running_and_echoes_ref(client: AsyncClient):
+    """A claiming start loses to a RUNNING task and gets the running
+    execution's ref back (for re-attach); a plain start is unaffected."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("claim-a")
+    )
+
+    # First claimant wins.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/claim-a/start",
+        params={
+            "claim": "true",
+            "executor": "modal",
+            "executor_ref": "fc-winner",
+        },
+    )
+    assert response.status_code == 200
+
+    # Second claimant is denied with the winner's ref echoed.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/claim-a/start",
+        params={"claim": "true"},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["error_code"] == "task_already_running"
+    assert detail["executor"] == "modal"
+    assert detail["executor_ref"] == "fc-winner"
+
+    # A non-claiming start (e.g. the winner recording a new ref, or an old
+    # client) is still allowed — duplicate starts remain tolerated.
+    response = await client.post(f"/api/v1/builds/{build_id}/tasks/claim-a/start")
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_claim_start_denies_completed(client: AsyncClient):
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("claim-done")
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/claim-done/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/claim-done/complete")
+
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/claim-done/start",
+        params={"claim": "true"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "task_already_completed"
+
+
+@pytest.mark.asyncio
+async def test_claim_start_allowed_after_failure_and_suspension(client: AsyncClient):
+    """FAILED and SUSPENDED tasks are claimable (retry / dynamic-deps
+    re-invocation) — only RUNNING and COMPLETED block."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("claim-retry")
+    )
+
+    await client.post(f"/api/v1/builds/{build_id}/tasks/claim-retry/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/claim-retry/fail")
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/claim-retry/start",
+        params={"claim": "true"},
+    )
+    assert response.status_code == 200  # failed → claimable again
+
+    await client.post(f"/api/v1/builds/{build_id}/tasks/claim-retry/suspend")
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/claim-retry/start",
+        params={"claim": "true"},
+    )
+    assert response.status_code == 200  # suspended → claimable (re-invocation)
+
+
+@pytest.mark.asyncio
+async def test_denied_claim_consumes_no_limit_slot(client: AsyncClient):
+    """A start that passes the limits pre-check but loses the claim rolls
+    the whole transaction back — no event, no limit-key rows occupied."""
+    await client.put("/api/v1/concurrency-limits/cl-k", json={"max_concurrent": 1})
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for tid in ("cl-a", "cl-b", "cl-c"):
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks", json=_register_payload(tid)
+        )
+
+    # cl-a runs WITHOUT the limit key, claiming.
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/cl-a/start", params={"claim": "true"}
+    )
+    # cl-a again with claim + limit key: denied by CLAIM (already running) —
+    # must not have consumed the cl-k slot despite passing the limits check.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/cl-a/start",
+        params={"claim": "true", "limit_key": ["cl-k"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "task_already_running"
+
+    # The cl-k slot is still free: cl-b acquires it.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/cl-b/start",
+        params={"claim": "true", "limit_key": ["cl-k"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 200
+    # And now the slot is genuinely occupied: cl-c is limit-denied.
+    response = await client.post(
+        f"/api/v1/builds/{build_id}/tasks/cl-c/start",
+        params={"claim": "true", "limit_key": ["cl-k"], "enforce_limits": "true"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "concurrency_limit_reached"

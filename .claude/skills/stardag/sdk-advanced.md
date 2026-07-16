@@ -345,7 +345,16 @@ implements the `TaskExecutorABC` detached surface (`submit_detached` /
 
 Key `stardag.build` exports for the execution layer: `DetachedHandle`,
 `DetachedExecutionStatus`, `get_current_build_id`, `run_tick_aio`,
-`TickConfig`, `TickSummary`, `BuildTaskStore`, `discover_and_register_aio`.
+`TickConfig`, `TickSummary`, `BuildTaskStore`, `discover_and_register_aio`,
+`ClaimConfig`.
+
+**Exactly-once by default (execution claims)**: task starts atomically
+claim the task (registry-arbitrated); a losing racer re-attaches to the
+winner instead of duplicating work. Control via `build(..., claim=...)`
+(`None`=auto for probeable executions, `True`, `False`) and
+`TickConfig.claim`; custom arbitration backends override
+`RegistryABC.task_start_claim_aio`. `GlobalLockConfig` is deprecated
+(kept for ref-less executions, now with background TTL renewal).
 
 See `docs/docs/concepts/build-execution.md` and
 `docs/docs/how-to/integrate-modal.md` for the full model.

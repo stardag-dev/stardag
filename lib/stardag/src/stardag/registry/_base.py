@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime
 from functools import lru_cache
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from stardag.base_model import StardagBaseModel
@@ -145,6 +145,29 @@ class BuildInfo(StardagBaseModel):
     reactive_app_name: str | None = None
     # Reactive-scheduler tick configuration; None/absent treated as ``{}``.
     reactive_tick_kwargs: dict[str, Any] | None = None
+
+
+class StartClaimResult(StardagBaseModel):
+    """Outcome of a claiming task start (see ``task_start_claim_aio``).
+
+    ``started=True`` means this caller won: the TASK_STARTED event was
+    recorded (and any requested concurrency-limit slots acquired). On a
+    denial, ``denied_reason`` says why and — for ``already_running`` — the
+    running execution's ``(executor, executor_ref)`` is echoed so the
+    caller can re-attach or probe liveness.
+    """
+
+    started: bool
+    denied_reason: Literal["already_running", "already_completed", "limit"] | None = (
+        None
+    )
+    executor: str | None = None
+    executor_ref: str | None = None
+    # ISO timestamp of the running execution's latest status transition
+    # (echoed on already_running denials when the server provides it) —
+    # lets ref-less losers apply a staleness bound instead of a blind wait.
+    latest_status_at: str | None = None
+    denied_keys: list[str] = []
 
 
 class RegisteredTaskInfo(StardagBaseModel):
@@ -703,6 +726,39 @@ class RegistryABC(metaclass=abc.ABCMeta):
         for task in tasks:
             await self.task_register_aio(build_id, task)
         return None
+
+    async def task_start_claim_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+        limit_keys: Sequence[str] | None = None,
+    ) -> StartClaimResult:
+        """Mark a task started under an atomic per-task execution claim.
+
+        The claim guarantees at most one concurrent RUNNING execution per
+        task (environment-wide, across builds): a start racing an existing
+        RUNNING task is denied — with the running execution's ref echoed —
+        instead of recorded. COMPLETED tasks deny with
+        ``already_completed`` (callers treat this like the lock's
+        ALREADY_COMPLETED: verify the target with eventual-consistency
+        retries). ``limit_keys`` compose atomically (a denied claim
+        consumes no slots).
+
+        **This is the extension seam for custom arbitration backends**: a
+        custom ``RegistryABC`` implementation can arbitrate however it
+        likes (Redis, DynamoDB, ...), keeping claim, status and completion
+        consistent in one backend. The default implementation performs NO
+        arbitration — it records the start via :meth:`task_start_aio` and
+        reports it as won, preserving pre-claim behavior for backends
+        without support.
+        """
+        await self.task_start_aio(
+            build_id, task, executor=executor, executor_ref=executor_ref
+        )
+        return StartClaimResult(started=True)
 
     async def task_start_with_limits_aio(
         self,

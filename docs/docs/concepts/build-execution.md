@@ -154,16 +154,49 @@ Reactive scheduling is experimental and currently Modal-first — see
 [Integrate with Modal](../how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental)
 for usage, requirements and limitations.
 
-## Global Concurrency Lock
+## Exactly-Once Execution (Execution Claims)
 
 Within one build, the engine guarantees each task executes at most once.
-Across builds (started from anywhere), the optional **global concurrency
-lock** extends that guarantee: a lease-based lock per task id, scoped to
-the environment, acquired before execution and released together with the
-completion record in one transaction (which also absorbs eventually-
-consistent storage). Enable it per build or per task via
-`GlobalLockConfig`; it adds a few registry roundtrips per task, so prefer
-enabling it selectively for expensive or non-idempotent tasks.
+Across builds, restarts and retries, the **execution claim** extends that
+guarantee — **by default** wherever a registry is configured and the
+execution is probeable (detached remote executions, in both resident and
+reactive scheduling):
+
+- The claim is an atomic check inside the task's start transaction (the
+  registry denies a start racing an already-RUNNING task and echoes the
+  running execution's ref), so it costs no extra roundtrips and at most
+  one concurrent claimant can win.
+- A losing claimant resolves with the machinery described above: it
+  **re-attaches** to the winner's live execution, self-heals a completion
+  the winner already produced (target existence is ground truth, with
+  eventual-consistency retries), records a provably dead winner and
+  re-claims, or — when the winner exposes no probeable ref — waits for
+  external completion with backoff.
+- Control it with `build(..., claim=...)`: `None` (default) claims
+  probeable executions; `True` forces claiming (losers without a ref
+  wait); `False` disables. Reactive ticks claim via
+  `TickConfig.claim` (default on). Older registry servers and custom
+  registry backends without claim support degrade gracefully to the
+  pre-claim behavior (duplicates remain _safe_ — idempotent re-execution
+  and sticky completion — just wasteful).
+- Custom arbitration backends implement
+  `RegistryABC.task_start_claim_aio` — keeping claim, status and
+  completion consistent in one backend.
+- The claim is taken **before** the build-local concurrency-limiter slot
+  (the registry-backed limiter counts RUNNING tasks, so claiming inside
+  the slot would deny itself). Consequence: a claimed task can appear
+  RUNNING (without an executor ref yet) while still queued behind a
+  local limit.
+
+### Global Concurrency Lock (deprecated)
+
+The optional lease-based **global concurrency lock** (`GlobalLockConfig`)
+predates execution claims and is deprecated in their favor. It remains
+available for the one case claims don't cover yet: executions **without
+probeable liveness** (e.g. local executors shared across machines), where
+its TTL lease is what recovers from a crashed holder. When enabled, the
+engine now renews held locks in the background so long-running tasks no
+longer outlive the lease.
 
 ## Concurrency Limits
 

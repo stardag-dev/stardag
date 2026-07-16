@@ -6,6 +6,69 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.14.0 — Exactly-once task execution by default (execution claims)
+
+Two concurrent builds that both see a task as PENDING could previously
+both execute it. As of v0.14.0 every task start carries an atomic
+**execution claim** — evaluated inside the registry's start transaction,
+at no extra roundtrip — so at most one execution can win a task, across
+builds, processes, retries and restarts. Run `pip install -U stardag`.
+
+Claims are **on by default** wherever a registry with claim support is
+configured and the execution is probeable (detached Modal executions, in
+both resident builds and reactive ticks). A losing claimant does not
+fail — it resolves:
+
+- **Re-attaches** to the winner's live execution and awaits its result.
+- **Self-heals** a completion the winner already produced (target
+  existence is ground truth, with eventual-consistency retries).
+- Records a **provably dead** winner (a FAILED liveness probe,
+  corroborated by a second delayed probe) and re-claims.
+- **Waits with backoff** for a winner that exposes no probeable ref,
+  bounded by `ClaimConfig.wait_timeout_seconds` (default 300s;
+  `0` means "claim, but don't wait if held"). A timeout fails only the
+  waiting build — never the winner's env-global status.
+
+Control:
+
+```python
+from stardag.build import build, ClaimConfig
+
+build(task)                    # claim=None (default): claim probeable executions
+build(task, claim=True)        # force claiming (ref-less losers wait)
+build(task, claim=False)       # disable
+build(task, claim_config=ClaimConfig(wait_timeout_seconds=60.0))
+```
+
+Reactive scheduler ticks claim via `TickConfig.claim` (default `True`).
+Older registry servers and custom registry backends without claim
+support **degrade gracefully** to the previous behavior (duplicate
+executions remain safe — idempotent re-execution and sticky
+completion — just wasteful). Custom arbitration backends implement
+`RegistryABC.task_start_claim_aio` (returning `StartClaimResult`), which
+keeps claim, status and completion arbitration in one backend.
+
+### `GlobalLockConfig` is deprecated
+
+The lease-based global concurrency lock predates claims and is now
+deprecated (a `DeprecationWarning` is emitted when it is enabled):
+
+```python
+# Before (deprecated)
+build(task, global_lock_config=GlobalLockConfig(enabled=True))
+
+# After — nothing: claims are on by default for probeable executions
+build(task)
+```
+
+The lock remains functional for the one case claims don't cover:
+executions **without probeable liveness** (e.g. local executors shared
+across machines), where its TTL lease recovers from a crashed holder.
+For long-running tasks the engine now **renews held locks in the
+background**, fixing the previous silent expiry of the 60s lease. The
+`GlobalConcurrencyLockManager` protocol is unchanged (it also backs the
+reactive scheduler lease and remains the registry-less escape hatch).
+
 ## v0.13.0 — Strict polymorphic fields: also enforced on load
 
 Follow-up to v0.12.0. A _strict_ polymorphic field — a bare concrete

@@ -29,6 +29,7 @@ from stardag.exceptions import (
     is_missing_route_error,
 )
 from stardag.registry._base import (
+    StartClaimResult,
     BuildFrontier,
     BuildInfo,
     RegisteredTaskInfo,
@@ -253,6 +254,7 @@ class APIRegistry(RegistryABC):
         # Try to extract detail from response JSON
         detail = None
         error_code = None
+        raw_detail = None
         try:
             data = response.json()
             raw_detail = data.get("detail")
@@ -300,7 +302,10 @@ class APIRegistry(RegistryABC):
 
         else:
             raise APIError(
-                f"{operation} failed", status_code=status_code, detail=detail
+                f"{operation} failed",
+                status_code=status_code,
+                detail=detail,
+                payload=raw_detail if isinstance(raw_detail, dict) else None,
             )
 
     @property
@@ -1411,6 +1416,61 @@ class APIRegistry(RegistryABC):
                 await self.task_register_aio(build_id, t)
             return None
         return _parse_bulk_register_response(response.json())
+
+    async def task_start_claim_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+        limit_keys: Sequence[str] | None = None,
+    ) -> StartClaimResult:
+        """Claiming start against the API (``claim=true`` on ``/start``).
+
+        Maps the structured 409 denials (``task_already_running`` /
+        ``task_already_completed`` / ``concurrency_limit_reached``) to a
+        :class:`StartClaimResult`. Against an older server the ``claim``
+        parameter is ignored and the start behaves like a plain (tolerated-
+        duplicate) start — i.e. graceful degradation to pre-claim behavior.
+        """
+        params: dict[str, Any] = self._get_start_params(
+            executor, executor_ref, executor_metadata
+        )
+        params["claim"] = "true"
+        if limit_keys:
+            params["limit_key"] = list(limit_keys)
+            params["enforce_limits"] = "true"
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
+                params=params,
+                operation=f"Start task {task.id} (claim)",
+            )
+        except APIError as e:
+            payload = e.payload or {}
+            error_code = payload.get("error_code")
+            if e.status_code == 409 and error_code == "task_already_running":
+                return StartClaimResult(
+                    started=False,
+                    denied_reason="already_running",
+                    executor=payload.get("executor"),
+                    executor_ref=payload.get("executor_ref"),
+                    latest_status_at=payload.get("latest_status_at"),
+                )
+            if e.status_code == 409 and error_code == "task_already_completed":
+                return StartClaimResult(
+                    started=False, denied_reason="already_completed"
+                )
+            if e.status_code == 409 and error_code == "concurrency_limit_reached":
+                return StartClaimResult(
+                    started=False,
+                    denied_reason="limit",
+                    denied_keys=list(payload.get("denied_keys") or []),
+                )
+            raise
+        return StartClaimResult(started=True)
 
     async def task_start_with_limits_aio(
         self,
