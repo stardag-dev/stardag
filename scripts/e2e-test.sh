@@ -2,6 +2,7 @@
 # End-to-end integration test
 # Brings up docker-compose, runs demo, verifies API and UI
 set -e
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -74,7 +75,7 @@ done
 # Bootstrap SDK credentials: test user -> workspace -> environment -> API key
 # (mirrors the flow in integration-tests/src/stardag_integration_tests/conftest.py)
 echo "=== Bootstrapping API credentials ==="
-OIDC_TOKEN=$(curl -sf -X POST http://localhost:8080/realms/stardag/protocol/openid-connect/token \
+OIDC_TOKEN=$(curl -fsS -X POST http://localhost:8080/realms/stardag/protocol/openid-connect/token \
     -d "grant_type=password" \
     -d "client_id=stardag-test" \
     -d "username=testuser" \
@@ -84,23 +85,23 @@ OIDC_TOKEN=$(curl -sf -X POST http://localhost:8080/realms/stardag/protocol/open
 
 # First authenticated request auto-creates the test user
 # and their personal workspace (with a default environment)
-WORKSPACE_ID=$(curl -sf http://localhost:8000/api/v1/ui/me \
+WORKSPACE_ID=$(curl -fsS http://localhost:8000/api/v1/ui/me \
     -H "Authorization: Bearer $OIDC_TOKEN" \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['workspaces'][0]['id'])")
 echo "Using workspace: $WORKSPACE_ID"
 
-INTERNAL_TOKEN=$(curl -sf -X POST http://localhost:8000/api/v1/auth/exchange \
+INTERNAL_TOKEN=$(curl -fsS -X POST http://localhost:8000/api/v1/auth/exchange \
     -H "Authorization: Bearer $OIDC_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"workspace_id\": \"$WORKSPACE_ID\"}" \
     | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
 
-ENVIRONMENT_ID=$(curl -sf "http://localhost:8000/api/v1/ui/workspaces/$WORKSPACE_ID/environments" \
+ENVIRONMENT_ID=$(curl -fsS "http://localhost:8000/api/v1/ui/workspaces/$WORKSPACE_ID/environments" \
     -H "Authorization: Bearer $INTERNAL_TOKEN" \
     | python3 -c "import sys, json; print(json.load(sys.stdin)[0]['id'])")
 echo "Using environment: $ENVIRONMENT_ID"
 
-API_KEY=$(curl -sf -X POST "http://localhost:8000/api/v1/ui/workspaces/$WORKSPACE_ID/environments/$ENVIRONMENT_ID/api-keys" \
+API_KEY=$(curl -fsS -X POST "http://localhost:8000/api/v1/ui/workspaces/$WORKSPACE_ID/environments/$ENVIRONMENT_ID/api-keys" \
     -H "Authorization: Bearer $INTERNAL_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"name": "e2e-test"}' \
