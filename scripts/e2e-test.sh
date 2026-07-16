@@ -59,7 +59,7 @@ done
 # Wait for Keycloak (realm import can take a while)
 echo "=== Waiting for Keycloak ==="
 for i in {1..60}; do
-    if curl -s http://localhost:8080/realms/stardag/.well-known/openid-configuration > /dev/null 2>&1; then
+    if curl -sf --max-time 5 http://localhost:8080/realms/stardag/.well-known/openid-configuration > /dev/null 2>&1; then
         echo "Keycloak is ready"
         break
     fi
@@ -114,12 +114,16 @@ export STARDAG_TARGET_ROOTS__DEFAULT="$TARGET_ROOT"
 export STARDAG_API_URL="http://localhost:8000"
 export STARDAG_API_KEY="$API_KEY"
 
-cd "$REPO_ROOT/lib/stardag-examples"
-uv run python -m stardag_examples.general.artifacts_demo
+# Subshell so the working directory stays at the repo root (the cleanup
+# trap relies on it to find the compose file).
+(
+    cd "$REPO_ROOT/lib/stardag-examples"
+    uv run python -m stardag_examples.general.artifacts_demo
+)
 
 # Verify API has builds
 echo "=== Verifying API - Builds ==="
-BUILDS_RESPONSE=$(curl -s -H "X-API-Key: $API_KEY" http://localhost:8000/api/v1/builds)
+BUILDS_RESPONSE=$(curl -fsS -H "X-API-Key: $API_KEY" http://localhost:8000/api/v1/builds)
 BUILD_COUNT=$(echo "$BUILDS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
 if [ "$BUILD_COUNT" -lt 1 ]; then
     echo "ERROR: No builds found in API"
@@ -130,7 +134,7 @@ echo "Found $BUILD_COUNT build(s) in API"
 
 # Verify API has tasks
 echo "=== Verifying API - Tasks ==="
-TASKS_RESPONSE=$(curl -s -H "X-API-Key: $API_KEY" http://localhost:8000/api/v1/tasks)
+TASKS_RESPONSE=$(curl -fsS -H "X-API-Key: $API_KEY" http://localhost:8000/api/v1/tasks)
 TASK_COUNT=$(echo "$TASKS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
 if [ "$TASK_COUNT" -lt 1 ]; then
     echo "ERROR: No tasks found in API"
