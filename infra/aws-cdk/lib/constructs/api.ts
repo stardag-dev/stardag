@@ -125,8 +125,13 @@ export class StardagApi extends Construct {
       memoryLimitMiB = 512,
       desiredCount = 1,
       certificate,
-      imageUri,
+      imageUri: rawImageUri,
     } = props;
+
+    // Normalize: treat a whitespace-only imageUri (e.g. from an unset or
+    // sloppily-quoted env/context value) as "not set" instead of
+    // synthesizing fromRegistry("   "), which would fail at deploy time.
+    const imageUri = rawImageUri?.trim() || undefined;
 
     // =============================================================
     // ECR Repository

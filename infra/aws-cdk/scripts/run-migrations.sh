@@ -11,7 +11,8 @@
 #   MIGRATION_COMMAND="alembic -c /path/to/alembic.ini upgrade head" ./scripts/run-migrations.sh
 set -e
 
-# Command to run inside the container (split on whitespace into argv)
+# Command to run inside the container (split into argv with shell-style
+# quoting, so arguments containing spaces can be quoted)
 MIGRATION_COMMAND="${MIGRATION_COMMAND:-alembic upgrade head}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,8 +113,8 @@ echo "Admin Secret: $ADMIN_SECRET_ARN"
 # configurable via MIGRATION_COMMAND (see header comment).
 echo "Migration command: $MIGRATION_COMMAND"
 OVERRIDES=$(python3 -c "
-import json, sys
-command = sys.argv[1].split()
+import json, shlex, sys
+command = shlex.split(sys.argv[1])
 print(json.dumps({'containerOverrides': [{'name': 'Api', 'command': command}]}))
 " "$MIGRATION_COMMAND")
 

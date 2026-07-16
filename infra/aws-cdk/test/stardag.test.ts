@@ -1,9 +1,12 @@
 import * as cdk from "aws-cdk-lib";
+import * as ec2 from "aws-cdk-lib/aws-ec2";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { ApiStack } from "../lib/api-stack";
 import { FoundationStack } from "../lib/foundation-stack";
 import { StardagStack } from "../lib/stardag-stack";
 import { FrontendStack } from "../lib/frontend-stack";
+import { StardagApi } from "../lib/constructs/api";
 
 // Mock config for testing
 const mockConfig = {
@@ -404,6 +407,52 @@ describe("ApiStack explicit image URI (apiImageUri)", () => {
   test("treats a whitespace-only value as unset", () => {
     const image = getApiContainerImage(synthApiStackWithImage("   "));
     expect(typeof image).not.toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// StardagApi construct — imageUri normalization. The reusable construct must
+// be safe on its own (independent of ApiStack's env/context normalization):
+// a whitespace-only imageUri prop is treated as unset, and surrounding
+// whitespace on a real URI is trimmed.
+// ---------------------------------------------------------------------------
+
+function synthStardagApiConstruct(imageUri?: string): Template {
+  const app = new cdk.App();
+  const stack = new cdk.Stack(app, "ConstructTest", {
+    env: { account: mockConfig.awsAccountId, region: mockConfig.awsRegion },
+  });
+  const vpc = new ec2.Vpc(stack, "Vpc", { maxAzs: 2 });
+  new StardagApi(stack, "Api", {
+    vpc,
+    dbClusterEndpoint: "db.example.internal",
+    dbPort: 5432,
+    dbName: "stardag",
+    dbServiceSecret: new secretsmanager.Secret(stack, "ServiceSecret"),
+    dbAdminSecret: new secretsmanager.Secret(stack, "AdminSecret"),
+    dbSecurityGroup: new ec2.SecurityGroup(stack, "DbSg", { vpc }),
+    oidcIssuerUrl: "https://issuer.example.com",
+    oidcAudience: "test-audience",
+    apiDomain: "api.example.com",
+    uiDomain: "app.example.com",
+    imageUri,
+  });
+  return Template.fromStack(stack);
+}
+
+describe("StardagApi construct imageUri normalization", () => {
+  test("treats a whitespace-only imageUri prop as unset", () => {
+    const image = getApiContainerImage(synthStardagApiConstruct("   "));
+    // Falls back to the construct's own ECR repository (a token, not a
+    // plain string), rather than fromRegistry("   ").
+    expect(typeof image).not.toBe("string");
+    expect(JSON.stringify(image)).toContain("dkr.ecr");
+  });
+
+  test("trims surrounding whitespace from a real imageUri", () => {
+    const uri = "ghcr.io/stardag-dev/stardag-server:0.1.0";
+    const image = getApiContainerImage(synthStardagApiConstruct(` ${uri}\n`));
+    expect(image).toBe(uri);
   });
 });
 
