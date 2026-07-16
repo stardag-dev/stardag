@@ -143,6 +143,7 @@ def _resolve_database_urls(
     neon_api_key: str | None,
     neon_project: str,
     interactive: bool,
+    neon_pg_version: int = 16,
 ) -> tuple[str, str, bool]:
     """Resolve (pooled_url, direct_url, pooler_compat) for the deployment.
 
@@ -176,7 +177,7 @@ def _resolve_database_urls(
     console.print(f"Provisioning Neon project [bold]{neon_project}[/bold]...")
     client = NeonClient(api_key)
     try:
-        db = client.get_or_create_project(neon_project)
+        db = client.get_or_create_project(neon_project, pg_version=neon_pg_version)
     except NeonAuthError as e:
         error_console.print(str(e))
         raise typer.Exit(1)
@@ -298,6 +299,13 @@ def up(
         "--neon-project",
         help="Neon project name to find-or-create",
     ),
+    neon_pg_version: int = typer.Option(
+        16,
+        "--neon-pg-version",
+        help="Postgres major version when creating the Neon project "
+        "(default 16 = what stardag is tested against; existing projects "
+        "keep their version)",
+    ),
     database_url: str = typer.Option(
         None,
         "--database-url",
@@ -380,7 +388,12 @@ def up(
         pooler_compat = False
     else:
         pooled_url, direct_url, pooler_compat = _resolve_database_urls(
-            database_url, database_url_direct, neon_api_key, neon_project, interactive
+            database_url,
+            database_url_direct,
+            neon_api_key,
+            neon_project,
+            interactive,
+            neon_pg_version=neon_pg_version,
         )
 
     # --- Auth config (only when [re]writing the config secret) ---

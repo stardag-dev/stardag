@@ -155,13 +155,17 @@ class NeonClient:
         )
         return direct, pooled
 
-    def get_or_create_project(self, name: str) -> NeonDatabase:
-        """Find a project by name or create it; returns connection info."""
+    def get_or_create_project(self, name: str, pg_version: int = 16) -> NeonDatabase:
+        """Find a project by name or create it; returns connection info.
+
+        ``pg_version`` only applies on creation - an existing project keeps
+        whatever version it was created with.
+        """
         project = self.find_project_by_name(name)
         created = False
         if project is None:
-            logger.info("Creating Neon project %r", name)
-            creation = self.create_project(name)
+            logger.info("Creating Neon project %r (pg %s)", name, pg_version)
+            creation = self.create_project(name, pg_version=pg_version)
             project = creation["project"]
             created = True
         direct_uri, pooled_uri = self.get_connection_uris(project["id"])
