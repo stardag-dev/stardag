@@ -14,6 +14,7 @@ import inspect
 import logging
 import traceback as tb_module
 import warnings
+from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from enum import StrEnum
 from typing import AsyncGenerator, Generator, Literal, Protocol, Sequence, Union, cast
@@ -592,9 +593,7 @@ async def build_aio(
         concurrency_config, concurrency_limiter
     )
 
-    if global_lock_manager is not None or (
-        global_lock_config is not None and global_lock_config.enabled
-    ):
+    if global_lock_config is not None and global_lock_config.enabled:
         warnings.warn(
             "The global concurrency lock is deprecated in favor of per-task "
             "execution claims, which are enabled by default for probeable "
@@ -1235,45 +1234,114 @@ async def build_aio(
         status=LockAcquisitionStatus.ALREADY_COMPLETED, acquired=False
     )
 
+    async def _probe_claimed_execution(
+        task: BaseTask, executor_name: str, ref: str
+    ) -> DetachedExecutionStatus:
+        """Probe a claimed execution's liveness, never letting the probe
+        itself decide "dead": any probe error degrades to UNKNOWN (wait)
+        rather than FAILED — a transient backend blip must not let a loser
+        declare a live winner dead and spawn the duplicate the claim exists
+        to prevent."""
+        try:
+            return await task_executor.detached_status(task, executor_name, ref)
+        except Exception as e:
+            logger.warning(
+                f"Liveness probe for claimed execution {ref!r} of task "
+                f"{task.id} failed (treating as unknown): {e}"
+            )
+            return DetachedExecutionStatus.UNKNOWN
+
+    def _claim_holder_is_stale(latest_status_at: str | None) -> bool:
+        """Whether a ref-less claim holder exceeded the optional staleness
+        bound (ClaimConfig.stale_running_no_ref_seconds)."""
+        bound = claim_cfg.stale_running_no_ref_seconds
+        if bound is None or not latest_status_at:
+            return False
+        try:
+            status_at = datetime.fromisoformat(latest_status_at)
+        except ValueError:
+            return False
+        if status_at.tzinfo is None:
+            status_at = status_at.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - status_at).total_seconds() > bound
+
     async def acquire_claim(
         task: BaseTask,
     ) -> tuple[str, DetachedHandle | LockAcquisitionResult | TaskExecutionError | None]:
         """Claim the task's execution, resolving denials.
 
         Returns one of:
-          - ``("granted", None)``: we won — a TASK_STARTED (without ref) is
-            recorded; caller spawns and then records the ref.
+          - ``("granted", None)``: we won — a claiming TASK_STARTED (without
+            ref) is recorded; caller spawns and then records the ref.
+          - ``("unclaimed", None)``: the claim call itself failed against
+            the registry (warn mode) — the caller proceeds through the
+            normal, unclaimed start path (true graceful degradation; no
+            state is assumed recorded).
           - ``("attach", handle)``: another live execution won — await it.
           - ``("already_completed", LockAcquisitionResult)``: task is done
             elsewhere; caller returns it so process_result runs the
             eventual-consistency completion retry (same as the lock path).
-          - ``("error", TaskExecutionError)``: gave up (wait timeout).
+          - ``("error", LockAcquisitionResult)``: gave up (wait timeout).
+            Deliberately NOT a task_fail: the winner may be a legitimately
+            long-running ref-less execution — this build records a local
+            failure only, without clobbering the task's env-global status
+            (which would release the winner's claim to a third build).
 
-        A denial with a dead executor ref records the failure and re-tries
-        the claim immediately; a denial without a probeable ref (local
-        claimant, or the winner's claim→spawn crash window) polls target
-        completion and re-tries with backoff up to
-        ``ClaimConfig.wait_timeout_seconds``.
+        Denial resolution: a live winner is re-attached; a winner whose ref
+        probes FAILED on **two probes** (corroborated after a short delay,
+        so a single transient error can't kill a live winner) is recorded
+        failed and the claim re-tried; a ref-less winner is waited on with
+        backoff — with optional staleness recovery via
+        ``ClaimConfig.stale_running_no_ref_seconds`` for the winner's
+        claim→ref-record crash window. Every branch — including dead-winner
+        retries — is bounded by ``wait_timeout_seconds``.
         """
         state = task_states[task.id]
         loop = asyncio.get_event_loop()
         start_time = loop.time()
         interval = claim_cfg.wait_initial_interval_seconds
         notified_waiting = False
+        # Ref that probed FAILED once — a second FAILED probe (next
+        # iteration, after a delay) corroborates before we record the death.
+        suspected_dead_ref: str | None = None
         try:
+            claim_metadata: dict | None = None
+            try:
+                claim_metadata = await task_executor.get_executor_metadata(task)
+            except Exception:
+                logger.debug(
+                    f"Executor metadata resolution failed for task {task.id}; "
+                    "claiming without it.",
+                    exc_info=True,
+                )
             while True:
+                timeout = claim_cfg.wait_timeout_seconds
+                if timeout is not None and loop.time() - start_time >= timeout:
+                    return (
+                        "error",
+                        LockAcquisitionResult(
+                            status=LockAcquisitionStatus.HELD_BY_OTHER,
+                            acquired=False,
+                            error_message=(
+                                f"Claim wait timed out after {timeout}s — the "
+                                f"task is (still) claimed by another execution"
+                            ),
+                        ),
+                    )
                 try:
-                    result = await registry.task_start_claim_aio(build_id, task)
+                    result = await registry.task_start_claim_aio(
+                        build_id, task, executor_metadata=claim_metadata
+                    )
                 except Exception as claim_err:
                     # Registry hiccup on the claim itself: in `warn` mode
-                    # proceed unclaimed (pre-claim behavior) rather than
-                    # failing the task; `raise` mode propagates.
+                    # fall back to the normal unclaimed start path (nothing
+                    # is assumed recorded); `raise` mode propagates.
                     handle_registry_error(
                         claim_err,
                         f"Claim start failed for task {task.id}",
                         on_registry_failure,
                     )
-                    return ("granted", None)
+                    return ("unclaimed", None)
                 if result.started:
                     return ("granted", None)
                 if result.denied_reason == "already_completed":
@@ -1298,10 +1366,19 @@ async def build_aio(
                             f"the winning execution {attach_handle.ref!r}."
                         )
                         return ("attach", attach_handle)
-                    probe = await task_executor.detached_status(
+                    probe = await _probe_claimed_execution(
                         task, result.executor, result.executor_ref
                     )
                     if probe == DetachedExecutionStatus.FAILED:
+                        if suspected_dead_ref != result.executor_ref:
+                            # First FAILED probe: corroborate after a short
+                            # delay before declaring the winner dead.
+                            suspected_dead_ref = result.executor_ref
+                            await asyncio.sleep(
+                                min(claim_cfg.wait_initial_interval_seconds, 1.0)
+                            )
+                            continue
+                        suspected_dead_ref = None
                         if await task.complete_aio():
                             return ("already_completed", _ALREADY_COMPLETED_RESULT)
                         try:
@@ -1318,10 +1395,38 @@ async def build_aio(
                                 f"task {task.id}",
                                 on_registry_failure,
                             )
-                        continue  # the claim should now be acquirable
+                        # Small pause before re-claiming so a persistently
+                        # failing /fail endpoint can't spin this loop hot
+                        # (the deadline above still bounds it).
+                        await asyncio.sleep(claim_cfg.wait_initial_interval_seconds)
+                        continue
+                    suspected_dead_ref = None
+                elif _claim_holder_is_stale(result.latest_status_at):
+                    # Ref-less holder past the (opt-in) staleness bound —
+                    # e.g. a winner that crashed between its claim and its
+                    # ref-recording start. Recover like a dead ref.
+                    if await task.complete_aio():
+                        return ("already_completed", _ALREADY_COMPLETED_RESULT)
+                    try:
+                        await registry.task_fail_aio(
+                            build_id,
+                            task,
+                            "Ref-less claimed execution exceeded the "
+                            "staleness bound (observed by a competing "
+                            "claimant)",
+                        )
+                    except Exception as reg_err:
+                        handle_registry_error(
+                            reg_err,
+                            f"Failed to record stale claimed execution for "
+                            f"task {task.id}",
+                            on_registry_failure,
+                        )
+                    await asyncio.sleep(claim_cfg.wait_initial_interval_seconds)
+                    continue
 
-                # No (probeable) ref: wait for external completion, re-trying
-                # the claim with backoff.
+                # Wait for external completion, re-trying the claim with
+                # backoff.
                 if not notified_waiting:
                     notified_waiting = True
                     state.waiting_for_lock = True
@@ -1336,19 +1441,6 @@ async def build_aio(
                         )
                 if await task.complete_aio():
                     return ("already_completed", _ALREADY_COMPLETED_RESULT)
-                timeout = claim_cfg.wait_timeout_seconds
-                if timeout is not None and loop.time() - start_time >= timeout:
-                    exc: Exception = TimeoutError(
-                        f"Timed out after {timeout}s waiting for the claimed "
-                        f"execution of task {task.id} (no re-attachable ref)"
-                    )
-                    return (
-                        "error",
-                        TaskExecutionError(
-                            exception=exc,
-                            traceback="".join(tb_module.format_exception(exc)),
-                        ),
-                    )
                 await asyncio.sleep(interval)
                 interval = min(
                     interval * claim_cfg.wait_backoff_factor,
@@ -1456,18 +1548,28 @@ async def build_aio(
                 elif claim_kind == "already_completed":
                     return cast(LockAcquisitionResult, claim_value)
                 elif claim_kind == "error":
-                    return cast(TaskExecutionError, claim_value)
-                else:
+                    return cast(LockAcquisitionResult, claim_value)
+                elif claim_kind == "granted":
+                    # A claiming TASK_STARTED (no ref) is durably recorded.
                     claimed = True
                     state.started = True
+                else:
+                    # "unclaimed": the claim call failed against the registry
+                    # (warn mode). Nothing was recorded — fall through to the
+                    # normal, unclaimed start path.
+                    assert claim_kind == "unclaimed", claim_kind
 
-        # Now we have the lock (or locking wasn't needed). Acquire a
-        # concurrency slot before marking the task started/executing so the
-        # registry/UI reflects actual execution (a task queued behind the limit
-        # is not shown as "started"). The slot is acquired *after* the global
-        # lock so tasks don't burn execution slots while blocked on a
-        # distributed lock, and released automatically on every exit path
-        # (completion, failure, cancellation, dynamic-deps suspension).
+        # Now we have the lock/claim (or neither was needed). Acquire a
+        # concurrency slot before spawning; the slot sits *after* the global
+        # lock and the claim so tasks don't burn execution slots while
+        # blocked on either, and it is released automatically on every exit
+        # path (completion, failure, cancellation, dynamic-deps suspension).
+        # Note: with claims on, a CLAIMED task queued behind a local limiter
+        # slot already shows RUNNING (without a ref) in the registry — the
+        # claim must precede the slot so a losing racer never occupies one,
+        # and a registry-backed limiter's own enforced start would otherwise
+        # deny our claim as already-running. Unclaimed tasks keep the old
+        # behavior (not shown started while queued).
         async with contextlib.AsyncExitStack() as slot_stack:
             try:
                 await slot_stack.enter_async_context(limiter.slot(task))
@@ -1880,9 +1982,11 @@ async def build_aio(
 
     finally:
         current_build_id_var.reset(_build_id_token)
-        for renewal in lock_renewals.values():
-            renewal.cancel()
-        lock_renewals.clear()
+        if lock_renewals:
+            for renewal in lock_renewals.values():
+                renewal.cancel()
+            await asyncio.gather(*lock_renewals.values(), return_exceptions=True)
+            lock_renewals.clear()
         await task_executor.teardown()
 
 

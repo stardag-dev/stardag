@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime
 from functools import lru_cache
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from stardag.base_model import StardagBaseModel
@@ -158,9 +158,15 @@ class StartClaimResult(StardagBaseModel):
     """
 
     started: bool
-    denied_reason: str | None = None  # already_running|already_completed|limit
+    denied_reason: Literal["already_running", "already_completed", "limit"] | None = (
+        None
+    )
     executor: str | None = None
     executor_ref: str | None = None
+    # ISO timestamp of the running execution's latest status transition
+    # (echoed on already_running denials when the server provides it) —
+    # lets ref-less losers apply a staleness bound instead of a blind wait.
+    latest_status_at: str | None = None
     denied_keys: list[str] = []
 
 

@@ -49,12 +49,19 @@ class ClaimRegistry(RecordingRegistry):
         # task_id(str) -> status; refs: task_id -> (executor, ref)
         self.statuses: dict[str, str] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
+        self.status_at: dict[str, str] = {}
 
     def seed_running(
-        self, task: BaseTask, executor: str | None, ref: str | None
+        self,
+        task: BaseTask,
+        executor: str | None,
+        ref: str | None,
+        latest_status_at: str | None = None,
     ) -> None:
         self.statuses[str(task.id)] = "running"
         self.refs[str(task.id)] = (executor, ref)
+        if latest_status_at is not None:
+            self.status_at[str(task.id)] = latest_status_at
 
     async def task_start_claim_aio(
         self,
@@ -75,6 +82,7 @@ class ClaimRegistry(RecordingRegistry):
                 denied_reason="already_running",
                 executor=stored_executor,
                 executor_ref=stored_ref,
+                latest_status_at=self.status_at.get(tid),
             )
         if status == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
@@ -266,7 +274,10 @@ class TestClaimLoser:
         assert summary.status == BuildExitStatus.SUCCESS
         assert task.complete()
         assert registry.has_call("task_fail_aio", task.id)  # dead winner recorded
-        assert registry.claim_calls(task) == 2  # denied, then won
+        # denied → corroborating re-probe (still denied) → won: a single
+        # FAILED probe is never trusted (transient errors must not kill a
+        # live winner).
+        assert registry.claim_calls(task) == 3
         assert executor.spawn_calls == [task.id]
 
     async def test_no_ref_winner_waits_until_completion(
@@ -303,14 +314,18 @@ class TestClaimLoser:
             m == "task_waiting_for_lock_aio" for (m, _, _) in registry.calls
         )
 
-    async def test_no_ref_winner_timeout_fails_task(
+    async def test_no_ref_winner_timeout_fails_locally_only(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
+        """A loser's wait timeout fails THIS build only — it must not stamp
+        the task's env-global status FAILED (the winner may be a
+        legitimately long-running ref-less execution; a global fail would
+        release its claim to a third build)."""
         task = SyncOnlyTask(name="claim-loser-timeout")
         registry = ClaimRegistry()
         registry.seed_running(task, None, None)
 
-        with pytest.raises(TimeoutError):
+        with pytest.raises(Exception, match="timed out"):
             await build_aio(
                 [task],
                 task_executor=FakeDetachedExecutor(),
@@ -322,7 +337,8 @@ class TestClaimLoser:
                 ),
             )
 
-        assert registry.has_call("task_fail_aio", task.id)
+        assert not registry.has_call("task_fail_aio", task.id)
+        assert registry.statuses[str(task.id)] == "running"  # claim intact
 
 
 class TestLockDeprecationAndRenewal:
@@ -393,3 +409,177 @@ class TestLockDeprecationAndRenewal:
         assert summary.status == BuildExitStatus.SUCCESS
         assert len(renews) >= 2
         assert all(r == str(task.id) for r in renews)
+
+
+class TestClaimRobustness:
+    """Review-driven hardening: transient errors must never break the
+    exactly-once guarantee or clobber a live winner."""
+
+    async def test_probe_exception_treated_as_unknown_not_dead(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A raising liveness probe (transient backend error) must NOT let
+        the loser declare the winner dead — it waits instead, and picks up
+        the winner's completion."""
+        task = SyncOnlyTask(name="claim-probe-raises")
+        registry = ClaimRegistry()
+        registry.seed_running(task, "fake", "fc-blip")
+
+        class RaisingProbeExecutor(FakeDetachedExecutor):
+            async def detached_status(self, task, executor, ref):
+                raise ConnectionError("backend blip")
+
+        async def external_completion():
+            await asyncio.sleep(0.1)
+            task.run()
+            registry.statuses[str(task.id)] = "completed"
+
+        completer = asyncio.create_task(external_completion())
+        try:
+            summary = await build_aio(
+                [task],
+                task_executor=RaisingProbeExecutor(),
+                registry=registry,
+                claim_config=FAST_CLAIM,
+            )
+        finally:
+            await completer
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert summary.task_count.previously_completed == 1
+        assert not registry.has_call("task_fail_aio", task.id)  # winner untouched
+
+    async def test_single_failed_probe_not_trusted(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """One FAILED probe followed by a healthy re-probe (transient
+        misclassification) must not record the winner as dead."""
+        task = SyncOnlyTask(name="claim-probe-flap")
+        registry = ClaimRegistry()
+        registry.seed_running(task, "fake", "fc-flap")
+
+        class FlappingProbeExecutor(FakeDetachedExecutor):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.probes = 0
+
+            async def detached_status(self, task, executor, ref):
+                self.probes += 1
+                if self.probes == 1:
+                    return DetachedExecutionStatus.FAILED  # transient blip
+                return DetachedExecutionStatus.RUNNING
+
+        executor = FlappingProbeExecutor()
+
+        async def external_completion():
+            await asyncio.sleep(0.15)
+            task.run()
+            registry.statuses[str(task.id)] = "completed"
+
+        completer = asyncio.create_task(external_completion())
+        try:
+            summary = await build_aio(
+                [task],
+                task_executor=executor,
+                registry=registry,
+                claim_config=FAST_CLAIM,
+            )
+        finally:
+            await completer
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert executor.probes >= 2  # corroboration probe happened
+        assert not registry.has_call("task_fail_aio", task.id)
+        assert executor.spawn_calls == []
+
+    async def test_unclaimed_fallback_records_normal_start(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """If the claim call itself errors in warn mode, the engine falls
+        back to the normal UNCLAIMED start path — a TASK_STARTED is still
+        recorded (nothing is silently assumed claimed)."""
+
+        class BrokenClaimRegistry(ClaimRegistry):
+            async def task_start_claim_aio(self, *args, **kwargs):
+                raise ConnectionError("registry down for claims")
+
+        task = SyncOnlyTask(name="claim-unclaimed-fallback")
+        registry = BrokenClaimRegistry()
+
+        summary = await build_aio(
+            [task],
+            task_executor=FakeDetachedExecutor(),
+            registry=registry,
+            on_registry_failure="warn",
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        # normal start path ran (with the executor ref recorded)
+        starts = [
+            extra
+            for (m, tid, extra) in registry.calls
+            if m == "task_start_aio" and tid == task.id
+        ]
+        assert len(starts) == 1
+        assert starts[0]["executor_ref"] == f"spawned-{task.id}"
+
+    async def test_stale_refless_holder_recovered(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Opt-in staleness bound: a ref-less holder whose status hasn't
+        moved past the bound (winner's claim→ref-record crash window) is
+        recorded failed and the claim re-taken."""
+        from datetime import datetime, timedelta, timezone
+
+        task = SyncOnlyTask(name="claim-stale-holder")
+        registry = ClaimRegistry()
+        stale_at = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        registry.seed_running(task, None, None, latest_status_at=stale_at)
+        executor = FakeDetachedExecutor()
+
+        summary = await build_aio(
+            [task],
+            task_executor=executor,
+            registry=registry,
+            claim_config=ClaimConfig(
+                wait_timeout_seconds=2.0,
+                wait_initial_interval_seconds=0.02,
+                wait_max_interval_seconds=0.05,
+                stale_running_no_ref_seconds=1.0,
+            ),
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert registry.has_call("task_fail_aio", task.id)  # stale holder recorded
+        assert executor.spawn_calls == [task.id]
+        assert task.complete()
+
+    async def test_no_warning_for_manager_without_enabled_lock(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Passing a lock manager with locking left disabled must not warn
+        (the lock is never acquired)."""
+        import warnings as warnings_module
+
+        task = SyncOnlyTask(name="lock-manager-no-warn")
+
+        class UnusedLockManager:
+            def lock(self, task_id):
+                raise NotImplementedError
+
+            async def acquire(self, task_id):
+                raise NotImplementedError
+
+            async def release(self, task_id, task_completed=False):
+                return True
+
+        with warnings_module.catch_warnings():
+            warnings_module.simplefilter("error", DeprecationWarning)
+            summary = await build_aio(
+                [task],
+                task_executor=FakeDetachedExecutor(),
+                registry=ClaimRegistry(),
+                global_lock_manager=typing.cast(typing.Any, UnusedLockManager()),
+            )
+
+        assert summary.status == BuildExitStatus.SUCCESS

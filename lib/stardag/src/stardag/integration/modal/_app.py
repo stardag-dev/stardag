@@ -482,6 +482,22 @@ def _callable_accepts_env_overrides(fn: typing.Callable[..., typing.Any]) -> boo
 # --- Task executor ---
 
 
+def _is_transient_modal_error(exception: BaseException) -> bool:
+    """Best-effort classification of transport-level (retryable) errors.
+
+    Anything raised by ``FunctionCall.get`` that reflects the CALL's outcome
+    (``modal.exception.RemoteError``, user exceptions re-raised from the
+    function, expired results) is terminal; connection/socket/gRPC-transport
+    failures are not — they say nothing about the call.
+    """
+    if isinstance(exception, (OSError, ConnectionError)):
+        return True
+    module = type(exception).__module__ or ""
+    if module.startswith("grpclib") or module.startswith("h2"):
+        return True
+    return type(exception).__name__ in ("ClientClosed", "StreamTerminatedError")
+
+
 MODAL_EXECUTOR_NAME = "modal"
 """Executor name recorded with detached executions (see DetachedHandle)."""
 
@@ -1076,7 +1092,19 @@ class ModalTaskExecutor(TaskExecutorABC):
             await function_call.get.aio(timeout=0)
         except TimeoutError:
             return DetachedExecutionStatus.RUNNING
-        except Exception:
+        except Exception as e:
+            # Transient transport/infrastructure errors must NOT classify as
+            # FAILED: callers (claim loser-resolution, tick healing) treat
+            # FAILED as proof of death — a network blip mistaken for a dead
+            # winner would let a racer record a live execution as failed and
+            # spawn the duplicate the claim exists to prevent. UNKNOWN is
+            # the safe degradation (leave/wait and re-probe later).
+            if _is_transient_modal_error(e):
+                logger.warning(
+                    f"Transient error probing Modal call {ref!r}; treating "
+                    f"as unknown: {e}"
+                )
+                return DetachedExecutionStatus.UNKNOWN
             return DetachedExecutionStatus.FAILED
         return DetachedExecutionStatus.SUCCEEDED
 

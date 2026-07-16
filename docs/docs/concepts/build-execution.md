@@ -182,6 +182,11 @@ reactive scheduling):
 - Custom arbitration backends implement
   `RegistryABC.task_start_claim_aio` — keeping claim, status and
   completion consistent in one backend.
+- The claim is taken **before** the build-local concurrency-limiter slot
+  (the registry-backed limiter counts RUNNING tasks, so claiming inside
+  the slot would deny itself). Consequence: a claimed task can appear
+  RUNNING (without an executor ref yet) while still queued behind a
+  local limit.
 
 ### Global Concurrency Lock (deprecated)
 

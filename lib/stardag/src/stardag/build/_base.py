@@ -219,6 +219,14 @@ class ClaimConfig:
     wait_initial_interval_seconds: float = 1.0
     wait_max_interval_seconds: float = 15.0
     wait_backoff_factor: float = 2.0
+    # Optional recovery for a claim held by a ref-less execution whose
+    # status hasn't moved for this long (e.g. the winner crashed in its
+    # claim→ref-record window): the waiting loser records the failure and
+    # re-claims. None (default) disables — a legitimately long-running
+    # ref-less winner (local executor) is indistinguishable from a crashed
+    # one, so this is opt-in; prefer probeable (detached) executions, whose
+    # liveness needs no such bound.
+    stale_running_no_ref_seconds: float | None = None
 
 
 class DetachedExecutionStatus(StrEnum):

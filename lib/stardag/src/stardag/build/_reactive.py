@@ -419,6 +419,10 @@ async def _act_on_frontier(
     claim_active = config.claim and (
         type(registry).task_start_claim_aio is not RegistryABC.task_start_claim_aio
     )
+    # The claim method's signature always accepts executor_metadata; only the
+    # legacy limits-start path needs reflection (pre-metadata custom
+    # registries).
+    acquiring_start_accepts_metadata = claim_active or limits_start_accepts_metadata
     for item in frontier.actionable:
         task = await _load_task(
             item.task_id,
@@ -492,7 +496,7 @@ async def _act_on_frontier(
             # below re-records with the ref (duplicate starts are
             # tolerated, and slots are counted per task, not per start).
             acquire_metadata: "dict[str, typing.Any] | None" = None
-            if limits_start_accepts_metadata:
+            if acquiring_start_accepts_metadata:
                 try:
                     acquire_metadata = await task_executor.get_executor_metadata(task)
                 except Exception:

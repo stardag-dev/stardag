@@ -1457,6 +1457,7 @@ class APIRegistry(RegistryABC):
                     denied_reason="already_running",
                     executor=payload.get("executor"),
                     executor_ref=payload.get("executor_ref"),
+                    latest_status_at=payload.get("latest_status_at"),
                 )
             if e.status_code == 409 and error_code == "task_already_completed":
                 return StartClaimResult(
