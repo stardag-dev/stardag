@@ -15,6 +15,7 @@ import logging
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import timezone
 from typing import Annotated
 from uuid import UUID
 
@@ -605,6 +606,25 @@ async def get_or_create_user_from_oidc(
     )
 
 
+def session_invalidated_by_password_change(user: User, token_iat: int) -> bool:
+    """True when a session token predates the user's last password change.
+
+    Changing the password invalidates outstanding session tokens (they are
+    stateless week-long JWTs, so a stolen token would otherwise survive the
+    rotation). Compared at whole-second granularity (JWT iat), so tokens
+    minted within the same second as the change stay valid - an acceptable
+    window. Workspace access tokens are deliberately unaffected (10-minute
+    TTL makes revocation moot). Naive timestamps (e.g. from SQLite in tests)
+    are interpreted as UTC.
+    """
+    changed_at = user.password_changed_at
+    if changed_at is None:
+        return False
+    if changed_at.tzinfo is None:
+        changed_at = changed_at.replace(tzinfo=timezone.utc)
+    return token_iat < int(changed_at.timestamp())
+
+
 async def get_current_user_flexible(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -653,6 +673,11 @@ async def get_current_user_flexible(
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="User not found",
+                )
+            if session_invalidated_by_password_change(user, session_payload.iat):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session is no longer valid, please log in again",
                 )
             return user
         except (TokenExpiredError, TokenInvalidError):

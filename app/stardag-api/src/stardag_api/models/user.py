@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import String, Uuid
+from sqlalchemy import DateTime, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7
@@ -45,6 +46,11 @@ class User(Base, TimestampMixin):
     display_name: Mapped[str | None] = mapped_column(String(255))
     # bcrypt hash, only set for local-auth users (null for OIDC users)
     password_hash: Mapped[str | None] = mapped_column(String(255))
+    # Set on password change; session tokens issued before this instant are
+    # rejected, so a stolen session token doesn't survive a password change.
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     # Relationships
     memberships: Mapped[list[WorkspaceMember]] = relationship(

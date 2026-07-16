@@ -7,7 +7,7 @@ identity provider is involved.
 
 import logging
 import time
-from collections import defaultdict, deque
+from collections import deque
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -31,21 +31,42 @@ class LoginRateLimiter:
     Sufficient for single-container deployments (the self-hosted target for
     local auth mode); multi-container deployments rate-limit per container,
     which still bounds attack throughput per replica.
+
+    Memory is bounded even though keys are attacker-chosen (unauthenticated
+    email/IP): a key is dropped as soon as its window empties, and once the
+    number of tracked keys exceeds ``sweep_threshold`` every check first
+    sweeps out fully-expired entries.
     """
 
-    def __init__(self, max_attempts: int = 10, window_seconds: float = 300.0):
+    def __init__(
+        self,
+        max_attempts: int = 10,
+        window_seconds: float = 300.0,
+        sweep_threshold: int = 10_000,
+    ):
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
-        self._attempts: dict[str, deque[float]] = defaultdict(deque)
+        self.sweep_threshold = sweep_threshold
+        self._attempts: dict[str, deque[float]] = {}
 
     def check(self, key: str) -> bool:
         """Record an attempt for key; returns False when rate-limited."""
         now = time.monotonic()
-        attempts = self._attempts[key]
-        while attempts and attempts[0] <= now - self.window_seconds:
-            attempts.popleft()
-        if len(attempts) >= self.max_attempts:
+        if len(self._attempts) > self.sweep_threshold:
+            self._sweep(now)
+        attempts = self._attempts.get(key)
+        if attempts is not None:
+            while attempts and attempts[0] <= now - self.window_seconds:
+                attempts.popleft()
+            if not attempts:
+                # Window fully expired: drop the key (recreated below).
+                del self._attempts[key]
+                attempts = None
+        if attempts is not None and len(attempts) >= self.max_attempts:
             return False
+        if attempts is None:
+            attempts = deque()
+            self._attempts[key] = attempts
         attempts.append(now)
         return True
 
@@ -53,8 +74,22 @@ class LoginRateLimiter:
         """Clear attempts for key (e.g. after successful login)."""
         self._attempts.pop(key, None)
 
+    def _sweep(self, now: float) -> None:
+        """Drop all keys whose windows have fully expired (O(keys))."""
+        cutoff = now - self.window_seconds
+        expired = [
+            key for key, dq in self._attempts.items() if not dq or dq[-1] <= cutoff
+        ]
+        for key in expired:
+            del self._attempts[key]
 
+
+# Two layers: per email+IP (tight, protects against a single source) and per
+# email only (looser, so rotating spoofable client IPs can't brute-force one
+# account while staying loose enough that a shared/NATed office doesn't lock
+# a user out).
 login_rate_limiter = LoginRateLimiter()
+login_email_rate_limiter = LoginRateLimiter(max_attempts=30, window_seconds=900.0)
 
 
 async def authenticate_local_user(

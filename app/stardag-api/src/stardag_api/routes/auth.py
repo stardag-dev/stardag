@@ -12,7 +12,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.auth.dependencies import get_current_user_flexible
+from stardag_api.auth.dependencies import (
+    get_current_user_flexible,
+    session_invalidated_by_password_change,
+)
 from stardag_api.auth.jwt import (
     AuthenticationError,
     TokenPayload,
@@ -32,9 +35,11 @@ from stardag_api.auth.tokens import (
 from stardag_api.config import auth_settings, oidc_settings
 from stardag_api.db import get_db
 from stardag_api.models import WorkspaceMember, User
+from stardag_api.models.base import utc_now
 from stardag_api.services.local_auth import (
     authenticate_local_user,
     create_local_user,
+    login_email_rate_limiter,
     login_rate_limiter,
 )
 
@@ -240,6 +245,11 @@ async def get_exchange_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found",
             )
+        if session_invalidated_by_password_change(user, session_payload.iat):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Session is no longer valid, please log in again",
+            )
         return user
 
     # Fall back to OIDC token
@@ -314,10 +324,15 @@ async def exchange_token(
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort client IP for rate limiting (proxy-aware)."""
+    """Best-effort client IP for rate limiting (proxy-aware).
+
+    Uses the LAST X-Forwarded-For entry: proxies append the peer address
+    they saw, so the last entry was added by the nearest (trusted) hop,
+    while earlier entries are client-supplied and trivially spoofable.
+    """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.rsplit(",", 1)[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -357,8 +372,13 @@ async def local_login(
     """
     _require_local_mode()
 
-    rate_key = f"{body.email.lower()}|{_client_ip(request)}"
-    if not login_rate_limiter.check(rate_key):
+    # Two rate-limit layers: per email+IP, plus per email only so rotating
+    # (spoofable) client IPs alone can't brute-force a single account.
+    email_key = body.email.lower()
+    ip_key = f"{email_key}|{_client_ip(request)}"
+    if not login_rate_limiter.check(ip_key) or not login_email_rate_limiter.check(
+        email_key
+    ):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts, try again later",
@@ -371,7 +391,8 @@ async def local_login(
             detail="Invalid email or password",
         )
 
-    login_rate_limiter.reset(rate_key)
+    login_rate_limiter.reset(ip_key)
+    login_email_rate_limiter.reset(email_key)
     logger.info("Local login: %s", user.id)
     return _mint_session_response(user)
 
@@ -447,5 +468,8 @@ async def local_change_password(
         ) from e
 
     user.password_hash = await hash_password_async(body.new_password)
+    # Invalidate outstanding session tokens: session tokens with iat before
+    # this instant are rejected (see session_invalidated_by_password_change).
+    user.password_changed_at = utc_now()
     await db.commit()
     logger.info("Password changed for user %s", user.id)

@@ -14,17 +14,20 @@ from stardag_api.services.local_auth import (
     LoginRateLimiter,
     create_local_user,
     ensure_bootstrap_admin,
+    login_email_rate_limiter,
     login_rate_limiter,
 )
 
 
 @pytest.fixture(autouse=True)
 def local_mode(monkeypatch: pytest.MonkeyPatch):
-    """Run these tests in local auth mode with a clean rate limiter."""
+    """Run these tests in local auth mode with clean rate limiters."""
     monkeypatch.setattr(auth_settings, "mode", "local")
     login_rate_limiter._attempts.clear()
+    login_email_rate_limiter._attempts.clear()
     yield
     login_rate_limiter._attempts.clear()
+    login_email_rate_limiter._attempts.clear()
 
 
 @pytest.fixture
@@ -91,6 +94,37 @@ def test_rate_limiter_blocks_after_max():
     assert not limiter.check("k")
     limiter.reset("k")
     assert limiter.check("k")
+
+
+def test_rate_limiter_expired_window_unblocks(monkeypatch: pytest.MonkeyPatch):
+    current = {"t": 1000.0}
+    monkeypatch.setattr(
+        "stardag_api.services.local_auth.time.monotonic", lambda: current["t"]
+    )
+    limiter = LoginRateLimiter(max_attempts=1, window_seconds=60)
+    assert limiter.check("k")
+    assert not limiter.check("k")
+    current["t"] += 61
+    assert limiter.check("k")  # window expired: allowed again
+    limiter.reset("k")
+    assert "k" not in limiter._attempts
+
+
+def test_rate_limiter_sweeps_expired_keys(monkeypatch: pytest.MonkeyPatch):
+    """Keys with fully-expired windows are dropped, bounding memory even for
+    attacker-chosen (unauthenticated) keys."""
+    current = {"t": 1000.0}
+    monkeypatch.setattr(
+        "stardag_api.services.local_auth.time.monotonic", lambda: current["t"]
+    )
+    limiter = LoginRateLimiter(max_attempts=3, window_seconds=60, sweep_threshold=5)
+    for i in range(6):
+        assert limiter.check(f"key-{i}")
+    assert len(limiter._attempts) == 6
+    # Below/at the threshold nothing is swept eagerly
+    current["t"] += 61
+    assert limiter.check("fresh")  # exceeds threshold -> sweep expired keys
+    assert set(limiter._attempts) == {"fresh"}
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +296,69 @@ async def test_login_rate_limited(
 
 
 @pytest.mark.asyncio
+async def test_login_rate_limit_ignores_spoofed_xff_prefix(
+    unauthenticated_client: AsyncClient,
+):
+    """The rate-limit IP is the LAST X-Forwarded-For entry (appended by the
+    nearest trusted proxy); rotating the client-supplied prefix must not
+    yield a fresh rate-limit bucket per request."""
+    for i in range(10):
+        response = await unauthenticated_client.post(
+            "/api/v1/auth/login",
+            json={"email": "xff@example.com", "password": "guess-a-pass"},
+            headers={"x-forwarded-for": f"10.0.0.{i}, 203.0.113.9"},
+        )
+        assert response.status_code == 401
+    response = await unauthenticated_client.post(
+        "/api/v1/auth/login",
+        json={"email": "xff@example.com", "password": "guess-a-pass"},
+        headers={"x-forwarded-for": "10.0.99.99, 203.0.113.9"},
+    )
+    assert response.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_login_per_email_limiter_blocks_ip_rotation(
+    unauthenticated_client: AsyncClient,
+):
+    """Even with a fully attacker-controlled (rotating) client IP, the
+    per-email limiter caps total attempts against one account."""
+    for i in range(30):
+        response = await unauthenticated_client.post(
+            "/api/v1/auth/login",
+            json={"email": "rotated@example.com", "password": "guess-a-pass"},
+            headers={"x-forwarded-for": f"10.0.{i}.1, 198.51.100.{i}"},
+        )
+        assert response.status_code == 401
+    response = await unauthenticated_client.post(
+        "/api/v1/auth/login",
+        json={"email": "rotated@example.com", "password": "guess-a-pass"},
+        headers={"x-forwarded-for": "10.0.255.1, 198.51.100.255"},
+    )
+    assert response.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_login_success_resets_both_limiters(
+    unauthenticated_client: AsyncClient, registration_enabled
+):
+    await _register(unauthenticated_client, "resetme@example.com", "s3cret-pass")
+    for _ in range(5):
+        response = await unauthenticated_client.post(
+            "/api/v1/auth/login",
+            json={"email": "resetme@example.com", "password": "wrong-pass"},
+        )
+        assert response.status_code == 401
+    response = await unauthenticated_client.post(
+        "/api/v1/auth/login",
+        json={"email": "resetme@example.com", "password": "s3cret-pass"},
+    )
+    assert response.status_code == 200
+    assert not any("resetme@example.com" in k for k in login_rate_limiter._attempts)
+    assert "resetme@example.com" not in login_email_rate_limiter._attempts
+
+
+@pytest.mark.asyncio
 async def test_change_password_flow(
     unauthenticated_client: AsyncClient, registration_enabled
 ):
@@ -298,6 +395,101 @@ async def test_change_password_flow(
         json={"email": "changer@example.com", "password": "n3w-passw0rd"},
     )
     assert new_login.status_code == 200
+
+
+def test_session_invalidated_by_password_change_helper():
+    from datetime import datetime, timezone
+
+    from stardag_api.auth.dependencies import session_invalidated_by_password_change
+    from stardag_api.models import User
+
+    user = User(external_id="x", email="helper@example.com")
+    # No password change recorded: any iat is fine (OIDC users, fresh users)
+    assert not session_invalidated_by_password_change(user, 0)
+
+    changed_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ts = int(changed_at.timestamp())
+    user.password_changed_at = changed_at
+    assert session_invalidated_by_password_change(user, ts - 1)
+    assert not session_invalidated_by_password_change(user, ts)
+    assert not session_invalidated_by_password_change(user, ts + 1)
+
+    # Naive datetimes (e.g. read back from SQLite) are interpreted as UTC
+    user.password_changed_at = datetime(2026, 1, 1)
+    assert session_invalidated_by_password_change(user, ts - 1)
+    assert not session_invalidated_by_password_change(user, ts)
+
+
+@pytest.mark.asyncio
+async def test_password_change_invalidates_old_session_tokens(
+    unauthenticated_client: AsyncClient, registration_enabled
+):
+    """A session token minted before a password change is rejected afterwards
+    (both on flexible-auth endpoints and on /auth/exchange); a token minted
+    after the change works; workspace tokens are unaffected."""
+    import time as time_module
+
+    data = await _register(
+        unauthenticated_client, "invalidate@example.com", "0ld-passw0rd"
+    )
+    old_token = data["session_token"]
+    old_headers = {"Authorization": f"Bearer {old_token}"}
+
+    me = await unauthenticated_client.get("/api/v1/ui/me", headers=old_headers)
+    assert me.status_code == 200
+    workspace_id = me.json()["workspaces"][0]["id"]
+
+    # Mint a workspace token before the change
+    exchange = await unauthenticated_client.post(
+        "/api/v1/auth/exchange",
+        json={"workspace_id": workspace_id},
+        headers=old_headers,
+    )
+    assert exchange.status_code == 200
+    workspace_token = exchange.json()["access_token"]
+
+    # Ensure the change lands in a later whole second than the token's iat
+    # (the cutoff is compared at JWT iat granularity)
+    time_module.sleep(1.1)
+
+    response = await unauthenticated_client.post(
+        "/api/v1/auth/change-password",
+        json={"current_password": "0ld-passw0rd", "new_password": "n3w-passw0rd"},
+        headers=old_headers,
+    )
+    assert response.status_code == 204
+
+    # Old session token is now rejected on both session-token surfaces
+    me = await unauthenticated_client.get("/api/v1/ui/me", headers=old_headers)
+    assert me.status_code == 401
+    exchange = await unauthenticated_client.post(
+        "/api/v1/auth/exchange",
+        json={"workspace_id": workspace_id},
+        headers=old_headers,
+    )
+    assert exchange.status_code == 401
+
+    # Workspace token minted before the change still works (10-min TTL)
+    me = await unauthenticated_client.get(
+        "/api/v1/ui/me", headers={"Authorization": f"Bearer {workspace_token}"}
+    )
+    assert me.status_code == 200
+
+    # A session token minted after the change works
+    login = await unauthenticated_client.post(
+        "/api/v1/auth/login",
+        json={"email": "invalidate@example.com", "password": "n3w-passw0rd"},
+    )
+    assert login.status_code == 200
+    new_headers = {"Authorization": f"Bearer {login.json()['session_token']}"}
+    me = await unauthenticated_client.get("/api/v1/ui/me", headers=new_headers)
+    assert me.status_code == 200
+    exchange = await unauthenticated_client.post(
+        "/api/v1/auth/exchange",
+        json={"workspace_id": workspace_id},
+        headers=new_headers,
+    )
+    assert exchange.status_code == 200
 
 
 # ---------------------------------------------------------------------------
