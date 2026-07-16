@@ -97,6 +97,27 @@ async def test_create_app_serves_ui_with_spa_fallback(ui_dist: Path):
 
 
 @pytest.mark.asyncio
+async def test_spa_fallback_does_not_swallow_api_paths(ui_dist: Path):
+    """Unknown API-shaped paths must return a real 404 (JSON), not 200 with
+    index.html - otherwise SDK/API clients hitting a typo'd or
+    version-skewed endpoint get opaque JSON decode errors."""
+    app = create_app(str(ui_dist))
+    async with _client(app) as client:
+        for path in (
+            "/api/v1/nonexistent",
+            "/api/nope",
+            "/health-nonexistent",
+            "/.well-known/nonexistent",
+        ):
+            response = await client.get(path)
+            assert response.status_code == 404, path
+            assert "stardag ui" not in response.text, path
+        response = await client.get("/api/v1/nonexistent")
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {"detail": "Not Found"}
+
+
+@pytest.mark.asyncio
 async def test_mount_ui_is_idempotent(ui_dist: Path):
     app = create_app(str(ui_dist))
     mount_ui(app, ui_dist)  # second mount must be a no-op
