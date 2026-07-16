@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     database_name: str = "stardag"
     database_user: str = "stardag"
     database_password: str = "stardag"
+    # Direct (non-pooled) database URL. When database_url points at a
+    # connection pooler (e.g. Neon's PgBouncer endpoint), operations that
+    # need a real session - Alembic migrations in particular - must bypass
+    # it. Falls back to the regular URL when unset.
+    database_url_direct: str | None = None
+    # Enable when database_url goes through a transaction-mode pooler
+    # (PgBouncer et al.): disables asyncpg's prepared-statement caching,
+    # which breaks when consecutive statements may hit different backend
+    # sessions.
+    database_pooler_compat: bool = False
 
     debug: bool = False
 
@@ -30,6 +40,11 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.database_user}:{self.database_password}"
             f"@{self.database_host}:{self.database_port}/{self.database_name}"
         )
+
+    @property
+    def effective_migration_database_url(self) -> str:
+        """Database URL for migrations: direct (non-pooled) when configured."""
+        return self.database_url_direct or self.effective_database_url
 
     @property
     def cors_origins_list(self) -> list[str]:

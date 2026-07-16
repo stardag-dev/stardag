@@ -104,7 +104,12 @@ class InternalTokenManager:
                 self._public_key = self._private_key.public_key()
         else:
             # Generate new RSA keypair
-            logger.info("No JWT private key configured, generating ephemeral keypair")
+            logger.warning(
+                "No JWT private key configured, generating ephemeral keypair. "
+                "Tokens will not survive restarts and will fail validation "
+                "across multiple instances - set JWT_PRIVATE_KEY in any "
+                "multi-container or serverless deployment."
+            )
             self._private_key = rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=2048,

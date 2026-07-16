@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -21,6 +22,20 @@ _engine_kwargs: dict[str, object] = {
 # pass them only for real DB backends.
 if settings.effective_database_url.startswith("sqlite"):
     _engine_kwargs = {}
+
+# Transaction-mode poolers (PgBouncer, Neon's pooled endpoint) hand
+# consecutive statements to different backend sessions, so asyncpg's
+# named-prepared-statement caching breaks. Disable both asyncpg's own cache
+# and SQLAlchemy's dialect-level cache, and give ad-hoc prepared statements
+# collision-free names.
+if settings.database_pooler_compat and settings.effective_database_url.startswith(
+    "postgresql+asyncpg"
+):
+    _engine_kwargs["connect_args"] = {
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4()}__",
+    }
 
 engine = create_async_engine(settings.effective_database_url, **_engine_kwargs)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
