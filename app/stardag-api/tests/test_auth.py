@@ -753,3 +753,39 @@ async def test_me_invites_endpoint(async_engine):
         assert data[0]["invited_by_email"] == "inviter@example.com"
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# /auth/config endpoint
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_config_oidc_mode(unauthenticated_client: AsyncClient):
+    """Default (oidc) mode returns full OIDC configuration."""
+    response = await unauthenticated_client.get("/api/v1/auth/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["auth_mode"] == "oidc"
+    assert data["oidc_issuer"]
+    assert data["oidc_client_id"] == "stardag-sdk"
+    assert data["oidc_ui_client_id"] == "stardag-ui"
+    assert data["local_registration_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_auth_config_local_mode(
+    unauthenticated_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Local mode returns no OIDC fields."""
+    from stardag_api.config import auth_settings
+
+    monkeypatch.setattr(auth_settings, "mode", "local")
+    response = await unauthenticated_client.get("/api/v1/auth/config")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["auth_mode"] == "local"
+    assert data["oidc_issuer"] is None
+    assert data["oidc_client_id"] is None
+    assert data["oidc_ui_client_id"] is None
+    assert data["local_registration_enabled"] is False

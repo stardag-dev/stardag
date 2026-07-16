@@ -1,7 +1,7 @@
 """Authentication routes for token exchange and JWKS."""
 
 import logging
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -20,7 +20,7 @@ from stardag_api.auth.tokens import (
     get_jwks,
     get_token_manager,
 )
-from stardag_api.config import oidc_settings
+from stardag_api.config import auth_settings, oidc_settings
 from stardag_api.db import get_db
 from stardag_api.models import WorkspaceMember, User
 
@@ -33,10 +33,25 @@ oidc_bearer = HTTPBearer(auto_error=True)
 
 
 class AuthConfigResponse(BaseModel):
-    """OIDC configuration for SDK/CLI clients."""
+    """Authentication configuration for SDK/CLI and UI clients.
 
-    oidc_issuer: str
-    oidc_client_id: str
+    Served at runtime so clients (in particular the web UI) can discover how
+    to authenticate against this registry without baking config in at build
+    time. In "local" auth mode the OIDC fields are null and clients should
+    use email/password login instead.
+    """
+
+    auth_mode: Literal["oidc", "local"] = "oidc"
+    oidc_issuer: str | None = None
+    # Client ID for SDK/CLI clients (kept as `oidc_client_id` for
+    # backwards compatibility with existing SDK versions)
+    oidc_client_id: str | None = None
+    # Client ID the web UI should use
+    oidc_ui_client_id: str | None = None
+    # Cognito hosted-UI domain, only set for Cognito (non-standard logout)
+    cognito_domain: str | None = None
+    # Whether self-service signup is enabled (local mode only)
+    local_registration_enabled: bool = False
 
 
 class TokenExchangeRequest(BaseModel):
@@ -124,15 +139,23 @@ async def get_jwks_endpoint():
 
 @router.get("/auth/config", response_model=AuthConfigResponse)
 async def get_auth_config():
-    """Get OIDC configuration for SDK/CLI clients.
+    """Get authentication configuration for SDK/CLI and UI clients.
 
-    Returns the OIDC issuer and client ID that clients should use
-    for authentication. This allows the CLI to dynamically discover
-    the correct OIDC provider for each registry.
+    Allows clients to dynamically discover how to authenticate against this
+    registry (auth mode, OIDC provider details) instead of requiring
+    build-time configuration.
     """
+    if auth_settings.mode == "local":
+        return AuthConfigResponse(
+            auth_mode="local",
+            local_registration_enabled=auth_settings.local_registration_enabled,
+        )
     return AuthConfigResponse(
+        auth_mode="oidc",
         oidc_issuer=oidc_settings.client_issuer_url,
         oidc_client_id=oidc_settings.sdk_client_id,
+        oidc_ui_client_id=oidc_settings.ui_client_id,
+        cognito_domain=oidc_settings.cognito_domain,
     )
 
 
