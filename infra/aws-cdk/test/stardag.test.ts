@@ -411,6 +411,51 @@ describe("ApiStack explicit image URI (apiImageUri)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ApiStack — runtime UI OIDC configuration. Prebuilt UI dists resolve their
+// client id and Cognito logout domain at runtime from GET /api/v1/auth/config,
+// which serves OIDC_UI_CLIENT_ID and OIDC_COGNITO_DOMAIN. Without these env
+// vars the API would serve its defaults (client id "stardag-ui", no Cognito
+// domain) and Cognito authorize/logout would break for runtime-config UIs.
+// ---------------------------------------------------------------------------
+
+describe("ApiStack runtime-UI OIDC environment", () => {
+  let environment: Array<{ Name: string; Value: unknown }>;
+
+  beforeAll(() => {
+    const template = synthApiStackWithImage(undefined);
+    const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+    const apiTaskDef = Object.values(taskDefs).find(
+      (td) =>
+        td.Properties.ContainerDefinitions?.some(
+          (c: { Name?: string }) => c.Name === "Api",
+        ),
+    );
+    expect(apiTaskDef).toBeDefined();
+    environment = apiTaskDef!.Properties.ContainerDefinitions[0].Environment;
+  });
+
+  function envValue(name: string): unknown {
+    const entry = environment.find((e) => e.Name === name);
+    expect(entry).toBeDefined();
+    return entry!.Value;
+  }
+
+  test("sets OIDC_UI_CLIENT_ID to the same Cognito client as the SDK", () => {
+    // The Foundation stack creates a single user-pool client shared by UI
+    // and SDK; both env vars must reference the same (imported) client id.
+    expect(envValue("OIDC_UI_CLIENT_ID")).toEqual(envValue("OIDC_SDK_CLIENT_ID"));
+  });
+
+  test("sets OIDC_COGNITO_DOMAIN to the bare hosted-UI host (no scheme)", () => {
+    // The UI builds https://{cognito_domain}/logout, so the value must be
+    // the bare host.
+    expect(envValue("OIDC_COGNITO_DOMAIN")).toBe(
+      `stardag.auth.${mockConfig.awsRegion}.amazoncognito.com`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // StardagApi construct — imageUri normalization. The reusable construct must
 // be safe on its own (independent of ApiStack's env/context normalization):
 // a whitespace-only imageUri prop is treated as unset, and surrounding
@@ -565,6 +610,45 @@ describe("FrontendStack same-origin API proxy (apiProxy)", () => {
       }>;
       expect(defaultAssociations).toHaveLength(1);
       expect(defaultAssociations[0].EventType).toBe("viewer-request");
+    });
+
+    describe("SPA rewrite function behavior", () => {
+      // Extract the inline CloudFront Function code from the template and
+      // execute it directly. The function is plain (CloudFront JS 2.0
+      // compatible) JavaScript, so evaluating it in Node exercises the
+      // real rewrite logic rather than string-matching the source.
+      let rewrite: (uri: string) => string;
+
+      beforeAll(() => {
+        const fns = template.findResources("AWS::CloudFront::Function");
+        const values = Object.values(fns);
+        expect(values).toHaveLength(1);
+        const code = values[0].Properties.FunctionCode as string;
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        const handler = new Function(`${code}; return handler;`)() as (event: {
+          request: { uri: string };
+        }) => { uri: string };
+        rewrite = (uri: string) => handler({ request: { uri } }).uri;
+      });
+
+      test("rewrites SPA routes (including dotted path params) to /index.html", () => {
+        expect(rewrite("/")).toBe("/index.html");
+        expect(rewrite("/workspaces/acme/builds")).toBe("/index.html");
+        // A future dotted route param must reach the SPA, not surface a
+        // raw S3 XML error (proxy mode has no distribution-wide error
+        // responses to catch the miss).
+        expect(rewrite("/tasks/v1.2.3")).toBe("/index.html");
+        expect(rewrite("/builds/some.dotted.id/details")).toBe("/index.html");
+      });
+
+      test("serves static assets as-is", () => {
+        expect(rewrite("/index.html")).toBe("/index.html");
+        expect(rewrite("/assets/index-B3xQ9z.js")).toBe("/assets/index-B3xQ9z.js");
+        expect(rewrite("/assets/index-C4yR1w.css")).toBe("/assets/index-C4yR1w.css");
+        expect(rewrite("/favicon.svg")).toBe("/favicon.svg");
+        expect(rewrite("/logo.svg")).toBe("/logo.svg");
+        expect(rewrite("/robots.txt")).toBe("/robots.txt");
+      });
     });
   });
 

@@ -222,6 +222,15 @@ export class ApiStack extends cdk.Stack {
         OIDC_AUDIENCE: foundation.cognitoClientId,
         // SDK client ID (same Cognito client used for both UI and SDK)
         OIDC_SDK_CLIENT_ID: foundation.cognitoClientId,
+        // UI client ID and Cognito hosted-UI domain, served to the web UI
+        // at runtime via GET /api/v1/auth/config. Required for prebuilt UI
+        // dists (deploy-ui.sh --release), which have no baked VITE_* config
+        // and would otherwise fall back to the API defaults (client id
+        // "stardag-ui", no Cognito logout). Harmless for locally-built
+        // dists, which bake their config at build time.
+        OIDC_UI_CLIENT_ID: foundation.cognitoClientId,
+        // Bare host, no scheme — the UI builds https://{domain}/logout.
+        OIDC_COGNITO_DOMAIN: foundation.cognitoDomain,
         // Cognito JWKS URL format: {issuer}/.well-known/jwks.json
         // (different from Keycloak which uses /protocol/openid-connect/certs)
         OIDC_JWKS_URL: `${foundation.cognitoIssuerUrl}/.well-known/jwks.json`,

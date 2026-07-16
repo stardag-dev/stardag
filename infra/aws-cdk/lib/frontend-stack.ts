@@ -119,17 +119,33 @@ export class FrontendStack extends cdk.Stack {
     // default mode would also rewrite legitimate API error responses
     // (CloudFront custom error responses apply to every cache behavior),
     // so SPA routing switches to a viewer-request function scoped to the
-    // S3 behavior: extensionless paths are rewritten to /index.html.
+    // S3 behavior. The function uses a static-asset allowlist rather than
+    // a "URI contains a dot" heuristic: the dist layout is under our
+    // control (Vite emits the fingerprinted bundle under /assets/ plus a
+    // handful of root-level files with well-known extensions), while
+    // future client route params are not — a dotted route param must fall
+    // through to the SPA (which renders its own not-found state), not to
+    // a raw S3 AccessDenied/NoSuchKey XML response (proxy mode has no
+    // distribution-wide error responses to catch the miss).
     const spaRewriteFunction = apiProxy
       ? new cloudfront.Function(this, "SpaRewriteFn", {
-          comment: "Rewrite extensionless paths to /index.html (SPA routing)",
+          comment: "SPA routing: rewrite non-static-asset paths to /index.html",
           runtime: cloudfront.FunctionRuntime.JS_2_0,
           code: cloudfront.FunctionCode.fromInline(
             [
               "function handler(event) {",
               "  var request = event.request;",
-              "  // Paths without a file extension are SPA routes.",
-              "  if (!request.uri.includes('.')) {",
+              "  var uri = request.uri;",
+              "  // Static assets are served as-is: the fingerprinted Vite",
+              "  // bundle under /assets/, and root-level files with a",
+              "  // known static extension (favicon.svg, robots.txt, ...).",
+              "  // Everything else is an SPA route -> /index.html. If the",
+              "  // UI dist ever ships static files outside /assets/ with",
+              "  // an extension not listed here, extend the allowlist.",
+              "  var isStaticAsset =",
+              "    uri.startsWith('/assets/') ||",
+              "    /\\.(html|js|css|map|json|svg|png|jpe?g|gif|webp|avif|ico|txt|xml|webmanifest|woff2?|ttf|eot)$/.test(uri);",
+              "  if (!isStaticAsset) {",
               "    request.uri = '/index.html';",
               "  }",
               "  return request;",

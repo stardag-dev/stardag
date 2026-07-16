@@ -172,7 +172,11 @@ configured (the CloudFront origin points at the API custom domain).
 When the proxy is enabled, SPA routing switches from distribution-wide
 403/404 → `index.html` error responses to a CloudFront viewer-request
 function on the S3 behavior (otherwise legitimate API 403/404 responses
-would be rewritten to the app shell).
+would be rewritten to the app shell). The function serves `/assets/*` and
+root-level files with a known static extension as-is and rewrites every
+other path to `/index.html`, so client routes may safely contain dots; if
+the UI dist ever ships static files outside `/assets/` with a new
+extension, add it to the allowlist in `lib/frontend-stack.ts`.
 
 The locally-built flow (plain `./scripts/deploy-ui.sh`) is unaffected and
 does not need the proxy: it bakes `VITE_API_BASE_URL` etc. at build time.
