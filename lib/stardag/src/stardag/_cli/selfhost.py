@@ -41,8 +41,27 @@ error_console = Console(stderr=True, style="bold red")
 
 DEFAULT_NEON_PROJECT = "stardag"
 
+# Mirrors the server's password policy (stardag_api.auth.passwords): bcrypt
+# truncates at 72 bytes, so the server rejects longer passwords. Enforce the
+# same bounds here - a too-long bootstrap password would otherwise make
+# `ensure_bootstrap_admin` raise during API startup on every container boot.
+MIN_ADMIN_PASSWORD_CHARS = 8
+MAX_ADMIN_PASSWORD_BYTES = 72
+
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _admin_password_error(password: str) -> str | None:
+    """Validate the bootstrap admin password; returns an error message or None."""
+    if len(password) < MIN_ADMIN_PASSWORD_CHARS:
+        return f"Admin password must be at least {MIN_ADMIN_PASSWORD_CHARS} characters"
+    if len(password.encode("utf-8")) > MAX_ADMIN_PASSWORD_BYTES:
+        return (
+            f"Admin password must be at most {MAX_ADMIN_PASSWORD_BYTES} bytes "
+            "of UTF-8 (bcrypt limit, enforced by the server)"
+        )
+    return None
 
 
 def _require_repo_root(repo: Path | None) -> Path:
@@ -123,6 +142,27 @@ def _generate_jwt_keypair() -> tuple[str, str]:
         .decode()
     )
     return private_pem, public_pem
+
+
+def _meta_dict_name(app_name: str) -> str:
+    """Name of the modal.Dict holding persisted deployment settings."""
+    return f"{app_name}-meta"
+
+
+def _resolve_keep_warm(app_name: str, keep_warm: int | None) -> int:
+    """Resolve the effective keep-warm value, persisting it across deploys.
+
+    An explicitly provided value wins and is stored in the app's meta Dict;
+    when the flag is omitted the previously stored value is used (default 0),
+    so a plain `upgrade` doesn't silently reset keep-warm to scale-to-zero.
+    """
+    import modal
+
+    meta = modal.Dict.from_name(_meta_dict_name(app_name), create_if_missing=True)
+    if keep_warm is not None:
+        meta["keep_warm"] = keep_warm
+        return keep_warm
+    return meta.get("keep_warm", 0)
 
 
 def _ensure_jwt_secret(name: str) -> bool:
@@ -387,10 +427,11 @@ def up(
         help="JWKS URL (only needed if not at <issuer>/protocol/openid-connect/certs)",
     ),
     keep_warm: int = typer.Option(
-        0,
+        None,
         "--keep-warm",
         help="Containers to keep always-on (0 = scale to zero, a few seconds "
-        "cold start on first request)",
+        "cold start on first request). Persisted: when omitted, the last "
+        "explicitly set value is kept (initially 0).",
     ),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Non-interactive: fail instead of prompting"
@@ -479,8 +520,9 @@ def up(
                     hide_input=True,
                     confirmation_prompt=True,
                 )
-            if len(admin_password) < 8:
-                error_console.print("Admin password must be at least 8 characters")
+            password_error = _admin_password_error(admin_password)
+            if password_error:
+                error_console.print(password_error)
                 raise typer.Exit(1)
         else:
             if not oidc_issuer:
@@ -533,7 +575,7 @@ def up(
         )
 
     # --- Migrate + deploy ---
-    url = _deploy(repo_root, name, keep_warm)
+    url = _deploy(repo_root, name, _resolve_keep_warm(name, keep_warm))
 
     console.print("\n[bold green]Stardag is up![/bold green]")
     console.print(f"\n  UI:  [bold]{url}[/bold]")
@@ -565,7 +607,10 @@ def upgrade(
     repo: Path = typer.Option(None, "--repo", help="Path to the stardag repo checkout"),
     name: str = typer.Option(DEFAULT_APP_NAME, "--name", help="Modal app name"),
     keep_warm: int = typer.Option(
-        0, "--keep-warm", help="Containers to keep always-on"
+        None,
+        "--keep-warm",
+        help="Containers to keep always-on. Persisted: when omitted, the "
+        "last explicitly set value is kept (initially 0).",
     ),
 ):
     """Update the deployment: apply DB migrations and redeploy from current source."""
@@ -581,7 +626,7 @@ def upgrade(
             )
             raise typer.Exit(1)
 
-    url = _deploy(repo_root, name, keep_warm)
+    url = _deploy(repo_root, name, _resolve_keep_warm(name, keep_warm))
     console.print("\n[bold green]Upgrade complete.[/bold green]")
     console.print(f"  UI: [bold]{url}[/bold]")
 
@@ -608,6 +653,12 @@ def status(
         state = "present" if _secret_exists(secret_name) else "missing"
         console.print(f"  Secret {secret_name}: {state}")
 
+    try:
+        meta = modal.Dict.from_name(_meta_dict_name(name))
+        console.print(f"  Keep-warm containers: {meta.get('keep_warm', 0)}")
+    except modal.exception.NotFoundError:
+        pass
+
 
 @app.command()
 def destroy(
@@ -615,8 +666,8 @@ def destroy(
     delete_secrets: bool = typer.Option(
         False,
         "--delete-secrets",
-        help="Also delete the config + JWT secrets (existing sessions and "
-        "SDK logins become invalid)",
+        help="Also delete the config + JWT secrets and the settings Dict "
+        "(existing sessions and SDK logins become invalid)",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
@@ -647,6 +698,8 @@ def destroy(
         for secret_name in (f"{name}-config", f"{name}-jwt"):
             modal.Secret.objects.delete(secret_name, allow_missing=True)
             console.print(f"Deleted secret {secret_name}")
+        modal.Dict.objects.delete(_meta_dict_name(name), allow_missing=True)
+        console.print(f"Deleted dict {_meta_dict_name(name)}")
 
     console.print(
         "\nNote: the Neon project/database was NOT deleted. Manage it at "

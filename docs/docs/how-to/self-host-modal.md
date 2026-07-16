@@ -169,7 +169,9 @@ Useful flags for `up` (all prompts have flag equivalents for CI):
 - `--database-url` / `--database-url-direct` — bring your own Postgres
   instead of Neon (use `postgresql+asyncpg://...` URLs; pass the direct
   variant if the main URL goes through a transaction-mode pooler)
-- `--keep-warm N` — always-on containers (default 0 = scale to zero)
+- `--keep-warm N` — always-on containers (initially 0 = scale to zero). The
+  value is persisted: `up`/`upgrade` without the flag keep the last
+  explicitly set value.
 - `--yes` — non-interactive; fails instead of prompting
 
 ## Troubleshooting

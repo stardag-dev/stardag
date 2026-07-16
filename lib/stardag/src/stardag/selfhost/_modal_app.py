@@ -121,12 +121,17 @@ def build_server_app(
 
         class SPAStaticFiles(StaticFiles):
             # SPA fallback: unknown paths serve index.html so client-side
-            # routes (e.g. /builds/<id>) work on hard reloads.
+            # routes (e.g. /builds/<id>) work on hard reloads. API-shaped
+            # paths (api/, health*, .well-known/) are excluded so unknown
+            # API endpoints return a proper 404 instead of 200 with HTML.
+            # (Inside the mount, `path` has no leading slash.)
             async def get_response(self, path: str, scope):
                 try:
                     return await super().get_response(path, scope)
                 except StarletteHTTPException as e:
-                    if e.status_code == 404:
+                    if e.status_code == 404 and not path.startswith(
+                        ("api/", "health", ".well-known/")
+                    ):
                         return await super().get_response("index.html", scope)
                     raise
 

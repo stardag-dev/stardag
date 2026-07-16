@@ -8,9 +8,13 @@ pytest.importorskip("modal")
 pytest.importorskip("cryptography")
 
 from stardag._cli.selfhost import (  # noqa: E402
+    MAX_ADMIN_PASSWORD_BYTES,
+    MIN_ADMIN_PASSWORD_CHARS,
+    _admin_password_error,
     _build_config_env,
     _generate_jwt_keypair,
     _provided_config_flags,
+    _resolve_keep_warm,
 )
 from stardag.selfhost._modal_app import find_repo_root  # noqa: E402
 
@@ -105,6 +109,62 @@ def test_provided_config_flags():
         oidc_audience=None,
         oidc_jwks_url=None,
     ) == ["--auth-mode", "--enable-registration", "--oidc-issuer"]
+
+
+def test_admin_password_validation():
+    """Mirrors the server's password policy: 8-char minimum AND 72-byte
+    maximum (bcrypt truncation limit) - a too-long password would otherwise
+    crash-loop the API container at startup (bootstrap admin provisioning)."""
+    assert _admin_password_error("short") is not None
+    assert _admin_password_error("a" * MIN_ADMIN_PASSWORD_CHARS) is None
+    assert _admin_password_error("a" * MAX_ADMIN_PASSWORD_BYTES) is None
+    assert _admin_password_error("a" * (MAX_ADMIN_PASSWORD_BYTES + 1)) is not None
+    # The limit is bytes of UTF-8, not characters ('€' is 3 bytes)
+    assert _admin_password_error("€" * 24) is None  # 72 bytes
+    assert _admin_password_error("€" * 25) is not None  # 75 bytes
+
+
+def _patch_meta_dict(monkeypatch: pytest.MonkeyPatch, store: dict) -> list[str]:
+    """Patch modal.Dict.from_name to return `store`; records requested names."""
+    import modal
+
+    names: list[str] = []
+
+    def fake_from_name(name: str, *, create_if_missing: bool = False):
+        names.append(name)
+        return store
+
+    monkeypatch.setattr(modal.Dict, "from_name", fake_from_name)
+    return names
+
+
+def test_resolve_keep_warm_explicit_value_wins_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store: dict = {}
+    names = _patch_meta_dict(monkeypatch, store)
+    assert _resolve_keep_warm("myapp", 2) == 2
+    assert store["keep_warm"] == 2
+    assert names == ["myapp-meta"]
+
+
+def test_resolve_keep_warm_omitted_uses_persisted_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store: dict = {"keep_warm": 1}
+    _patch_meta_dict(monkeypatch, store)
+    # Omitting the flag (None) must NOT reset a previously set value
+    assert _resolve_keep_warm("myapp", None) == 1
+    assert store["keep_warm"] == 1
+
+
+def test_resolve_keep_warm_defaults_to_zero(monkeypatch: pytest.MonkeyPatch):
+    store: dict = {}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_keep_warm("myapp", None) == 0
+    # Explicit 0 is persisted (distinguishable from "not provided")
+    assert _resolve_keep_warm("myapp", 0) == 0
+    assert store["keep_warm"] == 0
 
 
 def test_generate_jwt_keypair_pem():
