@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { changePasswordLocal } from "../api/auth";
 import { useAuth } from "../context/AuthContext";
 import { Modal } from "./Modal";
@@ -13,7 +13,7 @@ interface ChangePasswordModalProps {
 /**
  * Change-password dialog for local auth mode (email/password accounts
  * managed by the API). Verifies the current password server-side via
- * POST /auth/change-password.
+ * POST /api/v1/auth/change-password.
  */
 export function ChangePasswordModal({ isOpen, onClose }: ChangePasswordModalProps) {
   const { getAccessToken } = useAuth();
@@ -23,8 +23,22 @@ export function ChangePasswordModal({ isOpen, onClose }: ChangePasswordModalProp
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
+  const closeTimeoutRef = useRef<number | null>(null);
+
+  // Clear any pending auto-close timer on unmount
+  useEffect(() => {
+    return () => {
+      if (closeTimeoutRef.current !== null) {
+        window.clearTimeout(closeTimeoutRef.current);
+      }
+    };
+  }, []);
 
   function resetAndClose() {
+    if (closeTimeoutRef.current !== null) {
+      window.clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = null;
+    }
     setCurrentPassword("");
     setNewPassword("");
     setConfirmPassword("");
@@ -32,6 +46,16 @@ export function ChangePasswordModal({ isOpen, onClose }: ChangePasswordModalProp
     setIsSubmitting(false);
     setSuccess(false);
     onClose();
+  }
+
+  /**
+   * User-initiated close (Cancel, X button, overlay click, Escape).
+   * Ignored while the request is in flight so an in-flight submit can't
+   * later flip to the success state / schedule a stale delayed close.
+   */
+  function handleClose() {
+    if (isSubmitting) return;
+    resetAndClose();
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -56,9 +80,10 @@ export function ChangePasswordModal({ isOpen, onClose }: ChangePasswordModalProp
         throw new Error("Your session has expired — please sign in again");
       }
       await changePasswordLocal(currentPassword, newPassword, token);
+      setIsSubmitting(false);
       setSuccess(true);
-      // Brief confirmation, then close
-      setTimeout(resetAndClose, 1500);
+      // Brief confirmation, then close (dismissable early by the user)
+      closeTimeoutRef.current = window.setTimeout(resetAndClose, 1500);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to change password");
       setIsSubmitting(false);
@@ -71,7 +96,7 @@ export function ChangePasswordModal({ isOpen, onClose }: ChangePasswordModalProp
     "mb-1 block text-sm font-medium text-gray-700 dark:text-gray-300";
 
   return (
-    <Modal isOpen={isOpen} onClose={resetAndClose} title="Change password">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Change password">
       {success ? (
         <p className="py-2 text-sm text-green-600 dark:text-green-400" role="status">
           Password changed successfully.
@@ -128,8 +153,9 @@ export function ChangePasswordModal({ isOpen, onClose }: ChangePasswordModalProp
           <div className="flex justify-end gap-2 pt-2">
             <button
               type="button"
-              onClick={resetAndClose}
-              className="rounded-md px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+              onClick={handleClose}
+              disabled={isSubmitting}
+              className="rounded-md px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-gray-200 dark:hover:bg-gray-700"
             >
               Cancel
             </button>

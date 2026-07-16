@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChangePasswordModal } from "./ChangePasswordModal";
@@ -17,8 +17,12 @@ vi.mock("../api/auth", () => ({
 
 import { changePasswordLocal } from "../api/auth";
 
-async function fillForm(current: string, next: string, confirm: string) {
-  const user = userEvent.setup();
+async function fillForm(
+  current: string,
+  next: string,
+  confirm: string,
+  user = userEvent.setup(),
+) {
   await user.type(screen.getByLabelText("Current password"), current);
   await user.type(screen.getByLabelText("New password"), next);
   await user.type(screen.getByLabelText("Confirm new password"), confirm);
@@ -72,20 +76,59 @@ describe("ChangePasswordModal", () => {
   it("submits and shows a confirmation, then closes", async () => {
     vi.mocked(changePasswordLocal).mockResolvedValue(undefined);
     const onClose = vi.fn();
+
+    // Capture the 1.5s auto-close callback instead of waiting real time.
+    // Other setTimeout calls (userEvent, waitFor) pass through untouched.
+    let closeCallback: (() => void) | undefined;
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout").mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (timeout === 1500) {
+        closeCallback = handler as () => void;
+        return 0;
+      }
+      return nativeSetTimeout(handler, timeout, ...args);
+    }) as typeof window.setTimeout);
+
+    try {
+      render(<ChangePasswordModal isOpen={true} onClose={onClose} />);
+
+      await fillForm("old-password", "new-password", "new-password");
+
+      expect(
+        await screen.findByText("Password changed successfully."),
+      ).toBeInTheDocument();
+      expect(changePasswordLocal).toHaveBeenCalledWith(
+        "old-password",
+        "new-password",
+        "session-token-123",
+      );
+
+      // The close was scheduled with the confirmation delay; run it now
+      expect(onClose).not.toHaveBeenCalled();
+      expect(closeCallback).toBeDefined();
+      act(() => closeCallback!());
+      expect(onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it("ignores close attempts while the request is in flight", async () => {
+    // Keep the request pending for the duration of the test
+    vi.mocked(changePasswordLocal).mockImplementation(() => new Promise(() => {}));
+    const onClose = vi.fn();
     render(<ChangePasswordModal isOpen={true} onClose={onClose} />);
 
-    await fillForm("old-password", "new-password", "new-password");
+    const user = userEvent.setup();
+    await fillForm("old-password", "new-password", "new-password", user);
 
-    expect(
-      await screen.findByText("Password changed successfully."),
-    ).toBeInTheDocument();
-    expect(changePasswordLocal).toHaveBeenCalledWith(
-      "old-password",
-      "new-password",
-      "session-token-123",
-    );
-    // Closes after the brief confirmation
-    await waitFor(() => expect(onClose).toHaveBeenCalled(), { timeout: 3000 });
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("shows the API error on wrong current password (401)", async () => {
