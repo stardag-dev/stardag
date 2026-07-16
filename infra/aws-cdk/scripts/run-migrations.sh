@@ -1,7 +1,18 @@
 #!/bin/bash
 # Run database migrations on AWS
 # Uses ECS to run migrations task against Aurora database
+#
+# The migration task reuses the API service's task definition and overrides
+# the container command with `alembic upgrade head`. This assumes the image
+# working directory contains alembic.ini and migrations/ — true for both
+# the locally-built stardag-api image and the prebuilt public server image
+# (ghcr.io/stardag-dev/stardag-server:X.Y.Z), which keep the same layout.
+# For images with a different layout, override with e.g.:
+#   MIGRATION_COMMAND="alembic -c /path/to/alembic.ini upgrade head" ./scripts/run-migrations.sh
 set -e
+
+# Command to run inside the container (split on whitespace into argv)
+MIGRATION_COMMAND="${MIGRATION_COMMAND:-alembic upgrade head}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CDK_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -96,19 +107,22 @@ ADMIN_SECRET_ARN=$($AWS_CMD secretsmanager list-secrets \
 
 echo "Admin Secret: $ADMIN_SECRET_ARN"
 
-# Create a migration-specific task definition that uses admin credentials
-# This overrides the command to run alembic instead of uvicorn
+# Run a one-off task from the API service's task definition, overriding
+# the command to run alembic instead of the API server. The command is
+# configurable via MIGRATION_COMMAND (see header comment).
+echo "Migration command: $MIGRATION_COMMAND"
+OVERRIDES=$(python3 -c "
+import json, sys
+command = sys.argv[1].split()
+print(json.dumps({'containerOverrides': [{'name': 'Api', 'command': command}]}))
+" "$MIGRATION_COMMAND")
+
 TASK_RUN_RESULT=$($AWS_CMD ecs run-task \
     --cluster $CLUSTER_NAME \
     --task-definition $TASK_DEF_ARN \
     --launch-type FARGATE \
     --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SECURITY_GROUP],assignPublicIp=DISABLED}" \
-    --overrides '{
-        "containerOverrides": [{
-            "name": "Api",
-            "command": ["alembic", "upgrade", "head"]
-        }]
-    }' \
+    --overrides "$OVERRIDES" \
     --region $AWS_REGION \
     --output json)
 

@@ -3,6 +3,7 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { ApiStack } from "../lib/api-stack";
 import { FoundationStack } from "../lib/foundation-stack";
 import { StardagStack } from "../lib/stardag-stack";
+import { FrontendStack } from "../lib/frontend-stack";
 
 // Mock config for testing
 const mockConfig = {
@@ -345,5 +346,182 @@ describe("ApiStack JWT_PRIVATE_KEY secret wiring", () => {
       const names = secrets.map((s: { Name: string }) => s.Name);
       expect(names).not.toContain("JWT_PRIVATE_KEY");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ApiStack — optional explicit container image (prebuilt public release
+// image, e.g. ghcr.io/stardag-dev/stardag-server:X.Y.Z).
+// ---------------------------------------------------------------------------
+
+function synthApiStackWithImage(apiImageUri?: string): Template {
+  const app = new cdk.App();
+  const env = {
+    account: mockConfig.awsAccountId,
+    region: mockConfig.awsRegion,
+  };
+  const foundation = new FoundationStack(app, "Foundation", {
+    env,
+    config: mockConfig,
+  });
+  const apiStack = new ApiStack(app, "Api", {
+    env,
+    config: mockConfig,
+    foundation,
+    apiImageUri,
+  });
+  return Template.fromStack(apiStack);
+}
+
+function getApiContainerImage(template: Template): unknown {
+  const taskDefs = template.findResources("AWS::ECS::TaskDefinition");
+  const apiTaskDef = Object.values(taskDefs).find(
+    (td) =>
+      td.Properties.ContainerDefinitions?.some(
+        (c: { Name?: string }) => c.Name === "Api",
+      ),
+  );
+  expect(apiTaskDef).toBeDefined();
+  return apiTaskDef!.Properties.ContainerDefinitions[0].Image;
+}
+
+describe("ApiStack explicit image URI (apiImageUri)", () => {
+  test("defaults to the Foundation ECR repository image", () => {
+    const image = getApiContainerImage(synthApiStackWithImage(undefined));
+    // The ECR image URI is assembled from the imported repository name
+    // (an Fn::Join over the ECR ARN export) — assert it is NOT a plain
+    // public registry string and references the ECR repository ARN export.
+    expect(typeof image).not.toBe("string");
+    expect(JSON.stringify(image)).toContain("dkr.ecr");
+  });
+
+  test("uses the literal image URI when provided", () => {
+    const uri = "ghcr.io/stardag-dev/stardag-server:0.1.0";
+    const image = getApiContainerImage(synthApiStackWithImage(uri));
+    expect(image).toBe(uri);
+  });
+
+  test("treats a whitespace-only value as unset", () => {
+    const image = getApiContainerImage(synthApiStackWithImage("   "));
+    expect(typeof image).not.toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FrontendStack — optional same-origin API proxy (uiApiProxy). Required for
+// prebuilt UI dists, which resolve their config at runtime from
+// /api/v1/auth/config on their own origin.
+// ---------------------------------------------------------------------------
+
+// A config with a non-example.com domain so FoundationStack creates the
+// DNS construct (HostedZone.fromLookup returns a dummy zone during tests).
+const dnsConfig = {
+  ...mockConfig,
+  domainName: "stardag-cdk-test.dev",
+  apiDomain: "api.stardag-cdk-test.dev",
+  uiDomain: "app.stardag-cdk-test.dev",
+};
+
+function synthFrontendStack(config: typeof mockConfig, apiProxy: boolean): Template {
+  const app = new cdk.App();
+  const env = {
+    account: mockConfig.awsAccountId,
+    region: mockConfig.awsRegion,
+  };
+  const foundation = new FoundationStack(app, "Foundation", { env, config });
+  const frontend = new FrontendStack(app, "Frontend", {
+    env,
+    config,
+    foundation,
+    apiProxy,
+  });
+  return Template.fromStack(frontend);
+}
+
+function getDistributionConfig(template: Template): any {
+  const distributions = template.findResources("AWS::CloudFront::Distribution");
+  const values = Object.values(distributions);
+  expect(values).toHaveLength(1);
+  return values[0].Properties.DistributionConfig;
+}
+
+describe("FrontendStack same-origin API proxy (apiProxy)", () => {
+  describe("default (disabled)", () => {
+    let template: Template;
+
+    beforeAll(() => {
+      template = synthFrontendStack(dnsConfig, false);
+    });
+
+    test("keeps SPA routing via 403/404 error responses", () => {
+      const config = getDistributionConfig(template);
+      const codes = (config.CustomErrorResponses ?? []).map(
+        (r: { ErrorCode: number }) => r.ErrorCode,
+      );
+      expect(codes).toEqual(expect.arrayContaining([403, 404]));
+    });
+
+    test("has no additional cache behaviors and no CloudFront function", () => {
+      const config = getDistributionConfig(template);
+      expect(config.CacheBehaviors ?? []).toHaveLength(0);
+      template.resourceCountIs("AWS::CloudFront::Function", 0);
+    });
+  });
+
+  describe("enabled", () => {
+    let template: Template;
+
+    beforeAll(() => {
+      template = synthFrontendStack(dnsConfig, true);
+    });
+
+    test("routes /api/*, /health and /.well-known/* to the API domain", () => {
+      const config = getDistributionConfig(template);
+      const behaviors = config.CacheBehaviors as Array<{
+        PathPattern: string;
+        TargetOriginId: string;
+        CachePolicyId: string;
+        AllowedMethods: string[];
+      }>;
+      const patterns = behaviors.map((b) => b.PathPattern);
+      expect(patterns).toEqual(
+        expect.arrayContaining(["/api/*", "/health", "/.well-known/*"]),
+      );
+
+      // All API behaviors share the custom-domain HTTPS origin
+      const apiBehavior = behaviors.find((b) => b.PathPattern === "/api/*")!;
+      const origins = config.Origins as Array<{
+        Id: string;
+        DomainName: string;
+        CustomOriginConfig?: { OriginProtocolPolicy: string };
+      }>;
+      const apiOrigin = origins.find((o) => o.Id === apiBehavior.TargetOriginId)!;
+      expect(apiOrigin.DomainName).toBe(dnsConfig.apiDomain);
+      expect(apiOrigin.CustomOriginConfig?.OriginProtocolPolicy).toBe("https-only");
+
+      // Caching disabled (managed policy id), all methods allowed
+      expect(apiBehavior.CachePolicyId).toBe("4135ea2d-6df8-44a3-9df3-4b5a84be39ad");
+      expect(apiBehavior.AllowedMethods).toEqual(
+        expect.arrayContaining(["GET", "POST", "PUT", "DELETE"]),
+      );
+    });
+
+    test("switches SPA routing to a viewer-request function (no error responses)", () => {
+      const config = getDistributionConfig(template);
+      expect(config.CustomErrorResponses ?? []).toHaveLength(0);
+      template.resourceCountIs("AWS::CloudFront::Function", 1);
+      const defaultAssociations = config.DefaultCacheBehavior
+        .FunctionAssociations as Array<{
+        EventType: string;
+      }>;
+      expect(defaultAssociations).toHaveLength(1);
+      expect(defaultAssociations[0].EventType).toBe("viewer-request");
+    });
+  });
+
+  test("throws when enabled without DNS (example.com config)", () => {
+    expect(() => synthFrontendStack(mockConfig, true)).toThrow(
+      /uiApiProxy requires DNS/,
+    );
   });
 });

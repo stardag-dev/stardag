@@ -17,6 +17,25 @@ import { FoundationStack } from "./foundation-stack";
 export interface ApiStackProps extends cdk.StackProps {
   config: StardagConfig;
   foundation: FoundationStack;
+
+  /**
+   * Optional explicit container image URI for the API service.
+   *
+   * When set, the ECS task uses this image directly (e.g. a prebuilt
+   * public release image such as
+   * ``ghcr.io/stardag-dev/stardag-server:X.Y.Z``) instead of the
+   * ``:latest`` tag of the ECR repository created by the Foundation
+   * stack. Can also be provided via CDK context (``-c apiImageUri=...``)
+   * or the ``STARDAG_API_IMAGE_URI`` environment variable.
+   *
+   * Note: the combined ``stardag-server`` image also bundles the built
+   * web UI (served same-origin by the API). That is harmless here — this
+   * CDK setup keeps serving the UI via S3 + CloudFront — the image is
+   * simply also a superset of the API-only image.
+   *
+   * @default - image from the Foundation stack's ECR repository (:latest)
+   */
+  apiImageUri?: string;
 }
 
 /**
@@ -38,6 +57,18 @@ export class ApiStack extends cdk.Stack {
     super(scope, id, props);
 
     const { config, foundation } = props;
+
+    // Optional explicit image URI (prebuilt public release image).
+    // Resolution order: stack prop > CDK context > environment variable.
+    // Trim whitespace so a blank value in an env file is treated as unset.
+    const rawImageUri: unknown =
+      props.apiImageUri ??
+      this.node.tryGetContext("apiImageUri") ??
+      process.env.STARDAG_API_IMAGE_URI;
+    const apiImageUri =
+      typeof rawImageUri === "string" && rawImageUri.trim() !== ""
+        ? rawImageUri.trim()
+        : undefined;
 
     // Sizing knobs that ops may want to tune at deploy time without
     // editing this file. Defaults match the OSS-friendly free-tier shape;
@@ -171,8 +202,11 @@ export class ApiStack extends cdk.Stack {
 
     // Add container
     taskDefinition.addContainer("Api", {
-      // Use image from ECR repository
-      image: ecs.ContainerImage.fromEcrRepository(foundation.ecrRepository, "latest"),
+      // Either an explicit (typically prebuilt public) image, or the
+      // locally-built image pushed to the Foundation stack's ECR repo.
+      image: apiImageUri
+        ? ecs.ContainerImage.fromRegistry(apiImageUri)
+        : ecs.ContainerImage.fromEcrRepository(foundation.ecrRepository, "latest"),
       logging: ecs.LogDrivers.awsLogs({
         logGroup,
         streamPrefix: "api",

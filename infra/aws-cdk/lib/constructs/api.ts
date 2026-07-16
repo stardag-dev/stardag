@@ -88,6 +88,16 @@ export interface StardagApiProps {
    * If provided, enables HTTPS on the ALB
    */
   certificate?: acm.ICertificate;
+
+  /**
+   * Optional explicit container image URI (e.g. a prebuilt public
+   * release image such as ``ghcr.io/stardag-dev/stardag-server:X.Y.Z``).
+   * When set, the ECS task uses this image directly instead of the
+   * ``:latest`` tag of the ECR repository created by this construct.
+   *
+   * @default - image from this construct's ECR repository (:latest)
+   */
+  imageUri?: string;
 }
 
 export class StardagApi extends Construct {
@@ -115,6 +125,7 @@ export class StardagApi extends Construct {
       memoryLimitMiB = 512,
       desiredCount = 1,
       certificate,
+      imageUri,
     } = props;
 
     // =============================================================
@@ -184,8 +195,11 @@ export class StardagApi extends Construct {
 
     // Add container
     const container = taskDefinition.addContainer("Api", {
-      // Use image from ECR repository
-      image: ecs.ContainerImage.fromEcrRepository(this.repository, "latest"),
+      // Either an explicit (typically prebuilt public) image, or the
+      // locally-built image pushed to this construct's ECR repository.
+      image: imageUri
+        ? ecs.ContainerImage.fromRegistry(imageUri)
+        : ecs.ContainerImage.fromEcrRepository(this.repository, "latest"),
       logging: ecs.LogDrivers.awsLogs({
         logGroup,
         streamPrefix: "api",

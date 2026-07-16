@@ -1,7 +1,14 @@
 #!/bin/bash
 # Build, push, and deploy API to ECS
-# Usage: deploy-api.sh [--skip-update]
+# Usage: deploy-api.sh [--skip-update] [--image-uri <uri>]
 #   --skip-update: Only build and push, don't update the ECS service
+#   --image-uri <uri>: Skip the local docker build+push entirely and deploy
+#       the given (typically prebuilt public) image, e.g.
+#       ghcr.io/stardag-dev/stardag-server:X.Y.Z
+#       This runs `cdk deploy StardagApi -c apiImageUri=<uri>` so the ECS
+#       task definition points at the image directly (no ECR involved).
+#       Recommended for production: mirror the image through an ECR
+#       pull-through cache first — see infra/aws-cdk/README.md.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,14 +17,34 @@ REPO_ROOT="$(cd "$CDK_DIR/../.." && pwd)"
 
 # Parse arguments
 SKIP_UPDATE=false
-for arg in "$@"; do
-    case $arg in
+IMAGE_URI=""
+while [ $# -gt 0 ]; do
+    case $1 in
         --skip-update)
             SKIP_UPDATE=true
             shift
             ;;
+        --image-uri)
+            IMAGE_URI="$2"
+            if [ -z "$IMAGE_URI" ]; then
+                echo "ERROR: --image-uri requires a value"
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "ERROR: Unknown argument: $1"
+            echo "Usage: deploy-api.sh [--skip-update] [--image-uri <uri>]"
+            exit 1
+            ;;
     esac
 done
+
+if [ -n "$IMAGE_URI" ] && [ "$SKIP_UPDATE" = true ]; then
+    echo "ERROR: --skip-update only applies to the local build+push flow;"
+    echo "it cannot be combined with --image-uri."
+    exit 1
+fi
 
 cd "$CDK_DIR"
 
@@ -31,15 +58,46 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 # Only use AWS_PROFILE if credentials aren't already set (CI uses OIDC env vars)
 if [ -z "$AWS_ACCESS_KEY_ID" ]; then
     AWS_PROFILE="${AWS_PROFILE:-stardag}"
+    export AWS_PROFILE
     AWS_CMD="aws --profile $AWS_PROFILE"
-    echo "=== Building and Deploying API ==="
+    echo "=== Deploying API ==="
     echo "AWS Profile: $AWS_PROFILE"
 else
+    # Unset AWS_PROFILE to ensure env credentials are used (also by cdk)
+    unset AWS_PROFILE
     AWS_CMD="aws"
-    echo "=== Building and Deploying API ==="
+    echo "=== Deploying API ==="
     echo "Using environment credentials (CI mode)"
 fi
 echo "Region: $AWS_REGION"
+
+# =============================================================
+# Prebuilt image mode: no local docker build, no ECR push.
+# The image URI is baked into the ECS task definition via CDK.
+# =============================================================
+if [ -n "$IMAGE_URI" ]; then
+    echo "Mode: Prebuilt image (no local build)"
+    echo "Image: $IMAGE_URI"
+    echo ""
+    echo "=== Deploying StardagApi stack with explicit image ==="
+    npx cdk deploy StardagApi \
+        --require-approval never \
+        -c "apiImageUri=$IMAGE_URI"
+
+    echo ""
+    echo "=== API deployment initiated ==="
+    echo ""
+    echo "The ECS service now rolls out a task definition pointing at:"
+    echo "  $IMAGE_URI"
+    echo ""
+    echo "NOTE: subsequent 'cdk deploy StardagApi' runs without"
+    echo "-c apiImageUri=... will revert the service to the ECR :latest"
+    echo "image. Pin the value in .env.deploy to make it stick:"
+    echo "  STARDAG_API_IMAGE_URI=$IMAGE_URI"
+    exit 0
+fi
+
+echo "Mode: Local docker build + push to ECR"
 if [ "$SKIP_UPDATE" = true ]; then
     echo "Mode: Build and push only (--skip-update)"
 fi
