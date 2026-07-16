@@ -1,0 +1,15 @@
+# Dockerfile-specific ignore for app/server.Dockerfile (BuildKit picks this
+# up because it sits next to the Dockerfile and matches its name).
+# The build context is the repo root; only app/stardag-api and app/stardag-ui
+# are COPY'd, so exclude everything else plus local build/dev artifacts.
+*
+!app/stardag-api
+!app/stardag-ui
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.env
+**/.env.*
+app/stardag-api/tests
