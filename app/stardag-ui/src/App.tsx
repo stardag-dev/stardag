@@ -9,6 +9,7 @@ import { LandingPageDemo } from "./components/LandingPageDemo";
 import { LocalLoginPage } from "./components/LocalLoginPage";
 import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
+import { ServerVersionFooter } from "./components/ServerVersionFooter";
 import { SessionExpiredOverlay } from "./components/SessionExpiredOverlay";
 import { WorkspaceSelector } from "./components/WorkspaceSelector";
 import { WorkspaceSettings } from "./components/WorkspaceSettings";
@@ -233,6 +234,7 @@ function SettingsPage({
       onToggleSidebar={onToggleSidebar}
     >
       <WorkspaceSettings onNavigate={onNavigatePath} />
+      <ServerVersionFooter />
     </MainLayout>
   );
 }
