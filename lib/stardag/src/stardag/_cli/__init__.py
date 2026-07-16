@@ -34,6 +34,11 @@ Usage:
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
     stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
 
+    stardag self-host up [--neon-api-key key] [--auth-mode local|oidc] [...]
+    stardag self-host upgrade
+    stardag self-host status
+    stardag self-host destroy [--delete-secrets]
+
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.
     Set STARDAG_API_URL, STARDAG_WORKSPACE_ID, STARDAG_ENVIRONMENT_ID
@@ -63,6 +68,17 @@ try:
     from stardag._cli import modal
 
     app.add_typer(modal.app, name="modal")
+except ImportError:
+    pass
+
+# Add self-host subcommand only if the selfhost extra is installed
+try:
+    import cryptography  # noqa: F401
+    import modal as _modal  # noqa: F401
+
+    from stardag._cli import selfhost
+
+    app.add_typer(selfhost.app, name="self-host")
 except ImportError:
     pass
 
