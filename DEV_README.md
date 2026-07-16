@@ -244,6 +244,27 @@ pins the server version it was tested against
 (`DEFAULT_SERVER_VERSION` in `lib/stardag/src/stardag/selfhost/_modal_app.py`
 — bump it when a new server version becomes the tested pairing).
 
+### Version convention for non-release builds
+
+Release builds get a clean `X.Y.Z` from the tag (CI passes it as the
+`STARDAG_SERVER_VERSION` build arg). Any _other_ build of
+`app/server.Dockerfile` (e.g. a deployment pipeline building from an
+arbitrary commit) should derive the version with `scripts/server-version.sh`,
+which normalizes `git describe --tags --match "server-v*"` to semver
+build-metadata form — so deployments truthfully report their deviation from
+the nearest release:
+
+| State                          | Version          |
+| ------------------------------ | ---------------- |
+| Exactly at `server-vX.Y.Z`     | `X.Y.Z`          |
+| N commits past the nearest tag | `X.Y.Z+N.g<sha>` |
+| No `server-v*` tag reachable   | `0.0.0+g<sha>`   |
+
+```bash
+docker build -f app/server.Dockerfile \
+  --build-arg STARDAG_SERVER_VERSION="$(scripts/server-version.sh)" .
+```
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting changes.

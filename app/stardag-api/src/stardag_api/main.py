@@ -99,6 +99,15 @@ async def version():
     (API + UI) image, injected via the STARDAG_SERVER_VERSION environment
     variable at image build time ("dev" when unset, e.g. running from
     source). ``api_version`` is the installed stardag-api package version.
+
+    Expected ``server_version`` forms (see scripts/server-version.sh and
+    DEV_README.md "Releasing the Server"):
+
+    - ``X.Y.Z`` - a release build (from a ``server-vX.Y.Z`` tag)
+    - ``X.Y.Z+N.g<sha>`` - a non-release build, N commits past the
+      nearest release tag (semver build metadata)
+    - ``0.0.0+g<sha>`` - a build with no release tag reachable
+    - ``dev`` - the env var was not set
     """
     try:
         api_version = _package_version("stardag-api")
