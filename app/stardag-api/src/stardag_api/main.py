@@ -1,4 +1,7 @@
+import os
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -86,3 +89,22 @@ app.include_router(target_roots_router, prefix="/api/v1")
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/api/v1/version")
+async def version():
+    """Server + API package versions.
+
+    ``server_version`` is the release version of the combined server
+    (API + UI) image, injected via the STARDAG_SERVER_VERSION environment
+    variable at image build time ("dev" when unset, e.g. running from
+    source). ``api_version`` is the installed stardag-api package version.
+    """
+    try:
+        api_version = _package_version("stardag-api")
+    except PackageNotFoundError:  # pragma: no cover - running from a raw checkout
+        api_version = "unknown"
+    return {
+        "server_version": os.environ.get("STARDAG_SERVER_VERSION", "dev"),
+        "api_version": api_version,
+    }
