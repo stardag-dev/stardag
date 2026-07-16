@@ -162,6 +162,7 @@ nav:
       - ML Pipeline Example: how-to/ml-pipeline-example.md
       - Integrate with Prefect: how-to/integrate-prefect.md
       - Integrate with Modal: how-to/integrate-modal.md
+      - Self-host on Modal: how-to/self-host-modal.md
   - Configuration:
       - configuration/index.md
       - Profiles: configuration/profiles.md
