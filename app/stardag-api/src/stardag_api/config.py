@@ -112,6 +112,15 @@ class AuthSettings(BaseSettings):
     # Allow self-service signup in local mode. Off by default: a self-hosted
     # instance is typically reachable from the public internet.
     local_registration_enabled: bool = False
+    # TTL for session tokens minted by local-mode login. Session tokens act
+    # as the "refresh" credential (analogous to an OIDC session) and are
+    # exchanged for short-lived workspace tokens via /auth/exchange.
+    session_token_ttl_hours: int = 24 * 7
+    # Bootstrap admin for local mode: created at startup if no user with
+    # this email exists (idempotent; an existing user's password is never
+    # overwritten). Set both or neither.
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
 
     model_config = SettingsConfigDict(env_prefix="AUTH_")
 

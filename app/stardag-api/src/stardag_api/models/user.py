@@ -43,6 +43,8 @@ class User(Base, TimestampMixin):
         index=True,
     )
     display_name: Mapped[str | None] = mapped_column(String(255))
+    # bcrypt hash, only set for local-auth users (null for OIDC users)
+    password_hash: Mapped[str | None] = mapped_column(String(255))
 
     # Relationships
     memberships: Mapped[list[WorkspaceMember]] = relationship(

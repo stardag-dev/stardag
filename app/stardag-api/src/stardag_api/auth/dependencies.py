@@ -638,7 +638,21 @@ async def get_current_user_flexible(
             )
         return user
     except (TokenExpiredError, TokenInvalidError):
-        # Not a valid internal token, try OIDC
+        # Not a valid internal token, try session token
+        pass
+
+    # Try session token (local auth mode): user-scoped, minted by this API
+    try:
+        session_payload = token_manager.validate_session_token(token_str)
+        user = await get_user_by_id(db, session_payload.sub)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+        return user
+    except (TokenExpiredError, TokenInvalidError):
+        # Not a valid session token, try OIDC
         pass
 
     # Try OIDC token

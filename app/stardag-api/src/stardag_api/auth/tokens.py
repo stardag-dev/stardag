@@ -55,6 +55,8 @@ class InternalTokenPayload:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "InternalTokenPayload":
         """Create InternalTokenPayload from decoded JWT payload."""
+        if payload.get("token_use") == "session":
+            raise TokenInvalidError("Session token not valid for workspace access")
         # Validate required claims
         required = ["sub", "workspace_id", "iss", "aud", "exp", "iat"]
         for claim in required:
@@ -64,6 +66,42 @@ class InternalTokenPayload:
         return cls(
             sub=payload["sub"],
             workspace_id=payload["workspace_id"],
+            iss=payload["iss"],
+            aud=payload["aud"],
+            exp=payload["exp"],
+            iat=payload["iat"],
+        )
+
+
+@dataclass
+class SessionTokenPayload:
+    """Payload for local-auth session tokens.
+
+    Session tokens are user-scoped (no workspace_id) and serve the role an
+    OIDC session plays in oidc mode: they are exchanged for short-lived
+    workspace-scoped access tokens via /auth/exchange and accepted by
+    bootstrap endpoints (/ui/me). Distinguished from workspace tokens by
+    the token_use claim.
+    """
+
+    sub: str  # User ID
+    iss: str
+    aud: str
+    exp: int
+    iat: int
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SessionTokenPayload":
+        """Create SessionTokenPayload from decoded JWT payload."""
+        if payload.get("token_use") != "session":
+            raise TokenInvalidError("Not a session token")
+        required = ["sub", "iss", "aud", "exp", "iat"]
+        for claim in required:
+            if claim not in payload:
+                raise TokenInvalidError(f"Token missing required '{claim}' claim")
+
+        return cls(
+            sub=payload["sub"],
             iss=payload["iss"],
             aud=payload["aud"],
             exp=payload["exp"],
@@ -180,6 +218,64 @@ class InternalTokenManager:
             algorithm="RS256",
             headers={"kid": self._key_id},
         )
+
+    def create_session_token(self, user_id: str, ttl: timedelta) -> str:
+        """Create a user-scoped session token (local auth mode).
+
+        Args:
+            user_id: Internal user ID
+            ttl: Session lifetime
+
+        Returns:
+            Signed JWT string with token_use="session" and no workspace_id
+        """
+        now = datetime.now(timezone.utc)
+        exp = now + ttl
+
+        payload = {
+            "sub": user_id,
+            "token_use": "session",
+            "iss": self.issuer,
+            "aud": self.audience,
+            "iat": int(now.timestamp()),
+            "exp": int(exp.timestamp()),
+        }
+
+        return jwt.encode(
+            payload,
+            self._private_key_pem,
+            algorithm="RS256",
+            headers={"kid": self._key_id},
+        )
+
+    def validate_session_token(self, token: str) -> SessionTokenPayload:
+        """Validate a session token and return its payload.
+
+        Raises:
+            TokenExpiredError: If token has expired
+            TokenInvalidError: If token is invalid or not a session token
+        """
+        try:
+            payload = jwt.decode(
+                token,
+                self._public_key_pem,
+                algorithms=["RS256"],
+                issuer=self.issuer,
+                audience=self.audience,
+                options={
+                    "verify_iss": True,
+                    "verify_aud": True,
+                    "verify_exp": True,
+                },
+            )
+            return SessionTokenPayload.from_dict(payload)
+
+        except ExpiredSignatureError as e:
+            raise TokenExpiredError("Token has expired") from e
+        except JWTClaimsError as e:
+            raise TokenInvalidError(f"Invalid token claims: {e}") from e
+        except JWTError as e:
+            raise TokenInvalidError(f"Invalid token: {e}") from e
 
     def validate_token(self, token: str) -> InternalTokenPayload:
         """Validate an internal token and return its payload.

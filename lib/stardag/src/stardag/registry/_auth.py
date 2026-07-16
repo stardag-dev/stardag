@@ -33,11 +33,19 @@ logger = logging.getLogger(__name__)
 
 
 class Credentials(TypedDict, total=False):
-    """Stored credentials structure (OAuth tokens only)."""
+    """Stored credentials structure.
+
+    OIDC registries store a refresh token + token endpoint; local-auth
+    registries (self-hosted, email/password) store a session token minted
+    by the registry API (auth_mode == "local").
+    """
 
     refresh_token: str
     token_endpoint: str
     client_id: str
+    auth_mode: str
+    session_token: str
+    session_expires_at: float
 
 
 class AccessTokenCache(TypedDict, total=False):
@@ -254,15 +262,46 @@ def ensure_access_token(
     if not creds:
         return None
 
+    resolved_url = _resolve_registry_url(registry_name, registry_url)
+    if not resolved_url:
+        return None
+
+    # Local auth mode: the stored session token is the exchange credential
+    # (no OIDC refresh round-trip; sessions expire and require re-login)
+    if creds.get("auth_mode") == "local":
+        session_token = creds.get("session_token")
+        if not session_token or creds.get("session_expires_at", 0) <= time.time():
+            logger.debug(
+                "Local session expired for %s/%s - run `stardag auth login`",
+                cred_key,
+                user,
+            )
+            return None
+        try:
+            internal_tokens = exchange_for_internal_token(
+                resolved_url, session_token, workspace_id
+            )
+            access_token = internal_tokens["access_token"]
+            expires_in = internal_tokens.get("expires_in", 600)
+            save_access_token_cache(
+                cred_key, workspace_id, access_token, expires_in, user
+            )
+            return access_token
+        except Exception:
+            logger.debug(
+                "Session token exchange failed for %s/%s/%s",
+                cred_key,
+                user,
+                workspace_id,
+                exc_info=True,
+            )
+            return None
+
     token_endpoint = creds.get("token_endpoint")
     refresh_token_val = creds.get("refresh_token")
     client_id = creds.get("client_id")
 
     if not token_endpoint or not client_id:
-        return None
-
-    resolved_url = _resolve_registry_url(registry_name, registry_url)
-    if not resolved_url:
         return None
 
     try:
@@ -312,6 +351,13 @@ def get_fresh_oidc_token(registry: str, user: str) -> str | None:
     """
     creds = load_credentials(registry, user)
     if not creds:
+        return None
+
+    # Local auth mode: the session token plays the OIDC-token role
+    if creds.get("auth_mode") == "local":
+        session_token = creds.get("session_token")
+        if session_token and creds.get("session_expires_at", 0) > time.time():
+            return session_token
         return None
 
     token_endpoint = creds.get("token_endpoint")
