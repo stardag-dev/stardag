@@ -214,17 +214,21 @@ async def get_exchange_user(
 ) -> User:
     """Resolve the user for token exchange from the bearer credential.
 
-    Accepts either a session token (local auth mode) or an OIDC token.
+    Accepts either a session token (local auth mode only) or an OIDC token.
     Session tokens are tried first: they are minted by this API, so
-    validation is local and cheap.
+    validation is local and cheap. They are only honored while local mode
+    is active, so tokens minted before a deployment switched to OIDC can't
+    keep authenticating until expiry.
     """
     token_str = credentials.credentials
 
-    token_manager = get_token_manager()
-    try:
-        session_payload = token_manager.validate_session_token(token_str)
-    except TokenError:
-        session_payload = None
+    session_payload = None
+    if auth_settings.mode == "local":
+        token_manager = get_token_manager()
+        try:
+            session_payload = token_manager.validate_session_token(token_str)
+        except TokenError:
+            session_payload = None
 
     if session_payload is not None:
         result = await db.execute(

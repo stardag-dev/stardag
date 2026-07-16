@@ -1,11 +1,17 @@
 // Auth configuration, resolved at app boot.
 //
-// Sources, in order of precedence:
-// 1. Build-time environment variables (VITE_OIDC_*) — kept for backwards
-//    compatibility with deployments that bake config into the bundle.
-// 2. Runtime config fetched from the API (GET /api/v1/auth/config) — allows
-//    a prebuilt UI bundle to be pointed at any IdP (or local auth mode)
-//    without rebuilding.
+// Sources:
+// - Build-time environment variables (VITE_OIDC_*) — kept for backwards
+//   compatibility with deployments that bake config into the bundle.
+// - Runtime config fetched from the API (GET /api/v1/auth/config) — allows
+//   a prebuilt UI bundle to be pointed at any IdP (or local auth mode)
+//   without rebuilding.
+//
+// Resolution: the auth *mode* is server-declared — when the API reports
+// auth_mode=local the UI uses local auth even if build-time OIDC config is
+// present (an OIDC token could not be exchanged at that server anyway).
+// For the OIDC field values themselves, build-time VITE_OIDC_* settings
+// take precedence over the runtime-served values, field by field.
 //
 // initAuthConfig() must complete before getAuthConfig()/getUserManager()
 // are used; main.tsx awaits it before rendering the app.
@@ -68,9 +74,13 @@ function resolveConfig(runtime: RuntimeAuthConfigResponse | null): AuthConfig {
 export async function initAuthConfig(): Promise<AuthConfig> {
   if (authConfig) return authConfig;
   let runtime: RuntimeAuthConfigResponse | null = null;
+  // AbortController + setTimeout instead of AbortSignal.timeout() for
+  // compatibility with older browsers (AbortSignal.timeout is ~2022+).
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), 5000);
   try {
     const response = await fetch(`${API_V1}/auth/config`, {
-      signal: AbortSignal.timeout(5000),
+      signal: abortController.signal,
     });
     if (response.ok) {
       runtime = (await response.json()) as RuntimeAuthConfigResponse;
@@ -79,6 +89,8 @@ export async function initAuthConfig(): Promise<AuthConfig> {
     }
   } catch (error) {
     console.warn("[auth] Failed to fetch runtime auth config:", error);
+  } finally {
+    clearTimeout(timeoutId);
   }
   authConfig = resolveConfig(runtime);
   console.log(

@@ -37,6 +37,7 @@ from stardag_api.auth.tokens import (
     TokenInvalidError,
     get_token_manager,
 )
+from stardag_api.config import auth_settings
 from stardag_api.db import get_db
 from stardag_api.models import (
     ApiKey,
@@ -641,19 +642,22 @@ async def get_current_user_flexible(
         # Not a valid internal token, try session token
         pass
 
-    # Try session token (local auth mode): user-scoped, minted by this API
-    try:
-        session_payload = token_manager.validate_session_token(token_str)
-        user = await get_user_by_id(db, session_payload.sub)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-            )
-        return user
-    except (TokenExpiredError, TokenInvalidError):
-        # Not a valid session token, try OIDC
-        pass
+    # Try session token (local auth mode): user-scoped, minted by this API.
+    # Only honored when local mode is active, so session tokens minted before
+    # a deployment switched to OIDC can't keep authenticating until expiry.
+    if auth_settings.mode == "local":
+        try:
+            session_payload = token_manager.validate_session_token(token_str)
+            user = await get_user_by_id(db, session_payload.sub)
+            if user is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User not found",
+                )
+            return user
+        except (TokenExpiredError, TokenInvalidError):
+            # Not a valid session token, try OIDC
+            pass
 
     # Try OIDC token
     validator = get_jwt_validator()

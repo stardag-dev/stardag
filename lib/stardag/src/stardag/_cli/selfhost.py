@@ -197,6 +197,38 @@ def _resolve_database_urls(
     return pooled, direct, True
 
 
+def _provided_config_flags(
+    auth_mode: str | None,
+    admin_email: str | None,
+    admin_password: str | None,
+    enable_registration: bool,
+    oidc_issuer: str | None,
+    oidc_sdk_client_id: str | None,
+    oidc_ui_client_id: str | None,
+    oidc_audience: str | None,
+    oidc_jwks_url: str | None,
+) -> list[str]:
+    """Names of config-affecting flags the user explicitly provided.
+
+    Used to fail fast when `up` is re-run against an existing config secret
+    without database inputs: the secret can only be rewritten as a whole
+    (the DB URLs it contains must be re-supplied), so these flags would
+    otherwise be silently ignored.
+    """
+    provided = [
+        ("--auth-mode", auth_mode is not None),
+        ("--admin-email", admin_email is not None),
+        ("--admin-password", admin_password is not None),
+        ("--enable-registration", enable_registration),
+        ("--oidc-issuer", oidc_issuer is not None),
+        ("--oidc-sdk-client-id", oidc_sdk_client_id is not None),
+        ("--oidc-ui-client-id", oidc_ui_client_id is not None),
+        ("--oidc-audience", oidc_audience is not None),
+        ("--oidc-jwks-url", oidc_jwks_url is not None),
+    ]
+    return [flag for flag, given in provided if given]
+
+
 def _build_config_env(
     pooled_url: str,
     direct_url: str,
@@ -378,7 +410,29 @@ def up(
 
     # --- Database ---
     if config_exists and not (database_url or neon_api_key):
-        # Re-run without new DB config: keep the existing configuration
+        # Re-run without new DB config: keep the existing configuration.
+        # The config secret is only ever rewritten as a whole (its DB URLs
+        # must be re-supplied), so fail fast if the user passed auth/config
+        # flags that would otherwise be silently ignored.
+        overrides = _provided_config_flags(
+            auth_mode,
+            admin_email,
+            admin_password,
+            enable_registration,
+            oidc_issuer,
+            oidc_sdk_client_id,
+            oidc_ui_client_id,
+            oidc_audience,
+            oidc_jwks_url,
+        )
+        if overrides:
+            error_console.print(
+                f"Config secret {config_secret_name!r} already exists; "
+                f"{', '.join(overrides)} cannot be applied without rewriting "
+                "it, which requires re-supplying the database configuration. "
+                "Re-run with --neon-api-key or --database-url to reconfigure."
+            )
+            raise typer.Exit(1)
         console.print(
             f"Config secret [bold]{config_secret_name}[/bold] exists - "
             "keeping current configuration (pass --neon-api-key or "

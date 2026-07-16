@@ -127,6 +127,10 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> None:
       bootstrap password.
     - User exists with a password: leave untouched — never overwrite a
       password that may have been changed since bootstrap.
+
+    Raises:
+        PasswordPolicyError: the configured bootstrap password fails the
+            password policy (only when a password would actually be set).
     """
     email = auth_settings.bootstrap_admin_email
     password = auth_settings.bootstrap_admin_password
@@ -141,6 +145,10 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> None:
         await create_local_user(db, email=email, password=password)
         logger.info("Bootstrap admin created: %s", email)
     elif user.password_hash is None:
+        # Same policy as /auth/register (create_local_user validates in the
+        # branch above): reject weak passwords and >72 bytes, which bcrypt
+        # would otherwise silently truncate.
+        validate_password_policy(password)
         user.password_hash = await hash_password_async(password)
         await db.commit()
         logger.info("Bootstrap admin password set for existing user: %s", email)

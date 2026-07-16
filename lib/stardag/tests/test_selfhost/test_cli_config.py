@@ -7,7 +7,11 @@ import pytest
 pytest.importorskip("modal")
 pytest.importorskip("cryptography")
 
-from stardag._cli.selfhost import _build_config_env, _generate_jwt_keypair  # noqa: E402
+from stardag._cli.selfhost import (  # noqa: E402
+    _build_config_env,
+    _generate_jwt_keypair,
+    _provided_config_flags,
+)
 from stardag.selfhost._modal_app import find_repo_root  # noqa: E402
 
 
@@ -70,6 +74,37 @@ def test_build_config_env_oidc_mode():
     assert env["OIDC_SDK_CLIENT_ID"] == "client-sdk"
     assert env["OIDC_UI_CLIENT_ID"] == "client-ui"
     assert "AUTH_BOOTSTRAP_ADMIN_EMAIL" not in env
+
+
+def test_provided_config_flags():
+    # Nothing provided -> re-running `up` keeps the existing config silently
+    assert (
+        _provided_config_flags(
+            auth_mode=None,
+            admin_email=None,
+            admin_password=None,
+            enable_registration=False,
+            oidc_issuer=None,
+            oidc_sdk_client_id=None,
+            oidc_ui_client_id=None,
+            oidc_audience=None,
+            oidc_jwks_url=None,
+        )
+        == []
+    )
+    # Config-affecting flags are reported so `up` can fail fast instead of
+    # silently ignoring them when the config secret already exists
+    assert _provided_config_flags(
+        auth_mode="oidc",
+        admin_email=None,
+        admin_password=None,
+        enable_registration=True,
+        oidc_issuer="https://idp.example.com",
+        oidc_sdk_client_id=None,
+        oidc_ui_client_id=None,
+        oidc_audience=None,
+        oidc_jwks_url=None,
+    ) == ["--auth-mode", "--enable-registration", "--oidc-issuer"]
 
 
 def test_generate_jwt_keypair_pem():

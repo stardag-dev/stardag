@@ -184,6 +184,35 @@ async def test_login_rejected_in_oidc_mode(
 
 
 @pytest.mark.asyncio
+async def test_session_token_rejected_in_oidc_mode(
+    unauthenticated_client: AsyncClient,
+    registration_enabled,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Session tokens minted in local mode must not authenticate after a
+    deployment switches to OIDC mode (same JWT keys)."""
+    data = await _register(unauthenticated_client, "switch@example.com", "s3cret-pass")
+    session_token = data["session_token"]
+    headers = {"Authorization": f"Bearer {session_token}"}
+
+    # Sanity check: works in local mode
+    me = await unauthenticated_client.get("/api/v1/ui/me", headers=headers)
+    assert me.status_code == 200
+
+    monkeypatch.setattr(auth_settings, "mode", "oidc")
+
+    me = await unauthenticated_client.get("/api/v1/ui/me", headers=headers)
+    assert me.status_code == 401
+
+    exchange = await unauthenticated_client.post(
+        "/api/v1/auth/exchange",
+        json={"workspace_id": "00000000-0000-0000-0000-000000000000"},
+        headers=headers,
+    )
+    assert exchange.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_register_disabled_by_default(unauthenticated_client: AsyncClient):
     response = await unauthenticated_client.post(
         "/api/v1/auth/register",
@@ -305,6 +334,28 @@ async def test_bootstrap_admin_idempotent(
     await ensure_bootstrap_admin(async_session)
     await async_session.refresh(user)
     assert user.password_hash == original_hash
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_admin_existing_user_password_policy(
+    async_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+):
+    """Setting the bootstrap password on an existing passwordless user
+    enforces the same policy as registration."""
+    from stardag_api.auth.passwords import PasswordPolicyError
+    from stardag_api.models import User
+
+    user = User(external_id="ext-pre-created", email="pre@example.com")
+    async_session.add(user)
+    await async_session.flush()
+
+    monkeypatch.setattr(auth_settings, "bootstrap_admin_email", "pre@example.com")
+    monkeypatch.setattr(auth_settings, "bootstrap_admin_password", "short")
+    with pytest.raises(PasswordPolicyError):
+        await ensure_bootstrap_admin(async_session)
+
+    await async_session.refresh(user)
+    assert user.password_hash is None
 
 
 @pytest.mark.asyncio
