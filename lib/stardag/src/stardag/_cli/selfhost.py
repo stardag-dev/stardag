@@ -417,7 +417,7 @@ def _deploy(
 
 @app.command()
 def up(
-    server_version: str = typer.Option(
+    server_version: str | None = typer.Option(
         None,
         "--server-version",
         help="Prebuilt server image version to deploy: X.Y.Z or 'latest' "
@@ -691,7 +691,7 @@ def up(
 
 @app.command()
 def upgrade(
-    server_version: str = typer.Option(
+    server_version: str | None = typer.Option(
         None,
         "--server-version",
         help="Prebuilt server image version to deploy: X.Y.Z or 'latest' "
