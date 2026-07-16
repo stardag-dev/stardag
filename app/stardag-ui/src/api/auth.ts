@@ -87,3 +87,30 @@ export async function registerLocal(
     display_name: displayName || null,
   });
 }
+
+/**
+ * Change the current user's password (local auth mode). Requires a valid
+ * session (or workspace) token; the API verifies the current password.
+ * Resolves on success (204), throws Error with the API's detail otherwise.
+ */
+export async function changePasswordLocal(
+  currentPassword: string,
+  newPassword: string,
+  sessionToken: string,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/auth/change-password`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${sessionToken}`,
+    },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `Request failed: ${response.statusText}`);
+  }
+}

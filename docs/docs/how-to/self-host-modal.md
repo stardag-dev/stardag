@@ -113,8 +113,8 @@ no external identity provider.
   everyone register, then re-run without it to close signup again. Members
   are added to shared workspaces from the UI's workspace settings.
 - Passwords: min 8 characters, bcrypt-hashed; login is rate-limited.
-- Change your password anytime via `POST /api/v1/auth/change-password` (UI
-  support: sign out/in flow).
+- Change your password anytime from the UI (user menu → Change password),
+  or via `POST /api/v1/auth/change-password`.
 
 ## Auth mode: `oidc` (external identity provider)
 

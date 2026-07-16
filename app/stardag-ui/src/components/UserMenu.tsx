@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import { isAuthConfigured } from "../auth/config";
 import { useAuth } from "../context/AuthContext";
+import { ChangePasswordModal } from "./ChangePasswordModal";
 
 export function UserMenu() {
-  const { user, isLoading, isAuthenticated, login, logout } = useAuth();
+  const { user, isLoading, isAuthenticated, login, logout, authMode } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
+  const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Close menu when clicking outside
@@ -80,6 +82,17 @@ export function UserMenu() {
             )}
           </div>
           <div className="py-1">
+            {authMode === "local" && (
+              <button
+                onClick={() => {
+                  setIsOpen(false);
+                  setIsChangePasswordOpen(true);
+                }}
+                className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                Change password
+              </button>
+            )}
             <button
               onClick={() => {
                 setIsOpen(false);
@@ -92,6 +105,11 @@ export function UserMenu() {
           </div>
         </div>
       )}
+
+      <ChangePasswordModal
+        isOpen={isChangePasswordOpen}
+        onClose={() => setIsChangePasswordOpen(false)}
+      />
     </div>
   );
 }
