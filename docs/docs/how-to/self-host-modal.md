@@ -37,19 +37,12 @@ This opens the browser and stores a token in `~/.modal.toml`.
 Sign up at [console.neon.tech](https://console.neon.tech) (free plan), then
 create an API key at
 [console.neon.tech/app/settings/api-keys](https://console.neon.tech/app/settings/api-keys)
-→ **Create key**. Copy the key — you'll paste it in step 4.
+→ **Create key**. Copy the key — you'll paste it in step 3.
 
 You do _not_ need to create a database or project — the deploy command does
 that via the API (Postgres 16, project name `stardag`).
 
-### 3. Clone the stardag repo
-
-```bash
-git clone https://github.com/stardag-dev/stardag.git
-cd stardag
-```
-
-### 4. Deploy
+### 3. Deploy
 
 ```bash
 uvx --from "stardag[selfhost]" stardag self-host up
@@ -64,8 +57,9 @@ The command walks you through the rest interactively:
 - **Admin email + password** → your first login account
 
 It then generates a JWT signing keypair (stored as a Modal secret), applies
-database migrations, builds the container image (the UI is compiled inside
-the image build — no local Node needed), deploys, and prints your URL:
+database migrations, deploys the prebuilt server image (Registry API + web
+UI, published to the public GitHub Container Registry — no repo checkout,
+Node, or Docker needed locally), and prints your URL:
 
 ```
 Stardag is up!
@@ -74,7 +68,7 @@ Stardag is up!
   API: https://<your-workspace>--stardag-server.modal.run/api/v1
 ```
 
-### 5. Sign in and connect the SDK
+### 4. Sign in and connect the SDK
 
 Open the UI and sign in with the admin account. A personal workspace with a
 `Local` environment is created automatically.
@@ -92,16 +86,34 @@ for Modal-executed DAGs with `stardag modal stardag-api-key create`.
 
 ## Updating to a new version
 
-From the repo checkout:
-
 ```bash
-git pull
 uvx --from "stardag[selfhost]" stardag self-host upgrade
 ```
 
-This applies any new database migrations and redeploys the API + UI from
-the current source. The JWT keypair secret is left untouched, so existing
-sessions and SDK logins survive upgrades.
+This applies any new database migrations and redeploys the API + UI. Each
+SDK release pins the server version it was tested against, so `uvx` picking
+up a newer SDK also rolls the server forward; pass
+`--server-version X.Y.Z` (or `latest`) to deploy a specific
+[server release](https://github.com/stardag-dev/stardag/releases). The JWT
+keypair secret is left untouched, so existing sessions and SDK logins
+survive upgrades.
+
+## Deploying from source (development)
+
+The prebuilt image `ghcr.io/stardag-dev/stardag-server` is the default and
+needs no repo checkout. To deploy your own modifications instead, clone the
+repo and pass `--from-source`:
+
+```bash
+git clone https://github.com/stardag-dev/stardag.git
+cd stardag
+uvx --from "stardag[selfhost]" stardag self-host up --from-source
+```
+
+The image is then built from the checkout: the UI is compiled with npm
+inside the Modal image build (no local Node needed) and the API package is
+installed from source. `upgrade --from-source` redeploys after local
+changes or a `git pull`.
 
 ## Auth mode: `local` (default)
 
@@ -157,13 +169,18 @@ The UI discovers all of this at runtime from the API (`/api/v1/auth/config`)
 
 ```bash
 stardag self-host up         # provision + deploy (idempotent; re-run to reconfigure)
-stardag self-host upgrade    # migrate DB + redeploy from current source
+stardag self-host upgrade    # migrate DB + redeploy
 stardag self-host status     # deployment status + URL
 stardag self-host destroy    # stop the Modal app (never touches the database)
 ```
 
 Useful flags for `up` (all prompts have flag equivalents for CI):
 
+- `--server-version X.Y.Z` (or `latest`) — prebuilt server image version to
+  deploy (default: the version this SDK release is tested against)
+- `--from-source` — build the image from a local repo checkout instead of
+  the prebuilt image (see
+  [Deploying from source](#deploying-from-source-development))
 - `--name` — Modal app name / URL label (default `stardag-server`)
 - `--neon-project` — Neon project name to find-or-create (default `stardag`)
 - `--database-url` / `--database-url-direct` — bring your own Postgres

@@ -212,6 +212,38 @@ You should see tasks appearing in the web UI at http://localhost:3000.
 uv run stardag auth logout
 ```
 
+## Releasing the Server
+
+The server (Registry API + web UI) is released as one image with its own
+semver, independent of the SDK. API and UI share a single joint version.
+The image definition is `app/server.Dockerfile` (build context = repo root):
+
+```bash
+docker build -f app/server.Dockerfile -t stardag-server .
+```
+
+To release, push a `server-vX.Y.Z` tag on `main`:
+
+```bash
+git tag server-vX.Y.Z
+git push origin server-vX.Y.Z
+```
+
+CI (`.github/workflows/publish-server-image.yml`) then:
+
+1. Builds the image and pushes it to
+   `ghcr.io/stardag-dev/stardag-server:X.Y.Z` and `:latest`, with
+   `STARDAG_SERVER_VERSION=X.Y.Z` baked in (surfaced at
+   `GET /api/v1/version`).
+2. Creates a GitHub Release for the tag with the built web UI attached as
+   `stardag-ui-dist-X.Y.Z.tar.gz` (for deployments that serve the UI
+   separately, e.g. from S3/CDN).
+
+`stardag self-host` deploys the prebuilt image by default; each SDK release
+pins the server version it was tested against
+(`DEFAULT_SERVER_VERSION` in `lib/stardag/src/stardag/selfhost/_modal_app.py`
+— bump it when a new server version becomes the tested pairing).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting changes.
