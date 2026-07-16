@@ -1253,7 +1253,12 @@ async def build_aio(
 
     def _claim_holder_is_stale(latest_status_at: str | None) -> bool:
         """Whether a ref-less claim holder exceeded the optional staleness
-        bound (ClaimConfig.stale_running_no_ref_seconds)."""
+        bound (ClaimConfig.stale_running_no_ref_seconds).
+
+        Compares the server-issued timestamp against the local clock, so
+        client-server clock skew shifts the effective bound — keep it well
+        above plausible skew (tens of seconds+).
+        """
         bound = claim_cfg.stale_running_no_ref_seconds
         if bound is None or not latest_status_at:
             return False
@@ -1304,6 +1309,8 @@ async def build_aio(
         # Ref that probed FAILED once — a second FAILED probe (next
         # iteration, after a delay) corroborates before we record the death.
         suspected_dead_ref: str | None = None
+        attempted = False  # always try the claim at least once, even with
+        # wait_timeout_seconds=0 ("claim, but don't wait if held")
         try:
             claim_metadata: dict | None = None
             try:
@@ -1316,7 +1323,11 @@ async def build_aio(
                 )
             while True:
                 timeout = claim_cfg.wait_timeout_seconds
-                if timeout is not None and loop.time() - start_time >= timeout:
+                if (
+                    attempted
+                    and timeout is not None
+                    and loop.time() - start_time >= timeout
+                ):
                     return (
                         "error",
                         LockAcquisitionResult(
@@ -1328,6 +1339,7 @@ async def build_aio(
                             ),
                         ),
                     )
+                attempted = True
                 try:
                     result = await registry.task_start_claim_aio(
                         build_id, task, executor_metadata=claim_metadata

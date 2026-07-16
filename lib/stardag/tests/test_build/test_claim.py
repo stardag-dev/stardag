@@ -583,3 +583,43 @@ class TestClaimRobustness:
             )
 
         assert summary.status == BuildExitStatus.SUCCESS
+
+    async def test_zero_wait_timeout_still_claims_once(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """wait_timeout_seconds=0 means "claim, but don't wait if held" —
+        the claim must still be attempted (and won) when it is free."""
+        task = SyncOnlyTask(name="claim-zero-timeout-free")
+        registry = ClaimRegistry()
+        executor = FakeDetachedExecutor()
+
+        summary = await build_aio(
+            [task],
+            task_executor=executor,
+            registry=registry,
+            claim_config=ClaimConfig(wait_timeout_seconds=0.0),
+        )
+
+        assert summary.status == BuildExitStatus.SUCCESS
+        assert registry.claim_calls(task) == 1
+        assert executor.spawn_calls == [task.id]
+
+    async def test_zero_wait_timeout_denied_fails_fast_locally(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """With wait_timeout_seconds=0 a held claim fails this build
+        immediately — one attempt, no waiting, no global task_fail."""
+        task = SyncOnlyTask(name="claim-zero-timeout-held")
+        registry = ClaimRegistry()
+        registry.seed_running(task, None, None)
+
+        with pytest.raises(Exception, match="timed out"):
+            await build_aio(
+                [task],
+                task_executor=FakeDetachedExecutor(),
+                registry=registry,
+                claim_config=ClaimConfig(wait_timeout_seconds=0.0),
+            )
+
+        assert registry.claim_calls(task) == 1
+        assert not registry.has_call("task_fail_aio", task.id)

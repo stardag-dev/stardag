@@ -212,7 +212,9 @@ class ClaimConfig:
     winning execution exposes no probeable ref (e.g. a local executor in
     another build, or the winner's crash window between its claim and its
     ref-recording start): the loser polls target completion and re-tries
-    the claim with backoff until ``wait_timeout_seconds``.
+    the claim with backoff until ``wait_timeout_seconds``. The claim is
+    always attempted at least once — ``wait_timeout_seconds=0`` means
+    "claim, but don't wait if held".
     """
 
     wait_timeout_seconds: float | None = 300.0
