@@ -216,6 +216,10 @@ uv run stardag auth logout
 
 The server (Registry API + web UI) is released as one image with its own
 semver, independent of the SDK. API and UI share a single joint version.
+
+Before tagging, make sure `CHANGELOG.md` has an entry covering the
+release's Registry API / UI / Deployment changes (move them out of
+`[Unreleased]`) — the GitHub release links to it.
 The image definition is `app/server.Dockerfile` (build context = repo root):
 
 ```bash

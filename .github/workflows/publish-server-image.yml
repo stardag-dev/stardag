@@ -96,6 +96,10 @@ jobs:
           `ghcr.io/${{ github.repository_owner }}/stardag-server:${{ steps.version.outputs.version }}`
 
 
+          See the [changelog](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md)
+          for what changed (Registry API / UI / Deployment sections).
+
+
           The attached `stardag-ui-dist-${{ steps.version.outputs.version }}.tar.gz`
           contains the built web UI for deployments that serve it separately.'
 
