@@ -40,6 +40,7 @@ from stardag.selfhost._modal_app import (
     DEFAULT_APP_NAME,
     DEFAULT_SERVER_MODAL_ENV,
     DEFAULT_SERVER_VERSION,
+    PREBUILT_IMAGE_PYTHON,
     build_server_app,
     find_repo_root,
     server_image_ref,
@@ -97,6 +98,36 @@ def _require_repo_root(repo: Path | None) -> Path:
         )
         raise typer.Exit(1)
     return root
+
+
+def _check_prebuilt_python() -> None:
+    """Fail fast when the client interpreter can't drive the prebuilt image.
+
+    The `migrate`/`web` Modal functions are serialized (cloudpickled) by the
+    running interpreter and unpickled inside the server image; Modal rejects
+    the deploy when the two Python versions differ (``InvalidError: ... was
+    defined with Python X.Y, but its Image has 3.12``). Check up front -
+    before any provisioning - and print the exact remedy.
+    """
+    import sys
+
+    running = tuple(sys.version_info[:2])
+    if running == PREBUILT_IMAGE_PYTHON:
+        return
+    expected = "{}.{}".format(*PREBUILT_IMAGE_PYTHON)
+    actual = "{}.{}".format(*running)
+    error_console.print(
+        f"The prebuilt server image runs Python {expected} but this CLI is "
+        f"running under {actual}; serialized Modal functions require "
+        "matching interpreter versions."
+    )
+    console.print(
+        "\nRe-run with a matching interpreter, e.g.:\n"
+        f"  [bold]uvx --python {expected} --from 'stardag[selfhost]' "
+        "stardag self-host up[/bold]\n"
+        "(or pass --from-source to build an image matching your interpreter)."
+    )
+    raise typer.Exit(1)
 
 
 def _resolve_image_source(
@@ -763,7 +794,9 @@ def up(
     repo_root, resolved_server_version = _resolve_image_source(
         repo, from_source, server_version
     )
-    if repo_root is not None:
+    if repo_root is None:
+        _check_prebuilt_python()
+    else:
         console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
     target_root_override = parse_target_root_flag(target_root) if target_root else None
 
@@ -1071,7 +1104,9 @@ def upgrade(
     repo_root, resolved_server_version = _resolve_image_source(
         repo, from_source, server_version
     )
-    if repo_root is not None:
+    if repo_root is None:
+        _check_prebuilt_python()
+    else:
         console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
     modal_info = _check_modal_auth()
     console.print(f"Modal workspace: [bold]{modal_info.display}[/bold]")
