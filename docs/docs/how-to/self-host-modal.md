@@ -48,13 +48,11 @@ that via the API (Postgres 16, project name `stardag`).
 ### 3. Deploy
 
 ```bash
-uvx --python 3.12 --from "stardag[selfhost]" stardag self-host up
+uvx --from "stardag[selfhost]" stardag self-host up
 ```
 
-(`--python 3.12` matches the CLI's interpreter to the prebuilt server
-image's Python — required because the deploy serializes functions with your
-local interpreter. The CLI checks this and tells you the remedy if it
-doesn't match.)
+(Any Python ≥ 3.10 works — the prebuilt image is deployed by reference, so
+the CLI's interpreter is independent of the image's.)
 
 The command walks you through the rest interactively:
 
@@ -108,7 +106,7 @@ stardag self-host connect
 ## Updating to a new version
 
 ```bash
-uvx --python 3.12 --from "stardag[selfhost]" stardag self-host upgrade
+uvx --from "stardag[selfhost]" stardag self-host upgrade
 ```
 
 This applies any new database migrations and redeploys the API + UI. Each
@@ -140,10 +138,10 @@ uvx --from "stardag[selfhost]" stardag self-host up --from-source
 
 The image is then built from the checkout: the UI is compiled with npm
 inside the Modal image build (no local Node needed) and the API package is
-installed from source. The image's Python is matched to the interpreter
-running the CLI (any Python ≥ 3.10 works — no `--python 3.12` needed in
-this mode). `upgrade --from-source` redeploys after local changes or a
-`git pull`.
+installed from source. In this mode the function bodies are serialized with
+the CLI's interpreter, so the image's Python is matched to it automatically
+(any Python ≥ 3.10 works). `upgrade --from-source` redeploys after local
+changes or a `git pull`.
 
 ## Auth mode: `local` (default)
 
@@ -166,7 +164,7 @@ authorization code + PKCE, RS256 tokens). A good free option is
 [Auth0](https://auth0.com)'s free tier also works.
 
 ```bash
-uvx --python 3.12 --from "stardag[selfhost]" stardag self-host up --auth-mode oidc \
+uvx --from "stardag[selfhost]" stardag self-host up --auth-mode oidc \
   --oidc-issuer https://<your-idp-issuer> \
   --oidc-ui-client-id <client-id>
 ```
@@ -177,7 +175,7 @@ browser for the OIDC login, then creates the workspace, `main` environment,
 API key, and local profile exactly like the local-mode flow:
 
 ```bash
-uvx --python 3.12 --from "stardag[selfhost]" stardag self-host connect
+uvx --from "stardag[selfhost]" stardag self-host connect
 ```
 
 Provider setup (example: WorkOS AuthKit):
@@ -259,12 +257,13 @@ equivalent):
 
 - **First request hangs a few seconds** — cold start (Modal container boot
   - Neon wake). Expected with scale-to-zero; use `--keep-warm 1` to avoid.
-- **`InvalidError: The 'migrate' Function (using serialized=True) was defined with Python 3.X, but its Image has 3.12`**
-  — the CLI's interpreter must match the server image's Python. For the
-  prebuilt image, run under 3.12 (`uvx --python 3.12 ...` as in the
-  quickstart — recent CLI versions catch this before deploying); with
-  `--from-source` the image is built to match your interpreter
-  automatically.
+- **`InvalidError: The 'migrate' Function (using serialized=True) was defined with Python 3.X, but its Image has 3.Y`**
+  — only possible with `--from-source`, where the CLI serializes the
+  function bodies with your interpreter and the image is normally built to
+  match it. If you see it, drop any `--python`/`python_version` override so
+  the image tracks your interpreter. The default prebuilt path is deployed
+  by reference (not serialized), so it is immune to this and runs under any
+  Python ≥ 3.10.
 - **`Modal authentication not set up`** — run `uvx modal token new`.
 - **`Neon API key rejected`** — create a key at
   [console.neon.tech/app/settings/api-keys](https://console.neon.tech/app/settings/api-keys).

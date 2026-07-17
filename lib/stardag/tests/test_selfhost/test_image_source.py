@@ -82,8 +82,50 @@ def test_build_server_app_prebuilt_needs_no_repo():
 
 
 # ---------------------------------------------------------------------------
-# Client-Python / image-Python matching (serialized=True functions are
-# cloudpickled by the client and unpickled in the image: versions must match)
+# Prebuilt path: functions referenced BY NAME (serialized=False), so the
+# client's Python is decoupled from the image's. The entry module is loaded
+# as a standalone single-file module and mounted into the container.
+# ---------------------------------------------------------------------------
+
+
+def test_prebuilt_entry_module_imports_without_stardag_api():
+    """The entry module must load on a stardag-SDK-only client.
+
+    Its ``stardag_api`` imports are deferred into the function bodies, so
+    importing the module (to build the by-reference app graph) never needs
+    ``stardag_api`` - which the SDK client does not install.
+    """
+    from stardag.selfhost._modal_app import _load_prebuilt_entry_module
+
+    entry = _load_prebuilt_entry_module()
+    assert callable(entry.web)
+    assert callable(entry.migrate)
+
+
+def test_prebuilt_functions_are_by_reference_file_entrypoints():
+    """Prebuilt functions are non-serialized, file-entrypoint references.
+
+    A FILE-type FunctionInfo means Modal ships just the entry file and
+    imports it in-container by its stem (``_modal_entry``) - no cloudpickle,
+    so the deploy is independent of the client interpreter version.
+    """
+    from modal._utils.function_utils import FunctionInfo
+
+    from stardag.selfhost._modal_app import _load_prebuilt_entry_module
+
+    entry = _load_prebuilt_entry_module()
+    for fn in (entry.web, entry.migrate):
+        info = FunctionInfo(fn, serialized=False)
+        assert not info.is_serialized()
+        # Stem of _modal_entry.py: the module Modal imports in-container.
+        assert info.module_name == "_modal_entry"
+        # A single-part qualname is required for by-reference resolution.
+        assert "." not in (info.function_name or "")
+
+
+# ---------------------------------------------------------------------------
+# Client-Python / image-Python matching for --from-source (serialized=True
+# closures are cloudpickled by the client and unpickled in the image)
 # ---------------------------------------------------------------------------
 
 
@@ -143,34 +185,3 @@ def test_build_server_app_from_source_python_override(
     seen = _record_add_python(monkeypatch)
     build_server_app(repo_root=REPO_ROOT, python_version="3.11")
     assert seen["add_python"] == "3.11"
-
-
-def test_prebuilt_image_python_constant_matches_dockerfile():
-    """PREBUILT_IMAGE_PYTHON must track app/server.Dockerfile's base image."""
-    from stardag.selfhost._modal_app import PREBUILT_IMAGE_PYTHON
-
-    dockerfile = (REPO_ROOT / "app" / "server.Dockerfile").read_text()
-    expected = "FROM python:{}.{}-slim".format(*PREBUILT_IMAGE_PYTHON)
-    assert expected in dockerfile
-
-
-def test_check_prebuilt_python_matching(monkeypatch: pytest.MonkeyPatch):
-    import sys
-
-    from stardag._cli.selfhost import _check_prebuilt_python
-    from stardag.selfhost._modal_app import PREBUILT_IMAGE_PYTHON
-
-    monkeypatch.setattr(sys, "version_info", (*PREBUILT_IMAGE_PYTHON, 0, "final", 0))
-    _check_prebuilt_python()  # no-op
-
-
-def test_check_prebuilt_python_mismatch_fails_fast(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    import sys
-
-    from stardag._cli.selfhost import _check_prebuilt_python
-
-    monkeypatch.setattr(sys, "version_info", (3, 14, 0, "final", 0))
-    with pytest.raises(typer.Exit):
-        _check_prebuilt_python()

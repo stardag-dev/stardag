@@ -6,6 +6,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **`stardag self-host` prebuilt deploys no longer require a matching
+  client Python
+  ([#196](https://github.com/stardag-dev/stardag/issues/196)).** The
+  prebuilt-image path now defines the Modal `web`/`migrate` functions by
+  reference (`serialized=False`) against a module-level entry point that
+  Modal imports inside the server image, instead of cloudpickling closures
+  with the client interpreter. Because nothing is serialized, the CLI runs
+  under any supported Python (≥ 3.10) — the previous `uvx --python 3.12 …`
+  requirement (and its fail-fast check) is gone. `--from-source` is
+  unchanged (still serialized closures with a client-matched image Python).
+
 ## [0.15.0] — 2026-07-17
 
 ### SDK
