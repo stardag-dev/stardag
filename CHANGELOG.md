@@ -6,6 +6,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-07-17
+
 ### SDK
 
 - **Self-host the Stardag service on Modal with one command
