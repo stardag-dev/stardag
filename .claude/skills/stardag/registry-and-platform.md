@@ -187,19 +187,20 @@ stardag self-host status    # Deployment status + URL
 stardag self-host destroy   # Stop the Modal app (DB untouched)
 ```
 
-The server app + its secrets live in a dedicated Modal environment
-(default `stardag-server`, flag `--server-modal-env`), isolated from the
-environments where user DAG apps run. `up`/`connect` also complete the
-setup: a primary Stardag workspace (named after the shared Modal workspace,
-or the personal workspace; `--primary-workspace`/`--no-primary-workspace`),
-a `main` environment, an API key pushed as Modal secret `stardag-api-key`
-into the DAG-execution Modal environment (`--execution-modal-env`, default:
-the account's default env), a default target root
-`modalvol://stardag/<workspace-slug>` (`--target-root`/`--no-target-root`),
-and a local SDK registry + profile named `selfhosted`
-(`--registry-name`/`--profile-name`). In OIDC auth mode run
-`stardag self-host connect` after `up` (browser login, then the same setup
-via the API).
+The server app (default name `server`) + its secrets live in a dedicated
+Modal environment (default `stardag-host`, flag `--server-modal-env`),
+isolated from the environments where user DAG apps run; the default URL is
+`https://<workspace>-stardag-host--server.modal.run`. `up`/`connect` also
+complete the setup: a primary Stardag workspace (named after the shared
+Modal workspace, or the personal workspace;
+`--primary-workspace`/`--no-primary-workspace`), a `main` environment, an
+API key pushed as Modal secret `stardag-api-key` into the DAG-execution
+Modal environment (`--execution-modal-env`, default: the account's default
+env), a default target root `modalvol://stardag-targets/<workspace-slug>`
+(`--target-root`/`--no-target-root`), and a local SDK registry + profile
+named `selfhosted` (`--registry-name`/`--profile-name`). In OIDC auth mode
+run `stardag self-host connect` after `up` (browser login, then the same
+setup via the API).
 
 ## Configuration System
 

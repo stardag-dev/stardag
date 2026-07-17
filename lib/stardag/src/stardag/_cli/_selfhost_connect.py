@@ -8,7 +8,7 @@ setup, mirroring the Modal account's structure:
 - a **primary environment** (``main``) in it,
 - an **API key** for that environment pushed as the Modal secret
   ``stardag-api-key`` into the Modal environment where the user's DAGs run,
-- a **default target root** (``modalvol://stardag/<workspace-slug>``),
+- a **default target root** (``modalvol://stardag-targets/<workspace-slug>``),
 - a **local SDK registry + profile** so ``stardag`` CLI/SDK commands work
   immediately.
 
@@ -41,15 +41,25 @@ PRIMARY_ENVIRONMENT_SLUG = "main"
 # (the conventional name modal integration docs/examples use).
 API_KEY_SECRET_NAME = "stardag-api-key"
 
-# Modal volume name used for the default target root.
+# Modal volume + name for the default target root. The workspace slug is a
+# path segment (not dropped): several Stardag workspaces (a shared org
+# workspace plus members' personal ones) can execute in the same Modal
+# environment and task output paths are deterministic, so a bare
+# ``.../default`` would let identical task defs across workspaces collide in
+# the shared volume - the slug namespaces them.
 DEFAULT_TARGET_ROOT_NAME = "default"
-DEFAULT_TARGET_ROOT_VOLUME = "stardag"
+DEFAULT_TARGET_ROOT_VOLUME = "stardag-targets"
 
 DEFAULT_REGISTRY_NAME = "selfhosted"
 DEFAULT_PROFILE_NAME = "selfhosted"
 
 _LOGIN_ATTEMPTS = 3
 _LOGIN_TIMEOUT = 120.0  # first request cold-starts the container + database
+
+
+def default_target_root_uri(workspace_slug: str) -> str:
+    """Default target-root URI for a workspace (Modal volume, slug-scoped)."""
+    return f"modalvol://{DEFAULT_TARGET_ROOT_VOLUME}/{workspace_slug}"
 
 
 def _slugify(name: str) -> str:
@@ -63,7 +73,7 @@ def parse_target_root_flag(value: str) -> tuple[str, str]:
     if not sep or not name.strip() or not uri.strip():
         error_console.print(
             f"Invalid --target-root {value!r}: expected the form name=uri "
-            "(e.g. default=modalvol://stardag/my-workspace)"
+            "(e.g. default=modalvol://stardag-targets/my-workspace)"
         )
         raise typer.Exit(1)
     return name.strip(), uri.strip()
@@ -390,7 +400,7 @@ def run_connect(
         if not no_target_root:
             root_name, root_uri = target_root or (
                 DEFAULT_TARGET_ROOT_NAME,
-                f"modalvol://{DEFAULT_TARGET_ROOT_VOLUME}/{workspace_slug}",
+                default_target_root_uri(workspace_slug),
             )
             roots_url = f"{envs_url}/{environment_id}/target-roots"
             roots_response = ws_client.get(roots_url)
@@ -549,7 +559,7 @@ def print_summary(
         "[bold]Next steps[/bold]",
         f"  1. Open the UI: {outcome.api_url}",
         "  2. Deploy a DAG app to Modal: stardag modal deploy <your_app.py>",
-        "     (see the docs: How-to -> Integrate with Modal)",
+        "     https://docs.stardag.com/how-to/integrate-modal/",
         "  3. Upgrade later: stardag self-host upgrade",
     ]
     console.print(

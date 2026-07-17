@@ -14,7 +14,7 @@ needed). Pass --from-source to build from a local checkout of the stardag
 repo instead (run from the checkout or pass --repo).
 
 The server app and its secrets live in a dedicated Modal environment
-(default: "stardag-server", created on demand) so they stay isolated from
+(default: "stardag-host", created on demand) so they stay isolated from
 the Modal environments where your DAG apps run.
 """
 
@@ -764,7 +764,7 @@ def up(
         None,
         "--target-root",
         help="Default target root for the primary environment as name=uri "
-        "(default: default=modalvol://stardag/<workspace-slug>).",
+        "(default: default=modalvol://stardag-targets/<workspace-slug>).",
     ),
     no_target_root: bool = typer.Option(
         False, "--no-target-root", help="Skip creating a default target root."
@@ -1193,7 +1193,7 @@ def connect(
         None,
         "--target-root",
         help="Default target root for the primary environment as name=uri "
-        "(default: default=modalvol://stardag/<workspace-slug>).",
+        "(default: default=modalvol://stardag-targets/<workspace-slug>).",
     ),
     no_target_root: bool = typer.Option(
         False, "--no-target-root", help="Skip creating a default target root."

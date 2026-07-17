@@ -32,15 +32,19 @@ API_REMOTE_DIR = "/opt/stardag/api"
 UI_SRC_REMOTE_DIR = "/opt/stardag/ui-src"
 UI_DIST_REMOTE_DIR = "/opt/stardag/ui"
 
-DEFAULT_APP_NAME = "stardag-server"
-DEFAULT_CONFIG_SECRET = "stardag-server-config"
-DEFAULT_JWT_SECRET = "stardag-server-jwt"
+# The Modal app name (and URL label). Kept short: the deployed URL is
+# https://<workspace>-<modal-env>--<app>.modal.run, so with the default
+# server Modal environment below that reads ...-stardag-host--server....
+DEFAULT_APP_NAME = "server"
+DEFAULT_CONFIG_SECRET = "server-config"
+DEFAULT_JWT_SECRET = "server-jwt"
 
 # Modal environment the server app and its secrets live in, created on
-# demand. Keeping the server in its own Modal environment isolates it from
-# the environments where the user's DAG apps run (no name collisions with
-# user apps/secrets/volumes, and `modal app list` etc. stay uncluttered).
-DEFAULT_SERVER_MODAL_ENV = "stardag-server"
+# demand. Keeping the server/control-plane in its own Modal environment
+# isolates it from the environments where the user's DAG apps run (no name
+# collisions with user apps/secrets/volumes, and `modal app list` etc. stay
+# uncluttered).
+DEFAULT_SERVER_MODAL_ENV = "stardag-host"
 
 SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # The server release this SDK version is tested against. Bumped at SDK

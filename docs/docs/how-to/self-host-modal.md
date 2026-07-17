@@ -9,7 +9,7 @@ cover a low-traffic deployment).
 !!! info "What you get"
 
     - The Stardag **UI + Registry API** served from your own Modal workspace
-      at `https://<your-workspace>--stardag-server.modal.run`
+      at `https://<your-workspace>-stardag-host--server.modal.run`
     - A **Postgres database** on Neon (scale-to-zero, free tier)
     - **Authentication** without extra services (email/password managed by
       the API) — or bring any OIDC provider
@@ -76,8 +76,8 @@ everything is wired up:
 ```
 Stardag is up!
 
-  UI:  https://<your-workspace>--stardag-server.modal.run
-  API: https://<your-workspace>--stardag-server.modal.run/api/v1
+  UI:  https://<your-workspace>-stardag-host--server.modal.run
+  API: https://<your-workspace>-stardag-host--server.modal.run/api/v1
 ```
 
 ### 4. Done — what the defaults create
@@ -86,11 +86,11 @@ Stardag is up!
 
 | What                                         | Default                                                             | Purpose                                                                  |
 | -------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Modal env `stardag-server`                   | server app + config/JWT secrets                                     | Isolates the server from the Modal environments where your DAG apps run  |
+| Modal env `stardag-host` + app `server`      | server app + config/JWT secrets                                     | Isolates the server from the Modal environments where your DAG apps run  |
 | Stardag **workspace**                        | named after your shared Modal workspace, or your personal workspace | Mirrors your Modal account's structure                                   |
 | Stardag **environment**                      | `main`                                                              | Mirrors Modal's default environment; where deployed-DAG runs are tracked |
 | **API key** → Modal secret `stardag-api-key` | in Modal env `main` (your default)                                  | Lets Modal-executed DAGs authenticate against your registry              |
-| **Target root** `default`                    | `modalvol://stardag/<workspace-slug>`                               | Where task outputs land (a Modal volume)                                 |
+| **Target root** `default`                    | `modalvol://stardag-targets/<workspace-slug>`                       | Where task outputs land (a Modal volume, namespaced per workspace)       |
 | Local **registry + profile** `selfhosted`    | in `~/.stardag/config.toml`                                         | Points your SDK/CLI at the deployment                                    |
 
 Open the UI, sign in with the admin account, and deploy a DAG app with
@@ -118,6 +118,13 @@ up a newer SDK also rolls the server forward; pass
 [server release](https://github.com/stardag-dev/stardag/releases). The JWT
 keypair secret is left untouched, so existing sessions and SDK logins
 survive upgrades.
+
+If you deployed with a non-default `--name` or `--server-modal-env`, pass
+the **same** values to `upgrade` (and `status`/`destroy`) — otherwise the
+command looks in the wrong place and reports nothing deployed. In
+particular, a deployment created before these defaults changed (app
+`stardag-server` in Modal's default environment) is upgraded with
+`--name stardag-server --server-modal-env ''`.
 
 ## Deploying from source (development)
 
@@ -178,7 +185,7 @@ Provider setup (example: WorkOS AuthKit):
 1. Create a WorkOS account → enable AuthKit.
 2. Create a client application; note the **issuer URL** and **client ID**.
 3. Add the redirect URI printed by `self-host up`:
-   `https://<your-workspace>--stardag-server.modal.run/callback`
+   `https://<your-workspace>-stardag-host--server.modal.run/callback`
 4. If your provider's JWKS is not at
    `<issuer>/protocol/openid-connect/certs` (the Keycloak convention), pass
    `--oidc-jwks-url` explicitly (e.g. WorkOS: `<issuer>/oauth2/jwks`,
@@ -214,7 +221,7 @@ Useful flags for `up` (all prompts have flag equivalents for CI):
 - `--from-source` — build the image from a local repo checkout instead of
   the prebuilt image (see
   [Deploying from source](#deploying-from-source-development))
-- `--name` — Modal app name / URL label (default `stardag-server`)
+- `--name` — Modal app name / URL label (default `server`)
 - `--neon-project` — Neon project name to find-or-create (default `stardag`)
 - `--database-url` / `--database-url-direct` — bring your own Postgres
   instead of Neon (use `postgresql+asyncpg://...` URLs; pass the direct
@@ -223,7 +230,7 @@ Useful flags for `up` (all prompts have flag equivalents for CI):
   value is persisted: `up`/`upgrade` without the flag keep the last
   explicitly set value.
 - `--server-modal-env NAME` — Modal environment for the server app + its
-  secrets (default `stardag-server`, created if missing). Keeps the server
+  secrets (default `stardag-host`, created if missing). Keeps the server
   isolated from the environments your DAG apps run in. Also accepted by
   `connect`/`upgrade`/`status`/`destroy`; pass `''` for Modal's default
   environment (deployments made with older SDK versions live there).
@@ -240,7 +247,7 @@ equivalent):
   account's default environment). This is deliberately _not_ the server's
   environment.
 - `--target-root name=uri` — default target root for the `main` environment
-  (default `default=modalvol://stardag/<workspace-slug>`); or
+  (default `default=modalvol://stardag-targets/<workspace-slug>`); or
   `--no-target-root` to skip
 - `--registry-name` / `--profile-name` — names for the local SDK config
   entries (both default `selfhosted`)
@@ -263,9 +270,9 @@ equivalent):
 - **Sign-in loops or 401s right after an upgrade** — stale cached tokens;
   sign out and in again. (The JWT keypair is preserved across upgrades, so
   this should be rare.)
-- **Logs** — `uvx modal app logs stardag-server --env stardag-server` (the
-  server lives in its own Modal environment; drop `--env` for deployments
-  made with older SDK versions).
+- **Logs** — `uvx modal app logs server --env stardag-host` (the server
+  lives in its own Modal environment; use `--env ''`/the app name you chose
+  for deployments made with older SDK versions or a custom `--name`).
 - **Migration failures** — `self-host up`/`upgrade` print the Alembic
   output; migrations always run against Neon's direct (non-pooled)
   endpoint. Re-running the command is safe (migrations are idempotent).

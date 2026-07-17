@@ -172,10 +172,10 @@ def fake_secret_objects(monkeypatch: pytest.MonkeyPatch) -> _FakeSecretObjects:
 
 
 def test_push_secret_passes_environment(fake_secret_objects: _FakeSecretObjects):
-    _push_secret("my-secret", {"A": "1"}, "stardag-server")
+    _push_secret("my-secret", {"A": "1"}, "stardag-host")
     assert fake_secret_objects.calls == [
-        ("delete", "my-secret", "stardag-server"),
-        ("create", "my-secret", "stardag-server", {"A": "1"}),
+        ("delete", "my-secret", "stardag-host"),
+        ("create", "my-secret", "stardag-host", {"A": "1"}),
     ]
 
 
@@ -193,8 +193,8 @@ def test_secret_exists_passes_environment(monkeypatch: pytest.MonkeyPatch):
         return FakeRef()
 
     monkeypatch.setattr(modal.Secret, "from_name", fake_from_name)
-    assert _secret_exists("my-secret", "stardag-server") is False
-    assert seen == [("my-secret", "stardag-server")]
+    assert _secret_exists("my-secret", "stardag-host") is False
+    assert seen == [("my-secret", "stardag-host")]
 
 
 def test_ensure_jwt_secret_creates_in_environment(
@@ -203,9 +203,9 @@ def test_ensure_jwt_secret_creates_in_environment(
     monkeypatch.setattr(
         "stardag._cli.selfhost._secret_exists", lambda name, env=None: False
     )
-    assert _ensure_jwt_secret("app-jwt", "stardag-server") is True
+    assert _ensure_jwt_secret("app-jwt", "stardag-host") is True
     kinds = [(kind, name, env) for kind, name, env, *rest in fake_secret_objects.calls]
-    assert ("create", "app-jwt", "stardag-server") in kinds
+    assert ("create", "app-jwt", "stardag-host") in kinds
 
 
 def test_resolve_keep_warm_passes_environment(monkeypatch: pytest.MonkeyPatch):
@@ -219,8 +219,8 @@ def test_resolve_keep_warm_passes_environment(monkeypatch: pytest.MonkeyPatch):
         return store
 
     monkeypatch.setattr(modal.Dict, "from_name", fake_from_name)
-    assert _resolve_keep_warm("myapp", 1, "stardag-server") == 1
-    assert envs == ["stardag-server"]
+    assert _resolve_keep_warm("myapp", 1, "stardag-host") == 1
+    assert envs == ["stardag-host"]
 
 
 def test_build_server_app_resolves_secrets_in_environment(
@@ -237,10 +237,34 @@ def test_build_server_app_resolves_secrets_in_environment(
 
     monkeypatch.setattr(modal.Secret, "from_name", recording_from_name)
     build_server_app(server_version="1.2.3", environment_name=DEFAULT_SERVER_MODAL_ENV)
+    # Secret names derive from the default app name ("server")
     assert seen == [
-        ("stardag-server-config", DEFAULT_SERVER_MODAL_ENV),
-        ("stardag-server-jwt", DEFAULT_SERVER_MODAL_ENV),
+        ("server-config", DEFAULT_SERVER_MODAL_ENV),
+        ("server-jwt", DEFAULT_SERVER_MODAL_ENV),
     ]
+
+
+def test_default_names_avoid_doubled_url_label():
+    """The Modal env and app name differ, so the default URL reads
+    ...-stardag-host--server.modal.run rather than a doubled label."""
+    from stardag.selfhost._modal_app import (
+        DEFAULT_APP_NAME,
+        DEFAULT_SERVER_MODAL_ENV,
+    )
+
+    assert DEFAULT_APP_NAME == "server"
+    assert DEFAULT_SERVER_MODAL_ENV == "stardag-host"
+    assert DEFAULT_APP_NAME != DEFAULT_SERVER_MODAL_ENV
+
+
+def test_default_target_root_uri_namespaces_by_workspace():
+    from stardag._cli._selfhost_connect import default_target_root_uri
+
+    assert (
+        default_target_root_uri("acme-corp") == "modalvol://stardag-targets/acme-corp"
+    )
+    # The workspace slug is retained (namespacing), not dropped
+    assert default_target_root_uri("acme-corp").endswith("/acme-corp")
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +507,7 @@ def test_connect_personal_workspace(isolated_home):
     assert outcome.workspace_created is False
     assert outcome.environment_slug == "main"
     assert outcome.environment_created is False
-    assert outcome.target_root == ("default", "modalvol://stardag/admin")
+    assert outcome.target_root == ("default", "modalvol://stardag-targets/admin")
     assert outcome.api_key_name == "modal-default"
     assert outcome.modal_secret_name == API_KEY_SECRET_NAME
 
@@ -525,7 +549,7 @@ def test_connect_creates_primary_workspace(isolated_home):
     assert outcome.workspace_is_personal is False
     # main env was included in workspace creation, so not created separately
     assert outcome.environment_created is False
-    assert outcome.target_root == ("default", "modalvol://stardag/acme-corp")
+    assert outcome.target_root == ("default", "modalvol://stardag-targets/acme-corp")
     assert outcome.api_key_name == "modal-staging"
     assert push.calls[0][2] == "staging"
     assert api.api_key_requests[0]["name"] == "modal-staging"

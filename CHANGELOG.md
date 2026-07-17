@@ -19,15 +19,15 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (the UI compiles inside the Modal image build — no local Node/Docker
   required). See the "Self-host on Modal" guide.
 - **`stardag self-host up` completes the whole setup** (new `connect`
-  subcommand re-runs it idempotently): the server app + its secrets are
-  isolated in a dedicated Modal environment (`stardag-server`, flag
-  `--server-modal-env`); a primary Stardag workspace is created mirroring
-  a shared Modal workspace's name (`--primary-workspace` /
+  subcommand re-runs it idempotently): the server app (`server`) + its
+  secrets are isolated in a dedicated Modal environment (`stardag-host`,
+  flag `--server-modal-env`); a primary Stardag workspace is created
+  mirroring a shared Modal workspace's name (`--primary-workspace` /
   `--no-primary-workspace`; personal Modal accounts use the personal
   workspace) with a `main` environment; an API key is minted and pushed
   as the Modal secret `stardag-api-key` into the DAG-execution Modal
   environment (`--execution-modal-env`); a default target root
-  `modalvol://stardag/<workspace-slug>` is registered
+  `modalvol://stardag-targets/<workspace-slug>` is registered
   (`--target-root`/`--no-target-root`); and a local SDK registry +
   profile (`selfhosted`) are written. In OIDC auth mode, `connect` runs
   the browser login first and provisions via the API.
