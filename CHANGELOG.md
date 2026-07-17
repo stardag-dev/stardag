@@ -6,8 +6,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-17
+
 ### SDK
 
+- Default prebuilt server image bumped to `server-v0.1.1` (rebuilt from
+  the v0.15.0+ line, so a prebuilt `self-host up` now serves the UI with
+  the corrected version footer). `DEFAULT_SERVER_VERSION = "0.1.1"`.
 - **`stardag self-host` prebuilt deploys no longer require a matching
   client Python
   ([#196](https://github.com/stardag-dev/stardag/issues/196)).** The
