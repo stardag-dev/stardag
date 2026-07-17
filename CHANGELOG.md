@@ -18,6 +18,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   (`--server-version`); `--from-source` builds from a repo checkout
   (the UI compiles inside the Modal image build — no local Node/Docker
   required). See the "Self-host on Modal" guide.
+- **`stardag self-host up` completes the whole setup** (new `connect`
+  subcommand re-runs it idempotently): the server app (`server`) + its
+  secrets are isolated in a dedicated Modal environment (`stardag-host`,
+  flag `--server-modal-env`); a primary Stardag workspace is created
+  mirroring a shared Modal workspace's name (`--primary-workspace` /
+  `--no-primary-workspace`; personal Modal accounts use the personal
+  workspace) with a `main` environment; an API key is minted and pushed
+  as the Modal secret `stardag-api-key` into the DAG-execution Modal
+  environment (`--execution-modal-env`); a default target root
+  `modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default`
+  (a dedicated Modal volume per workspace + environment) is registered
+  (`--target-root`/`--no-target-root`); and a local SDK registry +
+  profile (`selfhosted`) are written. In OIDC auth mode, `connect` runs
+  the browser login first and provisions via the API.
 - **`stardag auth login` supports local-auth registries**: when the
   registry reports `auth_mode=local` it prompts for email/password and
   stores the session token; the existing token-refresh chain uses it
@@ -34,6 +48,11 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   rate limiting; idempotent bootstrap-admin provisioning at startup
   (`AUTH_BOOTSTRAP_ADMIN_EMAIL`/`_PASSWORD`). OIDC mode (default) is
   unchanged.
+- **Primary workspace bootstrap** (local auth mode): startup idempotently
+  ensures a shared workspace named `AUTH_PRIMARY_WORKSPACE_NAME` (bootstrap
+  admin as owner) and an `AUTH_PRIMARY_WORKSPACE_ENVIRONMENT` environment
+  (default `main`; empty disables) — in the named workspace, or in the
+  bootstrap admin's personal workspace when no name is set.
 - `GET /auth/config` now serves the full client auth configuration
   (auth mode, issuer, UI client id, Cognito domain, registration flag)
   so UIs and CLIs can be configured at runtime.

@@ -226,6 +226,16 @@ The image definition is `app/server.Dockerfile` (build context = repo root):
 docker build -f app/server.Dockerfile -t stardag-server .
 ```
 
+> **Python version coupling:** the Dockerfile's base Python version must
+> stay in sync with `PREBUILT_IMAGE_PYTHON` in
+> `lib/stardag/src/stardag/selfhost/_modal_app.py` — the self-host CLI
+> serializes Modal functions with the client interpreter and checks it
+> against that constant before deploying the prebuilt image. Bumping one
+> without the other breaks (or wrongly blocks) `stardag self-host up`.
+> A unit test (`test_prebuilt_image_python_constant_matches_dockerfile`)
+> guards the pairing; docs referencing `uvx --python 3.12 ...` need the
+> same bump.
+
 To release, push a `server-vX.Y.Z` tag on `main`:
 
 ```bash

@@ -1,7 +1,8 @@
 """CLI for self-hosting the Stardag service (API + UI) on Modal.
 
 Usage:
-    stardag self-host up          # provision + deploy the full stack
+    stardag self-host up          # provision + deploy + connect (complete setup)
+    stardag self-host connect     # (re)run the post-deploy setup only
     stardag self-host upgrade     # migrate DB + redeploy
     stardag self-host status      # show deployment status and URL
     stardag self-host destroy     # stop the Modal app (DB is left untouched)
@@ -11,19 +12,35 @@ Requires the `selfhost` extra: pip install "stardag[selfhost]"
 By default the prebuilt public server image is deployed (no repo checkout
 needed). Pass --from-source to build from a local checkout of the stardag
 repo instead (run from the checkout or pass --repo).
+
+The server app and its secrets live in a dedicated Modal environment
+(default: "stardag-host", created on demand) so they stay isolated from
+the Modal environments where your DAG apps run.
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
+from stardag._cli._selfhost_connect import (
+    PRIMARY_ENVIRONMENT_SLUG,
+    get_auth_config,
+    login_local,
+    parse_target_root_flag,
+    print_summary,
+    resolve_primary_workspace,
+    run_connect,
+)
 from stardag.selfhost._modal_app import (
     DEFAULT_APP_NAME,
+    DEFAULT_SERVER_MODAL_ENV,
     DEFAULT_SERVER_VERSION,
+    PREBUILT_IMAGE_PYTHON,
     build_server_app,
     find_repo_root,
     server_image_ref,
@@ -83,6 +100,36 @@ def _require_repo_root(repo: Path | None) -> Path:
     return root
 
 
+def _check_prebuilt_python() -> None:
+    """Fail fast when the client interpreter can't drive the prebuilt image.
+
+    The `migrate`/`web` Modal functions are serialized (cloudpickled) by the
+    running interpreter and unpickled inside the server image; Modal rejects
+    the deploy when the two Python versions differ (``InvalidError: ... was
+    defined with Python X.Y, but its Image has 3.12``). Check up front -
+    before any provisioning - and print the exact remedy.
+    """
+    import sys
+
+    running = tuple(sys.version_info[:2])
+    if running == PREBUILT_IMAGE_PYTHON:
+        return
+    expected = "{}.{}".format(*PREBUILT_IMAGE_PYTHON)
+    actual = "{}.{}".format(*running)
+    error_console.print(
+        f"The prebuilt server image runs Python {expected} but this CLI is "
+        f"running under {actual}; serialized Modal functions require "
+        "matching interpreter versions."
+    )
+    console.print(
+        "\nRe-run with a matching interpreter, e.g.:\n"
+        f"  [bold]uvx --python {expected} --from 'stardag[selfhost]' "
+        "stardag self-host up[/bold]\n"
+        "(or pass --from-source to build an image matching your interpreter)."
+    )
+    raise typer.Exit(1)
+
+
 def _resolve_image_source(
     repo: Path | None,
     from_source: bool,
@@ -106,8 +153,25 @@ def _resolve_image_source(
     return None, server_version or DEFAULT_SERVER_VERSION
 
 
-def _check_modal_auth() -> str:
-    """Verify Modal credentials; returns the workspace name."""
+@dataclass
+class ModalWorkspaceInfo:
+    """The authenticated Modal account's workspace identity.
+
+    ``workspace_name`` is the shared workspace's display name and is None
+    for personal Modal workspaces; ``username`` is the account slug (always
+    present).
+    """
+
+    username: str
+    workspace_name: str | None
+
+    @property
+    def display(self) -> str:
+        return self.workspace_name or self.username
+
+
+def _check_modal_auth() -> ModalWorkspaceInfo:
+    """Verify Modal credentials; returns the workspace identity."""
     import asyncio
 
     import modal.config
@@ -122,7 +186,11 @@ def _check_modal_auth() -> str:
         workspace = asyncio.run(
             modal.config._lookup_workspace(server_url, token_id, token_secret)
         )
-        return workspace.username
+        # workspace_name is empty for personal Modal workspaces
+        return ModalWorkspaceInfo(
+            username=workspace.username,
+            workspace_name=workspace.workspace_name or None,
+        )
     except Exception as e:
         error_console.print(f"Modal authentication not set up: {e}")
         console.print(
@@ -133,23 +201,42 @@ def _check_modal_auth() -> str:
         raise typer.Exit(1)
 
 
-def _secret_exists(name: str) -> bool:
+def _ensure_modal_environment(name: str) -> bool:
+    """Create the Modal environment if it doesn't exist yet.
+
+    Returns True if it was created. The dedicated environment isolates the
+    server app + secrets from the environments where user DAG apps run.
+    """
+    import modal.environments
+
+    existing = {env.name for env in modal.environments.list_environments()}
+    if name in existing:
+        return False
+    modal.environments.create_environment(name)
+    return True
+
+
+def _secret_exists(name: str, environment_name: str | None = None) -> bool:
     import modal
     import modal.exception
 
     try:
-        modal.Secret.from_name(name).hydrate()
+        modal.Secret.from_name(name, environment_name=environment_name).hydrate()
         return True
     except modal.exception.NotFoundError:
         return False
 
 
-def _push_secret(name: str, env: dict[str, str]) -> None:
+def _push_secret(
+    name: str, env: dict[str, str], environment_name: str | None = None
+) -> None:
     """Create or replace a named Modal secret."""
     import modal
 
-    modal.Secret.objects.delete(name, allow_missing=True)
-    modal.Secret.objects.create(name, env)
+    modal.Secret.objects.delete(
+        name, allow_missing=True, environment_name=environment_name
+    )
+    modal.Secret.objects.create(name, env, environment_name=environment_name)
 
 
 def _generate_jwt_keypair() -> tuple[str, str]:
@@ -179,7 +266,9 @@ def _meta_dict_name(app_name: str) -> str:
     return f"{app_name}-meta"
 
 
-def _resolve_keep_warm(app_name: str, keep_warm: int | None) -> int:
+def _resolve_keep_warm(
+    app_name: str, keep_warm: int | None, environment_name: str | None = None
+) -> int:
     """Resolve the effective keep-warm value, persisting it across deploys.
 
     An explicitly provided value wins and is stored in the app's meta Dict;
@@ -188,7 +277,11 @@ def _resolve_keep_warm(app_name: str, keep_warm: int | None) -> int:
     """
     import modal
 
-    meta = modal.Dict.from_name(_meta_dict_name(app_name), create_if_missing=True)
+    meta = modal.Dict.from_name(
+        _meta_dict_name(app_name),
+        create_if_missing=True,
+        environment_name=environment_name,
+    )
     if keep_warm is not None:
         meta["keep_warm"] = keep_warm
         return keep_warm
@@ -211,30 +304,42 @@ def _parse_semver(version: str) -> tuple[int, int, int] | None:
     return major, minor, patch
 
 
-def _record_deployed_server_version(app_name: str, version: str) -> None:
+def _record_deployed_server_version(
+    app_name: str, version: str, environment_name: str | None = None
+) -> None:
     """Persist the just-deployed server version in the app's meta Dict.
 
     ``FROM_SOURCE_VERSION`` is recorded for from-source deploys.
     """
     import modal
 
-    meta = modal.Dict.from_name(_meta_dict_name(app_name), create_if_missing=True)
+    meta = modal.Dict.from_name(
+        _meta_dict_name(app_name),
+        create_if_missing=True,
+        environment_name=environment_name,
+    )
     meta["server_version"] = version
 
 
-def _deployed_server_version(app_name: str) -> str | None:
+def _deployed_server_version(
+    app_name: str, environment_name: str | None = None
+) -> str | None:
     """The recorded deployed server version, or None if never recorded."""
     import modal
     import modal.exception
 
     try:
-        meta = modal.Dict.from_name(_meta_dict_name(app_name))
+        meta = modal.Dict.from_name(
+            _meta_dict_name(app_name), environment_name=environment_name
+        )
     except modal.exception.NotFoundError:
         return None
     return meta.get("server_version")
 
 
-def _resolve_upgrade_server_version(app_name: str, explicit: str | None) -> str:
+def _resolve_upgrade_server_version(
+    app_name: str, explicit: str | None, environment_name: str | None = None
+) -> str:
     """Server version for prebuilt-image `upgrade` runs.
 
     Resolution order: explicit --server-version flag > recorded deployed
@@ -244,7 +349,7 @@ def _resolve_upgrade_server_version(app_name: str, explicit: str | None) -> str:
     advanced the DB schema past what the default server release knows).
     An explicitly passed older version wins, with a warning.
     """
-    deployed = _deployed_server_version(app_name)
+    deployed = _deployed_server_version(app_name, environment_name)
     if explicit is not None:
         explicit_semver = _parse_semver(explicit)
         deployed_semver = _parse_semver(deployed) if deployed else None
@@ -272,15 +377,19 @@ def _resolve_upgrade_server_version(app_name: str, explicit: str | None) -> str:
     return DEFAULT_SERVER_VERSION
 
 
-def _ensure_jwt_secret(name: str) -> bool:
+def _ensure_jwt_secret(name: str, environment_name: str | None = None) -> bool:
     """Create the JWT keypair secret if absent. Never overwrites.
 
     Returns True if a new keypair was created.
     """
-    if _secret_exists(name):
+    if _secret_exists(name, environment_name):
         return False
     private_pem, public_pem = _generate_jwt_keypair()
-    _push_secret(name, {"JWT_PRIVATE_KEY": private_pem, "JWT_PUBLIC_KEY": public_pem})
+    _push_secret(
+        name,
+        {"JWT_PRIVATE_KEY": private_pem, "JWT_PUBLIC_KEY": public_pem},
+        environment_name,
+    )
     return True
 
 
@@ -389,6 +498,8 @@ def _build_config_env(
     oidc_ui_client_id: str | None,
     oidc_audience: str | None,
     oidc_jwks_url: str | None,
+    primary_workspace_name: str | None = None,
+    primary_workspace_environment: str | None = None,
 ) -> dict[str, str]:
     env = {
         "STARDAG_API_DATABASE_URL": pooled_url,
@@ -398,6 +509,14 @@ def _build_config_env(
         # Self-hosted single-endpoint deployment: no SES
         "EMAIL_ENABLED": "false",
     }
+    # Primary workspace/environment bootstrap: acted on by the server in
+    # local auth mode (idempotent, anchored on the bootstrap admin). In
+    # OIDC mode the server has no known admin at startup, so the CLI's
+    # connect flow provisions these via the API instead.
+    if primary_workspace_name:
+        env["AUTH_PRIMARY_WORKSPACE_NAME"] = primary_workspace_name
+    if primary_workspace_environment is not None:
+        env["AUTH_PRIMARY_WORKSPACE_ENVIRONMENT"] = primary_workspace_environment
     if auth_mode == "local":
         if admin_email:
             env["AUTH_BOOTSTRAP_ADMIN_EMAIL"] = admin_email
@@ -426,11 +545,14 @@ def _deploy(
     keep_warm: int,
     server_version: str | None = None,
     run_migrations: bool = True,
+    environment_name: str | None = None,
 ) -> str:
     """Build the Modal app, run migrations, deploy. Returns the web URL.
 
     Exactly one of ``repo_root`` (build from source) and ``server_version``
     (prebuilt image) should be set - see ``_resolve_image_source``.
+    ``environment_name`` is the Modal environment the app (and its secrets)
+    live in; None means Modal's default environment.
     """
     import modal
 
@@ -445,6 +567,7 @@ def _deploy(
             config_secret_name=f"{app_name}-config",
             jwt_secret_name=f"{app_name}-jwt",
             keep_warm=keep_warm,
+            environment_name=environment_name,
         )
     else:
         version = server_version or DEFAULT_SERVER_VERSION
@@ -457,19 +580,20 @@ def _deploy(
             jwt_secret_name=f"{app_name}-jwt",
             keep_warm=keep_warm,
             server_version=version,
+            environment_name=environment_name,
         )
 
     try:
         with modal.enable_output():
             if run_migrations:
                 console.print("Applying database migrations...")
-                with server_app.run():
+                with server_app.run(environment_name=environment_name):
                     output = functions["migrate"].remote()
                 for line in output.strip().splitlines()[-5:]:
                     console.print(f"  [dim]{line}[/dim]")
 
             console.print("Deploying...")
-            server_app.deploy()
+            server_app.deploy(environment_name=environment_name)
     except Exception:
         if repo_root is None:
             error_console.print(
@@ -485,8 +609,23 @@ def _deploy(
     url = functions["web"].get_web_url()
     if not url:
         # Fall back to looking up the deployed function
-        url = modal.Function.from_name(app_name, "web").get_web_url()
+        url = modal.Function.from_name(
+            app_name, "web", environment_name=environment_name
+        ).get_web_url()
     return url or "<unknown - check `modal app list`>"
+
+
+def _deployed_web_url(app_name: str, environment_name: str | None) -> str | None:
+    """Web URL of an already-deployed server app, or None if not deployed."""
+    import modal
+    import modal.exception
+
+    try:
+        return modal.Function.from_name(
+            app_name, "web", environment_name=environment_name
+        ).get_web_url()
+    except modal.exception.NotFoundError:
+        return None
 
 
 # --- commands ----------------------------------------------------------------
@@ -589,24 +728,102 @@ def up(
         "cold start on first request). Persisted: when omitted, the last "
         "explicitly set value is kept (initially 0).",
     ),
+    server_modal_env: str = typer.Option(
+        DEFAULT_SERVER_MODAL_ENV,
+        "--server-modal-env",
+        help="Modal environment for the server app + its secrets (created if "
+        "missing). Keeps the server isolated from the environments where "
+        "your DAG apps run. Pass '' for Modal's default environment.",
+    ),
+    primary_workspace: str = typer.Option(
+        None,
+        "--primary-workspace",
+        help="Name of the primary (shared) Stardag workspace to create. "
+        "Default: your shared Modal workspace's name; skipped for personal "
+        "Modal workspaces (your personal Stardag workspace is used instead).",
+    ),
+    no_primary_workspace: bool = typer.Option(
+        False,
+        "--no-primary-workspace",
+        help="Do not create/map a shared primary workspace.",
+    ),
+    skip_connect: bool = typer.Option(
+        False,
+        "--skip-connect",
+        help="Skip the post-deploy setup (workspace wiring, API key, local "
+        "SDK profile). Run it later with `stardag self-host connect`.",
+    ),
+    execution_modal_env: str = typer.Option(
+        None,
+        "--execution-modal-env",
+        help="Modal environment where your DAG apps run - the stardag-api-key "
+        "secret is pushed there (default: your Modal account's default "
+        "environment, typically 'main'). NOT the server's environment.",
+    ),
+    target_root: str = typer.Option(
+        None,
+        "--target-root",
+        help="Default target root for the primary environment as name=uri "
+        "(default: "
+        "default=modalvol://stardag-targets-<workspace-slug>-<environment-slug>"
+        "/default).",
+    ),
+    no_target_root: bool = typer.Option(
+        False, "--no-target-root", help="Skip creating a default target root."
+    ),
+    registry_name: str = typer.Option(
+        "selfhosted",
+        "--registry-name",
+        help="Name for the registry entry written to the local SDK config.",
+    ),
+    profile_name: str = typer.Option(
+        "selfhosted",
+        "--profile-name",
+        help="Name for the profile written to the local SDK config.",
+    ),
     yes: bool = typer.Option(
-        False, "--yes", "-y", help="Non-interactive: fail instead of prompting"
+        False, "--yes", "-y", help="Non-interactive: take defaults, fail on prompts"
     ),
 ):
-    """Bring up the full Stardag stack: database, migrations, API + UI on Modal."""
+    """Bring up the full Stardag stack: database, migrations, API + UI on Modal.
+
+    After the deploy, completes the setup (unless --skip-connect): primary
+    workspace + 'main' environment, an API key pushed as the Modal secret
+    'stardag-api-key' into your DAG-execution Modal environment, a default
+    target root, and a local SDK registry + profile.
+    """
     interactive = not yes
     repo_root, resolved_server_version = _resolve_image_source(
         repo, from_source, server_version
     )
-    if repo_root is not None:
+    if repo_root is None:
+        _check_prebuilt_python()
+    else:
         console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
+    target_root_override = parse_target_root_flag(target_root) if target_root else None
 
-    workspace = _check_modal_auth()
-    console.print(f"Modal workspace: [bold]{workspace}[/bold]")
+    modal_info = _check_modal_auth()
+    if modal_info.workspace_name:
+        console.print(
+            f"Modal workspace: [bold]{modal_info.workspace_name}[/bold] "
+            f"(shared, signed in as {modal_info.username})"
+        )
+    else:
+        console.print(f"Modal workspace: [bold]{modal_info.username}[/bold] (personal)")
+
+    server_env = server_modal_env or None
+    if server_env:
+        if _ensure_modal_environment(server_env):
+            console.print(
+                f"Created Modal environment [bold]{server_env}[/bold] for the "
+                "server (isolated from the environments where your DAG apps run)."
+            )
+        else:
+            console.print(f"Server Modal environment: [bold]{server_env}[/bold]")
 
     config_secret_name = f"{name}-config"
     jwt_secret_name = f"{name}-jwt"
-    config_exists = _secret_exists(config_secret_name)
+    config_exists = _secret_exists(config_secret_name, server_env)
 
     # --- Database ---
     if config_exists and not (database_url or neon_api_key):
@@ -651,6 +868,8 @@ def up(
         )
 
     # --- Auth config (only when [re]writing the config secret) ---
+    primary_ws_name: str | None = None
+    primary_ws_resolved = False
     if pooled_url is not None:
         if auth_mode is None:
             if interactive:
@@ -706,6 +925,21 @@ def up(
                     default=f"{oidc_ui_client_id},{oidc_sdk_client_id}",
                 )
 
+        # --- Primary workspace mapping (baked into the config secret so the
+        # server bootstraps it on first boot; local mode only - in OIDC mode
+        # only an explicit --primary-workspace is passed through and the
+        # connect flow creates it via the API after login) ---
+        if auth_mode == "local":
+            primary_ws_name = resolve_primary_workspace(
+                primary_workspace,
+                no_primary_workspace,
+                modal_info.workspace_name,
+                interactive,
+            )
+        else:
+            primary_ws_name = primary_workspace if not no_primary_workspace else None
+        primary_ws_resolved = True
+
         env = _build_config_env(
             pooled_url,
             direct_url,  # type: ignore[arg-type]
@@ -719,12 +953,14 @@ def up(
             oidc_ui_client_id,
             oidc_audience,
             oidc_jwks_url,
+            primary_workspace_name=primary_ws_name,
+            primary_workspace_environment=PRIMARY_ENVIRONMENT_SLUG,
         )
         console.print(f"Writing config secret [bold]{config_secret_name}[/bold]...")
-        _push_secret(config_secret_name, env)
+        _push_secret(config_secret_name, env, server_env)
 
     # --- JWT keypair (create once, never overwrite) ---
-    if _ensure_jwt_secret(jwt_secret_name):
+    if _ensure_jwt_secret(jwt_secret_name, server_env):
         console.print(
             f"Generated JWT signing keypair -> [bold]{jwt_secret_name}[/bold]"
         )
@@ -737,36 +973,96 @@ def up(
     url = _deploy(
         repo_root,
         name,
-        _resolve_keep_warm(name, keep_warm),
+        _resolve_keep_warm(name, keep_warm, server_env),
         server_version=resolved_server_version,
+        environment_name=server_env,
     )
     _record_deployed_server_version(
-        name, resolved_server_version or FROM_SOURCE_VERSION
+        name, resolved_server_version or FROM_SOURCE_VERSION, server_env
     )
 
     console.print("\n[bold green]Stardag is up![/bold green]")
     console.print(f"\n  UI:  [bold]{url}[/bold]")
     console.print(f"  API: {url}/api/v1")
-    console.print("\nNext steps:")
-    console.print(
-        "  1. Open the UI and sign in"
-        + (
-            " with the admin account you just configured."
-            if auth_mode == "local"
-            else "."
-        )
-    )
     if auth_mode == "oidc" and oidc_issuer:
         console.print(
-            f"     (Make sure {url}/callback is an allowed redirect URI "
+            f"\n(Make sure {url}/callback is an allowed redirect URI "
             "in your OIDC provider.)"
         )
-    console.print(
-        "  2. Point the SDK at your registry:\n"
-        f"     stardag config registry add selfhosted --url {url}\n"
-        "     stardag auth login -r selfhosted"
+
+    # --- Post-deploy connect phase ---
+    if auth_mode is None:
+        # Re-run against an existing config secret: ask the deployed service
+        auth_config = get_auth_config(url)
+        auth_mode = (auth_config or {}).get("auth_mode")
+
+    if skip_connect:
+        _print_connect_pointer(auth_mode)
+        return
+
+    if auth_mode != "local":
+        # OIDC (or unknown): the connect flow needs a browser login first
+        _print_connect_pointer(auth_mode)
+        return
+
+    if not (admin_email and admin_password):
+        # Re-run without fresh admin credentials: prompt, or point to connect
+        if not interactive:
+            _print_connect_pointer(auth_mode)
+            return
+        console.print("\nSign in to complete the setup (admin account):")
+        admin_email = typer.prompt("Email")
+        admin_password = typer.prompt("Password", hide_input=True)
+
+    if interactive and not typer.confirm(
+        "Complete the setup now (workspace, API key for Modal DAG execution, "
+        "local SDK profile)?",
+        default=True,
+    ):
+        _print_connect_pointer(auth_mode)
+        return
+
+    if not primary_ws_resolved:
+        primary_ws_name = resolve_primary_workspace(
+            primary_workspace,
+            no_primary_workspace,
+            modal_info.workspace_name,
+            interactive,
+        )
+
+    console.print()
+    session_token = login_local(url, admin_email, admin_password, registry_name)
+    outcome = run_connect(
+        url,
+        session_token,
+        admin_email,
+        primary_workspace=primary_ws_name,
+        execution_modal_env=execution_modal_env,
+        target_root=target_root_override,
+        no_target_root=no_target_root,
+        registry_name=registry_name,
+        profile_name=profile_name,
     )
-    console.print("  3. To update to a newer server release: stardag self-host upgrade")
+    console.print()
+    print_summary(outcome, name, server_env)
+
+
+def _print_connect_pointer(auth_mode: str | None) -> None:
+    """Next-steps output when the connect phase is skipped or deferred."""
+    console.print("\nNext steps:")
+    if auth_mode == "local":
+        console.print(
+            "  1. Complete the setup (workspace, API key for Modal DAG "
+            "execution, local SDK profile):\n"
+            "     [bold]stardag self-host connect[/bold]"
+        )
+    else:
+        console.print(
+            "  1. Complete the setup (sign in via your identity provider, "
+            "then workspace, API key, local SDK profile):\n"
+            "     [bold]stardag self-host connect[/bold]"
+        )
+    console.print("  2. To update to a newer server release: stardag self-host upgrade")
 
 
 @app.command()
@@ -798,53 +1094,241 @@ def upgrade(
         help="Containers to keep always-on. Persisted: when omitted, the "
         "last explicitly set value is kept (initially 0).",
     ),
+    server_modal_env: str = typer.Option(
+        DEFAULT_SERVER_MODAL_ENV,
+        "--server-modal-env",
+        help="Modal environment the server app + secrets live in. Pass '' "
+        "for Modal's default environment (deployments made before the "
+        "dedicated server environment existed).",
+    ),
 ):
     """Update the deployment: apply DB migrations and redeploy."""
     repo_root, resolved_server_version = _resolve_image_source(
         repo, from_source, server_version
     )
-    if repo_root is not None:
+    if repo_root is None:
+        _check_prebuilt_python()
+    else:
         console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
-    workspace = _check_modal_auth()
-    console.print(f"Modal workspace: [bold]{workspace}[/bold]")
+    modal_info = _check_modal_auth()
+    console.print(f"Modal workspace: [bold]{modal_info.display}[/bold]")
+    server_env = server_modal_env or None
+    if server_env:
+        console.print(f"Server Modal environment: [bold]{server_env}[/bold]")
 
     for secret_name in (f"{name}-config", f"{name}-jwt"):
-        if not _secret_exists(secret_name):
+        if not _secret_exists(secret_name, server_env):
             error_console.print(
-                f"Secret {secret_name!r} not found - run `stardag self-host up` first."
+                f"Secret {secret_name!r} not found"
+                + (f" in Modal environment {server_env!r}" if server_env else "")
+                + " - run `stardag self-host up` first. (Deployed with an "
+                "older SDK? Its objects live in your default Modal "
+                'environment - pass --server-modal-env "".)'
             )
             raise typer.Exit(1)
 
     if repo_root is None:
         # Prebuilt path: default to the recorded deployed version so a plain
         # `upgrade` never silently downgrades (explicit flag still wins).
-        resolved_server_version = _resolve_upgrade_server_version(name, server_version)
+        resolved_server_version = _resolve_upgrade_server_version(
+            name, server_version, server_env
+        )
 
     url = _deploy(
         repo_root,
         name,
-        _resolve_keep_warm(name, keep_warm),
+        _resolve_keep_warm(name, keep_warm, server_env),
         server_version=resolved_server_version,
+        environment_name=server_env,
     )
     _record_deployed_server_version(
-        name, resolved_server_version or FROM_SOURCE_VERSION
+        name, resolved_server_version or FROM_SOURCE_VERSION, server_env
     )
     console.print("\n[bold green]Upgrade complete.[/bold green]")
     console.print(f"  UI: [bold]{url}[/bold]")
 
 
 @app.command()
+def connect(
+    name: str = typer.Option(
+        DEFAULT_APP_NAME, "--name", help="Modal app name of the deployed server"
+    ),
+    url: str = typer.Option(
+        None,
+        "--url",
+        help="Server URL (default: looked up from the deployed Modal app)",
+    ),
+    server_modal_env: str = typer.Option(
+        DEFAULT_SERVER_MODAL_ENV,
+        "--server-modal-env",
+        help="Modal environment the server app lives in (for the URL lookup). "
+        "Pass '' for Modal's default environment.",
+    ),
+    admin_email: str = typer.Option(
+        None, "--admin-email", help="Email to sign in with (local auth mode)"
+    ),
+    admin_password: str = typer.Option(
+        None,
+        "--admin-password",
+        help="Password to sign in with (local auth mode). Prompted if omitted.",
+    ),
+    primary_workspace: str = typer.Option(
+        None,
+        "--primary-workspace",
+        help="Name of the primary (shared) Stardag workspace. Default: your "
+        "shared Modal workspace's name; skipped for personal Modal "
+        "workspaces (your personal Stardag workspace is used instead).",
+    ),
+    no_primary_workspace: bool = typer.Option(
+        False,
+        "--no-primary-workspace",
+        help="Do not create/map a shared primary workspace.",
+    ),
+    execution_modal_env: str = typer.Option(
+        None,
+        "--execution-modal-env",
+        help="Modal environment where your DAG apps run - the stardag-api-key "
+        "secret is pushed there (default: your Modal account's default "
+        "environment, typically 'main').",
+    ),
+    target_root: str = typer.Option(
+        None,
+        "--target-root",
+        help="Default target root for the primary environment as name=uri "
+        "(default: "
+        "default=modalvol://stardag-targets-<workspace-slug>-<environment-slug>"
+        "/default).",
+    ),
+    no_target_root: bool = typer.Option(
+        False, "--no-target-root", help="Skip creating a default target root."
+    ),
+    registry_name: str = typer.Option(
+        "selfhosted",
+        "--registry-name",
+        help="Name for the registry entry written to the local SDK config.",
+    ),
+    profile_name: str = typer.Option(
+        "selfhosted",
+        "--profile-name",
+        help="Name for the profile written to the local SDK config.",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Non-interactive: take defaults, fail on prompts"
+    ),
+):
+    """Complete (or re-run) the post-deploy setup for a deployed server.
+
+    Idempotent: ensures the primary workspace + 'main' environment, an API
+    key pushed as the Modal secret 'stardag-api-key' into your DAG-execution
+    Modal environment, a default target root, and a local SDK registry +
+    profile. In OIDC auth mode this signs you in via the browser first.
+    """
+    interactive = not yes
+    target_root_override = parse_target_root_flag(target_root) if target_root else None
+
+    modal_info = _check_modal_auth()
+    server_env = server_modal_env or None
+
+    resolved_url = url or _deployed_web_url(name, server_env)
+    if not resolved_url:
+        error_console.print(
+            f"App {name!r} is not deployed"
+            + (f" in Modal environment {server_env!r}" if server_env else "")
+            + " - run `stardag self-host up` first (or pass --url)."
+        )
+        raise typer.Exit(1)
+    resolved_url = resolved_url.rstrip("/")
+    console.print(f"Server: [bold]{resolved_url}[/bold]")
+
+    auth_config = get_auth_config(resolved_url)
+    if auth_config is None:
+        error_console.print(
+            f"Could not fetch auth configuration from {resolved_url} - is the "
+            "service healthy? (Check `stardag self-host status` and the logs.)"
+        )
+        raise typer.Exit(1)
+
+    if auth_config.get("auth_mode") == "local":
+        if not admin_email:
+            if not interactive:
+                error_console.print("--admin-email is required with --yes")
+                raise typer.Exit(1)
+            admin_email = typer.prompt("Email")
+        if not admin_password:
+            if not interactive:
+                error_console.print("--admin-password is required with --yes")
+                raise typer.Exit(1)
+            admin_password = typer.prompt("Password", hide_input=True)
+        bearer_token = login_local(
+            resolved_url, admin_email, admin_password, registry_name
+        )
+        user_email = admin_email
+    else:
+        if not interactive:
+            error_console.print(
+                "This registry uses OIDC authentication, which needs a "
+                "browser login. Re-run without --yes, or authenticate first "
+                f"with `stardag auth login -r {registry_name} --api-url "
+                f"{resolved_url}` and re-run."
+            )
+            raise typer.Exit(1)
+        # Same browser PKCE flow as `stardag auth login`
+        from stardag._cli.auth import _login_oidc_flow
+        from stardag._cli.credentials import add_registry
+
+        add_registry(registry_name, resolved_url)
+        bearer_token, user_email = _login_oidc_flow(
+            registry=registry_name,
+            api_url=resolved_url,
+            oidc_issuer=None,
+            client_id=None,
+            auth_config=auth_config,
+        )
+
+    primary_ws_name = resolve_primary_workspace(
+        primary_workspace,
+        no_primary_workspace,
+        modal_info.workspace_name,
+        interactive,
+    )
+
+    console.print()
+    outcome = run_connect(
+        resolved_url,
+        bearer_token,
+        user_email,
+        primary_workspace=primary_ws_name,
+        execution_modal_env=execution_modal_env,
+        target_root=target_root_override,
+        no_target_root=no_target_root,
+        registry_name=registry_name,
+        profile_name=profile_name,
+    )
+    console.print()
+    print_summary(outcome, name, server_env)
+
+
+@app.command()
 def status(
     name: str = typer.Option(DEFAULT_APP_NAME, "--name", help="Modal app name"),
+    server_modal_env: str = typer.Option(
+        DEFAULT_SERVER_MODAL_ENV,
+        "--server-modal-env",
+        help="Modal environment the server app + secrets live in. Pass '' "
+        "for Modal's default environment.",
+    ),
 ):
     """Show deployment status."""
     import modal
     import modal.exception
 
     _check_modal_auth()
+    server_env = server_modal_env or None
+    if server_env:
+        console.print(f"Server Modal environment: [bold]{server_env}[/bold]")
 
     try:
-        web = modal.Function.from_name(name, "web")
+        web = modal.Function.from_name(name, "web", environment_name=server_env)
         url = web.get_web_url()
         console.print(f"App [bold]{name}[/bold]: deployed")
         console.print(f"  UI: [bold]{url}[/bold]")
@@ -852,11 +1336,11 @@ def status(
         console.print(f"App [bold]{name}[/bold]: not deployed")
 
     for secret_name in (f"{name}-config", f"{name}-jwt"):
-        state = "present" if _secret_exists(secret_name) else "missing"
+        state = "present" if _secret_exists(secret_name, server_env) else "missing"
         console.print(f"  Secret {secret_name}: {state}")
 
     try:
-        meta = modal.Dict.from_name(_meta_dict_name(name))
+        meta = modal.Dict.from_name(_meta_dict_name(name), environment_name=server_env)
         server_version = meta.get("server_version")
         if server_version == FROM_SOURCE_VERSION:
             console.print("  Server version: built from source")
@@ -876,6 +1360,12 @@ def destroy(
         help="Also delete the config + JWT secrets and the settings Dict "
         "(existing sessions and SDK logins become invalid)",
     ),
+    server_modal_env: str = typer.Option(
+        DEFAULT_SERVER_MODAL_ENV,
+        "--server-modal-env",
+        help="Modal environment the server app + secrets live in. Pass '' "
+        "for Modal's default environment.",
+    ),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
     """Stop the Modal app. The database (Neon project) is never touched."""
@@ -889,8 +1379,12 @@ def destroy(
         )
 
     _check_modal_auth()
+    server_env = server_modal_env or None
+    stop_command = [sys.executable, "-m", "modal", "app", "stop", name]
+    if server_env:
+        stop_command += ["--env", server_env]
     result = subprocess.run(
-        [sys.executable, "-m", "modal", "app", "stop", name],
+        stop_command,
         capture_output=True,
         text=True,
     )
@@ -903,12 +1397,17 @@ def destroy(
         import modal
 
         for secret_name in (f"{name}-config", f"{name}-jwt"):
-            modal.Secret.objects.delete(secret_name, allow_missing=True)
+            modal.Secret.objects.delete(
+                secret_name, allow_missing=True, environment_name=server_env
+            )
             console.print(f"Deleted secret {secret_name}")
-        modal.Dict.objects.delete(_meta_dict_name(name), allow_missing=True)
+        modal.Dict.objects.delete(
+            _meta_dict_name(name), allow_missing=True, environment_name=server_env
+        )
         console.print(f"Deleted dict {_meta_dict_name(name)}")
 
     console.print(
         "\nNote: the Neon project/database was NOT deleted. Manage it at "
-        "https://console.neon.tech if you want to remove it."
+        "https://console.neon.tech if you want to remove it. The Modal "
+        "environment is also kept (delete with `modal environment delete`)."
     )

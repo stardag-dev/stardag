@@ -121,6 +121,16 @@ class AuthSettings(BaseSettings):
     # overwritten). Set both or neither.
     bootstrap_admin_email: str | None = None
     bootstrap_admin_password: str | None = None
+    # Primary workspace bootstrap (local mode only, requires the bootstrap
+    # admin): when set, a shared (non-personal) workspace with this name is
+    # idempotently created at startup with the bootstrap admin as owner.
+    # Typically the name of the Modal/cloud workspace the deployment
+    # belongs to, so Stardag mirrors the surrounding platform's structure.
+    primary_workspace_name: str | None = None
+    # Environment idempotently ensured at startup: in the primary workspace
+    # when `primary_workspace_name` is set, otherwise in the bootstrap
+    # admin's personal workspace. Set to an empty string to disable.
+    primary_workspace_environment: str = "main"
 
     model_config = SettingsConfigDict(env_prefix="AUTH_")
 
