@@ -258,6 +258,7 @@ class FakeRegistryApi:
         self.workspaces = workspaces if workspaces is not None else []
         self.api_key_requests: list[dict] = []
         self.requests: list[str] = []
+        self.fail_api_key_create = False
 
     def _find_workspace(self, workspace_id: str) -> dict:
         return next(ws for ws in self.workspaces if ws["id"] == workspace_id)
@@ -269,12 +270,37 @@ class FakeRegistryApi:
             "slug": slug,
             "is_personal": is_personal,
             "envs": {
-                s: {"id": str(uuid4()), "slug": s, "name": s, "target_roots": []}
+                s: {
+                    "id": str(uuid4()),
+                    "slug": s,
+                    "name": s,
+                    "target_roots": [],
+                    "api_keys": [],
+                }
                 for s in env_slugs
             },
         }
         self.workspaces.append(ws)
         return ws
+
+    def add_api_key(self, env: dict, name: str, revoked_at=None) -> dict:
+        key = {
+            "id": str(uuid4()),
+            "environment_id": env["id"],
+            "name": name,
+            "key_prefix": f"sk_old{len(env['api_keys'])}",
+            "created_by_id": self.user_id,
+            "created_at": "2026-01-01T00:00:00",
+            "last_used_at": None,
+            "revoked_at": revoked_at,
+        }
+        env["api_keys"].append(key)
+        return key
+
+    def live_keys(self, env: dict, name: str) -> list[dict]:
+        return [
+            k for k in env["api_keys"] if k["name"] == name and k["revoked_at"] is None
+        ]
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -384,25 +410,25 @@ class FakeRegistryApi:
                     }
                     env["target_roots"].append(root)
                     return httpx.Response(201, json=root)
-            if len(parts) == 8 and parts[7] == "api-keys" and method == "POST":
-                data = json.loads(request.content)
-                self.api_key_requests.append(
-                    {"environment_id": env["id"], "name": data["name"]}
-                )
-                return httpx.Response(
-                    201,
-                    json={
-                        "id": str(uuid4()),
-                        "environment_id": env["id"],
-                        "name": data["name"],
-                        "key_prefix": "sk_test1234",
-                        "created_by_id": self.user_id,
-                        "created_at": "2026-01-01T00:00:00",
-                        "last_used_at": None,
-                        "revoked_at": None,
-                        "key": "sk_test1234_full_key_value",
-                    },
-                )
+            if len(parts) == 8 and parts[7] == "api-keys":
+                if method == "GET":
+                    return httpx.Response(200, json=env["api_keys"])
+                if method == "POST":
+                    if self.fail_api_key_create:
+                        return httpx.Response(500, json={"detail": "boom"})
+                    data = json.loads(request.content)
+                    self.api_key_requests.append(
+                        {"environment_id": env["id"], "name": data["name"]}
+                    )
+                    key = self.add_api_key(env, data["name"])
+                    key["key_prefix"] = "sk_test1234"
+                    return httpx.Response(
+                        201, json={**key, "key": "sk_test1234_full_key_value"}
+                    )
+            if len(parts) == 9 and parts[7] == "api-keys" and method == "DELETE":
+                key = next(k for k in env["api_keys"] if k["id"] == parts[8])
+                key["revoked_at"] = "2026-01-02T00:00:00"
+                return httpx.Response(204)
 
         raise AssertionError(f"Unexpected request: {method} {path}")
 
@@ -565,6 +591,54 @@ def test_connect_target_root_override_and_skip(isolated_home):
     outcome2, _ = _run_connect(api2, primary_workspace=None, no_target_root=True)
     assert outcome2.target_root is None
     assert not any("target-roots" in r for r in api2.requests)
+
+
+def test_connect_rotates_existing_api_key(isolated_home):
+    """Re-running connect revokes the previous same-named key before
+    minting a new one - no live-credential accumulation."""
+    api = FakeRegistryApi()
+    ws = api.add_workspace(
+        "Admin's Workspace", "admin", is_personal=True, env_slugs=("main",)
+    )
+    env = ws["envs"]["main"]
+    api.add_api_key(env, "modal-default")
+    # An already-revoked key and a differently-named key are left alone
+    api.add_api_key(env, "modal-default", revoked_at="2025-01-01T00:00:00")
+    api.add_api_key(env, "other-key")
+
+    outcome, push = _run_connect(api, primary_workspace=None)
+
+    assert outcome.api_key_name == "modal-default"
+    assert len(api.live_keys(env, "modal-default")) == 1
+    assert api.live_keys(env, "modal-default")[0]["key_prefix"] == "sk_test1234"
+    assert len(api.live_keys(env, "other-key")) == 1
+    assert len(push.calls) == 1
+
+    # Second run: still exactly one live key with that name
+    _run_connect(api, primary_workspace=None)
+    assert len(api.live_keys(env, "modal-default")) == 1
+
+
+def test_connect_api_key_creation_failure_is_not_fatal(isolated_home):
+    """API-key creation failures degrade gracefully (connect-specific
+    handling, no typer.Exit): no secret pushed, SDK config still written."""
+    api = FakeRegistryApi()
+    api.add_workspace(
+        "Admin's Workspace", "admin", is_personal=True, env_slugs=("main",)
+    )
+    api.fail_api_key_create = True
+
+    outcome, push = _run_connect(api, primary_workspace=None)
+
+    assert outcome.api_key_name is None
+    assert outcome.modal_secret_name is None
+    assert push.calls == []
+
+    # The rest of the setup completed: profile + registry written
+    from stardag._cli.credentials import list_profiles, list_registries
+
+    assert list_registries() == {"selfhosted": API_URL}
+    assert "selfhosted" in list_profiles()
 
 
 def test_connect_modal_secret_push_failure_is_not_fatal(isolated_home):

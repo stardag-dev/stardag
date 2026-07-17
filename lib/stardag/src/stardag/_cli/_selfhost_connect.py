@@ -13,8 +13,10 @@ setup, mirroring the Modal account's structure:
   immediately.
 
 Everything is idempotent: existing workspaces/environments/target roots are
-matched before anything is created, so the flow can be re-run at any time
-(``stardag self-host connect``).
+matched before anything is created, and the API key is *rotated* (any live
+key with the same name is revoked before a fresh one is minted, mirroring
+the Modal-secret delete+create) - so the flow can be re-run at any time
+(``stardag self-host connect``) without accumulating credentials.
 """
 
 from __future__ import annotations
@@ -181,7 +183,8 @@ class ConnectOutcome:
     environment_slug: str
     environment_created: bool
     target_root: tuple[str, str] | None  # (name, uri) ensured, None if skipped
-    api_key_name: str | None  # None if the Modal secret push failed
+    # None if key creation or the Modal-secret push failed (non-fatal)
+    api_key_name: str | None
     modal_secret_name: str | None
     execution_modal_env: str | None  # None = Modal's default environment
     registry_name: str
@@ -192,6 +195,43 @@ class ConnectOutcome:
 def _api_error(response: httpx.Response, action: str) -> typer.Exit:
     error_console.print(f"Failed to {action} ({response.status_code}): {response.text}")
     return typer.Exit(1)
+
+
+def _rotate_api_key(ws_client: httpx.Client, keys_url: str, name: str) -> str:
+    """Revoke any live API key named ``name``, then mint a fresh one.
+
+    Delete+create (mirroring the Modal-secret push) so re-runs of the
+    connect flow rotate the credential instead of accumulating live keys.
+    Returns the full key value. Raises RuntimeError on API failures - the
+    caller degrades gracefully (unlike ``stardag modal stardag-api-key
+    create``, aborting here would strand the rest of the setup).
+    """
+    list_response = ws_client.get(keys_url)
+    if list_response.status_code != 200:
+        raise RuntimeError(
+            f"listing API keys failed ({list_response.status_code}): "
+            f"{list_response.text}"
+        )
+    for key in list_response.json():
+        if key["name"] == name and not key.get("revoked_at"):
+            revoke_response = ws_client.delete(f"{keys_url}/{key['id']}")
+            if revoke_response.status_code != 204:
+                raise RuntimeError(
+                    f"revoking the previous API key failed "
+                    f"({revoke_response.status_code}): {revoke_response.text}"
+                )
+            console.print(
+                f'Revoked previous API key "{name}" (prefix: {key["key_prefix"]})'
+            )
+    create_response = ws_client.post(keys_url, json={"name": name})
+    if create_response.status_code != 201:
+        raise RuntimeError(
+            f"creating the API key failed ({create_response.status_code}): "
+            f"{create_response.text}"
+        )
+    data = create_response.json()
+    console.print(f'Created Stardag API key "{name}" (prefix: {data["key_prefix"]})')
+    return data["key"]
 
 
 def run_connect(
@@ -223,7 +263,7 @@ def run_connect(
         get_active_profile,
         set_default_profile,
     )
-    from stardag._cli.modal import _create_stardag_api_key, _push_modal_secret
+    from stardag._cli.modal import _push_modal_secret
     from stardag.config.cache import cache_environment_id, cache_workspace_id
     from stardag.registry._auth import save_access_token_cache
 
@@ -377,32 +417,52 @@ def run_connect(
                 )
 
         # --- API key -> Modal secret (DAG-execution environment) ---
+        # Failures here are non-fatal by design: the local SDK config below
+        # is still written, and re-running `stardag self-host connect`
+        # retries this step (the rotate semantics keep that idempotent).
         api_key_name: str | None = f"modal-{execution_modal_env or 'default'}"
         modal_secret_name: str | None = API_KEY_SECRET_NAME
-        full_key, key_prefix = _create_stardag_api_key(
-            ws_client, api_url, workspace_id, environment_id, api_key_name
-        )
-        console.print(
-            f'Created Stardag API key "{api_key_name}" (prefix: {key_prefix})'
-        )
+        full_key: str | None = None
         try:
-            push_modal_secret(
-                API_KEY_SECRET_NAME, {"STARDAG_API_KEY": full_key}, execution_modal_env
-            )
-            modal_env_display = execution_modal_env or "default"
-            console.print(
-                f"Pushed Modal secret [bold]{API_KEY_SECRET_NAME}[/bold] "
-                f"(Modal environment: {modal_env_display})"
+            full_key = _rotate_api_key(
+                ws_client,
+                f"{envs_url}/{environment_id}/api-keys",
+                api_key_name,
             )
         except Exception as e:
-            error_console.print(f"Could not push the Modal secret: {e}")
+            error_console.print(f"Could not create the Stardag API key: {e}")
             console.print(
-                "[yellow]Create it later with:[/yellow] "
-                "stardag modal stardag-api-key create"
-                + (f" --modal-env {execution_modal_env}" if execution_modal_env else "")
+                "[yellow]Modal DAG execution is not wired up yet - re-run "
+                "`stardag self-host connect` to retry (the rest of the "
+                "setup is completed below).[/yellow]"
             )
             api_key_name = None
             modal_secret_name = None
+        if full_key is not None:
+            try:
+                push_modal_secret(
+                    API_KEY_SECRET_NAME,
+                    {"STARDAG_API_KEY": full_key},
+                    execution_modal_env,
+                )
+                modal_env_display = execution_modal_env or "default"
+                console.print(
+                    f"Pushed Modal secret [bold]{API_KEY_SECRET_NAME}[/bold] "
+                    f"(Modal environment: {modal_env_display})"
+                )
+            except Exception as e:
+                error_console.print(f"Could not push the Modal secret: {e}")
+                console.print(
+                    "[yellow]Create it later with:[/yellow] "
+                    "stardag modal stardag-api-key create"
+                    + (
+                        f" --modal-env {execution_modal_env}"
+                        if execution_modal_env
+                        else ""
+                    )
+                )
+                api_key_name = None
+                modal_secret_name = None
 
         # --- Local SDK config: registry + profile + caches ---
         add_registry(registry_name, api_url)
