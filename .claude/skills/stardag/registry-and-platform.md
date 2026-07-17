@@ -196,7 +196,8 @@ Modal workspace, or the personal workspace;
 `--primary-workspace`/`--no-primary-workspace`), a `main` environment, an
 API key pushed as Modal secret `stardag-api-key` into the DAG-execution
 Modal environment (`--execution-modal-env`, default: the account's default
-env), a default target root `modalvol://stardag-targets/<workspace-slug>`
+env), a default target root
+`modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default`
 (`--target-root`/`--no-target-root`), and a local SDK registry + profile
 named `selfhosted` (`--registry-name`/`--profile-name`). In OIDC auth mode
 run `stardag self-host connect` after `up` (browser login, then the same

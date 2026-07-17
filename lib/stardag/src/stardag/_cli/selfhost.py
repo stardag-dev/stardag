@@ -764,7 +764,9 @@ def up(
         None,
         "--target-root",
         help="Default target root for the primary environment as name=uri "
-        "(default: default=modalvol://stardag-targets/<workspace-slug>).",
+        "(default: "
+        "default=modalvol://stardag-targets-<workspace-slug>-<environment-slug>"
+        "/default).",
     ),
     no_target_root: bool = typer.Option(
         False, "--no-target-root", help="Skip creating a default target root."
@@ -1193,7 +1195,9 @@ def connect(
         None,
         "--target-root",
         help="Default target root for the primary environment as name=uri "
-        "(default: default=modalvol://stardag-targets/<workspace-slug>).",
+        "(default: "
+        "default=modalvol://stardag-targets-<workspace-slug>-<environment-slug>"
+        "/default).",
     ),
     no_target_root: bool = typer.Option(
         False, "--no-target-root", help="Skip creating a default target root."

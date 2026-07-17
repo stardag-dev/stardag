@@ -27,7 +27,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   workspace) with a `main` environment; an API key is minted and pushed
   as the Modal secret `stardag-api-key` into the DAG-execution Modal
   environment (`--execution-modal-env`); a default target root
-  `modalvol://stardag-targets/<workspace-slug>` is registered
+  `modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default`
+  (a dedicated Modal volume per workspace + environment) is registered
   (`--target-root`/`--no-target-root`); and a local SDK registry +
   profile (`selfhosted`) are written. In OIDC auth mode, `connect` runs
   the browser login first and provisions via the API.

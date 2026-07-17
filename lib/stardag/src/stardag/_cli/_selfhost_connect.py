@@ -8,7 +8,8 @@ setup, mirroring the Modal account's structure:
 - a **primary environment** (``main``) in it,
 - an **API key** for that environment pushed as the Modal secret
   ``stardag-api-key`` into the Modal environment where the user's DAGs run,
-- a **default target root** (``modalvol://stardag-targets/<workspace-slug>``),
+- a **default target root**
+  (``modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default``),
 - a **local SDK registry + profile** so ``stardag`` CLI/SDK commands work
   immediately.
 
@@ -21,6 +22,7 @@ the Modal-secret delete+create) - so the flow can be re-run at any time
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
@@ -41,14 +43,20 @@ PRIMARY_ENVIRONMENT_SLUG = "main"
 # (the conventional name modal integration docs/examples use).
 API_KEY_SECRET_NAME = "stardag-api-key"
 
-# Modal volume + name for the default target root. The workspace slug is a
-# path segment (not dropped): several Stardag workspaces (a shared org
-# workspace plus members' personal ones) can execute in the same Modal
-# environment and task output paths are deterministic, so a bare
-# ``.../default`` would let identical task defs across workspaces collide in
-# the shared volume - the slug namespaces them.
+# Default target root: a dedicated Modal volume *per (workspace, environment)*
+# with the target-root name as the path. Encoding both identifiers in the
+# volume name (rather than a shared ``stardag-targets`` volume with per-
+# workspace subpaths) makes teardown atomic - the volume is a single
+# deletable unit (``modal volume delete stardag-targets-<ws>-<env>``) instead
+# of orphaning subpaths in a shared volume - and ``stardag-targets-`` stays a
+# globbable namespace. Using the target-root *name* as the path lets several
+# modalvol roots on one environment (e.g. ``default``, ``scratch``) coexist;
+# non-modal target roots are unaffected.
 DEFAULT_TARGET_ROOT_NAME = "default"
 DEFAULT_TARGET_ROOT_VOLUME = "stardag-targets"
+
+# Modal object names are capped at 64 chars (charset ``[a-zA-Z0-9-_.]``).
+_MODAL_OBJECT_NAME_MAX_LEN = 64
 
 DEFAULT_REGISTRY_NAME = "selfhosted"
 DEFAULT_PROFILE_NAME = "selfhosted"
@@ -57,9 +65,34 @@ _LOGIN_ATTEMPTS = 3
 _LOGIN_TIMEOUT = 120.0  # first request cold-starts the container + database
 
 
-def default_target_root_uri(workspace_slug: str) -> str:
-    """Default target-root URI for a workspace (Modal volume, slug-scoped)."""
-    return f"modalvol://{DEFAULT_TARGET_ROOT_VOLUME}/{workspace_slug}"
+def _targets_volume_name(workspace_slug: str, environment_slug: str) -> str:
+    """Modal volume name for a (workspace, environment)'s default target root.
+
+    ``stardag-targets-<workspace-slug>-<environment-slug>``, guarded to fit
+    Modal's 64-char object-name limit: when the composed name overflows it is
+    truncated and a short deterministic hash of the (workspace, environment)
+    pair is appended, so the result stays <=64 chars and distinct pairs never
+    collide (a NUL separator makes the hash input injective on the pair).
+    """
+    name = f"{DEFAULT_TARGET_ROOT_VOLUME}-{workspace_slug}-{environment_slug}"
+    if len(name) <= _MODAL_OBJECT_NAME_MAX_LEN:
+        return name
+    digest = hashlib.sha256(
+        f"{workspace_slug}\x00{environment_slug}".encode()
+    ).hexdigest()[:8]
+    suffix = f"-{digest}"
+    return f"{name[: _MODAL_OBJECT_NAME_MAX_LEN - len(suffix)]}{suffix}"
+
+
+def default_target_root_uri(workspace_slug: str, environment_slug: str) -> str:
+    """Default target-root URI for a (workspace, environment).
+
+    Volume-per-(workspace, environment); the path is the target-root name.
+    """
+    return (
+        f"modalvol://{_targets_volume_name(workspace_slug, environment_slug)}"
+        f"/{DEFAULT_TARGET_ROOT_NAME}"
+    )
 
 
 def _slugify(name: str) -> str:
@@ -73,7 +106,7 @@ def parse_target_root_flag(value: str) -> tuple[str, str]:
     if not sep or not name.strip() or not uri.strip():
         error_console.print(
             f"Invalid --target-root {value!r}: expected the form name=uri "
-            "(e.g. default=modalvol://stardag-targets/my-workspace)"
+            "(e.g. default=modalvol://stardag-targets-my-workspace-main/default)"
         )
         raise typer.Exit(1)
     return name.strip(), uri.strip()
@@ -400,7 +433,7 @@ def run_connect(
         if not no_target_root:
             root_name, root_uri = target_root or (
                 DEFAULT_TARGET_ROOT_NAME,
-                default_target_root_uri(workspace_slug),
+                default_target_root_uri(workspace_slug, environment_slug),
             )
             roots_url = f"{envs_url}/{environment_id}/target-roots"
             roots_response = ws_client.get(roots_url)

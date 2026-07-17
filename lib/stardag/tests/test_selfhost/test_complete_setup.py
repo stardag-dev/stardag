@@ -257,14 +257,45 @@ def test_default_names_avoid_doubled_url_label():
     assert DEFAULT_APP_NAME != DEFAULT_SERVER_MODAL_ENV
 
 
-def test_default_target_root_uri_namespaces_by_workspace():
+def test_default_target_root_uri_volume_per_workspace_environment():
     from stardag._cli._selfhost_connect import default_target_root_uri
 
+    # Both identifiers live in the *volume name*; the path is the root name.
     assert (
-        default_target_root_uri("acme-corp") == "modalvol://stardag-targets/acme-corp"
+        default_target_root_uri("acme-corp", "main")
+        == "modalvol://stardag-targets-acme-corp-main/default"
     )
-    # The workspace slug is retained (namespacing), not dropped
-    assert default_target_root_uri("acme-corp").endswith("/acme-corp")
+
+
+def test_targets_volume_name_length_guard():
+    import re
+
+    from stardag._cli._selfhost_connect import _targets_volume_name
+
+    # Volume-name charset per Modal (max 64 chars, [a-zA-Z0-9-_.]).
+    charset = re.compile(r"^[a-zA-Z0-9._-]+$")
+
+    # Short (ws, env): composed verbatim, no hashing.
+    assert _targets_volume_name("acme-corp", "main") == "stardag-targets-acme-corp-main"
+
+    long_ws = "w" * 60
+    long_env = "e" * 40
+    name = _targets_volume_name(long_ws, long_env)
+    assert len(name) <= 64
+    assert charset.match(name)
+
+    # Deterministic: same inputs -> same name.
+    assert name == _targets_volume_name(long_ws, long_env)
+
+    # Distinct overflowing (ws, env) pairs -> distinct names (no collision).
+    other = _targets_volume_name(long_ws, long_env + "x")
+    assert len(other) <= 64
+    assert other != name
+    # A pair that composes to the same string under a naive "-".join but is a
+    # genuinely different (ws, env) split must still differ.
+    assert _targets_volume_name("a" * 40 + "-b", "c" * 40) != _targets_volume_name(
+        "a" * 40, "b-" + "c" * 40
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +538,10 @@ def test_connect_personal_workspace(isolated_home):
     assert outcome.workspace_created is False
     assert outcome.environment_slug == "main"
     assert outcome.environment_created is False
-    assert outcome.target_root == ("default", "modalvol://stardag-targets/admin")
+    assert outcome.target_root == (
+        "default",
+        "modalvol://stardag-targets-admin-main/default",
+    )
     assert outcome.api_key_name == "modal-default"
     assert outcome.modal_secret_name == API_KEY_SECRET_NAME
 
@@ -549,7 +583,10 @@ def test_connect_creates_primary_workspace(isolated_home):
     assert outcome.workspace_is_personal is False
     # main env was included in workspace creation, so not created separately
     assert outcome.environment_created is False
-    assert outcome.target_root == ("default", "modalvol://stardag-targets/acme-corp")
+    assert outcome.target_root == (
+        "default",
+        "modalvol://stardag-targets-acme-corp-main/default",
+    )
     assert outcome.api_key_name == "modal-staging"
     assert push.calls[0][2] == "staging"
     assert api.api_key_requests[0]["name"] == "modal-staging"
