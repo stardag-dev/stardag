@@ -6,17 +6,20 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## Unreleased — Self-host the Stardag service on Modal
+## v0.15.0 — Self-host the Stardag service on Modal
 
 You can now run your own private Stardag service (Registry API + web UI)
 on [Modal](https://modal.com) with a single command — database on
 [Neon](https://neon.com), free-tier friendly, no AWS or Docker required:
 
 ```bash
-uvx --from "stardag[selfhost]" stardag self-host up
+uvx --python 3.12 --from "stardag[selfhost]" stardag self-host up
 # → prompts for a Neon API key and an admin account, then prints your UI URL
-uvx --from "stardag[selfhost]" stardag self-host upgrade   # migrate + redeploy
+uvx --python 3.12 --from "stardag[selfhost]" stardag self-host upgrade  # migrate + redeploy
 ```
+
+(The `--python 3.12` pin matches the prebuilt server image's interpreter,
+required for the default prebuilt deploy; see the guide for details.)
 
 Alongside it, a new **local authentication mode**: the self-hosted API
 manages email/password accounts directly (no external identity
