@@ -126,9 +126,14 @@ def _resolve_image_source(
 class ModalWorkspaceInfo:
     """The authenticated Modal account's workspace identity.
 
-    ``workspace_name`` is the shared workspace's display name and is None
-    for personal Modal workspaces; ``username`` is the account slug (always
-    present).
+    ``username`` is the Modal workspace's name/identity and is always
+    present - it is the same field for both personal and team/org
+    workspaces, and is what we mirror the primary Stardag workspace after.
+
+    ``workspace_name`` is kept for reference but is NOT a reliable
+    personal-vs-team signal: Modal's token lookup returns it empty for both
+    personal and shared/org workspaces, so it must not be used to classify
+    the workspace.
     """
 
     username: str
@@ -155,7 +160,9 @@ def _check_modal_auth() -> ModalWorkspaceInfo:
         workspace = asyncio.run(
             modal.config._lookup_workspace(server_url, token_id, token_secret)
         )
-        # workspace_name is empty for personal Modal workspaces
+        # ``username`` is the Modal workspace identity (always set) for both
+        # personal and team/org workspaces; ``workspace_name`` comes back
+        # empty in both cases, so it is not a usable personal-vs-team signal.
         return ModalWorkspaceInfo(
             username=workspace.username,
             workspace_name=workspace.workspace_name or None,
@@ -708,13 +715,14 @@ def up(
         None,
         "--primary-workspace",
         help="Name of the primary (shared) Stardag workspace to create. "
-        "Default: your shared Modal workspace's name; skipped for personal "
-        "Modal workspaces (your personal Stardag workspace is used instead).",
+        "Default: your Modal workspace's name (a shared workspace mirroring "
+        "your Modal workspace, with you as owner).",
     ),
     no_primary_workspace: bool = typer.Option(
         False,
         "--no-primary-workspace",
-        help="Do not create/map a shared primary workspace.",
+        help="Do not create a shared workspace; use your personal Stardag "
+        "workspace instead (solo/individual use).",
     ),
     skip_connect: bool = typer.Option(
         False,
@@ -728,6 +736,13 @@ def up(
         help="Modal environment where your DAG apps run - the stardag-api-key "
         "secret is pushed there (default: your Modal account's default "
         "environment, typically 'main'). NOT the server's environment.",
+    ),
+    overwrite_api_key_secret: bool = typer.Option(
+        False,
+        "--overwrite-api-key-secret",
+        help="With --yes, replace an existing 'stardag-api-key' Modal secret "
+        "in the execution environment (otherwise it is left untouched to "
+        "protect DAG apps already wired to another registry).",
     ),
     target_root: str = typer.Option(
         None,
@@ -770,13 +785,7 @@ def up(
     target_root_override = parse_target_root_flag(target_root) if target_root else None
 
     modal_info = _check_modal_auth()
-    if modal_info.workspace_name:
-        console.print(
-            f"Modal workspace: [bold]{modal_info.workspace_name}[/bold] "
-            f"(shared, signed in as {modal_info.username})"
-        )
-    else:
-        console.print(f"Modal workspace: [bold]{modal_info.username}[/bold] (personal)")
+    console.print(f"Modal workspace: [bold]{modal_info.username}[/bold]")
 
     server_env = server_modal_env or None
     if server_env:
@@ -900,7 +909,7 @@ def up(
             primary_ws_name = resolve_primary_workspace(
                 primary_workspace,
                 no_primary_workspace,
-                modal_info.workspace_name,
+                modal_info.username,
                 interactive,
             )
         else:
@@ -993,7 +1002,7 @@ def up(
         primary_ws_name = resolve_primary_workspace(
             primary_workspace,
             no_primary_workspace,
-            modal_info.workspace_name,
+            modal_info.username,
             interactive,
         )
 
@@ -1009,6 +1018,8 @@ def up(
         no_target_root=no_target_root,
         registry_name=registry_name,
         profile_name=profile_name,
+        interactive=interactive,
+        overwrite_api_key_secret=overwrite_api_key_secret,
     )
     console.print()
     print_summary(outcome, name, server_env)
@@ -1141,13 +1152,14 @@ def connect(
         None,
         "--primary-workspace",
         help="Name of the primary (shared) Stardag workspace. Default: your "
-        "shared Modal workspace's name; skipped for personal Modal "
-        "workspaces (your personal Stardag workspace is used instead).",
+        "Modal workspace's name (a shared workspace mirroring your Modal "
+        "workspace, with you as owner).",
     ),
     no_primary_workspace: bool = typer.Option(
         False,
         "--no-primary-workspace",
-        help="Do not create/map a shared primary workspace.",
+        help="Do not create a shared workspace; use your personal Stardag "
+        "workspace instead (solo/individual use).",
     ),
     execution_modal_env: str = typer.Option(
         None,
@@ -1155,6 +1167,13 @@ def connect(
         help="Modal environment where your DAG apps run - the stardag-api-key "
         "secret is pushed there (default: your Modal account's default "
         "environment, typically 'main').",
+    ),
+    overwrite_api_key_secret: bool = typer.Option(
+        False,
+        "--overwrite-api-key-secret",
+        help="With --yes, replace an existing 'stardag-api-key' Modal secret "
+        "in the execution environment (otherwise it is left untouched to "
+        "protect DAG apps already wired to another registry).",
     ),
     target_root: str = typer.Option(
         None,
@@ -1253,7 +1272,7 @@ def connect(
     primary_ws_name = resolve_primary_workspace(
         primary_workspace,
         no_primary_workspace,
-        modal_info.workspace_name,
+        modal_info.username,
         interactive,
     )
 
@@ -1268,6 +1287,8 @@ def connect(
         no_target_root=no_target_root,
         registry_name=registry_name,
         profile_name=profile_name,
+        interactive=interactive,
+        overwrite_api_key_secret=overwrite_api_key_secret,
     )
     console.print()
     print_summary(outcome, name, server_env)

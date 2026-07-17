@@ -61,9 +61,10 @@ The command walks you through the rest interactively:
   accounts; see [OIDC mode](#auth-mode-oidc-external-identity-provider)
   for the alternative)
 - **Admin email + password** → your first login account
-- **Primary workspace** → if your Modal workspace is shared (a team
-  workspace), a Stardag workspace with the same name is created; personal
-  Modal accounts use your personal Stardag workspace
+- **Primary workspace** → by default a **shared** Stardag workspace named
+  after your Modal workspace is created (with you as owner), mirroring your
+  Modal account. Press Enter to accept, or decline to use your personal
+  Stardag workspace instead (solo/individual use)
 
 It then generates a JWT signing keypair (stored as a Modal secret), applies
 database migrations, deploys the prebuilt server image (Registry API + web
@@ -82,14 +83,14 @@ Stardag is up!
 
 `up` finishes with a summary panel of everything that now exists:
 
-| What                                         | Default                                                                  | Purpose                                                                        |
-| -------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| Modal env `stardag-host` + app `server`      | server app + config/JWT secrets                                          | Isolates the server from the Modal environments where your DAG apps run        |
-| Stardag **workspace**                        | named after your shared Modal workspace, or your personal workspace      | Mirrors your Modal account's structure                                         |
-| Stardag **environment**                      | `main`                                                                   | Mirrors Modal's default environment; where deployed-DAG runs are tracked       |
-| **API key** → Modal secret `stardag-api-key` | in Modal env `main` (your default)                                       | Lets Modal-executed DAGs authenticate against your registry                    |
-| **Target root** `default`                    | `modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default` | Where task outputs land (a dedicated Modal volume per workspace + environment) |
-| Local **registry + profile** `selfhosted`    | in `~/.stardag/config.toml`                                              | Points your SDK/CLI at the deployment                                          |
+| What                                         | Default                                                                                                  | Purpose                                                                        |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Modal env `stardag-host` + app `server`      | server app + config/JWT secrets                                                                          | Isolates the server from the Modal environments where your DAG apps run        |
+| Stardag **workspace**                        | a shared workspace named after your Modal workspace (or your personal one with `--no-primary-workspace`) | Mirrors your Modal account's structure                                         |
+| Stardag **environment**                      | `main`                                                                                                   | Mirrors Modal's default environment; where deployed-DAG runs are tracked       |
+| **API key** → Modal secret `stardag-api-key` | in Modal env `main` (your default)                                                                       | Lets Modal-executed DAGs authenticate against your registry                    |
+| **Target root** `default`                    | `modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default`                                 | Where task outputs land (a dedicated Modal volume per workspace + environment) |
+| Local **registry + profile** `selfhosted`    | in `~/.stardag/config.toml`                                                                              | Points your SDK/CLI at the deployment                                          |
 
 Open the UI, sign in with the admin account, and deploy a DAG app with
 [`stardag modal deploy`](integrate-modal.md) — the `stardag-api-key` secret
@@ -238,12 +239,20 @@ Setup flags shared by `up` and `connect` (each prompt/default has a flag
 equivalent):
 
 - `--primary-workspace NAME` — name of the shared Stardag workspace to
-  create (default: your shared Modal workspace's name); or
-  `--no-primary-workspace` to use only your personal workspace
+  create (default: your Modal workspace's name — a shared workspace with you
+  as owner); or `--no-primary-workspace` to use only your personal workspace
+  (solo/individual use). Modal exposes no reliable personal-vs-team signal,
+  so this is an explicit, shared-by-default choice.
 - `--execution-modal-env NAME` — Modal environment your DAG apps run in;
   the `stardag-api-key` secret is pushed there (default: your Modal
   account's default environment). This is deliberately _not_ the server's
   environment.
+- `--overwrite-api-key-secret` — with `--yes`, replace an existing
+  `stardag-api-key` secret in the execution Modal environment. Without it,
+  `connect`/`up` **never overwrite** a `stardag-api-key` secret that already
+  exists there (interactively you're warned and must type a confirmation
+  phrase; non-interactively the push is skipped) — this protects a Modal
+  environment already wired for DAG execution against another registry.
 - `--target-root name=uri` — default target root for the `main` environment
   (default
   `default=modalvol://stardag-targets-<workspace-slug>-<environment-slug>/default`);

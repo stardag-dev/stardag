@@ -3,8 +3,8 @@
 Wires a freshly deployed self-hosted Stardag service into a ready-to-use
 setup, mirroring the Modal account's structure:
 
-- a **primary Stardag workspace** (named after the shared Modal workspace,
-  when there is one) or the user's personal workspace,
+- a **primary Stardag workspace** (shared, named after the Modal workspace)
+  or, when opted out, the user's personal workspace,
 - a **primary environment** (``main``) in it,
 - an **API key** for that environment pushed as the Modal secret
   ``stardag-api-key`` into the Modal environment where the user's DAGs run,
@@ -115,29 +115,130 @@ def parse_target_root_flag(value: str) -> tuple[str, str]:
 def resolve_primary_workspace(
     explicit: str | None,
     no_primary_workspace: bool,
-    modal_shared_workspace: str | None,
+    modal_workspace: str,
     interactive: bool,
 ) -> str | None:
     """Determine the primary (shared) Stardag workspace name.
 
-    Explicit flags win; otherwise the shared Modal workspace's name is the
-    default (confirmed interactively). Personal Modal workspaces get no
-    shared Stardag workspace - the user's personal Stardag workspace is
-    used instead.
+    Modal's token lookup exposes no reliable personal-vs-team signal (the
+    workspace name is empty for both), so this is an explicit, well-defaulted
+    choice rather than auto-detection. ``modal_workspace`` is the Modal
+    workspace's identity (its ``username``), which is always present.
+
+    Default: create a shared Stardag workspace named after the Modal
+    workspace (confirmed interactively; the default answer is Yes).
+    ``--primary-workspace NAME`` overrides the name; ``--no-primary-workspace``
+    opts out entirely, using the caller's personal Stardag workspace instead
+    (for solo/individual use).
     """
     if no_primary_workspace:
         return None
     if explicit:
         return explicit
-    if not modal_shared_workspace:
-        return None
     if interactive and not typer.confirm(
-        f"Primary Stardag workspace: '{modal_shared_workspace}' "
-        "(named after your shared Modal workspace)?",
+        f"Create a shared Stardag workspace '{modal_workspace}' mirroring your "
+        "Modal workspace? (No = use your personal workspace for solo/"
+        "individual use.)",
         default=True,
     ):
         return None
-    return modal_shared_workspace
+    return modal_workspace
+
+
+def _default_modal_secret_exists(name: str, environment_name: str | None) -> bool:
+    """Whether a named Modal secret already exists in the target env.
+
+    Mirrors ``stardag._cli.selfhost._secret_exists`` (kept local to avoid a
+    circular import) and honors the target ``environment_name`` (the
+    DAG-execution Modal env, ``None`` meaning Modal's default environment).
+    """
+    import modal
+    import modal.exception
+
+    try:
+        modal.Secret.from_name(name, environment_name=environment_name).hydrate()
+        return True
+    except modal.exception.NotFoundError:
+        return False
+
+
+# Phrase the user must type to confirm a destructive secret overwrite.
+_OVERWRITE_CONFIRM_PHRASE = "replace key"
+
+
+def _confirm_overwrite_api_key_secret(
+    secret_exists: Callable[[str, str | None], bool],
+    execution_modal_env: str | None,
+    *,
+    interactive: bool,
+    overwrite: bool,
+) -> bool:
+    """Decide whether to (over)write the ``stardag-api-key`` Modal secret.
+
+    Returns True when the secret may be written. If no secret exists yet this
+    is always True (nothing to clobber). When one already exists in the target
+    execution Modal env, replacing it is a destructive action - it repoints
+    all DAG execution in that env, possibly away from another registry - so:
+
+    - non-interactive (``--yes``): only proceed when ``overwrite`` is set
+      (the explicit ``--overwrite-api-key-secret`` flag); otherwise skip;
+    - interactive: show a prominent warning and require the user to type an
+      exact confirmation phrase; anything else skips the push.
+    """
+    if not secret_exists(API_KEY_SECRET_NAME, execution_modal_env):
+        return True
+
+    from rich.panel import Panel
+
+    modal_env_display = execution_modal_env or "default"
+    if not interactive:
+        if overwrite:
+            console.print(
+                f"[yellow]Overwriting the existing '{API_KEY_SECRET_NAME}' "
+                f"Modal secret in environment '{modal_env_display}' "
+                "(--overwrite-api-key-secret).[/yellow]"
+            )
+            return True
+        console.print(
+            f"[yellow]A '{API_KEY_SECRET_NAME}' secret already exists in Modal "
+            f"environment '{modal_env_display}'; leaving it untouched. Re-run "
+            "with --overwrite-api-key-secret to replace it, or point DAG "
+            "execution here later with:[/yellow] stardag modal stardag-api-key "
+            "create"
+            + (f" --modal-env {execution_modal_env}" if execution_modal_env else "")
+        )
+        return False
+
+    console.print(
+        Panel(
+            f"[bold]A '{API_KEY_SECRET_NAME}' secret already exists in Modal "
+            f"environment '{modal_env_display}'.[/bold]\n\n"
+            "This environment appears to be connected to Stardag DAG execution "
+            "already - it's likely used by existing DAG apps, possibly against "
+            "a DIFFERENT registry (e.g. an app.stardag.com / cloud setup). "
+            "Replacing it will repoint ALL DAG execution in this environment to "
+            "THIS self-hosted registry and can break the existing setup.\n\n"
+            "If you meant to use a different Modal environment, cancel and "
+            "re-run with --execution-modal-env <other-env>.",
+            title="⚠  Overwrite Modal secret?",
+            border_style="red",
+        )
+    )
+    typed = typer.prompt(
+        f"Type '{_OVERWRITE_CONFIRM_PHRASE}' to replace the secret "
+        "(anything else cancels)",
+        default="",
+        show_default=False,
+    )
+    if typed.strip() == _OVERWRITE_CONFIRM_PHRASE:
+        return True
+    console.print(
+        f"[yellow]Left the existing '{API_KEY_SECRET_NAME}' Modal secret "
+        f"in environment '{modal_env_display}' untouched.[/yellow] To point "
+        "DAG execution here later: stardag modal stardag-api-key create"
+        + (f" --modal-env {execution_modal_env}" if execution_modal_env else "")
+    )
+    return False
 
 
 def get_auth_config(
@@ -229,6 +330,9 @@ class ConnectOutcome:
     # None if key creation or the Modal-secret push failed (non-fatal)
     api_key_name: str | None
     modal_secret_name: str | None
+    # True when an existing stardag-api-key secret was deliberately left in
+    # place (the overwrite guard declined) rather than failing
+    api_key_secret_left_untouched: bool
     execution_modal_env: str | None  # None = Modal's default environment
     registry_name: str
     profile_name: str
@@ -289,15 +393,21 @@ def run_connect(
     no_target_root: bool = False,
     registry_name: str = DEFAULT_REGISTRY_NAME,
     profile_name: str = DEFAULT_PROFILE_NAME,
+    interactive: bool = True,
+    overwrite_api_key_secret: bool = False,
     push_modal_secret: Callable[[str, dict[str, str], str | None], None] | None = None,
+    secret_exists: Callable[[str, str | None], bool] | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> ConnectOutcome:
     """Idempotently wire up workspace, environment, API key, and SDK config.
 
     ``bearer_token`` is a session token (local auth mode) or OIDC token -
     both are accepted by the bootstrap endpoints and ``/auth/exchange``.
-    ``push_modal_secret`` is injectable for tests; defaults to the Modal
-    secret push used by ``stardag modal stardag-api-key create``.
+    ``push_modal_secret`` and ``secret_exists`` are injectable for tests;
+    they default to the Modal secret push / lookup used elsewhere in the CLI.
+    ``interactive`` and ``overwrite_api_key_secret`` gate whether a
+    pre-existing ``stardag-api-key`` Modal secret may be replaced (see
+    ``_confirm_overwrite_api_key_secret``).
     """
     from stardag._cli.auth import _sync_target_roots
     from stardag._cli.credentials import (
@@ -312,6 +422,8 @@ def run_connect(
 
     if push_modal_secret is None:
         push_modal_secret = _push_modal_secret
+    if secret_exists is None:
+        secret_exists = _default_modal_secret_exists
 
     api_url = api_url.rstrip("/")
     client = httpx.Client(
@@ -463,49 +575,70 @@ def run_connect(
         # Failures here are non-fatal by design: the local SDK config below
         # is still written, and re-running `stardag self-host connect`
         # retries this step (the rotate semantics keep that idempotent).
-        api_key_name: str | None = f"modal-{execution_modal_env or 'default'}"
+        key_name = f"modal-{execution_modal_env or 'default'}"
+        api_key_name: str | None = key_name
         modal_secret_name: str | None = API_KEY_SECRET_NAME
-        full_key: str | None = None
-        try:
-            full_key = _rotate_api_key(
-                ws_client,
-                f"{envs_url}/{environment_id}/api-keys",
-                api_key_name,
-            )
-        except Exception as e:
-            error_console.print(f"Could not create the Stardag API key: {e}")
-            console.print(
-                "[yellow]Modal DAG execution is not wired up yet - re-run "
-                "`stardag self-host connect` to retry (the rest of the "
-                "setup is completed below).[/yellow]"
-            )
+        api_key_secret_left_untouched = False
+
+        # Safety guard: never silently clobber a pre-existing
+        # ``stardag-api-key`` secret in the target execution Modal env. Such a
+        # secret means that env is likely already wired for Stardag DAG
+        # execution - possibly against a *different* registry - and
+        # overwriting it repoints all DAG execution in that env to this
+        # deployment. Require an explicit, deliberate confirmation first.
+        should_push = _confirm_overwrite_api_key_secret(
+            secret_exists,
+            execution_modal_env,
+            interactive=interactive,
+            overwrite=overwrite_api_key_secret,
+        )
+        if not should_push:
             api_key_name = None
             modal_secret_name = None
-        if full_key is not None:
+            api_key_secret_left_untouched = True
+
+        if should_push:
+            full_key: str | None = None
             try:
-                push_modal_secret(
-                    API_KEY_SECRET_NAME,
-                    {"STARDAG_API_KEY": full_key},
-                    execution_modal_env,
-                )
-                modal_env_display = execution_modal_env or "default"
-                console.print(
-                    f"Pushed Modal secret [bold]{API_KEY_SECRET_NAME}[/bold] "
-                    f"(Modal environment: {modal_env_display})"
+                full_key = _rotate_api_key(
+                    ws_client,
+                    f"{envs_url}/{environment_id}/api-keys",
+                    key_name,
                 )
             except Exception as e:
-                error_console.print(f"Could not push the Modal secret: {e}")
+                error_console.print(f"Could not create the Stardag API key: {e}")
                 console.print(
-                    "[yellow]Create it later with:[/yellow] "
-                    "stardag modal stardag-api-key create"
-                    + (
-                        f" --modal-env {execution_modal_env}"
-                        if execution_modal_env
-                        else ""
-                    )
+                    "[yellow]Modal DAG execution is not wired up yet - re-run "
+                    "`stardag self-host connect` to retry (the rest of the "
+                    "setup is completed below).[/yellow]"
                 )
                 api_key_name = None
                 modal_secret_name = None
+            if full_key is not None:
+                try:
+                    push_modal_secret(
+                        API_KEY_SECRET_NAME,
+                        {"STARDAG_API_KEY": full_key},
+                        execution_modal_env,
+                    )
+                    modal_env_display = execution_modal_env or "default"
+                    console.print(
+                        f"Pushed Modal secret [bold]{API_KEY_SECRET_NAME}[/bold] "
+                        f"(Modal environment: {modal_env_display})"
+                    )
+                except Exception as e:
+                    error_console.print(f"Could not push the Modal secret: {e}")
+                    console.print(
+                        "[yellow]Create it later with:[/yellow] "
+                        "stardag modal stardag-api-key create"
+                        + (
+                            f" --modal-env {execution_modal_env}"
+                            if execution_modal_env
+                            else ""
+                        )
+                    )
+                    api_key_name = None
+                    modal_secret_name = None
 
         # --- Local SDK config: registry + profile + caches ---
         add_registry(registry_name, api_url)
@@ -544,6 +677,7 @@ def run_connect(
         target_root=ensured_target_root,
         api_key_name=api_key_name,
         modal_secret_name=modal_secret_name,
+        api_key_secret_left_untouched=api_key_secret_left_untouched,
         execution_modal_env=execution_modal_env,
         registry_name=registry_name,
         profile_name=profile_name,
@@ -580,6 +714,12 @@ def print_summary(
         lines.append(
             f"  API key:      {outcome.api_key_name} -> Modal secret "
             f"'{outcome.modal_secret_name}' (Modal environment: {exec_env})"
+        )
+    elif outcome.api_key_secret_left_untouched:
+        lines.append(
+            f"  API key:      existing '{API_KEY_SECRET_NAME}' Modal secret "
+            f"(environment: {exec_env}) left untouched - wire this env up "
+            "with 'stardag modal stardag-api-key create' if intended"
         )
     lines += [
         "",
