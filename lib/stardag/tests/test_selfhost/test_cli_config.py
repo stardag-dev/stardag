@@ -8,14 +8,18 @@ pytest.importorskip("modal")
 pytest.importorskip("cryptography")
 
 from stardag._cli.selfhost import (  # noqa: E402
+    FROM_SOURCE_VERSION,
     MAX_ADMIN_PASSWORD_BYTES,
     MIN_ADMIN_PASSWORD_CHARS,
     _admin_password_error,
     _build_config_env,
     _generate_jwt_keypair,
     _provided_config_flags,
+    _record_deployed_server_version,
     _resolve_keep_warm,
+    _resolve_upgrade_server_version,
 )
+from stardag.selfhost._modal_app import DEFAULT_SERVER_VERSION  # noqa: E402
 from stardag.selfhost._modal_app import find_repo_root  # noqa: E402
 
 
@@ -165,6 +169,75 @@ def test_resolve_keep_warm_defaults_to_zero(monkeypatch: pytest.MonkeyPatch):
     # Explicit 0 is persisted (distinguishable from "not provided")
     assert _resolve_keep_warm("myapp", 0) == 0
     assert store["keep_warm"] == 0
+
+
+def test_record_deployed_server_version(monkeypatch: pytest.MonkeyPatch):
+    store: dict = {}
+    names = _patch_meta_dict(monkeypatch, store)
+    _record_deployed_server_version("myapp", "0.2.0")
+    assert store["server_version"] == "0.2.0"
+    assert names == ["myapp-meta"]
+    _record_deployed_server_version("myapp", FROM_SOURCE_VERSION)
+    assert store["server_version"] == FROM_SOURCE_VERSION
+
+
+def test_upgrade_version_defaults_to_deployed(monkeypatch: pytest.MonkeyPatch):
+    """A plain `upgrade` must never silently downgrade: the recorded
+    deployed version wins over DEFAULT_SERVER_VERSION."""
+    store: dict = {"server_version": "99.0.0"}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == "99.0.0"
+    # The recorded value is not modified by resolution alone
+    assert store["server_version"] == "99.0.0"
+
+
+def test_upgrade_version_falls_back_to_default(monkeypatch: pytest.MonkeyPatch):
+    # Meta dict exists but no version recorded (pre-existing deployments)
+    store: dict = {"keep_warm": 1}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == DEFAULT_SERVER_VERSION
+
+
+def test_upgrade_version_no_meta_dict(monkeypatch: pytest.MonkeyPatch):
+    import modal
+    import modal.exception
+
+    def raise_not_found(name: str, *, create_if_missing: bool = False):
+        raise modal.exception.NotFoundError(f"Dict {name} not found")
+
+    monkeypatch.setattr(modal.Dict, "from_name", raise_not_found)
+    assert _resolve_upgrade_server_version("myapp", None) == DEFAULT_SERVER_VERSION
+
+
+def test_upgrade_version_explicit_flag_wins(monkeypatch: pytest.MonkeyPatch):
+    store: dict = {"server_version": "0.2.0"}
+    _patch_meta_dict(monkeypatch, store)
+    # Explicit newer version: no warning path, explicit wins
+    assert _resolve_upgrade_server_version("myapp", "0.3.0") == "0.3.0"
+    # Explicit 'latest' (not comparable): explicit wins
+    assert _resolve_upgrade_server_version("myapp", "latest") == "latest"
+
+
+def test_upgrade_version_explicit_downgrade_warns_but_proceeds(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+):
+    store: dict = {"server_version": "0.10.0"}
+    _patch_meta_dict(monkeypatch, store)
+    # Explicit older version wins (semver-aware: 0.2.0 < 0.10.0), with warning
+    assert _resolve_upgrade_server_version("myapp", "0.2.0") == "0.2.0"
+    captured = capsys.readouterr()
+    assert "Warning" in captured.out
+    assert "0.10.0" in captured.out
+
+
+def test_upgrade_version_from_source_deploy_uses_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Last deploy was from source: a plain prebuilt `upgrade` cannot infer a
+    # version from it, so it falls back to the SDK's tested default.
+    store: dict = {"server_version": FROM_SOURCE_VERSION}
+    _patch_meta_dict(monkeypatch, store)
+    assert _resolve_upgrade_server_version("myapp", None) == DEFAULT_SERVER_VERSION
 
 
 def test_generate_jwt_keypair_pem():

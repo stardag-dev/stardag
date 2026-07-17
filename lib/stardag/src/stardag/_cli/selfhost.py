@@ -195,6 +195,83 @@ def _resolve_keep_warm(app_name: str, keep_warm: int | None) -> int:
     return meta.get("keep_warm", 0)
 
 
+# Sentinel recorded as the deployed "version" for --from-source deploys.
+FROM_SOURCE_VERSION = "source"
+
+
+def _parse_semver(version: str) -> tuple[int, int, int] | None:
+    """Parse 'X.Y.Z' into a comparable tuple; None for anything else."""
+    parts = version.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        major, minor, patch = (int(p) for p in parts)
+    except ValueError:
+        return None
+    return major, minor, patch
+
+
+def _record_deployed_server_version(app_name: str, version: str) -> None:
+    """Persist the just-deployed server version in the app's meta Dict.
+
+    ``FROM_SOURCE_VERSION`` is recorded for from-source deploys.
+    """
+    import modal
+
+    meta = modal.Dict.from_name(_meta_dict_name(app_name), create_if_missing=True)
+    meta["server_version"] = version
+
+
+def _deployed_server_version(app_name: str) -> str | None:
+    """The recorded deployed server version, or None if never recorded."""
+    import modal
+    import modal.exception
+
+    try:
+        meta = modal.Dict.from_name(_meta_dict_name(app_name))
+    except modal.exception.NotFoundError:
+        return None
+    return meta.get("server_version")
+
+
+def _resolve_upgrade_server_version(app_name: str, explicit: str | None) -> str:
+    """Server version for prebuilt-image `upgrade` runs.
+
+    Resolution order: explicit --server-version flag > recorded deployed
+    version > DEFAULT_SERVER_VERSION. Defaulting to the recorded version
+    means a plain `upgrade` never silently downgrades a deployment running
+    a version newer than this SDK's default (whose migrations may have
+    advanced the DB schema past what the default server release knows).
+    An explicitly passed older version wins, with a warning.
+    """
+    deployed = _deployed_server_version(app_name)
+    if explicit is not None:
+        explicit_semver = _parse_semver(explicit)
+        deployed_semver = _parse_semver(deployed) if deployed else None
+        if (
+            explicit_semver is not None
+            and deployed_semver is not None
+            and explicit_semver < deployed_semver
+        ):
+            console.print(
+                f"[yellow]Warning:[/yellow] deploying server {explicit} over the "
+                f"currently deployed {deployed}. Downgrading does not roll back "
+                "database migrations, so the older server may run against a "
+                "newer schema."
+            )
+        return explicit
+    if deployed == FROM_SOURCE_VERSION:
+        console.print(
+            "Last deploy was built from source; deploying the prebuilt image "
+            f"[bold]{DEFAULT_SERVER_VERSION}[/bold] instead (pass --from-source "
+            "to keep building from a local checkout)."
+        )
+        return DEFAULT_SERVER_VERSION
+    if deployed is not None:
+        return deployed
+    return DEFAULT_SERVER_VERSION
+
+
 def _ensure_jwt_secret(name: str) -> bool:
     """Create the JWT keypair secret if absent. Never overwrites.
 
@@ -399,9 +476,9 @@ def _deploy(
                 f"\nDeployment with the prebuilt image "
                 f"{server_image_ref(server_version or DEFAULT_SERVER_VERSION)} "
                 "failed (see output above). If the image could not be pulled "
-                "(e.g. the version does not exist yet), retry with "
-                "--from-source from a checkout of "
-                "https://github.com/stardag-dev/stardag."
+                "(e.g. the version does not exist yet, or the GHCR package "
+                "is not public yet), retry with --from-source from a "
+                "checkout of https://github.com/stardag-dev/stardag."
             )
         raise
 
@@ -663,6 +740,9 @@ def up(
         _resolve_keep_warm(name, keep_warm),
         server_version=resolved_server_version,
     )
+    _record_deployed_server_version(
+        name, resolved_server_version or FROM_SOURCE_VERSION
+    )
 
     console.print("\n[bold green]Stardag is up![/bold green]")
     console.print(f"\n  UI:  [bold]{url}[/bold]")
@@ -695,8 +775,9 @@ def upgrade(
         None,
         "--server-version",
         help="Prebuilt server image version to deploy: X.Y.Z or 'latest' "
-        f"(default: {DEFAULT_SERVER_VERSION}, the version this SDK release "
-        "is tested against)",
+        "(default: the currently deployed version, falling back to "
+        f"{DEFAULT_SERVER_VERSION}, the version this SDK release is tested "
+        "against)",
     ),
     from_source: bool = typer.Option(
         False,
@@ -734,11 +815,19 @@ def upgrade(
             )
             raise typer.Exit(1)
 
+    if repo_root is None:
+        # Prebuilt path: default to the recorded deployed version so a plain
+        # `upgrade` never silently downgrades (explicit flag still wins).
+        resolved_server_version = _resolve_upgrade_server_version(name, server_version)
+
     url = _deploy(
         repo_root,
         name,
         _resolve_keep_warm(name, keep_warm),
         server_version=resolved_server_version,
+    )
+    _record_deployed_server_version(
+        name, resolved_server_version or FROM_SOURCE_VERSION
     )
     console.print("\n[bold green]Upgrade complete.[/bold green]")
     console.print(f"  UI: [bold]{url}[/bold]")
@@ -768,6 +857,11 @@ def status(
 
     try:
         meta = modal.Dict.from_name(_meta_dict_name(name))
+        server_version = meta.get("server_version")
+        if server_version == FROM_SOURCE_VERSION:
+            console.print("  Server version: built from source")
+        elif server_version:
+            console.print(f"  Server version: {server_version}")
         console.print(f"  Keep-warm containers: {meta.get('keep_warm', 0)}")
     except modal.exception.NotFoundError:
         pass
