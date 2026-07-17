@@ -212,6 +212,81 @@ You should see tasks appearing in the web UI at http://localhost:3000.
 uv run stardag auth logout
 ```
 
+## Releasing the Server
+
+The server (Registry API + web UI) is released as one image with its own
+semver, independent of the SDK. API and UI share a single joint version.
+
+Before tagging, make sure `CHANGELOG.md` has an entry covering the
+release's Registry API / UI / Deployment changes (move them out of
+`[Unreleased]`) — the GitHub release links to it.
+The image definition is `app/server.Dockerfile` (build context = repo root):
+
+```bash
+docker build -f app/server.Dockerfile -t stardag-server .
+```
+
+To release, push a `server-vX.Y.Z` tag on `main`:
+
+```bash
+git tag server-vX.Y.Z
+git push origin server-vX.Y.Z
+```
+
+CI (`.github/workflows/publish-server-image.yml`) then:
+
+1. Builds the image and pushes it to
+   `ghcr.io/stardag-dev/stardag-server:X.Y.Z` and `:latest`, with
+   `STARDAG_SERVER_VERSION=X.Y.Z` baked in (surfaced at
+   `GET /api/v1/version`).
+2. Creates a GitHub Release for the tag with the web UI (extracted from the
+   pushed image, so it is byte-identical to what the image serves) attached
+   as `stardag-ui-dist-X.Y.Z.tar.gz` (for deployments that serve the UI
+   separately, e.g. from S3/CDN).
+
+### First release only: make the GHCR package public
+
+The first push creates the `stardag-server` GHCR package with **private**
+visibility. `stardag self-host` pulls the image anonymously
+(`modal.Image.from_registry` without credentials), so the prebuilt-image
+path fails for everyone until the package is made public. One-time step
+after the first release workflow completes:
+
+1. Go to the package settings:
+   <https://github.com/orgs/stardag-dev/packages/container/stardag-server/settings>
+2. Under "Danger Zone" → "Change package visibility", set it to **Public**.
+3. While there, connect the package to the repository (adds the README and
+   links it from the repo's Packages sidebar).
+
+Verify with an anonymous pull: `docker logout ghcr.io && docker pull
+ghcr.io/stardag-dev/stardag-server:X.Y.Z`.
+
+`stardag self-host` deploys the prebuilt image by default; each SDK release
+pins the server version it was tested against
+(`DEFAULT_SERVER_VERSION` in `lib/stardag/src/stardag/selfhost/_modal_app.py`
+— bump it when a new server version becomes the tested pairing).
+
+### Version convention for non-release builds
+
+Release builds get a clean `X.Y.Z` from the tag (CI passes it as the
+`STARDAG_SERVER_VERSION` build arg). Any _other_ build of
+`app/server.Dockerfile` (e.g. a deployment pipeline building from an
+arbitrary commit) should derive the version with `scripts/server-version.sh`,
+which normalizes `git describe --tags --match "server-v*"` to semver
+build-metadata form — so deployments truthfully report their deviation from
+the nearest release:
+
+| State                          | Version          |
+| ------------------------------ | ---------------- |
+| Exactly at `server-vX.Y.Z`     | `X.Y.Z`          |
+| N commits past the nearest tag | `X.Y.Z+N.g<sha>` |
+| No `server-v*` tag reachable   | `0.0.0+g<sha>`   |
+
+```bash
+docker build -f app/server.Dockerfile \
+  --build-arg STARDAG_SERVER_VERSION="$(scripts/server-version.sh)" .
+```
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on submitting changes.

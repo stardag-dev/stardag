@@ -2,12 +2,15 @@
 
 Usage:
     stardag self-host up          # provision + deploy the full stack
-    stardag self-host upgrade     # migrate DB + redeploy from current source
+    stardag self-host upgrade     # migrate DB + redeploy
     stardag self-host status      # show deployment status and URL
     stardag self-host destroy     # stop the Modal app (DB is left untouched)
 
 Requires the `selfhost` extra: pip install "stardag[selfhost]"
-Run from a checkout of the stardag repo (or pass --repo).
+
+By default the prebuilt public server image is deployed (no repo checkout
+needed). Pass --from-source to build from a local checkout of the stardag
+repo instead (run from the checkout or pass --repo).
 """
 
 from __future__ import annotations
@@ -20,8 +23,10 @@ from rich.console import Console
 
 from stardag.selfhost._modal_app import (
     DEFAULT_APP_NAME,
+    DEFAULT_SERVER_VERSION,
     build_server_app,
     find_repo_root,
+    server_image_ref,
 )
 from stardag.selfhost._neon import (
     NeonAuthError,
@@ -69,11 +74,36 @@ def _require_repo_root(repo: Path | None) -> Path:
     if root is None:
         error_console.print(
             "Could not locate a stardag repo checkout (looked for "
-            "app/stardag-api and app/stardag-ui). Run this command from a "
-            "clone of https://github.com/stardag-dev/stardag or pass --repo."
+            "app/stardag-api and app/stardag-ui). --from-source requires a "
+            "clone of https://github.com/stardag-dev/stardag: run this "
+            "command from the clone or pass --repo. (Or drop --from-source "
+            "to deploy the prebuilt server image - no checkout needed.)"
         )
         raise typer.Exit(1)
     return root
+
+
+def _resolve_image_source(
+    repo: Path | None,
+    from_source: bool,
+    server_version: str | None,
+) -> tuple[Path | None, str | None]:
+    """Resolve (repo_root, server_version) - exactly one is non-None.
+
+    Default: prebuilt image at the given (or default) server version.
+    --from-source (or an explicit --repo) builds from a local checkout;
+    combining it with --server-version is an error.
+    """
+    build_from_source = from_source or repo is not None
+    if build_from_source and server_version is not None:
+        error_console.print(
+            "--server-version only applies to prebuilt images and cannot be "
+            "combined with --from-source/--repo."
+        )
+        raise typer.Exit(1)
+    if build_from_source:
+        return _require_repo_root(repo), None
+    return None, server_version or DEFAULT_SERVER_VERSION
 
 
 def _check_modal_auth() -> str:
@@ -163,6 +193,83 @@ def _resolve_keep_warm(app_name: str, keep_warm: int | None) -> int:
         meta["keep_warm"] = keep_warm
         return keep_warm
     return meta.get("keep_warm", 0)
+
+
+# Sentinel recorded as the deployed "version" for --from-source deploys.
+FROM_SOURCE_VERSION = "source"
+
+
+def _parse_semver(version: str) -> tuple[int, int, int] | None:
+    """Parse 'X.Y.Z' into a comparable tuple; None for anything else."""
+    parts = version.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        major, minor, patch = (int(p) for p in parts)
+    except ValueError:
+        return None
+    return major, minor, patch
+
+
+def _record_deployed_server_version(app_name: str, version: str) -> None:
+    """Persist the just-deployed server version in the app's meta Dict.
+
+    ``FROM_SOURCE_VERSION`` is recorded for from-source deploys.
+    """
+    import modal
+
+    meta = modal.Dict.from_name(_meta_dict_name(app_name), create_if_missing=True)
+    meta["server_version"] = version
+
+
+def _deployed_server_version(app_name: str) -> str | None:
+    """The recorded deployed server version, or None if never recorded."""
+    import modal
+    import modal.exception
+
+    try:
+        meta = modal.Dict.from_name(_meta_dict_name(app_name))
+    except modal.exception.NotFoundError:
+        return None
+    return meta.get("server_version")
+
+
+def _resolve_upgrade_server_version(app_name: str, explicit: str | None) -> str:
+    """Server version for prebuilt-image `upgrade` runs.
+
+    Resolution order: explicit --server-version flag > recorded deployed
+    version > DEFAULT_SERVER_VERSION. Defaulting to the recorded version
+    means a plain `upgrade` never silently downgrades a deployment running
+    a version newer than this SDK's default (whose migrations may have
+    advanced the DB schema past what the default server release knows).
+    An explicitly passed older version wins, with a warning.
+    """
+    deployed = _deployed_server_version(app_name)
+    if explicit is not None:
+        explicit_semver = _parse_semver(explicit)
+        deployed_semver = _parse_semver(deployed) if deployed else None
+        if (
+            explicit_semver is not None
+            and deployed_semver is not None
+            and explicit_semver < deployed_semver
+        ):
+            console.print(
+                f"[yellow]Warning:[/yellow] deploying server {explicit} over the "
+                f"currently deployed {deployed}. Downgrading does not roll back "
+                "database migrations, so the older server may run against a "
+                "newer schema."
+            )
+        return explicit
+    if deployed == FROM_SOURCE_VERSION:
+        console.print(
+            "Last deploy was built from source; deploying the prebuilt image "
+            f"[bold]{DEFAULT_SERVER_VERSION}[/bold] instead (pass --from-source "
+            "to keep building from a local checkout)."
+        )
+        return DEFAULT_SERVER_VERSION
+    if deployed is not None:
+        return deployed
+    return DEFAULT_SERVER_VERSION
 
 
 def _ensure_jwt_secret(name: str) -> bool:
@@ -314,33 +421,66 @@ def _build_config_env(
 
 
 def _deploy(
-    repo_root: Path,
+    repo_root: Path | None,
     app_name: str,
     keep_warm: int,
+    server_version: str | None = None,
     run_migrations: bool = True,
 ) -> str:
-    """Build the Modal app, run migrations, deploy. Returns the web URL."""
+    """Build the Modal app, run migrations, deploy. Returns the web URL.
+
+    Exactly one of ``repo_root`` (build from source) and ``server_version``
+    (prebuilt image) should be set - see ``_resolve_image_source``.
+    """
     import modal
 
-    console.print("\nBuilding server app (UI build runs inside the Modal image)...")
-    server_app, functions = build_server_app(
-        repo_root=repo_root,
-        app_name=app_name,
-        config_secret_name=f"{app_name}-config",
-        jwt_secret_name=f"{app_name}-jwt",
-        keep_warm=keep_warm,
-    )
+    if repo_root is not None:
+        console.print(
+            "\nBuilding server app from source "
+            "(UI build runs inside the Modal image)..."
+        )
+        server_app, functions = build_server_app(
+            repo_root=repo_root,
+            app_name=app_name,
+            config_secret_name=f"{app_name}-config",
+            jwt_secret_name=f"{app_name}-jwt",
+            keep_warm=keep_warm,
+        )
+    else:
+        version = server_version or DEFAULT_SERVER_VERSION
+        console.print(
+            f"\nUsing prebuilt server image [bold]{server_image_ref(version)}[/bold]..."
+        )
+        server_app, functions = build_server_app(
+            app_name=app_name,
+            config_secret_name=f"{app_name}-config",
+            jwt_secret_name=f"{app_name}-jwt",
+            keep_warm=keep_warm,
+            server_version=version,
+        )
 
-    with modal.enable_output():
-        if run_migrations:
-            console.print("Applying database migrations...")
-            with server_app.run():
-                output = functions["migrate"].remote()
-            for line in output.strip().splitlines()[-5:]:
-                console.print(f"  [dim]{line}[/dim]")
+    try:
+        with modal.enable_output():
+            if run_migrations:
+                console.print("Applying database migrations...")
+                with server_app.run():
+                    output = functions["migrate"].remote()
+                for line in output.strip().splitlines()[-5:]:
+                    console.print(f"  [dim]{line}[/dim]")
 
-        console.print("Deploying...")
-        server_app.deploy()
+            console.print("Deploying...")
+            server_app.deploy()
+    except Exception:
+        if repo_root is None:
+            error_console.print(
+                f"\nDeployment with the prebuilt image "
+                f"{server_image_ref(server_version or DEFAULT_SERVER_VERSION)} "
+                "failed (see output above). If the image could not be pulled "
+                "(e.g. the version does not exist yet, or the GHCR package "
+                "is not public yet), retry with --from-source from a "
+                "checkout of https://github.com/stardag-dev/stardag."
+            )
+        raise
 
     url = functions["web"].get_web_url()
     if not url:
@@ -354,8 +494,24 @@ def _deploy(
 
 @app.command()
 def up(
+    server_version: str | None = typer.Option(
+        None,
+        "--server-version",
+        help="Prebuilt server image version to deploy: X.Y.Z or 'latest' "
+        f"(default: {DEFAULT_SERVER_VERSION}, the version this SDK release "
+        "is tested against)",
+    ),
+    from_source: bool = typer.Option(
+        False,
+        "--from-source",
+        help="Build the image from a local stardag repo checkout instead of "
+        "using the prebuilt image (development workflow)",
+    ),
     repo: Path = typer.Option(
-        None, "--repo", help="Path to the stardag repo checkout (default: auto-detect)"
+        None,
+        "--repo",
+        help="Path to the stardag repo checkout (implies --from-source; "
+        "default: auto-detect from cwd)",
     ),
     name: str = typer.Option(
         DEFAULT_APP_NAME, "--name", help="Modal app name (and URL label)"
@@ -439,8 +595,11 @@ def up(
 ):
     """Bring up the full Stardag stack: database, migrations, API + UI on Modal."""
     interactive = not yes
-    repo_root = _require_repo_root(repo)
-    console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
+    repo_root, resolved_server_version = _resolve_image_source(
+        repo, from_source, server_version
+    )
+    if repo_root is not None:
+        console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
 
     workspace = _check_modal_auth()
     console.print(f"Modal workspace: [bold]{workspace}[/bold]")
@@ -575,7 +734,15 @@ def up(
         )
 
     # --- Migrate + deploy ---
-    url = _deploy(repo_root, name, _resolve_keep_warm(name, keep_warm))
+    url = _deploy(
+        repo_root,
+        name,
+        _resolve_keep_warm(name, keep_warm),
+        server_version=resolved_server_version,
+    )
+    _record_deployed_server_version(
+        name, resolved_server_version or FROM_SOURCE_VERSION
+    )
 
     console.print("\n[bold green]Stardag is up![/bold green]")
     console.print(f"\n  UI:  [bold]{url}[/bold]")
@@ -599,12 +766,31 @@ def up(
         f"     stardag config registry add selfhosted --url {url}\n"
         "     stardag auth login -r selfhosted"
     )
-    console.print("  3. To update after pulling new code: stardag self-host upgrade")
+    console.print("  3. To update to a newer server release: stardag self-host upgrade")
 
 
 @app.command()
 def upgrade(
-    repo: Path = typer.Option(None, "--repo", help="Path to the stardag repo checkout"),
+    server_version: str | None = typer.Option(
+        None,
+        "--server-version",
+        help="Prebuilt server image version to deploy: X.Y.Z or 'latest' "
+        "(default: the currently deployed version, falling back to "
+        f"{DEFAULT_SERVER_VERSION}, the version this SDK release is tested "
+        "against)",
+    ),
+    from_source: bool = typer.Option(
+        False,
+        "--from-source",
+        help="Build the image from a local stardag repo checkout instead of "
+        "using the prebuilt image (development workflow)",
+    ),
+    repo: Path = typer.Option(
+        None,
+        "--repo",
+        help="Path to the stardag repo checkout (implies --from-source; "
+        "default: auto-detect from cwd)",
+    ),
     name: str = typer.Option(DEFAULT_APP_NAME, "--name", help="Modal app name"),
     keep_warm: int = typer.Option(
         None,
@@ -613,9 +799,12 @@ def upgrade(
         "last explicitly set value is kept (initially 0).",
     ),
 ):
-    """Update the deployment: apply DB migrations and redeploy from current source."""
-    repo_root = _require_repo_root(repo)
-    console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
+    """Update the deployment: apply DB migrations and redeploy."""
+    repo_root, resolved_server_version = _resolve_image_source(
+        repo, from_source, server_version
+    )
+    if repo_root is not None:
+        console.print(f"Using stardag repo: [bold]{repo_root}[/bold]")
     workspace = _check_modal_auth()
     console.print(f"Modal workspace: [bold]{workspace}[/bold]")
 
@@ -626,7 +815,20 @@ def upgrade(
             )
             raise typer.Exit(1)
 
-    url = _deploy(repo_root, name, _resolve_keep_warm(name, keep_warm))
+    if repo_root is None:
+        # Prebuilt path: default to the recorded deployed version so a plain
+        # `upgrade` never silently downgrades (explicit flag still wins).
+        resolved_server_version = _resolve_upgrade_server_version(name, server_version)
+
+    url = _deploy(
+        repo_root,
+        name,
+        _resolve_keep_warm(name, keep_warm),
+        server_version=resolved_server_version,
+    )
+    _record_deployed_server_version(
+        name, resolved_server_version or FROM_SOURCE_VERSION
+    )
     console.print("\n[bold green]Upgrade complete.[/bold green]")
     console.print(f"  UI: [bold]{url}[/bold]")
 
@@ -655,6 +857,11 @@ def status(
 
     try:
         meta = modal.Dict.from_name(_meta_dict_name(name))
+        server_version = meta.get("server_version")
+        if server_version == FROM_SOURCE_VERSION:
+            console.print("  Server version: built from source")
+        elif server_version:
+            console.print(f"  Server version: {server_version}")
         console.print(f"  Keep-warm containers: {meta.get('keep_warm', 0)}")
     except modal.exception.NotFoundError:
         pass
