@@ -16,6 +16,13 @@ RUN uv pip install --system .
 COPY alembic.ini .
 COPY migrations/ migrations/
 
+# Server version, surfaced at GET /api/v1/version (read from this env var by
+# stardag_api.main). Injected at build time by infra/aws-cdk/scripts/deploy-api.sh
+# from scripts/server-version.sh (git-describe). Defaults to "dev" when unset.
+# Placed near the end so changing it only rebuilds the trivial trailing layers.
+ARG STARDAG_SERVER_VERSION=dev
+ENV STARDAG_SERVER_VERSION=${STARDAG_SERVER_VERSION}
+
 EXPOSE 8000
 
 # gunicorn with multiple uvicorn workers absorbs CPU-bound bursts (auth /

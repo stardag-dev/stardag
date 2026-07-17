@@ -55,6 +55,34 @@ For first-time deployments, the correct order is:
 
 The `deploy-all.sh` script handles this automatically.
 
+## Server version stamping
+
+`deploy-api.sh` stamps a server version into the locally-built API image via
+the `STARDAG_SERVER_VERSION` build arg, so the deployment reports a truthful
+version at `GET /api/v1/version` instead of the `"dev"` default.
+
+The version is resolved in this order:
+
+1. An already-exported `$STARDAG_SERVER_VERSION` (set it explicitly to override).
+2. Otherwise `scripts/server-version.sh` (git-describe against `server-v*` tags):
+   - exactly at a `server-vX.Y.Z` tag → `X.Y.Z`
+   - `N` commits past the nearest tag → `X.Y.Z+N.g<sha>`
+   - no `server-v*` tag reachable → `0.0.0+g<sha>`
+   - not a git checkout → `dev`
+3. If the script is missing or errors, it falls back to `"dev"` — versioning
+   never fails the deploy.
+
+**CI caveat — check out tags.** A clean tagged version requires the `server-v*`
+tags to be present in the checkout. A shallow or tagless CI checkout yields
+`0.0.0+g<sha>` or `"dev"`. In CI, check out with full history and tags — e.g.
+`actions/checkout` with `fetch-depth: 0` (and the same for any submodule
+checkout that contains this repo) — so `server-version.sh` can find the tags.
+Deployments degrade gracefully to a sha-based or `dev` version otherwise; no
+consumer code change is needed beyond ensuring tags are fetched.
+
+Prebuilt public images (`--image-uri …`) are already stamped at publish time
+by the release workflow, so this only concerns the local docker build path.
+
 ## Use Prebuilt Public Images (no local builds)
 
 Each server release (git tag `server-vX.Y.Z`) publishes:
