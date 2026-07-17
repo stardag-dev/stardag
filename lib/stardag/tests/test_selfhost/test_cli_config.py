@@ -128,14 +128,24 @@ def test_admin_password_validation():
     assert _admin_password_error("€" * 25) is not None  # 75 bytes
 
 
-def _patch_meta_dict(monkeypatch: pytest.MonkeyPatch, store: dict) -> list[str]:
-    """Patch modal.Dict.from_name to return `store`; records requested names."""
+def _patch_meta_dict(
+    monkeypatch: pytest.MonkeyPatch, store: dict, environments: list | None = None
+) -> list[str]:
+    """Patch modal.Dict.from_name to return `store`; records requested names
+    (and, when ``environments`` is given, the environment_name of each call)."""
     import modal
 
     names: list[str] = []
 
-    def fake_from_name(name: str, *, create_if_missing: bool = False):
+    def fake_from_name(
+        name: str,
+        *,
+        create_if_missing: bool = False,
+        environment_name: str | None = None,
+    ):
         names.append(name)
+        if environments is not None:
+            environments.append(environment_name)
         return store
 
     monkeypatch.setattr(modal.Dict, "from_name", fake_from_name)
@@ -202,7 +212,12 @@ def test_upgrade_version_no_meta_dict(monkeypatch: pytest.MonkeyPatch):
     import modal
     import modal.exception
 
-    def raise_not_found(name: str, *, create_if_missing: bool = False):
+    def raise_not_found(
+        name: str,
+        *,
+        create_if_missing: bool = False,
+        environment_name: str | None = None,
+    ):
         raise modal.exception.NotFoundError(f"Dict {name} not found")
 
     monkeypatch.setattr(modal.Dict, "from_name", raise_not_found)

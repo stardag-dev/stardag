@@ -34,10 +34,13 @@ Usage:
     stardag modal deploy <app_ref> [--name name] [-e env] [--stream-logs] [--tag tag] [-m]
     stardag modal stardag-api-key create [--modal-env env] [-w workspace] [-e env] [-p profile]
 
-    stardag self-host up [--neon-api-key key] [--auth-mode local|oidc] [...]
-    stardag self-host upgrade
-    stardag self-host status
-    stardag self-host destroy [--delete-secrets]
+    stardag self-host up [--neon-api-key key] [--auth-mode local|oidc]
+        [--primary-workspace name] [--execution-modal-env env]
+        [--server-modal-env env] [--skip-connect] [...]
+    stardag self-host connect [--primary-workspace name] [...]
+    stardag self-host upgrade [--server-modal-env env]
+    stardag self-host status [--server-modal-env env]
+    stardag self-host destroy [--delete-secrets] [--server-modal-env env]
 
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.

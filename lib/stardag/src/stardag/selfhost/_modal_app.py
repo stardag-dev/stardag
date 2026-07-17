@@ -35,6 +35,12 @@ DEFAULT_APP_NAME = "stardag-server"
 DEFAULT_CONFIG_SECRET = "stardag-server-config"
 DEFAULT_JWT_SECRET = "stardag-server-jwt"
 
+# Modal environment the server app and its secrets live in, created on
+# demand. Keeping the server in its own Modal environment isolates it from
+# the environments where the user's DAG apps run (no name collisions with
+# user apps/secrets/volumes, and `modal app list` etc. stay uncluttered).
+DEFAULT_SERVER_MODAL_ENV = "stardag-server"
+
 SERVER_IMAGE_REPO = "ghcr.io/stardag-dev/stardag-server"
 # The server release this SDK version is tested against. Bumped at SDK
 # release time; override per deployment with --server-version.
@@ -68,6 +74,7 @@ def build_server_app(
     keep_warm: int = 0,
     python_version: str = "3.12",
     server_version: str = DEFAULT_SERVER_VERSION,
+    environment_name: str | None = None,
 ) -> tuple["modal.App", dict[str, Any]]:
     """Build the Modal app serving the Stardag service.
 
@@ -75,6 +82,10 @@ def build_server_app(
     ``ghcr.io/stardag-dev/stardag-server:<server_version>`` is used.
     When ``repo_root`` is given the image is built from that checkout
     (``server_version`` is ignored).
+
+    ``environment_name`` is the Modal environment the referenced secrets
+    live in (the app itself is placed there by the caller at deploy time);
+    None means Modal's default environment.
 
     Secret names default to "<app_name>-config" and "<app_name>-jwt".
     Returns (app, {"web": web_fn, "migrate": migrate_fn}).
@@ -116,9 +127,11 @@ def build_server_app(
         )
 
     app = modal.App(app_name)
+    # The secrets must be resolved in the same Modal environment the app is
+    # deployed to (from_name lookups are environment-scoped).
     secrets = [
-        modal.Secret.from_name(config_secret_name),
-        modal.Secret.from_name(jwt_secret_name),
+        modal.Secret.from_name(config_secret_name, environment_name=environment_name),
+        modal.Secret.from_name(jwt_secret_name, environment_name=environment_name),
     ]
 
     # NOTE: the function bodies below are defined as closures (not module-
