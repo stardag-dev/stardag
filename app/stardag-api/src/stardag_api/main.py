@@ -33,13 +33,18 @@ get_token_manager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Local auth mode: idempotently provision the bootstrap admin so a
-    # fresh self-hosted deployment has a first user to log in with.
+    # fresh self-hosted deployment has a first user to log in with, then
+    # the primary workspace/environment (AUTH_PRIMARY_WORKSPACE_*).
     if auth_settings.mode == "local" and auth_settings.bootstrap_admin_email:
         from stardag_api.db import async_session_maker
-        from stardag_api.services.local_auth import ensure_bootstrap_admin
+        from stardag_api.services.local_auth import (
+            ensure_bootstrap_admin,
+            ensure_primary_workspace,
+        )
 
         async with async_session_maker() as session:
             await ensure_bootstrap_admin(session)
+            await ensure_primary_workspace(session)
     yield
 
 

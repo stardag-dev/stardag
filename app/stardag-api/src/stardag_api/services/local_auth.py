@@ -6,6 +6,8 @@ identity provider is involved.
 """
 
 import logging
+import re
+import secrets as _secrets
 import time
 from collections import deque
 from uuid import uuid4
@@ -20,7 +22,13 @@ from stardag_api.auth.passwords import (
     verify_password_async,
 )
 from stardag_api.config import auth_settings
-from stardag_api.models import User
+from stardag_api.models import (
+    Environment,
+    User,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +197,161 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> None:
         logger.info("Bootstrap admin password set for existing user: %s", email)
     else:
         logger.debug("Bootstrap admin already provisioned: %s", email)
+
+
+def _slugify(name: str) -> str:
+    """Derive a workspace/environment slug from a display name.
+
+    Same derivation as personal-workspace creation: lowercase, non-alphanumeric
+    runs collapsed to hyphens, trimmed to 50 chars.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50]
+
+
+async def _ensure_environment(
+    db: AsyncSession, workspace: Workspace, env_name: str
+) -> None:
+    """Idempotently ensure an environment named ``env_name`` in ``workspace``."""
+    env_slug = _slugify(env_name)
+    if not env_slug:
+        return
+    result = await db.execute(
+        select(Environment).where(
+            Environment.workspace_id == workspace.id,
+            Environment.slug == env_slug,
+        )
+    )
+    if result.scalar_one_or_none() is not None:
+        return
+    db.add(
+        Environment(
+            workspace_id=workspace.id,
+            name=env_name,
+            slug=env_slug,
+        )
+    )
+    logger.info("Created environment %r in workspace %s", env_slug, workspace.slug)
+
+
+async def ensure_primary_workspace(db: AsyncSession) -> None:
+    """Idempotently provision the primary workspace/environment (local mode).
+
+    Driven by ``AUTH_PRIMARY_WORKSPACE_NAME`` / ``AUTH_PRIMARY_WORKSPACE_ENVIRONMENT``
+    and anchored on the bootstrap admin (``ensure_bootstrap_admin`` must have
+    run first):
+
+    - ``primary_workspace_name`` set: ensure a shared (non-personal)
+      workspace with that name exists, with the bootstrap admin as owner,
+      and the primary environment in it.
+    - ``primary_workspace_name`` unset: ensure the primary environment in
+      the bootstrap admin's *personal* workspace instead (the typical
+      single-user deployment).
+
+    Safe to run on every startup: existing workspaces, memberships, and
+    environments are matched (by name/slug) before anything is created, and
+    nothing is ever renamed, demoted, or deleted. No-op outside local auth
+    mode (in OIDC mode there is no known admin at startup; the CLI's
+    ``self-host connect`` flow provisions the workspace via the API instead).
+    """
+    if auth_settings.mode != "local":
+        return
+    workspace_name = auth_settings.primary_workspace_name
+    environment_name = auth_settings.primary_workspace_environment
+    if not workspace_name and not environment_name:
+        return
+    admin_email = auth_settings.bootstrap_admin_email
+    if not admin_email:
+        return
+    result = await db.execute(
+        select(User).where(func.lower(User.email) == admin_email.lower())
+    )
+    admin = result.scalar_one_or_none()
+    if admin is None:
+        logger.warning(
+            "Primary workspace bootstrap skipped: bootstrap admin %s not found",
+            admin_email,
+        )
+        return
+
+    if workspace_name:
+        workspace = await _ensure_shared_workspace(db, admin, workspace_name)
+    else:
+        result = await db.execute(
+            select(Workspace)
+            .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+            .where(
+                WorkspaceMember.user_id == admin.id,
+                Workspace.is_personal.is_(True),
+            )
+        )
+        workspace = result.scalars().first()
+        if workspace is None:
+            logger.warning(
+                "Primary environment bootstrap skipped: no personal workspace "
+                "for bootstrap admin"
+            )
+            return
+
+    if environment_name:
+        await _ensure_environment(db, workspace, environment_name)
+    await db.commit()
+
+
+async def _ensure_shared_workspace(
+    db: AsyncSession, admin: User, name: str
+) -> Workspace:
+    """Find or create the shared primary workspace; ensure admin membership.
+
+    Matched by exact name (among non-personal workspaces) first — the
+    stable idempotency key across restarts — then by derived slug.
+    """
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.name == name,
+            Workspace.is_personal.is_(False),
+        )
+    )
+    workspace = result.scalars().first()
+
+    if workspace is None:
+        base_slug = _slugify(name) or "primary"
+        slug = base_slug
+        for hex_nbytes in [2, 2, 3, 3, 4]:
+            slug_exists = await db.execute(
+                select(Workspace).where(Workspace.slug == slug)
+            )
+            if not slug_exists.scalar_one_or_none():
+                break
+            slug = f"{base_slug}-{_secrets.token_hex(hex_nbytes)}"
+        else:
+            raise RuntimeError("Failed to generate unique workspace slug")
+
+        workspace = Workspace(
+            name=name,
+            slug=slug,
+            is_personal=False,
+            created_by_id=admin.id,
+        )
+        db.add(workspace)
+        await db.flush()
+        logger.info("Created primary workspace %r (%s)", name, slug)
+
+    membership_result = await db.execute(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace.id,
+            WorkspaceMember.user_id == admin.id,
+        )
+    )
+    if membership_result.scalar_one_or_none() is None:
+        db.add(
+            WorkspaceMember(
+                workspace_id=workspace.id,
+                user_id=admin.id,
+                role=WorkspaceRole.OWNER,
+            )
+        )
+        logger.info(
+            "Added bootstrap admin as owner of primary workspace %s",
+            workspace.slug,
+        )
+    return workspace
