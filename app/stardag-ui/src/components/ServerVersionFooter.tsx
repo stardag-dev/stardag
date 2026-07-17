@@ -26,9 +26,13 @@ export function ServerVersionFooter() {
 
   if (!version) return null;
 
+  // Prefix "v" only for actual version numbers (e.g. "0.1.0+1.gabc" → "v0.1.0…");
+  // non-numeric labels like "dev" render as-is so it doesn't read "vdev".
+  const label = /^\d/.test(version) ? `v${version}` : version;
+
   return (
     <p className="mx-auto max-w-4xl px-4 pb-6 text-xs text-gray-400 dark:text-gray-500">
-      Stardag server v{version}
+      Stardag server {label}
     </p>
   );
 }

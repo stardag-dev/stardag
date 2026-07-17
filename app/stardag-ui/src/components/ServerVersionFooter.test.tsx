@@ -14,16 +14,28 @@ describe("ServerVersionFooter", () => {
     vi.unstubAllGlobals();
   });
 
-  it("shows the server version once loaded", async () => {
+  it("shows a numeric server version with a v prefix", async () => {
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ server_version: "0.1.0", api_version: "0.0.1" }), {
+      new Response(
+        JSON.stringify({ server_version: "0.1.0+1.gabc", api_version: "0.0.1" }),
+        { status: 200 },
+      ),
+    );
+
+    render(<ServerVersionFooter />);
+    expect(await screen.findByText("Stardag server v0.1.0+1.gabc")).toBeInTheDocument();
+    expect(fetchMock.mock.calls[0][0] as string).toContain("/api/v1/version");
+  });
+
+  it("shows a non-numeric version (e.g. dev) without a v prefix", async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ server_version: "dev", api_version: "0.0.1" }), {
         status: 200,
       }),
     );
 
     render(<ServerVersionFooter />);
-    expect(await screen.findByText("Stardag server v0.1.0")).toBeInTheDocument();
-    expect(fetchMock.mock.calls[0][0] as string).toContain("/api/v1/version");
+    expect(await screen.findByText("Stardag server dev")).toBeInTheDocument();
   });
 
   it("renders nothing while loading", () => {
