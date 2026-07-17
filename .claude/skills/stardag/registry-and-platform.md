@@ -175,15 +175,31 @@ stardag modal stardag-api-key create        # Create API key for Modal
 
 ### Self-Hosting (API + UI on Modal)
 
-Requires the `selfhost` extra (`pip install "stardag[selfhost]"`) and a
-stardag repo checkout. See docs/how-to/self-host-modal.md.
+Requires the `selfhost` extra (`pip install "stardag[selfhost]"`). Deploys
+the prebuilt server image by default (`--from-source` builds from a repo
+checkout). See docs/how-to/self-host-modal.md.
 
 ```bash
-stardag self-host up        # Provision Neon DB, migrate, deploy API+UI, print URL
-stardag self-host upgrade   # Apply migrations + redeploy from current source
+stardag self-host up        # Provision Neon DB, migrate, deploy API+UI, complete setup
+stardag self-host connect   # (Re)run the post-deploy setup only (idempotent)
+stardag self-host upgrade   # Apply migrations + redeploy
 stardag self-host status    # Deployment status + URL
 stardag self-host destroy   # Stop the Modal app (DB untouched)
 ```
+
+The server app + its secrets live in a dedicated Modal environment
+(default `stardag-server`, flag `--server-modal-env`), isolated from the
+environments where user DAG apps run. `up`/`connect` also complete the
+setup: a primary Stardag workspace (named after the shared Modal workspace,
+or the personal workspace; `--primary-workspace`/`--no-primary-workspace`),
+a `main` environment, an API key pushed as Modal secret `stardag-api-key`
+into the DAG-execution Modal environment (`--execution-modal-env`, default:
+the account's default env), a default target root
+`modalvol://stardag/<workspace-slug>` (`--target-root`/`--no-target-root`),
+and a local SDK registry + profile named `selfhosted`
+(`--registry-name`/`--profile-name`). In OIDC auth mode run
+`stardag self-host connect` after `up` (browser login, then the same setup
+via the API).
 
 ## Configuration System
 
