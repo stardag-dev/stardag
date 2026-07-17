@@ -2,6 +2,7 @@
 # End-to-end integration test
 # Brings up docker-compose, runs demo, verifies API and UI
 set -e
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -56,18 +57,74 @@ for i in {1..30}; do
     sleep 1
 done
 
+# Wait for Keycloak (realm import can take a while)
+echo "=== Waiting for Keycloak ==="
+for i in {1..60}; do
+    if curl -sf --max-time 5 http://localhost:8080/realms/stardag/.well-known/openid-configuration > /dev/null 2>&1; then
+        echo "Keycloak is ready"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "ERROR: Keycloak failed to start"
+        docker-compose logs keycloak
+        exit 1
+    fi
+    sleep 2
+done
+
+# Bootstrap SDK credentials: test user -> workspace -> environment -> API key
+# (mirrors the flow in integration-tests/src/stardag_integration_tests/conftest.py)
+echo "=== Bootstrapping API credentials ==="
+OIDC_TOKEN=$(curl -fsS -X POST http://localhost:8080/realms/stardag/protocol/openid-connect/token \
+    -d "grant_type=password" \
+    -d "client_id=stardag-test" \
+    -d "username=testuser" \
+    -d "password=testpassword" \
+    -d "scope=openid profile email" \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+
+# First authenticated request auto-creates the test user
+# and their personal workspace (with a default environment)
+WORKSPACE_ID=$(curl -fsS http://localhost:8000/api/v1/ui/me \
+    -H "Authorization: Bearer $OIDC_TOKEN" \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)['workspaces'][0]['id'])")
+echo "Using workspace: $WORKSPACE_ID"
+
+INTERNAL_TOKEN=$(curl -fsS -X POST http://localhost:8000/api/v1/auth/exchange \
+    -H "Authorization: Bearer $OIDC_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"workspace_id\": \"$WORKSPACE_ID\"}" \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+
+ENVIRONMENT_ID=$(curl -fsS "http://localhost:8000/api/v1/ui/workspaces/$WORKSPACE_ID/environments" \
+    -H "Authorization: Bearer $INTERNAL_TOKEN" \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)[0]['id'])")
+echo "Using environment: $ENVIRONMENT_ID"
+
+API_KEY=$(curl -fsS -X POST "http://localhost:8000/api/v1/ui/workspaces/$WORKSPACE_ID/environments/$ENVIRONMENT_ID/api-keys" \
+    -H "Authorization: Bearer $INTERNAL_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"name": "e2e-test"}' \
+    | python3 -c "import sys, json; print(json.load(sys.stdin)['key'])")
+echo "API key created"
+
 # Run demo script
 echo "=== Running demo script ==="
 TARGET_ROOT=$(mktemp -d)
 export STARDAG_TARGET_ROOTS__DEFAULT="$TARGET_ROOT"
-export STARDAG_API_REGISTRY_URL="http://localhost:8000"
+export STARDAG_API_URL="http://localhost:8000"
+export STARDAG_API_KEY="$API_KEY"
 
-cd "$REPO_ROOT/lib/stardag-examples"
-uv run python src/stardag_examples/api_registry_demo.py
+# Subshell so the working directory stays at the repo root (the cleanup
+# trap relies on it to find the compose file).
+(
+    cd "$REPO_ROOT/lib/stardag-examples"
+    uv run python -m stardag_examples.general.artifacts_demo
+)
 
 # Verify API has builds
 echo "=== Verifying API - Builds ==="
-BUILDS_RESPONSE=$(curl -s http://localhost:8000/api/v1/builds)
+BUILDS_RESPONSE=$(curl -fsS -H "X-API-Key: $API_KEY" http://localhost:8000/api/v1/builds)
 BUILD_COUNT=$(echo "$BUILDS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
 if [ "$BUILD_COUNT" -lt 1 ]; then
     echo "ERROR: No builds found in API"
@@ -78,7 +135,7 @@ echo "Found $BUILD_COUNT build(s) in API"
 
 # Verify API has tasks
 echo "=== Verifying API - Tasks ==="
-TASKS_RESPONSE=$(curl -s http://localhost:8000/api/v1/tasks)
+TASKS_RESPONSE=$(curl -fsS -H "X-API-Key: $API_KEY" http://localhost:8000/api/v1/tasks)
 TASK_COUNT=$(echo "$TASKS_RESPONSE" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('total', 0))")
 if [ "$TASK_COUNT" -lt 1 ]; then
     echo "ERROR: No tasks found in API"
