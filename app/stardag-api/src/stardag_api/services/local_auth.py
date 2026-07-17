@@ -185,7 +185,18 @@ async def ensure_bootstrap_admin(db: AsyncSession) -> None:
     )
     user = result.scalar_one_or_none()
     if user is None:
-        await create_local_user(db, email=email, password=password)
+        try:
+            await create_local_user(db, email=email, password=password)
+        except ValueError:
+            # Duplicate-email race: multiple workers (e.g. gunicorn's
+            # default 2) run this lifespan concurrently on a first cold
+            # start; another worker created the admin between our lookup
+            # and the insert (create_local_user already rolled back).
+            logger.info(
+                "Bootstrap admin created concurrently by another worker: %s",
+                email,
+            )
+            return
         logger.info("Bootstrap admin created: %s", email)
     elif user.password_hash is None:
         # Same policy as /auth/register (create_local_user validates in the
@@ -249,19 +260,40 @@ async def ensure_primary_workspace(db: AsyncSession) -> None:
 
     Safe to run on every startup: existing workspaces, memberships, and
     environments are matched (by name/slug) before anything is created, and
-    nothing is ever renamed, demoted, or deleted. No-op outside local auth
-    mode (in OIDC mode there is no known admin at startup; the CLI's
-    ``self-host connect`` flow provisions the workspace via the API instead).
+    nothing is ever renamed, demoted, or deleted. Concurrency-safe across
+    multiple workers running the lifespan simultaneously (a lost create
+    race is retried and resolves to the row the other worker created).
+    No-op outside local auth mode (in OIDC mode there is no known admin at
+    startup; the CLI's ``self-host connect`` flow provisions the workspace
+    via the API instead).
     """
     if auth_settings.mode != "local":
         return
+    if not (
+        auth_settings.primary_workspace_name
+        or auth_settings.primary_workspace_environment
+    ):
+        return
+    if not auth_settings.bootstrap_admin_email:
+        return
+    try:
+        await _ensure_primary_workspace_once(db)
+    except IntegrityError:
+        # Unique-constraint race with another worker's lifespan (e.g.
+        # gunicorn's default 2 workers on a first cold start): "another
+        # worker won" is success - rollback and re-run the match-before-
+        # create logic, which now finds the existing rows.
+        await db.rollback()
+        logger.info("Primary workspace bootstrap raced with another worker; retrying")
+        await _ensure_primary_workspace_once(db)
+
+
+async def _ensure_primary_workspace_once(db: AsyncSession) -> None:
+    """Single pass of the primary workspace/environment provisioning."""
     workspace_name = auth_settings.primary_workspace_name
     environment_name = auth_settings.primary_workspace_environment
-    if not workspace_name and not environment_name:
-        return
     admin_email = auth_settings.bootstrap_admin_email
-    if not admin_email:
-        return
+    assert admin_email is not None  # guarded by the caller
     result = await db.execute(
         select(User).where(func.lower(User.email) == admin_email.lower())
     )
@@ -302,18 +334,38 @@ async def _ensure_shared_workspace(
 ) -> Workspace:
     """Find or create the shared primary workspace; ensure admin membership.
 
-    Matched by exact name (among non-personal workspaces) first — the
-    stable idempotency key across restarts — then by derived slug.
+    Matched by exact name among non-personal workspaces *created by the
+    bootstrap admin* — the stable idempotency key across restarts. The
+    creator scoping matters: with self-registration enabled, any user could
+    pre-create a workspace with the (predictable) primary name; adopting it
+    would silently make the admin an owner of — and wire API keys / target
+    roots into — a workspace that user controls. Such a name collision is
+    logged and a fresh admin-owned workspace is created instead (its slug
+    gets a random suffix via the usual collision handling).
     """
     result = await db.execute(
         select(Workspace).where(
             Workspace.name == name,
             Workspace.is_personal.is_(False),
+            Workspace.created_by_id == admin.id,
         )
     )
     workspace = result.scalars().first()
 
     if workspace is None:
+        foreign_match = await db.execute(
+            select(Workspace).where(
+                Workspace.name == name,
+                Workspace.is_personal.is_(False),
+            )
+        )
+        if foreign_match.scalars().first() is not None:
+            logger.warning(
+                "A workspace named %r exists but was not created by the "
+                "bootstrap admin; not adopting it - creating a separate "
+                "primary workspace instead",
+                name,
+            )
         base_slug = _slugify(name) or "primary"
         slug = base_slug
         for hex_nbytes in [2, 2, 3, 3, 4]:
