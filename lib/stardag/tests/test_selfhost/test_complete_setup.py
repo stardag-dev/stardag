@@ -42,51 +42,52 @@ API_URL = "http://stardag.test"
 
 
 def test_modal_workspace_info_display():
-    shared = ModalWorkspaceInfo(username="alice", workspace_name="Acme Corp")
-    personal = ModalWorkspaceInfo(username="alice", workspace_name=None)
-    assert shared.display == "Acme Corp"
-    assert personal.display == "alice"
+    # ``workspace_name`` is unreliable (empty for both personal and team
+    # workspaces); ``display`` falls back to ``username`` when it is None.
+    with_name = ModalWorkspaceInfo(username="acme-corp", workspace_name="Acme Corp")
+    without_name = ModalWorkspaceInfo(username="acme-corp", workspace_name=None)
+    assert with_name.display == "Acme Corp"
+    assert without_name.display == "acme-corp"
 
 
-def test_resolve_primary_workspace_shared_modal_workspace():
-    # Non-interactive: the shared Modal workspace name is the default
+def test_resolve_primary_workspace_defaults_to_modal_username():
+    # Non-interactive (--yes): default to a shared workspace named after the
+    # Modal workspace's identity (username), which is always present.
     assert (
-        resolve_primary_workspace(None, False, "Acme Corp", interactive=False)
-        == "Acme Corp"
+        resolve_primary_workspace(None, False, "acme-corp", interactive=False)
+        == "acme-corp"
     )
-
-
-def test_resolve_primary_workspace_personal_modal_workspace():
-    # Personal Modal workspace: no shared Stardag workspace by default
-    assert resolve_primary_workspace(None, False, None, interactive=False) is None
 
 
 def test_resolve_primary_workspace_explicit_wins():
     assert (
-        resolve_primary_workspace("My Team", False, "Acme Corp", interactive=False)
+        resolve_primary_workspace("My Team", False, "acme-corp", interactive=False)
         == "My Team"
     )
-    # Explicit also works for personal Modal workspaces
+
+
+def test_resolve_primary_workspace_opt_out_uses_personal():
+    # --no-primary-workspace: no shared workspace (personal is used instead)
+    assert resolve_primary_workspace(None, True, "acme-corp", interactive=False) is None
+    # Opt-out beats an explicit name too
     assert (
-        resolve_primary_workspace("My Team", False, None, interactive=False)
-        == "My Team"
+        resolve_primary_workspace("My Team", True, "acme-corp", interactive=False)
+        is None
     )
-
-
-def test_resolve_primary_workspace_opt_out():
-    assert resolve_primary_workspace(None, True, "Acme Corp", interactive=False) is None
 
 
 def test_resolve_primary_workspace_interactive_confirm(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    # Default answer Yes -> shared workspace named after the Modal workspace.
     monkeypatch.setattr(typer, "confirm", lambda *a, **k: True)
     assert (
-        resolve_primary_workspace(None, False, "Acme Corp", interactive=True)
-        == "Acme Corp"
+        resolve_primary_workspace(None, False, "acme-corp", interactive=True)
+        == "acme-corp"
     )
+    # Declining -> personal workspace (None).
     monkeypatch.setattr(typer, "confirm", lambda *a, **k: False)
-    assert resolve_primary_workspace(None, False, "Acme Corp", interactive=True) is None
+    assert resolve_primary_workspace(None, False, "acme-corp", interactive=True) is None
 
 
 def test_parse_target_root_flag():
@@ -144,6 +145,49 @@ def test_build_config_env_defaults_omit_primary_vars():
     env = _config_env()
     assert "AUTH_PRIMARY_WORKSPACE_NAME" not in env
     assert "AUTH_PRIMARY_WORKSPACE_ENVIRONMENT" not in env
+
+
+def test_modal_lookup_empty_workspace_name_still_bootstraps_shared_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Regression: Modal's token lookup returns an empty ``workspace_name``
+    for BOTH personal and team/org workspaces, so classification must key off
+    ``username`` (always present). The default flow must still resolve a
+    shared primary workspace named after ``username`` and bake
+    ``AUTH_PRIMARY_WORKSPACE_NAME`` into the config secret.
+    """
+    from types import SimpleNamespace
+
+    import modal.config
+
+    from stardag._cli.selfhost import _check_modal_auth
+
+    # A shared/org workspace comes back with a non-empty username but an
+    # empty workspace_name - identical shape to a personal workspace.
+    async def fake_lookup(server_url, token_id, token_secret):
+        return SimpleNamespace(username="acme-corp", workspace_name="")
+
+    monkeypatch.setattr(
+        modal.config,
+        "config",
+        {
+            "token_id": "ak-x",
+            "token_secret": "as-x",
+            "server_url": "https://api.modal.com",
+        },
+    )
+    monkeypatch.setattr(modal.config, "_lookup_workspace", fake_lookup)
+
+    info = _check_modal_auth()
+    assert info.username == "acme-corp"
+    assert info.workspace_name is None  # empty -> None, and NOT a signal
+
+    # Default (--yes / non-interactive) resolves to a shared workspace named
+    # after the Modal username, and that name lands in the config secret.
+    name = resolve_primary_workspace(None, False, info.username, interactive=False)
+    assert name == "acme-corp"
+    env = _config_env(primary_workspace_name=name, primary_workspace_environment="main")
+    assert env["AUTH_PRIMARY_WORKSPACE_NAME"] == "acme-corp"
 
 
 # ---------------------------------------------------------------------------
@@ -508,15 +552,24 @@ class _SecretPushRecorder:
         self.calls.append((secret_name, env_dict, modal_env))
 
 
+def _no_existing_secret(name, env):
+    """Default secret-existence probe for tests: nothing pre-exists."""
+    return False
+
+
 def _run_connect(
-    api: FakeRegistryApi, **kwargs
+    api: FakeRegistryApi, *, secret_exists=None, **kwargs
 ) -> tuple[ConnectOutcome, "_SecretPushRecorder"]:
     push = _SecretPushRecorder()
+    # Default: no pre-existing stardag-api-key secret (nothing to clobber).
+    resolved_secret_exists = secret_exists or _no_existing_secret
+
     outcome = run_connect(
         API_URL,
         "session-token",
         api.user_email,
         push_modal_secret=push,
+        secret_exists=resolved_secret_exists,
         transport=httpx.MockTransport(api.handler),
         **kwargs,
     )
@@ -590,6 +643,41 @@ def test_connect_creates_primary_workspace(isolated_home):
     assert outcome.api_key_name == "modal-staging"
     assert push.calls[0][2] == "staging"
     assert api.api_key_requests[0]["name"] == "modal-staging"
+
+
+def test_connect_wires_primary_not_personal_workspace(isolated_home):
+    """With both a personal and the shared primary workspace present, the
+    DAG-execution setup (API key, target root, local profile) must land on
+    the PRIMARY (shared) workspace's main env - not the personal one.
+    """
+    api = FakeRegistryApi()
+    api.add_workspace(
+        "Admin's Workspace", "admin", is_personal=True, env_slugs=("local", "main")
+    )
+    api.add_workspace("Acme Corp", "acme-corp", env_slugs=("main",))
+
+    outcome, push = _run_connect(api, primary_workspace="Acme Corp")
+
+    # Everything is wired to the shared workspace, not the personal one.
+    assert outcome.workspace_slug == "acme-corp"
+    assert outcome.workspace_is_personal is False
+    assert outcome.workspace_created is False
+    assert outcome.target_root == (
+        "default",
+        "modalvol://stardag-targets-acme-corp-main/default",
+    )
+    assert len(push.calls) == 1
+
+    # The local SDK profile points at the shared workspace.
+    from stardag._cli.credentials import list_profiles
+
+    assert list_profiles()["selfhosted"]["workspace"] == "acme-corp"
+    # The env/API-key/target-root work happened under the shared workspace's
+    # id, never the personal workspace's.
+    personal_id = next(ws["id"] for ws in api.workspaces if ws["is_personal"])
+    shared_id = next(ws["id"] for ws in api.workspaces if ws["slug"] == "acme-corp")
+    assert any(f"/workspaces/{shared_id}/environments" in r for r in api.requests)
+    assert not any(f"/workspaces/{personal_id}/" in r for r in api.requests)
 
 
 def test_connect_existing_primary_workspace_idempotent(isolated_home):
@@ -718,6 +806,7 @@ def test_connect_modal_secret_push_failure_is_not_fatal(isolated_home):
         api.user_email,
         primary_workspace=None,
         push_modal_secret=failing_push,
+        secret_exists=lambda name, env: False,
         transport=httpx.MockTransport(api.handler),
     )
     assert outcome.api_key_name is None
@@ -726,3 +815,117 @@ def test_connect_modal_secret_push_failure_is_not_fatal(isolated_home):
     from stardag._cli.credentials import list_registries
 
     assert list_registries() == {"selfhosted": API_URL}
+
+
+# ---------------------------------------------------------------------------
+# Overwrite guard for a pre-existing stardag-api-key Modal secret
+# ---------------------------------------------------------------------------
+
+
+def test_connect_existing_secret_interactive_decline_leaves_it_untouched(
+    isolated_home, monkeypatch: pytest.MonkeyPatch
+):
+    """Interactive: an existing stardag-api-key secret + a non-matching typed
+    phrase -> the secret is left untouched (no push, no key minted), but the
+    rest of the setup (target root, local profile) is still written."""
+    import typer as typer_mod
+
+    # User types something other than the confirmation phrase -> cancel.
+    monkeypatch.setattr(typer_mod, "prompt", lambda *a, **k: "no")
+
+    api = FakeRegistryApi()
+    ws = api.add_workspace(
+        "Admin's Workspace", "admin", is_personal=True, env_slugs=("main",)
+    )
+    env = ws["envs"]["main"]
+
+    outcome, push = _run_connect(
+        api,
+        primary_workspace=None,
+        interactive=True,
+        secret_exists=lambda name, e: name == API_KEY_SECRET_NAME,
+    )
+
+    assert outcome.api_key_name is None
+    assert outcome.modal_secret_name is None
+    assert outcome.api_key_secret_left_untouched is True
+    # No key was minted on the registry and nothing was pushed to Modal.
+    assert push.calls == []
+    assert api.live_keys(env, "modal-default") == []
+    # The rest of the setup completed.
+    assert outcome.target_root == (
+        "default",
+        "modalvol://stardag-targets-admin-main/default",
+    )
+    from stardag._cli.credentials import list_profiles
+
+    assert "selfhosted" in list_profiles()
+
+
+def test_connect_existing_secret_interactive_typed_phrase_replaces(
+    isolated_home, monkeypatch: pytest.MonkeyPatch
+):
+    """Interactive: typing the exact confirmation phrase replaces the secret."""
+    import typer as typer_mod
+
+    monkeypatch.setattr(typer_mod, "prompt", lambda *a, **k: "replace key")
+
+    api = FakeRegistryApi()
+    ws = api.add_workspace(
+        "Admin's Workspace", "admin", is_personal=True, env_slugs=("main",)
+    )
+    env = ws["envs"]["main"]
+
+    outcome, push = _run_connect(
+        api,
+        primary_workspace=None,
+        interactive=True,
+        secret_exists=lambda name, e: name == API_KEY_SECRET_NAME,
+    )
+
+    assert outcome.api_key_name == "modal-default"
+    assert outcome.modal_secret_name == API_KEY_SECRET_NAME
+    assert outcome.api_key_secret_left_untouched is False
+    assert len(push.calls) == 1
+    assert len(api.live_keys(env, "modal-default")) == 1
+
+
+def test_connect_existing_secret_noninteractive_skips_without_flag(isolated_home):
+    """Non-interactive (--yes) without the flag: never silently overwrite."""
+    api = FakeRegistryApi()
+    api.add_workspace(
+        "Admin's Workspace", "admin", is_personal=True, env_slugs=("main",)
+    )
+
+    outcome, push = _run_connect(
+        api,
+        primary_workspace=None,
+        interactive=False,
+        secret_exists=lambda name, e: name == API_KEY_SECRET_NAME,
+    )
+
+    assert outcome.api_key_name is None
+    assert outcome.api_key_secret_left_untouched is True
+    assert push.calls == []
+
+
+def test_connect_existing_secret_noninteractive_overwrite_flag_replaces(
+    isolated_home,
+):
+    """Non-interactive with --overwrite-api-key-secret: replace the secret."""
+    api = FakeRegistryApi()
+    api.add_workspace(
+        "Admin's Workspace", "admin", is_personal=True, env_slugs=("main",)
+    )
+
+    outcome, push = _run_connect(
+        api,
+        primary_workspace=None,
+        interactive=False,
+        overwrite_api_key_secret=True,
+        secret_exists=lambda name, e: name == API_KEY_SECRET_NAME,
+    )
+
+    assert outcome.api_key_name == "modal-default"
+    assert outcome.api_key_secret_left_untouched is False
+    assert len(push.calls) == 1

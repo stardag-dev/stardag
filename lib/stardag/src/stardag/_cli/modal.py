@@ -236,6 +236,18 @@ def _create_stardag_api_key(
     raise typer.Exit(1)
 
 
+def _modal_secret_exists(secret_name: str, modal_env: str | None) -> bool:
+    """Whether a named Modal secret already exists in the target env."""
+    import modal
+    import modal.exception
+
+    try:
+        modal.Secret.from_name(secret_name, environment_name=modal_env or "").hydrate()
+        return True
+    except modal.exception.NotFoundError:
+        return False
+
+
 def _push_modal_secret(
     secret_name: str,
     env_dict: dict[str, str],
@@ -326,6 +338,14 @@ def stardag_api_key_create(
             f'[green]Created Stardag API key: "{api_key_name}" '
             f"(prefix: {key_prefix})[/green]"
         )
+
+        if _modal_secret_exists(secret_name, modal_env):
+            modal_env_display = f" in Modal env '{modal_env}'" if modal_env else ""
+            console.print(
+                f"[yellow]Replacing the existing '{secret_name}' Modal "
+                f"secret{modal_env_display} - DAG apps using it will pick up "
+                "the new key on their next run.[/yellow]"
+            )
 
         try:
             _push_modal_secret(secret_name, {"STARDAG_API_KEY": full_key}, modal_env)

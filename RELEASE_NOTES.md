@@ -6,6 +6,27 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.16.1 — Self-host: shared-workspace default + API-key secret safety
+
+Two `stardag self-host` fixes:
+
+- The setup now defaults to creating a **shared** Stardag workspace named
+  after your Modal workspace (with you as owner), and wires the API key,
+  target root, and local profile to it. Modal's token lookup can't
+  distinguish a personal from a team/org workspace, so this is now an
+  explicit, shared-by-default choice — use `--no-primary-workspace` for
+  solo/individual use, or `--primary-workspace NAME` to name it.
+- `connect`/`up` no longer silently overwrite an existing `stardag-api-key`
+  Modal secret in your execution environment (which would repoint DAG
+  execution there, possibly away from another registry). You're warned and
+  must confirm — a typed phrase interactively, or `--overwrite-api-key-secret`
+  under `--yes`.
+
+CLI-only; no server image change. Upgrade in place with
+`stardag self-host upgrade`.
+
+---
+
 ## v0.16.0 — Self-host: no Python pin, cleaner defaults
 
 The prebuilt `self-host` deploy no longer needs its interpreter to match

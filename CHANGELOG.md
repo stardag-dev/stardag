@@ -6,6 +6,35 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-07-17
+
+### Fixed
+
+- **`stardag self-host` now creates a shared workspace named after your
+  Modal workspace by default.** Modal's token lookup returns an empty
+  `workspace_name` for _both_ personal and team/org workspaces (only
+  `username` differs), so the CLI could no longer tell them apart and
+  misclassified org workspaces as "personal": it never set
+  `AUTH_PRIMARY_WORKSPACE_NAME`, and the server bootstrapped `main` in the
+  admin's personal workspace instead of a shared one. The primary workspace
+  is now an explicit, well-defaulted choice keyed off the Modal `username`
+  (always present): `up`/`connect` default to creating a **shared** Stardag
+  workspace named after the Modal workspace (with the admin as owner) and
+  wire the target root, API key, and local profile to _that_ workspace's
+  `main` environment. Use `--no-primary-workspace` for solo/individual use
+  (personal workspace), or `--primary-workspace NAME` for an explicit name.
+- **`stardag self-host connect`/`up` no longer overwrite an existing
+  `stardag-api-key` Modal secret without confirmation.** Pushing the secret
+  into an execution Modal environment that already had one could silently
+  repoint all DAG execution in that environment (e.g. an existing
+  cloud/app.stardag.com setup) to the self-hosted registry. When the secret
+  already exists the CLI now warns and requires a typed confirmation phrase
+  interactively, or the explicit `--overwrite-api-key-secret` flag under
+  `--yes`; otherwise it leaves the secret untouched and completes the rest
+  of the setup. (The standalone `stardag modal stardag-api-key create`,
+  whose purpose is to (re)push the secret, now prints a warning when it
+  replaces an existing one.)
+
 ## [0.16.0] — 2026-07-17
 
 ### SDK
