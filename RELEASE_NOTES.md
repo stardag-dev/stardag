@@ -6,6 +6,26 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.16.0 — Self-host: no Python pin, cleaner defaults
+
+The prebuilt `self-host` deploy no longer needs its interpreter to match
+the server image — run it under any supported Python (≥ 3.10), no
+`--python 3.12` pin:
+
+```bash
+uvx --from "stardag[selfhost]" stardag self-host up
+```
+
+Under the hood the Modal `web`/`migrate` functions are now defined
+by-reference and imported inside the server image, so nothing is
+cloudpickled by the client ([#196](https://github.com/stardag-dev/stardag/issues/196)).
+The default prebuilt image is now `server-v0.1.1` (fixes the settings
+footer that read "vdev"). `--from-source` is unchanged.
+
+No breaking changes; upgrade in place with `stardag self-host upgrade`.
+
+---
+
 ## v0.15.0 — Self-host the Stardag service on Modal
 
 You can now run your own private Stardag service (Registry API + web UI)
