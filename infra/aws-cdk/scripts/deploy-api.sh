@@ -137,13 +137,32 @@ echo "=== Logging in to ECR ==="
 $AWS_CMD ecr get-login-password --region $AWS_REGION | \
     docker login --username AWS --password-stdin "${ECR_URI%%/*}"
 
+# Resolve the server version to stamp into the image (surfaced at
+# GET /api/v1/version; otherwise the deployment reports "dev").
+#
+# Honor an already-exported $STARDAG_SERVER_VERSION; otherwise derive it from
+# scripts/server-version.sh (git-describe). Never fail the deploy over
+# versioning: if the script is missing or errors, fall back to "dev".
+#
+# CAVEAT: server-version.sh needs the `server-v*` tags present in the checkout
+# to produce a clean X.Y.Z (or X.Y.Z+N.g<sha>); a shallow/tagless CI checkout
+# yields 0.0.0+g<sha> or "dev". CI should check out with full history and tags
+# (e.g. actions/checkout with fetch-depth: 0, including for submodules) for a
+# clean version. It degrades gracefully otherwise. See infra/aws-cdk/README.md.
+if [ -z "$STARDAG_SERVER_VERSION" ]; then
+    STARDAG_SERVER_VERSION="$(bash "$REPO_ROOT/scripts/server-version.sh" 2>/dev/null || echo dev)"
+fi
+echo "Server version (STARDAG_SERVER_VERSION): $STARDAG_SERVER_VERSION"
+
 # Build the API image
 echo ""
 echo "=== Building API Docker image ==="
 cd "$REPO_ROOT/app/stardag-api"
 
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-docker build -t stardag-api:$IMAGE_TAG .
+docker build \
+    --build-arg STARDAG_SERVER_VERSION="$STARDAG_SERVER_VERSION" \
+    -t stardag-api:$IMAGE_TAG .
 
 # Tag and push to ECR
 echo ""
