@@ -38,6 +38,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # One-time note (first release only): the initial push creates the
+      # GHCR package with PRIVATE visibility. `stardag self-host` pulls the
+      # image anonymously (`modal.Image.from_registry` without credentials),
+      # so the package must be switched to public — see "Releasing the
+      # Server" in DEV_README.md for the step.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -57,32 +62,38 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: read
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME#server-v}" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: app/stardag-ui/package-lock.json
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build web UI
-        working-directory: app/stardag-ui
+      # Extract the UI dist from the image that was just pushed (instead of
+      # rebuilding it on the runner) so the release asset is byte-identical
+      # to what the image serves. Flat layout (index.html at the tar root) —
+      # downstream extractors depend on it.
+      - name: Extract UI dist from the pushed image
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/stardag-server:${{ steps.version.outputs.version }}
         run: |
-          npm ci
-          npm run build
+          docker pull "$IMAGE"
+          cid=$(docker create "$IMAGE")
+          docker cp "$cid:/opt/stardag/ui" ./ui-dist
+          docker rm "$cid"
 
       - name: Package UI dist
         run: >-
           tar -czf
           "stardag-ui-dist-${{ steps.version.outputs.version }}.tar.gz"
-          -C app/stardag-ui/dist .
+          -C ui-dist .
 
       - name: Create GitHub Release
         env:

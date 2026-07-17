@@ -239,9 +239,27 @@ CI (`.github/workflows/publish-server-image.yml`) then:
    `ghcr.io/stardag-dev/stardag-server:X.Y.Z` and `:latest`, with
    `STARDAG_SERVER_VERSION=X.Y.Z` baked in (surfaced at
    `GET /api/v1/version`).
-2. Creates a GitHub Release for the tag with the built web UI attached as
-   `stardag-ui-dist-X.Y.Z.tar.gz` (for deployments that serve the UI
+2. Creates a GitHub Release for the tag with the web UI (extracted from the
+   pushed image, so it is byte-identical to what the image serves) attached
+   as `stardag-ui-dist-X.Y.Z.tar.gz` (for deployments that serve the UI
    separately, e.g. from S3/CDN).
+
+### First release only: make the GHCR package public
+
+The first push creates the `stardag-server` GHCR package with **private**
+visibility. `stardag self-host` pulls the image anonymously
+(`modal.Image.from_registry` without credentials), so the prebuilt-image
+path fails for everyone until the package is made public. One-time step
+after the first release workflow completes:
+
+1. Go to the package settings:
+   <https://github.com/orgs/stardag-dev/packages/container/stardag-server/settings>
+2. Under "Danger Zone" → "Change package visibility", set it to **Public**.
+3. While there, connect the package to the repository (adds the README and
+   links it from the repo's Packages sidebar).
+
+Verify with an anonymous pull: `docker logout ghcr.io && docker pull
+ghcr.io/stardag-dev/stardag-server:X.Y.Z`.
 
 `stardag self-host` deploys the prebuilt image by default; each SDK release
 pins the server version it was tested against
