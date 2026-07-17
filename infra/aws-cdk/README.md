@@ -36,6 +36,11 @@ Use the deployment scripts in `scripts/`:
 ./scripts/deploy-api.sh            # Build, push, and deploy API
 ./scripts/deploy-ui.sh             # Build and deploy UI
 ./scripts/run-migrations.sh        # Run database migrations
+
+# Prebuilt public release images (no local docker/npm builds)
+# See "Use Prebuilt Public Images" below
+./scripts/deploy-api.sh --image-uri ghcr.io/stardag-dev/stardag-server:X.Y.Z
+./scripts/deploy-ui.sh --release server-vX.Y.Z
 ```
 
 ### Deployment Order
@@ -49,6 +54,143 @@ For first-time deployments, the correct order is:
 5. Update API service
 
 The `deploy-all.sh` script handles this automatically.
+
+## Use Prebuilt Public Images (no local builds)
+
+Each server release (git tag `server-vX.Y.Z`) publishes:
+
+- A combined server container image: `ghcr.io/stardag-dev/stardag-server:X.Y.Z`
+  (Registry API + built web UI served same-origin + Alembic migrations).
+- The built UI dist as a GitHub Release asset: `stardag-ui-dist-X.Y.Z.tar.gz`.
+
+These let you deploy without Docker or Node installed locally.
+
+### API from a prebuilt image
+
+```bash
+# One-off deploy of a specific release image
+./scripts/deploy-api.sh --image-uri ghcr.io/stardag-dev/stardag-server:0.1.0
+
+# Or pass through the infra deploy (used by deploy-all.sh)
+./scripts/deploy-infra.sh --all --image-uri ghcr.io/stardag-dev/stardag-server:0.1.0
+```
+
+Under the hood this is a CDK context value (`-c apiImageUri=<uri>`), so it
+also works with plain CDK commands:
+
+```bash
+npx cdk deploy StardagApi -c apiImageUri=ghcr.io/stardag-dev/stardag-server:0.1.0
+```
+
+To make the choice persistent (so later deploys don't silently fall back to
+the ECR `:latest` image), pin it in `.env.deploy`:
+
+```bash
+STARDAG_API_IMAGE_URI=ghcr.io/stardag-dev/stardag-server:0.1.0
+```
+
+Notes:
+
+- **Always pin an explicit version** (`:0.1.0`), never a moving tag. ECS
+  resolves the tag at task start, so a moving tag would make scale-out
+  events and task replacements pull a different build than the running
+  tasks. Upgrades are then an explicit `.env.deploy` edit + `cdk deploy`.
+- The combined `stardag-server` image also contains the built web UI
+  (the API serves it same-origin when no external UI is configured). That
+  is harmless here: this CDK setup keeps serving the UI via S3 +
+  CloudFront, and the image is a strict superset of the API-only image —
+  including `alembic.ini` + `migrations/` at the same working directory,
+  so `run-migrations.sh` works unchanged.
+- `run-migrations.sh` overrides the container command with
+  `alembic upgrade head` (configurable via `MIGRATION_COMMAND` for images
+  with a different layout).
+
+### Recommended for production: ECR pull-through cache
+
+Pulling from `ghcr.io` puts an external registry on your ECS scale-up /
+recovery path (rate limits, availability). The recommended production
+pattern is an ECR pull-through cache: ECS pulls from your own ECR, which
+transparently mirrors GHCR on first pull.
+
+```bash
+# 1. Store GitHub credentials for GHCR upstream (a PAT with read:packages;
+#    required by ECR for ghcr.io upstreams). The secret name must start
+#    with "ecr-pullthroughcache/".
+aws secretsmanager create-secret \
+    --name ecr-pullthroughcache/ghcr \
+    --secret-string '{"username":"<github-username>","accessToken":"<github-pat>"}'
+
+# 2. Create the pull-through cache rule
+aws ecr create-pull-through-cache-rule \
+    --ecr-repository-prefix ghcr \
+    --upstream-registry-url ghcr.io \
+    --credential-arn arn:aws:secretsmanager:<region>:<account-id>:secret:ecr-pullthroughcache/ghcr-xxxxxx
+
+# 3. Prime the cache (first pull creates the repo and mirrors the image)
+aws ecr get-login-password --region <region> | \
+    docker login --username AWS --password-stdin <account-id>.dkr.ecr.<region>.amazonaws.com
+docker pull <account-id>.dkr.ecr.<region>.amazonaws.com/ghcr/stardag-dev/stardag-server:0.1.0
+
+# 4. Use the cached URI as the API image
+./scripts/deploy-api.sh \
+    --image-uri <account-id>.dkr.ecr.<region>.amazonaws.com/ghcr/stardag-dev/stardag-server:0.1.0
+```
+
+The ECS task execution role created by CDK already has ECR pull
+permissions via the managed `AmazonECSTaskExecutionRolePolicy`; add
+`ecr:BatchImportUpstreamImage` on the cache repositories if you want ECS
+itself (rather than a manual `docker pull`) to trigger first-time imports.
+
+### UI from a prebuilt release dist
+
+```bash
+./scripts/deploy-ui.sh --release server-v0.1.0
+```
+
+This downloads `stardag-ui-dist-0.1.0.tar.gz` from the GitHub release
+(via `gh` if installed, else `curl`) and syncs it to S3 — no `npm` needed.
+
+**Important caveat — same-origin requirement:** the prebuilt dist contains
+no baked `VITE_*` configuration. It resolves auth/API configuration at
+runtime from `GET /api/v1/auth/config` on its own origin
+(`window.location.origin`). In this CDK setup the UI (CloudFront) and API
+(ALB) are different origins by default, so the prebuilt dist only works if
+CloudFront routes `/api/*` (plus `/health` and `/.well-known/*`) to the
+API. Enable the same-origin proxy and redeploy the Frontend stack first:
+
+```bash
+# via .env.deploy: STARDAG_UI_API_PROXY=true, then ./scripts/deploy-infra.sh
+# or one-off:
+npx cdk deploy StardagFrontend -c uiApiProxy=true
+```
+
+`deploy-ui.sh --release` verifies the deployed distribution has the
+`/api/*` behavior and refuses to deploy without it
+(`--skip-same-origin-check` overrides). The proxy requires DNS to be
+configured (the CloudFront origin points at the API custom domain).
+
+When the proxy is enabled, SPA routing switches from distribution-wide
+403/404 → `index.html` error responses to a CloudFront viewer-request
+function on the S3 behavior (otherwise legitimate API 403/404 responses
+would be rewritten to the app shell). The function serves `/assets/*` and
+root-level files with a known static extension as-is and rewrites every
+other path to `/index.html`, so client routes may safely contain dots; if
+the UI dist ever ships static files outside `/assets/` with a new
+extension, add it to the allowlist in `lib/frontend-stack.ts`.
+
+The locally-built flow (plain `./scripts/deploy-ui.sh`) is unaffected and
+does not need the proxy: it bakes `VITE_API_BASE_URL` etc. at build time.
+
+### Fully prebuilt deployment
+
+```bash
+STARDAG_UI_API_PROXY=true ./scripts/deploy-all.sh \
+    --image-uri ghcr.io/stardag-dev/stardag-server:0.1.0 \
+    --release server-v0.1.0
+```
+
+Keep the API image version and the UI `--release` tag in lockstep (same
+`X.Y.Z`) unless a release note says otherwise.
 
 ## Operations
 

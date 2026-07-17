@@ -11,6 +11,31 @@ import { FoundationStack } from "./foundation-stack";
 export interface FrontendStackProps extends cdk.StackProps {
   config: StardagConfig;
   foundation: FoundationStack;
+
+  /**
+   * Route ``/api/*`` (plus ``/health`` and ``/.well-known/*``) through
+   * CloudFront to the API, making the UI and API same-origin.
+   *
+   * Required when deploying a prebuilt UI dist from a GitHub release
+   * (``deploy-ui.sh --release server-vX.Y.Z``): the prebuilt bundle has
+   * no baked ``VITE_*`` config and resolves its auth/API configuration at
+   * runtime from ``GET /api/v1/auth/config`` on ``window.location.origin``
+   * — which only reaches the API if CloudFront forwards ``/api/*`` to it.
+   *
+   * Can also be enabled via CDK context (``-c uiApiProxy=true``) or the
+   * ``STARDAG_UI_API_PROXY`` environment variable.
+   *
+   * Only supported when DNS is configured (the CloudFront origin points
+   * at the API custom domain, which needs a valid certificate).
+   *
+   * Side effect: SPA fallback switches from distribution-wide 403/404
+   * error responses (which would also rewrite legitimate API error
+   * responses to ``index.html``) to a viewer-request CloudFront Function
+   * scoped to the S3 behavior.
+   *
+   * @default false
+   */
+  apiProxy?: boolean;
 }
 
 /**
@@ -27,6 +52,25 @@ export class FrontendStack extends cdk.Stack {
     super(scope, id, props);
 
     const { config, foundation } = props;
+
+    // Optional same-origin API proxy (see FrontendStackProps.apiProxy).
+    // Resolution order: stack prop > CDK context > environment variable.
+    const rawApiProxy: unknown =
+      props.apiProxy ??
+      this.node.tryGetContext("uiApiProxy") ??
+      process.env.STARDAG_UI_API_PROXY;
+    const apiProxy =
+      rawApiProxy === true ||
+      (typeof rawApiProxy === "string" &&
+        ["true", "1"].includes(rawApiProxy.trim().toLowerCase()));
+
+    if (apiProxy && !foundation.dns) {
+      throw new Error(
+        "uiApiProxy requires DNS to be configured (a real DOMAIN_NAME): " +
+          "the CloudFront API origin points at the API custom domain " +
+          `(https://${config.apiDomain}) which needs a valid certificate.`,
+      );
+    }
 
     // =============================================================
     // S3 Bucket for Static Assets
@@ -67,6 +111,70 @@ export class FrontendStack extends cdk.Stack {
     });
 
     // =============================================================
+    // Optional same-origin API proxy behaviors
+    // =============================================================
+    // In apiProxy mode, CloudFront forwards API paths to the API custom
+    // domain so the UI and API share an origin. The distribution-wide
+    // 403/404 -> index.html error responses used for SPA routing in the
+    // default mode would also rewrite legitimate API error responses
+    // (CloudFront custom error responses apply to every cache behavior),
+    // so SPA routing switches to a viewer-request function scoped to the
+    // S3 behavior. The function uses a static-asset allowlist rather than
+    // a "URI contains a dot" heuristic: the dist layout is under our
+    // control (Vite emits the fingerprinted bundle under /assets/ plus a
+    // handful of root-level files with well-known extensions), while
+    // future client route params are not — a dotted route param must fall
+    // through to the SPA (which renders its own not-found state), not to
+    // a raw S3 AccessDenied/NoSuchKey XML response (proxy mode has no
+    // distribution-wide error responses to catch the miss).
+    const spaRewriteFunction = apiProxy
+      ? new cloudfront.Function(this, "SpaRewriteFn", {
+          comment: "SPA routing: rewrite non-static-asset paths to /index.html",
+          runtime: cloudfront.FunctionRuntime.JS_2_0,
+          code: cloudfront.FunctionCode.fromInline(
+            [
+              "function handler(event) {",
+              "  var request = event.request;",
+              "  var uri = request.uri;",
+              "  // Static assets are served as-is: the fingerprinted Vite",
+              "  // bundle under /assets/, and root-level files with a",
+              "  // known static extension (favicon.svg, robots.txt, ...).",
+              "  // Everything else is an SPA route -> /index.html. If the",
+              "  // UI dist ever ships static files outside /assets/ with",
+              "  // an extension not listed here, extend the allowlist.",
+              "  var isStaticAsset =",
+              "    uri.startsWith('/assets/') ||",
+              "    /\\.(html|js|css|map|json|svg|png|jpe?g|gif|webp|avif|ico|txt|xml|webmanifest|woff2?|ttf|eot)$/.test(uri);",
+              "  if (!isStaticAsset) {",
+              "    request.uri = '/index.html';",
+              "  }",
+              "  return request;",
+              "}",
+            ].join("\n"),
+          ),
+        })
+      : undefined;
+
+    const apiBehavior: cloudfront.BehaviorOptions | undefined = apiProxy
+      ? {
+          // Point at the API custom domain (resolves to the ALB via
+          // Route53); avoids a cross-stack reference to the Api stack and
+          // presents a certificate that matches the origin hostname.
+          origin: new cloudfront_origins.HttpOrigin(config.apiDomain, {
+            protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+          }),
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          // Forward all viewer headers (incl. Authorization) except Host,
+          // which must stay the origin's own hostname for TLS/routing.
+          originRequestPolicy:
+            cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          compress: true,
+        }
+      : undefined;
+
+    // =============================================================
     // CloudFront Distribution
     // =============================================================
     const certificate = foundation.dns?.uiCertificate;
@@ -95,23 +203,52 @@ export class FrontendStack extends cdk.Stack {
           cloudfront.ResponseHeadersPolicy
             .CORS_ALLOW_ALL_ORIGINS_WITH_PREFLIGHT_AND_SECURITY_HEADERS,
         compress: true,
+        ...(spaRewriteFunction
+          ? {
+              functionAssociations: [
+                {
+                  function: spaRewriteFunction,
+                  eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+                },
+              ],
+            }
+          : {}),
       },
 
-      // SPA routing: serve index.html for all 403/404 errors
-      errorResponses: [
-        {
-          httpStatus: 403,
-          responseHttpStatus: 200,
-          responsePagePath: "/index.html",
-          ttl: cdk.Duration.minutes(5),
-        },
-        {
-          httpStatus: 404,
-          responseHttpStatus: 200,
-          responsePagePath: "/index.html",
-          ttl: cdk.Duration.minutes(5),
-        },
-      ],
+      // Same-origin API proxy behaviors (apiProxy mode only)
+      ...(apiBehavior
+        ? {
+            additionalBehaviors: {
+              "/api/*": apiBehavior,
+              "/health": apiBehavior,
+              // JWKS is served at the root-level standard location too
+              "/.well-known/*": apiBehavior,
+            },
+          }
+        : {}),
+
+      // SPA routing (default mode): serve index.html for all 403/404
+      // errors. In apiProxy mode the viewer-request function on the S3
+      // behavior handles SPA routing instead, so API error responses
+      // pass through untouched.
+      ...(apiProxy
+        ? {}
+        : {
+            errorResponses: [
+              {
+                httpStatus: 403,
+                responseHttpStatus: 200,
+                responsePagePath: "/index.html",
+                ttl: cdk.Duration.minutes(5),
+              },
+              {
+                httpStatus: 404,
+                responseHttpStatus: 200,
+                responsePagePath: "/index.html",
+                ttl: cdk.Duration.minutes(5),
+              },
+            ],
+          }),
 
       // Default root object
       defaultRootObject: "index.html",
@@ -156,6 +293,14 @@ export class FrontendStack extends cdk.Stack {
       value: this.distribution.distributionId,
       description: "CloudFront distribution ID",
       exportName: "StardagFrontendDistributionId",
+    });
+
+    new cdk.CfnOutput(this, "ApiProxyEnabled", {
+      value: apiProxy ? "true" : "false",
+      description:
+        "Whether CloudFront routes /api/* to the API (required for " +
+        "prebuilt UI dists deployed with deploy-ui.sh --release)",
+      exportName: "StardagFrontendApiProxyEnabled",
     });
 
     new cdk.CfnOutput(this, "DistributionDomain", {

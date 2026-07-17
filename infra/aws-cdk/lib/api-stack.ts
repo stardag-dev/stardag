@@ -17,6 +17,25 @@ import { FoundationStack } from "./foundation-stack";
 export interface ApiStackProps extends cdk.StackProps {
   config: StardagConfig;
   foundation: FoundationStack;
+
+  /**
+   * Optional explicit container image URI for the API service.
+   *
+   * When set, the ECS task uses this image directly (e.g. a prebuilt
+   * public release image such as
+   * ``ghcr.io/stardag-dev/stardag-server:X.Y.Z``) instead of the
+   * ``:latest`` tag of the ECR repository created by the Foundation
+   * stack. Can also be provided via CDK context (``-c apiImageUri=...``)
+   * or the ``STARDAG_API_IMAGE_URI`` environment variable.
+   *
+   * Note: the combined ``stardag-server`` image also bundles the built
+   * web UI (served same-origin by the API). That is harmless here — this
+   * CDK setup keeps serving the UI via S3 + CloudFront — the image is
+   * simply also a superset of the API-only image.
+   *
+   * @default - image from the Foundation stack's ECR repository (:latest)
+   */
+  apiImageUri?: string;
 }
 
 /**
@@ -38,6 +57,18 @@ export class ApiStack extends cdk.Stack {
     super(scope, id, props);
 
     const { config, foundation } = props;
+
+    // Optional explicit image URI (prebuilt public release image).
+    // Resolution order: stack prop > CDK context > environment variable.
+    // Trim whitespace so a blank value in an env file is treated as unset.
+    const rawImageUri: unknown =
+      props.apiImageUri ??
+      this.node.tryGetContext("apiImageUri") ??
+      process.env.STARDAG_API_IMAGE_URI;
+    const apiImageUri =
+      typeof rawImageUri === "string" && rawImageUri.trim() !== ""
+        ? rawImageUri.trim()
+        : undefined;
 
     // Sizing knobs that ops may want to tune at deploy time without
     // editing this file. Defaults match the OSS-friendly free-tier shape;
@@ -171,8 +202,11 @@ export class ApiStack extends cdk.Stack {
 
     // Add container
     taskDefinition.addContainer("Api", {
-      // Use image from ECR repository
-      image: ecs.ContainerImage.fromEcrRepository(foundation.ecrRepository, "latest"),
+      // Either an explicit (typically prebuilt public) image, or the
+      // locally-built image pushed to the Foundation stack's ECR repo.
+      image: apiImageUri
+        ? ecs.ContainerImage.fromRegistry(apiImageUri)
+        : ecs.ContainerImage.fromEcrRepository(foundation.ecrRepository, "latest"),
       logging: ecs.LogDrivers.awsLogs({
         logGroup,
         streamPrefix: "api",
@@ -188,6 +222,15 @@ export class ApiStack extends cdk.Stack {
         OIDC_AUDIENCE: foundation.cognitoClientId,
         // SDK client ID (same Cognito client used for both UI and SDK)
         OIDC_SDK_CLIENT_ID: foundation.cognitoClientId,
+        // UI client ID and Cognito hosted-UI domain, served to the web UI
+        // at runtime via GET /api/v1/auth/config. Required for prebuilt UI
+        // dists (deploy-ui.sh --release), which have no baked VITE_* config
+        // and would otherwise fall back to the API defaults (client id
+        // "stardag-ui", no Cognito logout). Harmless for locally-built
+        // dists, which bake their config at build time.
+        OIDC_UI_CLIENT_ID: foundation.cognitoClientId,
+        // Bare host, no scheme — the UI builds https://{domain}/logout.
+        OIDC_COGNITO_DOMAIN: foundation.cognitoDomain,
         // Cognito JWKS URL format: {issuer}/.well-known/jwks.json
         // (different from Keycloak which uses /protocol/openid-connect/certs)
         OIDC_JWKS_URL: `${foundation.cognitoIssuerUrl}/.well-known/jwks.json`,
