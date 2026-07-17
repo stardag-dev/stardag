@@ -383,78 +383,70 @@ def _determine_registry(
         return registry_name, registries[registry_name]
 
 
-@app.command()
-def login(
-    registry: str = typer.Option(
-        None,
-        "--registry",
-        "-r",
-        help="Registry name to login to (uses active profile's registry if not specified)",
-    ),
-    api_url: str = typer.Option(
-        None,
-        "--api-url",
-        "-u",
-        help="Base URL of the Stardag API (overrides registry URL)",
-    ),
-    oidc_issuer: str = typer.Option(
-        None,
-        "--oidc-issuer",
-        help="OIDC issuer URL (overrides registry config)",
-    ),
-    client_id: str = typer.Option(
-        None,
-        "--client-id",
-        help="OIDC client ID (overrides registry config)",
-    ),
-) -> None:
-    """Login to Stardag API via browser.
+def _login_local_flow(registry: str, api_url: str) -> tuple[str, str]:
+    """Email/password login against a local-auth-mode registry.
 
-    Opens your browser to authenticate with the OIDC identity provider.
-    After successful login, credentials are stored locally.
-
-    If a profile is active (via STARDAG_PROFILE or default), this command
-    will refresh credentials for that profile's registry without prompting
-    for workspace/environment selection.
-
-    For first-time setup (no profiles), you'll be guided through workspace/environment
-    selection to create your first profile.
-
-    For production/CI, use the STARDAG_API_KEY environment variable instead.
+    Prompts for credentials, stores the returned session token in the
+    credentials file, and returns (session_token, user_email). The session
+    token plays the OIDC-token role downstream (bearer for /auth/exchange
+    and bootstrap endpoints).
     """
-    # Check if API key is already set via env var
-    env_api_key = os.environ.get("STARDAG_API_KEY")
-    if env_api_key:
-        typer.echo("STARDAG_API_KEY environment variable is set.")
-        typer.echo("You're already authenticated via API key.")
-        typer.echo("")
-        typer.echo("To use browser login instead, unset the environment variable:")
-        typer.echo("  unset STARDAG_API_KEY")
-        return
+    typer.echo("This registry uses email/password authentication.")
+    email = typer.prompt("Email")
+    password = typer.prompt("Password", hide_input=True)
 
-    # Determine which registry to use
-    effective_registry, effective_url = _determine_registry(registry, api_url)
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                f"{api_url}/api/v1/auth/login",
+                json={"email": email, "password": password},
+            )
+    except httpx.HTTPError as e:
+        typer.echo(f"Error: Could not reach registry: {e}", err=True)
+        raise typer.Exit(1)
 
-    # Check if we have an active profile for this registry
-    active_profile, active_source = get_active_profile()
-    profiles = list_profiles()
-    has_active_profile_for_registry = (
-        active_profile
-        and active_profile in profiles
-        and profiles[active_profile]["registry"] == effective_registry
-    )
+    if response.status_code == 401:
+        typer.echo("Error: Invalid email or password", err=True)
+        raise typer.Exit(1)
+    if response.status_code == 429:
+        typer.echo("Error: Too many login attempts, try again later", err=True)
+        raise typer.Exit(1)
+    if response.status_code != 200:
+        typer.echo(
+            f"Error: Login failed ({response.status_code}): {response.text}", err=True
+        )
+        raise typer.Exit(1)
 
-    typer.echo(f"Logging into registry: {effective_registry} ({effective_url})")
+    data = response.json()
+    session_token = data["session_token"]
+    expires_in = data.get("expires_in", 3600)
 
-    # Determine OIDC issuer and client ID
-    # Priority: CLI args > registry config > local defaults
+    creds_to_save: Credentials = {
+        "auth_mode": "local",
+        "session_token": session_token,
+        "session_expires_at": time.time() + expires_in - 30,
+    }
+    save_credentials(creds_to_save, registry, email)
+
+    typer.echo(f"Logged in as: {email}")
+    return session_token, email
+
+
+def _login_oidc_flow(
+    registry: str,
+    api_url: str,
+    oidc_issuer: str | None,
+    client_id: str | None,
+    auth_config: dict | None,
+) -> tuple[str, str]:
+    """Browser-based OIDC login (PKCE). Returns (oidc_token, user_email).
+
+    Stores the OIDC refresh token in the credentials file.
+    """
     effective_issuer = oidc_issuer
     effective_client_id = client_id
 
     if not effective_issuer or not effective_client_id:
-        typer.echo("Fetching auth configuration from registry...")
-        auth_config = _get_auth_config_from_registry(effective_url)
-
         if auth_config:
             if not effective_issuer:
                 effective_issuer = auth_config.get("oidc_issuer")
@@ -463,7 +455,7 @@ def login(
             typer.echo(f"Using OIDC issuer: {effective_issuer}")
         else:
             # Fall back to local defaults only if registry is "local"
-            if effective_registry == "local":
+            if registry == "local":
                 typer.echo("Using local development defaults")
                 if not effective_issuer:
                     effective_issuer = LOCAL_OIDC_ISSUER
@@ -471,7 +463,7 @@ def login(
                     effective_client_id = LOCAL_OIDC_CLIENT_ID
             else:
                 typer.echo(
-                    f"Error: Could not fetch auth config from {effective_url}",
+                    f"Error: Could not fetch auth config from {api_url}",
                     err=True,
                 )
                 typer.echo(
@@ -481,7 +473,7 @@ def login(
                 typer.echo("")
                 typer.echo("You can manually specify OIDC settings:")
                 typer.echo(
-                    f"  stardag auth login -r {effective_registry} "
+                    f"  stardag auth login -r {registry} "
                     "--oidc-issuer <issuer-url> --client-id <client-id>"
                 )
                 raise typer.Exit(1)
@@ -502,7 +494,7 @@ def login(
         )
         typer.echo(f"  {e}", err=True)
         typer.echo("")
-        if effective_registry == "local":
+        if registry == "local":
             typer.echo("Make sure Keycloak is running (docker compose up keycloak)")
         else:
             typer.echo("Check that the OIDC issuer is accessible.")
@@ -616,7 +608,94 @@ def login(
     }
     if tokens.get("refresh_token"):
         creds_to_save["refresh_token"] = tokens["refresh_token"]
-    save_credentials(creds_to_save, effective_registry, logged_in_user)
+    save_credentials(creds_to_save, registry, logged_in_user)
+
+    return oidc_token, logged_in_user
+
+
+@app.command()
+def login(
+    registry: str = typer.Option(
+        None,
+        "--registry",
+        "-r",
+        help="Registry name to login to (uses active profile's registry if not specified)",
+    ),
+    api_url: str = typer.Option(
+        None,
+        "--api-url",
+        "-u",
+        help="Base URL of the Stardag API (overrides registry URL)",
+    ),
+    oidc_issuer: str = typer.Option(
+        None,
+        "--oidc-issuer",
+        help="OIDC issuer URL (overrides registry config)",
+    ),
+    client_id: str = typer.Option(
+        None,
+        "--client-id",
+        help="OIDC client ID (overrides registry config)",
+    ),
+) -> None:
+    """Login to Stardag API via browser.
+
+    Opens your browser to authenticate with the OIDC identity provider.
+    After successful login, credentials are stored locally.
+
+    If a profile is active (via STARDAG_PROFILE or default), this command
+    will refresh credentials for that profile's registry without prompting
+    for workspace/environment selection.
+
+    For first-time setup (no profiles), you'll be guided through workspace/environment
+    selection to create your first profile.
+
+    For production/CI, use the STARDAG_API_KEY environment variable instead.
+    """
+    # Check if API key is already set via env var
+    env_api_key = os.environ.get("STARDAG_API_KEY")
+    if env_api_key:
+        typer.echo("STARDAG_API_KEY environment variable is set.")
+        typer.echo("You're already authenticated via API key.")
+        typer.echo("")
+        typer.echo("To use browser login instead, unset the environment variable:")
+        typer.echo("  unset STARDAG_API_KEY")
+        return
+
+    # Determine which registry to use
+    effective_registry, effective_url = _determine_registry(registry, api_url)
+
+    # Check if we have an active profile for this registry
+    active_profile, active_source = get_active_profile()
+    profiles = list_profiles()
+    has_active_profile_for_registry = (
+        active_profile
+        and active_profile in profiles
+        and profiles[active_profile]["registry"] == effective_registry
+    )
+
+    typer.echo(f"Logging into registry: {effective_registry} ({effective_url})")
+
+    # Fetch auth configuration to determine the auth mode, unless the OIDC
+    # settings are fully specified via CLI args (explicit OIDC override)
+    auth_config: dict | None = None
+    if not oidc_issuer or not client_id:
+        typer.echo("Fetching auth configuration from registry...")
+        auth_config = _get_auth_config_from_registry(effective_url)
+
+    if auth_config and auth_config.get("auth_mode") == "local":
+        # Registry manages email/password accounts directly - no OIDC
+        oidc_token, logged_in_user = _login_local_flow(
+            effective_registry, effective_url
+        )
+    else:
+        oidc_token, logged_in_user = _login_oidc_flow(
+            registry=effective_registry,
+            api_url=effective_url,
+            oidc_issuer=oidc_issuer,
+            client_id=client_id,
+            auth_config=auth_config,
+        )
 
     typer.echo("")
     typer.echo("Login successful!")

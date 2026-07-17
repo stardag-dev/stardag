@@ -1,8 +1,10 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.auth.tokens import get_token_manager
-from stardag_api.config import settings
+from stardag_api.config import auth_settings, settings
 from stardag_api.middleware import GZipRequestMiddleware
 from stardag_api.routes import (
     auth_router,
@@ -25,10 +27,24 @@ from stardag_api.routes import (
 get_token_manager()
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Local auth mode: idempotently provision the bootstrap admin so a
+    # fresh self-hosted deployment has a first user to log in with.
+    if auth_settings.mode == "local" and auth_settings.bootstrap_admin_email:
+        from stardag_api.db import async_session_maker
+        from stardag_api.services.local_auth import ensure_bootstrap_admin
+
+        async with async_session_maker() as session:
+            await ensure_bootstrap_admin(session)
+    yield
+
+
 app = FastAPI(
     title="Stardag API",
     description="API for tracking and monitoring Stardag task execution",
     version="0.0.1",
+    lifespan=lifespan,
 )
 
 # CORS for frontend

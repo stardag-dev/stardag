@@ -36,9 +36,17 @@ The SDK integrates with the API optionally — tasks work standalone without it.
 
 ### Authentication Methods
 
-1. **API Key** (SDK): Set `STARDAG_API_KEY=sk_...` or `X-API-Key` header
-2. **Browser Login** (CLI): `stardag auth login` → stores JWT in credentials
-3. **OIDC** (UI): Keycloak-based login → token exchange → internal JWT
+The server runs in one of two auth modes (`AUTH_MODE=oidc|local`, served to
+clients at runtime via `GET /api/v1/auth/config`):
+
+1. **API Key** (SDK): Set `STARDAG_API_KEY=sk_...` or `X-API-Key` header (both modes)
+2. **Browser Login** (CLI): `stardag auth login` → OIDC PKCE flow (oidc mode)
+   or email/password prompt (local mode) → stores credentials
+3. **OIDC** (UI, oidc mode): external IdP login → token exchange → internal JWT
+4. **Local** (UI, local mode): email/password → session token (user-scoped
+   internal JWT, `token_use=session`) → exchange for workspace tokens.
+   Endpoints: `POST /auth/login`, `/auth/register` (opt-in), `/auth/change-password`.
+   Bootstrap admin via `AUTH_BOOTSTRAP_ADMIN_EMAIL/_PASSWORD` env vars.
 
 ### SDK Integration
 
@@ -163,6 +171,18 @@ non-active profile / environment.
 ```bash
 stardag modal deploy APP_REF                # Deploy to Modal.com
 stardag modal stardag-api-key create        # Create API key for Modal
+```
+
+### Self-Hosting (API + UI on Modal)
+
+Requires the `selfhost` extra (`pip install "stardag[selfhost]"`) and a
+stardag repo checkout. See docs/how-to/self-host-modal.md.
+
+```bash
+stardag self-host up        # Provision Neon DB, migrate, deploy API+UI, print URL
+stardag self-host upgrade   # Apply migrations + redeploy from current source
+stardag self-host status    # Deployment status + URL
+stardag self-host destroy   # Stop the Modal app (DB untouched)
 ```
 
 ## Configuration System

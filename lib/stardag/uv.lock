@@ -3605,6 +3605,10 @@ s3 = [
     { name = "botocore" },
     { name = "types-aioboto3", extra = ["s3"] },
 ]
+selfhost = [
+    { name = "cryptography" },
+    { name = "modal" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -3626,9 +3630,11 @@ requires-dist = [
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
     { name = "boto3-stubs", extras = ["s3"], marker = "extra == 's3'" },
     { name = "botocore", marker = "extra == 's3'", specifier = ">=1.36" },
+    { name = "cryptography", marker = "extra == 'selfhost'", specifier = ">=42.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "httpx-retries", specifier = ">=0.1.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.0.0" },
+    { name = "modal", marker = "extra == 'selfhost'", specifier = ">=1.0.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.1.0" },
     { name = "prefect", marker = "extra == 'prefect'", specifier = ">=3.0.3" },
     { name = "pydantic", specifier = ">=2.8.2" },
@@ -3639,7 +3645,7 @@ requires-dist = [
     { name = "types-aioboto3", extras = ["s3"], marker = "extra == 's3'" },
     { name = "uuid6", specifier = ">=2022.6.25" },
 ]
-provides-extras = ["modal", "pandas", "prefect", "s3"]
+provides-extras = ["modal", "pandas", "prefect", "s3", "selfhost"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag_api.limits import LimitsSettings
@@ -11,6 +13,16 @@ class Settings(BaseSettings):
     database_name: str = "stardag"
     database_user: str = "stardag"
     database_password: str = "stardag"
+    # Direct (non-pooled) database URL. When database_url points at a
+    # connection pooler (e.g. Neon's PgBouncer endpoint), operations that
+    # need a real session - Alembic migrations in particular - must bypass
+    # it. Falls back to the regular URL when unset.
+    database_url_direct: str | None = None
+    # Enable when database_url goes through a transaction-mode pooler
+    # (PgBouncer et al.): disables asyncpg's prepared-statement caching,
+    # which breaks when consecutive statements may hit different backend
+    # sessions.
+    database_pooler_compat: bool = False
 
     debug: bool = False
 
@@ -28,6 +40,11 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.database_user}:{self.database_password}"
             f"@{self.database_host}:{self.database_port}/{self.database_name}"
         )
+
+    @property
+    def effective_migration_database_url(self) -> str:
+        """Database URL for migrations: direct (non-pooled) when configured."""
+        return self.database_url_direct or self.effective_database_url
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -82,6 +99,32 @@ class EmailSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EMAIL_")
 
 
+class AuthSettings(BaseSettings):
+    """Top-level authentication mode configuration.
+
+    - "oidc" (default): users authenticate against an external OIDC provider
+      and exchange the OIDC token for an internal token via /auth/exchange.
+    - "local": users authenticate with email/password managed by this API,
+      which mints internal tokens directly. No external IdP required.
+    """
+
+    mode: Literal["oidc", "local"] = "oidc"
+    # Allow self-service signup in local mode. Off by default: a self-hosted
+    # instance is typically reachable from the public internet.
+    local_registration_enabled: bool = False
+    # TTL for session tokens minted by local-mode login. Session tokens act
+    # as the "refresh" credential (analogous to an OIDC session) and are
+    # exchanged for short-lived workspace tokens via /auth/exchange.
+    session_token_ttl_hours: int = 24 * 7
+    # Bootstrap admin for local mode: created at startup if no user with
+    # this email exists (idempotent; an existing user's password is never
+    # overwritten). Set both or neither.
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
+
+    model_config = SettingsConfigDict(env_prefix="AUTH_")
+
+
 class OIDCSettings(BaseSettings):
     """OIDC configuration for JWT validation."""
 
@@ -97,6 +140,12 @@ class OIDCSettings(BaseSettings):
     jwks_cache_ttl: int = 300
     # OIDC client ID for SDK/CLI authentication
     sdk_client_id: str = "stardag-sdk"
+    # OIDC client ID the web UI should use (served via /auth/config so the UI
+    # can be configured at runtime instead of at build time)
+    ui_client_id: str = "stardag-ui"
+    # Cognito hosted-UI domain (only needed for Cognito's non-standard logout;
+    # served to the UI via /auth/config)
+    cognito_domain: str | None = None
 
     model_config = SettingsConfigDict(env_prefix="OIDC_")
 
@@ -131,6 +180,7 @@ class OIDCSettings(BaseSettings):
 
 settings = Settings()
 jwt_settings = JWTSettings()
+auth_settings = AuthSettings()
 oidc_settings = OIDCSettings()
 email_settings = EmailSettings()
 limits_settings = LimitsSettings()

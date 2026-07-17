@@ -45,6 +45,10 @@ s3 = [
 modal = [
     "modal>=1.0.0",
 ]
+selfhost = [
+    "modal>=1.0.0",
+    "cryptography>=42.0.0",
+]
 pandas = [
     "pandas>=2.1.0",
 ]

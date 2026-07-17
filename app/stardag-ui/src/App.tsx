@@ -6,6 +6,7 @@ import { BuildView } from "./components/BuildView";
 import { CreateWorkspace } from "./components/CreateWorkspace";
 import { CodeExampleTabs } from "./components/CodeExampleTabs";
 import { LandingPageDemo } from "./components/LandingPageDemo";
+import { LocalLoginPage } from "./components/LocalLoginPage";
 import { Logo } from "./components/Logo";
 import { OnboardingModal } from "./components/OnboardingModal";
 import { SessionExpiredOverlay } from "./components/SessionExpiredOverlay";
@@ -457,7 +458,13 @@ function UspsCarousel() {
 
 // Landing page for non-authenticated users
 function LandingPage() {
-  const { login } = useAuth();
+  const { login, authMode } = useAuth();
+
+  // Local auth mode (self-hosted): straight to the sign-in form — the
+  // marketing landing page is for the hosted offering.
+  if (authMode === "local") {
+    return <LocalLoginPage />;
+  }
 
   return (
     <div className="flex min-h-screen flex-col overflow-x-hidden bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900">

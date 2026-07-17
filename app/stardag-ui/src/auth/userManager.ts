@@ -1,17 +1,9 @@
 import { User, UserManager, WebStorageStateStore, Log } from "oidc-client-ts";
-import {
-  OIDC_ISSUER,
-  OIDC_CLIENT_ID,
-  OIDC_REDIRECT_URI,
-  OIDC_POST_LOGOUT_REDIRECT_URI,
-} from "./config";
+import { getAuthConfig } from "./config";
 
 // Build version for debugging (set at build time)
 const BUILD_VERSION = import.meta.env.VITE_BUILD_VERSION || new Date().toISOString();
 console.log(`[OIDC] Build version: ${BUILD_VERSION}`);
-console.log(
-  `[OIDC] Config: issuer=${OIDC_ISSUER}, clientId=${OIDC_CLIENT_ID}, redirectUri=${OIDC_REDIRECT_URI}`,
-);
 
 // Enable oidc-client-ts debug logging
 Log.setLogger(console);
@@ -21,17 +13,21 @@ Log.setLevel(Log.DEBUG);
 let userManager: UserManager | null = null;
 
 export function getUserManager(): UserManager | null {
-  if (!OIDC_ISSUER) {
-    // Auth not configured - return null
+  const config = getAuthConfig();
+  if (config.mode !== "oidc" || !config.oidcIssuer) {
+    // No OIDC provider configured (auth disabled or local mode) - return null
     return null;
   }
 
   if (!userManager) {
+    console.log(
+      `[OIDC] Config: issuer=${config.oidcIssuer}, clientId=${config.oidcClientId}, redirectUri=${config.oidcRedirectUri}`,
+    );
     userManager = new UserManager({
-      authority: OIDC_ISSUER,
-      client_id: OIDC_CLIENT_ID,
-      redirect_uri: OIDC_REDIRECT_URI,
-      post_logout_redirect_uri: OIDC_POST_LOGOUT_REDIRECT_URI,
+      authority: config.oidcIssuer,
+      client_id: config.oidcClientId,
+      redirect_uri: config.oidcRedirectUri,
+      post_logout_redirect_uri: config.oidcPostLogoutRedirectUri,
       response_type: "code",
       scope: "openid profile email",
       automaticSilentRenew: true,

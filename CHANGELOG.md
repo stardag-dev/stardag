@@ -4,6 +4,69 @@ All notable changes to the Stardag project (SDK, Registry API, and UI).
 
 For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
+## [Unreleased]
+
+### SDK
+
+- **Self-host the Stardag service on Modal with one command
+  ([#187](https://github.com/stardag-dev/stardag/issues/187)).** New
+  `stardag self-host` CLI (`up`/`upgrade`/`status`/`destroy`, extra:
+  `stardag[selfhost]`): provisions a Postgres database on Neon from an
+  API key (or bring-your-own via `--database-url`), applies migrations,
+  and deploys the Registry API + web UI as a single Modal web endpoint.
+  Deploys a prebuilt public server image by default
+  (`--server-version`); `--from-source` builds from a repo checkout
+  (the UI compiles inside the Modal image build — no local Node/Docker
+  required). See the "Self-host on Modal" guide.
+- **`stardag auth login` supports local-auth registries**: when the
+  registry reports `auth_mode=local` it prompts for email/password and
+  stores the session token; the existing token-refresh chain uses it
+  transparently.
+
+### Registry API
+
+- **Local authentication mode** (`AUTH_MODE=local`): email/password
+  accounts managed by the API itself — no external identity provider.
+  New endpoints `POST /auth/login`, `POST /auth/register` (disabled by
+  default), `POST /auth/change-password`; user-scoped session tokens
+  (`token_use=session`) accepted by `/auth/exchange` and bootstrap
+  endpoints; bcrypt hashing with timing-uniform verification; login
+  rate limiting; idempotent bootstrap-admin provisioning at startup
+  (`AUTH_BOOTSTRAP_ADMIN_EMAIL`/`_PASSWORD`). OIDC mode (default) is
+  unchanged.
+- `GET /auth/config` now serves the full client auth configuration
+  (auth mode, issuer, UI client id, Cognito domain, registration flag)
+  so UIs and CLIs can be configured at runtime.
+- `GET /api/v1/version` reports the server version
+  (`STARDAG_SERVER_VERSION`, stamped by the release pipeline) and the
+  installed API package version.
+- Serverless/pooler support: `STARDAG_API_DATABASE_URL_DIRECT`
+  (migrations bypass transaction-mode poolers) and
+  `STARDAG_API_DATABASE_POOLER_COMPAT` (asyncpg prepared-statement
+  settings for PgBouncer-style poolers).
+
+### UI
+
+- Auth/API configuration resolves at runtime from the API — a prebuilt
+  UI bundle works against any IdP or auth mode without rebuilding
+  (build-time `VITE_*` values still take precedence when set).
+- Local-auth mode: sign-in/registration page and a "Change password"
+  action in the user menu.
+- The Settings page footer shows the server version.
+
+### Deployment
+
+- **Server release pipeline**: git tags `server-vX.Y.Z` publish the
+  combined server image `ghcr.io/stardag-dev/stardag-server:X.Y.Z`
+  (Registry API + web UI + migrations, one joint version) and attach
+  the built UI dist to the GitHub release. `app/server.Dockerfile` is
+  the single image definition; `scripts/server-version.sh` derives
+  truthful versions for non-release builds (`X.Y.Z+N.g<sha>`).
+- AWS CDK: optional `apiImageUri` to run the public server image
+  instead of building to ECR; `deploy-ui.sh --release` deploys the
+  prebuilt UI dist; opt-in CloudFront same-origin `/api/*` proxy
+  (`uiApiProxy=true`); ECR pull-through-cache recipe documented.
+
 ## [0.14.0] — 2026-07-16
 
 ### SDK

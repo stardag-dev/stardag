@@ -13,12 +13,18 @@ import { Modal } from "./Modal";
  * Escape will fire the no-op ``onClose`` and the modal stays mounted.
  */
 export function SessionExpiredOverlay() {
-  const { sessionExpired, login, logout } = useAuth();
+  const { sessionExpired, login, logout, authMode } = useAuth();
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   async function handleSignIn() {
     setIsLoggingIn(true);
     try {
+      if (authMode === "local") {
+        // Local mode: sessions can't be silently renewed. Drop the
+        // session — the router lands on the sign-in form.
+        await logout();
+        return;
+      }
       // ``login()`` calls signinRedirect — the browser navigates away to
       // Cognito and comes back to the OIDC callback URL, which finishes
       // the sign-in flow and clears the sessionExpired flag via the

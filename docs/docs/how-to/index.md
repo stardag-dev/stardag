@@ -10,6 +10,7 @@ Practical guides for common tasks and integrations.
 
 - **[Integrate with Prefect](integrate-prefect.md)** - Orchestration and observability
 - **[Integrate with Modal](integrate-modal.md)** - Serverless execution
+- **[Self-host on Modal](self-host-modal.md)** - Run your own Stardag service (API + UI) on Modal
 
 ## Prerequisites
 
