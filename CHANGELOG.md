@@ -6,6 +6,27 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-08-06
+
+### SDK
+
+- **The published distribution now ships a [PEP 561](https://peps.python.org/pep-0561/)
+  `py.typed` marker** (plus the `Typing :: Typed` classifier), so type
+  checkers use stardag's inline annotations instead of discarding them. No
+  API change — the minor bump reflects the downstream effect below.
+
+  **Downstream:** mypy previously skipped the package entirely —
+  `module is installed, but missing library stubs or py.typed marker` —
+  and treated every stardag symbol as `Any`, so genuine mismatches in
+  consumer code went unreported. They are now flagged, which means a
+  previously green mypy run can surface new — real — errors after
+  upgrading. Two workarounds also go stale and should be removed:
+  `# type: ignore[import-untyped]` comments on stardag imports, and any
+  `ignore_missing_imports` override for `stardag.*` (`warn_unused_ignores`
+  will report them as unused). Pyright already resolved stardag's types
+  from the installed package; the only change there is that strict mode
+  no longer emits `reportMissingTypeStubs`.
+
 ## [0.16.1] — 2026-07-17
 
 ### Fixed

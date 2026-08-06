@@ -6,6 +6,45 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.17.0 — stardag ships its type information (PEP 561)
+
+The published distribution now includes a
+[PEP 561](https://peps.python.org/pep-0561/) `py.typed` marker, so type
+checkers honour stardag's inline annotations instead of discarding them.
+There are no API or runtime changes.
+
+**What this means if you use mypy.** Without the marker, mypy ignored
+stardag's annotations altogether:
+
+```
+error: Skipping analyzing "stardag": module is installed, but missing
+library stubs or py.typed marker  [import-untyped]
+```
+
+Every stardag symbol was `Any`, so mistakes in your own code — a wrong
+argument type, a misspelled attribute on a `Task` — passed silently. After
+upgrading they are checked, so **a mypy run that was green may now report
+new errors**. Those errors were always there; they were just invisible.
+
+Two workarounds you may have in place become unnecessary, and will be
+reported as unused once `warn_unused_ignores` is on:
+
+```python
+from stardag import Task  # type: ignore[import-untyped]  # <- remove
+```
+
+```toml
+[[tool.mypy.overrides]]           # <- remove
+module = ["stardag.*"]
+ignore_missing_imports = true
+```
+
+**If you use pyright**, nothing changes in practice — it already resolved
+stardag's types from the installed package. Strict mode simply stops
+emitting `reportMissingTypeStubs: Stub file not found for "stardag"`.
+
+---
+
 ## v0.16.1 — Self-host: shared-workspace default + API-key secret safety
 
 Two `stardag self-host` fixes:
