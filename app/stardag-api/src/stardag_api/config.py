@@ -103,6 +103,54 @@ class ReaperSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_REAPER_")
 
 
+# Bounds on a claim TTL, shared by the ``claim_ttl_seconds`` query parameter
+# and by :class:`ClaimSettings`. Both ends reject values that can only be
+# mistakes:
+#
+# - Below a minute a claim can expire while its own executor is still
+#   starting up, and one clock-skewed client would hand the task to a second
+#   claimant *while the first is running it*. A claim is not a heartbeat
+#   lease; there is nothing that renews it mid-execution.
+# - Above a month the expiry stops being liveness evidence at all — it is
+#   indistinguishable from the "forever" it replaces, and NULL already says
+#   that more honestly.
+MIN_CLAIM_TTL_SECONDS = 60
+MAX_CLAIM_TTL_SECONDS = 30 * 24 * 60 * 60
+
+
+class ClaimSettings(BaseSettings):
+    """Expiry of the per-task execution claim (``Task.latest_status_expires_at``).
+
+    A task whose ``latest_status`` is RUNNING holds the environment-global
+    execution claim (see ``services.claims`` for the predicates).
+    Recording *when that claim stops being believable* is what lets a third
+    party — another build, the concurrency-limit counter — decide the holder
+    is gone without probing anything.
+
+    The TTL is written once, at claim time, and is **not** renewed by a
+    heartbeat. Callers should therefore pass ``claim_ttl_seconds`` on the
+    start, derived from their executor's own timeout plus a small grace:
+    the caller is the only party that knows how long the execution it is
+    about to spawn can legitimately take.
+    """
+
+    # Used when the claiming start supplies no TTL of its own.
+    #
+    # Deliberately generous. The two failure modes are not symmetric: expiring
+    # late merely delays the self-heal of a task that is already wedged today
+    # (the status quo is "never"), whereas expiring early hands a *live*
+    # task to a second claimant — a double execution, which is the one thing
+    # the claim exists to prevent. A day also matches
+    # ``ReaperSettings.idle_for_seconds``, so an operator has a single number
+    # in their head for "how long silence means abandoned", and it is at or
+    # above the maximum function timeout of the execution backends stardag
+    # currently drives. Anything longer-running than that must state its own
+    # TTL.
+    default_ttl_seconds: int = 24 * 60 * 60
+
+    model_config = SettingsConfigDict(env_prefix="STARDAG_API_CLAIM_")
+
+
 class JWTSettings(BaseSettings):
     """Settings for internal JWT signing and validation."""
 
@@ -241,6 +289,7 @@ class OIDCSettings(BaseSettings):
 
 settings = Settings()
 reaper_settings = ReaperSettings()
+claim_settings = ClaimSettings()
 jwt_settings = JWTSettings()
 auth_settings = AuthSettings()
 oidc_settings = OIDCSettings()

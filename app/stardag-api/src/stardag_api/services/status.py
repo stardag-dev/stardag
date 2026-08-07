@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import BuildStatus, Event, EventType, Task, TaskStatus
+from stardag_api.services.claims import claim_expires_at
 
 # Statuses TASK_RETRIED resets to PENDING. Shared by the denormalised path
 # (apply_event_to_task) and the two per-build event replays below, which
@@ -46,6 +47,24 @@ def apply_event_to_task(task: Task, event: Event) -> None:
       - TASK_REFERENCED and TASK_PENDING are status-neutral on existing rows
         (they don't downgrade COMPLETED → PENDING).
 
+    It also maintains ``latest_status_expires_at``, the expiry of the
+    execution claim that RUNNING *is* (see ``services.claims``): every event
+    that asserts RUNNING sets it from the event's own
+    ``claim_ttl_seconds`` metadata (or the server default), and every event
+    that moves the task out of RUNNING clears it. Deriving it here rather
+    than at the route means the value is a function of the event stream —
+    the TTL is recorded in the event metadata, so a replay reproduces the
+    expiry it produced the first time — and means no start path can grant an
+    unexpiring claim by forgetting a keyword argument.
+
+    Note what "every event that asserts RUNNING" does and does not buy. A
+    re-start (recording an executor ref) or a resume extends the claim for
+    free, on traffic that already exists. But a task that emits nothing
+    between start and finish — the long-running batch job this whole system
+    exists for — gets exactly one expiry, at start. That is why the TTL
+    wants to come from the caller's executor timeout rather than being a
+    short lease topped up by liveness traffic there is none of.
+
     The caller is responsible for persisting the Task — this function only
     mutates the in-memory ORM instance.
     """
@@ -63,6 +82,7 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
         task.latest_completed_at = event.created_at
+        task.latest_status_expires_at = None
         task.latest_waiting_for_lock = False
         if event_commit is not None:
             task.latest_commit_hash = event_commit
@@ -90,6 +110,14 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_executor = metadata.get("executor")
         task.latest_executor_ref = metadata.get("executor_ref")
         task.latest_executor_metadata = metadata.get("executor_metadata")
+        # Grant (or re-grant) the claim's expiry alongside the executor
+        # fields, from the same event. Doing both here is what makes a
+        # re-claim of an expired claim coherent: the new holder's ref, its
+        # build and its expiry replace the dead holder's together, so no
+        # reader can pair a fresh expiry with a stale ref.
+        task.latest_status_expires_at = claim_expires_at(
+            event.created_at, metadata.get("claim_ttl_seconds")
+        )
     elif et == EventType.TASK_RETRIED:
         # Reset a retryable status to PENDING (see _RETRYABLE_STATUSES);
         # sticky-COMPLETED is already handled by the early return, and
@@ -101,6 +129,7 @@ def apply_event_to_task(task: Task, event: Event) -> None:
             task.latest_status_build_id = event.build_id
             task.latest_completed_at = None
             task.latest_error_message = None
+            task.latest_status_expires_at = None
             # The executor fields describe the run that reached the
             # retryable status — including a suspended one, which keeps the
             # ref of the execution that yielded. A retry re-runs from
@@ -115,6 +144,12 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
         task.latest_waiting_for_lock = False
+        # A resume re-asserts the claim, so it re-grants the expiry —
+        # renewal on lifecycle traffic that already exists.
+        task.latest_status_expires_at = claim_expires_at(
+            event.created_at,
+            (event.event_metadata or {}).get("claim_ttl_seconds"),
+        )
         if event_commit is not None:
             task.latest_commit_hash = event_commit
     elif et == EventType.TASK_FAILED:
@@ -124,6 +159,7 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_build_id = event.build_id
         task.latest_completed_at = event.created_at
         task.latest_error_message = event.error_message
+        task.latest_status_expires_at = None
         if event_commit is not None:
             task.latest_commit_hash = event_commit
     elif et == EventType.TASK_CANCELLED:
@@ -132,6 +168,7 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
         task.latest_completed_at = event.created_at
+        task.latest_status_expires_at = None
         if event_commit is not None:
             task.latest_commit_hash = event_commit
     elif et == EventType.TASK_SKIPPED:
@@ -140,11 +177,15 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
         task.latest_completed_at = event.created_at
+        task.latest_status_expires_at = None
     elif et == EventType.TASK_SUSPENDED:
         task.latest_status = TaskStatus.SUSPENDED
         task.latest_status_at = event.created_at
         task.latest_status_event_id = event.id
         task.latest_status_build_id = event.build_id
+        # A suspension is an execution that yielded and returned: nothing is
+        # running, so the claim is over and its expiry is meaningless.
+        task.latest_status_expires_at = None
     elif et == EventType.TASK_WAITING_FOR_LOCK:
         if task.latest_status == TaskStatus.PENDING:
             task.latest_waiting_for_lock = True

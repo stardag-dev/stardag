@@ -148,6 +148,32 @@ class Task(Base, TimestampMixin):
     latest_status_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
     )
+    # Expiry of the execution claim that ``latest_status == RUNNING`` *is*
+    # (see services/claims.py for both predicates). Written once, at
+    # claim time, from the caller's ``claim_ttl_seconds`` or the server
+    # default; cleared on every move out of RUNNING. NOT a lease: nothing
+    # renews it mid-execution, so it is sized from the executor's own
+    # timeout, not from a heartbeat interval.
+    #
+    # NULL means "no expiry known", which is exactly the pre-expiry
+    # behaviour — a claim that never lapses. Every row written before this
+    # column existed reads that way, so the predicate below is additive by
+    # construction rather than by migration backfill.
+    #
+    # Its whole purpose is that a *third party* can evaluate it. Within a
+    # build the claim already carries an executor ref that can be probed,
+    # and probing stays the better evidence; across builds there was
+    # previously nothing at all, so a holder that vanished wedged the task
+    # for every future build forever and leaked its concurrency-limit slots
+    # with it. A claim past its expiry is simply re-claimable — that is the
+    # entire healing mechanism; no reaper, no release call, no new status.
+    #
+    # Deliberately not indexed: every reader already narrows on
+    # ``latest_status`` (or on the task's own row) first, and the expiry is
+    # then a comparison on the handful of RUNNING rows that survive that.
+    latest_status_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
     latest_status_event_id: Mapped[UUID | None] = mapped_column(Uuid)
     latest_status_build_id: Mapped[UUID | None] = mapped_column(
         Uuid,
