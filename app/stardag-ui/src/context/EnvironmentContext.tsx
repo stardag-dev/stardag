@@ -177,7 +177,7 @@ export function EnvironmentProvider({ children }: EnvironmentProviderProps) {
             localStorage.removeItem(STORAGE_KEY_ENVIRONMENT);
           }
 
-          // Navigate to home page when switching workspaces to avoid
+          // Navigate to the builds list when switching workspaces to avoid
           // "not found" errors from workspace-specific resources (builds, tasks, etc.)
           window.history.pushState({}, "", "/");
           window.dispatchEvent(new PopStateEvent("popstate"));
