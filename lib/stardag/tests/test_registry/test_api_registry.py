@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from uuid import UUID
 
 import pytest
 
@@ -596,132 +597,332 @@ class TestConcurrencyLimitPathEncoding:
         )
 
 
-class TestBuildListRunningFilters:
-    """``build_list_running`` narrows ``GET /builds`` server-side.
+class _CapturingRegistry:
+    """An APIRegistry whose sync client is a MockTransport recorder.
 
-    The watchdog's question is "RUNNING reactive builds owned by app X".
-    Asking it unfiltered and answering it client-side lets unrelated builds
-    consume ``limit`` — an environment that accumulates stale RUNNING builds
-    then silently starves the reactive ones. The client-side status re-check
-    stays as the graceful-degradation guard for servers predating the
-    filters (unknown query params are ignored, not rejected).
+    Shared by the operator-surface tests below: they are all about what
+    goes on the wire (query params, request body, path) and what comes
+    back off it (model parsing), so a canned response plus the captured
+    request is the whole fixture.
     """
 
-    def _make_registry_and_capture(self, pages):
+    def __init__(self, response_json: dict, status_code: int = 200):
         import httpx
 
         from stardag.registry._api_registry import APIRegistry
 
-        captured: list[httpx.Request] = []
-        remaining = list(pages)
+        self.requests: list[httpx.Request] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            captured.append(request)
-            builds = remaining.pop(0) if remaining else []
-            return httpx.Response(200, json={"builds": builds})
+            self.requests.append(request)
+            return httpx.Response(status_code, json=response_json)
 
-        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        registry._client = httpx.Client(
+        self.registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        self.registry._client = httpx.Client(
             transport=httpx.MockTransport(handler),
-            auth=registry._auth,
+            auth=self.registry._auth,
         )
-        return registry, captured
 
-    @staticmethod
-    def _build(status: str) -> dict:
-        from uuid import uuid4
+    @property
+    def request(self):
+        assert len(self.requests) == 1, f"expected 1 request, got {len(self.requests)}"
+        return self.requests[0]
 
-        return {"id": str(uuid4()), "status": status}
 
-    def test_status_filter_always_sent(self):
-        registry, captured = self._make_registry_and_capture([[self._build("running")]])
-        assert len(registry.build_list_running()) == 1
-        assert captured[0].url.params["status"] == "running"
-        assert "reactive_app_name" not in captured[0].url.params
+_BUILD_ID = "11111111-1111-1111-1111-111111111111"
+_OTHER_BUILD_ID = "22222222-2222-2222-2222-222222222222"
 
-    def test_reactive_app_name_forwarded_when_given(self):
-        registry, captured = self._make_registry_and_capture([[self._build("running")]])
-        registry.build_list_running(limit=10, reactive_app_name="an-app")
-        assert captured[0].url.params["reactive_app_name"] == "an-app"
-        assert captured[0].url.params["status"] == "running"
 
-    def test_old_server_ignoring_filters_still_yields_only_running(self):
-        """Graceful degradation: a server that ignores the query params
-        answers with the unfiltered listing — the client-side re-check must
-        keep terminal builds out of the result."""
-        page = [
-            self._build("completed"),
-            self._build("running"),
-            self._build("failed"),
-        ]
-        registry, _ = self._make_registry_and_capture([page])
-        result = registry.build_list_running()
-        assert [str(b) for b in result] == [page[1]["id"]]
+class TestBuildList:
+    """``GET /builds`` — filters go server-side, unknown fields are ignored."""
 
-    def test_limit_stops_paging(self):
-        registry, captured = self._make_registry_and_capture(
-            [[self._build("running") for _ in range(100)]]
+    def _page(self, **build_overrides):
+        build = {
+            "id": _BUILD_ID,
+            "name": "spring-otter-42",
+            "status": "running",
+            "last_active_at": "2026-07-01T10:00:00+00:00",
+            "last_activity_at": "2026-07-04T11:30:00+00:00",
+            # A field this SDK version does not model: forward compatibility
+            # requires it to be ignored, not to raise.
+            "some_future_field": {"nested": True},
+        }
+        build.update(build_overrides)
+        return {"builds": [build], "total": 7, "page": 2, "page_size": 5}
+
+    def test_filters_ride_as_query_params(self):
+        cap = _CapturingRegistry(self._page())
+        result = cap.registry.build_list(
+            page=2,
+            page_size=5,
+            status="running",
+            reactive_app_name="my-app",
+            idle_for_seconds=86400,
         )
-        assert len(registry.build_list_running(limit=2)) == 2
-        assert len(captured) == 1  # limit reached mid-page: no second request
+        params = cap.request.url.params
+        assert params["page"] == "2"
+        assert params["page_size"] == "5"
+        assert params["status"] == "running"
+        assert params["reactive_app_name"] == "my-app"
+        assert params["idle_for_seconds"] == "86400"
+        assert result.total == 7
+        assert result.page == 2
+        assert result.builds[0].name == "spring-otter-42"
+
+    def test_unset_filters_are_omitted(self):
+        cap = _CapturingRegistry(self._page())
+        cap.registry.build_list()
+        params = cap.request.url.params
+        assert "status" not in params
+        assert "reactive_app_name" not in params
+        assert "idle_for_seconds" not in params
+
+    def test_unknown_response_fields_are_ignored(self):
+        cap = _CapturingRegistry(self._page())
+        result = cap.registry.build_list()
+        build = result.builds[0]
+        assert not hasattr(build, "some_future_field")
+        # Both liveness timestamps are parsed and kept distinct.
+        assert build.last_active_at is not None
+        assert build.last_activity_at is not None
+        assert build.last_active_at != build.last_activity_at
+
+    def test_missing_liveness_fields_default_to_none(self):
+        """An older server sends neither timestamp; parsing must not fail."""
+        cap = _CapturingRegistry(
+            {
+                "builds": [{"id": _BUILD_ID, "name": "old-server-build"}],
+                "total": 1,
+                "page": 1,
+                "page_size": 20,
+            }
+        )
+        build = cap.registry.build_list().builds[0]
+        assert build.last_activity_at is None
+        assert build.status is None
 
 
-class TestBuildListRunningAioDelegate:
-    """`RegistryABC.build_list_running_aio` forwards to the sync method.
+class TestBuildListRunning:
+    """The watchdog sweep must filter server-side, not client-side."""
 
-    How it forwards is a compatibility surface: `reactive_app_name` was
-    added to the ABC after implementations existed, so the delegate must
-    still reach an implementation that predates it.
-    """
+    def test_passes_status_running_to_the_server(self):
+        cap = _CapturingRegistry(
+            {
+                "builds": [{"id": _BUILD_ID, "name": "b1", "status": "running"}],
+                "total": 1,
+                "page": 1,
+                "page_size": 100,
+            }
+        )
+        running = cap.registry.build_list_running(limit=10)
+        assert running == [UUID(_BUILD_ID)]
+        # Server-side filter: the sweep must not page an unfiltered list and
+        # match in Python, or an environment full of non-running builds can
+        # starve it of the running ones it exists to find.
+        assert cap.request.url.params["status"] == "running"
 
-    @pytest.mark.asyncio
-    async def test_unscoped_call_reaches_an_implementation_without_the_kwarg(self):
-        """An unscoped sweep has nothing to forward, so it must not try.
+    def test_stops_paging_on_a_short_page(self):
+        cap = _CapturingRegistry(
+            {
+                "builds": [{"id": _BUILD_ID, "name": "b1", "status": "running"}],
+                "total": 1,
+                "page": 1,
+                "page_size": 100,
+            }
+        )
+        cap.registry.build_list_running(limit=100)
+        assert len(cap.requests) == 1
 
-        Passing `reactive_app_name=None` through anyway raises TypeError on
-        a pre-kwarg implementation — on precisely the call that asked for
-        no scoping and therefore needs no new parameter.
-        """
-        from stardag.registry import NoOpRegistry
 
-        seen: list[int] = []
+class TestBuildCancelCascade:
+    def test_cascade_param_and_parsed_result(self):
+        cap = _CapturingRegistry(
+            {
+                "id": _BUILD_ID,
+                "name": "spring-otter-42",
+                "cascaded_task_ids": ["task-a", "task-b"],
+                "cascaded_task_count": 2,
+            }
+        )
+        result = cap.registry.build_cancel(UUID(_BUILD_ID), cascade=True)
+        assert cap.request.url.params["cascade"] == "true"
+        assert result is not None
+        assert result.cascaded_task_ids == ["task-a", "task-b"]
 
-        class OldRegistry(NoOpRegistry):
-            def build_list_running(self, limit: int = 100):  # type: ignore[override]
-                seen.append(limit)
-                return []
+    def test_cascade_omitted_by_default(self):
+        cap = _CapturingRegistry({"id": _BUILD_ID, "name": "b"})
+        result = cap.registry.build_cancel(UUID(_BUILD_ID))
+        assert "cascade" not in cap.request.url.params
+        # A server predating the cascade returns no cascade fields; they
+        # default, which reads as "nothing was cascaded".
+        assert result is not None
+        assert result.cascaded_task_ids == []
+        assert result.cascaded_task_count == 0
 
-        assert await OldRegistry().build_list_running_aio(limit=7) == []
-        assert seen == [7]
 
-    @pytest.mark.asyncio
-    async def test_scoped_call_forwards_by_keyword(self):
-        """Keyword, not positional: an implementation may make it
-        keyword-only, and a positional forward would then fail."""
-        from stardag.registry import NoOpRegistry
+class TestBuildBulkCancel:
+    def _response(self, **overrides):
+        payload = {
+            "dry_run": True,
+            "builds": [
+                {
+                    "build_id": _BUILD_ID,
+                    "name": "spring-otter-42",
+                    "last_activity_at": "2026-07-01T10:00:00+00:00",
+                    "cascaded_task_ids": ["task-a"],
+                }
+            ],
+            "build_count": 1,
+            "task_count": 1,
+            "skipped": {_OTHER_BUILD_ID: "not_running"},
+            "truncated": True,
+        }
+        payload.update(overrides)
+        return payload
 
-        seen: list[tuple] = []
+    def test_body_carries_only_the_filters_that_were_set(self):
+        cap = _CapturingRegistry(self._response())
+        cap.registry.build_bulk_cancel(idle_for_seconds=86400, dry_run=True)
+        body = json.loads(cap.request.content)
+        assert body["idle_for_seconds"] == 86400
+        assert body["dry_run"] is True
+        # Defaults the caller did not touch are still sent explicitly (the
+        # SDK's defaults and the server's must not silently diverge), but
+        # unset optional filters are absent so the server decides.
+        assert body["cascade"] is True
+        assert "build_ids" not in body
+        assert "reactive_app_name" not in body
+        assert "reason" not in body
 
-        class NewRegistry(NoOpRegistry):
-            def build_list_running(  # type: ignore[override]
-                self, limit: int = 100, *, reactive_app_name: str | None = None
-            ):
-                seen.append((limit, reactive_app_name))
-                return []
+    def test_build_ids_are_stringified(self):
+        cap = _CapturingRegistry(self._response())
+        cap.registry.build_bulk_cancel(build_ids=[UUID(_BUILD_ID), _OTHER_BUILD_ID])
+        body = json.loads(cap.request.content)
+        assert body["build_ids"] == [_BUILD_ID, _OTHER_BUILD_ID]
 
-        await NewRegistry().build_list_running_aio(limit=3, reactive_app_name="an-app")
-        assert seen == [(3, "an-app")]
+    def test_result_is_parsed_including_skipped_and_truncated(self):
+        cap = _CapturingRegistry(self._response())
+        result = cap.registry.build_bulk_cancel(idle_for_seconds=60)
+        assert result.dry_run is True
+        assert result.build_count == 1
+        assert result.task_count == 1
+        assert result.skipped == {_OTHER_BUILD_ID: "not_running"}
+        assert result.truncated is True
+        assert result.builds[0].cascaded_task_ids == ["task-a"]
 
-    @pytest.mark.asyncio
-    async def test_scoped_call_degrades_when_the_kwarg_is_unsupported(self):
-        from stardag.registry import NoOpRegistry
 
-        seen: list[int] = []
+class TestTaskList:
+    def _response(self, **overrides):
+        payload = {
+            "tasks": [
+                {
+                    "id": "33333333-3333-3333-3333-333333333333",
+                    "task_id": "task-abc",
+                    "task_namespace": "demo.pipeline",
+                    "task_name": "TrainModel",
+                    "latest_status": "running",
+                    "latest_status_at": "2026-07-04T09:00:00+00:00",
+                    "latest_status_build_id": _OTHER_BUILD_ID,
+                }
+            ],
+            "total": 1,
+            "page": 1,
+            "page_size": 20,
+        }
+        payload.update(overrides)
+        return payload
 
-        class OldRegistry(NoOpRegistry):
-            def build_list_running(self, limit: int = 100):  # type: ignore[override]
-                seen.append(limit)
-                return []
+    def test_status_is_a_repeated_query_param(self):
+        """A dict cannot express two values for one key; a pair list can."""
+        cap = _CapturingRegistry(self._response())
+        cap.registry.task_list(status=["running", "suspended"])
+        assert cap.request.url.params.get_list("status") == ["running", "suspended"]
 
-        await OldRegistry().build_list_running_aio(limit=5, reactive_app_name="an-app")
-        assert seen == [5]
+    def test_status_older_than_is_sent_as_iso8601(self):
+        from datetime import datetime, timezone
+
+        cap = _CapturingRegistry(self._response())
+        cutoff = datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc)
+        cap.registry.task_list(status_older_than=cutoff)
+        assert (
+            cap.request.url.params["status_older_than"] == "2026-07-04T09:00:00+00:00"
+        )
+
+    def test_claim_holder_fields_are_parsed(self):
+        cap = _CapturingRegistry(self._response())
+        task = cap.registry.task_list(status=["running"]).tasks[0]
+        assert task.latest_status == "running"
+        assert task.latest_status_at is not None
+        assert str(task.latest_status_build_id) == _OTHER_BUILD_ID
+
+    def test_unset_filters_are_omitted(self):
+        cap = _CapturingRegistry(self._response())
+        cap.registry.task_list()
+        params = cap.request.url.params
+        assert "status" not in params
+        assert "status_older_than" not in params
+        assert "task_name" not in params
+
+
+class TestTaskByIdEndpoints:
+    """Cancel/retry addressed by id hit the same routes as the task-object variants."""
+
+    def test_cancel_by_id_path(self):
+        cap = _CapturingRegistry({})
+        cap.registry.task_cancel_by_id(UUID(_BUILD_ID), "task-abc")
+        assert (
+            cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tasks/task-abc/cancel"
+        )
+
+    def test_retry_by_id_path(self):
+        cap = _CapturingRegistry({})
+        cap.registry.task_retry_by_id(UUID(_BUILD_ID), "task-abc")
+        assert (
+            cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tasks/task-abc/retry"
+        )
+
+
+class TestTickSummaries:
+    def test_report_posts_the_summary_verbatim(self):
+        cap = _CapturingRegistry(
+            {
+                "id": "44444444-4444-4444-4444-444444444444",
+                "build_id": _BUILD_ID,
+                "outcome": "terminal",
+                "summary": {"outcome": "terminal"},
+                "created_at": "2026-07-04T09:00:00+00:00",
+            },
+            status_code=201,
+        )
+        summary = {"outcome": "terminal", "spawned": 3, "some_future_counter": 1}
+        cap.registry.build_report_tick_summary(UUID(_BUILD_ID), summary)
+        assert cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tick-summaries"
+        # The body is the summary as given — the server stores unknown keys
+        # verbatim, which is what lets the SDK grow the summary without a
+        # server release.
+        assert json.loads(cap.request.content) == summary
+
+    def test_list_parses_records_with_open_summaries(self):
+        cap = _CapturingRegistry(
+            {
+                "build_id": _BUILD_ID,
+                "summaries": [
+                    {
+                        "id": "44444444-4444-4444-4444-444444444444",
+                        "build_id": _BUILD_ID,
+                        "outcome": "lingered_out",
+                        "summary": {
+                            "outcome": "lingered_out",
+                            "some_future_counter": 7,
+                        },
+                        "created_at": "2026-07-04T09:00:00+00:00",
+                    }
+                ],
+            }
+        )
+        records = cap.registry.build_list_tick_summaries(UUID(_BUILD_ID), limit=5)
+        assert cap.request.url.params["limit"] == "5"
+        assert len(records) == 1
+        assert records[0].outcome == "lingered_out"
+        # The blob is kept whole, unknown keys included.
+        assert records[0].summary["some_future_counter"] == 7

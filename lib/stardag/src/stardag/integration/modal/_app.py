@@ -85,7 +85,6 @@ from stardag.integration.modal._target import (
 from stardag.registry._base import (
     NoOpRegistry,
     accepts_executor_metadata_kwarg,
-    accepts_reactive_app_name_kwarg,
     get_git_commit_hash,
     registry_provider,
 )
@@ -335,11 +334,10 @@ def _run_watchdog_sweep(
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
-    # Old custom RegistryABC implementations predate the kwarg; degrade to
-    # an unscoped listing rather than breaking the sweep entirely.
-    scoped = reactive_app_name is not None and accepts_reactive_app_name_kwarg(
-        registry.build_list_running
-    )
+    # `build_list_running` is now expressed in terms of `build_list`, so the
+    # scoping is server-side and every RegistryABC gets it — the signature
+    # shim this used to need went with it.
+    scoped = reactive_app_name is not None
     if scoped:
         running_builds = registry.build_list_running(
             limit=sweep_limit, reactive_app_name=reactive_app_name

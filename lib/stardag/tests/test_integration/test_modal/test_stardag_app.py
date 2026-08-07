@@ -1966,23 +1966,6 @@ class TestWatchdogSweep:
             limit=100, reactive_app_name="an-app"
         )
 
-    def test_sweep_degrades_to_unscoped_listing_on_old_registry(self):
-        """A custom RegistryABC implementation predating the kwarg must not
-        break the sweep — it just gets the wider listing it always got."""
-        from stardag.integration.modal._app import _run_watchdog_sweep
-
-        calls: list = []
-
-        class OldRegistry(NoOpRegistry):
-            def build_list_running(self, limit: int = 100):  # type: ignore[override]
-                calls.append(limit)
-                return []
-
-        _run_watchdog_sweep(
-            OldRegistry(), lambda *a, **k: None, reactive_app_name="an-app"
-        )
-
-        assert calls == [100]
 
     def test_truncation_warning_names_the_scope_and_the_remedy(self, caplog):
         import logging
@@ -2004,32 +1987,6 @@ class TestWatchdogSweep:
         # operator needs to know the cap was hit on RELEVANT builds.
         assert "2+ reactive builds owned by 'an-app'" in caplog.text
         assert "reduce the number of concurrent reactive builds" in caplog.text
-
-    def test_truncation_warning_remedy_differs_when_the_listing_is_unscoped(
-        self, caplog
-    ):
-        """An unscoped listing hit its cap on RUNNING builds of every kind,
-        so "run fewer reactive builds per app" is advice about the wrong
-        population — and the real remedy includes upgrading the registry."""
-        import logging
-
-        from stardag.integration.modal._app import _run_watchdog_sweep
-
-        class OldRegistry(NoOpRegistry):
-            def build_list_running(self, limit: int = 100):  # type: ignore[override]
-                return [uuid4(), uuid4()]
-
-        with caplog.at_level(logging.WARNING):
-            _run_watchdog_sweep(
-                OldRegistry(),
-                lambda *a, **k: None,
-                sweep_limit=2,
-                reactive_app_name="an-app",
-            )
-
-        assert "2+ running builds" in caplog.text
-        assert "not scoped to a reactive app" in caplog.text
-        assert "reduce the number of concurrent reactive builds" not in caplog.text
 
 
 class TestBuildTickConfig:

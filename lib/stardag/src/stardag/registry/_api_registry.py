@@ -6,6 +6,7 @@ import json as _json
 import logging
 import time
 from collections.abc import Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 from uuid import UUID
@@ -30,11 +31,17 @@ from stardag.exceptions import (
 )
 from stardag.registry._base import (
     StartClaimResult,
+    BuildCancelResult,
     BuildFrontier,
     BuildInfo,
+    BuildListPage,
+    BuildSummary,
+    BulkCancelResult,
     RegisteredTaskInfo,
     RegistryABC,
+    TaskListPage,
     TaskMetadata,
+    TickSummaryRecord,
     get_git_commit_hash,
 )
 from stardag.artifact import Artifact
@@ -102,6 +109,13 @@ def _maybe_gzip_json_body(
         return encoded, headers
     headers["Content-Encoding"] = "gzip"
     return gzip.compress(encoded), headers
+
+
+# Query params as accepted by the request helpers. A mapping covers every
+# call but one: ``GET /tasks?status=`` is *repeatable*, and a dict cannot
+# express two values for one key — hence the sequence-of-pairs alternative,
+# which httpx encodes as repeated params.
+_QueryParams = dict[str, str] | Sequence[tuple[str, str]]
 
 
 def _is_route_not_found(err: NotFoundError) -> bool:
@@ -336,7 +350,7 @@ class APIRegistry(RegistryABC):
         url: str,
         *,
         json: object = None,
-        params: dict[str, str] | None = None,
+        params: _QueryParams | None = None,
         operation: str = "API call",
     ) -> httpx.Response:
         """Make a sync HTTP request with automatic rate-limit retry.
@@ -386,7 +400,7 @@ class APIRegistry(RegistryABC):
         url: str,
         *,
         json: object = None,
-        params: dict[str, str] | None = None,
+        params: _QueryParams | None = None,
         operation: str = "API call",
     ) -> httpx.Response:
         """Make an async HTTP request with automatic rate-limit retry.
@@ -526,15 +540,30 @@ class APIRegistry(RegistryABC):
         )
         logger.info(f"Marked build as failed: {build_id}")
 
-    def build_cancel(self, build_id: UUID) -> None:
-        """Cancel a build."""
-        self._request(
+    def build_cancel(
+        self, build_id: UUID, *, cascade: bool = False
+    ) -> BuildCancelResult | None:
+        """Cancel a build, optionally cascading to the claims its tasks hold.
+
+        ``cascade=True`` additionally cancels the build's RUNNING /
+        SUSPENDED tasks, releasing their execution claims and
+        concurrency-limit slots (see :meth:`RegistryABC.build_cancel`).
+
+        Returns the cancelled build. ``cascade`` and the cascade fields
+        are ignored by servers predating them, in which case the returned
+        record simply reports nothing cascaded.
+        """
+        params = self._get_event_params()
+        if cascade:
+            params["cascade"] = "true"
+        response = self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/cancel",
-            params=self._get_event_params(),
+            params=params,
             operation="Cancel build",
         )
         logger.info(f"Cancelled build: {build_id}")
+        return BuildCancelResult.model_validate(response.json())
 
     def build_exit_early(self, build_id: UUID, reason: str | None = None) -> None:
         """Mark a build as exited early."""
@@ -747,11 +776,15 @@ class APIRegistry(RegistryABC):
 
     def task_cancel(self, build_id: UUID, task: "BaseTask") -> None:
         """Cancel a task."""
+        self.task_cancel_by_id(build_id, str(task.id))
+
+    def task_cancel_by_id(self, build_id: UUID, task_id: str) -> None:
+        """Cancel a task addressed by id (see the ABC for why this exists)."""
         self._request(
             "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task_id}/cancel",
             params=self._get_event_params(),
-            operation=f"Cancel task {task.id}",
+            operation=f"Cancel task {task_id}",
         )
 
     def task_skip(self, build_id: UUID, task: "BaseTask") -> None:
@@ -1080,15 +1113,21 @@ class APIRegistry(RegistryABC):
         )
         logger.info(f"Marked build as failed: {build_id}")
 
-    async def build_cancel_aio(self, build_id: UUID) -> None:
-        """Async version - cancel a build."""
-        await self._arequest(
+    async def build_cancel_aio(
+        self, build_id: UUID, *, cascade: bool = False
+    ) -> BuildCancelResult | None:
+        """Async version - cancel a build (see :meth:`build_cancel`)."""
+        params = self._get_event_params()
+        if cascade:
+            params["cascade"] = "true"
+        response = await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/cancel",
-            params=self._get_event_params(),
+            params=params,
             operation="Cancel build",
         )
         logger.info(f"Cancelled build: {build_id}")
+        return BuildCancelResult.model_validate(response.json())
 
     async def build_exit_early_aio(
         self, build_id: UUID, reason: str | None = None
@@ -1105,68 +1144,207 @@ class APIRegistry(RegistryABC):
         )
         logger.info(f"Build exited early: {build_id}")
 
-    def build_list_running(
-        self, limit: int = 100, reactive_app_name: str | None = None
-    ) -> list[UUID]:
+    def build_list(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        status: str | None = None,
+        reactive_app_name: str | None = None,
+        idle_for_seconds: int | None = None,
+    ) -> BuildListPage:
+        """One page of ``GET /builds`` (see :meth:`RegistryABC.build_list`).
+
+        All filters are server-side. Older servers ignore query params
+        they don't know, so a filter this server predates comes back
+        *unapplied* rather than as an error — callers that must not act on
+        an unfiltered list should re-check the returned rows (the CLI
+        re-applies the idle cut on ``last_activity_at`` for exactly this
+        reason).
+        """
+        params = {
+            **self._get_params(),
+            "page": str(page),
+            "page_size": str(page_size),
+        }
+        if status is not None:
+            params["status"] = status
+        if reactive_app_name is not None:
+            params["reactive_app_name"] = reactive_app_name
+        if idle_for_seconds is not None:
+            params["idle_for_seconds"] = str(idle_for_seconds)
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/builds",
+            params=params,
+            operation="List builds",
+        )
+        return BuildListPage.model_validate(response.json())
+
+    # Bound on the watchdog sweep in ``build_list_running``: builds come
+    # back ordered by last_active_at desc, so RUNNING ones cluster early
+    # and paging the entire history to find stragglers would make the
+    # sweep cost grow with total build count. Truncation is logged.
+    _RUNNING_SWEEP_MAX_PAGES = 10
+
+    def build_list_running(self, limit: int = 100) -> list[UUID]:
         """List ids of running builds (most recently active first).
 
-        Pages through ``GET /builds``, narrowing server-side with
-        ``status=running`` and (when given) ``reactive_app_name`` — the
-        watchdog's real question is "RUNNING reactive builds owned by app
-        X", and an unnarrowed listing lets unrelated builds consume
-        ``limit`` (an environment that accumulates stale RUNNING builds
-        would silently stop reaching the reactive ones).
-
-        The derived status is re-checked client-side because a server
-        predating either filter ignores unknown query params and answers
-        with the unfiltered listing; the re-check keeps that degradation to
-        "wider than asked for" rather than "wrong". A wider listing is
-        harmless for the caller: a tick no-ops on a non-reactive build.
+        Expressed in terms of :meth:`build_list` with ``status="running"``
+        so the derived-status filter is applied *server-side*. It used to
+        page the list unfiltered and match on the status client-side,
+        which meant an environment holding more non-running builds than
+        the page budget could starve the watchdog of the running ones it
+        exists to find. Nothing else here changed: same ordering, same
+        page budget, same truncation warning.
         """
         running: list[UUID] = []
         page = 1
         page_size = 100
-        # Bound the sweep: builds are ordered by last_active_at desc, so
-        # RUNNING builds cluster early — paging the entire history to find
-        # stragglers would make the watchdog cost grow with total build
-        # count. Truncation is logged.
-        max_pages = 10
-        filter_params = {"status": "running"}
-        if reactive_app_name is not None:
-            filter_params["reactive_app_name"] = reactive_app_name
         while len(running) < limit:
-            response = self._request(
-                "GET",
-                f"{self.api_url}/api/v1/builds",
-                params={
-                    **self._get_params(),
-                    **filter_params,
-                    "page": str(page),
-                    "page_size": str(page_size),
-                },
-                operation="List builds",
-            )
-            payload = response.json()
-            builds = payload.get("builds", [])
-            for build in builds:
-                # Redundant against a server that honours ``status``, and
-                # the only thing standing between a server that doesn't and
-                # a watchdog ticking terminal builds — keep it.
-                if build.get("status") == "running":
-                    running.append(UUID(build["id"]))
-                    if len(running) >= limit:
-                        break
-            if len(builds) < page_size:
+            result = self.build_list(page=page, page_size=page_size, status="running")
+            for build in result.builds:
+                running.append(build.id)
+                if len(running) >= limit:
+                    break
+            if len(result.builds) < page_size:
                 break
-            if page >= max_pages:
+            if page >= self._RUNNING_SWEEP_MAX_PAGES:
                 logger.warning(
-                    f"build_list_running: stopped after {max_pages} pages "
-                    f"({page * page_size} builds scanned); older running "
-                    "builds (if any) are not included."
+                    f"build_list_running: stopped after "
+                    f"{self._RUNNING_SWEEP_MAX_PAGES} pages "
+                    f"({page * page_size} running builds scanned); older "
+                    "running builds (if any) are not included."
                 )
                 break
             page += 1
         return running
+
+    def build_bulk_cancel(
+        self,
+        *,
+        build_ids: Sequence[UUID | str] | None = None,
+        idle_for_seconds: int | None = None,
+        reactive_app_name: str | None = None,
+        include_reactive: bool = False,
+        cascade: bool = True,
+        dry_run: bool = False,
+        limit: int = 100,
+        reason: str | None = None,
+    ) -> BulkCancelResult:
+        """Bulk-cancel / reap RUNNING builds.
+
+        See :meth:`RegistryABC.build_bulk_cancel` for the semantics. Only
+        the filters the caller actually set are put on the wire, so the
+        server's own defaults stay authoritative for the rest.
+        """
+        body: dict[str, Any] = {
+            "include_reactive": include_reactive,
+            "cascade": cascade,
+            "dry_run": dry_run,
+            "limit": limit,
+        }
+        if build_ids is not None:
+            body["build_ids"] = [str(b) for b in build_ids]
+        if idle_for_seconds is not None:
+            body["idle_for_seconds"] = idle_for_seconds
+        if reactive_app_name is not None:
+            body["reactive_app_name"] = reactive_app_name
+        if reason is not None:
+            body["reason"] = reason
+        response = self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/bulk-cancel",
+            json=body,
+            params=self._get_params(),
+            operation="Bulk-cancel builds",
+        )
+        return BulkCancelResult.model_validate(response.json())
+
+    def task_list(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        status: Sequence[str] | None = None,
+        status_older_than: datetime | None = None,
+        task_name: str | None = None,
+        task_namespace: str | None = None,
+    ) -> TaskListPage:
+        """One page of ``GET /tasks`` (see :meth:`RegistryABC.task_list`).
+
+        ``status`` rides as a repeated query param, which is why the
+        params dict is built as a list of pairs rather than a mapping.
+        ``status_older_than`` is sent as an ISO-8601 timestamp.
+        """
+        # httpx accepts a sequence of (key, value) pairs, which is the only
+        # way to express the repeated ``status=`` the server matches on.
+        params: list[tuple[str, str]] = [
+            *self._get_params().items(),
+            ("page", str(page)),
+            ("page_size", str(page_size)),
+        ]
+        for value in status or ():
+            params.append(("status", value))
+        if status_older_than is not None:
+            params.append(("status_older_than", status_older_than.isoformat()))
+        if task_name is not None:
+            params.append(("task_name", task_name))
+        if task_namespace is not None:
+            params.append(("task_namespace", task_namespace))
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/tasks",
+            params=params,
+            operation="List tasks",
+        )
+        return TaskListPage.model_validate(response.json())
+
+    def build_report_tick_summary(
+        self, build_id: UUID, summary: dict[str, Any]
+    ) -> None:
+        """Record one reactive scheduler tick's summary against a build.
+
+        Errors propagate — the *caller* owns the best-effort contract (see
+        ``stardag.build._reactive``), because only the caller knows whether
+        it is on a hot path. Swallowing here would also hide a genuinely
+        broken registry from ops tooling that wants to know.
+        """
+        self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/tick-summaries",
+            json=summary,
+            params=self._get_params(),
+            operation=f"Report tick summary for build {build_id}",
+        )
+
+    async def build_report_tick_summary_aio(
+        self, build_id: UUID, summary: dict[str, Any]
+    ) -> None:
+        """Async version - record a tick summary (see the sync variant)."""
+        await self._arequest(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/tick-summaries",
+            json=summary,
+            params=self._get_params(),
+            operation=f"Report tick summary for build {build_id}",
+        )
+
+    def build_list_tick_summaries(
+        self, build_id: UUID, limit: int = 20
+    ) -> list[TickSummaryRecord]:
+        """List a build's retained tick summaries, newest first."""
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/builds/{build_id}/tick-summaries",
+            params={**self._get_params(), "limit": str(limit)},
+            operation=f"List tick summaries for build {build_id}",
+        )
+        payload = response.json()
+        return [
+            TickSummaryRecord.model_validate(item)
+            for item in payload.get("summaries", [])
+        ]
 
     def build_add_roots(self, build_id: UUID, root_task_ids: list[str]) -> None:
         """Append root task ids to a build."""
@@ -1191,21 +1369,29 @@ class APIRegistry(RegistryABC):
         )
 
     def task_retry(self, build_id: UUID, task: "BaseTask") -> None:
-        """Reset a failed/cancelled/skipped task to pending (retry)."""
-        self._request(
-            "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/retry",
-            params=self._get_event_params(),
-            operation=f"Retry task {task.id}",
-        )
+        """Reset a retryable task to pending (retry)."""
+        self.task_retry_by_id(build_id, str(task.id))
 
     async def task_retry_aio(self, build_id: UUID, task: "BaseTask") -> None:
-        """Async version - reset a failed/cancelled/skipped task to pending."""
+        """Async version - reset a retryable task to pending."""
+        await self.task_retry_by_id_aio(build_id, str(task.id))
+
+    def task_retry_by_id(self, build_id: UUID, task_id: str) -> None:
+        """Reset a retryable task to pending, addressed by id."""
+        self._request(
+            "POST",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task_id}/retry",
+            params=self._get_event_params(),
+            operation=f"Retry task {task_id}",
+        )
+
+    async def task_retry_by_id_aio(self, build_id: UUID, task_id: str) -> None:
+        """Async version - reset a retryable task to pending, by id."""
         await self._arequest(
             "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/retry",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task_id}/retry",
             params=self._get_event_params(),
-            operation=f"Retry task {task.id}",
+            operation=f"Retry task {task_id}",
         )
 
     def build_skip_blocked(self, build_id: UUID) -> list[str]:
@@ -1293,6 +1479,16 @@ class APIRegistry(RegistryABC):
             operation=f"Get build {build_id}",
         )
         return BuildInfo.model_validate(response.json())
+
+    def build_get_summary(self, build_id: UUID) -> BuildSummary:
+        """Return the full build record (see :meth:`RegistryABC.build_get_summary`)."""
+        response = self._request(
+            "GET",
+            f"{self.api_url}/api/v1/builds/{build_id}",
+            params=self._get_params(),
+            operation=f"Get build {build_id}",
+        )
+        return BuildSummary.model_validate(response.json())
 
     async def build_get_aio(self, build_id: UUID) -> BuildInfo:
         """Async version - return a slim build record."""
@@ -1625,11 +1821,15 @@ class APIRegistry(RegistryABC):
 
     async def task_cancel_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - cancel a task."""
+        await self.task_cancel_by_id_aio(build_id, str(task.id))
+
+    async def task_cancel_by_id_aio(self, build_id: UUID, task_id: str) -> None:
+        """Async version - cancel a task addressed by id."""
         await self._arequest(
             "POST",
-            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/cancel",
+            f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task_id}/cancel",
             params=self._get_event_params(),
-            operation=f"Cancel task {task.id}",
+            operation=f"Cancel task {task_id}",
         )
 
     async def task_skip_aio(self, build_id: UUID, task: "BaseTask") -> None:
