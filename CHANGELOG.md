@@ -42,6 +42,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   undocumented cancel-then-retry. `running` remains non-retryable on
   purpose: it holds a live execution claim, and releasing that is
   cancellation, not retry.
+- **`GET /tasks` can enumerate claim holders**
+  ([#208](https://github.com/stardag-dev/stardag/issues/208)). New
+  `status` filter (repeatable, so `?status=running&status=suspended`
+  works) and `status_older_than` (an absolute ISO-8601 cutoff) answer
+  "which tasks in this environment are holding an execution claim, and for
+  how long?". `latest_status` is environment-global, so a task left RUNNING
+  by a build whose orchestrator died denies the claim to every future build
+  that needs it. When either filter is applied the list is ordered oldest
+  claim first; unfiltered ordering is unchanged. Backed by a new
+  `(environment_id, latest_status, latest_status_at)` index.
+- **`TaskResponse` now carries `latest_status`, `latest_status_at` and
+  `latest_status_build_id`.** The last is the claim holder — "running under
+  build Y since T" — and was previously unavailable outside the build
+  frontier. Purely additive.
 
 ### SDK
 
