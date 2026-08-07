@@ -3121,3 +3121,137 @@ class TestFanOutConcurrency:
         for leaf in denied:
             assert ("spawn", str(leaf.id)) not in registry.calls
         assert registry.build_status == "running"
+
+
+class TestSpawnCap:
+    async def test_cap_truncates_and_the_tick_re_acts_immediately(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """``linger_seconds=0`` is the probe: the linger loop returns on its
+        first check, so the only way the remaining tasks get spawned in this
+        same tick is the ``acted`` path re-evaluating on a fresh frontier.
+        A cap that "just truncated" would leave 20 of the 30 unspawned."""
+        width, cap = 30, 10
+        leaves, root = _wide_layer("cap", width)
+        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.0,
+                poll_interval_seconds=30.0,  # never reached: no lingering
+                max_spawns_per_tick=cap,
+            ),
+        )
+
+        assert summary.spawned == width
+        assert len(executor.spawned) == width
+        # Three acting passes of `cap` each, plus the pass that found
+        # nothing left to do and let the tick linger out.
+        assert summary.iterations == width // cap + 1
+        assert summary.outcome == "lingered_out"
+
+    async def test_uncapped_layer_is_one_pass(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Control for the test above: the same layer under the default cap
+        goes out in a single acting pass."""
+        width = 30
+        leaves, root = _wide_layer("uncapped", width)
+        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(linger_seconds=0.0, poll_interval_seconds=30.0),
+        )
+
+        assert summary.spawned == width
+        assert summary.iterations == 2
+
+    def test_cap_is_derived_from_the_executors_timeout(self):
+        """No explicit cap → the cap is a duration budget: a fraction of the
+        backend's own execution timeout, spread over the in-flight bound."""
+        tasks = [SyncOnlyTask(name=f"derive-{i}") for i in range(3)]
+        config = TickConfig(max_concurrent_actions=10)
+
+        cap = reactive_module._spawn_cap(
+            tasks, FakeTickExecutor(timeout_seconds=600.0), config
+        )
+
+        assert cap == int(
+            reactive_module._SPAWN_BUDGET_FRACTION
+            * 600.0
+            * 10
+            / reactive_module._SECONDS_PER_SPAWN
+        )
+
+    def test_cap_uses_the_tightest_timeout_across_candidates(self):
+        """Heterogeneous routing: the smallest backend limit bounds the
+        pass, so the cap is derived from it."""
+
+        class PerTaskTimeoutExecutor(FakeTickExecutor):
+            def execution_timeout_seconds(self, task: BaseTask) -> float | None:
+                return {"tight": 400.0}.get(typing.cast(typing.Any, task).name, 4000.0)
+
+        tasks = [SyncOnlyTask(name="tight"), SyncOnlyTask(name="loose")]
+        config = TickConfig(max_concurrent_actions=10)
+
+        cap = reactive_module._spawn_cap(tasks, PerTaskTimeoutExecutor(), config)
+
+        assert cap == reactive_module._spawn_cap(
+            [SyncOnlyTask(name="tight")], PerTaskTimeoutExecutor(), config
+        )
+        assert cap < reactive_module._spawn_cap(
+            [SyncOnlyTask(name="loose")], PerTaskTimeoutExecutor(), config
+        )
+
+    def test_cap_falls_back_when_no_timeout_is_exposed(self):
+        """An executor enforcing no wall-clock limit leaves nothing to
+        derive from — but the cap is still a cap, never "everything"."""
+        tasks = [SyncOnlyTask(name="no-timeout")]
+
+        cap = reactive_module._spawn_cap(
+            tasks, FakeTickExecutor(timeout_seconds=None), TickConfig()
+        )
+
+        assert cap == reactive_module._DEFAULT_MAX_SPAWNS_PER_TICK
+
+    def test_derived_cap_is_clamped(self):
+        """Floor and ceiling, so neither a 30-second task nor a 30-day one
+        produces a nonsense batch size."""
+        tasks = [SyncOnlyTask(name="clamp")]
+
+        assert (
+            reactive_module._spawn_cap(
+                tasks,
+                FakeTickExecutor(timeout_seconds=1.0),
+                TickConfig(max_concurrent_actions=1),
+            )
+            == reactive_module._MIN_SPAWN_CAP
+        )
+        assert (
+            reactive_module._spawn_cap(
+                tasks,
+                FakeTickExecutor(timeout_seconds=2_592_000.0),
+                TickConfig(max_concurrent_actions=50),
+            )
+            == reactive_module._MAX_SPAWN_CAP
+        )
+
+    def test_explicit_cap_wins(self):
+        assert (
+            reactive_module._spawn_cap(
+                [SyncOnlyTask(name="explicit")],
+                FakeTickExecutor(timeout_seconds=600.0),
+                TickConfig(max_spawns_per_tick=7),
+            )
+            == 7
+        )

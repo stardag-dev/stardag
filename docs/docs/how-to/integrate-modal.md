@@ -740,6 +740,28 @@ the registry's default expiry. This is the main reason to set an explicit
 taken while the execution is still alive, and equally what lets a claim
 left behind by a dead scheduler heal promptly.
 
+**Wide layers.** A tick fans out concurrently, up to
+`max_concurrent_actions` spawns in flight (default 50), and caps how many
+tasks one pass commits to via `max_spawns_per_tick`. Left unset, that cap
+is derived from the worker `timeout` above — a fraction of it, spread over
+the in-flight bound — so it scales with how long Modal lets an execution
+live. When a pass truncates at the cap it says so in the tick log and
+immediately re-evaluates on a fresh frontier; the layer goes out in
+batches, not over the watchdog period. Both are `tick_kwargs`, so they can
+be set per build at trigger time:
+
+```{.python notest}
+app.build_trigger(
+    root_task, reactive=True,
+    tick_kwargs={"max_concurrent_actions": 100, "max_spawns_per_tick": 2000},
+)
+```
+
+Set `max_spawns_per_tick` explicitly if you give the `tick` function a much
+shorter `timeout` than your workers (`tick_settings=...`): the derivation
+reads the _worker's_ limit, which is the only wall clock it can see, and a
+cap scaled to an hour-long worker is too generous for a five-minute tick.
+
 **Seeing what a tick decided.** Every tick reports its summary to the registry
 (`stardag builds ticks <build-id>`), so a build driven by dozens of
 short-lived tick containers does not leave its reasoning scattered across as

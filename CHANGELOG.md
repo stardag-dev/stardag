@@ -20,6 +20,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   acquiring start still precedes the spawn (a denied task never occupies a
   worker) and the ref-recording start still follows it.
 
+- **A per-tick spawn cap, derived from the executor's timeout.** The old
+  cap was "however many tasks are actionable", which is unrelated to how
+  long the container may live. `TickConfig.max_spawns_per_tick` bounds one
+  pass; left unset it is derived as a duration budget — a fraction of the
+  executor's own `execution_timeout_seconds`, spread over the in-flight
+  bound. Truncation is logged, never silent, and never a stall: the pass
+  acted, so the tick re-evaluates on a fresh frontier immediately and takes
+  the next batch. Set the cap explicitly when the tick function is sized
+  very differently from the workers it spawns. Both knobs are accepted as
+  Modal `tick_kwargs`.
+
 - **Concurrent DAG discovery in reactive mode.**
   `discover_and_register_aio` walked the DAG with a recursive `await
 task.complete_aio()` and no concurrency, while the resident engine did

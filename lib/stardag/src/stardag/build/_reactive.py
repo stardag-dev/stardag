@@ -11,6 +11,15 @@ reactive scheduling runs short-lived, idempotent **ticks**:
    running refs, self-heal completions, handle terminal states) → linger
    briefly polling the wake-up flag → exit when quiet.
 
+Acting on a frontier is **bounded-concurrent**, not serial: a wide layer
+is thousands of independent registry round-trips and executor spawns, and
+doing them one after another in a single container is the difference
+between a tick that finishes and a tick that is killed by its function
+timeout mid-fan-out. The bound (``TickConfig.max_concurrent_actions``) and
+the per-tick spawn cap (``TickConfig.max_spawns_per_tick``) are what keep
+"concurrent" from meaning "unbounded" — see :func:`_act_on_frontier` and
+:func:`_spawn_cap`. Truncating at the cap is not a stall: the tick acted,
+so it re-evaluates immediately on a fresh frontier rather than lingering.
 
 Workers self-report their lifecycle (see the Modal ``Runner``) and wake the
 scheduler when they finish, so no process needs to stay alive while
@@ -129,6 +138,44 @@ _CLAIM_TTL_GRACE_SECONDS = 900.0
 # logical work, so they should not disagree about how much of it may be in
 # flight; keeping one number is also what stops them drifting apart again.
 _DEFAULT_MAX_CONCURRENCY = 50
+
+# --- Per-tick spawn cap ------------------------------------------------
+#
+# A tick runs in a container with a finite life, so "spawn everything that
+# is actionable" is a bound on nothing: a wide enough layer outlives the
+# container and the tick is killed mid-fan-out. These constants turn the
+# cap into a duration budget instead of a magic count — see
+# :func:`_spawn_cap` for how they combine, and for the honest caveat about
+# which timeout is being read.
+
+# Fraction of the executor's own execution timeout that one fan-out pass
+# may spend. Well under half, because the pass is not all a tick does: the
+# frontier fetch, terminal evaluation, the summary report and (usually) a
+# second pass on a fresh frontier all have to fit in the same container.
+_SPAWN_BUDGET_FRACTION = 0.25
+
+# Wall-clock cost of putting ONE actionable task on a worker: a task-store
+# read, the acquiring start, the executor spawn, and the ref-recording
+# start — three network round-trips and a local read. Deliberately
+# pessimistic (a p99 round-trip, not a median), because underestimating it
+# inflates the cap, and an inflated cap is the failure this exists to
+# prevent.
+_SECONDS_PER_SPAWN = 2.0
+
+# Used when the executor exposes no timeout at all (``None`` — a backend
+# that enforces no wall-clock limit, or one that cannot resolve it): there
+# is nothing to derive from, so this is the one place a plain number is
+# unavoidable. Chosen so that the pass stays short on any plausible
+# container: 500 spawns x 2 s / 50 in flight is ~20 s of round-trips.
+_DEFAULT_MAX_SPAWNS_PER_TICK = 500
+
+# Floor and ceiling on the derived cap. The floor keeps a tight executor
+# timeout from producing a cap so small that a build advances by dribs;
+# the ceiling is where the fan-out stops being the limiting factor anyway
+# (a frontier carrying 10k actionable refs is itself the expensive part of
+# the tick).
+_MIN_SPAWN_CAP = 50
+_MAX_SPAWN_CAP = 10_000
 
 # The server's accepted range for claim_ttl_seconds (outside it: 422).
 # Clamped rather than raised on — a 30-second task and a 60-day task are
@@ -481,6 +528,16 @@ class TickConfig:
     # the registry's connection pool. The default is the resident engine's
     # (see ``_DEFAULT_MAX_CONCURRENCY``).
     max_concurrent_actions: int = _DEFAULT_MAX_CONCURRENCY
+    # Hard cap on how many tasks ONE pass may spawn, i.e. how much work a
+    # single container commits to. ``None`` (the default) derives it from
+    # the executor's own execution timeout — see :func:`_spawn_cap`. Set it
+    # explicitly when the tick function is sized very differently from the
+    # workers it spawns, which is the one thing the derivation cannot see.
+    #
+    # Truncation is never silent, and never a stall: the pass acted, so the
+    # tick re-evaluates immediately on a fresh frontier (see
+    # ``_run_tick_body_aio``'s ``if acted:`` branch) and picks up the rest.
+    max_spawns_per_tick: int | None = None
     # Maps a task to the named concurrency-limit keys it runs under (see
     # the registry's environment concurrency limits). Acquisition happens
     # atomically at task start, before the spawn: a denied task simply
@@ -780,6 +837,17 @@ async def _run_tick_body_aio(
                     # frontier instead of waiting for an external wake-up
                     # (terminal detection above ran on the pre-action
                     # snapshot).
+                    #
+                    # This is also what makes the per-tick spawn cap a
+                    # throttle rather than a stall: a pass that truncated at
+                    # the cap necessarily spawned (or failed to spawn, or
+                    # was denied) every task it did attempt, so either it
+                    # acted — and lands here, taking the next batch off a
+                    # fresh frontier without waiting for anything — or every
+                    # attempt was denied by a concurrency limit, in which
+                    # case lingering for a slot to free up is precisely the
+                    # right thing to do and re-acting immediately would be a
+                    # hot loop against the registry.
                     deadline = loop.time() + config.linger_seconds
                     continue
 
@@ -852,6 +920,72 @@ async def _load_task(
     return task
 
 
+def _spawn_cap(
+    candidates: Sequence[BaseTask],
+    task_executor: TaskExecutorABC,
+    config: TickConfig,
+) -> int:
+    """How many tasks this pass may spawn.
+
+    An explicit ``TickConfig.max_spawns_per_tick`` wins. Otherwise the cap
+    is *derived*, because the number that matters is not a count at all —
+    it is a duration. A tick lives in a container with a wall-clock limit;
+    putting one task on a worker costs a bounded amount of round-trips
+    (``_SECONDS_PER_SPAWN``); ``max_concurrent_actions`` of them are in
+    flight at once. So the largest batch a pass can finish is::
+
+        budget_seconds * max_concurrent_actions / _SECONDS_PER_SPAWN
+
+    with ``budget_seconds`` a fraction of the wall-clock limit, leaving the
+    rest of the container for the rest of the tick.
+
+    **Which wall-clock limit.** The one real duration a tick can read is
+    the executor's own ``execution_timeout_seconds`` — the point at which
+    the backend kills an execution (for Modal, the worker function's
+    ``timeout``). That is a property of the *workers*, not of the tick's
+    own container, and the two are configured separately; this is a proxy,
+    and it is named as one. It is the right proxy for the common case (a
+    tick sized like the work it schedules) and it is derived rather than
+    guessed, which is the whole point — but a deployment that runs a
+    short-lived tick function alongside long-running workers should set
+    ``max_spawns_per_tick`` rather than inherit a cap scaled to the
+    workers' hour. The **smallest** timeout among the candidates is used:
+    with heterogeneous routing the tightest backend limit is the one that
+    bounds the pass.
+
+    An executor that enforces no limit anywhere (all ``None``) leaves
+    nothing to derive from, and falls back to
+    ``_DEFAULT_MAX_SPAWNS_PER_TICK`` — small enough to stay a short pass on
+    any plausible container. Never unbounded: "however many are actionable"
+    is what this replaces.
+    """
+    if config.max_spawns_per_tick is not None:
+        return max(1, config.max_spawns_per_tick)
+    timeouts: list[float] = []
+    for task in candidates:
+        try:
+            timeout = task_executor.execution_timeout_seconds(task)
+        except Exception:
+            # The ABC says this must not raise, but a spawn cap is not
+            # worth failing a tick over — an executor that misbehaves here
+            # simply contributes no timeout.
+            logger.debug(
+                f"Execution timeout resolution failed for task {task.id} "
+                "while sizing the spawn cap; ignoring it.",
+                exc_info=True,
+            )
+            continue
+        if timeout is not None:
+            timeouts.append(timeout)
+    if not timeouts:
+        return _DEFAULT_MAX_SPAWNS_PER_TICK
+    budget_seconds = _SPAWN_BUDGET_FRACTION * min(timeouts)
+    derived = int(
+        budget_seconds * max(1, config.max_concurrent_actions) / _SECONDS_PER_SPAWN
+    )
+    return max(_MIN_SPAWN_CAP, min(_MAX_SPAWN_CAP, derived))
+
+
 async def _act_on_frontier(
     frontier: BuildFrontier,
     *,
@@ -871,8 +1005,10 @@ async def _act_on_frontier(
 
     **Three phases, each bounded by ``max_concurrent_actions``.** Resolve
     every actionable task's object; probe the ones already RUNNING; spawn
-    the rest. Within a phase the work is independent per task; between
-    phases nothing is.
+    the rest. Phases exist because the spawn cap has to be sized against
+    the tasks that are actually spawn candidates, which is not knowable
+    until the objects are loaded. Within a phase the work is independent
+    per task; between phases nothing is.
 
     **What concurrency does NOT change.** Each spawn coroutine still runs
     its three steps in order — acquiring start, spawn, ref-recording start
@@ -991,7 +1127,21 @@ async def _act_on_frontier(
         semaphore,
     )
 
-    # --- phase 3: spawn -----------------------------------------------
+    # --- phase 3: spawn, up to this pass's cap ------------------------
+    cap = _spawn_cap(spawn_candidates, task_executor, config)
+    if len(spawn_candidates) > cap:
+        # Loud, always: a build that spawns in batches is a build whose
+        # logs must say so, or the next reader concludes the frontier is
+        # shrinking for some other reason. Not a stall — see the
+        # ``if acted:`` branch in ``_run_tick_body_aio``.
+        logger.info(
+            f"Build {build_id} has {len(spawn_candidates)} spawnable tasks "
+            f"this pass, more than the per-tick cap of {cap}; spawning the "
+            f"first {cap} and re-evaluating on a fresh frontier immediately. "
+            "Set TickConfig.max_spawns_per_tick to change the cap."
+        )
+        spawn_candidates = spawn_candidates[:cap]
+
     async def spawn(task: BaseTask) -> None:
         nonlocal acted, denied_this_round
         limit_keys: list[str] = (

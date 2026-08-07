@@ -381,6 +381,21 @@ def _run_watchdog_sweep(
             logger.exception(f"Watchdog tick failed for build {running_build_id}")
 
 
+_TICK_KWARGS_ALLOWED = (
+    "linger_seconds",
+    "poll_interval_seconds",
+    "fail_mode",
+    # Fan-out throttles. Both default to something derived (see TickConfig
+    # and stardag.build._reactive._spawn_cap) and both are here because the
+    # thing the derivation cannot see — how the *tick* function is sized
+    # relative to its workers, and how much concurrency the registry
+    # deployment behind it will take — is per-deployment, and a build
+    # triggered against that deployment is where it can be said.
+    "max_concurrent_actions",
+    "max_spawns_per_tick",
+)
+
+
 def _fail_build_on_trigger_error(
     registry: typing.Any,
     build_id: UUID,
