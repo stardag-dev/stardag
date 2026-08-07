@@ -300,6 +300,14 @@ class FrontierTaskRef(BaseModel):
     # staleness bounds (e.g. fail a long-RUNNING task with no executor
     # ref, which would otherwise hold concurrency-limit slots forever).
     latest_status_at: datetime | None = None
+    # When a RUNNING task's execution claim stops being believable. Past
+    # it, the server itself lets the next claiming start take the task
+    # over, and the task stops counting against its concurrency limits —
+    # so a scheduler can act on this instead of inferring death from
+    # elapsed time. Null means "no expiry known": a claim granted before
+    # this column existed, which behaves as it always did (never lapses).
+    # Meaningless unless latest_status is RUNNING.
+    latest_status_expires_at: datetime | None = None
 
 
 class FrontierExternalBlocker(BaseModel):
@@ -336,6 +344,15 @@ class FrontierExternalBlocker(BaseModel):
     # only for rows predating status denormalisation.
     blocking_status_at: datetime | None = None
     blocking_status_build_id: UUID | None = None
+    # When the blocker's execution claim lapses, if it is RUNNING (null
+    # otherwise, and for claims granted before the column existed). This is
+    # the one thing about a cross-build blocker a consumer could not
+    # previously establish: it cannot probe another build's executor, so
+    # "is that holder still alive?" was pure inference from
+    # blocking_status_at. Note what it still does NOT give you — proving
+    # the blocker dead does not let this build run it, because a blocker
+    # with blocking_in_build=False is not in this build's plan at all.
+    blocking_status_expires_at: datetime | None = None
     # Whether the blocker is also part of *this* build's task set. False is
     # the pathological case: this build will never schedule it, so it can
     # only wait for whoever owns it. True still blocks, but the blocker
@@ -431,13 +448,17 @@ class ConcurrencyLimitUpsert(BaseModel):
 
 
 class ConcurrencyLimitHolder(BaseModel):
-    """A RUNNING task currently occupying one slot of a concurrency-limit key."""
+    """A task whose live execution claim occupies one slot of a limit key."""
 
     task_id: str
     task_namespace: str
     task_name: str
     # When the task's RUNNING status was recorded ("running since").
     latest_status_at: datetime | None = None
+    # When this holder's claim lapses, releasing the slot with no
+    # intervention. Null = never (a claim granted before the column
+    # existed), which is the case that needs eviction.
+    latest_status_expires_at: datetime | None = None
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None
