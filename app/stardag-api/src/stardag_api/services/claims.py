@@ -64,6 +64,14 @@ def claim_is_live(task: Task, now: datetime | None = None) -> bool:
     at the one call site that matters, locked FOR UPDATE). An expired claim
     is *not* a distinct state a caller has to handle: it simply is not a
     claim, so the task is claimable again by whoever asks next.
+
+    A NULL expiry counts as live, i.e. never lapses. That is not a hole
+    left open for abandoned claims — the migration backfilled every row
+    RUNNING at the time from its ``latest_status_at`` — but the honest
+    answer for the residue nothing can date: a claim stamped by a server
+    predating the column and not re-started since. There is no timestamp
+    from which to conclude it is dead, so it is not this predicate's place
+    to guess; releasing it stays an operator action.
     """
     if task.latest_status != TaskStatus.RUNNING:
         return False

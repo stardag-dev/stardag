@@ -130,10 +130,24 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
     `blocked_by_external` entries, and in the `task_already_running` 409
     detail — so a scheduler can act on evidence instead of inferring death
     from elapsed time.
-  - Purely additive: `NULL` means "no expiry known", which is exactly the
-    previous behaviour, so every existing row and every older client
-    behaves as before. Executor probing is unaffected and remains the
-    better evidence where it is available.
+  - **The migration backfills the claims that are already RUNNING**, as
+    `latest_status_at + <default TTL>`. Those rows are the population this
+    feature exists to heal — a task RUNNING since three months ago is an
+    abandoned claim, not one that "never lapses" — and leaving them null
+    would have shipped the fix while excluding every case that motivated
+    it. The value is correct in both directions without guessing: a claim
+    abandoned long ago backfills to a timestamp already past, so it is
+    immediately re-claimable; one genuinely running across the deploy
+    backfills to a future timestamp and is untouched, and its next
+    `TASK_STARTED` re-stamps it from the caller's TTL anyway. Rows with no
+    `latest_status_at` to measure from are left null.
+  - Purely additive otherwise: `NULL` means "no expiry known" and is
+    treated as a claim that never lapses, exactly as before this column.
+    After the backfill that is a much narrower population than it sounds —
+    a claim stamped by a server predating the column and not re-started
+    since — and those still need an operator (cancel, retry, evict) to
+    release. Executor probing is unaffected and remains the better evidence
+    where it is available.
 
 ## [0.17.0] — 2026-08-06
 

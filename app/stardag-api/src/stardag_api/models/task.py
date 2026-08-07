@@ -155,10 +155,21 @@ class Task(Base, TimestampMixin):
     # renews it mid-execution, so it is sized from the executor's own
     # timeout, not from a heartbeat interval.
     #
-    # NULL means "no expiry known", which is exactly the pre-expiry
-    # behaviour — a claim that never lapses. Every row written before this
-    # column existed reads that way, so the predicate below is additive by
-    # construction rather than by migration backfill.
+    # NULL means "no expiry known", and every predicate treats it as a
+    # claim that never lapses — the pre-expiry behaviour, so the column is
+    # additive by construction.
+    #
+    # Read that narrowly. The migration backfilled every row that was
+    # RUNNING when it ran and had a latest_status_at to measure from
+    # (status_at + the default TTL), because those rows ARE the abandoned
+    # claims this exists to heal — leaving them NULL would have shipped the
+    # fix while excluding every case that motivated it. So NULL on a
+    # RUNNING task does not mean "an old claim, so probably dead"; it means
+    # the claim was stamped by a server predating this column and has not
+    # been re-started since — a pre-denormalisation row with no
+    # latest_status_at to date it, or a straggler from a rolling deploy.
+    # Nothing can date those, so they genuinely never lapse and still need
+    # an operator (cancel, retry, evict) to release.
     #
     # Its whole purpose is that a *third party* can evaluate it. Within a
     # build the claim already carries an executor ref that can be probed,
