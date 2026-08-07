@@ -90,7 +90,6 @@ from stardag.registry import (
     FrontierTaskRef,
     RegistryABC,
 )
-from stardag.registry._base import accepts_executor_metadata_kwarg
 
 logger = logging.getLogger(__name__)
 
@@ -661,23 +660,12 @@ async def _act_on_frontier(
         return False, 0  # terminal handling deals with it
     acted = False
     denied_this_round = 0
-    # Hoisted signature reflection (mirrors _concurrent.py's once-per-build
-    # check): whether the registry accepts the executor_metadata kwarg on
-    # the two start surfaces used below.
-    start_accepts_metadata = accepts_executor_metadata_kwarg(registry.task_start_aio)
-    limits_start_accepts_metadata = accepts_executor_metadata_kwarg(
-        registry.task_start_with_limits_aio
-    )
     # Claim only through registries that implement arbitration (see the
     # resident engine's identical gate) — the ABC default would just add a
     # duplicate start. Keeps pre-claim custom registries on their old path.
     claim_active = config.claim and (
         type(registry).task_start_claim_aio is not RegistryABC.task_start_claim_aio
     )
-    # The claim method's signature always accepts executor_metadata; only the
-    # legacy limits-start path needs reflection (pre-metadata custom
-    # registries).
-    acquiring_start_accepts_metadata = claim_active or limits_start_accepts_metadata
     for item in frontier.actionable:
         task = await _load_task(
             item.task_id,
@@ -751,15 +739,14 @@ async def _act_on_frontier(
             # below re-records with the ref (duplicate starts are
             # tolerated, and slots are counted per task, not per start).
             acquire_metadata: "dict[str, typing.Any] | None" = None
-            if acquiring_start_accepts_metadata:
-                try:
-                    acquire_metadata = await task_executor.get_executor_metadata(task)
-                except Exception:
-                    logger.debug(
-                        f"Executor metadata resolution failed for task "
-                        f"{task.id}; acquiring without it.",
-                        exc_info=True,
-                    )
+            try:
+                acquire_metadata = await task_executor.get_executor_metadata(task)
+            except Exception:
+                logger.debug(
+                    f"Executor metadata resolution failed for task "
+                    f"{task.id}; acquiring without it.",
+                    exc_info=True,
+                )
             if claim_active:
                 claim_result = await registry.task_start_claim_aio(
                     build_id,
@@ -790,17 +777,12 @@ async def _act_on_frontier(
                     denied_this_round += 1
                     continue
             else:
-                if acquire_metadata is not None:
-                    started = await registry.task_start_with_limits_aio(
-                        build_id,
-                        task,
-                        executor_metadata=acquire_metadata,
-                        limit_keys=limit_keys,
-                    )
-                else:
-                    started = await registry.task_start_with_limits_aio(
-                        build_id, task, limit_keys=limit_keys
-                    )
+                started = await registry.task_start_with_limits_aio(
+                    build_id,
+                    task,
+                    executor_metadata=acquire_metadata,
+                    limit_keys=limit_keys,
+                )
                 if not started:
                     logger.info(
                         f"Task {task.id} denied by concurrency limits "
@@ -817,18 +799,13 @@ async def _act_on_frontier(
             summary.failed_recorded += 1
             acted = True
             continue
-        if handle.executor_metadata is not None and start_accepts_metadata:
-            await registry.task_start_aio(
-                build_id,
-                task,
-                executor=handle.executor,
-                executor_ref=handle.ref,
-                executor_metadata=handle.executor_metadata,
-            )
-        else:
-            await registry.task_start_aio(
-                build_id, task, executor=handle.executor, executor_ref=handle.ref
-            )
+        await registry.task_start_aio(
+            build_id,
+            task,
+            executor=handle.executor,
+            executor_ref=handle.ref,
+            executor_metadata=handle.executor_metadata,
+        )
         summary.spawned += 1
         acted = True
     return acted, denied_this_round

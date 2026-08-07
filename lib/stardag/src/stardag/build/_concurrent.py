@@ -56,10 +56,6 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.registry import RegistryABC, registry_provider
-from stardag.registry._base import (
-    accepts_executor_kwargs,
-    accepts_executor_metadata_kwarg,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -1184,15 +1180,6 @@ async def build_aio(
             await asyncio.sleep(current_interval)
             current_interval = min(current_interval * backoff_factor, max_interval)
 
-    # Custom RegistryABC implementations written against the pre-detached
-    # task_start_aio(build_id, task) signature can't receive executor refs.
-    # Detected once via signature inspection (not try/except TypeError, which
-    # would also mask unrelated TypeErrors raised inside an implementation).
-    registry_accepts_executor_kwargs = accepts_executor_kwargs(registry.task_start_aio)
-    registry_accepts_executor_metadata = accepts_executor_metadata_kwarg(
-        registry.task_start_aio
-    )
-
     def _start_lock_renewal(task_id_str: str) -> None:
         """Keep the (deprecated) global lock alive under long tasks.
 
@@ -1465,29 +1452,15 @@ async def build_aio(
         task: BaseTask, handle: DetachedHandle | None
     ) -> None:
         """Emit TASK_STARTED, with the detached-execution ref when present."""
-        if handle is None or not registry_accepts_executor_kwargs:
-            if handle is not None:
-                logger.warning(
-                    f"Registry {type(registry).__name__} does not accept "
-                    "executor refs on task_start_aio; detached execution "
-                    f"{handle.ref!r} for task {task.id} will not be "
-                    "re-attachable."
-                )
+        if handle is None:
             await registry.task_start_aio(build_id, task)
             return
-        # Metadata is dropped (not warned) for registries predating the
-        # kwarg — it's descriptive only, unlike the ref above.
-        if handle.executor_metadata is not None and registry_accepts_executor_metadata:
-            await registry.task_start_aio(
-                build_id,
-                task,
-                executor=handle.executor,
-                executor_ref=handle.ref,
-                executor_metadata=handle.executor_metadata,
-            )
-            return
         await registry.task_start_aio(
-            build_id, task, executor=handle.executor, executor_ref=handle.ref
+            build_id,
+            task,
+            executor=handle.executor,
+            executor_ref=handle.ref,
+            executor_metadata=handle.executor_metadata,
         )
 
     async def submit_with_lock(

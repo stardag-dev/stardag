@@ -2,9 +2,8 @@
 
 Two layers:
 
-- ``RegistryABC`` default implementations forward the kwarg to sync
-  overrides that accept it and DROP it (never raise) for overrides
-  written against the pre-metadata signatures.
+- ``RegistryABC``'s async default implementations forward the kwarg to
+  their sync counterparts.
 - ``APIRegistry`` puts the dict on the wire: a JSON-encoded query param
   on the (body-less) task-start and build-resume endpoints, a body field
   on build creation.
@@ -19,11 +18,7 @@ import httpx
 
 from stardag import BaseTask
 from stardag.registry._api_registry import APIRegistry
-from stardag.registry._base import (
-    NoOpRegistry,
-    accepts_executor_metadata_kwarg,
-    accepts_executor_kwargs,
-)
+from stardag.registry._base import NoOpRegistry
 
 METADATA = {
     "kind": "modal",
@@ -38,32 +33,6 @@ def _make_task() -> BaseTask:
     task = MagicMock(spec=BaseTask)
     task.id = uuid4()
     return task
-
-
-class TestAcceptsExecutorMetadataKwarg:
-    def test_named_param(self):
-        def fn(
-            build_id, task, executor=None, executor_ref=None, executor_metadata=None
-        ):
-            pass
-
-        assert accepts_executor_metadata_kwarg(fn) is True
-
-    def test_var_keyword(self):
-        def fn(build_id, task, **kwargs):
-            pass
-
-        assert accepts_executor_metadata_kwarg(fn) is True
-
-    def test_legacy_signature(self):
-        def fn(build_id, task, executor=None, executor_ref=None):
-            pass
-
-        assert accepts_executor_metadata_kwarg(fn) is False
-        assert accepts_executor_kwargs(fn) is True
-
-    def test_uninspectable(self):
-        assert accepts_executor_metadata_kwarg(dict.get) in (True, False)  # no raise
 
 
 class MetadataAwareRegistry(NoOpRegistry):
@@ -93,26 +62,6 @@ class MetadataAwareRegistry(NoOpRegistry):
         self.calls.append(("build_resume", {"executor_metadata": executor_metadata}))
 
 
-class LegacyRegistry(NoOpRegistry):
-    """Overrides written against the pre-metadata signatures (deliberate)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.calls: list[tuple[str, dict]] = []
-
-    def task_start(self, build_id, task, executor=None, executor_ref=None) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
-        self.calls.append(
-            ("task_start", {"executor": executor, "executor_ref": executor_ref})
-        )
-
-    def build_start(self, root_tasks=None, description=None):  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
-        self.calls.append(("build_start", {}))
-        return uuid4()
-
-    def build_resume(self, build_id) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
-        self.calls.append(("build_resume", {}))
-
-
 class TestRegistryABCForwarding:
     async def test_task_start_aio_forwards_metadata(self):
         registry = MetadataAwareRegistry()
@@ -134,20 +83,6 @@ class TestRegistryABCForwarding:
             )
         ]
 
-    async def test_task_start_aio_drops_metadata_for_legacy_override(self):
-        registry = LegacyRegistry()
-        await registry.task_start_aio(
-            uuid4(),
-            _make_task(),
-            executor="modal",
-            executor_ref="fc-1",
-            executor_metadata=METADATA,
-        )
-        # No TypeError; the executor ref still lands.
-        assert registry.calls == [
-            ("task_start", {"executor": "modal", "executor_ref": "fc-1"})
-        ]
-
     async def test_task_start_with_limits_aio_default_forwards_metadata(self):
         registry = MetadataAwareRegistry()
         started = await registry.task_start_with_limits_aio(
@@ -161,24 +96,15 @@ class TestRegistryABCForwarding:
         assert started is True
         assert registry.calls[0][1]["executor_metadata"] == METADATA
 
-    async def test_build_start_aio_forwards_and_drops(self):
+    async def test_build_start_aio_forwards_metadata(self):
         aware = MetadataAwareRegistry()
         await aware.build_start_aio(executor_metadata=METADATA)
         assert aware.calls == [("build_start", {"executor_metadata": METADATA})]
 
-        legacy = LegacyRegistry()
-        await legacy.build_start_aio(executor_metadata=METADATA)
-        assert legacy.calls == [("build_start", {})]
-
-    async def test_build_resume_aio_forwards_and_drops(self):
-        build_id = uuid4()
+    async def test_build_resume_aio_forwards_metadata(self):
         aware = MetadataAwareRegistry()
-        await aware.build_resume_aio(build_id, executor_metadata=METADATA)
+        await aware.build_resume_aio(uuid4(), executor_metadata=METADATA)
         assert aware.calls == [("build_resume", {"executor_metadata": METADATA})]
-
-        legacy = LegacyRegistry()
-        await legacy.build_resume_aio(build_id, executor_metadata=METADATA)
-        assert legacy.calls == [("build_resume", {})]
 
 
 class TestAPIRegistryWireFormat:
