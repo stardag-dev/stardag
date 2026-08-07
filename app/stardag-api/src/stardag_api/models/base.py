@@ -21,6 +21,18 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def as_utc(value: datetime) -> datetime:
+    """Attach UTC to a naive timestamp.
+
+    Every timestamp we write is UTC (``utc_now``), but SQLite's DATETIME
+    storage format carries no offset, so values read back from the test
+    database are naive while values still in the session are aware. Mixing
+    the two in a comparison raises. Postgres returns aware values
+    throughout, so this is a no-op there.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
 class Base(DeclarativeBase):
     """Base class for all models."""
 
