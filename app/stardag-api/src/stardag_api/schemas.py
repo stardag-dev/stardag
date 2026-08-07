@@ -323,9 +323,16 @@ class BuildFrontierResponse(BaseModel):
     # inside the dynamic-dep registration window) — cancellation targets.
     running: list[FrontierTaskRef] = []
     # Non-terminal tasks of this build held back by an upstream this build
-    # doesn't own. Empty for the overwhelming majority of builds; capped, in
-    # which case blocked_by_external_truncated is set (it is a diagnostic,
-    # not a work queue — a truncated list still proves "waiting, not stuck").
+    # doesn't own. Capped, in which case blocked_by_external_truncated is set
+    # (it is a diagnostic, not a work queue — a truncated list still proves
+    # "waiting, not stuck").
+    #
+    # Populated ONLY when the build has nothing actionable and nothing
+    # running, i.e. when it looks stuck — which is the only state in which
+    # the answer matters, and keeps a per-edge sort off the hot path of
+    # every healthy build's linger polls. So an EMPTY list means "not
+    # externally blocked, OR not stalled"; do not read it as proof that no
+    # external blocker exists while the build is still progressing.
     blocked_by_external: list[FrontierExternalBlocker] = []
     blocked_by_external_truncated: bool = False
     # Reactive-scheduling owner: the app whose ticks drive this build. None
