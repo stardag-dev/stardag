@@ -1148,6 +1148,49 @@ class TestReactivePickleElision:
         loaded = store.load_task(root.id)
         assert loaded is not None and loaded.id == root.id
 
+    def test_inferred_task_modules_do_not_elide(
+        self, monkeypatch, modal_function_stub, default_in_memory_fs_target
+    ):
+        """Inference is observation-only; only an explicit declaration elides.
+
+        The trigger reads the LOCAL app definition while the tick runs the
+        DEPLOYED one, and nothing lets the trigger see the deployed app's
+        baked module list. If inference alone enabled elision, merely
+        upgrading the SDK would start dropping pickles that an app deployed
+        by an older SDK has no module list to compensate for — an upgrade
+        that breaks builds.
+        """
+        from stardag.build import BuildTaskStore
+        from stardag.integration.modal import _app as app_module
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        monkeypatch.setattr(
+            app_module, "_infer_task_module_patterns", lambda *a, **k: ("stardag.*",)
+        )
+        app = _app_with_task_modules("tm-elide-inferred")
+        # The inferred patterns DO cover the task class — coverage is not
+        # what is being withheld here, the opt-in is.
+        assert app.task_modules == ("stardag.*",)
+        root = SyncOnlyTask(name="elide-inferred-root")
+
+        result, _ = self._trigger(app, root)
+
+        assert BuildTaskStore(result.build_id).load_task(root.id) is not None
+
+    def test_the_same_patterns_declared_explicitly_do_elide(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The opt-in is the user's act, not the patterns' content."""
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules("tm-elide-explicit", task_modules=["stardag.*"])
+        root = SyncOnlyTask(name="elide-explicit-root")
+
+        result, _ = self._trigger(app, root)
+
+        assert BuildTaskStore(result.build_id).load_task(root.id) is None
+
     def test_opted_out_app_pickles_everything_exactly_as_before(
         self, modal_function_stub, default_in_memory_fs_target
     ):

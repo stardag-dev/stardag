@@ -37,12 +37,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   about classes the patterns don't cover, naming the pattern to add;
   `require_pickle_free=True` turns that fallback into a hard error.
 
-  Resident (non-reactive) builds are unaffected, and `task_modules=[]`
-  behaves exactly as before. **Upgrade note for reactive users:** because
-  the default _infers_ patterns, a reactive trigger from the upgraded SDK
-  may skip pickles that the currently _deployed_ tick cannot compensate
-  for — redeploy the app before triggering (reactive mode already requires
-  the deployed app and the SDK to match), or pass `task_modules=[]`.
+  Skipping pickles requires declaring `task_modules` explicitly; the
+  inferred default only drives the coverage warning. Upgrading stardag
+  therefore changes nothing on its own — a newer SDK triggering against an
+  app deployed by an older one still writes pickles, because eliding them
+  would depend on a baked-in module list that deployment does not have.
+  Resident (non-reactive) builds are unaffected either way, and
+  `task_modules=[]` behaves exactly as before. **Redeploy the app whenever
+  you change `task_modules`**, before triggering.
 
 ### Fixed
 

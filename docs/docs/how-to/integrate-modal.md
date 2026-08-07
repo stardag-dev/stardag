@@ -584,12 +584,24 @@ by default but **warn-only** — your deploy environment may lack extras the
 image has, so a local import failure never fails the deploy. Pass
 `--no-check-task-modules` to skip the check and report names only.
 
-**What you get.** At trigger time, every discovered task whose class is
-covered _and_ whose payload round-trips to the same task id is persisted
-**without a pickle**. A build whose classes are all covered writes nothing
-to the target root, so reactive triggering stops needing target-root write
-access at all. Set `require_pickle_free=True` to turn the fallback into a
-hard error that names every task that would have needed a pickle and why.
+**What you get.** Once you declare `task_modules` explicitly, every
+discovered task whose class is covered _and_ whose payload round-trips to
+the same task id is persisted **without a pickle**. A build whose classes
+are all covered writes nothing to the target root, so reactive triggering
+stops needing target-root write access at all. Set
+`require_pickle_free=True` to turn the fallback into a hard error that
+names every task that would have needed a pickle and why.
+
+**Skipping pickles requires the explicit declaration** — the inferred
+default never elides on its own. Inference happens for every app,
+including apps written before this feature existed, and the trigger runs
+from your _local_ app definition while the tick runs from the _deployed_
+one. If inference alone skipped pickles, upgrading stardag would silently
+start dropping pickles that an app deployed by an older version has no
+baked-in module list to compensate for. Requiring you to write the
+argument is what puts the redeploy requirement in front of you at the
+moment it matters. Inference still drives the coverage warning below,
+which only observes.
 
 Some payloads stay pickle-bound by design, and always will:
 
@@ -615,16 +627,16 @@ Two caveats worth designing around:
   it directly buys tick cold-start latency.
 - **Stale-deploy blind spot.** The trigger-time coverage check reads your
   _local_ app definition, so it cannot tell that the _deployed_ app was
-  built from an older `task_modules` — or from a stardag version that
-  predates the feature entirely. If you add a pattern (or upgrade stardag)
-  and trigger without redeploying, the pre-flight is silent while the tick
-  still can't resolve the class, and because the trigger already skipped
-  the pickle there is no fallback left. **Redeploy the app whenever you
-  change `task_modules` or upgrade stardag**, before triggering — which
-  the reactive mode already requires for other reasons (see the
-  requirements above). Passing `task_modules=[]` restores the pre-feature
-  behaviour unconditionally if you need to trigger against an older
-  deployment.
+  built from an older `task_modules`. If you add a pattern and trigger
+  without redeploying, the pre-flight is silent while the tick still can't
+  resolve the class — and because the trigger already skipped the pickle,
+  there is no fallback left. **Redeploy the app whenever you change
+  `task_modules`**, before triggering — which reactive mode already
+  requires for other reasons (see the requirements above). Upgrading
+  stardag alone is safe: elision only follows an explicit declaration, so
+  a newer SDK triggering against an app deployed by an older one still
+  writes pickles. Passing `task_modules=[]` restores the pre-feature
+  behaviour unconditionally.
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment

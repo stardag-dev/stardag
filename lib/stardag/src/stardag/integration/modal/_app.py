@@ -2119,6 +2119,13 @@ class StardagApp:
 
                 Default (``None``): infer ``"<root package of the module
                 defining this app>.*"``. Pass ``[]`` to opt out.
+
+                **Declaring this explicitly is also the opt-in to skipping
+                pickles** — the inferred default only drives the coverage
+                warning. The trigger reads the local app definition while
+                the tick runs the deployed one, so if inference alone
+                elided, upgrading stardag would start dropping pickles that
+                an app deployed by an older version cannot compensate for.
             require_pickle_free: Turn the pickle fallback from a silent
                 safety net into a hard error. With ``task_modules``
                 covering a build's classes, a reactive trigger writes no
@@ -2187,6 +2194,12 @@ class StardagApp:
         # stardag.build._task_modules). Validated eagerly — a malformed
         # pattern must fail here, not silently match nothing and surface
         # hours later as a tick that cannot reconstruct a task.
+        #
+        # Whether the patterns were *declared* or merely inferred decides
+        # whether pickles may be elided — see _persist_discovered_tasks.
+        # Inference must stay observation-only: it happens on every app,
+        # including apps written before this feature existed.
+        self._task_modules_declared = task_modules is not None
         if task_modules is None:
             task_modules = _infer_task_module_patterns()
         self.task_modules: tuple[str, ...] = validate_task_module_patterns(task_modules)
@@ -2885,17 +2898,33 @@ class StardagApp:
     ) -> None:
         """Write the build task store, skipping pickles that aren't needed.
 
-        With no declared ``task_modules`` this is byte-for-byte the old
-        behaviour: pickle everything. With them, each task gets a local
+        Unless the app *opted in*, this is byte-for-byte the old
+        behaviour: pickle everything. With opt-in, each task gets a local
         dry run of what a tick will do — reconstruct it from exactly the
         payload registration stored — and only the ones that fail keep a
         pickle. A build whose classes are all covered writes nothing to
         the target root at all, so the trigger stops needing write access
         there (and stops being vulnerable to a storage error minting an
         orphan RUNNING build).
+
+        Opt-in means ``task_modules`` was passed explicitly (or
+        ``require_pickle_free`` was), NOT merely inferred. This matters:
+        the trigger runs from the local app definition while the tick runs
+        from the *deployed* one, and nothing lets the trigger see the
+        deployed app's task modules (the stale-deploy blind spot). If
+        inference alone enabled elision, then simply upgrading the SDK
+        would start eliding pickles that an app deployed by an older SDK
+        has no baked-in module list to compensate for — turning an upgrade
+        into a broken build. Elision therefore requires an act by the user,
+        which is also what makes the "redeploy after changing
+        ``task_modules``" requirement land at a moment they are paying
+        attention. Inference still drives the coverage warning, which is
+        pure observation and safe to do everywhere.
         """
         store = BuildTaskStore(build_id)
-        if not self.task_modules:
+        if not self.task_modules or not (
+            self._task_modules_declared or self.require_pickle_free
+        ):
             store.save_tasks(tasks)
             return
         plan: PickleElisionPlan = plan_pickle_elision(tasks, self.task_modules)
