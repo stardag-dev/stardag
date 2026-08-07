@@ -24,6 +24,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   was declared and documented as the input to scheduler staleness bounds
   but never populated, so it always serialised as `null` and those guards
   silently did nothing.
+- **`POST /builds/{id}/tasks/{task_id}/retry` accepts `suspended`.** A task
+  suspended for dynamic dependencies and then abandoned (orchestrator died,
+  build cancelled) was permanently unschedulable — the only escape was an
+  undocumented cancel-then-retry. `running` remains non-retryable on
+  purpose: it holds a live execution claim, and releasing that is
+  cancellation, not retry.
 
 ### SDK
 
