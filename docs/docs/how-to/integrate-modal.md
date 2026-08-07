@@ -712,6 +712,18 @@ can be force-failed by that build's `stale_running_no_ref_seconds`
 escape hatch — raise the bound if you mix modes over the same long
 tasks.
 
+**Builds that overlap.** Task state is per environment, so a task another
+build is executing blocks yours. A tick waits that out instead of failing
+the build (bounded by `TickConfig.stale_external_blocker_seconds`, default
+6 hours); a blocker nobody is executing fails the build with a message
+naming the task and the build that owns it. Symptom worth knowing: a tick
+log line saying the build is _"blocked by N task(s) running in other
+build(s); waiting rather than failing"_ means your build is fine and
+waiting on a neighbour. See
+[Cross-build blocking](../concepts/build-execution.md#cross-build-blocking)
+for the recovery path when the blocker is abandoned — including a task left
+SUSPENDED, which a retry (and therefore a re-trigger) now resets.
+
 Requirements and current limitations: the app must be deployed with this
 stardag version (scheduler `tick` function + self-reporting workers); the
 triggering process needs registry credentials and access to the default
