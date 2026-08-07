@@ -238,14 +238,13 @@ reactive scheduling):
   external completion with backoff.
 - Control it with `build(..., claim=...)`: `None` (default) claims
   probeable executions; `True` forces claiming (losers without a ref
-  wait); `False` disables. Reactive ticks claim via
-  `TickConfig.claim` (default on). Older registry servers and custom
-  registry backends without claim support degrade gracefully to the
-  pre-claim behavior (duplicates remain _safe_ — idempotent re-execution
-  and sticky completion — just wasteful).
+  wait); `False` disables. Reactive scheduler ticks always claim.
 - Custom arbitration backends implement
   `RegistryABC.task_start_claim_aio` — keeping claim, status and
-  completion consistent in one backend.
+  completion consistent in one backend. There is no default
+  implementation: without a registry (`NoOpRegistry`) there is no shared
+  state to arbitrate against and every claim is granted; any other
+  backend must arbitrate for real.
 - The claim is taken **before** the build-local concurrency-limiter slot
   (the registry-backed limiter counts RUNNING tasks, so claiming inside
   the slot would deny itself). Consequence: a claimed task can appear

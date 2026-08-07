@@ -1096,15 +1096,19 @@ class RegistryABC(metaclass=abc.ABCMeta):
         **This is the extension seam for custom arbitration backends**: a
         custom ``RegistryABC`` implementation can arbitrate however it
         likes (Redis, DynamoDB, ...), keeping claim, status and completion
-        consistent in one backend. The default implementation performs NO
-        arbitration — it records the start via :meth:`task_start_aio` and
-        reports it as won, preserving pre-claim behavior for backends
-        without support.
+        consistent in one backend. There is deliberately no default
+        implementation: a backend that answers "you won" without
+        arbitrating is indistinguishable from one that arbitrates
+        correctly, and the build engines rely on this method for
+        exactly-once execution. Implement it, or subclass
+        :class:`NoOpRegistry` to opt out explicitly.
         """
-        await self.task_start_aio(
-            build_id, task, executor=executor, executor_ref=executor_ref
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement task_start_claim_aio. "
+            "Implement it to arbitrate per-task execution claims (see "
+            "APIRegistry), or subclass NoOpRegistry to opt out of "
+            "arbitration."
         )
-        return StartClaimResult(started=True)
 
     async def task_start_with_limits_aio(
         self,
@@ -1225,6 +1229,26 @@ class NoOpRegistry(RegistryABC):
 
     def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
         raise NotImplementedError("NoOpRegistry does not support task_get_metadata.")
+
+    async def task_start_claim_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+        limit_keys: Sequence[str] | None = None,
+    ) -> StartClaimResult:
+        """Always grant: there is nothing to arbitrate against.
+
+        This is the registry-*less* path — no shared state records that a
+        task is RUNNING, so no other execution can be observed and no
+        cross-build exactly-once guarantee is on offer in the first place.
+        Granting unconditionally is the honest answer here, unlike on
+        :class:`RegistryABC` (where it would silently defeat arbitration a
+        real backend was expected to provide).
+        """
+        return StartClaimResult(started=True)
 
 
 def init_registry() -> RegistryABC:

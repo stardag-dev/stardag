@@ -609,19 +609,6 @@ async def build_aio(
 
     # --- Per-task execution claims (default exactly-once) ---
     claim_cfg = claim_config or ClaimConfig()
-    # Claims require a registry that actually implements arbitration (the
-    # ABC default records a plain start and always reports "won") —
-    # claiming through it would only add a pointless duplicate start.
-    # Override detection doubles as graceful degradation for custom
-    # registries written before claims existed.
-    _registry_supports_claim = (
-        type(registry).task_start_claim_aio is not RegistryABC.task_start_claim_aio
-    )
-    if claim is True and not _registry_supports_claim:
-        logger.warning(
-            f"claim=True requested but {type(registry).__name__} does not "
-            "implement task_start_claim_aio — proceeding without claims."
-        )
 
     def claim_enabled_for(task: BaseTask) -> bool:
         """Whether to claim-start this task (see build_aio's ``claim``).
@@ -631,7 +618,7 @@ async def build_aio(
         executions (local executors) would need TTL liveness the claim
         doesn't have; the (deprecated) global lock still covers those.
         """
-        if claim is False or not _registry_supports_claim:
+        if claim is False:
             return False
         if claim is True:
             return True
