@@ -166,26 +166,60 @@ own and still be perfectly healthy. Terminal detection distinguishes the
 two cases from the frontier's list of blocking upstreams this build does
 not own:
 
-- **A blocker another build is running** — the build waits, exactly as it
-  waits for a busy concurrency-limit slot. The blocker's completion wakes
-  this scheduler, and the watchdog covers a lost wake-up.
+- **A RUNNING blocker whose execution claim is still live** — the build
+  waits, exactly as it waits for a busy concurrency-limit slot. The
+  blocker's completion wakes this scheduler, and the watchdog covers a lost
+  wake-up.
+- **A RUNNING blocker whose execution claim has lapsed** — the build fails.
+  Not "presumed abandoned": the claim's expiry has passed, so the registry
+  no longer honours it, has stopped counting it against concurrency limits,
+  and will hand the task to the next claimant.
 - **A blocker another build has yet to schedule** (pending or suspended,
   under a build that is itself still live) — the build waits too. That
   build is going to run it; failing here would just trade one spurious
   failure for another.
-- **A blocker no live build is going to run** — its owning build has gone
-  terminal, no build owns its status at all, or that status could not be
-  resolved. Nothing is going to move it, so the build fails immediately,
-  naming the blocking task, its status, how long it has been in it, the
-  build that owns it, and why that owner will not move it.
+- **A non-RUNNING blocker no live build is going to run** — its owning
+  build has gone terminal, no build owns its status at all, or that status
+  could not be resolved. Nothing is going to move it, so the build fails
+  immediately, naming the blocking task, its status, how long it has been
+  in it, the build that owns it, and why that owner will not move it.
 
-Both waits are bounded by `TickConfig.stale_external_blocker_seconds`
-(default 6 hours, measured on how long the blocker has sat in its status,
-not on this tick): past the bound the blocker is presumed abandoned and the
-build fails rather than hanging silently. Raise it if your tasks routinely
-run longer; `None` waits indefinitely. Owner liveness is resolved only when
-a build actually looks stalled, and once per owning build, so a healthy
-build never pays for it.
+The two questions are answered from different evidence, on purpose. A
+RUNNING task holds an **execution claim**, and every start records that
+claim with an expiry (see [Claim expiry](#claim-expiry)) — so "is anyone
+still executing this?" is something a build in another scheduler can simply
+read, without probing an executor it has no access to. Every other status
+holds no claim and therefore carries no expiry, so the only available
+evidence is whether the build that owns the blocker's status is itself
+still live; that lookup happens only when a build actually looks stalled,
+and once per owning build, so a healthy build never pays for it.
+
+A RUNNING blocker whose claim carries **no** expiry — an older registry, or
+a start recorded before expiry existed — is waited on indefinitely, and the
+tick logs that the wait cannot be shown to end. That is deliberate: a
+missing expiry means "never lapses", not "dead", and failing on it would
+reintroduce exactly the spurious failures this path exists to remove.
+Cancel the blocking task to break such a wait.
+
+Note what proving a blocker dead does **not** buy you: if the blocker is not
+in your build's task set, your build can never run it however dead it is, so
+the build still fails. What changes is the certainty and the message — it
+names the claim that lapsed instead of quoting a timeout.
+
+#### Claim expiry
+
+Every start a reactive tick records carries a claim TTL derived from the
+**executor's own timeout** (for Modal, the worker function's `timeout` from
+its `FunctionSettings`) plus a grace margin, so the claim outlives the
+execution it guards by a small margin and no more. Where no timeout is
+known the registry's own default applies.
+
+The derivation matters. Granting an expiry on every start is what makes an
+abandoned claim heal at all, but it also means a task that outlives its TTL
+could have its claim taken while it is still alive — a duplicate execution.
+Tying the TTL to the limit the backend itself enforces is what keeps that
+from being a real risk: the backend will have killed the execution before
+its claim lapses.
 
 **Seeing it.** `stardag builds frontier <build-id>` renders the blocking
 upstreams: which task of your build is held up, by which task (namespace and
