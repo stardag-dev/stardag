@@ -1428,67 +1428,86 @@ async def get_build_frontier(
     # meaning "RUNNING tasks of *this* build" (it is the cancellation
     # target list).
     #
+    # Computed ONLY when this build has nothing actionable and nothing
+    # running — i.e. exactly when it looks stuck, which is the only state in
+    # which either consumer asks the question. That is not an optimisation
+    # detail to gloss over: the frontier is re-read on every linger poll
+    # (~3 s per active build), and this query sorts over the build's
+    # dependency edges, so computing it unconditionally would put a
+    # per-edge sort on the hot path of every healthy build. A build that is
+    # visibly progressing does not need to be told what it is waiting on.
+    #
+    # The gate mirrors the SDK's own stuck check (`not actionable and
+    # running == 0`) so the two cannot disagree about when the diagnostic
+    # is meaningful. Consequence for consumers: an EMPTY list means "not
+    # blocked externally, or not stalled" — never read it as proof that no
+    # external blocker exists while the build is still making progress.
+    #
     # One flat (blocked, blocker) query — resolving blockers per blocked
-    # task would be N+1 on an endpoint polled every tick. It mirrors the
-    # join `actionable` already performs, so the added cost is ~one more
-    # pass over this build's dependency edges (ix_task_dep_downstream),
-    # bounded by LIMIT.
-    blocked = aliased(Task)
-    blocker = aliased(Task)
-    blocker_rows = (
-        await db.execute(
-            select(
-                blocked.task_id,
-                blocker.task_id,
-                blocker.task_namespace,
-                blocker.task_name,
-                blocker.latest_status,
-                blocker.latest_status_at,
-                blocker.latest_status_build_id,
-                blocker.id.in_(build_task_ids),
+    # task would be N+1. It mirrors the join `actionable` already performs,
+    # so the added cost is ~one more pass over this build's dependency
+    # edges (ix_task_dep_downstream), bounded by LIMIT.
+    blocked_by_external: list[FrontierExternalBlocker] = []
+    blocked_by_external_truncated = False
+    if not actionable_tasks and not running_tasks:
+        blocked = aliased(Task)
+        blocker = aliased(Task)
+        blocker_rows = (
+            await db.execute(
+                select(
+                    blocked.task_id,
+                    blocker.task_id,
+                    blocker.task_namespace,
+                    blocker.task_name,
+                    blocker.latest_status,
+                    blocker.latest_status_at,
+                    blocker.latest_status_build_id,
+                    blocker.id.in_(build_task_ids),
+                )
+                .select_from(TaskDependency)
+                .join(blocked, TaskDependency.downstream_task_id == blocked.id)
+                .join(blocker, TaskDependency.upstream_task_id == blocker.id)
+                .where(
+                    blocked.id.in_(build_task_ids),
+                    blocked.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
+                    blocker.latest_status != TaskStatus.COMPLETED,
+                    # Null-safe inequality (renders IS DISTINCT FROM on
+                    # Postgres, IS NOT on SQLite): a blocker with no recorded
+                    # status build — a pre-denormalisation row — is likewise
+                    # not something this build put there.
+                    blocker.latest_status_build_id.is_distinct_from(build_id),
+                )
+                # Registration order, matching `actionable`. Deterministic,
+                # so a truncated list is stable across the polls of one tick.
+                .order_by(blocked.created_at, blocker.created_at)
+                .limit(_MAX_FRONTIER_EXTERNAL_BLOCKERS + 1)
             )
-            .select_from(TaskDependency)
-            .join(blocked, TaskDependency.downstream_task_id == blocked.id)
-            .join(blocker, TaskDependency.upstream_task_id == blocker.id)
-            .where(
-                blocked.id.in_(build_task_ids),
-                blocked.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
-                blocker.latest_status != TaskStatus.COMPLETED,
-                # Null-safe inequality (renders IS DISTINCT FROM on
-                # Postgres, IS NOT on SQLite): a blocker with no recorded
-                # status build — a pre-denormalisation row — is likewise not
-                # something this build put there.
-                blocker.latest_status_build_id.is_distinct_from(build_id),
+        ).all()
+        blocked_by_external_truncated = (
+            len(blocker_rows) > _MAX_FRONTIER_EXTERNAL_BLOCKERS
+        )
+        blocked_by_external = [
+            FrontierExternalBlocker(
+                task_id=blocked_task_id,
+                blocking_task_id=blocking_task_id,
+                blocking_task_namespace=blocking_namespace,
+                blocking_task_name=blocking_name,
+                blocking_status=blocking_status,
+                blocking_status_at=blocking_status_at,
+                blocking_status_build_id=blocking_status_build_id,
+                blocking_in_build=bool(blocking_in_build),
             )
-            # Registration order, matching `actionable`. Deterministic, so a
-            # truncated list is stable across the polls of one tick.
-            .order_by(blocked.created_at, blocker.created_at)
-            .limit(_MAX_FRONTIER_EXTERNAL_BLOCKERS + 1)
-        )
-    ).all()
-    blocked_by_external_truncated = len(blocker_rows) > _MAX_FRONTIER_EXTERNAL_BLOCKERS
-    blocked_by_external = [
-        FrontierExternalBlocker(
-            task_id=blocked_task_id,
-            blocking_task_id=blocking_task_id,
-            blocking_task_namespace=blocking_namespace,
-            blocking_task_name=blocking_name,
-            blocking_status=blocking_status,
-            blocking_status_at=blocking_status_at,
-            blocking_status_build_id=blocking_status_build_id,
-            blocking_in_build=bool(blocking_in_build),
-        )
-        for (
-            blocked_task_id,
-            blocking_task_id,
-            blocking_namespace,
-            blocking_name,
-            blocking_status,
-            blocking_status_at,
-            blocking_status_build_id,
-            blocking_in_build,
-        ) in blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
-    ]
+            for (
+                blocked_task_id,
+                blocking_task_id,
+                blocking_namespace,
+                blocking_name,
+                blocking_status,
+                blocking_status_at,
+                blocking_status_build_id,
+                blocking_in_build,
+            ) in blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
+        ]
 
     root_task_ids: list[str] = list(build.root_task_ids or [])
     roots: list[Task] = []
