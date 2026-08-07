@@ -64,6 +64,11 @@ from stardag.build import (
 )
 from stardag.build._base import GlobalLockConfig
 from stardag.build._base import BuildSummary
+from stardag.build._task_modules import (
+    expand_task_module_patterns,
+    import_task_modules,
+    validate_task_module_patterns,
+)
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
@@ -255,12 +260,17 @@ class FinalizeResult(typing.NamedTuple):
         functions: List of created Modal function names.
         volume_mounts: Dict of mount_path -> volume_name for auto-mounted volumes.
         auto_volumes: Dict of mount_path -> Volume for auto-mounted volumes.
+        task_modules: The app's ``task_modules`` patterns expanded to the
+            concrete, sorted module list baked into the deployed scheduler
+            tick (empty when the app opted out). Surfaced so the CLI can
+            report what the deployment will import.
     """
 
     volumes: dict[str, modal.Volume]
     functions: list[str]
     volume_mounts: dict[str, str] = {}
     auto_volumes: dict[str, modal.Volume] = {}
+    task_modules: list[str] = []
 
 
 # --- Function settings ---
@@ -1900,6 +1910,46 @@ def _setup_logging():
 # --- Stardag App ---
 
 
+def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
+    """Infer ``task_modules`` from the module that constructs the app.
+
+    The default declaration is "the root package of the module defining
+    this app, recursively" — which is right far more often than not: an
+    app and the tasks it schedules almost always live in the same
+    distribution, and a whole-package wildcard costs only import time.
+
+    Inference is impossible for a module that is not part of a package —
+    ``__main__``, or a loose script that Modal loads as a top-level module.
+    Such a module isn't importable in a container under a stable name in
+    the first place, so a pattern derived from it would be a lie. We warn
+    and opt out (the pickle path still works), rather than baking in a
+    module list that would fail to import in every tick container.
+
+    Args:
+        _depth: Stack frames back to the user's call site (``__init__``'s
+            caller by default). Not part of the public contract.
+    """
+    frame = inspect.currentframe()
+    for _ in range(_depth):
+        frame = frame.f_back if frame is not None else None
+    module_name = frame.f_globals.get("__name__") if frame is not None else None
+    package = frame.f_globals.get("__package__") if frame is not None else None
+    if not module_name or module_name == "__main__" or not package:
+        logger.warning(
+            "Could not infer StardagApp(task_modules=...): the app is "
+            f"defined in {module_name or 'an unknown module'!r}, which is "
+            "not part of an importable package. Reactive scheduler ticks "
+            "will therefore fall back to the build task store's pickles "
+            "(which need target-root write access at trigger time and are "
+            "invalidated by a redeploy). Declare the modules explicitly — "
+            'e.g. task_modules=["my_pkg.tasks.*"] — to let ticks '
+            "reconstruct tasks from registry data instead, or pass "
+            "task_modules=[] to silence this warning."
+        )
+        return ()
+    return (f"{module_name.split('.')[0]}.*",)
+
+
 class StardagApp:
     """Wrapper around modal.App for Stardag task execution.
 
@@ -1940,6 +1990,8 @@ class StardagApp:
         modal_app: The underlying modal.App instance.
         name: The app name.
         is_finalized: Whether finalize() has been called.
+        task_modules: The validated task-module patterns (see the
+            ``task_modules`` argument); empty when opted out.
     """
 
     def __init__(
@@ -1955,6 +2007,7 @@ class StardagApp:
         watchdog_period_minutes: int | None = None,
         limit_key_selector: typing.Callable[[BaseTask], typing.Sequence[str]]
         | None = None,
+        task_modules: typing.Sequence[str] | None = None,
         modal_workspace: str | None = None,
         stardag_api_key_secret: "modal.Secret | str | None" = "stardag-api-key",
     ):
@@ -2003,6 +2056,26 @@ class StardagApp:
                 concurrency-limit keys it runs under in reactive scheduling
                 (deployed-app configuration applied by every tick). Default:
                 no limits.
+            task_modules: Modules whose import registers the task classes
+                this app may schedule. **Only reactive scheduling needs
+                this**: a scheduler tick reconstructs tasks from registry
+                data and can resolve only classes that are already
+                registered in its process (registration happens at class
+                definition time). Resident builds hold the real task
+                objects and are entirely unaffected.
+
+                Each entry is an exact module (``"my_pkg.tasks.ingest"``)
+                or a package with a trailing recursive wildcard
+                (``"my_pkg.tasks.*"``); anything else raises. The patterns
+                are expanded to a concrete module list at ``finalize()``
+                and baked into the deployed tick, so **adding or moving
+                task classes requires a redeploy**. Declared modules become
+                import-hot — they are imported in every tick container —
+                so keep heavy runtime dependencies inside ``run()`` rather
+                than at module scope.
+
+                Default (``None``): infer ``"<root package of the module
+                defining this app>.*"``. Pass ``[]`` to opt out.
             modal_workspace: Explicit Modal workspace name recorded in the
                 executor metadata of triggered builds and started tasks
                 (used by the UI for Modal dashboard deep links). Default:
@@ -2051,6 +2124,15 @@ class StardagApp:
         # consistently (callables can't be persisted in the JSON build
         # meta like the scalar tick_kwargs).
         self.limit_key_selector = limit_key_selector
+        # Task-module declaration for reactive scheduling: the patterns
+        # whose expansion is imported by every scheduler tick so it can
+        # rebuild task objects from registry data (see
+        # stardag.build._task_modules). Validated eagerly — a malformed
+        # pattern must fail here, not silently match nothing and surface
+        # hours later as a tick that cannot reconstruct a task.
+        if task_modules is None:
+            task_modules = _infer_task_module_patterns()
+        self.task_modules: tuple[str, ...] = validate_task_module_patterns(task_modules)
         # Explicit Modal workspace name for executor metadata (UI deep
         # links). Default: resolved from the Modal token, best-effort.
         # Used by build_trigger and by the tick's executor; the resident
@@ -2130,10 +2212,13 @@ class StardagApp:
                 target roots if they don't exist.
 
         Returns:
-            FinalizeResult with created volumes, function names, and mount info.
+            FinalizeResult with created volumes, function names, mount info,
+            and the expanded ``task_modules`` baked into the tick.
 
         Raises:
             RuntimeError: If finalize() has already been called.
+            TaskModulesError: If a ``task_modules`` pattern cannot be
+                expanded (e.g. its root package is not importable here).
         """
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
@@ -2209,6 +2294,16 @@ class StardagApp:
                         f"proceeding: {e}"
                     )
             extra_secrets.append(self.stardag_api_key_secret)
+        # Expand the declared task-module patterns to a concrete, sorted
+        # module list ONCE, here, and bake it into the deployed functions
+        # below. Deploy-time expansion (rather than in-container) keeps the
+        # deployed set explicit and auditable, keeps container startup off
+        # the filesystem, and makes the deployment reproducible: a module
+        # added after this deploy is not silently picked up by a running
+        # tick — it needs a redeploy, which is also when the operator gets
+        # to see the list change. Only name expansion happens here (no
+        # submodule imports): the CLI does the optional local import check.
+        task_modules = expand_task_module_patterns(self.task_modules)
         # Wrap callables in real functions for Modal compatibility.
         # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
         # not callable class instances. The wrappers delegate to the actual callable
@@ -2375,6 +2470,18 @@ class StardagApp:
                 build_info.reactive_tick_kwargs, tick_kwargs, limit_key_selector
             )
 
+            # Register the app's task classes in THIS container before the
+            # tick reconstructs anything: rehydrating a task from registry
+            # data is a dict lookup in the polymorphic registry, which is
+            # populated only as a side effect of importing the defining
+            # modules (unlike pickle, which self-imports). The list was
+            # expanded and frozen at deploy time; the import is cached per
+            # module list, so a container serving many ticks pays it once.
+            # Failures warn rather than abort — and are retained, so a
+            # later "could not rehydrate" error can name them.
+            if task_modules:
+                import_task_modules(task_modules)
+
             executor = ModalTaskExecutor(
                 modal_app_name=app_name,
                 worker_selector=default_worker_selector,
@@ -2442,6 +2549,7 @@ class StardagApp:
             functions=function_names,
             volume_mounts=volume_mounts,
             auto_volumes=auto_volumes,
+            task_modules=task_modules,
         )
 
     def build_spawn(

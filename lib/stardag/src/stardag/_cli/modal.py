@@ -36,7 +36,7 @@ from stardag._cli.credentials import (
 )
 from stardag.config.cache import get_cached_slugs
 from stardag.config.loader import clear_config_cache, get_config
-from stardag.integration.modal import StardagApp
+from stardag.integration.modal import FinalizeResult, StardagApp
 
 # Check if modal is available
 try:
@@ -488,6 +488,61 @@ def _parse_app_ref(app_ref: str) -> tuple[str, str]:
     return app_ref, ""
 
 
+def _report_task_modules(
+    stardag_app_instance: StardagApp,
+    finalize_result: FinalizeResult,
+    *,
+    check: bool,
+) -> None:
+    """Report the task-module expansion baked into the deployed tick.
+
+    The class count is the genuinely useful number — "37 modules" says
+    nothing about whether the DAG's classes are among them — but getting it
+    requires actually importing the modules *here*, in the deploy
+    environment, which is not the image: it may lack extras, GPU libraries,
+    or credentials the containers have. So the import check is default-on
+    and strictly **warn-only**; it can never fail a deploy, and
+    ``--no-check-task-modules`` skips it entirely. It also stays in the CLI
+    rather than in ``finalize()``, so programmatic callers pay only for
+    name expansion.
+    """
+    task_modules = list(finalize_result.task_modules)
+    patterns = list(stardag_app_instance.task_modules)
+    if not task_modules:
+        if not patterns:
+            console.print(
+                "[dim]  task modules: none declared — reactive scheduler "
+                "ticks will rely on task-store pickles[/dim]"
+            )
+        return
+
+    from_patterns = ", ".join(f'"{p}"' for p in patterns)
+    summary = f"{len(task_modules)} discovered from {from_patterns}"
+    if not check:
+        console.print(f"[cyan]Task modules:[/cyan] [dim]{summary}[/dim]")
+        return
+
+    from stardag.build import import_task_modules
+
+    report = import_task_modules(task_modules)
+    console.print(
+        f"[cyan]Task modules:[/cyan] [dim]{summary}  ->  "
+        f"{report.task_classes_registered} task classes registered[/dim]"
+    )
+    if report.failures:
+        console.print(
+            f"[yellow]  {len(report.failures)} task module(s) failed to "
+            "import locally. This does NOT fail the deploy — the image may "
+            "have dependencies this environment lacks — but if the failure "
+            "reproduces in the container, task classes defined in these "
+            "modules will not be reconstructable by scheduler ticks:[/yellow]"
+        )
+        for module_name in sorted(report.failures):
+            console.print(
+                f"[yellow]    {module_name}: {report.failures[module_name]}[/yellow]"
+            )
+
+
 @app.command("deploy")
 def deploy(
     app_ref: str = typer.Argument(
@@ -531,6 +586,16 @@ def deploy(
         False,
         "-m",
         help="Interpret argument as a Python module path instead of a file/script path",
+    ),
+    check_task_modules: bool = typer.Option(
+        True,
+        "--check-task-modules/--no-check-task-modules",
+        help=(
+            "Import the app's expanded task_modules locally to report how "
+            "many task classes they register. Warn-only — a local import "
+            "failure never fails the deploy (the deploy environment may "
+            "lack extras the image has)."
+        ),
     ),
 ) -> None:
     """Deploy a Stardag Modal application.
@@ -632,6 +697,10 @@ def deploy(
         console.print("[cyan]Functions:[/cyan]")
         for func_name in finalize_result.functions:
             console.print(f"[dim]  {func_name}[/dim]")
+
+        _report_task_modules(
+            stardag_app_instance, finalize_result, check=check_task_modules
+        )
 
     # Get the underlying Modal app
     modal_app = stardag_app_instance.modal_app

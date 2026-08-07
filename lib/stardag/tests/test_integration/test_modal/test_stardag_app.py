@@ -795,6 +795,182 @@ class TestStardagAppReactiveTrigger:
                 )
 
 
+# ---------------------------------------------------------------------------
+# task_modules: declaration, deploy-time expansion, pre-flight, pickle elision
+# ---------------------------------------------------------------------------
+
+
+def _app_with_task_modules(name: str, **kwargs) -> StardagApp:
+    return StardagApp(
+        name,
+        builder_settings=FunctionSettings(image=_make_image()),
+        worker_settings={"default": FunctionSettings(image=_make_image())},
+        **kwargs,
+    )
+
+
+class TestTaskModulesDeclaration:
+    """`StardagApp(task_modules=...)` validation and inference."""
+
+    def test_patterns_are_validated_eagerly(self):
+        from stardag.build import TaskModulesError
+
+        with pytest.raises(TaskModulesError, match="only allowed as the final"):
+            _app_with_task_modules("tm-bad", task_modules=["my_pkg.*.tasks"])
+
+    def test_empty_list_opts_out_silently(self, caplog):
+        with caplog.at_level("WARNING"):
+            app = _app_with_task_modules("tm-optout", task_modules=[])
+        assert app.task_modules == ()
+        assert "task_modules" not in caplog.text
+
+    def test_declared_patterns_are_deduped_and_sorted(self):
+        app = _app_with_task_modules(
+            "tm-declared", task_modules=["b_pkg.*", "a_pkg.tasks", "b_pkg.*"]
+        )
+        assert app.task_modules == ("a_pkg.tasks", "b_pkg.*")
+
+    def test_default_infers_from_the_defining_module(self):
+        """The default is "the root package of the module defining the app,
+        recursively" — resolved from the caller's frame, so it matches what
+        inference sees from this very test function."""
+        from stardag.integration.modal._app import _infer_task_module_patterns
+
+        expected = _infer_task_module_patterns(_depth=1)
+        app = _app_with_task_modules("tm-inferred")
+        assert app.task_modules == expected
+
+    def test_inference_uses_the_callers_root_package(self):
+        from stardag.integration.modal._app import _infer_task_module_patterns
+
+        namespace = {
+            "__name__": "acme_pipelines.deploy.app",
+            "__package__": "acme_pipelines.deploy",
+            "_infer": _infer_task_module_patterns,
+        }
+        exec("result = _infer(_depth=1)", namespace)  # noqa: S102
+        assert namespace["result"] == ("acme_pipelines.*",)
+
+    @pytest.mark.parametrize(
+        "module_name,package",
+        [("__main__", None), ("loose_deploy_script", ""), ("__main__", "")],
+    )
+    def test_inference_opts_out_with_a_warning_for_unpackaged_modules(
+        self, caplog, module_name, package
+    ):
+        """A module that isn't part of a package has no importable name in a
+        container, so a pattern derived from it would be a lie: warn (naming
+        the fallback and the fix) and opt out."""
+        from stardag.integration.modal._app import _infer_task_module_patterns
+
+        namespace = {
+            "__name__": module_name,
+            "__package__": package,
+            "_infer": _infer_task_module_patterns,
+        }
+        with caplog.at_level("WARNING"):
+            exec("result = _infer(_depth=1)", namespace)  # noqa: S102
+
+        assert namespace["result"] == ()
+        assert "Could not infer StardagApp(task_modules=...)" in caplog.text
+        assert "fall back to the build task store's pickles" in caplog.text
+        assert 'task_modules=["my_pkg.tasks.*"]' in caplog.text
+
+
+class TestFinalizeBakesTaskModules:
+    """finalize() expands the patterns once and freezes the result into the
+    deployed tick — so the deployed set is explicit, auditable, and only
+    changes on redeploy."""
+
+    def _finalize(self, **app_kwargs):
+        app = _app_with_task_modules("tm-finalize", **app_kwargs)
+        captured: dict = {}
+
+        def capture_function(**kwargs):
+            def decorator(fn):
+                captured[kwargs.get("name", "unknown")] = fn
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        with patch("stardag.integration.modal._app.get_target_roots_volumes") as mv:
+            mv.return_value = MagicMock(by_volume_name={}, by_root_key={})
+            result = app.finalize()
+        return app, result, captured
+
+    def test_expansion_is_surfaced_on_the_finalize_result(self):
+        _, result, _ = self._finalize(task_modules=["stardag.utils.*"])
+
+        assert "stardag.utils" in result.task_modules
+        assert "stardag.utils.testing.helper_tasks" in result.task_modules
+        assert result.task_modules == sorted(set(result.task_modules))
+
+    def test_opted_out_app_bakes_nothing(self):
+        _, result, _ = self._finalize(task_modules=[])
+        assert result.task_modules == []
+
+    def test_tick_imports_the_baked_list(self, default_in_memory_fs_target):
+        from stardag.build import TickSummary
+        from stardag.registry import BuildInfo
+
+        _, result, captured = self._finalize(task_modules=["stardag.utils.*"])
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(
+            id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+        )
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            return TickSummary(outcome="noop")
+
+        with (
+            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch(
+                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+            ),
+            patch(
+                "stardag.integration.modal._app.import_task_modules"
+            ) as import_modules,
+        ):
+            rp.get.return_value = registry
+            captured["tick"](str(build_id))
+
+        # Exactly the list frozen at deploy time — not re-derived in the
+        # container, where the filesystem walk would cost cold-start time.
+        import_modules.assert_called_once_with(result.task_modules)
+
+    def test_opted_out_tick_imports_nothing(self, default_in_memory_fs_target):
+        from stardag.build import TickSummary
+        from stardag.registry import BuildInfo
+
+        _, _, captured = self._finalize(task_modules=[])
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(
+            id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+        )
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            return TickSummary(outcome="noop")
+
+        with (
+            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch(
+                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+            ),
+            patch(
+                "stardag.integration.modal._app.import_task_modules"
+            ) as import_modules,
+        ):
+            rp.get.return_value = registry
+            captured["tick"](str(build_id))
+
+        import_modules.assert_not_called()
+
+
 class TestReactiveTriggerFailureLeavesNoOrphanBuild:
     """A build minted by ``build_start`` is RUNNING until a terminal EVENT
     says otherwise — and no orchestrator exists yet to emit one. So a

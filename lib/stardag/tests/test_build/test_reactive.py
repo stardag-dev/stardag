@@ -1225,6 +1225,74 @@ class TestRehydrationFallback:
         assert summary.terminal_status == "failed"
 
 
+class TestRehydrationDiagnostics:
+    """A rehydration failure names the declared task modules that failed to
+    import — "class X unresolved" and "the module defining X blew up on
+    import" are the same incident seen from two ends, and only the
+    annotation connects them."""
+
+    @pytest.fixture
+    def failed_task_module_import(self):
+        from stardag.build._task_modules import (
+            _reset_import_state_for_tests,
+            import_task_modules,
+        )
+
+        _reset_import_state_for_tests()
+        import_task_modules(["stardag_no_such_declared_task_module"])
+        yield
+        _reset_import_state_for_tests()
+
+    async def test_failure_note_is_appended_to_the_rehydration_error(
+        self,
+        caplog,
+        failed_task_module_import,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        (root,) = _chain("diagnostic-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        store._tasks.clear()  # neither a pickle nor rehydratable metadata
+
+        with caplog.at_level("WARNING"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "could not be rehydrated from registry data" in messages
+        assert "stardag_no_such_declared_task_module" in messages
+        assert "likely cause" in messages
+
+    async def test_no_note_when_every_task_module_imported(
+        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        from stardag.build._task_modules import _reset_import_state_for_tests
+
+        _reset_import_state_for_tests()
+        (root,) = _chain("diagnostic-clean-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        store._tasks.clear()
+
+        with caplog.at_level("WARNING"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "could not be rehydrated from registry data" in messages
+        assert "failed to import" not in messages
+
+
 class TestExecutorMetadataRecording:
     """The post-spawn ref-recording start carries the handle's
     executor_metadata (and drops it for pre-metadata registries)."""
