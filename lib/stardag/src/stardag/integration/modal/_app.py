@@ -65,10 +65,13 @@ from stardag.build import (
 from stardag.build._base import GlobalLockConfig
 from stardag.build._base import BuildSummary
 from stardag.build._task_modules import (
+    PickleElisionPlan,
+    TaskModulesError,
     declared_task_module_patterns,
     expand_task_module_patterns,
     format_uncovered_message,
     import_task_modules,
+    plan_pickle_elision,
     set_declared_task_module_patterns,
     uncovered_task_classes,
     validate_task_module_patterns,
@@ -1601,6 +1604,11 @@ class _WorkerLifecycleReporter:
         # coverage check is re-run here, on the app's patterns as published
         # by the deployed worker wrapper. Once per class per process: this
         # runs on every suspending worker invocation.
+        #
+        # The same elision applies (see StardagApp._persist_discovered_tasks):
+        # without it the pickle-free property would hold only until a task
+        # yielded its first dynamic dependency, and a build with dynamic
+        # deps would still need target-root write access.
         patterns = declared_task_module_patterns()
         if patterns:
             uncovered = uncovered_task_classes(
@@ -1617,7 +1625,14 @@ class _WorkerLifecycleReporter:
                         ),
                     )
                 )
-        store.save_tasks(result.incomplete.values())
+            plan = plan_pickle_elision(result.incomplete.values(), patterns)
+            store.save_tasks(task for task, _ in plan.pickled)
+            logger.info(
+                f"Build {self.build_id} dynamic deps of task "
+                f"{self.task.id}: {plan.summary()}"
+            )
+        else:
+            store.save_tasks(result.incomplete.values())
         deps = flatten_task_struct(task_struct)
         self.registry.task_add_dependencies(
             self.build_id, self.task, deps, is_dynamic=True
@@ -2017,6 +2032,8 @@ class StardagApp:
         is_finalized: Whether finalize() has been called.
         task_modules: The validated task-module patterns (see the
             ``task_modules`` argument); empty when opted out.
+        require_pickle_free: Whether a reactive trigger refuses to fall
+            back to writing task pickles.
     """
 
     def __init__(
@@ -2033,6 +2050,7 @@ class StardagApp:
         limit_key_selector: typing.Callable[[BaseTask], typing.Sequence[str]]
         | None = None,
         task_modules: typing.Sequence[str] | None = None,
+        require_pickle_free: bool = False,
         modal_workspace: str | None = None,
         stardag_api_key_secret: "modal.Secret | str | None" = "stardag-api-key",
     ):
@@ -2101,6 +2119,20 @@ class StardagApp:
 
                 Default (``None``): infer ``"<root package of the module
                 defining this app>.*"``. Pass ``[]`` to opt out.
+            require_pickle_free: Turn the pickle fallback from a silent
+                safety net into a hard error. With ``task_modules``
+                covering a build's classes, a reactive trigger writes no
+                task pickles at all and therefore needs no target-root
+                *write* access; with this flag, a trigger that *would* have
+                fallen back to pickling raises instead, naming every task
+                and why. Off by default (the fallback is what keeps the
+                feature additive).
+
+                Enforced at the trigger only. Dynamic dependencies
+                registered from inside a worker apply the same elision but
+                never raise: their task has already run, and failing its
+                bookkeeping to enforce a storage preference would be a
+                strictly worse outcome than one extra pickle.
             modal_workspace: Explicit Modal workspace name recorded in the
                 executor metadata of triggered builds and started tasks
                 (used by the UI for Modal dashboard deep links). Default:
@@ -2158,6 +2190,16 @@ class StardagApp:
         if task_modules is None:
             task_modules = _infer_task_module_patterns()
         self.task_modules: tuple[str, ...] = validate_task_module_patterns(task_modules)
+        if require_pickle_free and not self.task_modules:
+            raise TaskModulesError(
+                "require_pickle_free=True is meaningless without "
+                "task_modules: with no declared modules, no task can be "
+                "reconstructed from registry data and every task would "
+                "need a pickle. Declare task_modules explicitly (if you "
+                "left it at the default, inference was not possible — see "
+                "the warning above), or drop require_pickle_free."
+            )
+        self.require_pickle_free = require_pickle_free
         # Explicit Modal workspace name for executor metadata (UI deep
         # links). Default: resolved from the Modal token, best-effort.
         # Used by build_trigger and by the tick's executor; the resident
@@ -2802,12 +2844,15 @@ class StardagApp:
         tick will be able to reconstruct — before a single container
         starts, rather than as a mystifying tick failure hours later.
 
-        **Severity is a warning, not an error.** An uncovered class is not
-        broken: it falls back to the pickle path, which is exactly how
-        every reactive build worked before ``task_modules`` existed.
-        Failing the trigger would therefore break working setups the
-        moment they upgrade, which is precisely what "this feature is
-        additive" forbids.
+        **Severity is a warning, not an error** (unless
+        ``require_pickle_free``). An uncovered class is not broken: it
+        falls back to the pickle path, which is exactly how every reactive
+        build worked before ``task_modules`` existed. Failing the trigger
+        would therefore break working setups the moment they upgrade,
+        which is precisely what "this feature is additive" forbids. The
+        hard failure lives behind ``require_pickle_free=True``, raised
+        from the persistence step below (which additionally knows about
+        round-trip failures, not just coverage).
 
         Known limitation: this reads the *local* app definition, so it
         cannot detect that the deployed app was built from an older
@@ -2834,6 +2879,32 @@ class StardagApp:
                 ),
             )
         )
+
+    def _persist_discovered_tasks(
+        self, build_id: UUID, tasks: typing.Iterable[BaseTask]
+    ) -> None:
+        """Write the build task store, skipping pickles that aren't needed.
+
+        With no declared ``task_modules`` this is byte-for-byte the old
+        behaviour: pickle everything. With them, each task gets a local
+        dry run of what a tick will do — reconstruct it from exactly the
+        payload registration stored — and only the ones that fail keep a
+        pickle. A build whose classes are all covered writes nothing to
+        the target root at all, so the trigger stops needing write access
+        there (and stops being vulnerable to a storage error minting an
+        orphan RUNNING build).
+        """
+        store = BuildTaskStore(build_id)
+        if not self.task_modules:
+            store.save_tasks(tasks)
+            return
+        plan: PickleElisionPlan = plan_pickle_elision(tasks, self.task_modules)
+        if self.require_pickle_free:
+            error = plan.require_pickle_free_error()
+            if error is not None:
+                raise TaskModulesError(error)
+        store.save_tasks(task for task, _ in plan.pickled)
+        logger.info(f"Build {build_id} task store: {plan.summary()}")
 
     def _trigger_reactive(
         self,
@@ -2923,8 +2994,7 @@ class StardagApp:
             # walk avoids a second local traversal of the DAG.
             self._preflight_task_modules(discovery.incomplete.values())
             stage = "task store write"
-            store = BuildTaskStore(build_id)
-            store.save_tasks(discovery.incomplete.values())
+            self._persist_discovered_tasks(build_id, discovery.incomplete.values())
             stage = "reactive metadata write"
             # Persist the reactive marker/owner/config in the registry
             # (``reactive_app_name`` is the "this build is reactively
