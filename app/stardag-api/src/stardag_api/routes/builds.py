@@ -2524,14 +2524,25 @@ async def retry_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
 ):
-    """Reset a failed/cancelled/skipped task to pending (retry).
+    """Reset a failed/cancelled/skipped/suspended task to pending (retry).
 
-    Emits TASK_RETRIED; status derivation flips only terminal-but-
-    retryable statuses back to PENDING — completed and running tasks are
-    unaffected (the event is still recorded, making concurrent
-    trigger/retry races benign). Used by reactive triggers so a
-    re-triggered failed build (or a new build referencing a previously
-    failed task) becomes schedulable again.
+    Emits TASK_RETRIED; status derivation flips only retryable statuses
+    back to PENDING. Used by reactive triggers so a re-triggered failed
+    build (or a new build referencing a previously failed task) becomes
+    schedulable again.
+
+    **Suspended tasks are retryable.** A task suspended for dynamic
+    dependencies is not executing — the execution yielded and returned —
+    so a task whose orchestrator then died has no path forward except
+    running again from scratch, which is what a retry means. Without this
+    it would be permanently unschedulable.
+
+    **Completed and running tasks are unaffected.** COMPLETED is sticky.
+    RUNNING is excluded on purpose: it holds a live execution claim, and
+    releasing that claim is cancellation (POST .../cancel), not retry —
+    resetting it to PENDING would invite a second, concurrent execution of
+    the same task. The event is recorded either way, which is what makes
+    concurrent trigger/retry races benign.
     """
     return await _create_task_event(
         build_id, task_id, EventType.TASK_RETRIED, db, auth, commit_hash=commit_hash

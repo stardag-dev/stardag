@@ -1882,7 +1882,44 @@ async def test_retry_task_never_downgrades_completed_or_running(client: AsyncCli
     r1 = await client.post(f"/api/v1/builds/{build_id}/tasks/retry-done/retry")
     r2 = await client.post(f"/api/v1/builds/{build_id}/tasks/retry-running/retry")
     assert r1.json()["status"] == "completed"
+    # A running task holds a live execution claim: releasing it is
+    # cancellation, not retry — a reset here would invite a second execution.
     assert r2.json()["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_retry_task_resets_suspended_to_pending(client: AsyncClient):
+    """A task suspended for dynamic dependencies and then abandoned is
+    recoverable by retry — otherwise it is permanently unschedulable."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks", json=_register_payload("susp-t")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/susp-t/start",
+        params={"executor": "modal", "executor_ref": "fc-suspended"},
+    )
+    await client.post(f"/api/v1/builds/{build_id}/tasks/susp-t/suspend")
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["status_counts"] == {"suspended": 1}
+
+    response = await client.post(f"/api/v1/builds/{build_id}/tasks/susp-t/retry")
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+
+    frontier = (await client.get(f"/api/v1/builds/{build_id}/frontier")).json()
+    assert frontier["status_counts"] == {"pending": 1}
+    assert [t["task_id"] for t in frontier["actionable"]] == ["susp-t"]
+    # The suspended run's executor ref is cleared with the retry, so no
+    # scheduler re-attaches to an execution that already returned.
+    assert frontier["actionable"][0]["latest_executor"] is None
+    assert frontier["actionable"][0]["latest_executor_ref"] is None
+
+    # Per-build derived status (the event replay) agrees with the
+    # denormalised global one.
+    tasks = (await client.get(f"/api/v1/builds/{build_id}/tasks")).json()
+    assert [t["status"] for t in tasks] == ["pending"]
 
 
 @pytest.mark.asyncio
