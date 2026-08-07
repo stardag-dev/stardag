@@ -73,6 +73,7 @@ from stardag.integration.modal._target import (
 from stardag.registry._base import (
     NoOpRegistry,
     accepts_executor_metadata_kwarg,
+    accepts_reactive_app_name_kwarg,
     get_git_commit_hash,
     registry_provider,
 )
@@ -288,6 +289,7 @@ def _run_watchdog_sweep(
     registry: typing.Any,
     tick: typing.Callable[..., typing.Any],
     sweep_limit: int = 100,
+    reactive_app_name: str | None = None,
 ) -> None:
     """One watchdog pass: tick every running build, without lingering.
 
@@ -295,21 +297,94 @@ def _run_watchdog_sweep(
     sweep runs ticks sequentially in one function call — persisted linger
     settings (default 120 s) would blow through the function timeout after
     a couple of builds and starve the rest of the safety-net tick.
+
+    ``reactive_app_name`` scopes the listing to the builds this app owns.
+    Without it, ``sweep_limit`` is spent on whatever RUNNING builds happen
+    to be most recently active in the environment — including builds no
+    tick can ever advance (resident-orchestrator builds, and builds whose
+    orchestrator died without emitting a terminal event, which stay RUNNING
+    forever). Once those exceed the limit the safety net stops reaching
+    genuine reactive builds entirely, and silently.
+
+    Trade-off: scoping drops the incidental cross-app coverage a sweep used
+    to provide, where app A's watchdog would tick app B's builds and the
+    tick would forward the wake-up to B. That coverage was accidental and
+    unreliable (it competed for the same limit); the owner app's own
+    watchdog is the supported mechanism, and forwarding still handles
+    wake-ups from workers of a previous owner. The one case that regresses
+    is a build owned by an app deployed WITHOUT a watchdog, which
+    build_trigger already warns about at trigger time.
     """
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
-    running_builds = registry.build_list_running(limit=sweep_limit)
+    # Old custom RegistryABC implementations predate the kwarg; degrade to
+    # an unscoped listing rather than breaking the sweep entirely.
+    if reactive_app_name is not None and accepts_reactive_app_name_kwarg(
+        registry.build_list_running
+    ):
+        running_builds = registry.build_list_running(
+            limit=sweep_limit, reactive_app_name=reactive_app_name
+        )
+        scope = f"reactive builds owned by {reactive_app_name!r}"
+    else:
+        running_builds = registry.build_list_running(limit=sweep_limit)
+        scope = "running builds"
     if len(running_builds) >= sweep_limit:
         logger.warning(
-            f"Tick watchdog: {sweep_limit}+ running builds; only the "
-            f"{sweep_limit} most recently active are swept."
+            f"Tick watchdog: {sweep_limit}+ {scope}; only the {sweep_limit} "
+            "most recently active are swept, so a less-recently-active build "
+            "may not be ticked this period. Cancel or clean up builds that "
+            "are RUNNING but abandoned, or reduce the number of concurrent "
+            "reactive builds per app."
         )
+    # Each tick re-reads the build's reactive metadata (GET /builds/{id}) to
+    # resolve the owner app and the stored tick_kwargs, so that probe is not
+    # redundant with the server-side filter — but it is now paid only for
+    # builds that survived the filter, instead of once per RUNNING build in
+    # the environment. It also stays the correctness backstop: a tick on a
+    # non-reactive build (which a degraded, unfiltered listing can still
+    # yield) no-ops on that gate.
     for running_build_id in running_builds:
         try:
             tick(str(running_build_id), tick_kwargs={"linger_seconds": 0})
         except Exception:
             logger.exception(f"Watchdog tick failed for build {running_build_id}")
+
+
+def _fail_build_on_trigger_error(
+    registry: typing.Any,
+    build_id: UUID,
+    stage: str,
+    error: BaseException,
+) -> None:
+    """Emit a terminal BUILD_FAILED for a trigger that died mid-way.
+
+    A build's status is derived from its events: once ``build_start`` has
+    happened, only a terminal event can move the build out of RUNNING. If
+    the trigger raises before it is finished, nobody else will ever emit
+    one — no orchestrator was ever spawned — so the trigger must do it.
+
+    Best-effort by construction: the caller re-raises the original error
+    unconditionally, and a failure to record the terminal event is logged
+    rather than raised, so a secondary registry error can never mask the
+    root cause the user needs to see.
+    """
+    try:
+        registry.build_fail(
+            build_id,
+            f"Reactive trigger failed during {stage}: {type(error).__name__}: {error}",
+        )
+        logger.info(
+            f"Reactive trigger failed during {stage}; marked build "
+            f"{build_id} as failed."
+        )
+    except Exception:
+        logger.exception(
+            f"Reactive trigger failed during {stage}, and marking build "
+            f"{build_id} as failed ALSO failed; the build may be left in "
+            "RUNNING status and should be cancelled manually."
+        )
 
 
 _TICK_KWARGS_ALLOWED = ("linger_seconds", "poll_interval_seconds", "fail_mode")
@@ -2328,7 +2403,14 @@ class StardagApp:
 
             def _modal_tick_watchdog() -> None:
                 _setup_logging()
-                _run_watchdog_sweep(registry_provider.get(), _modal_tick)
+                # Scoped to this app's own reactive builds: see
+                # _run_watchdog_sweep for why sweeping the environment's
+                # whole RUNNING set is both wasteful and unsafe at scale.
+                _run_watchdog_sweep(
+                    registry_provider.get(),
+                    _modal_tick,
+                    reactive_app_name=app_name,
+                )
 
             self.modal_app.function(
                 **{
@@ -2591,37 +2673,70 @@ class StardagApp:
         same configuration.
         """
         root_ids = [str(t.id) for t in task_list]
-        if is_retrigger:
-            # Un-terminal the build (no-op on a fresh/running build) and
-            # register the (possibly new) roots BEFORE discovery, so a
-            # concurrent tick can't complete-and-terminal the build on the
-            # old root set while we're adding to it.
-            if executor_metadata is not None and accepts_executor_metadata_kwarg(
-                registry.build_resume
-            ):
-                registry.build_resume(build_id, executor_metadata=executor_metadata)
-            else:
-                registry.build_resume(build_id)
-            registry.build_add_roots(build_id, root_ids)
-        discovery = asyncio.run(
-            discover_and_register_aio(
-                registry, build_id, tuple(task_list), retry_failed=True
+        # Everything up to and including build_set_reactive_meta runs AFTER
+        # the build row exists and is RUNNING (build status is derived from
+        # events, so nothing else will ever move it). A failure in here —
+        # most likely a target-root permission/storage error on the task
+        # store write, but discovery can raise too — used to leave the build
+        # RUNNING forever, and, because the reactive marker is written last,
+        # not even attributable to an app: invisible to the owner's scoped
+        # watchdog sweep and swept fruitlessly by everything else.
+        #
+        # Writing the marker earlier would make such a build discoverable,
+        # but it would also expose a partially-discovered DAG to a tick,
+        # which treats the registry frontier as ground truth and can
+        # terminal a build whose tasks are not registered yet. So the
+        # ordering stays and the terminal event is the fix: any failure
+        # emits BUILD_FAILED naming the stage, then re-raises.
+        stage = "build resume / root registration"
+        try:
+            if is_retrigger:
+                # Un-terminal the build (no-op on a fresh/running build) and
+                # register the (possibly new) roots BEFORE discovery, so a
+                # concurrent tick can't complete-and-terminal the build on
+                # the old root set while we're adding to it.
+                if executor_metadata is not None and accepts_executor_metadata_kwarg(
+                    registry.build_resume
+                ):
+                    registry.build_resume(build_id, executor_metadata=executor_metadata)
+                else:
+                    registry.build_resume(build_id)
+                registry.build_add_roots(build_id, root_ids)
+            stage = "task discovery and registration"
+            discovery = asyncio.run(
+                discover_and_register_aio(
+                    registry, build_id, tuple(task_list), retry_failed=True
+                )
             )
-        )
-        store = BuildTaskStore(build_id)
-        store.save_tasks(discovery.incomplete.values())
-        # Persist the reactive marker/owner/config in the registry
-        # (``reactive_app_name`` is the "this build is reactively scheduled"
-        # marker read by every tick). This is an upsert: because the registry
-        # is mutable — unlike a possibly-immutable target root — a re-trigger
-        # MAY update tick_kwargs. tick_kwargs is passed through as-is: None
-        # (a bare re-trigger) preserves the stored config server-side rather
-        # than wiping it, so the 0.10.1 merge-semantics guarantee holds.
-        # Build roots are tracked in the registry too (build_add_roots above
-        # — the scheduler reads them from the frontier).
-        registry.build_set_reactive_meta(
-            build_id, app_name=self.name, tick_kwargs=tick_kwargs
-        )
+            stage = "task store write"
+            store = BuildTaskStore(build_id)
+            store.save_tasks(discovery.incomplete.values())
+            stage = "reactive metadata write"
+            # Persist the reactive marker/owner/config in the registry
+            # (``reactive_app_name`` is the "this build is reactively
+            # scheduled" marker read by every tick). This is an upsert:
+            # because the registry is mutable — unlike a possibly-immutable
+            # target root — a re-trigger MAY update tick_kwargs. tick_kwargs
+            # is passed through as-is: None (a bare re-trigger) preserves the
+            # stored config server-side rather than wiping it, so the 0.10.1
+            # merge-semantics guarantee holds. Build roots are tracked in the
+            # registry too (build_add_roots above — the scheduler reads them
+            # from the frontier).
+            registry.build_set_reactive_meta(
+                build_id, app_name=self.name, tick_kwargs=tick_kwargs
+            )
+        except BaseException as error:
+            # BaseException, not Exception: a Ctrl-C during discovery is one
+            # of the likelier ways to abandon a trigger, and it wedges the
+            # build exactly the same way. The original error always
+            # propagates — _fail_build_on_trigger_error never masks it.
+            _fail_build_on_trigger_error(registry, build_id, stage, error)
+            raise
+        # The spawn is deliberately OUTSIDE the wrapper: by this point the
+        # durable state is complete and consistent, and the build carries the
+        # reactive marker, so a failed spawn is recovered by the app's next
+        # watchdog sweep (or a re-trigger). Failing the build here would take
+        # it out of the watchdog's RUNNING listing and remove that recovery.
         tick_function = modal.Function.from_name(app_name=self.name, name="tick")
         function_call = tick_function.spawn(build_id=str(build_id))
         return BuildTriggerResult(build_id=build_id, function_call=function_call)

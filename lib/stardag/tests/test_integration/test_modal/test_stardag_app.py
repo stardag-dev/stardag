@@ -795,6 +795,112 @@ class TestStardagAppReactiveTrigger:
                 )
 
 
+class TestReactiveTriggerFailureLeavesNoOrphanBuild:
+    """A build minted by ``build_start`` is RUNNING until a terminal EVENT
+    says otherwise — and no orchestrator exists yet to emit one. So a
+    trigger that dies after minting must emit ``BUILD_FAILED`` itself, or
+    it leaves a build that is RUNNING forever and (because the reactive
+    marker is written last) not even attributable to an app.
+    """
+
+    def _make_app(self):
+        return StardagApp(
+            "test-reactive-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+
+    def _make_registry(self, build_id):
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        return registry
+
+    def _root(self):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        return SyncOnlyTask(name="reactive-root")
+
+    def test_task_store_write_failure_fails_the_build(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        app = self._make_app()
+        build_id = uuid4()
+        registry = self._make_registry(build_id)
+
+        with patch(
+            "stardag.integration.modal._app.BuildTaskStore.save_tasks",
+            side_effect=PermissionError("read-only target root"),
+        ):
+            with registry_provider.override(registry):
+                with pytest.raises(PermissionError, match="read-only target root"):
+                    app.build_trigger(self._root(), reactive=True)
+
+        registry.build_fail.assert_called_once()
+        message = registry.build_fail.call_args.args[1]
+        assert "task store write" in message
+        assert "read-only target root" in message
+        # The marker is written after the store, so this build would have
+        # been an unattributable orphan; it must not be left RUNNING.
+        registry.build_set_reactive_meta.assert_not_called()
+
+    def test_discovery_failure_fails_the_build(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """Reordering the store write ahead of ``build_start`` would not
+        cover this: discovery runs against the build id too."""
+        app = self._make_app()
+        build_id = uuid4()
+        registry = self._make_registry(build_id)
+        registry.task_register_bulk_aio.side_effect = RuntimeError("registry down")
+
+        with registry_provider.override(registry):
+            with pytest.raises(RuntimeError, match="registry down"):
+                app.build_trigger(self._root(), reactive=True)
+
+        assert (
+            "task discovery and registration" in registry.build_fail.call_args.args[1]
+        )
+
+    def test_secondary_build_fail_error_never_masks_the_root_cause(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        app = self._make_app()
+        build_id = uuid4()
+        registry = self._make_registry(build_id)
+        registry.build_fail.side_effect = RuntimeError("registry unreachable too")
+
+        with patch(
+            "stardag.integration.modal._app.BuildTaskStore.save_tasks",
+            side_effect=PermissionError("read-only target root"),
+        ):
+            with registry_provider.override(registry):
+                # The ORIGINAL error propagates, not the bookkeeping one.
+                with pytest.raises(PermissionError, match="read-only target root"):
+                    app.build_trigger(self._root(), reactive=True)
+
+    def test_spawn_failure_leaves_the_build_recoverable(
+        self, modal_function_stub, default_in_memory_fs_target, monkeypatch
+    ):
+        """The spawn is outside the wrapper on purpose: the durable state is
+        complete and the build carries the reactive marker, so the app's
+        watchdog recovers it. Failing it would remove that recovery path."""
+        app = self._make_app()
+        build_id = uuid4()
+        registry = self._make_registry(build_id)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("modal spawn failed")
+
+        with registry_provider.override(registry):
+            with patch("modal.Function.from_name") as from_name:
+                from_name.return_value.spawn = _boom
+                with pytest.raises(RuntimeError, match="modal spawn failed"):
+                    app.build_trigger(self._root(), reactive=True)
+
+        registry.build_set_reactive_meta.assert_called_once()
+        registry.build_fail.assert_not_called()
+
+
 @pytest.fixture(autouse=True)
 def _mock_secret_hydrate(monkeypatch):
     """StardagApp.finalize() validates a by-name api-key secret via
@@ -1242,6 +1348,60 @@ class TestWatchdogSweep:
         from stardag.integration.modal._app import _run_watchdog_sweep
 
         _run_watchdog_sweep(NoOpRegistry(), lambda *a, **k: 1 / 0)  # no raise
+
+    def test_sweep_scopes_listing_to_this_apps_reactive_builds(self):
+        """The listing — not the tick — is where irrelevant builds must be
+        dropped: a tick on a non-reactive build is a whole (wasted) function
+        invocation, and unrelated builds otherwise consume the sweep limit."""
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_list_running.return_value = []
+
+        _run_watchdog_sweep(registry, lambda *a, **k: None, reactive_app_name="an-app")
+
+        registry.build_list_running.assert_called_once_with(
+            limit=100, reactive_app_name="an-app"
+        )
+
+    def test_sweep_degrades_to_unscoped_listing_on_old_registry(self):
+        """A custom RegistryABC implementation predating the kwarg must not
+        break the sweep — it just gets the wider listing it always got."""
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        calls: list = []
+
+        class OldRegistry(NoOpRegistry):
+            def build_list_running(self, limit: int = 100):  # type: ignore[override]
+                calls.append(limit)
+                return []
+
+        _run_watchdog_sweep(
+            OldRegistry(), lambda *a, **k: None, reactive_app_name="an-app"
+        )
+
+        assert calls == [100]
+
+    def test_truncation_warning_names_the_scope_and_the_remedy(self, caplog):
+        import logging
+
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_list_running.return_value = [uuid4(), uuid4()]
+
+        with caplog.at_level(logging.WARNING):
+            _run_watchdog_sweep(
+                registry,
+                lambda *a, **k: None,
+                sweep_limit=2,
+                reactive_app_name="an-app",
+            )
+
+        # "2+ reactive builds owned by X", not "2+ running builds": the
+        # operator needs to know the cap was hit on RELEVANT builds.
+        assert "2+ reactive builds owned by 'an-app'" in caplog.text
+        assert "Cancel or clean up builds" in caplog.text
 
 
 class TestBuildTickConfig:

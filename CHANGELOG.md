@@ -6,6 +6,39 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The reactive watchdog now asks the registry only for the RUNNING builds
+  its own app owns** (`GET /builds?status=running&reactive_app_name=...`,
+  filters the API has supported since the reactive-metadata release but the
+  SDK never used). Previously each sweep paged the whole build listing,
+  filtered the derived status client-side, and then spent a full `tick`
+  invocation on every RUNNING build in the environment just to discover
+  most were not reactive. Worse, the sweep's per-period cap was consumed by
+  those irrelevant builds: an environment holding more stale RUNNING builds
+  than the cap could stop reaching genuine reactive builds entirely, and
+  silently — disabling the safety net exactly when it was needed. The
+  truncation warning now says how many _reactive_ builds owned by _which
+  app_ it truncated, and what to do about it. `build_list_running` gained an
+  optional `reactive_app_name` argument; the client-side status re-check is
+  retained so a server predating the filters degrades to a wider listing
+  rather than to ticking terminal builds. Note that scoping removes the
+  incidental cross-app coverage a sweep used to provide: a build owned by
+  an app deployed without a watchdog is no longer swept by another app's
+  watchdog. ([#208](https://github.com/stardag-dev/stardag/issues/208) A3)
+- **A reactive trigger that fails part-way no longer leaves a build stuck
+  in RUNNING forever.** `build_trigger(reactive=True)` mints the build
+  before running discovery and persisting the task store, and a build's
+  status is derived from its events — so a failure in between (most often a
+  target-root permission or storage error on the task-store write) left a
+  RUNNING build that nothing would ever terminate and that carried no
+  reactive owner, so it was invisible to its own app's sweep and pure
+  overhead for every other one. All post-mint trigger work is now wrapped:
+  any failure emits a terminal `BUILD_FAILED` naming the stage that failed
+  before the original exception propagates (a failure to record that event
+  is logged, never allowed to mask the root cause).
+  ([#208](https://github.com/stardag-dev/stardag/issues/208) A4)
+
 ## [0.17.0] — 2026-08-06
 
 ### SDK

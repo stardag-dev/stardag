@@ -1105,11 +1105,23 @@ class APIRegistry(RegistryABC):
         )
         logger.info(f"Build exited early: {build_id}")
 
-    def build_list_running(self, limit: int = 100) -> list[UUID]:
+    def build_list_running(
+        self, limit: int = 100, reactive_app_name: str | None = None
+    ) -> list[UUID]:
         """List ids of running builds (most recently active first).
 
-        Pages through ``GET /builds`` (ordered by last_active_at desc) and
-        filters client-side on the derived status.
+        Pages through ``GET /builds``, narrowing server-side with
+        ``status=running`` and (when given) ``reactive_app_name`` — the
+        watchdog's real question is "RUNNING reactive builds owned by app
+        X", and an unnarrowed listing lets unrelated builds consume
+        ``limit`` (an environment that accumulates stale RUNNING builds
+        would silently stop reaching the reactive ones).
+
+        The derived status is re-checked client-side because a server
+        predating either filter ignores unknown query params and answers
+        with the unfiltered listing; the re-check keeps that degradation to
+        "wider than asked for" rather than "wrong". A wider listing is
+        harmless for the caller: a tick no-ops on a non-reactive build.
         """
         running: list[UUID] = []
         page = 1
@@ -1119,12 +1131,16 @@ class APIRegistry(RegistryABC):
         # stragglers would make the watchdog cost grow with total build
         # count. Truncation is logged.
         max_pages = 10
+        filter_params = {"status": "running"}
+        if reactive_app_name is not None:
+            filter_params["reactive_app_name"] = reactive_app_name
         while len(running) < limit:
             response = self._request(
                 "GET",
                 f"{self.api_url}/api/v1/builds",
                 params={
                     **self._get_params(),
+                    **filter_params,
                     "page": str(page),
                     "page_size": str(page_size),
                 },
@@ -1133,6 +1149,9 @@ class APIRegistry(RegistryABC):
             payload = response.json()
             builds = payload.get("builds", [])
             for build in builds:
+                # Redundant against a server that honours ``status``, and
+                # the only thing standing between a server that doesn't and
+                # a watchdog ticking terminal builds — keep it.
                 if build.get("status") == "running":
                     running.append(UUID(build["id"]))
                     if len(running) >= limit:
