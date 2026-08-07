@@ -80,11 +80,10 @@ from stardag_api.schemas import (
     TaskResponse,
     TaskWithStatusResponse,
 )
-from stardag_api.services import generate_build_slug, get_build_status
+from stardag_api.services import generate_build_slug
 from stardag_api.services.build_cleanup import (
     CASCADE_CANCEL_STATUSES,
     STALEST_FIRST_ORDER,
-    build_is_running,
     cancel_builds,
     cascade_cancel_build_tasks,
     idle_filters,
@@ -93,6 +92,7 @@ from stardag_api.services.build_cleanup import (
 )
 from stardag_api.services.claims import claim_is_live, live_claim_filter
 from stardag_api.services.status import (
+    apply_event_to_build,
     apply_event_to_task,
     get_all_task_global_statuses,
     get_task_status_in_build,
@@ -236,20 +236,20 @@ async def _build_to_response(
     build: Build,
     last_event_at: datetime | None = None,
 ) -> BuildResponse:
-    """Assemble a BuildResponse with derived status for a build row.
+    """Assemble a BuildResponse from a build row.
+
+    Status and its timestamps come straight off the denormalised
+    ``latest_*`` columns, maintained in-transaction by
+    :func:`~stardag_api.services.status.apply_event_to_build`. This used to
+    replay the build's whole build-level event stream on every response.
 
     ``last_event_at`` short-circuits the per-build activity lookup when the
     caller already fetched it in bulk. Passing None for a build that has
     events simply costs one extra index lookup, never a wrong answer.
     """
-    (
-        status,
-        started_at,
-        completed_at,
-        triggered_by_id,
-        is_resumed,
-    ) = await get_build_status(db, build.id)
-    triggered_by_user = await _get_triggered_by_user(db, triggered_by_id)
+    triggered_by_user = await _get_triggered_by_user(
+        db, build.latest_status_triggered_by_user_id
+    )
     if last_event_at is None:
         last_event_at = await _last_event_at(db, build.id)
     return BuildResponse(
@@ -264,11 +264,11 @@ async def _build_to_response(
         executor_metadata=build.executor_metadata,
         reactive_app_name=build.reactive_app_name,
         reactive_tick_kwargs=build.reactive_tick_kwargs,
-        status=status,
-        started_at=started_at,
-        completed_at=completed_at,
+        status=build.latest_status,
+        started_at=build.latest_started_at,
+        completed_at=build.latest_completed_at,
         status_triggered_by_user=triggered_by_user,
-        is_resumed=is_resumed,
+        is_resumed=build.latest_is_resumed,
         last_active_at=build.last_active_at,
         last_activity_at=last_activity_at(build, last_event_at),
     )
@@ -291,6 +291,53 @@ async def _get_triggered_by_user(
         email=user.email or "",
         display_name=user.display_name,
     )
+
+
+async def _get_build_for_update(
+    build_id: UUID, db: AsyncSession, auth: SdkAuth
+) -> Build:
+    """Fetch a build for a lifecycle transition, with its row locked.
+
+    ``SELECT ... FOR UPDATE``, for the same reason ``_get_build_and_task``
+    takes it on the task row: writing the denormalised status columns is a
+    read-modify-write (see ``services.status.apply_event_to_build``), and
+    without the lock two concurrent lifecycle calls on the same build can
+    each read the pre-state, apply different events, and leave a row that is
+    a mixture of the two — e.g. a COMPLETED build still carrying the
+    ``is_resumed`` flag and the NULL ``completed_at`` of a racing resume.
+    Every path that folds an event must go through here; the lock releases on
+    commit, so request duration governs hold time. On SQLite the clause is
+    silently dropped — fine, the test suite runs single-connection.
+
+    A build is always locked *before* any task rows it cascades to, so this
+    and ``_create_task_event`` acquire in one consistent order.
+
+    Read-only paths (``GET /builds``, ``/{id}``, the frontier) deliberately
+    don't take it — they just read the columns.
+    """
+    build = (
+        await db.execute(select(Build).where(Build.id == build_id).with_for_update())
+    ).scalar_one_or_none()
+    if not build:
+        raise HTTPException(status_code=404, detail="Build not found")
+    if build.environment_id != auth.environment_id:
+        raise HTTPException(
+            status_code=403, detail="Build does not belong to this environment"
+        )
+    return build
+
+
+async def _record_build_event(db: AsyncSession, build: Build, event: Event) -> None:
+    """Add a build-level event and fold it into the build's status columns.
+
+    The two halves are one operation and must stay in one transaction — an
+    event without its fold silently desynchronises the row, and every read
+    (and the reaper's selection) trusts the row. The flush is what populates
+    ``event.created_at`` before the fold reads it.
+    """
+    db.add(event)
+    await db.flush()
+    apply_event_to_build(build, event)
 
 
 async def _get_build_and_task(
@@ -526,7 +573,9 @@ async def create_build(
     db.add(db_build)
     await db.flush()  # Get the build ID
 
-    # Create BUILD_STARTED event
+    # Create BUILD_STARTED event, and fold it — this is what puts the fresh
+    # build in RUNNING with a started_at. No row lock: the build row is not
+    # visible to any other transaction until this one commits.
     start_event = Event(
         build_id=db_build.id,
         task_id=None,
@@ -535,7 +584,7 @@ async def create_build(
         if build.executor_metadata is not None
         else None,
     )
-    db.add(start_event)
+    await _record_build_event(db, db_build, start_event)
 
     await db.commit()
     await db.refresh(db_build)
@@ -545,15 +594,6 @@ async def create_build(
 
     # Build response with derived status
     return await _build_to_response(db, db_build)
-
-
-# When a derived-status filter is applied, build status can't be filtered
-# in SQL (it's computed from events, not stored), so we scan the most-
-# recently-active candidates and filter in Python. This caps that scan so
-# the cost stays bounded; the intended use — "RUNNING reactive builds owned
-# by app X" (reactive_app_name filter) — narrows the candidate set well
-# below this. Truncation is logged.
-_STATUS_FILTER_SCAN_CAP = 500
 
 
 @router.get("", response_model=BuildListResponse)
@@ -589,16 +629,15 @@ async def list_builds(
     - ``reactive_app_name``: only builds reactively scheduled by the named
       app (``reactive_app_name`` column). A server-side filter — the
       watchdog's real question is "RUNNING reactive builds owned by app X".
-    - ``status``: only builds with the given derived status (e.g.
-      ``running``). Because build status is derived from events (not a
-      column), it generally can't be paginated in SQL: matching candidates
-      are scanned up to a bounded cap and filtered in Python, so ``total``
-      means "matches within the scanned window". Intended to be combined
-      with ``reactive_app_name``, which keeps the candidate set small.
-    - ``idle_for_seconds``: only builds that are **still running** and have
-      been idle for at least that long. **A real SQL predicate**, so
+    - ``status``: only builds with the given status. A plain predicate on the
+      denormalised ``builds.latest_status`` column, for **every** status, so
       ``total`` is an exact ``COUNT(*)`` and pagination is server-side and
-      unbounded — no scan cap, nothing silently dropped.
+      unbounded. (It used to derive status in Python over the 500
+      most-recently-active candidates and report the matches within that
+      window as ``total``.)
+    - ``idle_for_seconds``: only builds that are **still running** and have
+      been idle for at least that long. Also a real SQL predicate, on the
+      same terms.
 
     Idleness implies RUNNING because that is the only state in which it
     means anything. A finished build has no activity by definition, so
@@ -606,6 +645,8 @@ async def list_builds(
     that ever completed, ordered by how long ago — which is a history
     listing wearing a cleanup query's clothes. The word this filter exists
     to express is *abandoned*, and only a running build can be abandoned.
+    Now that every status is a real predicate, that is a deliberate
+    semantic choice rather than a limitation of what SQL could express.
 
     Idleness is the same definition the stale-build reaper uses
     (:func:`~stardag_api.services.build_cleanup.idle_filters`), deliberately
@@ -647,17 +688,16 @@ async def list_builds(
     filters = [Build.environment_id == environment_id]
     if reactive_app_name is not None:
         filters.append(Build.reactive_app_name == reactive_app_name)
-
-    # Both filters below are exact SQL, so the derived-status Python scan is
-    # skipped entirely when they cover the request.
-    sql_filtered = idle_for_seconds is not None
+    if status is not None:
+        filters.append(Build.latest_status == status)
     if idle_for_seconds is not None:
         filters.extend(idle_filters(utc_now() - timedelta(seconds=idle_for_seconds)))
         # Unconditionally, not just when status=running was asked for: this
         # endpoint is the preview for POST /builds/bulk-cancel, which only
-        # ever acts on running builds. A preview that lists rows the action
-        # will not touch is worse than no preview.
-        filters.append(build_is_running())
+        # ever acts on running builds (`select_cancellable_builds` opens with
+        # this same predicate). A preview that lists rows the action will not
+        # touch is worse than no preview.
+        filters.append(Build.latest_status == BuildStatus.RUNNING)
 
     # Sort by last_active_at so a resumed build (BUILD_RESUMED touches this
     # column) jumps back to the top of the list. ``Build.id`` is a UUID7
@@ -677,41 +717,17 @@ async def list_builds(
         )
     )
 
-    if status is None or sql_filtered:
-        count_query = select(func.count()).select_from(Build).where(*filters)
-        total = (await db.execute(count_query)).scalar() or 0
-        result = await db.execute(
-            ordered.offset((page - 1) * page_size).limit(page_size)
-        )
-        page_builds = list(result.scalars().all())
-        # One grouped query for the page's activity timestamps rather than
-        # one per build.
-        last_events = await _last_event_at_map(db, [b.id for b in page_builds])
-        build_responses = [
-            await _build_to_response(db, build, last_events.get(build.id))
-            for build in page_builds
-        ]
-    else:
-        # Derived-status filter: scan bounded candidates, compute status,
-        # filter, then paginate the matches in Python.
-        scanned = (
-            (await db.execute(ordered.limit(_STATUS_FILTER_SCAN_CAP))).scalars().all()
-        )
-        if len(scanned) >= _STATUS_FILTER_SCAN_CAP:
-            logger.warning(
-                "list_builds status filter: scan hit the %d-candidate cap; "
-                "older matching builds (if any) are not included.",
-                _STATUS_FILTER_SCAN_CAP,
-            )
-        last_events = await _last_event_at_map(db, [b.id for b in scanned])
-        matched = []
-        for build in scanned:
-            response = await _build_to_response(db, build, last_events.get(build.id))
-            if response.status == status:
-                matched.append(response)
-        total = len(matched)
-        offset = (page - 1) * page_size
-        build_responses = matched[offset : offset + page_size]
+    count_query = select(func.count()).select_from(Build).where(*filters)
+    total = (await db.execute(count_query)).scalar() or 0
+    result = await db.execute(ordered.offset((page - 1) * page_size).limit(page_size))
+    page_builds = list(result.scalars().all())
+    # One grouped query for the page's activity timestamps rather than one
+    # per build.
+    last_events = await _last_event_at_map(db, [b.id for b in page_builds])
+    build_responses = [
+        await _build_to_response(db, build, last_events.get(build.id))
+        for build in page_builds
+    ]
 
     return BuildListResponse(
         builds=build_responses,
@@ -762,20 +778,17 @@ async def bulk_cancel_builds(
     ``include_reactive`` (or ``reactive_app_name``) when you know the owning
     app is gone.
 
-    Beyond that: only builds whose derived status is RUNNING are ever
-    touched, so the call is idempotent — safe to retry, and safe for two
-    replicas to run concurrently (duplicated work, not double cancellation).
-    ``dry_run`` reports the exact same selection and writes nothing.
+    Beyond that: only builds whose status is RUNNING are ever touched, so
+    the call is idempotent — safe to retry, and safe for two replicas to run
+    concurrently (duplicated work, not double cancellation). ``dry_run``
+    reports the exact same selection and writes nothing.
 
-    **Cost.** The RUNNING test is a SQL predicate (two correlated aggregates
-    over ``ix_events_build_created``), *not* the bounded Python scan that
-    ``GET /builds?status=`` uses — a reaper that inherited that 500-candidate
-    cap would systematically miss the oldest stale builds, which are exactly
-    the ones it exists to find. The idle filter puts an index-backed
-    ``last_active_at`` conjunct in front of the aggregates (sound because the
-    real signal is a max() over that column among others), so the aggregates
-    run only for builds already known to be quiet. Writes are capped by
-    ``limit``; the scan is not.
+    **Cost.** The RUNNING test is a predicate on ``builds.latest_status``,
+    served by ``ix_builds_environment_status`` — the same column, and the
+    same answer, as ``GET /builds?status=running``, so the preview an
+    operator runs cannot disagree with what this cancels. The idle filter's
+    correlated aggregates then run only for builds already known to be
+    RUNNING. Writes are capped by ``limit``; the scan is not.
 
     Auth: destructive, so the JWT/UI path requires the workspace ADMIN role
     (API keys, being environment-scoped machine credentials, are
@@ -1080,15 +1093,7 @@ async def complete_build(
         )
     )
 
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated environment
-    if build.environment_id != auth.environment_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this environment"
-        )
+    build = await _get_build_for_update(build_id, db, auth)
 
     event = Event(
         build_id=build_id,
@@ -1096,7 +1101,7 @@ async def complete_build(
         event_type=EventType.BUILD_COMPLETED,
         event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
-    db.add(event)
+    await _record_build_event(db, build, event)
     await _touch_build_last_active(db, build_id)
     await db.commit()
 
@@ -1129,15 +1134,7 @@ async def fail_build(
         )
     )
 
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated environment
-    if build.environment_id != auth.environment_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this environment"
-        )
+    build = await _get_build_for_update(build_id, db, auth)
 
     event = Event(
         build_id=build_id,
@@ -1146,7 +1143,7 @@ async def fail_build(
         error_message=error_message,
         event_metadata=_build_event_metadata(commit_hash, triggered_by_user_id),
     )
-    db.add(event)
+    await _record_build_event(db, build, event)
     await _touch_build_last_active(db, build_id)
     await db.commit()
 
@@ -1217,15 +1214,9 @@ async def cancel_build(
         )
     )
 
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated environment
-    if build.environment_id != auth.environment_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this environment"
-        )
+    # Locked before the cascade below takes its task locks — build then
+    # tasks, the order every path uses.
+    build = await _get_build_for_update(build_id, db, auth)
 
     metadata = _build_event_metadata(commit_hash, triggered_by_user_id)
     cascaded_task_ids: list[str] = []
@@ -1258,7 +1249,7 @@ async def cancel_build(
         event_type=EventType.BUILD_CANCELLED,
         event_metadata=metadata,
     )
-    db.add(event)
+    await _record_build_event(db, build, event)
     await _touch_build_last_active(db, build_id)
     # One transaction: the build and the claims it held go terminal together,
     # so a failure here cannot leave a cancelled build still holding claims.
@@ -1292,15 +1283,7 @@ async def exit_early(
         )
     )
 
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated environment
-    if build.environment_id != auth.environment_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this environment"
-        )
+    build = await _get_build_for_update(build_id, db, auth)
 
     event = Event(
         build_id=build_id,
@@ -1309,7 +1292,7 @@ async def exit_early(
         error_message=reason,  # Reuse error_message field for the reason
         event_metadata=_build_event_metadata(commit_hash),
     )
-    db.add(event)
+    await _record_build_event(db, build, event)
     await _touch_build_last_active(db, build_id)
     await db.commit()
 
@@ -1330,8 +1313,8 @@ async def resume_build(
 
     Called by the SDK when ``sd.build(resume_build_id=...)`` reuses an
     existing build that may have already terminated. Emits a
-    ``BUILD_RESUMED`` event so ``get_build_status`` flips the build back
-    to RUNNING and the UI shows a "running (resumed)" affordance.
+    ``BUILD_RESUMED`` event, which flips the build back to RUNNING with
+    ``is_resumed`` set so the UI shows a "running (resumed)" affordance.
 
     A build with no recorded activity beyond its ``BUILD_STARTED`` event
     is "fresh" — attaching to it is not a resume (e.g. a build id minted
@@ -1358,15 +1341,7 @@ async def resume_build(
         )
     )
 
-    build = await db.get(Build, build_id)
-    if not build:
-        raise HTTPException(status_code=404, detail="Build not found")
-
-    # Verify build belongs to authenticated environment
-    if build.environment_id != auth.environment_id:
-        raise HTTPException(
-            status_code=403, detail="Build does not belong to this environment"
-        )
+    build = await _get_build_for_update(build_id, db, auth)
 
     has_activity = (
         await db.execute(
@@ -1399,7 +1374,7 @@ async def resume_build(
             event_type=EventType.BUILD_RESUMED,
             event_metadata=event_metadata or None,
         )
-        db.add(event)
+        await _record_build_event(db, build, event)
         await _touch_build_last_active(db, build_id)
         needs_commit = True
 
@@ -1845,8 +1820,6 @@ async def get_build_frontier(
             .all()
         )
 
-    build_status, _, _, _, _ = await get_build_status(db, build.id)
-
     def _ref(t: Task) -> FrontierTaskRef:
         return FrontierTaskRef(
             task_id=t.task_id,
@@ -1866,7 +1839,7 @@ async def get_build_frontier(
 
     return BuildFrontierResponse(
         build_id=build_id,
-        build_status=build_status,
+        build_status=build.latest_status,
         needs_tick=build.needs_tick_at is not None,
         root_task_ids=root_task_ids,
         roots=[_ref(t) for t in roots],
