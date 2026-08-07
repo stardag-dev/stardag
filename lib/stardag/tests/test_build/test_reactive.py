@@ -32,7 +32,7 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
 )
-from stardag.build._reactive import TickSummary, _skip_blocked
+from stardag.build._reactive import _RETRYABLE_STATUSES, TickSummary, _skip_blocked
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
     BuildFrontier,
@@ -236,7 +236,9 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("retry", tid))
-        if self.statuses.get(tid) in ("failed", "cancelled", "skipped"):
+        # Same retryable set the server applies (suspended included: a
+        # suspended task has no live execution to orphan).
+        if self.statuses.get(tid) in _RETRYABLE_STATUSES:
             self.statuses[tid] = "pending"
             self.refs.pop(tid, None)
 
@@ -915,6 +917,51 @@ class TestRetryPath:
         )
         assert summary.terminal_status == "completed"
         assert registry.build_status == "completed"
+
+    async def test_retry_failed_resets_an_abandoned_suspended_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """#208 A2: a task left SUSPENDED — its execution yielded dynamic
+        dependencies and returned, then the build was abandoned — used to be
+        permanently unschedulable, since the re-trigger's retry skipped it.
+        It is now reset like any other non-completed status."""
+        (root,) = _chain("suspended-retry-root")
+        registry, locks, executor, store = _setup([root])
+        registry.add_task(str(root.id), status="suspended")
+
+        result = await discover_and_register_aio(
+            registry, uuid4(), root, retry_failed=True
+        )
+
+        assert [t.id for t in result.retried] == [root.id]
+        assert registry.statuses[str(root.id)] == "pending"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+        assert summary.terminal_status == "completed"
+
+    async def test_worker_dynamic_dep_registration_never_resets_suspended(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The other caller of discover_and_register_aio is a worker
+        registering its dynamically yielded deps — it takes the default
+        retry_failed=False, so widening the retryable set cannot make a
+        suspending worker reset its own task."""
+        (root,) = _chain("suspended-worker-root")
+        registry, _, _, _ = _setup([root], auto_complete=False)
+        registry.add_task(str(root.id), status="suspended")
+
+        result = await discover_and_register_aio(registry, uuid4(), root)
+
+        assert result.retried == []
+        assert registry.statuses[str(root.id)] == "suspended"
+        assert not any(method == "retry" for (method, _) in registry.calls)
 
     async def test_without_retry_failed_build_fail_fasts(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

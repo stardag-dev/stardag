@@ -110,12 +110,26 @@ class DiscoveryResult:
     incomplete: dict[UUID, BaseTask] = field(default_factory=dict)
     # Tasks found already complete (registered + marked complete).
     previously_completed: list[BaseTask] = field(default_factory=list)
-    # Tasks whose failed/cancelled/skipped registry status was reset to
-    # pending (only when retry_failed=True).
+    # Tasks whose failed/cancelled/skipped/suspended registry status was
+    # reset to pending (only when retry_failed=True).
     retried: list[BaseTask] = field(default_factory=list)
 
 
-_RETRYABLE_STATUSES = ("failed", "cancelled", "skipped")
+# Statuses a re-trigger resets to PENDING (see discover_and_register_aio's
+# retry_failed). Mirrors the registry's own retryable set.
+#
+# SUSPENDED is in here — and is safe — because a suspended task has NO live
+# execution: suspension means the execution registered its dynamic
+# dependencies, yielded and *returned*. Resetting it therefore cannot orphan
+# a running worker; re-running from scratch is exactly what the retry
+# expresses. RUNNING is deliberately absent: it holds a live execution
+# claim, and releasing that claim is cancellation, not retry.
+#
+# Only the re-trigger path passes retry_failed=True. Workers registering
+# dynamically yielded deps call discover_and_register_aio with the default
+# (False), so a worker can never reset its own parent's SUSPENDED status
+# out from under itself.
+_RETRYABLE_STATUSES = ("failed", "cancelled", "skipped", "suspended")
 
 
 async def discover_and_register_aio(
@@ -137,9 +151,13 @@ async def discover_and_register_aio(
     registering dynamically yielded deps.
 
     With ``retry_failed=True``, incomplete tasks whose registry status is
-    failed/cancelled/skipped (from a previous build) are reset to pending
-    via ``task_retry`` — without it, a previously failed task would never
-    enter the frontier and would FAIL_FAST a new build on its first tick.
+    failed/cancelled/skipped/suspended (from a previous build) are reset to
+    pending via ``task_retry`` — without it, a previously failed task would
+    never enter the frontier and would FAIL_FAST a new build on its first
+    tick, and a task abandoned SUSPENDED (its orchestrator died, or its
+    build was cancelled mid dynamic-dependency yield) would stay
+    permanently unschedulable. See ``_RETRYABLE_STATUSES`` for why
+    resetting a SUSPENDED task cannot orphan a live execution.
     """
     result = DiscoveryResult()
     post_order: list[BaseTask] = []
