@@ -2838,6 +2838,7 @@ async def test_evict_holder_frees_slot(client: AsyncClient):
         "task_id": "ev-a",
         "status": "failed",
         "latest_status": "failed",
+        "attempt_count": 1,
     }
 
     # Failure recorded with the evictor identity (mocked auth user).
@@ -3024,6 +3025,7 @@ async def test_evicted_then_worker_completes_sticky_completed(client: AsyncClien
         "task_id": "alive-ev",
         "status": "failed",
         "latest_status": "failed",
+        "attempt_count": 1,
     }
 
     # The (still-alive) worker reports completion afterwards.
@@ -3143,6 +3145,7 @@ async def test_evict_admin_allowed_and_records_admin_identity(client: AsyncClien
         "task_id": "admin-ev",
         "status": "failed",
         "latest_status": "failed",
+        "attempt_count": 1,
     }
 
 

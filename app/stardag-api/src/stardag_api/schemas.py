@@ -314,6 +314,37 @@ class FrontierTaskRef(BaseModel):
     # to date it). Those need an operator to release; there is no timestamp
     # that would let a client conclude anything else.
     latest_status_expires_at: datetime | None = None
+    # How many times execution has been started for this task **in this
+    # build** — the input to a scheduler's own retry policy (a
+    # `max_attempts`), which the reactive engine has no other way to
+    # express: a tick is short-lived and cannot remember what it already
+    # tried, and the execution backend's own function-level retries only
+    # cover exceptions raised *inside* a container that started. A spawn
+    # that failed before the container existed, an OOM kill, a preemption,
+    # or a worker that died after writing partial output are all invisible
+    # to them and visible here.
+    #
+    # **Per build, unlike every other field on this ref.** The latest_*
+    # fields are environment-global because a completed task is completed
+    # for everyone; attempts are the opposite — a task that burned two
+    # attempts in an earlier build arrives in a new one with a full budget,
+    # which is what a fresh trigger means.
+    #
+    # Counts *attempts*, not TASK_STARTED events: engines emit several
+    # starts per execution (a claim/limit-acquiring start with no executor
+    # ref, then one carrying the ref, plus the worker's own start when the
+    # executor self-reports lifecycle), and consecutive starts collapse
+    # into the one attempt they describe.
+    #
+    # A retry (TASK_RETRIED) does NOT reset it: a scheduler retries a
+    # failed task *through* that endpoint, so a resetting counter would be
+    # cleared by the very act it is meant to bound. Within one build the
+    # number is therefore a lifetime budget; a re-trigger gets a new build
+    # and a fresh count.
+    #
+    # 0 means "not attempted in this build" — and is also what a server
+    # predating this field serialises, i.e. "unknown, don't enforce".
+    attempt_count: int = 0
 
 
 class FrontierExternalBlocker(BaseModel):
@@ -639,6 +670,14 @@ class TaskWithStatusResponse(TaskResponse):
     status_build_id: UUID | None = None
     # Git commit hash from the event that determined the current status
     commit_hash: str | None = None
+    # Execution attempts for this task in the build being listed — see
+    # ``FrontierTaskRef.attempt_count`` for the counting rule. Scoped to the
+    # build in the URL, NOT global like ``status`` above: this endpoint is
+    # the only consumer of this model, and it is per-build, which is what
+    # makes the field meaningful here. It deliberately does not appear on
+    # the environment-global task responses, where "how many attempts"
+    # would have no build to be about.
+    attempt_count: int = 0
 
 
 class TaskEventResponse(BaseModel):
@@ -657,6 +696,13 @@ class TaskEventResponse(BaseModel):
     # The environment-global denormalised status after this event — the
     # execution claim's own answer.
     latest_status: TaskStatus | None = None
+    # Execution attempts for this task in this build, *including the event
+    # just recorded* — so a caller that has recorded a failure, or won a
+    # claiming start, can apply its retry budget without a second
+    # round-trip to the frontier (and against a count that is authoritative
+    # rather than a snapshot some racing scheduler may have moved on from).
+    # Counting rule and per-build scoping: see ``FrontierTaskRef``.
+    attempt_count: int = 0
 
 
 class TaskListResponse(BaseModel):
