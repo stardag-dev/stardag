@@ -56,6 +56,40 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `latest_status_build_id`.** The last is the claim holder — "running under
   build Y since T" — and was previously unavailable outside the build
   frontier. Purely additive.
+- **`POST /builds/{id}/cancel` accepts `cascade=true`.** Cancelling a build
+  wrote a single build-level event and nothing else, so the claims and
+  concurrency-limit slots its tasks held survived it indefinitely. With
+  `cascade` the build's RUNNING/SUSPENDED tasks are cancelled in the same
+  transaction. Scoped to tasks whose current status _this_ build produced,
+  so it can never declare another build's live execution dead; PENDING tasks
+  are left alone for the same reason. Default off — it is a behaviour change,
+  and the SDK's fail-fast path cancels its own running tasks.
+  The response gains `cascaded_task_ids` / `cascaded_task_count`.
+- **New `POST /builds/bulk-cancel`: bulk cleanup and a stale-build reaper.**
+  Nothing terminated abandoned builds: build status is derived from events,
+  so a build whose orchestrator died without emitting a terminal one stays
+  RUNNING forever, and interrupted local runs, crashed CI jobs and failed
+  triggers accumulate permanently. One endpoint serves both shapes —
+  `build_ids` for an explicit set, `idle_for_seconds` for staleness — with
+  `dry_run`, `cascade` (on by default here), and reactive builds excluded
+  unless asked for. Only builds whose derived status is RUNNING are ever
+  touched, so it is idempotent.
+
+  **Idleness is measured on activity, not on `last_active_at`.** That column
+  is bumped by build-level lifecycle transitions only — task events skip it
+  so worker traffic doesn't contend on the build row — so a build running
+  tasks for three days still shows its BUILD_STARTED timestamp there, and
+  reaping on it would cancel live work. The signal used is the newest of the
+  build's entire event stream, its `last_active_at`, and any pending
+  scheduler wake-up (`needs_tick_at`).
+
+- **`BuildResponse` exposes `last_active_at` and `last_activity_at`** — the
+  ordering column and the reaper's idleness signal respectively — so a UI can
+  show operators the same number the reaper acts on.
+- **Optional unattended sweep** (`STARDAG_API_REAPER_ENABLED`, off by
+  default) runs the same operation on a timer inside the API process. Note
+  that every replica runs its own timer with no leader election; cancellation
+  is idempotent, so concurrent sweeps are wasteful rather than wrong.
 
 ## [0.17.0] — 2026-08-06
 
