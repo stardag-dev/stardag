@@ -204,8 +204,10 @@ class TestUISidebarNavigation:
         expect(collapse_btn).to_be_visible()
 
         # Test navigation items exist
-        home_btn = logged_in_page.get_by_text("Home", exact=True)
-        expect(home_btn).to_be_visible()
+        # Scoped to the sidebar button: the breadcrumb also reads "Builds",
+        # so a bare text locator matches two elements and trips strict mode.
+        builds_btn = logged_in_page.locator("button[title='Builds']")
+        expect(builds_btn).to_be_visible()
 
         # Test collapse/expand
         collapse_btn.click()
@@ -481,8 +483,9 @@ class TestUIBuildViewDAG:
         """Test DAG toggle exists on build page and collapse/expand works."""
         self._go_to_home(logged_in_page, docker_services)
 
-        # Navigate to Home (builds list)
-        logged_in_page.get_by_text("Home", exact=True).click()
+        # Navigate to the builds list (sidebar button — see above on why this
+        # is not a text locator).
+        logged_in_page.locator("button[title='Builds']").click()
         logged_in_page.wait_for_load_state("networkidle")
 
         # Check if there are any builds to click on
