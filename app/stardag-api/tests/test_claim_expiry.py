@@ -30,6 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from stardag_api.config import claim_settings
 from stardag_api.models import Task
 
+# The revision below the claim-expiry migration. Downgrading to it and back
+# re-runs that migration (and anything stacked above it), which is what makes
+# the backfill observable. Named explicitly so a later migration cannot
+# silently turn these tests into no-ops -- see the note in the first one.
+_CLAIM_EXPIRY_DOWN_REVISION = "11716b1f4c1a"
+
 BUILDS = "/api/v1/builds"
 
 
@@ -463,6 +469,12 @@ async def test_migration_backfills_claims_that_are_already_running(
 
     Here: a claim that has been RUNNING for 90 days, taken back through
     ``downgrade`` / ``upgrade`` so the backfill runs over real rows.
+
+    Targets the revision *below* this one by name rather than ``-1``.
+    ``-1`` means "one step back from head", which is this migration only
+    while it happens to be the newest — the moment anything stacks on top,
+    ``-1`` unwinds that instead, the backfill never re-runs, and this test
+    fails without the backfill having changed.
     """
     import asyncio
 
@@ -491,7 +503,7 @@ async def test_migration_backfills_claims_that_are_already_running(
     await pg_engine.dispose()
     pg_url = os.environ["STARDAG_API_TEST_DATABASE_URL"]
     alembic_cfg = get_alembic_config(pg_url)
-    await asyncio.to_thread(command.downgrade, alembic_cfg, "-1")
+    await asyncio.to_thread(command.downgrade, alembic_cfg, _CLAIM_EXPIRY_DOWN_REVISION)
     await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
 
     pg_session.expire_all()
@@ -542,7 +554,7 @@ async def test_migration_leaves_claims_with_no_status_timestamp_alone(
 
     await pg_engine.dispose()
     alembic_cfg = get_alembic_config(os.environ["STARDAG_API_TEST_DATABASE_URL"])
-    await asyncio.to_thread(command.downgrade, alembic_cfg, "-1")
+    await asyncio.to_thread(command.downgrade, alembic_cfg, _CLAIM_EXPIRY_DOWN_REVISION)
     await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
 
     pg_session.expire_all()
