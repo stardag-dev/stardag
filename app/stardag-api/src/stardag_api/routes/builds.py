@@ -1642,11 +1642,13 @@ async def get_build_frontier(
     :class:`FrontierExternalBlocker`.
 
     ``attempt_count`` on every task ref is the one field here that is
-    scoped to **this build** rather than the environment — deliberately,
-    because "how many times has this build tried" is the retry-relevant
-    number, and a task that failed twice in an earlier build must not
-    arrive here with its budget already spent. It also counts *attempts*,
-    not TASK_STARTED events; see :class:`FrontierTaskRef`.
+    scoped to **this build**, and to its current round, rather than to the
+    environment — deliberately, because "how many times has this build
+    tried since it was last resumed" is the retry-relevant number. A task
+    that failed twice in an earlier build must not arrive here with its
+    budget already spent, and neither must one whose build the user has
+    just re-triggered. It also counts *attempts*, not TASK_STARTED events;
+    see :class:`FrontierTaskRef`.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
@@ -1834,11 +1836,12 @@ async def get_build_frontier(
             .all()
         )
 
-    # Execution attempts per task, for the scheduler's retry policy (see
-    # FrontierTaskRef.attempt_count). Derived rather than denormalised:
-    # attempts are per *build*, and there is no per-(build, task) row to
-    # denormalise onto — inventing one would cost a table, a fold on every
-    # start path and a backfill, to replace this.
+    # Execution attempts per task in this build's current round, for the
+    # scheduler's retry policy (see FrontierTaskRef.attempt_count). Derived
+    # rather than denormalised: attempts are per *build* and per *round*,
+    # and there is no per-(build, task) row to denormalise onto — inventing
+    # one would cost a table, a fold on every start path and a backfill, to
+    # replace this.
     #
     # ONE grouped query for every task in the response — the frontier is
     # re-read on every linger poll (~3 s per active build), so a per-task
@@ -3111,9 +3114,10 @@ async def list_tasks_in_build(
 
     Statuses are global (events from all builds); ``attempt_count`` is
     per-build by construction — it answers "how many times did *this* build
-    try", which is what a UI or CLI showing a build wants, and what a
-    global count could not express. See ``FrontierTaskRef.attempt_count``
-    for the counting rule.
+    try since it was last resumed", which is what a UI or CLI showing a
+    build wants, and what a global count could not express. See
+    ``FrontierTaskRef.attempt_count`` for the counting rule and the round
+    window.
 
     Requires authentication via API key or JWT token with environment_id.
     """

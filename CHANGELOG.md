@@ -20,10 +20,12 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   tick is short-lived and cannot remember what it already tried.
 
   `attempt_count` is how many times execution has been started for a task
-  **in that build**, exposed on `FrontierTaskRef` (all of `actionable`,
-  `running` and `roots`), on `GET /builds/{id}/tasks`, and on every task
-  lifecycle event response so a caller that has just recorded a failure or
-  won a claiming start can apply its budget without a second round-trip.
+  **since its build's most recent `BUILD_RESUMED` event** — since the
+  build began, if it never was. Exposed on `FrontierTaskRef` (all of
+  `actionable`, `running` and `roots`), on `GET /builds/{id}/tasks`, and on
+  every task lifecycle event response so a caller that has just recorded a
+  failure or won a claiming start can apply its budget without a second
+  round-trip. Always populated wherever it is declared.
 
   Three things it is easy to assume and get wrong:
 
@@ -37,17 +39,28 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   - **The scope is the build, not the environment** — unlike the
     `latest_*` fields it travels with. A task that spent two attempts in
     an earlier build arrives in a fresh trigger with a full budget.
-  - **A retry does not reset it.** A scheduler retries a failed task
-    _through_ `POST .../retry`, so a resetting counter would be cleared by
-    every enforcement of the budget it defines. Within one build the
-    number is a lifetime budget; a re-trigger gets a new build.
+  - **A resume resets it; a retry does not.** `build_trigger(...,
+build_id=<existing>, reactive=True)` is the recommended way to pick a
+    failed reactive build back up, and it does _not_ mint a new build: it
+    resumes this one and retries the failed tasks in it. Counting over a
+    build's whole history would therefore leave the budget spent the
+    moment the user asked for another go, and resuming would mean also
+    raising `max_attempts`. `BUILD_RESUMED` is the durable marker of
+    "another round was asked for" — and the server already skips it for a
+    build with no activity beyond `BUILD_STARTED`, so a first trigger is
+    unaffected. `TASK_RETRIED` on its own does not reset, because a
+    scheduler retries _through_ that endpoint: a counter cleared by it
+    would be cleared by every enforcement of the budget it defines. So a
+    bare retry against a spent budget is a real "this round is out of
+    attempts", and resuming is the answer to it.
 
   Derived from the event log rather than denormalised — attempts are
-  per-build and there is no per-(build, task) row to hang a column on — as
-  one grouped query bounded to the tasks being reported. No migration; the
-  frontier costs exactly one extra query, and none at all when it has no
-  tasks to report. Purely additive: every existing field keeps its exact
-  semantics.
+  per-build, per-round, and there is no per-(build, task) row to hang a
+  column on — as one grouped query bounded to the tasks being reported,
+  with the round cutoff riding along as a correlated subquery. No
+  migration; the frontier costs exactly one extra query, and none at all
+  when it has no tasks to report. Purely additive: every existing field
+  keeps its exact semantics.
 
 - **Reactive scheduler tick summaries are now persisted per build**
   (`POST`/`GET /builds/{build_id}/tick-summaries`). A reactive build is
