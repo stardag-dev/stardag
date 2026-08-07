@@ -17,7 +17,11 @@ from stardag_api.auth import (
     SdkAuth,
     require_sdk_auth,
 )
-from stardag_api.config import limits_settings
+from stardag_api.config import (
+    MAX_CLAIM_TTL_SECONDS,
+    MIN_CLAIM_TTL_SECONDS,
+    limits_settings,
+)
 from stardag_api.db import get_db
 from stardag_api.limits import (
     ErrorCode,
@@ -87,6 +91,7 @@ from stardag_api.services.build_cleanup import (
     last_activity_at,
     select_cancellable_builds,
 )
+from stardag_api.services.claims import claim_is_live, live_claim_filter
 from stardag_api.services.status import (
     apply_event_to_task,
     get_all_task_global_statuses,
@@ -351,9 +356,9 @@ async def _create_task_event(
     concurrency-limit keys in the same transaction — a RUNNING task with a
     key row occupies one slot of that key's limit.
 
-    ``claim`` (TASK_STARTED only): deny with 409 when the task is already
-    RUNNING or COMPLETED (see ``start_task``); evaluated on the
-    FOR-UPDATE-locked task row, and the raised HTTPException rolls back
+    ``claim`` (TASK_STARTED only): deny with 409 when the task holds a
+    *live* claim or is already COMPLETED (see ``start_task``); evaluated on
+    the FOR-UPDATE-locked task row, and the raised HTTPException rolls back
     the whole transaction (no event, no limit-key rows, and any
     limit-row locks taken by the enforce_limits pre-check are released).
     """
@@ -377,7 +382,15 @@ async def _create_task_event(
         # Atomic execution claim: at most one concurrent claiming start can
         # win. The row is locked FOR UPDATE, so a racing claimant blocks
         # here and re-reads the committed RUNNING status once we commit.
-        if db_task.latest_status == TaskStatus.RUNNING:
+        #
+        # RUNNING alone is not the test — the claim also has to still be
+        # believable. A claim past its expiry is not a claim, so it does not
+        # deny anything: the start below overwrites the dead holder's
+        # status, build, executor fields and expiry in one go. That
+        # re-claim IS the healing mechanism (see services.claims); nothing
+        # has to release the old claim first, and there is nothing to
+        # release it *with* across builds.
+        if claim_is_live(db_task):
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -387,6 +400,14 @@ async def _create_task_event(
                     "latest_status_at": (
                         db_task.latest_status_at.isoformat()
                         if db_task.latest_status_at
+                        else None
+                    ),
+                    # When the denial stops applying without anyone doing
+                    # anything. Null = never (a claim written before the
+                    # column existed, or by a caller of an older API).
+                    "latest_status_expires_at": (
+                        db_task.latest_status_expires_at.isoformat()
+                        if db_task.latest_status_expires_at
                         else None
                     ),
                 },
@@ -1748,6 +1769,7 @@ async def get_build_frontier(
                     blocker.task_name,
                     blocker.latest_status,
                     blocker.latest_status_at,
+                    blocker.latest_status_expires_at,
                     blocker.latest_status_build_id,
                     blocker.id.in_(build_task_ids),
                 )
@@ -1781,6 +1803,11 @@ async def get_build_frontier(
                 blocking_task_name=blocking_name,
                 blocking_status=blocking_status,
                 blocking_status_at=blocking_status_at,
+                # The point of the whole entry: a blocker RUNNING under a
+                # build that died used to be indistinguishable from one
+                # running normally, leaving the consumer to guess from
+                # elapsed time. Past this instant it is provably gone.
+                blocking_status_expires_at=blocking_status_expires_at,
                 blocking_status_build_id=blocking_status_build_id,
                 blocking_in_build=bool(blocking_in_build),
             )
@@ -1791,6 +1818,7 @@ async def get_build_frontier(
                 blocking_name,
                 blocking_status,
                 blocking_status_at,
+                blocking_status_expires_at,
                 blocking_status_build_id,
                 blocking_in_build,
             ) in blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
@@ -1825,6 +1853,10 @@ async def get_build_frontier(
             # long with no executor ref"); omitting it silently disabled
             # those guards, since the field defaults to None.
             latest_status_at=t.latest_status_at,
+            # ...and this turns that heuristic into evidence: past the
+            # expiry the server itself will hand the task to the next
+            # claimant, so a scheduler can stop inferring from elapsed time.
+            latest_status_expires_at=t.latest_status_expires_at,
         )
 
     return BuildFrontierResponse(
@@ -2534,6 +2566,21 @@ async def start_task(
     limit_key: Annotated[list[str] | None, Query()] = None,
     enforce_limits: bool = False,
     claim: bool = False,
+    claim_ttl_seconds: Annotated[
+        int | None,
+        Query(
+            ge=MIN_CLAIM_TTL_SECONDS,
+            le=MAX_CLAIM_TTL_SECONDS,
+            description=(
+                "How long this execution's claim on the task stays "
+                "believable, in seconds. Recorded as "
+                "`tasks.latest_status_expires_at`; once past, the task is "
+                "claimable again by anyone. Set it to the executor's own "
+                "timeout plus a small grace — it is NOT a lease and nothing "
+                "renews it mid-execution. Omitted: the server default."
+            ),
+        ),
+    ] = None,
 ):
     """Mark a task as started within a build.
 
@@ -2559,14 +2606,26 @@ async def start_task(
             environment's limit rows are locked for the duration of the
             check, serializing concurrent acquires.
         claim: Atomic per-task execution claim: reject the start with
-            **409** when the task is already RUNNING (error code
+            **409** when the task already holds a *live* claim (error code
             ``task_already_running``, echoing the running execution's
-            ``executor``/``executor_ref`` so the caller can re-attach) or
-            already COMPLETED (``task_already_completed``). The check runs
-            on the FOR-UPDATE-locked task row inside the start
-            transaction, so concurrent claiming starts serialize — at most
-            one wins. A denied claim records nothing (no event, no
-            concurrency-limit slots).
+            ``executor``/``executor_ref`` so the caller can re-attach, and
+            its ``latest_status_expires_at``) or is already COMPLETED
+            (``task_already_completed``). The check runs on the
+            FOR-UPDATE-locked task row inside the start transaction, so
+            concurrent claiming starts serialize — at most one wins. A
+            denied claim records nothing (no event, no concurrency-limit
+            slots). A claim whose expiry has passed denies nothing: this
+            start takes it over, replacing the previous holder's build,
+            executor fields and expiry together.
+        claim_ttl_seconds: Lifetime of the claim this start grants, from
+            the event's timestamp. Written to
+            ``tasks.latest_status_expires_at`` and echoed in the event
+            metadata; outside [``MIN_CLAIM_TTL_SECONDS``,
+            ``MAX_CLAIM_TTL_SECONDS``] the request is rejected with **422**.
+            Applies to *every* start, not only claiming ones: RUNNING is
+            the claim however it was recorded, and a start that granted no
+            expiry would be exactly the wedge this exists to end. Omitted
+            → ``ClaimSettings.default_ttl_seconds``.
     """
     parsed_executor_metadata = _parse_executor_metadata_param(executor_metadata)
     limit_keys = list(dict.fromkeys(limit_key)) if limit_key else None
@@ -2587,6 +2646,7 @@ async def start_task(
         or executor_ref is not None
         or parsed_executor_metadata is not None
         or limit_keys
+        or claim_ttl_seconds is not None
     ):
         extra_metadata = {}
         if executor is not None:
@@ -2597,6 +2657,12 @@ async def start_task(
             extra_metadata["executor_metadata"] = parsed_executor_metadata
         if limit_keys:
             extra_metadata["limit_keys"] = limit_keys
+        if claim_ttl_seconds is not None:
+            # Carried on the event, not passed alongside it: the expiry is
+            # derived in apply_event_to_task from the event that granted it,
+            # so what the caller asked for stays auditable and a replay of
+            # the stream reproduces the same expiry.
+            extra_metadata["claim_ttl_seconds"] = claim_ttl_seconds
     return await _create_task_event(
         build_id,
         task_id,
@@ -2625,6 +2691,14 @@ async def _check_concurrency_limits(
     configured limit are unlimited. The task being started is excluded
     from the count, so re-starting a RUNNING task (e.g. re-recording an
     executor ref) never self-blocks.
+
+    A slot is occupied by a *live* claim, not by the RUNNING string — the
+    count uses the same predicate as the claim check
+    (:func:`~stardag_api.services.claims.live_claim_filter`). The two have
+    to agree: counting expired claims here would mean an abandoned task
+    stops blocking its own re-execution while still consuming the cap it
+    was admitted under, which is precisely the leak this expiry exists to
+    stop, preserved in the one place nobody looks.
     """
     limits = (
         (
@@ -2655,7 +2729,7 @@ async def _check_concurrency_limits(
                 .where(
                     TaskLimitKey.key == limit.key,
                     Task.environment_id == auth.environment_id,
-                    Task.latest_status == TaskStatus.RUNNING,
+                    live_claim_filter(),
                     Task.task_id != task_id,
                 )
             )
