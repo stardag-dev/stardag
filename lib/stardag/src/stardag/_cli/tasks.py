@@ -127,7 +127,7 @@ def tasks_list(
     first: the task that has been RUNNING longest is both the most likely
     to be abandoned and the most expensive to leave holding a claim.
 
-    ``--older-than`` is converted to an absolute cutoff before it is sent,
+    `--older-than` is converted to an absolute cutoff before it is sent,
     so paging a large result cannot have the cutoff drift underneath it.
     Tasks with no recorded status timestamp never match it — an age that
     cannot be established is not evidence of staleness.
@@ -218,7 +218,7 @@ def tasks_cancel(
     """Cancel a task, releasing its execution claim and limit slots.
 
     This is the recovery for a task stranded RUNNING or SUSPENDED by a
-    build that is gone. Pass the build from ``latest_status_build_id`` —
+    build that is gone. Pass the build from `latest_status_build_id` —
     the claim holder.
 
     The server cannot stop anything: a worker still executing keeps going
@@ -260,7 +260,7 @@ def tasks_retry(
     Flips failed / cancelled / skipped / suspended back to PENDING; a
     COMPLETED or RUNNING task is untouched (a RUNNING task holds a live
     claim, and releasing that is cancellation, not retry — see
-    ``stardag tasks cancel``).
+    `stardag tasks cancel`).
     """
     parsed_build = _parse_uuid(build_id, "build ID")
     if not yes:

@@ -157,13 +157,27 @@ def builds_list(
 ) -> None:
     """List builds, most recently active first.
 
-    ``--older-than`` measures *activity* — the newest of the build's whole
+    `--older-than` measures *activity* — the newest of the build's whole
     event stream, its lifecycle column and any pending scheduler wake-up —
     not the list's ordering column, which task events deliberately never
     touch. Filtering on the ordering column would call a build that has
-    been running tasks for three days "idle".
+    been running tasks for three days "idle". The filter is applied
+    server-side against the same SQL predicate the reaper and
+    `builds cleanup` use, so this list and that cleanup agree on what is
+    stale; with it set the server orders stalest-first.
     """
     idle_seconds = _parse_older_than(older_than)
+    if idle_seconds is not None and status is not None and status != "running":
+        # Only RUNNING has a SQL predicate for the derived status; the other
+        # statuses are filtered after a bounded scan, which would pair an
+        # exact-looking ``total`` with an approximate one. The server rejects
+        # the combination with a 422 — say so here instead of surfacing it raw.
+        error_console.print(
+            "[bold red]Error:[/bold red] --older-than can only be combined "
+            f"with --status running (got {status!r}). Idleness is only "
+            "meaningful for builds that are still running."
+        )
+        raise typer.Exit(1)
 
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
@@ -181,33 +195,36 @@ def builds_list(
 
     builds = list(result.builds)
     if idle_seconds is not None:
-        # Belt and braces: an older server ignores a query param it does
-        # not know rather than rejecting it, which would silently turn
-        # "--older-than 24h" into "everything". Re-applying the cut on the
-        # returned rows means the output is never *wrong*, only possibly
-        # incomplete — and the warning says which.
+        # A CLI can be newer than the registry it talks to, and an older
+        # server *ignores* a query param it does not know rather than
+        # rejecting it — so "--older-than 24h" would quietly mean
+        # "everything". Detect that and say so loudly.
+        #
+        # Deliberately a warning, not a local filter: the server paginates
+        # and counts, so cutting the page here would drop rows from a page
+        # already chosen without the filter — under-reporting precisely the
+        # oldest builds, which are the entire population --older-than exists
+        # to find. A row with no ``last_activity_at`` counts as evidence too:
+        # a server that cannot report the field cannot have filtered on it.
         cutoff = _utcnow() - timedelta(seconds=idle_seconds)
-        kept = [
+        unfiltered = [
             b
             for b in builds
-            if b.last_activity_at is not None and _as_utc(b.last_activity_at) <= cutoff
+            if b.last_activity_at is None or _as_utc(b.last_activity_at) > cutoff
         ]
-        if len(kept) != len(builds):
+        if unfiltered:
             error_console.print(
-                f"[yellow]Note:[/yellow] the server did not apply --older-than "
-                f"(it returned {len(builds) - len(kept)} row(s) that do not "
-                "match, or rows with no activity timestamp). The filter was "
-                "applied locally to this page only — paging may be uneven. "
-                "Upgrade stardag-api for server-side filtering."
+                "[bold yellow]Warning:[/bold yellow] this registry does not "
+                "support --older-than (idle_for_seconds); it ignored the "
+                f"filter and returned {len(unfiltered)} build(s) newer than "
+                "the cutoff. [bold]The results below are unfiltered.[/bold] "
+                "Upgrade stardag-api to filter by idleness."
             )
-        builds = kept
 
     if json_output:
         _emit_json(
             {
                 "builds": [b.model_dump(mode="json") for b in builds],
-                # The server's count for the filter the *server* applied;
-                # it can exceed len(builds) when the cut above ran locally.
                 "total": result.total,
                 "page": result.page,
                 "page_size": result.page_size,
@@ -314,8 +331,8 @@ def builds_frontier(
     """Show a build's scheduling frontier, including cross-build blockers.
 
     The diagnostic command: what a reactive scheduler tick sees when it
-    decides whether the build can progress. ``actionable`` are the tasks
-    it would act on now, ``running`` the executions it would probe, and
+    decides whether the build can progress. `actionable` are the tasks
+    it would act on now, `running` the executions it would probe, and
     the external-blocker section explains a build that has neither.
     """
     parsed = _parse_build_id(build_id)
@@ -546,7 +563,7 @@ def builds_cancel(
 ) -> None:
     """Cancel a build, optionally releasing the claims its tasks hold.
 
-    Without ``--cascade`` this records a build-level event and nothing
+    Without `--cascade` this records a build-level event and nothing
     else — which is why cancelling a build has never actually cleaned
     anything up. Task state is per environment, so a task this build left
     RUNNING keeps denying its claim to every future build that needs it.
@@ -629,7 +646,10 @@ def builds_cleanup(
         False,
         "--yes",
         "-y",
-        help="Skip the confirmation prompt. Implies --apply.",
+        help=(
+            "Skip the confirmation prompt. Does NOT imply --apply; pair the "
+            "two to run unattended."
+        ),
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -637,8 +657,13 @@ def builds_cleanup(
 
     Defaults to a dry run: it prints exactly what a real run would cancel
     — the builds, the task claims that would be released, and why any
-    explicitly-named build was skipped — and writes nothing. Pass
-    ``--apply`` (or ``-y``, which implies it) to act.
+    explicitly-named build was skipped — and writes nothing.
+
+    `--apply` is the only thing that makes this act. `-y/--yes`
+    only skips the confirmation prompt: on a command that is a dry run by
+    default, `-y` alone must not turn into a cascade of cancellations —
+    that is exactly the surprise a destructive command may not have. Use
+    `--apply` interactively and `--apply --yes` on a timer.
 
     The selection is the *server's*, both times: the dry run and the real
     run take the same filter through the same endpoint, so what you review
@@ -656,9 +681,9 @@ def builds_cleanup(
         )
         raise typer.Exit(1)
 
-    # -y is the scripted/timer path (a cleanup on a schedule cannot answer a
-    # prompt), so it implies --apply rather than requiring both flags.
-    do_apply = apply or yes
+    # --apply is the sole switch from "report" to "act"; -y only silences the
+    # prompt (see the docstring).
+    do_apply = apply
     if do_apply and not yes:
         if json_output:
             error_console.print(

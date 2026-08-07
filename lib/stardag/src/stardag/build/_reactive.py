@@ -53,7 +53,9 @@ Each tick reports its :class:`TickSummary` to the registry on the way out
 (``TickConfig.report_tick_summaries``), so the scheduler's own account of
 what it did survives the container it ran in — a build driven by dozens of
 short-lived ticks otherwise leaves its reasoning scattered across as many
-logs. Strictly best-effort, and tolerant of a server without the endpoint.
+logs. A tick that crashes is reported too, as ``outcome="error"``. Strictly
+best-effort throughout: it never fails a tick, never changes an outcome,
+never masks an exception, and tolerates a server without the endpoint.
 """
 
 from __future__ import annotations
@@ -303,8 +305,18 @@ class TickSummary:
     with ``dataclasses.asdict`` and reported to the registry.
     """
 
-    outcome: str  # "not_reactive" | "lease_held" | "terminal" | "lingered_out"
+    # "not_reactive" | "lease_held" | "terminal" | "lingered_out" | "error"
+    outcome: str
     terminal_status: str | None = None
+    # Set only for outcome == "error": the exception that ended the tick.
+    # A crashed tick is the single most informative thing a "why did this
+    # build stall?" query can find, so it is recorded like any other
+    # outcome — but the exception itself is never masked or replaced (see
+    # ``run_tick_aio``). The message is bounded so a pathological
+    # traceback-in-a-message cannot push the summary past the server's
+    # size cap and turn a recorded failure into an unrecorded one.
+    error_type: str | None = None
+    error_message: str | None = None
     spawned: int = 0
     self_healed: int = 0
     failed_recorded: int = 0
@@ -335,8 +347,26 @@ class TickSummary:
 # Everything else says something: ``lease_held`` is contention (many of
 # them means ticks are piling up on one build), ``lingered_out`` is a tick
 # that found nothing to do, ``terminal`` carries the outcome and the
-# counters explaining it.
+# counters explaining it, and ``error`` is a tick that crashed — the most
+# informative of the lot.
 _UNREPORTED_TICK_OUTCOMES = frozenset({"not_reactive"})
+
+# Bounds on the recorded exception identity/text. The server caps a summary
+# at 8 KiB of compact JSON and rejects anything larger, so an unbounded
+# message — a chained traceback, a repr of a huge payload — would turn "this
+# tick crashed" into no record at all, losing exactly the outcome most worth
+# keeping. Generous enough that a real error message survives intact.
+_MAX_ERROR_TYPE_CHARS = 128
+_MAX_ERROR_MESSAGE_CHARS = 1024
+_TRUNCATION_MARKER = "… [truncated]"
+
+
+def _bounded(text: str, limit: int) -> str:
+    """Clip ``text`` to ``limit`` characters, marking that it was clipped."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+
 
 # Set once per process when the registry answers the tick-summary route
 # with a missing-route 404, so an SDK pointed at an older server stops
@@ -414,22 +444,39 @@ async def run_tick_aio(
     summary in place and has several early returns — wrapping it here is
     what keeps the report to exactly one call site instead of one per
     return, which is how a return added later would silently stop being
-    observable. A tick that *raises* reports nothing: its summary never
-    reached the outcome it would claim, and the exception itself reaches
-    the caller.
+    observable.
+
+    A tick that *raises* is reported too, as ``outcome="error"`` carrying
+    the exception's type and (bounded) message: a crashed tick is the most
+    informative answer a "why did this build stall?" query can get, and
+    the summary is stored as an open blob so the extra fields need no
+    server change. Reporting it never changes what the caller sees — the
+    original exception is re-raised unconditionally, and a failure to
+    record the failure is logged and swallowed, exactly like the
+    success-path report.
     """
     config = config or TickConfig()
     task_store = task_store or BuildTaskStore(build_id)
     summary = TickSummary(outcome="lingered_out")
-    await _run_tick_body_aio(
-        build_id,
-        registry=registry,
-        task_executor=task_executor,
-        lock_manager=lock_manager,
-        task_store=task_store,
-        config=config,
-        summary=summary,
-    )
+    try:
+        await _run_tick_body_aio(
+            build_id,
+            registry=registry,
+            task_executor=task_executor,
+            lock_manager=lock_manager,
+            task_store=task_store,
+            config=config,
+            summary=summary,
+        )
+    except Exception as e:
+        summary.outcome = "error"
+        summary.error_type = _bounded(type(e).__name__, _MAX_ERROR_TYPE_CHARS)
+        summary.error_message = _bounded(str(e), _MAX_ERROR_MESSAGE_CHARS)
+        # Best-effort, and cannot mask: _report_tick_summary swallows
+        # everything it can raise. The bare `raise` re-raises the original
+        # with its traceback intact.
+        await _report_tick_summary(build_id, registry, config, summary)
+        raise
     await _report_tick_summary(build_id, registry, config, summary)
     return summary
 

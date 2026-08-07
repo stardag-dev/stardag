@@ -731,11 +731,14 @@ task and the build that owns it — see
 **Seeing what a tick decided.** Every tick reports its summary to the registry
 (`stardag builds ticks <build-id>`), so a build driven by dozens of
 short-lived tick containers does not leave its reasoning scattered across as
-many logs. Reporting is best-effort — it can never fail a tick or change its
-outcome — and is tolerated by servers that predate the endpoint. Turn it off
-for a whole deployment with `TickConfig(report_tick_summaries=False)`; like the
-other staleness knobs it is app-level configuration, not a per-trigger
-`tick_kwarg`.
+many logs. A tick that _crashes_ is reported too, as `outcome="error"` with
+the exception's type and message — usually the most informative thing a "why
+did this build stall?" question can turn up. Reporting is best-effort
+throughout: it can never fail a tick, change its outcome or mask its
+exception, and it is tolerated by servers that predate the endpoint. Turn it
+off for a whole deployment with `TickConfig(report_tick_summaries=False)`;
+like the other staleness knobs it is app-level configuration, not a
+per-trigger `tick_kwarg`.
 
 Requirements and current limitations: the app must be deployed with this
 stardag version (scheduler `tick` function + self-reporting workers); the

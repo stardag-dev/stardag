@@ -9,6 +9,7 @@ instantly (simulating worker-side lifecycle reporting + wake-up).
 from __future__ import annotations
 
 import asyncio
+import json
 import typing
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -123,6 +124,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         # raise from the reporting endpoint.
         self.reported_tick_summaries: list[dict] = []
         self.tick_summary_error: Exception | None = None
+        # Set to make the frontier fetch blow up, i.e. crash the tick itself.
+        self.frontier_error: Exception | None = None
 
     # --- test setup helpers ---
 
@@ -364,6 +367,9 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.needs_tick = False
 
     async def build_get_frontier_aio(self, build_id) -> BuildFrontier:
+        if self.frontier_error is not None:
+            raise self.frontier_error
+
         def ref(tid: str) -> FrontierTaskRef:
             executor, executor_ref = self.refs.get(tid, (None, None))
             return FrontierTaskRef(
@@ -2518,3 +2524,77 @@ class TestTickSummaryReporting:
 
         assert summary.outcome == "terminal"
         assert reactive_module._tick_summary_route_missing is False
+
+    async def test_crashed_tick_is_reported_and_the_exception_propagates(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A crashed tick is the most informative "why did this stall?" answer.
+
+        Recording it must not change what the caller sees: the original
+        exception is re-raised, with its type and message captured.
+        """
+        dep, root = _chain("crash-dep", "crash-root")
+        registry, locks, executor, store = _setup([dep, root])
+        registry.frontier_error = RuntimeError("frontier query exploded")
+
+        with pytest.raises(RuntimeError, match="frontier query exploded"):
+            await self._run(registry, locks, executor, store)
+
+        assert len(registry.reported_tick_summaries) == 1
+        reported = registry.reported_tick_summaries[0]
+        assert reported["outcome"] == "error"
+        assert reported["error_type"] == "RuntimeError"
+        assert reported["error_message"] == "frontier query exploded"
+
+    async def test_error_message_is_bounded(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An unbounded message would blow the server's 8 KiB summary cap —
+        turning a recorded failure into no record at all."""
+        dep, root = _chain("huge-dep", "huge-root")
+        registry, locks, executor, store = _setup([dep, root])
+        registry.frontier_error = RuntimeError("x" * 50_000)
+
+        with pytest.raises(RuntimeError):
+            await self._run(registry, locks, executor, store)
+
+        reported = registry.reported_tick_summaries[0]
+        message = reported["error_message"]
+        assert len(message) == reactive_module._MAX_ERROR_MESSAGE_CHARS
+        assert message.endswith(reactive_module._TRUNCATION_MARKER)
+        # The whole summary stays well inside the server's cap.
+        assert len(json.dumps(reported, separators=(",", ":")).encode()) < 8192
+
+    async def test_failing_to_report_a_crash_does_not_mask_it(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A failure to record the failure is swallowed, never substituted."""
+        dep, root = _chain("mask-dep", "mask-root")
+        registry, locks, executor, store = _setup([dep, root])
+        registry.frontier_error = RuntimeError("the original problem")
+        registry.tick_summary_error = RuntimeError("and the reporter died too")
+
+        with pytest.raises(RuntimeError, match="the original problem"):
+            await self._run(registry, locks, executor, store)
+
+    async def test_crash_reporting_respects_the_config_toggle(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("crash-off-dep", "crash-off-root")
+        registry, locks, executor, store = _setup([dep, root])
+        registry.frontier_error = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await self._run(
+                registry,
+                locks,
+                executor,
+                store,
+                config=TickConfig(
+                    linger_seconds=0.3,
+                    poll_interval_seconds=0.01,
+                    report_tick_summaries=False,
+                ),
+            )
+
+        assert registry.reported_tick_summaries == []

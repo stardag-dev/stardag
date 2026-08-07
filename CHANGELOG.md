@@ -43,17 +43,27 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   stays `RUNNING` forever while holding every execution claim and
   concurrency-limit slot its tasks had. It **defaults to a dry run** — the
   server's own selection, so what you review is what you get — printing the
-  builds, the claims that would be released and any per-build skip reasons,
-  and requires `--apply` (or `-y`, which implies it) to act. Cascade is on by
-  default here, and reactive builds are excluded unless asked for.
+  builds, the claims that would be released and any per-build skip reasons.
+  **`--apply` is the only thing that makes it act**; `-y/--yes` only skips
+  the confirmation prompt, so `cleanup -y` on its own is still a dry run.
+  Cascade is on by default here, and reactive builds are excluded unless
+  asked for.
 
   `--older-than` accepts `24h` / `90m` / `3d` (one number, one optional unit
   of `s`/`m`/`h`/`d`/`w`; bare numbers are seconds) and converts at the
-  boundary to whatever the endpoint takes. The read-only commands — and
-  `cleanup`'s dry run — take **`--json`**, a new convention for the CLI:
-  stdout carries exactly one JSON document (the SDK's model of the API
-  payload) and every hint, warning and prompt goes to stderr, so piping to
-  `jq` is safe.
+  boundary to whatever the endpoint takes — a duration for builds, an
+  absolute cutoff for tasks. It is applied server-side by the same predicate
+  the reaper uses, so `builds list --older-than 24h` and
+  `builds cleanup --older-than 24h` agree on what is stale; on `builds list`
+  it may only be combined with `--status running`. A registry older than the
+  CLI silently ignores the filter, so the command detects that and warns on
+  stderr that the results are unfiltered rather than quietly filtering the
+  page itself (which would under-report exactly the oldest builds).
+
+  The read-only commands — and `cleanup`'s dry run — take **`--json`**, a new
+  convention for the CLI: stdout carries exactly one JSON document (the SDK's
+  model of the API payload) and every hint, warning and prompt goes to
+  stderr, so piping to `jq` is safe.
 
 - **Reactive scheduler ticks now report their `TickSummary` to the
   registry** (`stardag builds ticks <build-id>`). A reactive build is driven
@@ -61,13 +71,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   scheduler's own account of what it did and why — used to reach nobody but
   that container's log, and reconstructing why a build stalled meant reading
   logs across dozens of them. Reporting is strictly best-effort: it sits at
-  the end of every tick and can never fail one or change its outcome, it
-  tolerates a registry that predates the endpoint (and stops retrying a
-  route that 404s), and every outcome except `not_reactive` is recorded.
-  Turn it off for a deployment with `TickConfig(report_tick_summaries=False)`
-  — app-level configuration, like the other staleness knobs, not a
-  per-trigger `tick_kwarg`. The summary is stored verbatim server-side, so
-  future `TickSummary` fields need no server release.
+  the end of every tick and can never fail one, change its outcome or mask
+  its exception; it tolerates a registry that predates the endpoint (and
+  stops retrying a route that 404s); and every outcome except `not_reactive`
+  is recorded. A tick that **crashes** is recorded too, under a new
+  `"error"` outcome carrying `TickSummary.error_type` and a length-bounded
+  `error_message` — the most informative thing a "why did this build stall?"
+  query can find — after which the original exception is re-raised
+  untouched. Turn reporting off for a deployment with
+  `TickConfig(report_tick_summaries=False)` — app-level configuration, like
+  the other staleness knobs, not a per-trigger `tick_kwarg`. The summary is
+  stored verbatim server-side, so future `TickSummary` fields need no server
+  release.
 
 - **The reactive watchdog's build sweep now filters server-side.**
   `build_list_running` passed no `status` and matched on the derived status
@@ -89,6 +104,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `BuildSummary`, `BuildListPage`, `BuildCancelResult`, `BulkCancelResult`,
   `BulkCancelBuildRef`, `TaskSummary`, `TaskListPage` and `TickSummaryRecord`
   are exported from `stardag.registry` and ignore unknown response fields.
+  `build_list` takes the server's `status`, `reactive_app_name` and
+  `idle_for_seconds` filters.
 
 - **`StardagApp(task_modules=[...])`: declare the modules whose import
   registers your task classes, so reactive scheduler ticks can rebuild

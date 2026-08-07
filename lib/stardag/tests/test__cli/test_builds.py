@@ -143,8 +143,36 @@ class TestList:
         assert "at least 60s" in result.output
         registry.build_list.assert_not_called()
 
-    def test_older_than_reapplied_when_server_ignores_it(self):
-        """An older server ignores the unknown param; the cut still holds."""
+    def test_older_than_rejects_a_non_running_status(self):
+        """Only RUNNING has a SQL predicate; the server 422s the rest."""
+        registry = _mock_registry()
+        with _patch_resolve(registry):
+            result = runner.invoke(
+                app, ["list", "--status", "failed", "--older-than", "24h"]
+            )
+        assert result.exit_code == 1
+        assert "--status running" in result.output
+        registry.build_list.assert_not_called()
+
+    def test_older_than_allows_status_running(self):
+        registry = _mock_registry(
+            build_list=BuildListPage(builds=[_build()], total=1, page=1, page_size=20)
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(
+                app, ["list", "--status", "running", "--older-than", "24h"]
+            )
+        assert result.exit_code == 0, result.output
+        assert registry.build_list.call_args.kwargs["idle_for_seconds"] == 24 * 3600
+
+    def test_warns_loudly_when_the_server_ignored_the_filter(self):
+        """A CLI can be newer than its registry; FastAPI drops unknown params.
+
+        The rows must NOT be filtered locally: the server paginated and
+        counted without the filter, so cutting the page here would drop rows
+        from a page already chosen wrong — under-reporting exactly the oldest
+        builds, which are the population --older-than exists to find.
+        """
         fresh = _build(
             id=OTHER_BUILD_ID, name="fresh", last_activity_at=_ago(minutes=1)
         )
@@ -156,9 +184,32 @@ class TestList:
         with _patch_resolve(registry):
             result = runner.invoke(app, ["list", "--older-than", "24h"])
         assert result.exit_code == 0, result.output
+        assert "does not support --older-than" in result.output
+        assert "results below are unfiltered" in result.output
+        # Both rows are still shown — nothing is silently dropped.
         assert "spring-otter-42" in result.output
-        assert "fresh" not in result.output
-        assert "did not apply --older-than" in result.output
+        assert "fresh" in result.output
+
+    def test_missing_activity_timestamp_counts_as_unsupported(self):
+        """A server that cannot report the field cannot have filtered on it."""
+        registry = _mock_registry(
+            build_list=BuildListPage(
+                builds=[_build(last_activity_at=None)], total=1, page=1, page_size=20
+            )
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["list", "--older-than", "24h"])
+        assert result.exit_code == 0, result.output
+        assert "does not support --older-than" in result.output
+
+    def test_no_warning_when_the_server_honoured_the_filter(self):
+        registry = _mock_registry(
+            build_list=BuildListPage(builds=[_build()], total=1, page=1, page_size=20)
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["list", "--older-than", "24h"])
+        assert result.exit_code == 0, result.output
+        assert "does not support" not in result.output
 
     def test_json_is_parseable_and_uncontaminated(self):
         registry = _mock_registry(
@@ -187,7 +238,10 @@ class TestList:
             )
         assert result.exit_code == 0, result.output
         payload = json.loads(result.stdout)
-        assert len(payload["builds"]) == 1
+        # The payload is the server's page verbatim — the warning went to
+        # stderr and changed nothing about what was emitted.
+        assert len(payload["builds"]) == 2
+        assert payload["total"] == 2
 
 
 class TestShow:
@@ -462,10 +516,27 @@ class TestCleanup:
         assert result.exit_code != 0
         registry.build_bulk_cancel.assert_not_called()
 
-    def test_yes_implies_apply(self):
-        registry = _mock_registry(build_bulk_cancel=_bulk_result(dry_run=False))
+    def test_yes_alone_is_still_a_dry_run(self):
+        """-y only silences the prompt; --apply is the sole switch to acting.
+
+        On a command that is a dry run by default, `-y` alone turning into a
+        cascade of cancellations is precisely the surprise a destructive
+        command may not have.
+        """
+        registry = _mock_registry(build_bulk_cancel=_bulk_result(dry_run=True))
         with _patch_resolve(registry):
             result = runner.invoke(app, ["cleanup", "--older-than", "24h", "--yes"])
+        assert result.exit_code == 0, result.output
+        assert registry.build_bulk_cancel.call_args.kwargs["dry_run"] is True
+        assert "Dry run" in result.output
+
+    def test_apply_with_yes_runs_unattended(self):
+        registry = _mock_registry(build_bulk_cancel=_bulk_result(dry_run=False))
+        with _patch_resolve(registry):
+            # No input available: a prompt here would fail the invocation.
+            result = runner.invoke(
+                app, ["cleanup", "--older-than", "24h", "--apply", "--yes"]
+            )
         assert result.exit_code == 0, result.output
         assert registry.build_bulk_cancel.call_args.kwargs["dry_run"] is False
 

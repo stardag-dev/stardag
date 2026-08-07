@@ -386,9 +386,9 @@ profile / environment other than the active one.
 - `builds frontier` — what a reactive scheduler tick sees: which tasks it would
   act on, which executions it would probe, and which upstreams are holding the
   build back (see [Reading the frontier](#reading-the-frontier)).
-- `builds ticks` — the scheduler's own account of its recent ticks. Reactive
-  builds are driven by many short-lived ticks, each in its own container; this
-  is where their reasoning is kept.
+- `builds ticks` — the scheduler's own account of its recent ticks, crashed
+  ones included. Reactive builds are driven by many short-lived ticks, each in
+  its own container; this is where their reasoning is kept.
 - `builds cancel` — cancel one build. `--cascade` also cancels its
   RUNNING/SUSPENDED tasks, releasing their execution claims.
 - `builds cleanup` — find and cancel abandoned builds (see
@@ -404,6 +404,20 @@ profile / environment other than the active one.
 `w`; a bare number is seconds. `24h`, `90m`, `3d`, `2w`. Compound forms
 (`1h30m`) and fractions (`1.5h`) are not accepted, and the minimum for a build
 staleness threshold is 60 seconds.
+
+The filter is applied **server-side** — by the same predicate the reaper and
+`builds cleanup` use, so a build that `builds list --older-than 24h` shows is
+a build `builds cleanup --older-than 24h` would act on. Paging and totals stay
+exact, and with the filter set the server orders stalest-first. On
+`builds list` it can only be combined with `--status running`: idleness is
+only meaningful for a build that has not finished.
+
+If the registry is older than the CLI it will silently ignore the filter — the
+command detects that (a returned build newer than the cutoff, or one with no
+activity timestamp at all) and prints a warning on stderr saying the results
+are unfiltered. It does **not** quietly filter the page itself: the server
+already paginated and counted without the filter, so a local cut would drop
+rows from a page chosen wrong and under-report exactly the oldest builds.
 
 ### JSON output
 
@@ -477,12 +491,19 @@ stardag tasks list --status running --older-than 24h
 #    anything named was skipped. Writes nothing.
 stardag builds cleanup --older-than 24h
 
-# 6. Apply.
+# 6. Apply (prompts for confirmation).
 stardag builds cleanup --older-than 24h --apply
+
+# ...or unattended, e.g. from a timer.
+stardag builds cleanup --older-than 24h --apply --yes
 ```
 
 Notes on step 5/6:
 
+- **`--apply` is the only thing that makes `cleanup` act.** `-y/--yes` only
+  skips the confirmation prompt — `cleanup -y` on its own is still a dry run.
+  On a command that reports by default, `-y` alone must not become a cascade
+  of cancellations.
 - **The selection is the server's, both times.** The dry run and the real run
   send the same filter to the same endpoint, so what you review is what you
   get.
@@ -495,7 +516,7 @@ Notes on step 5/6:
   `--reactive-app NAME`. A reactive build is quiet between ticks by design, and
   already has a watchdog for the case where it wedges.
 - Only `RUNNING` builds are ever eligible, which makes the operation
-  idempotent — safe to re-run, and safe to put on a timer with `--yes`.
+  idempotent — safe to re-run, and safe to put on a timer.
 - If the output says the result was truncated, more builds matched than
   `--limit` allowed; run it again.
 
