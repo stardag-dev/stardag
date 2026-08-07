@@ -84,7 +84,6 @@ from stardag.build._base import (
 from stardag.build._task_modules import import_failure_note
 from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError, is_missing_route_error
-from stardag.registry._api_registry import _is_route_not_found
 from stardag.registry import (
     BuildFrontier,
     FrontierExternalBlocker,
@@ -406,7 +405,7 @@ async def _report_tick_summary(
         # build is gone) is also not worth escalating from here — the tick
         # already ran — but it is not a reason to disable reporting for
         # every other build in the process.
-        if _is_route_not_found(e):
+        if is_missing_route_error(e):
             _tick_summary_route_missing = True
             logger.debug(
                 "Registry API does not support tick summaries; reporting "
@@ -1381,7 +1380,7 @@ async def _skip_blocked(
         skipped = await registry.build_skip_blocked_aio(build_id)
         summary.skipped += len(skipped)
     except NotFoundError as e:
-        if not _is_route_not_found(e):
+        if not is_missing_route_error(e):
             raise
         logger.warning(
             "Registry server does not support skip-blocked; tasks blocked "
