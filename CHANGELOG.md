@@ -8,6 +8,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Registry API
 
+- **Reactive scheduler tick summaries are now persisted per build**
+  (`POST`/`GET /builds/{build_id}/tick-summaries`). A reactive build is
+  driven by many short-lived scheduler ticks, each in its own container,
+  and each tick's `TickSummary` — the scheduler's own account of what it
+  did and why it did nothing — previously reached nothing but that
+  container's log. Reconstructing why a build stalled meant correlating
+  logs across dozens of containers; it is now a single request. The
+  summary is stored verbatim in a JSONB blob (with `outcome` promoted to
+  an indexed column), so the SDK can add fields without a server release
+  or a migration. Retention is bounded per build (newest 50 by default,
+  `STARDAG_API_MAX_TICK_SUMMARIES_PER_BUILD`), pruned on insert.
+  Additive: nothing writes to these endpoints yet.
 - **`GET /builds/{id}/frontier` now reports why a build is waiting on work
   it does not own** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
   Dependency gating is environment-global (task rows and edges are shared
