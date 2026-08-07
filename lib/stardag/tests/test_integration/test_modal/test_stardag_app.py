@@ -970,6 +970,106 @@ class TestFinalizeBakesTaskModules:
 
         import_modules.assert_not_called()
 
+    def test_worker_publishes_the_patterns_for_dynamic_dep_registration(self):
+        """The worker doesn't import the modules (its task arrived by value,
+        self-importing) but it does need the patterns: dynamic deps are
+        coverage-checked there, where the trigger's pre-flight can't see
+        them."""
+        from stardag.build import declared_task_module_patterns
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app, _, captured = self._finalize(task_modules=["stardag.utils.*"])
+        from stardag.build import set_declared_task_module_patterns
+
+        set_declared_task_module_patterns([])
+        try:
+            with patch.object(Runner, "run", return_value=None):
+                captured["worker_default"](SyncOnlyTask(name="publishes"))
+            assert declared_task_module_patterns() == app.task_modules
+        finally:
+            set_declared_task_module_patterns([])
+
+
+class TestReactiveTriggerCoveragePreflight:
+    """The trigger holds both the real DAG and the app, so it is the only
+    place that can tell the user a scheduler tick won't be able to rebuild
+    one of their task classes — before a single container starts."""
+
+    def _trigger(self, app, root):
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+        registry.task_register_bulk_aio.return_value = None
+        with registry_provider.override(registry):
+            return app.build_trigger(root, reactive=True), registry
+
+    def test_uncovered_class_warns_with_the_pattern_to_add(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-preflight", task_modules=["acme_pipelines.tasks.*"]
+        )
+        root = SyncOnlyTask(name="preflight-uncovered")
+
+        with caplog.at_level("WARNING"):
+            self._trigger(app, root)
+
+        assert "not covered by this app's task_modules" in caplog.text
+        assert "['acme_pipelines.tasks.*']" in caplog.text
+        # The exact pattern that would fix it, and the redeploy requirement.
+        assert f"{SyncOnlyTask.__module__.rsplit('.', 1)[0]}.*" in caplog.text
+        assert "redeploy" in caplog.text
+
+    def test_covered_class_does_not_warn(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-preflight-ok", task_modules=[SyncOnlyTask.__module__]
+        )
+        with caplog.at_level("WARNING"):
+            self._trigger(app, SyncOnlyTask(name="preflight-covered"))
+
+        assert "not covered" not in caplog.text
+
+    def test_opted_out_app_never_warns(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        """An app that declared nothing would otherwise warn about every
+        class in every DAG, on every trigger."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules("tm-preflight-optout", task_modules=[])
+        with caplog.at_level("WARNING"):
+            self._trigger(app, SyncOnlyTask(name="preflight-optout"))
+
+        assert "not covered" not in caplog.text
+
+    def test_only_incomplete_tasks_are_checked(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        """Discovery stops at complete tasks and only incomplete ones are
+        ever rehydrated by a tick — so a completed dep's class is
+        irrelevant, and checking it would be a false alarm."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        dep = SyncOnlyTask(name="preflight-complete-dep")
+        dep.run()  # writes its target -> discovery treats it as complete
+        root = SyncOnlyTask(name="preflight-root", deps=(dep,))
+        app = _app_with_task_modules(
+            "tm-preflight-incomplete", task_modules=["acme_pipelines.*"]
+        )
+
+        with caplog.at_level("WARNING"):
+            _, registry = self._trigger(app, root)
+
+        # One warning for the class, naming only the root's occurrence: the
+        # class is reported once regardless, but the point is the completed
+        # dep never entered the checked set.
+        assert caplog.text.count("not covered by this app's task_modules") == 1
+
 
 class TestReactiveTriggerFailureLeavesNoOrphanBuild:
     """A build minted by ``build_start`` is RUNNING until a terminal EVENT

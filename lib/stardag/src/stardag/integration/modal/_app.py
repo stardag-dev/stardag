@@ -65,8 +65,12 @@ from stardag.build import (
 from stardag.build._base import GlobalLockConfig
 from stardag.build._base import BuildSummary
 from stardag.build._task_modules import (
+    declared_task_module_patterns,
     expand_task_module_patterns,
+    format_uncovered_message,
     import_task_modules,
+    set_declared_task_module_patterns,
+    uncovered_task_classes,
     validate_task_module_patterns,
 )
 from stardag.config import clear_config_cache, config_provider, load_config
@@ -1592,6 +1596,27 @@ class _WorkerLifecycleReporter:
             discover_and_register_aio(self.registry, self.build_id, task_struct)
         )
         store = BuildTaskStore(self.build_id)
+        # The trigger's pre-flight structurally cannot see dynamically
+        # yielded deps — they don't exist until their parent runs — so the
+        # coverage check is re-run here, on the app's patterns as published
+        # by the deployed worker wrapper. Once per class per process: this
+        # runs on every suspending worker invocation.
+        patterns = declared_task_module_patterns()
+        if patterns:
+            uncovered = uncovered_task_classes(
+                result.incomplete.values(), patterns, only_unwarned=True
+            )
+            if uncovered:
+                logger.warning(
+                    format_uncovered_message(
+                        uncovered,
+                        patterns,
+                        remedy=(
+                            "These were registered as dynamic dependencies, "
+                            "so the trigger's pre-flight could not see them."
+                        ),
+                    )
+                )
         store.save_tasks(result.incomplete.values())
         deps = flatten_task_struct(task_struct)
         self.registry.task_add_dependencies(
@@ -2303,7 +2328,8 @@ class StardagApp:
         # tick — it needs a redeploy, which is also when the operator gets
         # to see the list change. Only name expansion happens here (no
         # submodule imports): the CLI does the optional local import check.
-        task_modules = expand_task_module_patterns(self.task_modules)
+        task_module_patterns = self.task_modules
+        task_modules = expand_task_module_patterns(task_module_patterns)
         # Wrap callables in real functions for Modal compatibility.
         # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
         # not callable class instances. The wrappers delegate to the actual callable
@@ -2328,6 +2354,15 @@ class StardagApp:
         def _modal_run(
             task: BaseTask, *, env_overrides: dict[str, str] | None = None
         ) -> typing.Any:
+            # Publish the app's task-module patterns for the worker-side
+            # code that needs them but is nowhere near the app object:
+            # _WorkerLifecycleReporter._register_dynamic_deps checks the
+            # coverage of dynamically yielded deps, which the trigger's
+            # pre-flight cannot see. The worker does not IMPORT the
+            # modules: its task arrived by value (self-importing) and its
+            # dynamic deps were just constructed by user code, so their
+            # classes are registered by definition.
+            set_declared_task_module_patterns(task_module_patterns)
             if run_fn_accepts_env:
                 run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
                 return run_fn_with_env(task, env_overrides=env_overrides)
@@ -2480,6 +2515,7 @@ class StardagApp:
             # Failures warn rather than abort — and are retained, so a
             # later "could not rehydrate" error can name them.
             if task_modules:
+                set_declared_task_module_patterns(task_module_patterns)
                 import_task_modules(task_modules)
 
             executor = ModalTaskExecutor(
@@ -2758,6 +2794,47 @@ class StardagApp:
             )
         return metadata
 
+    def _preflight_task_modules(self, tasks: typing.Iterable[BaseTask]) -> None:
+        """Warn about discovered task classes ``task_modules`` doesn't cover.
+
+        The trigger is the one place that holds both the real DAG and the
+        app, so it is the only place that can catch a class no scheduler
+        tick will be able to reconstruct — before a single container
+        starts, rather than as a mystifying tick failure hours later.
+
+        **Severity is a warning, not an error.** An uncovered class is not
+        broken: it falls back to the pickle path, which is exactly how
+        every reactive build worked before ``task_modules`` existed.
+        Failing the trigger would therefore break working setups the
+        moment they upgrade, which is precisely what "this feature is
+        additive" forbids.
+
+        Known limitation: this reads the *local* app definition, so it
+        cannot detect that the deployed app was built from an older
+        ``task_modules``. Closing that needs the deployed list exposed for
+        comparison.
+
+        Skipped entirely when the app opted out of ``task_modules`` — an
+        app that never declared any would otherwise warn about every class
+        in every DAG, on every trigger.
+        """
+        if not self.task_modules:
+            return
+        uncovered = uncovered_task_classes(tasks, self.task_modules)
+        if not uncovered:
+            return
+        logger.warning(
+            format_uncovered_message(
+                uncovered,
+                self.task_modules,
+                remedy=(
+                    "Until then these tasks stay dependent on their "
+                    "build-task-store pickles, which need target-root "
+                    "write access and are invalidated by a redeploy."
+                ),
+            )
+        )
+
     def _trigger_reactive(
         self,
         task_list: list[BaseTask],
@@ -2840,6 +2917,11 @@ class StardagApp:
                     registry, build_id, tuple(task_list), retry_failed=True
                 )
             )
+            stage = "task-module coverage pre-flight"
+            # Runs on the DISCOVERED incomplete set: those are exactly the
+            # tasks a tick may have to rehydrate, and reusing discovery's
+            # walk avoids a second local traversal of the DAG.
+            self._preflight_task_modules(discovery.incomplete.values())
             stage = "task store write"
             store = BuildTaskStore(build_id)
             store.save_tasks(discovery.incomplete.values())
