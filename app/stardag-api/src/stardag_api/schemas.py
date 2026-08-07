@@ -304,9 +304,15 @@ class FrontierTaskRef(BaseModel):
     # it, the server itself lets the next claiming start take the task
     # over, and the task stops counting against its concurrency limits —
     # so a scheduler can act on this instead of inferring death from
-    # elapsed time. Null means "no expiry known": a claim granted before
-    # this column existed, which behaves as it always did (never lapses).
-    # Meaningless unless latest_status is RUNNING.
+    # elapsed time. Meaningless unless latest_status is RUNNING.
+    #
+    # Null means "no expiry known" and must be treated as a claim that
+    # never lapses — waiting, not failing. It is a narrower population than
+    # it looks: claims already RUNNING when the expiry shipped were
+    # backfilled, so a null here is a claim stamped by a server predating
+    # the column and not re-started since (or one with no status timestamp
+    # to date it). Those need an operator to release; there is no timestamp
+    # that would let a client conclude anything else.
     latest_status_expires_at: datetime | None = None
 
 
@@ -345,7 +351,8 @@ class FrontierExternalBlocker(BaseModel):
     blocking_status_at: datetime | None = None
     blocking_status_build_id: UUID | None = None
     # When the blocker's execution claim lapses, if it is RUNNING (null
-    # otherwise, and for claims granted before the column existed). This is
+    # otherwise, and for the narrow set of claims nothing can date — see
+    # FrontierTaskRef.latest_status_expires_at; treat null as "wait"). This is
     # the one thing about a cross-build blocker a consumer could not
     # previously establish: it cannot probe another build's executor, so
     # "is that holder still alive?" was pure inference from
@@ -456,8 +463,9 @@ class ConcurrencyLimitHolder(BaseModel):
     # When the task's RUNNING status was recorded ("running since").
     latest_status_at: datetime | None = None
     # When this holder's claim lapses, releasing the slot with no
-    # intervention. Null = never (a claim granted before the column
-    # existed), which is the case that needs eviction.
+    # intervention. Null = never, which after the backfill means a claim
+    # nothing can date (see FrontierTaskRef.latest_status_expires_at) —
+    # precisely the case eviction still exists for.
     latest_status_expires_at: datetime | None = None
     latest_executor: str | None = None
     latest_executor_ref: str | None = None

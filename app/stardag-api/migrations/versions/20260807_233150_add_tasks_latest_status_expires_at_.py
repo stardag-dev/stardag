@@ -1,10 +1,34 @@
 """add tasks.latest_status_expires_at (execution claim expiry)
 
-Nullable with no backfill and no index, deliberately. NULL is the pre-expiry
-semantic — "this claim never lapses" — so every existing row keeps behaving
-exactly as it does today, and the column starts mattering only for claims
-granted after the deploy. Every reader narrows on latest_status first, so the
-expiry is a comparison over the few RUNNING rows that survive that.
+Two steps: an additive nullable column, then a deliberate data backfill for
+the rows that are RUNNING at the moment the migration lands.
+
+The backfill is the point. Those rows are the population this feature exists
+to heal — a task that has been RUNNING since three months ago is not a claim
+that "never lapses", it is an abandoned one — and leaving them NULL would
+ship the fix while excluding every case that motivated it. Worse, a consumer
+that (correctly) reads NULL as "no expiry known, so wait" would then wait on
+them forever, which is the wedge, restored.
+
+Giving each such row ``latest_status_at + <default TTL>`` is right in both
+directions, without the migration having to guess which is which:
+
+- abandoned long ago  → the value is already in the past → immediately
+  re-claimable, which is the heal;
+- genuinely running across the deploy → the value is in the future →
+  untouched, and its next TASK_STARTED re-stamps it with a TTL properly
+  derived from the caller's executor timeout anyway.
+
+Rows whose ``latest_status_at`` is itself NULL (pre-denormalisation rows) are
+left NULL: there is no timestamp to measure from, so any value would be
+invented. They keep the "no expiry known" reading, and an operator releases
+them with the cleanup endpoints as before.
+
+No index: every reader narrows on ``latest_status`` first, so the expiry is a
+comparison over the few RUNNING rows that survive that.
+
+``downgrade`` needs nothing extra — dropping the column discards the backfill
+with it.
 
 Revision ID: f6a5873c30fb
 Revises: 11716b1f4c1a
@@ -17,12 +41,19 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
+from stardag_api.config import claim_settings
+
 
 # revision identifiers, used by Alembic.
 revision: str = "f6a5873c30fb"
 down_revision: Union[str, Sequence[str], None] = "11716b1f4c1a"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+# Status literal, spelled out rather than imported from TaskStatus: a
+# migration describes the database as it was at this revision, and must not
+# change meaning if the enum is later renamed.
+_RUNNING = "running"
 
 
 def upgrade() -> None:
@@ -35,6 +66,31 @@ def upgrade() -> None:
         ),
     )
     # ### end Alembic commands ###
+
+    # Backfill (see the module docstring). The TTL is read from the
+    # deployment's own configuration rather than hardcoded, and that
+    # direction matters for safety: an operator who raised the default
+    # because their jobs legitimately run for days would otherwise have
+    # every two-day-old live task declared expired by a 24h constant — a
+    # double execution, the one outcome the claim exists to prevent. The
+    # cost is that the migration's result depends on configuration, which
+    # is acceptable for a data heal whose whole content is a policy
+    # judgement about how long silence means abandoned.
+    ttl_seconds = int(claim_settings.default_ttl_seconds)
+    dialect = op.get_bind().dialect.name
+    # Interval arithmetic has no portable spelling. ttl_seconds is an int,
+    # so the interpolation carries no injection surface.
+    if dialect == "sqlite":
+        expires_at = f"datetime(latest_status_at, '+{ttl_seconds} seconds')"
+    else:
+        expires_at = f"latest_status_at + interval '{ttl_seconds} seconds'"
+    op.execute(
+        sa.text(
+            f"UPDATE tasks SET latest_status_expires_at = {expires_at} "  # noqa: S608
+            f"WHERE latest_status = '{_RUNNING}' "
+            "AND latest_status_at IS NOT NULL"
+        )
+    )
 
 
 def downgrade() -> None:

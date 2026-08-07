@@ -8,7 +8,8 @@ a future refactor could quietly drop:
   is unchanged for everything that has not lapsed);
 - an *expired* claim denies nothing and is taken over whole — status, build,
   executor fields and expiry replace the dead holder's together;
-- ``NULL`` behaves exactly as the column never existed;
+- ``NULL`` behaves exactly as the column never existed, while the claims
+  that were RUNNING when it landed are backfilled rather than left there;
 - the concurrency-limit count uses the same predicate, so an expired claim
   releases its slots. Missing this one preserves the leak in the single
   place nobody reads.
@@ -17,6 +18,7 @@ a future refactor could quietly drop:
 directly — the same trick ``test_build_cleanup`` uses for build ages.
 """
 
+import os
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -445,6 +447,111 @@ async def test_expired_cross_build_blocker_is_still_a_blocker(
 
 
 # --- Postgres ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_migration_backfills_claims_that_are_already_running(
+    pg_client: AsyncClient, pg_session: AsyncSession, pg_engine
+):
+    """The migration's data step, end to end.
+
+    Every task RUNNING when the column lands would otherwise carry NULL —
+    and those are exactly the abandoned claims this feature exists to heal.
+    A consumer that correctly reads NULL as "no expiry known, so wait"
+    would then wait on them forever, i.e. the wedge restored, and the
+    feature would ship not fixing the cases that motivated it.
+
+    Here: a claim that has been RUNNING for 90 days, taken back through
+    ``downgrade`` / ``upgrade`` so the backfill runs over real rows.
+    """
+    import asyncio
+
+    from alembic import command
+
+    from tests.conftest import get_alembic_config
+
+    build_a = (await pg_client.post(BUILDS, json={})).json()["id"]
+    await pg_client.post(f"{BUILDS}/{build_a}/tasks", json=_register("pg-ancient"))
+    await pg_client.post(
+        f"{BUILDS}/{build_a}/tasks/pg-ancient/start",
+        params={"claim": "true", "executor_ref": "fc-long-gone"},
+    )
+    # Pre-migration shape: RUNNING, long ago, no expiry recorded.
+    long_ago = datetime.now(timezone.utc) - timedelta(days=90)
+    await pg_session.execute(
+        update(Task)
+        .where(Task.task_id == "pg-ancient")
+        .values(latest_status_at=long_ago, latest_status_expires_at=None)
+    )
+    await pg_session.commit()
+
+    # Drop the column and re-add it, running the backfill over that row.
+    # Dispose first: asyncpg caches statements per connection, and the DDL
+    # changes the shape of `tasks`.
+    await pg_engine.dispose()
+    pg_url = os.environ["STARDAG_API_TEST_DATABASE_URL"]
+    alembic_cfg = get_alembic_config(pg_url)
+    await asyncio.to_thread(command.downgrade, alembic_cfg, "-1")
+    await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+
+    pg_session.expire_all()
+    task = await _task_row(pg_session, "pg-ancient")
+    expires_at = _utc(task.latest_status_expires_at)
+    # Backfilled to latest_status_at + the default TTL — a day after a
+    # start 90 days ago, so already long past.
+    assert expires_at < datetime.now(timezone.utc)
+    assert expires_at == _utc(long_ago) + timedelta(
+        seconds=claim_settings.default_ttl_seconds
+    )
+
+    # ...which is the whole point: it is claimable again, with no operator
+    # action and nothing having moved its status.
+    assert (await _task_row(pg_session, "pg-ancient")).latest_status == "running"
+    build_b = (await pg_client.post(BUILDS, json={})).json()["id"]
+    await pg_client.post(f"{BUILDS}/{build_b}/tasks", json=_register("pg-ancient"))
+    response = await pg_client.post(
+        f"{BUILDS}/{build_b}/tasks/pg-ancient/start", params={"claim": "true"}
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_migration_leaves_claims_with_no_status_timestamp_alone(
+    pg_client: AsyncClient, pg_session: AsyncSession, pg_engine
+):
+    """A pre-denormalisation row has no timestamp to measure from, so the
+    backfill invents nothing — it stays NULL and keeps denying, exactly as
+    it did before the column existed."""
+    import asyncio
+
+    from alembic import command
+
+    from tests.conftest import get_alembic_config
+
+    build_id = (await pg_client.post(BUILDS, json={})).json()["id"]
+    await pg_client.post(f"{BUILDS}/{build_id}/tasks", json=_register("pg-no-ts"))
+    await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-no-ts/start", params={"claim": "true"}
+    )
+    await pg_session.execute(
+        update(Task)
+        .where(Task.task_id == "pg-no-ts")
+        .values(latest_status_at=None, latest_status_expires_at=None)
+    )
+    await pg_session.commit()
+
+    await pg_engine.dispose()
+    alembic_cfg = get_alembic_config(os.environ["STARDAG_API_TEST_DATABASE_URL"])
+    await asyncio.to_thread(command.downgrade, alembic_cfg, "-1")
+    await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+
+    pg_session.expire_all()
+    assert (await _task_row(pg_session, "pg-no-ts")).latest_status_expires_at is None
+    denied = await pg_client.post(
+        f"{BUILDS}/{build_id}/tasks/pg-no-ts/start", params={"claim": "true"}
+    )
+    assert denied.status_code == 409
+    assert denied.json()["detail"]["error_code"] == "task_already_running"
 
 
 @pytest.mark.asyncio

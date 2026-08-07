@@ -403,8 +403,9 @@ async def _create_task_event(
                         else None
                     ),
                     # When the denial stops applying without anyone doing
-                    # anything. Null = never (a claim written before the
-                    # column existed, or by a caller of an older API).
+                    # anything. Null = never: a claim nothing can date, so
+                    # only an operator releases it (the claims already
+                    # RUNNING when the column shipped were backfilled).
                     "latest_status_expires_at": (
                         db_task.latest_status_expires_at.isoformat()
                         if db_task.latest_status_expires_at
