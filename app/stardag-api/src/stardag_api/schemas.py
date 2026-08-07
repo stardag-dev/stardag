@@ -206,6 +206,25 @@ class TaskResponse(BaseModel):
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None
+    # Denormalised *global* status of the task — the environment-wide state,
+    # not "the state within some build". A task row is unique per
+    # (environment_id, task_id), so a task left RUNNING by any build denies
+    # the execution claim to every other build until something moves it.
+    # That makes these three the answer to "who is holding this claim, and
+    # since when":
+    #
+    #   latest_status_build_id — the build whose event produced the current
+    #     status, i.e. the claim holder. Null only for rows predating status
+    #     denormalisation.
+    #   latest_status_at — when it entered that status ("running since").
+    #
+    # Defaulted so the fields are purely additive for clients built against
+    # the older shape. ``TaskWithStatusResponse`` also carries ``status`` /
+    # ``status_build_id``; those are the same values under the names that
+    # endpoint has always used, kept for compatibility.
+    latest_status: TaskStatus | None = None
+    latest_status_at: datetime | None = None
+    latest_status_build_id: UUID | None = None
 
 
 class TaskBulkResponse(BaseModel):

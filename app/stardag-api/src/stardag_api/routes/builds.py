@@ -1841,6 +1841,9 @@ async def register_task(
         latest_executor=db_task.latest_executor,
         latest_executor_ref=db_task.latest_executor_ref,
         latest_executor_metadata=db_task.latest_executor_metadata,
+        latest_status=db_task.latest_status,
+        latest_status_at=db_task.latest_status_at,
+        latest_status_build_id=db_task.latest_status_build_id,
     )
 
 
@@ -2222,6 +2225,9 @@ async def register_tasks_bulk(
                 latest_executor=db_task.latest_executor,
                 latest_executor_ref=db_task.latest_executor_ref,
                 latest_executor_metadata=db_task.latest_executor_metadata,
+                latest_status=db_task.latest_status,
+                latest_status_at=db_task.latest_status_at,
+                latest_status_build_id=db_task.latest_status_build_id,
             )
             for t in tasks_in
         ]
