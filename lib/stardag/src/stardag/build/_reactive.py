@@ -470,6 +470,17 @@ class TickConfig:
     linger_seconds: float = 120.0
     poll_interval_seconds: float = 3.0
     fail_mode: FailMode = FailMode.FAIL_FAST
+    # How many of a pass's per-task actions may be in flight at once. Each
+    # actionable task costs a task-store read, an acquiring start, an
+    # executor spawn and a ref-recording start; doing that serially makes a
+    # wide layer a queue of thousands of round-trips in one container.
+    #
+    # Bounded rather than unbounded because the failure mode of "spawn
+    # everything at once" is not better than the failure mode of "spawn
+    # them one at a time" — it just moves it from the tick's own clock to
+    # the registry's connection pool. The default is the resident engine's
+    # (see ``_DEFAULT_MAX_CONCURRENCY``).
+    max_concurrent_actions: int = _DEFAULT_MAX_CONCURRENCY
     # Maps a task to the named concurrency-limit keys it runs under (see
     # the registry's environment concurrency limits). Acquisition happens
     # atomically at task start, before the spawn: a denied task simply
@@ -851,73 +862,138 @@ async def _act_on_frontier(
     config: TickConfig,
     summary: TickSummary,
 ) -> tuple[bool, int]:
-    """Spawn/probe/heal the actionable tasks.
+    """Spawn/probe/heal the actionable tasks, with bounded concurrency.
 
     Returns ``(acted, denied_this_round)``: whether anything acted, and how
     many tasks were denied by concurrency limits in THIS pass (used by
     terminal detection — a cumulative count would keep suppressing the
     stuck-build check long after the denied tasks have run).
+
+    **Three phases, each bounded by ``max_concurrent_actions``.** Resolve
+    every actionable task's object; probe the ones already RUNNING; spawn
+    the rest. Within a phase the work is independent per task; between
+    phases nothing is.
+
+    **What concurrency does NOT change.** Each spawn coroutine still runs
+    its three steps in order — acquiring start, spawn, ref-recording start
+    — so a task denied by a concurrency limit or by a competing claim never
+    reaches ``submit_detached`` and never occupies a worker, and no
+    executor ref is ever recorded for an execution that does not exist.
+    Ordering *between* tasks was never guaranteed and is not relied upon:
+    the frontier's actionable set is by definition a set of tasks whose
+    dependencies are all satisfied.
+
+    **Nor does it change the claim.** Every task here is claimed at most
+    once per pass — the frontier lists a task once, and phases do not
+    overlap — so these coroutines are not racing each other for the same
+    claim. Nor is this tick racing another tick of the same build: it holds
+    the build's scheduler lease. The claim is still what arbitrates against
+    *other builds* (and against a tick of this build that the lease
+    manager's own failure modes let through), which is exactly the job it
+    had before, unchanged.
+
+    **Counters.** ``summary``'s fields and the two returned values are
+    mutated from several coroutines. That is safe without a lock because
+    every mutation is a bare ``+=`` on the same event loop with no
+    ``await`` between the read and the write — asyncio switches tasks only
+    at suspension points. Please keep it that way: a counter update that
+    grows an ``await`` in the middle stops being atomic.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
         return False, 0  # terminal handling deals with it
     acted = False
     denied_this_round = 0
-    for item in frontier.actionable:
+    semaphore = asyncio.Semaphore(max(1, config.max_concurrent_actions))
+
+    # --- phase 1: resolve task objects --------------------------------
+    # Results are written by index, not appended, so the partition below
+    # follows the frontier's own order regardless of which loads finished
+    # first — a tick's logs stay readable in the order the registry
+    # reported.
+    resolved: list[BaseTask | None] = [None] * len(frontier.actionable)
+
+    async def resolve(index: int, item: FrontierTaskRef) -> None:
+        nonlocal acted
         task = await _load_task(
             item.task_id,
             registry,
             task_store,
             quiet=item.latest_status in _RUNNING_STATUSES,
         )
-        if task is None:
-            if item.latest_status in _RUNNING_STATUSES:
-                # Can't probe without the object, but the worker reports its
-                # own terminal events — leave it to resolve itself.
-                continue
-            # A pending/suspended task with no stored object AND no
-            # rehydratable registry data can never be scheduled: fail it
-            # (rather than leaving it in the frontier forever, where it
-            # would block terminal detection and stall the build across
-            # endless watchdog ticks).
-            logger.error(
-                f"Task {item.task_id} of build {build_id} has no stored "
-                "task object and could not be rehydrated; failing it."
-            )
-            try:
-                from uuid import UUID as _UUID
-
-                await registry.task_fail_aio(
-                    build_id,
-                    typing.cast(BaseTask, _MissingTaskRef(id=_UUID(item.task_id))),
-                    "Task object missing from the build task store",
-                )
-                summary.failed_recorded += 1
-                acted = True
-            except Exception as e:
-                logger.error(
-                    f"Failed to record store-missing failure for task "
-                    f"{item.task_id}: {e}"
-                )
-            continue
-
+        if task is not None:
+            resolved[index] = task
+            return
         if item.latest_status in _RUNNING_STATUSES:
-            resolution = await _resolve_running(item, task, task_executor)
-            if resolution == "complete":
-                await registry.task_complete_aio(build_id, task)
-                summary.self_healed += 1
-                acted = True
-            elif resolution == "failed":
-                # Failed executions are recorded, not respawned — retries
-                # are the execution backend's job (e.g. Modal function
-                # retries); a fresh attempt needs an explicit re-trigger.
-                await registry.task_fail_aio(
-                    build_id, task, "Detached execution failed (observed by tick)"
-                )
-                summary.failed_recorded += 1
-                acted = True
-            # "leave": still running (or unprobeable) — nothing to do.
-            continue
+            # Can't probe without the object, but the worker reports its
+            # own terminal events — leave it to resolve itself.
+            return
+        # A pending/suspended task with no stored object AND no
+        # rehydratable registry data can never be scheduled: fail it
+        # (rather than leaving it in the frontier forever, where it
+        # would block terminal detection and stall the build across
+        # endless watchdog ticks).
+        logger.error(
+            f"Task {item.task_id} of build {build_id} has no stored "
+            "task object and could not be rehydrated; failing it."
+        )
+        try:
+            await registry.task_fail_aio(
+                build_id,
+                typing.cast(BaseTask, _MissingTaskRef(id=UUID(item.task_id))),
+                "Task object missing from the build task store",
+            )
+            summary.failed_recorded += 1
+            acted = True
+        except Exception as e:
+            logger.error(
+                f"Failed to record store-missing failure for task {item.task_id}: {e}"
+            )
 
+    await _run_bounded(
+        [
+            partial(resolve, index, item)
+            for index, item in enumerate(frontier.actionable)
+        ],
+        semaphore,
+    )
+
+    running_items: list[tuple[FrontierTaskRef, BaseTask]] = []
+    spawn_candidates: list[BaseTask] = []
+    for item, task in zip(frontier.actionable, resolved):
+        if task is None:
+            continue
+        if item.latest_status in _RUNNING_STATUSES:
+            running_items.append((item, task))
+        else:
+            spawn_candidates.append(task)
+
+    # --- phase 2: probe the RUNNING ones ------------------------------
+    async def probe(item: FrontierTaskRef, task: BaseTask) -> None:
+        nonlocal acted
+        resolution = await _resolve_running(item, task, task_executor)
+        if resolution == "complete":
+            await registry.task_complete_aio(build_id, task)
+            summary.self_healed += 1
+            acted = True
+        elif resolution == "failed":
+            # Failed executions are recorded, not respawned — retries
+            # are the execution backend's job (e.g. Modal function
+            # retries); a fresh attempt needs an explicit re-trigger.
+            await registry.task_fail_aio(
+                build_id, task, "Detached execution failed (observed by tick)"
+            )
+            summary.failed_recorded += 1
+            acted = True
+        # "leave": still running (or unprobeable) — nothing to do.
+
+    await _run_bounded(
+        [partial(probe, item, task) for item, task in running_items],
+        semaphore,
+    )
+
+    # --- phase 3: spawn -----------------------------------------------
+    async def spawn(task: BaseTask) -> None:
+        nonlocal acted, denied_this_round
         limit_keys: list[str] = (
             list(config.limit_key_selector(task))
             if config.limit_key_selector is not None
@@ -972,7 +1048,7 @@ async def _act_on_frontier(
                 )
                 summary.claim_denied += 1
             denied_this_round += 1
-            continue
+            return
         try:
             handle = await task_executor.submit_detached(task)
         except Exception as e:
@@ -980,7 +1056,7 @@ async def _act_on_frontier(
             await registry.task_fail_aio(build_id, task, f"Spawn failed: {e}")
             summary.failed_recorded += 1
             acted = True
-            continue
+            return
         await registry.task_start_aio(
             build_id,
             task,
@@ -991,6 +1067,8 @@ async def _act_on_frontier(
         )
         summary.spawned += 1
         acted = True
+
+    await _run_bounded([partial(spawn, task) for task in spawn_candidates], semaphore)
     return acted, denied_this_round
 
 

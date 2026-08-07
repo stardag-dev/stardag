@@ -2907,3 +2907,217 @@ class TestConcurrentDiscovery:
         ]
         assert [t.id for t in result.retried] == registered
         assert all(registry.statuses[str(t.id)] == "pending" for t in [*leaves, root])
+
+
+# =============================================================================
+# Bounded concurrent fan-out
+# =============================================================================
+
+
+class InstrumentedTickExecutor(FakeTickExecutor):
+    """FakeTickExecutor that records spawn concurrency and interleaving.
+
+    ``submit_detached`` suspends (``asyncio.sleep(0)``) so several spawn
+    coroutines can genuinely be in flight at once — without a suspension
+    point the fakes complete synchronously and every "concurrent" pass
+    would look serial no matter what the scheduler does.
+    """
+
+    def __init__(self, *, call_log: list[tuple[str, str | None]], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.call_log = call_log
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            # Two suspensions: one to let siblings pile up against the
+            # semaphore, one to make sure the peak is observed while they
+            # are all still inside this block.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.call_log.append(("spawn", str(task.id)))
+            return await super().submit_detached(task)
+        finally:
+            self.in_flight -= 1
+
+
+def _wide_layer(prefix: str, width: int) -> tuple[list[BaseTask], BaseTask]:
+    """``width`` independent leaves plus a root depending on all of them."""
+    leaves = [SyncOnlyTask(name=f"{prefix}-{index}") for index in range(width)]
+    root = SyncOnlyTask(name=f"{prefix}-root", deps=tuple(leaves))
+    return list(leaves), root
+
+
+class TestFanOutConcurrency:
+    async def test_wide_layer_spawns_concurrently_within_the_bound(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A wide layer fans out concurrently — and never wider than
+        ``max_concurrent_actions``.
+
+        This is the test that pins the bound. Without the semaphore the
+        peak would be the whole layer (200), which is exactly the
+        unbounded fan-out that would just move the failure from the tick's
+        clock to the registry's connection pool; without the TaskGroup it
+        would be 1, which is the serial wall this change removes.
+        """
+        width, bound = 200, 5
+        leaves, root = _wide_layer("fanout", width)
+        registry, locks, _, store = _setup([*leaves, root], auto_complete=False)
+        executor = InstrumentedTickExecutor(call_log=registry.calls)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.0,
+                poll_interval_seconds=0.01,
+                max_concurrent_actions=bound,
+            ),
+        )
+
+        assert summary.spawned == width
+        assert len(executor.spawned) == width
+        assert set(executor.spawned) == {leaf.id for leaf in leaves}
+        assert executor.max_in_flight <= bound
+        assert executor.max_in_flight == bound  # the bound is saturated
+        assert summary.outcome == "lingered_out"
+
+    async def test_ordering_holds_per_task_under_concurrency(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Concurrency reorders tasks against each other, never the three
+        steps *within* one task: the acquiring start precedes the spawn (a
+        denied task must never occupy a worker), and the ref-recording
+        start follows it (no executor ref for an execution that does not
+        exist yet)."""
+        width = 40
+        leaves, root = _wide_layer("order", width)
+        registry, locks, _, store = _setup([*leaves, root], auto_complete=False)
+        executor = InstrumentedTickExecutor(call_log=registry.calls)
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.0,
+                poll_interval_seconds=0.01,
+                max_concurrent_actions=8,
+            ),
+        )
+
+        calls = registry.calls
+        # Interleaving across tasks is real (otherwise this asserts nothing).
+        assert executor.max_in_flight > 1
+        for leaf in leaves:
+            tid = str(leaf.id)
+            claim_at = calls.index(("start_claim", tid))
+            spawn_at = calls.index(("spawn", tid))
+            # The last start for this task is the post-spawn one carrying
+            # the executor ref (the claim records one too, ref-less).
+            ref_start_at = len(calls) - 1 - calls[::-1].index(("start", tid))
+            assert claim_at < spawn_at < ref_start_at
+        # And the ref actually landed, for every task.
+        assert all(registry.refs[str(leaf.id)][1] is not None for leaf in leaves)
+
+    async def test_counters_stay_accurate_under_concurrency(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Three outcomes in one concurrent pass — spawned, self-healed and
+        two flavours of recorded failure — all counted exactly once."""
+        spawnable = [SyncOnlyTask(name=f"count-spawn-{i}") for i in range(12)]
+        healed = [SyncOnlyTask(name=f"count-heal-{i}") for i in range(5)]
+        dead = [SyncOnlyTask(name=f"count-dead-{i}") for i in range(4)]
+        lost = [SyncOnlyTask(name=f"count-lost-{i}") for i in range(3)]
+        root = SyncOnlyTask(
+            name="count-root", deps=tuple([*spawnable, *healed, *dead, *lost])
+        )
+        registry, locks, _, store = _setup(
+            [*spawnable, *healed, *dead, *lost, root], auto_complete=False
+        )
+        executor = InstrumentedTickExecutor(call_log=registry.calls)
+        for index, task in enumerate(healed):
+            task.run()  # target exists → self-heal on probe
+            registry.add_task(
+                str(task.id),
+                status="running",
+                executor="fake",
+                executor_ref=f"heal-{index}",
+            )
+        for index, task in enumerate(dead):
+            registry.add_task(
+                str(task.id),
+                status="running",
+                executor="fake",
+                executor_ref=f"dead-{index}",
+            )
+            executor.probe_statuses[f"dead-{index}"] = DetachedExecutionStatus.FAILED
+        for task in lost:
+            store._tasks.pop(str(task.id), None)  # no pickle, no registry data
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.0,
+                poll_interval_seconds=0.01,
+                max_concurrent_actions=4,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.spawned == len(spawnable)
+        assert summary.self_healed == len(healed)
+        assert summary.failed_recorded == len(dead) + len(lost)
+        assert sorted(executor.spawned) == sorted(task.id for task in spawnable)
+
+    async def test_denied_task_never_reaches_a_worker(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A one-slot limit against a concurrent fan-out: exactly one task
+        acquires and spawns, and no denied task is ever submitted."""
+        width = 10
+        leaves, root = _wide_layer("denied", width)
+        registry, locks, _, store = _setup([*leaves, root], auto_complete=False)
+        executor = InstrumentedTickExecutor(call_log=registry.calls)
+        registry.limits["one-slot"] = 1
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.05,
+                poll_interval_seconds=0.01,
+                max_concurrent_actions=width,
+                limit_key_selector=lambda t: ["one-slot"],
+            ),
+        )
+
+        assert summary.spawned == 1
+        # Cumulative across the tick's passes (the denied nine are re-tried
+        # on every fresh frontier), so at least one full round of denials.
+        assert summary.limit_denied >= width - 1
+        assert summary.limit_denied % (width - 1) == 0
+        assert len(executor.spawned) == 1
+        # The denied ones were claimed-and-refused, never spawned.
+        spawned_ids = set(executor.spawned)
+        denied = [leaf for leaf in leaves if leaf.id not in spawned_ids]
+        assert len(denied) == width - 1
+        for leaf in denied:
+            assert ("spawn", str(leaf.id)) not in registry.calls
+        assert registry.build_status == "running"

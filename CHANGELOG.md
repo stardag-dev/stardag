@@ -8,6 +8,18 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Reactive ticks fan out concurrently.** Acting on a frontier was a plain
+  `for` loop with awaits inside it: per actionable task, a task-store read,
+  an execution-claim acquisition, an executor spawn and a start recording
+  the ref — 2–3 registry round-trips plus a spawn, strictly serialised. A
+  layer thousands of tasks wide was therefore thousands of sequential HTTP
+  calls in one short-lived container, racing a function timeout nothing
+  related it to. Each pass now runs those actions with bounded concurrency
+  (`TickConfig.max_concurrent_actions`, default 50 — the bound the resident
+  engine has always used). Ordering _within_ a task is unchanged: the
+  acquiring start still precedes the spawn (a denied task never occupies a
+  worker) and the ref-recording start still follows it.
+
 - **Concurrent DAG discovery in reactive mode.**
   `discover_and_register_aio` walked the DAG with a recursive `await
 task.complete_aio()` and no concurrency, while the resident engine did
