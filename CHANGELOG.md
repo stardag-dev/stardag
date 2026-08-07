@@ -8,6 +8,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Concurrent DAG discovery in reactive mode.**
+  `discover_and_register_aio` walked the DAG with a recursive `await
+task.complete_aio()` and no concurrency, while the resident engine did
+  the same work 50 at a time. That cost was not paid once per build: this
+  walk runs at every reactive trigger _and_ in every worker registering
+  dynamically yielded dependencies, i.e. on the hot path of every dynamic
+  dependency. It is now bounded-concurrent on the same default
+  (`max_concurrent_discover=50`). The completion checks overlap; the
+  ordering does not — post-order registration (dependencies before the
+  tasks that need them, so the bulk endpoint never creates phantom rows),
+  diamond deduplication, `retry_failed` behaviour and all three
+  `DiscoveryResult` collections come out identical to the serial walk's,
+  element for element.
+
 - **Blocker liveness is now read from the execution claim's expiry, not
   inferred.** A reactive tick decided whether to wait on a RUNNING upstream
   owned by another build from a table over `(in-build, status, owning-build

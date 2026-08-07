@@ -11,6 +11,7 @@ reactive scheduling runs short-lived, idempotent **ticks**:
    running refs, self-heal completions, handle terminal states) → linger
    briefly polling the wake-up flag → exit when quiet.
 
+
 Workers self-report their lifecycle (see the Modal ``Runner``) and wake the
 scheduler when they finish, so no process needs to stay alive while
 long-running tasks execute. A periodic watchdog tick covers lost wake-ups
@@ -71,7 +72,8 @@ import logging
 import typing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Sequence
+from functools import partial
+from typing import Callable, Coroutine, Sequence
 from uuid import UUID
 
 from stardag import (
@@ -117,6 +119,16 @@ _TERMINAL_BUILD_STATUSES = ("completed", "failed", "cancelled")
 # execution, which is what claims exist to prevent); too long and an
 # abandoned claim merely heals later than it could have.
 _CLAIM_TTL_GRACE_SECONDS = 900.0
+
+# Default in-flight bound for everything a tick does per task: the frontier
+# actions (load / probe / claim / spawn / record) and discovery's completion
+# checks. 50 is not a new number — it is the resident engine's own
+# ``max_concurrent_discover`` default (see ``build/_concurrent.py``), which
+# has been driving the same registry and the same targets from a single
+# process since long before ticks existed. The two paths perform the same
+# logical work, so they should not disagree about how much of it may be in
+# flight; keeping one number is also what stops them drifting apart again.
+_DEFAULT_MAX_CONCURRENCY = 50
 
 # The server's accepted range for claim_ttl_seconds (outside it: 422).
 # Clamped rather than raised on — a 30-second task and a 60-day task are
@@ -173,6 +185,83 @@ def scheduler_lock_name(build_id: UUID) -> str:
 
 
 # =============================================================================
+# Bounded concurrency (shared by discovery and the tick)
+# =============================================================================
+
+
+# A unit of concurrent work: a zero-argument callable producing the
+# coroutine, not the coroutine itself (see :func:`_run_concurrently`).
+_ActionFactory = Callable[[], Coroutine[typing.Any, typing.Any, typing.Any]]
+
+
+def _first_leaf_exception(error: BaseException) -> BaseException:
+    """The first non-group exception inside a (possibly nested) group."""
+    exceptions = getattr(error, "exceptions", None)
+    if not exceptions:
+        return error
+    return _first_leaf_exception(exceptions[0])
+
+
+async def _run_concurrently(
+    factories: "Sequence[_ActionFactory]",
+) -> None:
+    """Run ``factories``' coroutines concurrently; wait for all of them.
+
+    The resident engine's idiom (``asyncio.TaskGroup``; see
+    ``build/_concurrent.py``), factored out so the tick and discovery use
+    exactly one pattern between them rather than growing a second. This
+    helper carries **no** bound of its own — every caller supplies one,
+    either by passing a shared semaphore through :func:`_run_bounded` or,
+    where the fan-out is recursive, by gating the expensive await inside
+    the coroutine with a semaphore that spans the whole walk. A per-call
+    semaphore would be no bound at all under recursion: each nesting level
+    would mint a fresh one.
+
+    **Factories, not coroutines.** TaskGroup cancels its siblings the
+    moment one of them raises, and a sibling cancelled before it started
+    would leave an already-constructed coroutine un-awaited — a "coroutine
+    was never awaited" warning attached to the *unrelated* failure that
+    triggered the cancellation. Nothing is constructed until it runs, so
+    there is nothing to leak.
+
+    **Failures surface as themselves.** TaskGroup wraps everything in an
+    ``ExceptionGroup``; the tick's error handling — and the ``error_type``
+    a crashed tick reports in its :class:`TickSummary` — is meant to name
+    the thing that actually broke (a registry timeout, say), exactly as it
+    did when this work ran in a plain ``for`` loop. The group is therefore
+    unwrapped to its first leaf, with the group kept as the cause so
+    siblings that failed at the same moment are still in the traceback.
+    """
+    if not factories:
+        return
+    try:
+        async with asyncio.TaskGroup() as task_group:
+            for factory in factories:
+                task_group.create_task(factory())
+    except BaseExceptionGroup as group:  # noqa: F821 (3.11+; TaskGroup is too)
+        raise _first_leaf_exception(group) from group
+
+
+async def _run_bounded(
+    factories: "Sequence[_ActionFactory]",
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """:func:`_run_concurrently` with ``semaphore`` held for each coroutine.
+
+    For flat fan-outs, where "at most N in flight" and "at most N of these
+    coroutines running" are the same statement. The semaphore is passed in
+    rather than created here so a caller can share one bound across
+    several fan-outs (or across a recursion).
+    """
+
+    async def run_one(factory: "_ActionFactory") -> None:
+        async with semaphore:
+            await factory()
+
+    await _run_concurrently([partial(run_one, factory) for factory in factories])
+
+
+# =============================================================================
 # Discovery (shared by trigger and workers)
 # =============================================================================
 
@@ -213,6 +302,7 @@ async def discover_and_register_aio(
     tasks: TaskStruct,
     retry_failed: bool = False,
     _chunk_size: int = 50,
+    max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENCY,
 ) -> DiscoveryResult:
     """Walk ``tasks``' dependency trees, register everything, return state.
 
@@ -223,7 +313,34 @@ async def discover_and_register_aio(
     reflects them (in reactive mode the registry *is* the scheduler state).
 
     Used by the reactive trigger (initial discovery) and by workers
-    registering dynamically yielded deps.
+    registering dynamically yielded deps. That second caller is why the
+    I/O here is worth bounded concurrency rather than a plain recursive
+    ``await``: it is not a once-per-build cost, it is paid on the hot path
+    of *every* dynamic-dependency yield, in every worker, on top of every
+    reactive re-trigger.
+
+    **Two phases, on purpose.** The expensive part of the walk is the
+    per-task ``complete_aio()`` — a target existence check, i.e. remote
+    I/O. That is what runs concurrently (``max_concurrent_discover``
+    checks in flight, matching the resident engine's default so the two
+    discovery paths stop being an order of magnitude apart). The
+    *ordering* is then reconstructed by a second, purely local, strictly
+    sequential post-order pass over the memoised results. Nothing about
+    the returned :class:`DiscoveryResult` or the registration order
+    therefore depends on which completion check happened to answer first:
+    ``post_order``, ``incomplete``, ``previously_completed`` and
+    ``retried`` come out exactly as the serial walk produced them, for any
+    DAG — diamonds included. Concurrency buys throughput here and nothing
+    else, which is the only way to add it to a path whose whole job is to
+    get an ordering right.
+
+    Bulk registration stays sequential across chunks for the same reason
+    the walk is post-order: chunk *n* may contain the dependencies of
+    chunk *n+1*, and overlapping them would reintroduce exactly the
+    phantom-row window the ordering exists to close. Only the per-task
+    calls that are independent of each other — the retry resets and the
+    completion marks — are run concurrently, and both preserve their
+    result order.
 
     With ``retry_failed=True``, incomplete tasks whose registry status is
     failed/cancelled/skipped/suspended (from a previous build) are reset to
@@ -236,38 +353,100 @@ async def discover_and_register_aio(
     """
     result = DiscoveryResult()
     post_order: list[BaseTask] = []
+
+    # --- phase 1: concurrent completion checks -------------------------
+    # Memoised per task id: whether it is complete, and (only when it is
+    # not) its static dependencies. Both are exactly what the serial walk
+    # computed inline; phase 2 replays the same recursion over them.
+    is_complete: dict[UUID, bool] = {}
+    deps_of: dict[UUID, list[BaseTask]] = {}
+    # Guards the visited set. A task reached from two parents at once must
+    # be checked once and recursed into once — the dedupe the serial walk
+    # got for free from being serial. Held across no await but the set
+    # mutation itself, so it never serialises the I/O below.
+    visit_lock = asyncio.Lock()
+    visited: set[UUID] = set()
+    # ONE semaphore for the whole walk (not one per recursion level, which
+    # would bound nothing), gating exactly the remote call: the target
+    # existence check. Mirrors ``build/_concurrent.py``'s
+    # ``discover_semaphore``.
+    discover_semaphore = asyncio.Semaphore(max(1, max_concurrent_discover))
+
+    async def visit(task: BaseTask) -> None:
+        """Check ``task`` for completion and recurse into its deps.
+
+        Order-free by construction: it records facts about tasks and never
+        appends to an ordered collection, so sibling subtrees may finish in
+        any interleaving. The set of tasks it visits is a property of the
+        DAG and the completion predicate, not of the traversal order, so it
+        is the same set the serial walk visited.
+        """
+        async with visit_lock:
+            if task.id in visited:
+                return
+            visited.add(task.id)
+        async with discover_semaphore:
+            complete = await task.complete_aio()
+        is_complete[task.id] = complete
+        if complete:
+            return  # don't recurse below complete tasks
+        deps = flatten_task_struct(task.requires())
+        deps_of[task.id] = deps
+        await _run_concurrently([partial(visit, dep) for dep in deps])
+
+    roots = flatten_task_struct(tasks)
+    await _run_concurrently([partial(visit, task) for task in roots])
+
+    # --- phase 2: sequential post-order over the memoised results ------
+    # No I/O, no awaits: the same recursion the serial implementation ran,
+    # with the completion check replaced by a dict lookup. This is what
+    # makes the result byte-identical to the serial version's.
     seen: set[UUID] = set()
 
-    async def walk(task: BaseTask) -> None:
+    def emit(task: BaseTask) -> None:
         if task.id in seen:
             return
         seen.add(task.id)
-        if await task.complete_aio():
+        if is_complete[task.id]:
             result.previously_completed.append(task)
             post_order.append(task)
-            return  # don't recurse below complete tasks
-        for dep in flatten_task_struct(task.requires()):
-            await walk(dep)
+            return
+        for dep in deps_of[task.id]:
+            emit(dep)
         result.incomplete[task.id] = task
         post_order.append(task)
 
-    for task in flatten_task_struct(tasks):
-        await walk(task)
+    for task in roots:
+        emit(task)
 
     for chunk_start in range(0, len(post_order), _chunk_size):
         chunk = post_order[chunk_start : chunk_start + _chunk_size]
         infos = await registry.task_register_bulk_aio(build_id, chunk)
-        if retry_failed:
-            for info in infos or []:
-                if (
-                    info.latest_status in _RETRYABLE_STATUSES
-                    and UUID(info.task_id) in result.incomplete
-                ):
-                    task = result.incomplete[UUID(info.task_id)]
-                    await registry.task_retry_aio(build_id, task)
-                    result.retried.append(task)
-    for task in result.previously_completed:
-        await registry.task_complete_aio(build_id, task)
+        if not retry_failed:
+            continue
+        # Resets are independent of each other (each addresses one task
+        # row), so they run concurrently — but ``retried`` is appended in
+        # ``infos`` order, not completion order, so the caller sees the
+        # same list the serial version returned.
+        to_retry = [
+            result.incomplete[UUID(info.task_id)]
+            for info in infos or []
+            if info.latest_status in _RETRYABLE_STATUSES
+            and UUID(info.task_id) in result.incomplete
+        ]
+        await _run_bounded(
+            [partial(registry.task_retry_aio, build_id, task) for task in to_retry],
+            discover_semaphore,
+        )
+        result.retried.extend(to_retry)
+
+    await _run_bounded(
+        [
+            partial(registry.task_complete_aio, build_id, task)
+            for task in result.previously_completed
+        ],
+        discover_semaphore,
+    )
 
     return result
 
