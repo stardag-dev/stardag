@@ -1,7 +1,25 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
-import { ModalExecutionCallRef, ModalExecutionDetails } from "./TaskDetail";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Task } from "../types/task";
+
+let mockWorkspaceRole: "owner" | "admin" | "member" | null = "admin";
+vi.mock("../context/EnvironmentContext", () => ({
+  useEnvironment: () => ({
+    activeEnvironment: { id: "env-1", slug: "default", name: "default" },
+    activeWorkspaceRole: mockWorkspaceRole,
+  }),
+}));
+
+vi.mock("../api/tasks", () => ({
+  cancelTask: vi.fn(),
+  retryTask: vi.fn(),
+  fetchTaskArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
+  fetchTaskEvents: vi.fn().mockResolvedValue([]),
+}));
+
+import { cancelTask, retryTask } from "../api/tasks";
+import { ModalExecutionCallRef, ModalExecutionDetails, TaskDetail } from "./TaskDetail";
 
 const fullMetadata = {
   kind: "modal",
@@ -251,5 +269,150 @@ describe("ModalExecutionDetails", () => {
     });
     await user.click(copyButtons[copyButtons.length - 1]);
     expect(await window.navigator.clipboard.readText()).toBe("fc-789");
+  });
+});
+
+// ---- Claim holder ----
+
+const VIEWED_BUILD = "99999999-aaaa-bbbb-cccc-dddddddddddd";
+const HOLDER_BUILD = "11111111-2222-3333-4444-555555555555";
+const HOUR = 3600 * 1000;
+
+function makeTask(overrides: Partial<Task> = {}): Task {
+  return {
+    id: "pk-1",
+    task_id: "tid-grind-beans",
+    environment_id: "env-1",
+    task_namespace: "",
+    task_name: "GrindBeans",
+    task_data: {},
+    version: null,
+    output_uri: null,
+    created_at: new Date(Date.now() - 5 * HOUR).toISOString(),
+    status: "running",
+    started_at: new Date(Date.now() - 4 * HOUR).toISOString(),
+    completed_at: null,
+    error_message: null,
+    artifact_count: 0,
+    latest_status: "running",
+    latest_status_at: new Date(Date.now() - 4 * HOUR).toISOString(),
+    latest_status_build_id: HOLDER_BUILD,
+    ...overrides,
+  };
+}
+
+describe("TaskDetail claim holder", () => {
+  beforeEach(() => {
+    mockWorkspaceRole = "admin";
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("says in words that another build holds the claim, and for how long", async () => {
+    const onStatusBuildClick = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <TaskDetail
+        task={makeTask()}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+        onStatusBuildClick={onStatusBuildClick}
+      />,
+    );
+
+    expect(
+      screen.getByText("Execution claim held by another build"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/for 4h 00m/)).toBeInTheDocument();
+    expect(screen.getByText(/not the build you are viewing/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: HOLDER_BUILD.slice(0, 8) }));
+    expect(onStatusBuildClick).toHaveBeenCalledWith(HOLDER_BUILD);
+  });
+
+  it("addresses the release to the holding build, not the one on screen", async () => {
+    vi.mocked(cancelTask).mockResolvedValue(undefined);
+    const onTaskCancelled = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <TaskDetail
+        task={makeTask()}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+        onTaskCancelled={onTaskCancelled}
+      />,
+    );
+
+    // The plain Cancel button stands down: it would address the wrong build.
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Release claim" }));
+    expect(
+      await screen.findByText("Release this task's execution claim"),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getAllByRole("button", { name: "Release claim" }).slice(-1)[0],
+    );
+
+    await waitFor(() =>
+      expect(cancelTask).toHaveBeenCalledWith(HOLDER_BUILD, "tid-grind-beans", "env-1"),
+    );
+    expect(onTaskCancelled).toHaveBeenCalled();
+  });
+
+  it("offers a reset as well for a suspended task, and retries under the holder", async () => {
+    vi.mocked(retryTask).mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <TaskDetail
+        task={makeTask({ status: "suspended", latest_status: "suspended" })}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reset to pending" }));
+    await user.click(
+      screen.getAllByRole("button", { name: "Reset to pending" }).slice(-1)[0],
+    );
+    await waitFor(() =>
+      expect(retryTask).toHaveBeenCalledWith(HOLDER_BUILD, "tid-grind-beans", "env-1"),
+    );
+  });
+
+  it("hides the remedies from non-admin members but keeps the diagnosis", async () => {
+    mockWorkspaceRole = "member";
+    render(<TaskDetail task={makeTask()} buildId={VIEWED_BUILD} onClose={() => {}} />);
+
+    expect(
+      await screen.findByText("Execution claim held by another build"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Release claim" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Releasing a claim requires the workspace admin role."),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing about claims for a task that holds none", async () => {
+    render(
+      <TaskDetail
+        task={makeTask({ status: "completed", latest_status: "completed" })}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+      />,
+    );
+    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
+    expect(screen.queryByText(/execution claim/i)).not.toBeInTheDocument();
+  });
+
+  it("reports the holder without cross-build wording when no build is in view", async () => {
+    // The task explorer renders this panel with no build context.
+    render(<TaskDetail task={makeTask()} onClose={() => {}} />);
+    expect(await screen.findByText("Holding an execution claim")).toBeInTheDocument();
+    expect(screen.queryByText(/not the build you are viewing/)).not.toBeInTheDocument();
   });
 });
