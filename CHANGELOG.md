@@ -6,6 +6,25 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### Registry API
+
+- **`GET /builds/{id}/frontier` now reports why a build is waiting on work
+  it does not own** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
+  Dependency gating is environment-global (task rows and edges are shared
+  across builds) while `running`/`status_counts` cover only the tasks a
+  build has events for, so an upstream left non-COMPLETED by another build
+  could gate a build's tasks while contributing nothing it could see — a
+  scheduler then read "nothing actionable, nothing running" as "cannot
+  progress" and failed the build. The new `blocked_by_external` list pairs
+  each such blocked task with its blocker (identity, status, the owning
+  build id and status timestamp, and whether the blocker is in this build's
+  task set), capped with an explicit `blocked_by_external_truncated` flag.
+  Purely additive: every existing field keeps its exact semantics.
+- **Frontier task refs now actually carry `latest_status_at`.** The field
+  was declared and documented as the input to scheduler staleness bounds
+  but never populated, so it always serialised as `null` and those guards
+  silently did nothing.
+
 ## [0.17.0] — 2026-08-06
 
 ### SDK
