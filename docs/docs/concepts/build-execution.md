@@ -187,17 +187,32 @@ run longer; `None` waits indefinitely. Owner liveness is resolved only when
 a build actually looks stalled, and once per owning build, so a healthy
 build never pays for it.
 
+**Seeing it.** `stardag builds frontier <build-id>` renders the blocking
+upstreams: which task of your build is held up, by which task (namespace and
+name), in what status, for how long, and which build owns it — plus which of
+the two remedies below applies. `stardag tasks list --status running` asks the
+same question claim-first: which tasks in this environment are holding an
+execution claim, and since when. See the
+[CLI reference](../configuration/cli.md#reading-the-frontier).
+
 **Recovering a build blocked on a task from another build.** Retry the
-blocking task (`POST /api/v1/builds/{build_id}/tasks/{task_id}/retry`,
-using the owning build's id) to reset it to PENDING, then re-trigger your
-build — a re-trigger resets blocking tasks in any retryable status for you.
+blocking task (`stardag tasks retry <owning-build-id> <task-id>`, or `POST
+/api/v1/builds/{build_id}/tasks/{task_id}/retry`, using the owning build's id)
+to reset it to PENDING, then re-trigger your build — a re-trigger resets
+blocking tasks in any retryable status for you.
 Retry covers **suspended** as well as failed/cancelled/skipped: a task left
 SUSPENDED (its execution registered dynamic dependencies, yielded and
 returned, and then its build was abandoned) used to have no supported way
 back, and needed an undocumented cancel-then-retry dance. A task stuck
 RUNNING is the one exception — it holds a live execution claim, so
-**cancel** it (`.../cancel`) to release the claim; retry deliberately does
-not, since that would risk a second concurrent execution.
+**cancel** it (`stardag tasks cancel <owning-build-id> <task-id>`) to release
+the claim; retry deliberately does not, since that would risk a second
+concurrent execution.
+
+If the owning build is abandoned altogether — its orchestrator died without
+emitting a terminal event, so it is `RUNNING` forever and holding every claim
+its tasks had — `stardag builds cleanup` is the bulk recovery; see
+[Cleaning up abandoned builds](../configuration/cli.md#cleaning-up-abandoned-builds).
 
 Reactive scheduling is experimental and currently Modal-first — see
 [Integrate with Modal](../how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental)

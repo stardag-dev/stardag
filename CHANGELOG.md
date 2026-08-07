@@ -8,6 +8,88 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **New `stardag builds` and `stardag tasks` CLI groups.** There was no way
+  to list builds, inspect a build's scheduling frontier, cancel a build or
+  task, or clean up abandoned state without writing a script against the
+  registry API — which is what made a wedged or spuriously-failed build hard
+  to diagnose: the failure was visible in logs and in the UI, but "what does
+  the scheduler actually think the state is?" required hand-rolled calls.
+
+  ```
+  stardag builds list [--status running] [--reactive-app NAME] [--older-than 24h]
+  stardag builds show <build-id>
+  stardag builds frontier <build-id>
+  stardag builds ticks <build-id> [--limit N]
+  stardag builds cancel <build-id> [--cascade] [--yes]
+  stardag builds cleanup [--older-than 24h] [--build-id ID ...] [--apply] [--yes]
+  stardag tasks list [--status running] [--older-than 1h]
+  stardag tasks cancel <build-id> <task-id> [--yes]
+  stardag tasks retry <build-id> <task-id> [--yes]
+  ```
+
+  `builds frontier` is the diagnostic one: besides the actionable/running
+  partitions it renders the build's **external blockers** — tasks of this
+  build held back by an upstream whose current status _another_ build
+  produced — naming the blocking task's namespace/name (not just an id), its
+  status, how long it has been in it, the owning build, and which of the two
+  remedies applies (a blocker outside this build's task set can only be
+  waited on or released; one inside it resolves when its owner finishes it).
+  It also states honestly that the registry computes that list only for a
+  build with nothing actionable and nothing running, so an empty list never
+  reads as "no blockers" for a build that is merely progressing.
+
+  `builds cleanup` is the recovery for builds abandoned by a process that
+  died: build status is derived from build-level events, so such a build
+  stays `RUNNING` forever while holding every execution claim and
+  concurrency-limit slot its tasks had. It **defaults to a dry run** — the
+  server's own selection, so what you review is what you get — printing the
+  builds, the claims that would be released and any per-build skip reasons,
+  and requires `--apply` (or `-y`, which implies it) to act. Cascade is on by
+  default here, and reactive builds are excluded unless asked for.
+
+  `--older-than` accepts `24h` / `90m` / `3d` (one number, one optional unit
+  of `s`/`m`/`h`/`d`/`w`; bare numbers are seconds) and converts at the
+  boundary to whatever the endpoint takes. The read-only commands — and
+  `cleanup`'s dry run — take **`--json`**, a new convention for the CLI:
+  stdout carries exactly one JSON document (the SDK's model of the API
+  payload) and every hint, warning and prompt goes to stderr, so piping to
+  `jq` is safe.
+
+- **Reactive scheduler ticks now report their `TickSummary` to the
+  registry** (`stardag builds ticks <build-id>`). A reactive build is driven
+  by many short-lived ticks, each in its own container, so the summary — the
+  scheduler's own account of what it did and why — used to reach nobody but
+  that container's log, and reconstructing why a build stalled meant reading
+  logs across dozens of them. Reporting is strictly best-effort: it sits at
+  the end of every tick and can never fail one or change its outcome, it
+  tolerates a registry that predates the endpoint (and stops retrying a
+  route that 404s), and every outcome except `not_reactive` is recorded.
+  Turn it off for a deployment with `TickConfig(report_tick_summaries=False)`
+  — app-level configuration, like the other staleness knobs, not a
+  per-trigger `tick_kwarg`. The summary is stored verbatim server-side, so
+  future `TickSummary` fields need no server release.
+
+- **The reactive watchdog's build sweep now filters server-side.**
+  `build_list_running` passed no `status` and matched on the derived status
+  in Python, so an environment holding more non-running builds than the
+  sweep's page budget could starve it of the running builds it exists to
+  find — silently disabling the safety net exactly when a backlog makes it
+  necessary. Same ordering, page budget and truncation warning as before.
+
+- **New registry-client methods** for the operational surface, all on
+  `RegistryABC` (with safe defaults) and `APIRegistry`: `build_list`,
+  `build_get_summary`, `build_bulk_cancel`, `build_report_tick_summary[_aio]`,
+  `build_list_tick_summaries`, `task_list`, and id-addressed
+  `task_cancel_by_id[_aio]` / `task_retry_by_id[_aio]` (operator tooling only
+  ever has the id, and rehydrating a task object to cancel it would fail for
+  exactly the abandoned tasks that most need cancelling). `build_cancel` gains
+  a `cascade` keyword and now returns the cancelled build plus the claims the
+  cascade released, or `None` for backends that don't report it — the same
+  optional-return convention as `task_register_bulk`. New response models
+  `BuildSummary`, `BuildListPage`, `BuildCancelResult`, `BulkCancelResult`,
+  `BulkCancelBuildRef`, `TaskSummary`, `TaskListPage` and `TickSummaryRecord`
+  are exported from `stardag.registry` and ignore unknown response fields.
+
 - **`StardagApp(task_modules=[...])`: declare the modules whose import
   registers your task classes, so reactive scheduler ticks can rebuild
   tasks from registry data instead of pickles.** A tick reconstructs task

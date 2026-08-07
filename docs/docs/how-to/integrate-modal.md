@@ -724,6 +724,18 @@ means your build is fine and waiting on a neighbour. See
 [Cross-build blocking](../concepts/build-execution.md#cross-build-blocking)
 for the recovery path when the blocker is abandoned — including a task left
 SUSPENDED, which a retry (and therefore a re-trigger) now resets.
+`stardag builds frontier <build-id>` shows this directly, naming the blocking
+task and the build that owns it — see
+[Reading the frontier](../configuration/cli.md#reading-the-frontier).
+
+**Seeing what a tick decided.** Every tick reports its summary to the registry
+(`stardag builds ticks <build-id>`), so a build driven by dozens of
+short-lived tick containers does not leave its reasoning scattered across as
+many logs. Reporting is best-effort — it can never fail a tick or change its
+outcome — and is tolerated by servers that predate the endpoint. Turn it off
+for a whole deployment with `TickConfig(report_tick_summaries=False)`; like the
+other staleness knobs it is app-level configuration, not a per-trigger
+`tick_kwarg`.
 
 Requirements and current limitations: the app must be deployed with this
 stardag version (scheduler `tick` function + self-reporting workers); the
