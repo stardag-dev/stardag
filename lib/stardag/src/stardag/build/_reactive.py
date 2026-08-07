@@ -48,6 +48,12 @@ build is going to run fails the build immediately, with a message naming
 the task, the build that owns it and why that owner will not move it.
 Against servers predating those fields the list is always empty and
 detection degrades to its pre-fix behaviour.
+
+Each tick reports its :class:`TickSummary` to the registry on the way out
+(``TickConfig.report_tick_summaries``), so the scheduler's own account of
+what it did survives the container it ran in — a build driven by dozens of
+short-lived ticks otherwise leaves its reasoning scattered across as many
+logs. Strictly best-effort, and tolerant of a server without the endpoint.
 """
 
 from __future__ import annotations
@@ -55,7 +61,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import typing
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Sequence
 from uuid import UUID
@@ -266,6 +272,19 @@ class TickConfig:
     # regardless of this bound — failing on missing information would
     # reintroduce the spurious failures. The wait is logged as unbounded.
     stale_external_blocker_seconds: float | None = 21600.0
+    # Report each tick's :class:`TickSummary` to the registry, so "why is
+    # this build not progressing?" is answerable without reading logs
+    # across many short-lived tick containers. Strictly best-effort: a
+    # reporting failure never fails a tick or changes its outcome.
+    #
+    # Deployed-app configuration, NOT a per-trigger tick_kwarg (see
+    # ``_TICK_KWARGS_ALLOWED``): the reasons to turn this off — a registry
+    # without the endpoint, or a deployment that keeps its observability
+    # elsewhere — are properties of the whole deployment, never of one
+    # build. Following ``stale_running_no_ref_seconds`` and
+    # ``stale_external_blocker_seconds``, which are app-level for the same
+    # reason. Widening the allowlist later is additive; narrowing it is not.
+    report_tick_summaries: bool = True
 
 
 class _MissingTaskRef(typing.NamedTuple):
@@ -310,6 +329,70 @@ class TickSummary:
     external_blockers_fatal: int = 0
 
 
+# Outcomes worth persisting. ``not_reactive`` is excluded by definition:
+# the build is not reactively scheduled, so the tick is a stray that did
+# nothing and learnt nothing — pure noise in a finite retention window.
+# Everything else says something: ``lease_held`` is contention (many of
+# them means ticks are piling up on one build), ``lingered_out`` is a tick
+# that found nothing to do, ``terminal`` carries the outcome and the
+# counters explaining it.
+_UNREPORTED_TICK_OUTCOMES = frozenset({"not_reactive"})
+
+# Set once per process when the registry answers the tick-summary route
+# with a missing-route 404, so an SDK pointed at an older server stops
+# paying for a doomed request on every tick. Process-global rather than
+# per-registry because a process talks to one registry, and the cost of
+# being wrong is one extra request in the (nonexistent) other case.
+_tick_summary_route_missing = False
+
+
+async def _report_tick_summary(
+    build_id: UUID,
+    registry: RegistryABC,
+    config: TickConfig,
+    summary: TickSummary,
+) -> None:
+    """Report a finished tick's summary to the registry. Best-effort.
+
+    "Best-effort" is a contract, not a hope: this runs at the end of every
+    tick — a hot path — and recording observability must never fail a tick
+    or change its outcome. Hence a bare ``except Exception``, which is the
+    correct breadth here precisely because *nothing* this call can raise
+    is worth propagating to a scheduler.
+    """
+    global _tick_summary_route_missing
+    if not config.report_tick_summaries:
+        return
+    if summary.outcome in _UNREPORTED_TICK_OUTCOMES:
+        return
+    if _tick_summary_route_missing:
+        return
+    try:
+        await registry.build_report_tick_summary_aio(build_id, asdict(summary))
+    except NotFoundError as e:
+        # Same tolerance as ``_skip_blocked``: a server predating the
+        # endpoint answers with FastAPI's generic missing-route 404, which
+        # is version skew rather than an error. A resource-level 404 (the
+        # build is gone) is also not worth escalating from here — the tick
+        # already ran — but it is not a reason to disable reporting for
+        # every other build in the process.
+        if _is_route_not_found(e):
+            _tick_summary_route_missing = True
+            logger.debug(
+                "Registry API does not support tick summaries; reporting "
+                "disabled for this process. Upgrade stardag-api to see "
+                "per-tick scheduler reasoning in the registry."
+            )
+        else:
+            logger.debug("Tick summary for build %s not recorded: %s", build_id, e)
+    except Exception as e:
+        logger.warning(
+            "Failed to report tick summary for build %s (ignored): %s",
+            build_id,
+            e,
+        )
+
+
 async def run_tick_aio(
     build_id: UUID,
     *,
@@ -325,11 +408,43 @@ async def run_tick_aio(
     wake-ups, periodic watchdog, manual): single-flighted per build via the
     scheduler lease, and a no-op for builds whose registry frontier carries
     no ``reactive_app_name`` (i.e. not reactively scheduled).
+
+    The tick's summary is reported to the registry on the way out. The
+    scheduling itself lives in ``_run_tick_body_aio``, which mutates the
+    summary in place and has several early returns — wrapping it here is
+    what keeps the report to exactly one call site instead of one per
+    return, which is how a return added later would silently stop being
+    observable. A tick that *raises* reports nothing: its summary never
+    reached the outcome it would claim, and the exception itself reaches
+    the caller.
     """
     config = config or TickConfig()
     task_store = task_store or BuildTaskStore(build_id)
     summary = TickSummary(outcome="lingered_out")
+    await _run_tick_body_aio(
+        build_id,
+        registry=registry,
+        task_executor=task_executor,
+        lock_manager=lock_manager,
+        task_store=task_store,
+        config=config,
+        summary=summary,
+    )
+    await _report_tick_summary(build_id, registry, config, summary)
+    return summary
 
+
+async def _run_tick_body_aio(
+    build_id: UUID,
+    *,
+    registry: RegistryABC,
+    task_executor: TaskExecutorABC,
+    lock_manager: GlobalConcurrencyLockManager,
+    task_store: BuildTaskStore,
+    config: TickConfig,
+    summary: TickSummary,
+) -> None:
+    """The tick proper — see :func:`run_tick_aio`. Mutates ``summary``."""
     # Scheduler lease: the lock() handle auto-renews the TTL while the tick
     # lingers, and releases on exit. The manager should be configured with
     # lock_wait_timeout_seconds=None so a held lease means immediate no-op
@@ -340,7 +455,7 @@ async def run_tick_aio(
         if not lease.result.acquired:
             logger.info(f"Scheduler lease for build {build_id} held; tick no-op.")
             summary.outcome = "lease_held"
-            return summary
+            return
 
         # Expose the ambient build id (the executor forwards it to
         # self-reporting workers, exactly like the resident engine does).
@@ -375,7 +490,7 @@ async def run_tick_aio(
                     # marker never flips back to None mid-build, so it is
                     # safe to re-evaluate each iteration.
                     summary.outcome = "not_reactive"
-                    return summary
+                    return
 
                 acted, denied_this_round = await _act_on_frontier(
                     frontier,
@@ -399,7 +514,7 @@ async def run_tick_aio(
                 if terminal is not None:
                     summary.outcome = "terminal"
                     summary.terminal_status = terminal
-                    return summary
+                    return
                 if acted:
                     # The tick's own actions (spawns recorded as started,
                     # self-healed completions, recorded failures) changed the
@@ -413,14 +528,14 @@ async def run_tick_aio(
                 # Linger: poll the wake-up flag until deadline.
                 while True:
                     if loop.time() >= deadline:
-                        return summary
+                        return
                     await asyncio.sleep(config.poll_interval_seconds)
                     flag = await registry.build_get_frontier_aio(build_id)
                     if flag.needs_tick:
                         break  # outer loop clears the flag and re-acts
         finally:
             current_build_id_var.reset(build_id_token)
-    return summary  # unreachable: the loop above always returns
+    return  # unreachable: the loop above always returns
 
 
 async def _load_task(

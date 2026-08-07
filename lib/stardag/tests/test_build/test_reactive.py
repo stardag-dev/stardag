@@ -32,6 +32,7 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
 )
+from stardag.build import _reactive as reactive_module
 from stardag.build._reactive import _RETRYABLE_STATUSES, TickSummary, _skip_blocked
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
@@ -118,6 +119,10 @@ class FakeReactiveRegistry(NoOpRegistry):
         # fields stay at their model defaults, as they would deserialising
         # a response that never carried them.
         self.serves_blocked_by_external = True
+        # Tick summaries reported by run_tick_aio, and an optional error to
+        # raise from the reporting endpoint.
+        self.reported_tick_summaries: list[dict] = []
+        self.tick_summary_error: Exception | None = None
 
     # --- test setup helpers ---
 
@@ -327,6 +332,14 @@ class FakeReactiveRegistry(NoOpRegistry):
                 self.statuses[tid] = "skipped"
                 skipped.append(tid)
         return skipped
+
+    async def build_report_tick_summary_aio(self, build_id, summary):
+        # Observability sink. ``tick_summary_error`` lets a test make it
+        # fail the way a real registry can (route missing, server down)
+        # and assert the tick is unaffected.
+        self.reported_tick_summaries.append(summary)
+        if self.tick_summary_error is not None:
+            raise self.tick_summary_error
 
     async def build_set_reactive_meta_aio(
         self, build_id, *, app_name, tick_kwargs=None
@@ -2331,3 +2344,177 @@ class TestExternalBlockers:
         assert summary.terminal_status == "completed"
         assert executor.spawned == [root.id]
         assert summary.external_blockers_waited >= 1
+
+
+class TestTickSummaryReporting:
+    """B6: a tick's own account of what it did must outlive its container.
+
+    Reporting is strictly best-effort — it sits at the end of every tick,
+    and observability failing must never fail a tick or change its
+    outcome. These tests pin both halves: that the summaries do get
+    reported, and that nothing about reporting can leak into the result.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_route_flag(self):
+        """The missing-route latch is process-global; isolate the tests."""
+        reactive_module._tick_summary_route_missing = False
+        yield
+        reactive_module._tick_summary_route_missing = False
+
+    async def _run(
+        self,
+        registry: FakeReactiveRegistry,
+        locks,
+        executor,
+        store,
+        config: TickConfig | None = None,
+    ) -> TickSummary:
+        return await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=config or FAST_TICK,
+        )
+
+    async def test_terminal_tick_is_reported(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("report-dep", "report-root")
+        registry, locks, executor, store = _setup([dep, root])
+
+        summary = await self._run(registry, locks, executor, store)
+
+        assert summary.outcome == "terminal"
+        assert len(registry.reported_tick_summaries) == 1
+        reported = registry.reported_tick_summaries[0]
+        # The whole dataclass rides, so a field added later needs no server
+        # change (the summary is stored as an open blob).
+        assert reported["outcome"] == "terminal"
+        assert reported["terminal_status"] == "completed"
+        assert reported["spawned"] == 2
+        assert set(reported) == set(vars(summary))
+
+    async def test_lingered_out_tick_is_reported(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A tick that found nothing to do still says so."""
+        (task,) = _chain("linger-only")
+        registry, locks, executor, store = _setup([task], auto_complete=False)
+        # Nothing actionable and something running -> not terminal, so the
+        # tick lingers and exits on its deadline.
+        registry.statuses[str(task.id)] = "running"
+        registry.refs[str(task.id)] = ("fake", "ref-live")
+        executor.probe_statuses["ref-live"] = DetachedExecutionStatus.RUNNING
+
+        summary = await self._run(registry, locks, executor, store)
+
+        assert summary.outcome == "lingered_out"
+        assert [s["outcome"] for s in registry.reported_tick_summaries] == [
+            "lingered_out"
+        ]
+
+    async def test_lease_held_tick_is_reported(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Contention is signal: many of these means ticks are piling up."""
+        dep, root = _chain("held-dep", "held-root")
+        registry, locks, executor, store = _setup([dep, root], lease_acquired=False)
+
+        summary = await self._run(registry, locks, executor, store)
+
+        assert summary.outcome == "lease_held"
+        assert [s["outcome"] for s in registry.reported_tick_summaries] == [
+            "lease_held"
+        ]
+
+    async def test_not_reactive_tick_is_not_reported(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A stray tick on a non-reactive build learnt nothing worth keeping."""
+        dep, root = _chain("stray-dep", "stray-root")
+        registry, locks, executor, store = _setup([dep, root])
+        registry.reactive_app_name = None
+
+        summary = await self._run(registry, locks, executor, store)
+
+        assert summary.outcome == "not_reactive"
+        assert registry.reported_tick_summaries == []
+
+    async def test_disabled_by_config(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        dep, root = _chain("off-dep", "off-root")
+        registry, locks, executor, store = _setup([dep, root])
+
+        summary = await self._run(
+            registry,
+            locks,
+            executor,
+            store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+                report_tick_summaries=False,
+            ),
+        )
+
+        assert summary.outcome == "terminal"
+        assert registry.reported_tick_summaries == []
+
+    async def test_reporting_failure_does_not_affect_the_tick(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The contract: a broken registry must not fail or alter a tick."""
+        dep, root = _chain("raise-dep", "raise-root")
+        registry, locks, executor, store = _setup([dep, root])
+        registry.tick_summary_error = RuntimeError("registry exploded")
+
+        summary = await self._run(registry, locks, executor, store)
+
+        assert summary.outcome == "terminal"
+        assert summary.terminal_status == "completed"
+        assert summary.spawned == 2
+        assert registry.build_status == "completed"
+        # It was attempted — the failure is swallowed, not skipped.
+        assert len(registry.reported_tick_summaries) == 1
+
+    async def test_missing_route_is_tolerated_and_latched(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An older server 404s the route; don't pay for it every tick."""
+        dep, root = _chain("route-dep", "route-root")
+        registry, locks, executor, store = _setup([dep, root])
+        # FastAPI's generic missing-route body — version skew, not an error.
+        registry.tick_summary_error = NotFoundError(
+            "Report tick summary: resource not found", detail="Not Found"
+        )
+
+        summary = await self._run(registry, locks, executor, store)
+        assert summary.outcome == "terminal"
+        assert len(registry.reported_tick_summaries) == 1
+        assert reactive_module._tick_summary_route_missing is True
+
+        # Second tick on a fresh build: the latch keeps it from re-trying.
+        dep2, root2 = _chain("route-dep-2", "route-root-2")
+        registry2, locks2, executor2, store2 = _setup([dep2, root2])
+        summary2 = await self._run(registry2, locks2, executor2, store2)
+        assert summary2.outcome == "terminal"
+        assert registry2.reported_tick_summaries == []
+
+    async def test_resource_404_does_not_latch(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A build that vanished is not a reason to stop reporting others."""
+        dep, root = _chain("gone-dep", "gone-root")
+        registry, locks, executor, store = _setup([dep, root])
+        registry.tick_summary_error = NotFoundError(
+            "Report tick summary: resource not found", detail="Build not found"
+        )
+
+        summary = await self._run(registry, locks, executor, store)
+
+        assert summary.outcome == "terminal"
+        assert reactive_module._tick_summary_route_missing is False
