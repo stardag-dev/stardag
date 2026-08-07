@@ -251,6 +251,47 @@ class FrontierTaskRef(BaseModel):
     latest_status_at: datetime | None = None
 
 
+class FrontierExternalBlocker(BaseModel):
+    """An upstream outside this build that holds one of its tasks back.
+
+    Task rows (and their dependency edges) are per *environment*, not per
+    build, so an upstream left non-COMPLETED by some *other* build still
+    gates this build's downstream tasks — silently, since such an upstream
+    need not be part of this build's task set at all (a dynamic dependency
+    registered under an earlier build is the common case). Each entry pairs
+    one blocked task of this build with one such blocker.
+
+    "Not this build's doing" is decided by ``blocking_status_build_id``:
+    the build whose event produced the blocker's current status. If that is
+    not this build, this build did not put the blocker in that state and
+    cannot generally get it out of it.
+
+    The blocked side carries only ``task_id`` (the caller registered it, and
+    every other frontier field is task_id-keyed too); the *blocking* side
+    carries name/namespace because it may be entirely unknown to the caller,
+    and a diagnostic is useless without something human-readable.
+    """
+
+    # Blocked task — always a member of this build's task set.
+    task_id: str
+    # The blocking upstream. Identity is spelled out because the caller may
+    # never have seen this task.
+    blocking_task_id: str
+    blocking_task_namespace: str
+    blocking_task_name: str
+    blocking_status: TaskStatus
+    # When the blocker entered its current status, and the build whose event
+    # put it there ("running under build Z since T"). The build id is null
+    # only for rows predating status denormalisation.
+    blocking_status_at: datetime | None = None
+    blocking_status_build_id: UUID | None = None
+    # Whether the blocker is also part of *this* build's task set. False is
+    # the pathological case: this build will never schedule it, so it can
+    # only wait for whoever owns it. True still blocks, but the blocker
+    # shows up in this build's own ``actionable``/``running`` as well.
+    blocking_in_build: bool
+
+
 class BuildFrontierResponse(BaseModel):
     """Scheduling state of a build, for reactive scheduler ticks.
 
@@ -263,6 +304,12 @@ class BuildFrontierResponse(BaseModel):
     ``status_counts`` covers *all* tasks referenced by the build, keyed by
     global status value — used for terminal detection (e.g. nothing running
     and nothing actionable).
+
+    ``blocked_by_external`` explains the gap between the two: dependency
+    gating is environment-global while ``running``/``status_counts`` are
+    scoped to this build, so a build can have nothing actionable and
+    nothing running yet still be legitimately waiting. See
+    :class:`FrontierExternalBlocker`.
     """
 
     build_id: UUID
@@ -275,6 +322,12 @@ class BuildFrontierResponse(BaseModel):
     # All RUNNING tasks in the build, including non-actionable ones (e.g.
     # inside the dynamic-dep registration window) — cancellation targets.
     running: list[FrontierTaskRef] = []
+    # Non-terminal tasks of this build held back by an upstream this build
+    # doesn't own. Empty for the overwhelming majority of builds; capped, in
+    # which case blocked_by_external_truncated is set (it is a diagnostic,
+    # not a work queue — a truncated list still proves "waiting, not stuck").
+    blocked_by_external: list[FrontierExternalBlocker] = []
+    blocked_by_external_truncated: bool = False
     # Reactive-scheduling owner: the app whose ticks drive this build. None
     # for non-reactive builds — its presence is the marker a tick reads to
     # decide whether to drive the build (and which app owns it).
