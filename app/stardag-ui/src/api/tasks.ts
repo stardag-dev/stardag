@@ -51,6 +51,15 @@ export interface BuildFilters {
   status?: BuildStatus;
   // Only builds reactively scheduled by the named app.
   reactive_app_name?: string;
+  // Only builds with no activity for at least this long, measured on
+  // `last_activity_at`. Same definition and same 60s floor as
+  // POST /builds/bulk-cancel — deliberately the one predicate, so what a
+  // list shows and what a cleanup would act on cannot disagree. Ordering
+  // flips to stalest-first when it is set.
+  //
+  // Only `status=running` may accompany it (that pair is the
+  // abandoned-build query and stays exact); any other status is a 422.
+  idle_for_seconds?: number;
 }
 
 export async function fetchBuilds(
@@ -63,6 +72,8 @@ export async function fetchBuilds(
   if (filters.status) params.set("status", filters.status);
   if (filters.reactive_app_name)
     params.set("reactive_app_name", filters.reactive_app_name);
+  if (filters.idle_for_seconds)
+    params.set("idle_for_seconds", String(filters.idle_for_seconds));
 
   const url = `${API_BASE}/builds?${params.toString()}`;
   const response = await fetchWithAuth(url);
