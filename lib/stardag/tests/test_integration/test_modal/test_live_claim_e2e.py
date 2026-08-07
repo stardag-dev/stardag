@@ -84,6 +84,7 @@ class SharedClaimRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
+        claim_ttl_seconds=None,
     ) -> StartClaimResult:
         tid = str(task.id)
         if self.statuses.get(tid) == "running":
@@ -106,6 +107,7 @@ class SharedClaimRegistry(NoOpRegistry):
         executor=None,
         executor_ref=None,
         executor_metadata=None,
+        claim_ttl_seconds=None,
     ):
         self.statuses[str(task.id)] = "running"
         if executor_ref is not None:

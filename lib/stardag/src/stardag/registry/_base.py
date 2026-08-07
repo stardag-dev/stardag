@@ -28,8 +28,17 @@ class FrontierTaskRef(StardagBaseModel):
     # Modal app/workspace/environment). None on servers predating the field.
     latest_executor_metadata: dict[str, Any] | None = None
     # When the current status was recorded (None on servers predating the
-    # field) — used for staleness bounds on RUNNING-without-ref tasks.
+    # field).
     latest_status_at: datetime | None = None
+    # When the RUNNING execution claim stops being honoured, if ever — the
+    # one piece of *third-party evaluable* liveness evidence a claim
+    # carries: past it the claim is re-claimable and stops occupying
+    # concurrency slots, so a reader may treat it as abandoned without
+    # probing anything. None means "never lapses" (older server, or a start
+    # predating the column) and is NOT evidence of death. Only meaningful
+    # while ``latest_status == "running"``: every other transition releases
+    # the claim, and the server clears this with it.
+    latest_status_expires_at: datetime | None = None
 
 
 class FrontierExternalBlocker(StardagBaseModel):
@@ -65,11 +74,17 @@ class FrontierExternalBlocker(StardagBaseModel):
     blocking_status: str
     # When the blocker entered its current status, and the build whose event
     # put it there ("running under build Z since T"). Both are None only for
-    # rows predating status denormalisation server-side — a scheduler that
-    # bounds its wait on the age must handle the None (see
-    # ``TickConfig.stale_external_blocker_seconds``).
+    # rows predating status denormalisation server-side.
     blocking_status_at: datetime | None = None
     blocking_status_build_id: UUID | None = None
+    # When the blocker's RUNNING execution claim lapses, if ever — the same
+    # column as ``FrontierTaskRef.latest_status_expires_at``, surfaced here
+    # because it turns the wait-or-fail decision for a RUNNING blocker from
+    # an inference into a read (see
+    # ``stardag.build._reactive._classify_external_blockers``). None =
+    # "never lapses". Always None for a non-RUNNING blocker: it holds no
+    # claim, so "will anyone move it?" must be asked of its owning build.
+    blocking_status_expires_at: datetime | None = None
     # Whether the blocker is also part of *this* build's task set. False is
     # the pathological case: this build will never schedule it, so it can
     # only wait for whoever owns it. True still blocks, but the blocker also
@@ -172,10 +187,13 @@ class StartClaimResult(StardagBaseModel):
     )
     executor: str | None = None
     executor_ref: str | None = None
-    # ISO timestamp of the running execution's latest status transition
-    # (echoed on already_running denials when the server provides it) —
-    # lets ref-less losers apply a staleness bound instead of a blind wait.
-    latest_status_at: str | None = None
+    # ISO timestamp at which the winning execution's claim lapses, echoed on
+    # ``already_running`` denials when the server provides it. A lapsed claim
+    # is re-claimable, so a ref-less loser can act on evidence that the
+    # winner is gone rather than guessing from how long it has been running.
+    # None = "never lapses" (older server, or a start predating the column),
+    # which is not evidence of death — the loser waits, as it always has.
+    latest_status_expires_at: str | None = None
     denied_keys: list[str] = []
 
 
@@ -848,6 +866,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor: str | None = None,
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> None:
         """Mark a task as started/running.
 
@@ -862,6 +881,13 @@ class RegistryABC(metaclass=abc.ABCMeta):
         more detail (e.g. Modal app/workspace/environment/function) for
         surfacing in the UI. Backends that don't track them may ignore all
         three.
+
+        ``claim_ttl_seconds`` is how long the execution claim this start
+        records stays honoured (see
+        ``FrontierTaskRef.latest_status_expires_at``). None leaves it to the
+        backend's own default. Callers that know the wall-clock limit the
+        execution runs under should pass it rather than accept that default
+        — see ``stardag.build._reactive.claim_ttl_seconds``.
 
         Args:
             build_id: The build UUID returned by build_start.
@@ -1081,6 +1107,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> StartClaimResult:
         """Mark a task started under an atomic per-task execution claim.
 
@@ -1092,6 +1119,16 @@ class RegistryABC(metaclass=abc.ABCMeta):
         ALREADY_COMPLETED: verify the target with eventual-consistency
         retries). ``limit_keys`` compose atomically (a denied claim
         consumes no slots).
+
+        ``claim_ttl_seconds`` bounds how long the granted claim is honoured
+        (surfaced to every reader as
+        ``FrontierTaskRef.latest_status_expires_at``). Past it the claim is
+        re-claimable and stops occupying concurrency slots, which is what
+        lets a build in *another* scheduler decide a claim is abandoned
+        without probing an executor it cannot reach. None leaves it to the
+        backend's default; derive it from the execution's own wall-clock
+        limit where one is known (see
+        ``stardag.build._reactive.claim_ttl_seconds``).
 
         **This is the extension seam for custom arbitration backends**: a
         custom ``RegistryABC`` implementation can arbitrate however it
@@ -1146,6 +1183,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor: str | None = None,
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> None:
         """Async version of task_start."""
         self.task_start(
@@ -1154,6 +1192,7 @@ class RegistryABC(metaclass=abc.ABCMeta):
             executor=executor,
             executor_ref=executor_ref,
             executor_metadata=executor_metadata,
+            claim_ttl_seconds=claim_ttl_seconds,
         )
 
     async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
@@ -1238,6 +1277,7 @@ class NoOpRegistry(RegistryABC):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> StartClaimResult:
         """Always grant: there is nothing to arbitrate against.
 

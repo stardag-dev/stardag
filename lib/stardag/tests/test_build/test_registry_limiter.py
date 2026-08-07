@@ -45,6 +45,7 @@ class CountingLimitRegistry(NoOpRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
+        claim_ttl_seconds=None,
     ) -> bool:
         self.acquire_attempts += 1
         if self.pending_errors:

@@ -215,20 +215,16 @@ class ClaimConfig:
     the claim with backoff until ``wait_timeout_seconds``. The claim is
     always attempted at least once — ``wait_timeout_seconds=0`` means
     "claim, but don't wait if held".
+
+    A ref-less winner whose claim has *lapsed* needs no knob at all: the
+    denial echoes the claim's expiry, so the loser recovers on evidence
+    rather than on a locally configured guess at how long "too long" is.
     """
 
     wait_timeout_seconds: float | None = 300.0
     wait_initial_interval_seconds: float = 1.0
     wait_max_interval_seconds: float = 15.0
     wait_backoff_factor: float = 2.0
-    # Optional recovery for a claim held by a ref-less execution whose
-    # status hasn't moved for this long (e.g. the winner crashed in its
-    # claim→ref-record window): the waiting loser records the failure and
-    # re-claims. None (default) disables — a legitimately long-running
-    # ref-less winner (local executor) is indistinguishable from a crashed
-    # one, so this is opt-in; prefer probeable (detached) executions, whose
-    # liveness needs no such bound.
-    stale_running_no_ref_seconds: float | None = None
 
 
 class DetachedExecutionStatus(StrEnum):
@@ -353,6 +349,23 @@ class TaskExecutorABC(ABC):
         spawn, so the registry never shows a RUNNING task with blank
         executor info in the acquire→spawn window. Best-effort; default
         None (no metadata).
+        """
+        return None
+
+    def execution_timeout_seconds(self, task: BaseTask) -> float | None:
+        """Wall-clock limit this backend enforces on an execution of ``task``.
+
+        Not a request, a *fact*: the number after which the backend itself
+        kills the execution (e.g. Modal's per-function ``timeout``). It is
+        the only thing that lets a scheduler put a defensible expiry on the
+        execution claim it records — a claim that outlives the execution it
+        guards by a small margin, and no more (see
+        ``stardag.build._reactive.claim_ttl_seconds``).
+
+        Return None when the backend enforces no limit, or when it cannot
+        be resolved for this task; callers then fall back to the registry's
+        own default rather than inventing a bound. Must not raise and must
+        not do I/O — it is called on the spawn path for every task.
         """
         return None
 

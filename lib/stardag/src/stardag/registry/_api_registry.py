@@ -652,6 +652,7 @@ class APIRegistry(RegistryABC):
         executor: str | None = None,
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> None:
         """Mark a task as started.
 
@@ -662,7 +663,9 @@ class APIRegistry(RegistryABC):
         self._request(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_start_params(executor, executor_ref, executor_metadata),
+            params=self._get_start_params(
+                executor, executor_ref, executor_metadata, claim_ttl_seconds
+            ),
             operation=f"Start task {task.id}",
         )
 
@@ -671,12 +674,16 @@ class APIRegistry(RegistryABC):
         executor: str | None,
         executor_ref: str | None,
         executor_metadata: dict[str, Any] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> dict[str, str]:
         """Event params plus optional detached-execution reference.
 
         ``executor_metadata`` rides as a JSON-encoded query param (the
         start endpoint has no body); older servers ignore the unknown
-        param, so no version gating is needed.
+        param, so no version gating is needed. The same goes for
+        ``claim_ttl_seconds``: a server predating claim expiry ignores it
+        and the recorded claim simply never lapses, which is that server's
+        behaviour anyway.
         """
         params = self._get_event_params()
         if executor is not None:
@@ -687,6 +694,8 @@ class APIRegistry(RegistryABC):
             params["executor_metadata"] = _json.dumps(
                 executor_metadata, separators=(",", ":")
             )
+        if claim_ttl_seconds is not None:
+            params["claim_ttl_seconds"] = str(claim_ttl_seconds)
         return params
 
     def task_complete(self, build_id: UUID, task: "BaseTask") -> None:
@@ -1648,6 +1657,7 @@ class APIRegistry(RegistryABC):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
         limit_keys: Sequence[str] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> StartClaimResult:
         """Claiming start against the API (``claim=true`` on ``/start``).
 
@@ -1655,10 +1665,12 @@ class APIRegistry(RegistryABC):
         ``task_already_completed`` / ``concurrency_limit_reached``) to a
         :class:`StartClaimResult`. Against an older server the ``claim``
         parameter is ignored and the start behaves like a plain (tolerated-
-        duplicate) start — i.e. graceful degradation to pre-claim behavior.
+        duplicate) start — i.e. graceful degradation to pre-claim behavior;
+        ``claim_ttl_seconds`` degrades the same way, to a claim that never
+        lapses.
         """
         params: dict[str, Any] = self._get_start_params(
-            executor, executor_ref, executor_metadata
+            executor, executor_ref, executor_metadata, claim_ttl_seconds
         )
         params["claim"] = "true"
         if limit_keys:
@@ -1680,7 +1692,7 @@ class APIRegistry(RegistryABC):
                     denied_reason="already_running",
                     executor=payload.get("executor"),
                     executor_ref=payload.get("executor_ref"),
-                    latest_status_at=payload.get("latest_status_at"),
+                    latest_status_expires_at=payload.get("latest_status_expires_at"),
                 )
             if e.status_code == 409 and error_code == "task_already_completed":
                 return StartClaimResult(
@@ -1736,6 +1748,7 @@ class APIRegistry(RegistryABC):
         executor: str | None = None,
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> None:
         """Async version - mark a task as started.
 
@@ -1746,7 +1759,9 @@ class APIRegistry(RegistryABC):
         await self._arequest(
             "POST",
             f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/start",
-            params=self._get_start_params(executor, executor_ref, executor_metadata),
+            params=self._get_start_params(
+                executor, executor_ref, executor_metadata, claim_ttl_seconds
+            ),
             operation=f"Start task {task.id}",
         )
 

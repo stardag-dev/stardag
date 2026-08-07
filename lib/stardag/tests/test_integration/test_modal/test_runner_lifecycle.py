@@ -50,6 +50,7 @@ class RecordingSyncRegistry(NoOpRegistry):
         executor=None,
         executor_ref=None,
         executor_metadata=None,
+        claim_ttl_seconds=None,
     ) -> None:
         self._record(
             "task_start",

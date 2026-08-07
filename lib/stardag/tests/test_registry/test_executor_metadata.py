@@ -41,7 +41,13 @@ class MetadataAwareRegistry(NoOpRegistry):
         self.calls: list[tuple[str, dict]] = []
 
     def task_start(
-        self, build_id, task, executor=None, executor_ref=None, executor_metadata=None
+        self,
+        build_id,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
+        claim_ttl_seconds=None,
     ) -> None:
         self.calls.append(
             (
