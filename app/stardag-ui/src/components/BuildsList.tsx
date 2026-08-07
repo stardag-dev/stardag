@@ -23,14 +23,13 @@ interface BuildsListProps {
 
 const PAGE_SIZE = 20;
 
-// `GET /builds` filters by status and reactive app server-side, but it has
-// no activity filter — so the "idle for" filter is evaluated in the
-// browser over a wider scan window (the server's maximum page size) and
-// discloses when that window was not the whole environment. The
-// authoritative, whole-environment version of the same question is the
-// server-side `idle_for_seconds` sweep behind "Clean up idle builds".
-const IDLE_SCAN_PAGE_SIZE = 100;
-
+// Every filter here is server-side. The "idle for" one matters most:
+// `GET /builds?idle_for_seconds=` and `POST /builds/bulk-cancel` share one
+// SQL predicate on the API side, so the set this table shows and the set
+// "Clean up idle builds" acts on are identical by construction rather than
+// by two implementations happening to agree. `total` is an exact COUNT
+// over that predicate and pagination is unbounded — nothing is dropped, so
+// there is nothing to caveat.
 const IDLE_OPTIONS: { seconds: number; label: string }[] = [
   { seconds: 3600, label: "1 hour" },
   { seconds: 6 * 3600, label: "6 hours" },
@@ -68,6 +67,29 @@ const LAST_ACTIVITY_EXPLAINER =
   "the signal stale-build cleanup measures idleness against — not the " +
   "build's last lifecycle change, which stays put while tasks are running.";
 
+// With an idle filter the API returns stalest-first, but it sorts on the
+// index-backed `last_active_at` proxy rather than on the composed
+// `last_activity_at` this column renders. The two nearly always agree;
+// where they don't, a row can sit slightly out of order. Said plainly here
+// rather than "fixed" by re-sorting the page, which would only impose a
+// local ordering on one page of a server-side result set.
+const STALEST_FIRST_CAVEAT =
+  "Stalest first. The server orders on the build's last lifecycle change, " +
+  "an index-backed proxy for last activity, so this column runs close to — " +
+  "but not strictly — oldest-first.";
+
+// Statuses other than "running" cannot be combined with an idle filter:
+// only RUNNING has a SQL predicate, so the API answers 422 rather than
+// serving an approximate `total` that looks exact. The controls below make
+// that combination unreachable instead of letting a user click into it.
+const IDLE_COMPATIBLE_STATUSES: (BuildStatus | "")[] = ["", "running"];
+
+const STATUS_WITH_IDLE_HINT =
+  "An idle filter can only be combined with All statuses or Running. The " +
+  "other statuses are derived by scanning a bounded window of builds, so " +
+  "pairing them with idleness would silently drop the oldest matches — " +
+  "exactly the builds a staleness query is looking for.";
+
 export function BuildsList({ onSelectBuild }: BuildsListProps) {
   const { activeEnvironment, activeWorkspaceRole } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
@@ -76,8 +98,8 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
   // that can only 403 — same rule as the concurrency-limit admin surface.
   const isAdmin = activeWorkspaceRole === "owner" || activeWorkspaceRole === "admin";
 
-  const [rawBuilds, setRawBuilds] = useState<Build[]>([]);
-  const [serverTotal, setServerTotal] = useState(0);
+  const [pageBuilds, setPageBuilds] = useState<Build[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -93,6 +115,13 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
   const [result, setResult] = useState<BulkCancelBuildsResponse | null>(null);
 
   const idleFilterActive = idleForSeconds > 0;
+  // The API rejects `idle_for_seconds` alongside any status but "running"
+  // (422). Both controls are constrained so that pair cannot be built:
+  // incompatible statuses are disabled while an idle filter is set, and
+  // the idle select is disabled while such a status is selected. Nothing
+  // is silently rewritten behind the user — the block is visible and
+  // explained on both sides.
+  const idleBlockedByStatus = !IDLE_COMPATIBLE_STATUSES.includes(statusFilter);
 
   useEffect(() => {
     setBreadcrumb([{ label: "Builds" }]);
@@ -122,8 +151,8 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
       // Don't flip loading=false here — the parent gate handles the
       // no-environment case, and clearing loading would briefly leak
       // the empty-state UI on env transitions.
-      setRawBuilds([]);
-      setServerTotal(0);
+      setPageBuilds([]);
+      setTotal(0);
       return;
     }
 
@@ -149,60 +178,33 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
     setError(null);
     try {
       const response = await fetchBuilds({
-        // With an idle filter the matching set is computed in the
-        // browser, so fetch one wide window and paginate it locally.
-        page: idleFilterActive ? 1 : page,
-        page_size: idleFilterActive ? IDLE_SCAN_PAGE_SIZE : PAGE_SIZE,
+        page,
+        page_size: PAGE_SIZE,
         environment_id: activeEnvironment.id,
         status: statusFilter || undefined,
         reactive_app_name: reactiveApp || undefined,
+        // Filtered, counted, paginated and ordered by the server, using
+        // the same predicate the cleanup sweep runs.
+        idle_for_seconds: idleForSeconds || undefined,
       });
       if (!fresh()) return;
-      setRawBuilds(response.builds);
-      setServerTotal(response.total);
+      setPageBuilds(response.builds);
+      setTotal(response.total);
     } catch (err) {
       if (!fresh()) return;
-      setRawBuilds([]);
-      setServerTotal(0);
+      setPageBuilds([]);
+      setTotal(0);
       setError(err instanceof Error ? err.message : "Failed to load builds");
     } finally {
       if (fresh()) setLoading(false);
     }
-  }, [activeEnvironment?.id, page, idleFilterActive, statusFilter, reactiveApp]);
+  }, [activeEnvironment?.id, page, idleForSeconds, statusFilter, reactiveApp]);
 
   useEffect(() => {
     loadBuilds();
   }, [loadBuilds]);
 
-  const { pageBuilds, total, totalPages, scanIncomplete } = useMemo(() => {
-    if (!idleFilterActive) {
-      return {
-        pageBuilds: rawBuilds,
-        total: serverTotal,
-        totalPages: Math.ceil(serverTotal / PAGE_SIZE),
-        scanIncomplete: false,
-      };
-    }
-    const cutoffMs = Date.now() - idleForSeconds * 1000;
-    const activityMs = (build: Build) =>
-      build.last_activity_at ? new Date(build.last_activity_at).getTime() : NaN;
-    const matched = rawBuilds
-      // A build with no activity timestamp at all (an API response
-      // predating the field) is not claimed to be idle.
-      .filter((build) => {
-        const ms = activityMs(build);
-        return !Number.isNaN(ms) && ms <= cutoffMs;
-      })
-      // Stalest first: with an idle filter the interesting end of the
-      // list is the oldest, not the newest.
-      .sort((a, b) => activityMs(a) - activityMs(b));
-    return {
-      pageBuilds: matched.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-      total: matched.length,
-      totalPages: Math.ceil(matched.length / PAGE_SIZE),
-      scanIncomplete: serverTotal > rawBuilds.length,
-    };
-  }, [rawBuilds, serverTotal, idleFilterActive, idleForSeconds, page]);
+  const totalPages = Math.ceil(total / PAGE_SIZE);
 
   const visibleIds = useMemo(() => pageBuilds.map((build) => build.id), [pageBuilds]);
   // Selection is scoped to the visible page and cleared whenever the
@@ -265,12 +267,12 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
     () =>
       Array.from(
         new Set(
-          rawBuilds
+          pageBuilds
             .map((build) => build.reactive_app_name)
             .filter((name): name is string => !!name),
         ),
       ).sort(),
-    [rawBuilds],
+    [pageBuilds],
   );
 
   if (!activeEnvironment) {
@@ -296,21 +298,38 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
             className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
           >
             <option value="">All statuses</option>
-            {STATUS_OPTIONS.map((status) => (
-              <option key={status} value={status}>
-                {STATUS_LABELS[status]}
-              </option>
-            ))}
+            {STATUS_OPTIONS.map((status) => {
+              // Disabled rather than hidden while an idle filter is set:
+              // the option stays visible so the constraint is legible, and
+              // the pair the API rejects can never be submitted.
+              const blocked =
+                idleFilterActive && !IDLE_COMPATIBLE_STATUSES.includes(status);
+              return (
+                <option
+                  key={status}
+                  value={status}
+                  disabled={blocked}
+                  title={blocked ? STATUS_WITH_IDLE_HINT : undefined}
+                >
+                  {STATUS_LABELS[status]}
+                  {blocked ? " — n/a with an idle filter" : ""}
+                </option>
+              );
+            })}
           </select>
         </label>
 
-        <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+        <label
+          className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400"
+          title={idleBlockedByStatus ? STATUS_WITH_IDLE_HINT : undefined}
+        >
           Idle for
           <select
             aria-label="Filter by time since last activity"
             value={idleForSeconds}
+            disabled={idleBlockedByStatus}
             onChange={(e) => handleIdleChange(Number(e.target.value))}
-            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
+            className="rounded-md border border-gray-300 px-2 py-1 text-xs text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
           >
             <option value={0}>Any</option>
             {IDLE_OPTIONS.map((option) => (
@@ -346,7 +365,10 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
         )}
 
         <div className="ml-auto flex items-center gap-3">
-          <span className="text-xs text-gray-500 dark:text-gray-400">
+          <span
+            className="text-xs text-gray-500 dark:text-gray-400"
+            title={idleFilterActive ? STALEST_FIRST_CAVEAT : undefined}
+          >
             {loading
               ? "Loading…"
               : `${total} build${total === 1 ? "" : "s"}` +
@@ -378,7 +400,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
       </div>
 
       {/* Outcome of the last cleanup, and load errors */}
-      {(result || error || (idleFilterActive && scanIncomplete)) && (
+      {(result || error) && (
         <div className="space-y-2 border-b border-gray-200 bg-white px-4 py-2 dark:border-gray-700 dark:bg-gray-800">
           {result && (
             <ResultBanner
@@ -410,14 +432,6 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
               </button>
             </ResultBanner>
           )}
-          {idleFilterActive && scanIncomplete && (
-            <ResultBanner tone="info">
-              The idle filter is applied in the browser over the {rawBuilds.length}{" "}
-              builds loaded here, of {serverTotal} matching in this environment — older
-              matches may be missing. “Clean up idle builds” evaluates the same
-              threshold server-side across all of them.
-            </ResultBanner>
-          )}
         </div>
       )}
 
@@ -447,7 +461,15 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
                 <HeaderCell>Build</HeaderCell>
                 <HeaderCell>Description</HeaderCell>
                 <HeaderCell>Duration</HeaderCell>
-                <HeaderCell title={LAST_ACTIVITY_EXPLAINER}>Last activity</HeaderCell>
+                <HeaderCell
+                  title={
+                    idleFilterActive
+                      ? `${LAST_ACTIVITY_EXPLAINER} ${STALEST_FIRST_CAVEAT}`
+                      : LAST_ACTIVITY_EXPLAINER
+                  }
+                >
+                  Last activity
+                </HeaderCell>
                 <HeaderCell>Created</HeaderCell>
                 <th scope="col" className="w-8" />
               </tr>

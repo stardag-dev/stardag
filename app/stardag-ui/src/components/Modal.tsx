@@ -1,5 +1,14 @@
 import { useEffect, type ReactNode } from "react";
 
+// TODO(a11y): this modal does not trap focus. Escape closes it and the
+// body is scroll-locked, but Tab walks straight out of the dialog into the
+// page behind it, and focus is not restored to the trigger on close. Every
+// caller (ChangePasswordModal, OnboardingModal, ConfirmDialog, …) inherits
+// the gap. Fixing it means cycling Tab/Shift-Tab within the dialog,
+// marking the rest of the page `aria-hidden`/`inert` while open, and
+// remembering `document.activeElement` — a change to shared behaviour that
+// deserves its own PR rather than riding along with a feature.
+
 interface ModalProps {
   isOpen: boolean;
   onClose: () => void;

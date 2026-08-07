@@ -182,10 +182,14 @@ describe("BuildsList", () => {
     expect(screen.getByRole("button", { name: "Clear filters" })).toBeInTheDocument();
   });
 
-  it("keeps only builds idle beyond the threshold, stalest first", async () => {
+  it("asks the server for idle builds instead of filtering locally", async () => {
+    // The API filters, counts, paginates and orders by idleness with the
+    // same predicate the cleanup sweep uses, so the component must send
+    // the threshold and render whatever comes back verbatim.
+    vi.mocked(fetchBuilds).mockResolvedValue(buildsResponse([staleBuild], 1));
     const user = userEvent.setup();
     renderList();
-    await screen.findByText("nightly-refresh");
+    await screen.findByLabelText("Filter by time since last activity");
 
     await user.selectOptions(
       screen.getByLabelText("Filter by time since last activity"),
@@ -193,11 +197,86 @@ describe("BuildsList", () => {
     );
 
     await waitFor(() =>
-      expect(screen.queryByText("hourly-ingest")).not.toBeInTheDocument(),
+      expect(fetchBuilds).toHaveBeenCalledWith(
+        expect.objectContaining({
+          idle_for_seconds: 86400,
+          page: 1,
+          page_size: 20,
+          environment_id: "env-1",
+        }),
+      ),
     );
-    expect(screen.getByText("nightly-refresh")).toBeInTheDocument();
-    expect(screen.queryByText("feature-sandbox")).not.toBeInTheDocument();
-    expect(screen.getByText(/1 build idle ≥ 24h, stalest first/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/1 build idle ≥ 24h, stalest first/),
+    ).toBeInTheDocument();
+    // No over-fetching and no local caveat: `total` is exact and
+    // pagination is server-side for this filter.
+    expect(fetchBuilds).not.toHaveBeenCalledWith(
+      expect.objectContaining({ page_size: 100 }),
+    );
+    expect(screen.queryByText(/older matches may be missing/)).not.toBeInTheDocument();
+  });
+
+  it("does not re-sort or re-filter the page the server returned", async () => {
+    // The server orders stalest-first on an index-backed proxy for last
+    // activity, so the rendered column is not strictly monotonic. The
+    // component must render the server's order as given rather than
+    // imposing a local ordering on one page of a server-side set — and it
+    // must not drop a row whose `last_activity_at` looks too recent.
+    vi.mocked(fetchBuilds).mockResolvedValue(
+      buildsResponse([busyBuild, staleBuild], 2),
+    );
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByLabelText("Filter by time since last activity");
+
+    await user.selectOptions(
+      screen.getByLabelText("Filter by time since last activity"),
+      String(DAY / 1000),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("2 builds idle ≥ 24h, stalest first"),
+      ).toBeInTheDocument(),
+    );
+    const names = screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => row.querySelector("td:nth-child(3) button")?.textContent);
+    expect(names).toEqual(["hourly-ingest", "nightly-refresh"]);
+  });
+
+  it("makes the status + idleness combination the API rejects unreachable", async () => {
+    const user = userEvent.setup();
+    renderList();
+    await screen.findByText("nightly-refresh");
+
+    const statusSelect = screen.getByLabelText("Filter by build status");
+    const idleSelect = screen.getByLabelText("Filter by time since last activity");
+
+    // With an idle filter set, only "All statuses" and "Running" remain
+    // selectable — the rest are the 422.
+    await user.selectOptions(idleSelect, String(DAY / 1000));
+    expect(
+      within(statusSelect).getByRole("option", { name: /^Running/ }),
+    ).toBeEnabled();
+    expect(
+      within(statusSelect).getByRole("option", { name: /^Failed/ }),
+    ).toBeDisabled();
+    await user.selectOptions(statusSelect, "running");
+    await waitFor(() =>
+      expect(fetchBuilds).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "running", idle_for_seconds: 86400 }),
+      ),
+    );
+
+    // ...and symmetrically: an incompatible status disables the idle
+    // filter rather than silently dropping it.
+    await user.selectOptions(idleSelect, "0");
+    await user.selectOptions(statusSelect, "failed");
+    expect(idleSelect).toBeDisabled();
+    expect(idleSelect).toHaveValue("0");
   });
 
   it("selects rows, supports select-all, and reports an indeterminate header", async () => {
