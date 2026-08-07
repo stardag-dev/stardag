@@ -111,21 +111,21 @@ interface SidebarStateProps {
   onToggleSidebar: () => void;
 }
 
-// Home page with builds list
-interface HomePageProps extends SidebarStateProps {
+// Builds list page (the app root view)
+interface BuildsPageProps extends SidebarStateProps {
   onNavigate: (item: NavItem) => void;
   onSelectBuild: (buildId: string) => void;
 }
 
-function HomePage({
+function BuildsPage({
   onNavigate,
   onSelectBuild,
   sidebarCollapsed,
   onToggleSidebar,
-}: HomePageProps) {
+}: BuildsPageProps) {
   return (
     <MainLayout
-      activeNav="home"
+      activeNav="builds"
       onNavigate={onNavigate}
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
@@ -153,7 +153,7 @@ function BuildPage({
 }: BuildPageProps) {
   return (
     <MainLayout
-      activeNav="home"
+      activeNav="builds"
       onNavigate={onNavigate}
       sidebarCollapsed={sidebarCollapsed}
       onToggleSidebar={onToggleSidebar}
@@ -611,7 +611,7 @@ function Router() {
       return "build";
     }
 
-    return "home";
+    return "builds";
   }, [path]);
 
   // Handle sidebar navigation
@@ -619,7 +619,7 @@ function Router() {
     (item: NavItem) => {
       const basePath = getEnvironmentPath();
       switch (item) {
-        case "home":
+        case "builds":
           navigateTo(basePath || "/");
           break;
         case "tasks":
@@ -722,7 +722,7 @@ function Router() {
           );
         }
         return (
-          <HomePage
+          <BuildsPage
             onNavigate={handleNavigation}
             onSelectBuild={handleSelectBuild}
             sidebarCollapsed={sidebarCollapsed}
@@ -730,10 +730,10 @@ function Router() {
           />
         );
 
-      case "home":
+      case "builds":
       default:
         return (
-          <HomePage
+          <BuildsPage
             onNavigate={handleNavigation}
             onSelectBuild={handleSelectBuild}
             sidebarCollapsed={sidebarCollapsed}
