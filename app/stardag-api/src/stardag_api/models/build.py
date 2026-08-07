@@ -6,11 +6,21 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Index, JSON, String, Text, Uuid
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    JSON,
+    String,
+    Text,
+    Uuid,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from stardag_api.models.base import Base, TimestampMixin, generate_uuid7, utc_now
+from stardag_api.models.enums import BuildStatus
 
 if TYPE_CHECKING:
     from stardag_api.models.event import Event
@@ -21,8 +31,8 @@ if TYPE_CHECKING:
 class Build(Base, TimestampMixin):
     """Represents execution of sd.build() for a DAG/set of tasks.
 
-    Status is derived from events (no stored status field).
-    Timestamps (started_at, completed_at) are derived from events.
+    Status is a fold of the build's build-level events, denormalised onto
+    the row (the ``latest_*`` columns below) exactly as ``Task`` does it.
     """
 
     __tablename__ = "builds"
@@ -31,6 +41,25 @@ class Build(Base, TimestampMixin):
         Index(
             "ix_builds_environment_last_active",
             "environment_id",
+            "last_active_at",
+        ),
+        # Serves ``GET /builds?status=`` — "builds in THIS environment with
+        # status X, most recently active first" — and the reaper's
+        # "RUNNING builds, stalest first". Same shape, and the same reasoning,
+        # as ix_tasks_environment_status: the single-environment filter and
+        # the status filter are useless apart (RUNNING spans every tenant;
+        # the environment-keyed composites don't mention status), and the
+        # distribution is badly skewed — a mature environment is almost all
+        # terminal builds with a handful RUNNING.
+        #
+        # ``last_active_at`` is the third column, not a separate index, so
+        # the ORDER BY of a single-status page resolves from the index alone
+        # in either direction (newest-first for the default listing,
+        # stalest-first for a staleness query).
+        Index(
+            "ix_builds_environment_status",
+            "environment_id",
+            "latest_status",
             "last_active_at",
         ),
     )
@@ -138,6 +167,52 @@ class Build(Base, TimestampMixin):
     reactive_tick_kwargs: Mapped[dict | None] = mapped_column(
         JSON().with_variant(JSONB(), "postgresql"),
         nullable=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Denormalised build-status columns.
+    #
+    # Maintained in-transaction whenever a build-level event is created
+    # (see services.status.apply_event_to_build, called by every build
+    # lifecycle path). They hold exactly what the historical
+    # ``get_build_status`` event replay returned, so a read is a column
+    # read rather than a scan of the build's whole event stream.
+    #
+    # They exist for three reasons, in increasing order of importance:
+    # every BuildResponse used to cost one event scan; ``GET /builds?status=``
+    # could not filter in SQL and so scanned a bounded window of candidates
+    # and reported a `total` that was only the matches *within that window*;
+    # and the stale-build reaper needed an exact, unbounded "is this build
+    # RUNNING?", which meant a second SQL encoding of the same rule that
+    # disagreed with the replay on timestamp ties. One column, one answer.
+    # ------------------------------------------------------------------
+    latest_status: Mapped[BuildStatus] = mapped_column(
+        String(32),
+        nullable=False,
+        default=BuildStatus.PENDING,
+    )
+    # First BUILD_STARTED. A resume does *not* move it — the build started
+    # when it first started; resuming is a separate concept, flagged by
+    # ``latest_is_resumed``.
+    latest_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    # The terminal event that produced ``latest_status``; cleared by a
+    # resume so the UI doesn't keep showing a stale "completed at".
+    latest_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    # ``external_id`` of the user who triggered the current status, when it
+    # came from a manual UI override (the ``triggered_by_user_id`` key in
+    # the event metadata). NULL for the machine-driven transitions —
+    # start/resume/exit-early are never user-triggered.
+    latest_status_triggered_by_user_id: Mapped[str | None] = mapped_column(String(255))
+    # True iff the event that produced the current status was BUILD_RESUMED,
+    # i.e. the build was picked up again after finishing/failing and is
+    # RUNNING under resume semantics. The UI surfaces this as
+    # "running (resumed)".
+    latest_is_resumed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
     )
 
     # Relationships
