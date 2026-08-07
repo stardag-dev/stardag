@@ -72,6 +72,76 @@ export interface Build {
   // older API responses and null for builds without a recorded trigger
   // executor.
   executor_metadata?: ExecutorMetadata | null;
+  // Reactive-scheduling owner: the app whose ticks drive this build. Null
+  // for ordinary (resident) builds — its presence is the reactive marker.
+  reactive_app_name?: string | null;
+  // ---- Liveness. Two different numbers; do not confuse them. ----
+  //
+  // `last_active_at` is the column the API orders the build list by. It is
+  // bumped by build-level LIFECYCLE transitions only (resume, complete,
+  // fail, cancel, exit-early, roots appended) — never by task events — so
+  // it is NOT an activity signal: a build that has been running tasks for
+  // three days still reports its BUILD_STARTED timestamp here.
+  //
+  // `last_activity_at` is the activity signal: the newest of the build's
+  // whole event stream (task events included), its `last_active_at`, and
+  // any pending scheduler wake-up. This is what the stale-build reaper
+  // measures idleness against, so it is the one to show and filter on.
+  // Both are optional: absent on API responses predating them.
+  last_active_at?: string | null;
+  last_activity_at?: string | null;
+}
+
+// Response of POST /builds/{id}/cancel — a superset of Build. The cascade
+// fields are empty/zero unless the call passed cascade=true.
+export interface BuildCancelResult extends Build {
+  cascaded_task_ids: string[];
+  cascaded_task_count: number;
+}
+
+// Why bulk-cancel did not act on an explicitly requested build id. Kept as
+// a union of the reasons the API documents today, widened to `string` at
+// the response boundary so an unknown future reason still renders.
+export type BulkCancelSkipReason =
+  | "not_found"
+  | "not_running"
+  | "reactive"
+  | "not_idle"
+  | "limit_reached";
+
+// Body of POST /builds/bulk-cancel. At least one of `build_ids` /
+// `idle_for_seconds` is required — the API answers 422 otherwise.
+export interface BulkCancelBuildsRequest {
+  build_ids?: string[];
+  // Idleness measured against `last_activity_at`, not `last_active_at`.
+  idle_for_seconds?: number;
+  reactive_app_name?: string | null;
+  include_reactive?: boolean;
+  // Also cancel the build's RUNNING/SUSPENDED tasks, releasing the
+  // execution claims and concurrency slots they hold.
+  cascade?: boolean;
+  dry_run?: boolean;
+  limit?: number;
+  reason?: string | null;
+}
+
+export interface CancelledBuildRef {
+  build_id: string;
+  name: string;
+  last_activity_at: string | null;
+  reactive_app_name: string | null;
+  cascaded_task_ids: string[];
+}
+
+export interface BulkCancelBuildsResponse {
+  dry_run: boolean;
+  builds: CancelledBuildRef[];
+  build_count: number;
+  task_count: number;
+  // build_id -> reason (see BulkCancelSkipReason).
+  skipped: Record<string, string>;
+  // More builds matched the filter than `limit` allowed; call again.
+  truncated: boolean;
 }
 
 export interface BuildListResponse {

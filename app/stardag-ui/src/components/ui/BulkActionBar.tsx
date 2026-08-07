@@ -46,7 +46,9 @@ export function BulkActionBar({
           {count === 1 ? "" : "s"} selected
         </p>
         {note && (
-          <p className="mt-0.5 text-xs text-blue-700/80 dark:text-blue-300/70">{note}</p>
+          <p className="mt-0.5 text-xs text-blue-700/80 dark:text-blue-300/70">
+            {note}
+          </p>
         )}
       </div>
       <div className="flex items-center gap-2">

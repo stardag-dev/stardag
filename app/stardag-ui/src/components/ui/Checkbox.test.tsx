@@ -31,7 +31,9 @@ describe("Checkbox", () => {
     const { rerender } = render(
       <Checkbox checked={false} indeterminate onChange={vi.fn()} label="Select all" />,
     );
-    const box = screen.getByRole("checkbox", { name: "Select all" }) as HTMLInputElement;
+    const box = screen.getByRole("checkbox", {
+      name: "Select all",
+    }) as HTMLInputElement;
     expect(box.indeterminate).toBe(true);
 
     rerender(<Checkbox checked indeterminate onChange={vi.fn()} label="Select all" />);

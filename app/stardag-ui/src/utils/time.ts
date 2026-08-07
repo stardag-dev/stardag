@@ -65,9 +65,13 @@ export function formatDuration(
 
 /**
  * Humanise an idleness threshold in seconds: "1h", "24h", "7d".
- * Used in filter labels and in the bulk-cleanup confirmation copy.
+ * Used in filter summaries and in the bulk-cleanup confirmation copy.
+ *
+ * Hours are kept up to two days so a threshold the user picked as
+ * "24 hours" is not echoed back at them as "1d".
  */
 export function formatIdleThreshold(seconds: number): string {
+  if (seconds % 3600 === 0 && seconds < 48 * 3600) return `${seconds / 3600}h`;
   if (seconds % 86400 === 0) return `${seconds / 86400}d`;
   if (seconds % 3600 === 0) return `${seconds / 3600}h`;
   if (seconds % 60 === 0) return `${seconds / 60}m`;
