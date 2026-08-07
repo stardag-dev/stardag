@@ -41,11 +41,13 @@ stuck. Task rows and dependency edges are per environment, so an upstream
 that some other build left non-COMPLETED gates this build's tasks while
 contributing nothing to the counts this build can see. Terminal detection
 therefore consults the frontier's ``blocked_by_external`` before declaring
-a build dead: a blocker RUNNING under another build is waited on (bounded
-by ``TickConfig.stale_external_blocker_seconds``), while a blocker nobody
-is executing fails the build immediately with a message naming the task
-and the build that owns it. Against servers predating those fields the
-list is always empty and detection degrades to its pre-fix behaviour.
+a build dead: a blocker another build is executing — or one a still-live
+build has yet to schedule — is waited on (bounded by
+``TickConfig.stale_external_blocker_seconds``), while a blocker no live
+build is going to run fails the build immediately, with a message naming
+the task, the build that owns it and why that owner will not move it.
+Against servers predating those fields the list is always empty and
+detection degrades to its pre-fix behaviour.
 """
 
 from __future__ import annotations
@@ -239,13 +241,14 @@ class TickConfig:
     # its actual execution is unaffected and its completion (sticky) still
     # lands; generous default accordingly.
     stale_running_no_ref_seconds: float | None = 1800.0
-    # How long this build will wait on a blocker that is RUNNING under
-    # ANOTHER build before giving up and failing (see
-    # ``_classify_external_blockers``). Measured on the blocker's status
-    # timestamp — how long it has been RUNNING — not on tick-local time: a
-    # tick is short-lived and the watchdog keeps re-ticking, so a tick-local
-    # bound would never expire and the build would hang silently forever,
-    # which is the failure mode this whole path exists to remove.
+    # How long this build will wait on a blocker owned by ANOTHER build —
+    # one that build is executing, or one it has yet to schedule — before
+    # giving up and failing (see ``_classify_external_blockers``). Measured
+    # on the blocker's status timestamp — how long it has sat in that status
+    # — not on tick-local time: a tick is short-lived and the watchdog keeps
+    # re-ticking, so a tick-local bound would never expire and the build
+    # would hang silently forever, which is the failure mode this whole path
+    # exists to remove.
     #
     # Deliberately generous (6 h). Waiting is the cheap direction: the
     # blocker's own build has far better information about it (a live
@@ -726,19 +729,39 @@ async def _resolve_running(
     return "leave"
 
 
+class _BlockerVerdict(typing.NamedTuple):
+    """A blocker paired with the reason it landed in its bucket.
+
+    The reason is carried rather than re-derived at rendering time so the
+    message can say *why* a blocker is fatal ("its owning build is failed")
+    without re-issuing the lookups the classification already made.
+    """
+
+    blocker: FrontierExternalBlocker
+    # Short why-clause appended to this blocker's description.
+    note: str
+
+
 class _ExternalBlockers(typing.NamedTuple):
     """Partition of a frontier's ``blocked_by_external`` (see below)."""
 
-    # Out-of-build and RUNNING within the staleness bound: someone else is
+    # Out-of-build, RUNNING, within the staleness bound: someone else is
     # executing it, and their completion frees this build. Wait.
-    waiting: list[FrontierExternalBlocker]
-    # Out-of-build and NOT going to run — either not RUNNING at all, or
-    # RUNNING for longer than ``stale_external_blocker_seconds``. Fail.
-    fatal: list[FrontierExternalBlocker]
+    executing: list[_BlockerVerdict]
+    # Out-of-build, not running, but owned by a build that is still live —
+    # that build is going to schedule it. Wait, on the same bound.
+    queued: list[_BlockerVerdict]
+    # Out-of-build and nothing is going to run it. Fail.
+    fatal: list[_BlockerVerdict]
     # In this build's own task set: already accounted for by actionable /
     # running / status_counts, so it must not influence the wait-or-fail
     # decision. Kept only to enrich the message.
-    in_build: list[FrontierExternalBlocker]
+    in_build: list[_BlockerVerdict]
+
+    @property
+    def waiting(self) -> list[_BlockerVerdict]:
+        """Every blocker this build should wait on rather than fail over."""
+        return self.executing + self.queued
 
 
 def _blocker_label(blocker: FrontierExternalBlocker) -> str:
@@ -765,53 +788,172 @@ def _blocker_status_age_seconds(
     return (now - status_at).total_seconds()
 
 
-def _classify_external_blockers(
-    frontier: BuildFrontier, config: TickConfig, now: datetime
+def _blocker_is_stale(
+    blocker: FrontierExternalBlocker, config: TickConfig, now: datetime
+) -> bool:
+    """Whether the blocker has sat in its status longer than the bound.
+
+    False when the bound is disabled or the blocker carries no status
+    timestamp: an unageable blocker is waited on rather than failed, since
+    failing on missing information would reintroduce exactly the spurious
+    failures this path removes (see
+    ``TickConfig.stale_external_blocker_seconds``).
+    """
+    stale_after = config.stale_external_blocker_seconds
+    if stale_after is None:
+        return False
+    age = _blocker_status_age_seconds(blocker, now)
+    return age is not None and age > stale_after
+
+
+async def _classify_external_blockers(
+    frontier: BuildFrontier,
+    config: TickConfig,
+    now: datetime,
+    *,
+    registry: RegistryABC,
 ) -> _ExternalBlockers:
     """Split the frontier's external blockers into wait / fail / ignore.
 
     The frontier reports these only when the build has nothing actionable
-    and nothing running — precisely the state the stuck-build check reads
-    as "this build is dead". The split decides whether it actually is:
+    and nothing running — precisely the state the stuck-build check reads as
+    "this build is dead". The split decides whether it actually is, on two
+    questions: is the blocker in this build's own task set, and is anyone
+    going to move it?
 
-    - ``blocking_in_build`` → ignored. The blocker is in this build's own
-      task set, so it is already visible in ``actionable``/``running``/
-      ``status_counts``; letting it also drive this decision would
-      double-count it (and a blocker that is genuinely stuck *in* this
-      build must still fail the build, exactly as before).
+    - ``blocking_in_build`` → **ignored**. The blocker is in this build's
+      own task set, so it is already visible in ``actionable`` /
+      ``running`` / ``status_counts``; letting it also drive this decision
+      would double-count it (and a blocker that is genuinely stuck *in*
+      this build must still fail the build, exactly as before).
     - out-of-build and RUNNING → **wait**. Another build is executing it;
       its completion unblocks this build and wakes this scheduler. Treated
-      like a concurrency-limit denial: return, don't fail. Bounded by
-      ``config.stale_external_blocker_seconds`` against the blocker's own
-      status timestamp, since a tick is too short-lived to bound anything
-      itself — see that field for the rationale and the None cases.
-    - out-of-build and anything else (pending/suspended/failed/cancelled/
-      skipped) → **fail now**. Nobody is executing it and this build will
-      never schedule it, so waiting would be waiting forever. (Narrow
-      exception this deliberately does not carve out: a PENDING blocker
-      belonging to another *live* build will be scheduled by that build.
-      It is rare — a build's discovery registers the whole static
-      dependency tree, so out-of-build blockers are dynamic dependencies
-      of an earlier build — and the failure now says exactly which task to
-      retry, unlike the silent hang it replaces.)
+      like a concurrency-limit denial: return, don't fail.
+    - out-of-build, not RUNNING, but its status-owning build is still live
+      → **wait**. That build is going to schedule it. Without this a
+      PENDING dynamic dependency of a healthy concurrent build would fail
+      this build — a *new* spurious failure, which is the very class of bug
+      being fixed here, so the liveness question is asked rather than
+      assumed.
+    - out-of-build with no live owner → **fail now**: its owning build has
+      gone terminal, no build owns its status at all, or the owner's status
+      could not be resolved. Nothing is going to run it and this build
+      never will, so waiting would be waiting forever.
+
+    Both waits are bounded by ``config.stale_external_blocker_seconds``
+    against the blocker's own status timestamp, since a tick is too
+    short-lived to bound anything itself — see that field for the rationale
+    and the unageable cases.
+
+    A blocker with ``blocking_status_build_id is None`` is fatal without a
+    lookup: no build owns its status, meaning no status-moving event was
+    ever recorded against it, so there is no evidence anyone intends to run
+    it — and a silent indefinite hang is the failure mode #208 exists to
+    kill. The same goes for an owner status of None, whether because the
+    lookup failed or because the server doesn't report the field: unknown
+    is not evidence of life. Every one of those still fails with the full
+    remediation, so the operator is never left without a next step.
     """
-    waiting: list[FrontierExternalBlocker] = []
-    fatal: list[FrontierExternalBlocker] = []
-    in_build: list[FrontierExternalBlocker] = []
-    stale_after = config.stale_external_blocker_seconds
+    executing: list[_BlockerVerdict] = []
+    queued: list[_BlockerVerdict] = []
+    fatal: list[_BlockerVerdict] = []
+    in_build: list[_BlockerVerdict] = []
+
+    # Owning-build statuses resolved during THIS classification only. A wide
+    # DAG stalled behind one build yields one blocker entry per blocked edge,
+    # every one naming the same owner, so without the memo this would be N
+    # requests for one answer. Deliberately not cached across calls: a later
+    # pass must be able to see the owner go terminal.
+    #
+    # The whole lookup only happens on the stalled path — the frontier
+    # populates blocked_by_external solely when the build has nothing
+    # actionable and nothing running — so a healthy build issues zero extra
+    # requests, however often it polls. Please don't "optimise" this away on
+    # the assumption that it runs per tick in steady state; it does not.
+    owner_statuses: dict[UUID, str | None] = {}
+
+    async def owner_status(owner_id: UUID) -> str | None:
+        if owner_id not in owner_statuses:
+            try:
+                info = await registry.build_get_aio(owner_id)
+                owner_statuses[owner_id] = info.status
+            except Exception as e:
+                # Swallowed on purpose: this is a diagnostic lookup on the
+                # path that decides a build's fate, and an unreachable or
+                # deleted owner must produce a precise failure, not an
+                # exception out of the tick.
+                logger.warning(
+                    f"Could not resolve the status of build {owner_id}, which "
+                    f"owns a task blocking this build: {e}"
+                )
+                owner_statuses[owner_id] = None
+        return owner_statuses[owner_id]
+
     for blocker in frontier.blocked_by_external:
         if blocker.blocking_in_build:
-            in_build.append(blocker)
+            in_build.append(_BlockerVerdict(blocker, "in this build's own task set"))
             continue
-        if blocker.blocking_status not in _RUNNING_STATUSES:
-            fatal.append(blocker)
+
+        if blocker.blocking_status in _RUNNING_STATUSES:
+            if _blocker_is_stale(blocker, config, now):
+                fatal.append(
+                    _BlockerVerdict(
+                        blocker,
+                        "RUNNING past the "
+                        f"{config.stale_external_blocker_seconds:.0f}s staleness "
+                        "bound, so its execution claim is presumed abandoned",
+                    )
+                )
+            else:
+                executing.append(
+                    _BlockerVerdict(blocker, "another build is executing it")
+                )
             continue
-        age = _blocker_status_age_seconds(blocker, now)
-        if stale_after is not None and age is not None and age > stale_after:
-            fatal.append(blocker)
+
+        # Not running: it moves only if the build owning its status is still
+        # going to schedule it.
+        owner_id = blocker.blocking_status_build_id
+        if owner_id is None:
+            fatal.append(
+                _BlockerVerdict(
+                    blocker,
+                    "no build owns its status, so nothing has ever moved it",
+                )
+            )
+            continue
+        status = await owner_status(owner_id)
+        if status is None:
+            fatal.append(
+                _BlockerVerdict(
+                    blocker,
+                    "its owning build's status is unknown (the lookup failed, "
+                    "or this registry does not report it), which is not "
+                    "evidence that anyone will run it",
+                )
+            )
+        elif status in _TERMINAL_BUILD_STATUSES:
+            fatal.append(_BlockerVerdict(blocker, f"its owning build is {status}"))
+        elif _blocker_is_stale(blocker, config, now):
+            fatal.append(
+                _BlockerVerdict(
+                    blocker,
+                    f"its owning build is still {status} but has left it in "
+                    "this status past the "
+                    f"{config.stale_external_blocker_seconds:.0f}s staleness "
+                    "bound",
+                )
+            )
         else:
-            waiting.append(blocker)
-    return _ExternalBlockers(waiting=waiting, fatal=fatal, in_build=in_build)
+            # Includes an owner still PENDING: a build that has not started
+            # yet may still start, and the staleness bound above is what
+            # stops that from being an unbounded wait.
+            queued.append(
+                _BlockerVerdict(blocker, f"its owning build is still {status}")
+            )
+
+    return _ExternalBlockers(
+        executing=executing, queued=queued, fatal=fatal, in_build=in_build
+    )
 
 
 # How many blockers a log line or build error names before summarising the
@@ -822,7 +964,7 @@ _MAX_REPORTED_BLOCKERS = 5
 
 
 def _describe_blockers(
-    blockers: Sequence[FrontierExternalBlocker], now: datetime, truncated: bool
+    verdicts: Sequence[_BlockerVerdict], now: datetime, truncated: bool
 ) -> str:
     """One-line, user-actionable rendering of blockers (names, not ids only).
 
@@ -831,22 +973,25 @@ def _describe_blockers(
     """
     described = "; ".join(
         (
-            f"task {blocker.task_id} is blocked by {_blocker_label(blocker)} "
-            f"({blocker.blocking_task_id}), {blocker.blocking_status.upper()}"
+            f"task {verdict.blocker.task_id} is blocked by "
+            f"{_blocker_label(verdict.blocker)} "
+            f"({verdict.blocker.blocking_task_id}), "
+            f"{verdict.blocker.blocking_status.upper()}"
             + (
                 ""
-                if (age := _blocker_status_age_seconds(blocker, now)) is None
+                if (age := _blocker_status_age_seconds(verdict.blocker, now)) is None
                 else f" for {age:.0f}s"
             )
             + (
-                f" under build {blocker.blocking_status_build_id}"
-                if blocker.blocking_status_build_id is not None
-                else " under an unrecorded build"
+                f" under build {verdict.blocker.blocking_status_build_id}"
+                if verdict.blocker.blocking_status_build_id is not None
+                else " under no recorded build"
             )
+            + f" — {verdict.note}"
         )
-        for blocker in blockers[:_MAX_REPORTED_BLOCKERS]
+        for verdict in verdicts[:_MAX_REPORTED_BLOCKERS]
     )
-    remaining = len(blockers) - _MAX_REPORTED_BLOCKERS
+    remaining = len(verdicts) - _MAX_REPORTED_BLOCKERS
     if remaining > 0:
         described += f"; and {remaining} more"
     if truncated:
@@ -857,7 +1002,7 @@ def _describe_blockers(
     return described
 
 
-def _blocker_remediation(blockers: Sequence[FrontierExternalBlocker]) -> str:
+def _blocker_remediation(verdicts: Sequence[_BlockerVerdict]) -> str:
     """How to get out of it — the part #208 says today's error lacks."""
     remedy = (
         "Retry the blocking task under the build that owns it "
@@ -865,7 +1010,9 @@ def _blocker_remediation(blockers: Sequence[FrontierExternalBlocker]) -> str:
         "to pending — this now works from suspended as well as from "
         "failed/cancelled/skipped — then re-trigger this build"
     )
-    if any(blocker.blocking_status in _RUNNING_STATUSES for blocker in blockers):
+    if any(
+        verdict.blocker.blocking_status in _RUNNING_STATUSES for verdict in verdicts
+    ):
         remedy += (
             ". A blocker stuck RUNNING holds an execution claim no retry can "
             "take: cancel it (POST /api/v1/builds/{build_id}/tasks/{task_id}"
@@ -942,50 +1089,67 @@ async def _handle_terminal(
         # failure.
         now = datetime.now(timezone.utc)
         truncated = frontier.blocked_by_external_truncated
-        blockers = _classify_external_blockers(frontier, config, now)
+        blockers = await _classify_external_blockers(
+            frontier, config, now, registry=registry
+        )
+        waiting = blockers.waiting
         summary.external_blockers += len(frontier.blocked_by_external)
-        summary.external_blockers_waited += len(blockers.waiting)
+        summary.external_blockers_waited += len(waiting)
         summary.external_blockers_fatal += len(blockers.fatal)
 
-        if blockers.waiting and not blockers.fatal:
-            # Waiting on work someone else is doing — the same call the
-            # denied_this_round branch above makes, and for the same reason:
-            # running == 0 here does not mean the environment is idle. The
-            # blocker's completion wakes this scheduler; a lost wake-up is
-            # covered by the watchdog. Logged every pass on purpose: a build
-            # that sits here needs to be diagnosable from the tick logs
-            # alone.
+        if waiting and not blockers.fatal:
+            # Waiting on work another build is doing or is about to do — the
+            # same call the denied_this_round branch above makes, and for the
+            # same reason: running == 0 here does not mean the environment is
+            # idle. The blocker's completion wakes this scheduler; a lost
+            # wake-up is covered by the watchdog. Logged every pass on
+            # purpose: a build that sits here needs to be diagnosable from
+            # the tick logs alone.
             if config.stale_external_blocker_seconds is None:
                 bound_note = " (staleness bound disabled — this wait is unbounded)"
-            elif any(
-                blocker.blocking_status_at is None for blocker in blockers.waiting
-            ):
+            elif any(verdict.blocker.blocking_status_at is None for verdict in waiting):
                 bound_note = (
                     " (a blocker carries no status timestamp, so its wait "
                     "cannot be bounded)"
                 )
             else:
                 bound_note = ""
+            # Spelled out as "executing" vs "queued in a live build" because
+            # the two are different operational situations: one is work in
+            # progress, the other is work another build has not started yet.
+            held_by = " and ".join(
+                part
+                for part in (
+                    f"{len(blockers.executing)} being executed elsewhere"
+                    if blockers.executing
+                    else "",
+                    f"{len(blockers.queued)} queued in a build that is still live"
+                    if blockers.queued
+                    else "",
+                )
+                if part
+            )
             logger.info(
-                f"Build {build_id} has nothing to schedule but is blocked by "
-                f"{len(blockers.waiting)} task(s) running in other build(s); "
-                f"waiting rather than failing{bound_note}: "
-                f"{_describe_blockers(blockers.waiting, now, truncated)}"
+                f"Build {build_id} has nothing runnable or running of its own "
+                f"but is waiting on {len(waiting)} upstream task(s) owned by "
+                f"other builds ({held_by}); waiting rather than failing"
+                f"{bound_note}: {_describe_blockers(waiting, now, truncated)}"
             )
             return None
 
         await _skip_blocked(registry, build_id, summary)
         if blockers.fatal:
             # Precise, actionable failure: which task, its name, its status,
-            # how long it has been in it, and which build owns it — plus how
-            # to release it. The status counts alone (the whole of the old
-            # message) point nowhere near the cause when the cause is not in
-            # this build's task set at all.
+            # how long it has been in it, which build owns it, why that owner
+            # is not going to move it — plus how to release it. The status
+            # counts alone (the whole of the old message) point nowhere near
+            # the cause when the cause is not in this build's task set at all.
             reason = (
-                f"Build is blocked by {len(blockers.fatal)} task(s) owned by "
-                "another build that nobody is executing, and has nothing "
-                f"runnable or running of its own (status counts: {counts}). "
-                f"Blocked by: {_describe_blockers(blockers.fatal, now, truncated)}"
+                f"Build cannot progress: it has nothing runnable or running "
+                f"of its own, and {len(blockers.fatal)} of its task(s) are "
+                "blocked by an upstream owned by another build that no live "
+                f"build is going to run (status counts: {counts}). Blocked "
+                f"by: {_describe_blockers(blockers.fatal, now, truncated)}"
                 f". {_blocker_remediation(blockers.fatal)}"
             )
         else:

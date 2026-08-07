@@ -713,13 +713,14 @@ escape hatch — raise the bound if you mix modes over the same long
 tasks.
 
 **Builds that overlap.** Task state is per environment, so a task another
-build is executing blocks yours. A tick waits that out instead of failing
-the build (bounded by `TickConfig.stale_external_blocker_seconds`, default
-6 hours); a blocker nobody is executing fails the build with a message
-naming the task and the build that owns it. Symptom worth knowing: a tick
-log line saying the build is _"blocked by N task(s) running in other
-build(s); waiting rather than failing"_ means your build is fine and
-waiting on a neighbour. See
+build owns blocks yours. A tick waits that out — whether the other build is
+executing the task or has yet to schedule it — instead of failing the build
+(bounded by `TickConfig.stale_external_blocker_seconds`, default 6 hours);
+a blocker no _live_ build is going to run fails the build with a message
+naming the task, the build that owns it and why that owner will not move
+it. Symptom worth knowing: a tick log line saying the build is _"waiting on
+N upstream task(s) owned by other builds … waiting rather than failing"_
+means your build is fine and waiting on a neighbour. See
 [Cross-build blocking](../concepts/build-execution.md#cross-build-blocking)
 for the recovery path when the blocker is abandoned — including a task left
 SUSPENDED, which a retry (and therefore a re-trigger) now resets.

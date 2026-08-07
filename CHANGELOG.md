@@ -57,23 +57,33 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   a dynamic dependency registered under an earlier build, so it is not in
   the new build's task set at all.
 
-  A tick now reads the frontier's blocking upstreams and acts on them: a
-  blocker **running under another build** is waited out (like a busy
-  concurrency-limit slot — its completion wakes this scheduler), while a
-  blocker **nobody is executing** fails the build immediately, naming the
-  task, its namespace/name, its status, how long it has been in it, the
-  build that owns it, and how to release it. A blocker inside this build's
-  own task set is unchanged: it is already visible in the counts, and still
-  fails the build when it can never run.
+  A tick now reads the frontier's blocking upstreams and asks, for each,
+  whether anyone is going to move it. A blocker **another build is
+  executing** is waited out (like a busy concurrency-limit slot — its
+  completion wakes this scheduler), and so is one **a still-live build has
+  yet to schedule**: that build is going to run it, and failing here would
+  only trade one spurious failure for another. A blocker **no live build is
+  going to run** — its owning build has gone terminal, no build owns its
+  status, or that status could not be resolved — fails the build
+  immediately, naming the task, its namespace/name, its status, how long it
+  has been in it, the build that owns it, why that owner will not move it,
+  and how to release it. A blocker inside this build's own task set is
+  unchanged: it is already visible in the counts, and still fails the build
+  when it can never run.
 
-  The wait is bounded by the new `TickConfig.stale_external_blocker_seconds`
-  (default 6 hours), measured on how long the blocker has been RUNNING
-  rather than on the tick, which is too short-lived to bound anything: past
-  the bound the claim is presumed abandoned and the build fails with the
-  full explanation instead of hanging silently. `None` waits indefinitely.
-  `TickSummary` gains `external_blockers`, `external_blockers_waited` and
-  `external_blockers_fatal`. Requires a stardag-api version matching this
-  SDK; against an older server the blocker list is always empty and
+  Both waits are bounded by the new
+  `TickConfig.stale_external_blocker_seconds` (default 6 hours), measured on
+  how long the blocker has sat in its status rather than on the tick, which
+  is too short-lived to bound anything: past the bound the blocker is
+  presumed abandoned and the build fails with the full explanation instead
+  of hanging silently. `None` waits indefinitely. `TickSummary` gains
+  `external_blockers`, `external_blockers_waited` and
+  `external_blockers_fatal`, and `BuildInfo` gains `status` (the build's
+  derived status, `None` when a server or custom registry does not report
+  it). Owner liveness is resolved only when a build actually looks stalled,
+  and once per owning build per pass, so a healthy build issues no extra
+  requests however often it polls. Requires a stardag-api version matching
+  this SDK; against an older server the blocker list is always empty and
   terminal detection behaves exactly as before.
 
 - **Fixed: re-triggering a reactive build now recovers tasks left

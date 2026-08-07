@@ -220,6 +220,12 @@ class BuildInfo(StardagBaseModel):
     """
 
     id: UUID
+    # The build's *derived* status (computed server-side from its recorded
+    # events, same values as ``BuildFrontier.build_status``): pending /
+    # running / completed / failed / cancelled. None on servers or custom
+    # registries that don't report it — a consumer asking "is this build
+    # still live?" must treat None as unknown rather than as terminal.
+    status: str | None = None
     # Reactive-scheduling marker/owner (see ``BuildFrontier``). None = not
     # reactively scheduled.
     reactive_app_name: str | None = None

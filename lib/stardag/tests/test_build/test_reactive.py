@@ -98,13 +98,22 @@ class FakeReactiveRegistry(NoOpRegistry):
         # this build's tasks (dependency edges are global too) while
         # contributing to neither ``actionable`` nor ``status_counts``.
         self.not_in_build: set[str] = set()
-        # task_id -> the build whose event produced the current status.
-        # Absent means "this build's own doing" (the common case), which is
-        # what makes a task NOT an external blocker.
-        self.status_build_id: dict[str, UUID] = {}
+        # task_id -> the build whose event produced the current status. An
+        # ABSENT key means "this build's own doing" (the common case), which
+        # is what makes a task NOT an external blocker; an explicit None is a
+        # row predating status denormalisation — not this build's doing
+        # either, and with no build to ask about it.
+        self.status_build_id: dict[str, UUID | None] = {}
         # task_id -> (namespace, name), echoed on blocker entries.
         self.task_names: dict[str, tuple[str, str]] = {}
         self.blocked_by_external_truncated = False
+        # Derived status of OTHER builds in the environment, served by
+        # build_get_aio — how the tick decides whether the build owning a
+        # blocker is still going to schedule it. Absent ids 404, and
+        # ``build_get_status`` of None emulates a server that doesn't report
+        # the field.
+        self.other_build_statuses: dict[UUID, str | None] = {}
+        self.build_get_calls: list[UUID] = []
         # Set False to emulate a server predating blocked_by_external: the
         # fields stay at their model defaults, as they would deserialising
         # a response that never carried them.
@@ -135,6 +144,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         blocks: "set[str]",
         status: str = "running",
         owner_build_id: "UUID | None" = None,
+        owner_build_status: "str | None" = "running",
+        owner_build_known: bool = True,
         name: str = "BlockingTask",
         namespace: str = "",
         status_at: "datetime | None" = None,
@@ -145,10 +156,15 @@ class FakeReactiveRegistry(NoOpRegistry):
         Defaults to the #208 A1 shape: RUNNING under some *other* build and
         absent from this build's task set, so it gates ``blocks`` while
         appearing in neither this build's ``running`` nor its
-        ``status_counts``.
+        ``status_counts``. ``owner_build_status`` is what ``build_get`` will
+        report for that other build (None = a server that doesn't report it);
+        ``owner_build_known=False`` makes the lookup 404 instead.
         """
         self.statuses[task_id] = status
-        self.status_build_id[task_id] = owner_build_id or uuid4()
+        owner_build_id = owner_build_id or uuid4()
+        self.status_build_id[task_id] = owner_build_id
+        if owner_build_known:
+            self.other_build_statuses[owner_build_id] = owner_build_status
         self.task_names[task_id] = (namespace, name)
         if status_at is not None:
             self.status_at[task_id] = status_at
@@ -320,6 +336,14 @@ class FakeReactiveRegistry(NoOpRegistry):
         if tick_kwargs is not None:
             self.reactive_tick_kwargs = tick_kwargs
 
+    async def build_get_aio(self, build_id):
+        from stardag.registry import BuildInfo
+
+        self.build_get_calls.append(build_id)
+        if build_id not in self.other_build_statuses:
+            raise NotFoundError(f"Build {build_id} not found", detail="Build not found")
+        return BuildInfo(id=build_id, status=self.other_build_statuses[build_id])
+
     async def build_notify_aio(self, build_id):
         self.needs_tick = True
 
@@ -370,8 +394,11 @@ class FakeReactiveRegistry(NoOpRegistry):
                         continue
                     if self.statuses[up] == "completed":
                         continue
-                    if self.status_build_id.get(up, build_id) == build_id:
+                    if up not in self.status_build_id:
                         continue  # this build's own doing — not external
+                    owner_id = self.status_build_id[up]
+                    if owner_id == build_id:
+                        continue
                     namespace, name = self.task_names.get(up, ("", up))
                     blocked_by_external.append(
                         FrontierExternalBlocker(
@@ -381,7 +408,7 @@ class FakeReactiveRegistry(NoOpRegistry):
                             blocking_task_name=name,
                             blocking_status=self.statuses[up],
                             blocking_status_at=self.status_at.get(up),
-                            blocking_status_build_id=self.status_build_id[up],
+                            blocking_status_build_id=owner_id,
                             blocking_in_build=up not in self.not_in_build,
                         )
                     )
@@ -1782,6 +1809,9 @@ class TestExternalBlockers:
         blocker_status: str = "running",
         blocker_age_seconds: float | None = 60.0,
         in_build: bool = False,
+        owner_build_id: "UUID | None" = None,
+        owner_build_status: "str | None" = "running",
+        owner_build_known: bool = True,
     ):
         """A build whose only task is gated by an upstream it does not own."""
         (root,) = _chain("ext-blocked-root")
@@ -1796,6 +1826,9 @@ class TestExternalBlockers:
                 else datetime.now(timezone.utc) - timedelta(seconds=blocker_age_seconds)
             ),
             in_build=in_build,
+            owner_build_id=owner_build_id,
+            owner_build_status=owner_build_status,
+            owner_build_known=owner_build_known,
             namespace="pipelines",
             name="Ingest",
         )
@@ -1890,11 +1923,12 @@ class TestExternalBlockers:
         blocker_status: str,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
-        """Nobody is executing the blocker and this build will never schedule
-        it (it is not in this build's task set), so waiting would be waiting
-        forever — fail now, naming the task and the build that owns it."""
+        """Nobody is executing the blocker, the build that owns it has gone
+        terminal, and this build will never schedule it (it is not in this
+        build's task set) — so waiting would be waiting forever. Fail now,
+        naming the task and the build that owns it."""
         _, registry, locks, executor, store = self._blocked_build(
-            blocker_status=blocker_status
+            blocker_status=blocker_status, owner_build_status="completed"
         )
 
         summary = await run_tick_aio(
@@ -1917,6 +1951,166 @@ class TestExternalBlockers:
         # RUNNING blocker needs the cancel-first hint.
         assert "/retry" in message
         assert "release the claim" not in message
+
+    @pytest.mark.parametrize("owner_build_status", ["running", "pending"])
+    async def test_non_running_blocker_of_a_live_build_waits(
+        self,
+        owner_build_status: str,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """A PENDING blocker belonging to a build that is still live *will* be
+        scheduled by that build — failing here would be a brand-new spurious
+        failure, the very class of bug being fixed. A build the server still
+        reports as pending counts as live too: it may yet start, and the
+        staleness bound is what keeps that from being an unbounded wait."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_status=owner_build_status
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert registry.build_status == "running"
+        assert summary.external_blockers_waited == 1
+        assert summary.external_blockers_fatal == 0
+
+    async def test_non_running_blocker_of_a_live_build_is_still_bounded(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The owner being live is not a licence to wait forever: a build that
+        has left a task pending past the bound is not making progress on it."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending",
+            owner_build_status="running",
+            blocker_age_seconds=60 * 60 * 24,
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert "staleness bound" in (registry.build_error_message or "")
+
+    async def test_blocker_with_no_status_owning_build_fails(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """No build owns the blocker's status (a row predating status
+        denormalisation), so no status-moving event was ever recorded against
+        it — there is no evidence anyone intends to run it, and no build to
+        ask. Fail, with the remediation intact."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending"
+        )
+        registry.status_build_id[self.BLOCKER_ID] = None
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert registry.build_get_calls == []  # nothing to look up
+        message = registry.build_error_message or ""
+        assert "no build owns its status" in message
+        assert "/retry" in message
+
+    async def test_failed_owner_lookup_fails_without_propagating(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An unresolvable owner (deleted build, unreachable registry) is not
+        evidence of life: the build fails with a precise message rather than
+        the lookup error escaping the tick."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_known=False
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert "status is unknown" in (registry.build_error_message or "")
+
+    async def test_server_not_reporting_build_status_fails(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Same treatment for a server (or custom registry) that doesn't
+        report the derived build status: the field defaults to None, unknown
+        is not evidence of life, and the message says so."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_status=None
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert "status is unknown" in (registry.build_error_message or "")
+
+    async def test_owner_status_is_resolved_once_per_build(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A wide DAG stalled behind one build yields one blocker entry per
+        blocked edge, all naming the same owner — that must cost one request,
+        not one per entry."""
+        root, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_id=(owner := uuid4())
+        )
+        sibling = SyncOnlyTask(name="ext-memo-sibling")
+        store.save_task(sibling)
+        registry.add_task(str(sibling.id), status="pending")
+        registry.add_blocking_task(
+            "second-blocker",
+            blocks={str(sibling.id)},
+            status="pending",
+            owner_build_id=owner,  # same owner as the first blocker
+            namespace="pipelines",
+            name="Transform",
+        )
+        registry.build_get_calls.clear()
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(linger_seconds=0.0, poll_interval_seconds=0.01),
+        )
+
+        assert summary.external_blockers_waited == 2
+        assert registry.build_get_calls == [owner]
 
     async def test_in_build_blocker_does_not_cause_a_wait(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -2012,6 +2206,7 @@ class TestExternalBlockers:
             "dead-blocker",
             blocks={str(root.id)},
             status="suspended",
+            owner_build_status="cancelled",
             namespace="pipelines",
             name="Abandoned",
             status_at=datetime.now(timezone.utc),
@@ -2041,7 +2236,7 @@ class TestExternalBlockers:
         """The server caps its blocker list; the failure must not read as an
         exhaustive account of what is holding the build back."""
         _, registry, locks, executor, store = self._blocked_build(
-            blocker_status="suspended"
+            blocker_status="suspended", owner_build_status="failed"
         )
         registry.blocked_by_external_truncated = True
 

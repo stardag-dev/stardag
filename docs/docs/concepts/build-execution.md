@@ -168,16 +168,24 @@ not own:
 
 - **A blocker another build is running** — the build waits, exactly as it
   waits for a busy concurrency-limit slot. The blocker's completion wakes
-  this scheduler, and the watchdog covers a lost wake-up. The wait is
-  bounded by `TickConfig.stale_external_blocker_seconds` (default 6 hours,
-  measured on how long the blocker has been RUNNING, not on this tick):
-  past the bound the claim is presumed abandoned and the build fails rather
-  than hanging silently. Raise it if your tasks routinely run longer;
-  `None` waits indefinitely.
-- **A blocker nobody is running** (pending, suspended, failed, cancelled or
-  skipped, and not part of this build) — nothing is going to move it, so
-  the build fails immediately, naming the blocking task, its status, how
-  long it has been in it, and the build that owns it.
+  this scheduler, and the watchdog covers a lost wake-up.
+- **A blocker another build has yet to schedule** (pending or suspended,
+  under a build that is itself still live) — the build waits too. That
+  build is going to run it; failing here would just trade one spurious
+  failure for another.
+- **A blocker no live build is going to run** — its owning build has gone
+  terminal, no build owns its status at all, or that status could not be
+  resolved. Nothing is going to move it, so the build fails immediately,
+  naming the blocking task, its status, how long it has been in it, the
+  build that owns it, and why that owner will not move it.
+
+Both waits are bounded by `TickConfig.stale_external_blocker_seconds`
+(default 6 hours, measured on how long the blocker has sat in its status,
+not on this tick): past the bound the blocker is presumed abandoned and the
+build fails rather than hanging silently. Raise it if your tasks routinely
+run longer; `None` waits indefinitely. Owner liveness is resolved only when
+a build actually looks stalled, and once per owning build, so a healthy
+build never pays for it.
 
 **Recovering a build blocked on a task from another build.** Retry the
 blocking task (`POST /api/v1/builds/{build_id}/tasks/{task_id}/retry`,
