@@ -39,14 +39,17 @@ class FrontierTaskRef(StardagBaseModel):
     # while ``latest_status == "running"``: every other transition releases
     # the claim, and the server clears this with it.
     latest_status_expires_at: datetime | None = None
-    # How many times execution has been *started* for this task in THIS
-    # build — the budget a reactive tick's ``TickConfig.max_attempts``
-    # spends (see ``stardag.build._reactive``).
+    # How many times execution has been *started* for this task in the
+    # build's current **round** — the budget a reactive tick's
+    # ``TickConfig.max_attempts`` spends (see ``stardag.build._reactive``).
     #
-    # Per *build*, deliberately: a task that failed twice under an earlier
-    # build must not arrive at a fresh build with its budget already gone,
-    # which is what makes "re-trigger it" a real escape from an exhausted
-    # budget rather than a no-op.
+    # A round runs from the build's most recent BUILD_RESUMED event, or
+    # from the build's beginning if it has never been resumed. So the count
+    # is scoped tighter than the build: re-triggering an existing build id
+    # emits BUILD_RESUMED and thereby starts a fresh round, which is what
+    # makes "re-trigger it" a real escape from an exhausted budget rather
+    # than a no-op. A *bare* retry (the retry route, the UI's Retry,
+    # ``stardag tasks retry``) emits no such event and does not reset it.
     #
     # The server collapses *runs of consecutive* TASK_STARTED events into
     # one attempt, so the several starts one execution records — the

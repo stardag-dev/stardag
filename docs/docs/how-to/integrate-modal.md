@@ -738,13 +738,13 @@ Modal's side there is nothing to retry, and from the build's side those
 used to end a `FAIL_FAST` build outright.
 
 Reactive ticks therefore carry `TickConfig.max_attempts` (default **2**), a
-per-task, per-build budget on how many executions the _scheduler_ starts.
-It applies only to failures a tick records itself — a failed spawn, an
-execution Modal reports as failed, and a task whose execution claim lapsed
-with no ref left to probe (the preemption/OOM shape). A task that simply
-raises never reaches it: the worker self-reports the failure, which is what
-`retries=` is for. Set the two together — `retries=` for flaky task code,
-`max_attempts` for flaky infrastructure:
+per-task budget on how many executions the _scheduler_ starts in one build
+round. It applies only to failures a tick records itself — a failed spawn,
+an execution Modal reports as failed, and a task whose execution claim
+lapsed with no ref left to probe (the preemption/OOM shape). A task that
+simply raises never reaches it: the worker self-reports the failure, which
+is what `retries=` is for. Set the two together — `retries=` for flaky task
+code, `max_attempts` for flaky infrastructure:
 
 ```{.python notest}
 app.build_trigger(
@@ -753,13 +753,28 @@ app.build_trigger(
 ```
 
 `max_attempts=1` restores the previous behaviour (record the failure, never
-respawn). The budget is per build and a retry does **not** reset it: an
-operator clicking Retry in the UI on a task already at budget gets a
-succeeded retry and a scheduler that refuses to start it — the tick logs
-that case explicitly and fails the task again rather than leaving it
-pending and inert. To get more attempts, re-trigger with a raised
-`max_attempts` (a re-trigger may update the stored tick config) or trigger
-a fresh build. See
+respawn).
+
+**A build that ran out of attempts is recovered by re-triggering it.** The
+budget is scoped to a build _round_, and re-triggering an existing build id
+records `BUILD_RESUMED` ahead of its discovery retries, so every task
+starts the new round at zero:
+
+```{.python notest}
+# Resets the attempt budget and re-runs what failed. Optionally raise the
+# budget for the new round at the same time.
+app.build_trigger(
+    root_task, build_id=result.build_id, reactive=True,
+    tick_kwargs={"max_attempts": 4},
+)
+```
+
+A **bare** retry does not do this. Clicking Retry in the UI (or running
+`stardag tasks retry`) flips the task to pending without starting a new
+round, so on a task already at budget the retry succeeds and the scheduler
+still refuses to start it. The tick logs that case explicitly, names the
+re-trigger, and fails the task again rather than leaving it pending and
+inert. See
 [Task retries](../concepts/build-execution.md#task-retries-the-failures-no-backend-can-retry-for-you).
 
 **Claim expiry and your worker `timeout`.** Every start a tick records

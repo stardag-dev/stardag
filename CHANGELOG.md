@@ -18,7 +18,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `FAIL_FAST`, any one of those ended the whole build.
 
   `TickConfig.max_attempts` (default **2**, also accepted as a Modal
-  `tick_kwarg`) is a lifetime budget, per task per build, on how many
+  `tick_kwarg`) is a budget, per task per build _round_, on how many
   executions the scheduler starts. A failure the tick records is reset to
   pending and picked up on the next pass while the budget allows. The
   budget covers exactly the failures no backend can retry: a failed spawn,
@@ -29,16 +29,24 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   worker self-reports that and the task leaves the frontier. Set
   `max_attempts=1` for the previous behaviour.
 
+  A **round** runs from the build's most recent `BUILD_RESUMED` event, which
+  makes the recovery path the one you already reach for: **re-triggering the
+  build** (`build_trigger(..., build_id=<this build>, reactive=True)`)
+  records `BUILD_RESUMED` ahead of its discovery retries, so every task
+  starts the new round at zero — optionally with a raised budget via
+  `tick_kwargs={"max_attempts": N}`. A **bare** retry (the UI's Retry,
+  `stardag tasks retry`, the retry route) does not start a round and does
+  not reset anything.
+
   Exhaustion is loud in both directions. A tick that declines to respawn
-  names the task, the attempts spent and the budget. And because a retry
-  does not reset the budget, an operator clicking Retry in the UI (or
-  running `stardag tasks retry`) on a task already at budget gets a retry
-  that succeeds server-side and a scheduler that then refuses to start it —
-  previously a silent no-op; now the tick says so explicitly, fails the task
-  again rather than leaving it pending and inert, and names both escapes
-  (raise `max_attempts`, or trigger a fresh build whose count starts at
-  zero). New `TickSummary` counters `retried`, `retry_exhausted` and
-  `budget_denied` carry the same facts into the persisted per-build summary.
+  names the task, the attempts spent, the budget and the re-trigger. And on
+  a task already at budget, a bare retry succeeds server-side while the
+  scheduler still refuses to start it — previously a silent no-op; now the
+  tick says exactly that, distinguishes it from a re-trigger, fails the task
+  again rather than leaving it pending and inert, and spells out the
+  re-trigger that would work. New `TickSummary` counters `retried`,
+  `retry_exhausted` and `budget_denied` carry the same facts into the
+  persisted per-build summary.
 
   Resuming a **suspended** task is never budget-gated: a dynamic-dependency
   yield records a fresh start, so gating resumption would cap dynamic

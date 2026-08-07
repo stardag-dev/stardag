@@ -47,7 +47,7 @@ with detached support. Requirements and current limitations:
   older servers without the skip-blocked endpoint are tolerated).
 
 **Retries.** A failure a tick *observes or causes* is retried, up to
-``TickConfig.max_attempts`` attempts per task per build. That is a
+``TickConfig.max_attempts`` attempts per task per build *round*. That is a
 narrower promise than it sounds, and the narrowness is the point: the only
 failures reaching the tick are the ones no execution backend can retry for
 you — a spawn that failed before any container existed, and an execution
@@ -61,14 +61,17 @@ infrastructure failures, not on deterministic ones — and a failure that
 be rehydrated) is excluded explicitly.
 
 A tick is short-lived and remembers nothing, so the count comes from the
-server: ``FrontierTaskRef.attempt_count``, per task per build, riding the
-frontier the tick already fetches. It is a lifetime budget for the build —
-a retry does **not** reset it, and neither does re-triggering the same
-build id. The two ways out are raising ``max_attempts`` (a re-trigger of
-the same build may update the stored tick config) and triggering a *fresh*
-build, whose count starts at zero. Both exhaustion messages name both,
-because the failure mode of a budget nobody can see is an operator
-clicking Retry and watching nothing happen.
+server: ``FrontierTaskRef.attempt_count``, riding the frontier the tick
+already fetches. Its window is the build's current **round** — starts
+since the most recent BUILD_RESUMED, or since the build began. So the
+budget is spent for the round, not for all time, and the escape is the one
+operators already reach for: **re-trigger the build**, which emits
+BUILD_RESUMED ahead of its discovery retries and starts every task at
+zero again. A *bare* retry (the retry route, the UI's Retry button,
+``stardag tasks retry``) emits no such event and does **not** reset the
+budget — which is exactly the trap the second exhaustion message exists to
+name, because from the operator's side the retry succeeds and then nothing
+happens.
 
 A build with nothing actionable and nothing running is *not* automatically
 stuck. Task rows and dependency edges are per environment, so an upstream
@@ -545,13 +548,18 @@ class TickConfig:
     linger_seconds: float = 120.0
     poll_interval_seconds: float = 3.0
     fail_mode: FailMode = FailMode.FAIL_FAST
-    # Lifetime budget, per task per build, on how many executions a tick
+    # Budget, per task per build **round**, on how many executions a tick
     # will start for one task — counted server-side and read off the
     # frontier as ``FrontierTaskRef.attempt_count``, since a tick is
-    # short-lived and remembers nothing. ``1`` disables retrying entirely:
-    # a failure is recorded and never respawned, exactly as before this
-    # existed — and, being a budget of one start, a task reset to PENDING
-    # after its one attempt is refused rather than started again.
+    # short-lived and remembers nothing. A round runs from the build's most
+    # recent BUILD_RESUMED event (so re-triggering an existing build id
+    # starts a fresh one and resets every task's count) or from the build's
+    # beginning. A bare retry emits no such event and does not reset it.
+    #
+    # ``1`` disables retrying entirely: a failure is recorded and never
+    # respawned, exactly as before this existed — and, being a budget of
+    # one start, a task reset to PENDING after its one attempt in the
+    # round is refused rather than started again.
     #
     # **Why the default is 2, not 1.** 1 would be the conservative choice
     # if the failures on this path were a random sample of failures — you
@@ -671,7 +679,7 @@ class TickSummary:
     skipped: int = 0
     # --- attempt budget (TickConfig.max_attempts) ---
     # Failures this tick recorded and then reset to PENDING because the
-    # task's per-build attempt budget still had room.
+    # task's attempt budget for this build round still had room.
     retried: int = 0
     # Failures this tick recorded and deliberately left failed because the
     # budget was spent. Under FAIL_FAST every one of these fails the build
@@ -679,12 +687,13 @@ class TickSummary:
     # "why did this build fail when the failure looked transient?".
     retry_exhausted: int = 0
     # Starts this tick refused to make because the task arrived PENDING
-    # with its budget already spent — i.e. something (an operator's Retry,
-    # the API's retry endpoint) put a budget-exhausted task back in the
-    # frontier. Counted separately from ``retry_exhausted`` because it is a
-    # different event with a different remedy: not "a failure we won't
-    # retry" but "a retry that cannot do anything". See
-    # ``_act_on_frontier``'s budget gate.
+    # with its budget already spent — i.e. a *bare* retry (the API's retry
+    # route, the UI's Retry, ``stardag tasks retry``) put a budget-
+    # exhausted task back in the frontier without starting a new round.
+    # Counted separately from ``retry_exhausted`` because it is a different
+    # event with a different remedy: not "a failure we won't retry" but "a
+    # retry that cannot do anything". See ``_act_on_frontier``'s budget
+    # gate.
     budget_denied: int = 0
     # Cross-build blocking, summed over the terminal evaluations of this
     # tick (like limit_denied, these are counts of observations, not of
@@ -1224,7 +1233,7 @@ async def _record_task_failure(
             # is the only signal that a *configured* retry policy is inert.
             logger.warning(
                 f"Task {task.id} of build {build_id} failed and will not be "
-                "retried: this registry does not report per-build attempt "
+                "retried: this registry does not report per-round attempt "
                 "counts, so TickConfig.max_attempts "
                 f"({config.max_attempts}) cannot be enforced and retrying "
                 "would be unbounded. Upgrade stardag-api to enable "
@@ -1243,14 +1252,19 @@ async def _record_task_failure(
             summary.retry_exhausted += 1
             logger.error(
                 f"Task {task.id} of build {build_id} failed and will NOT be "
-                "retried: its per-build attempt budget is spent "
+                "retried: its attempt budget for this build round is spent "
                 f"({_attempts_phrase(attempts_spent, config.max_attempts)}). "
-                "Retrying the task does not reset the budget — the budget is "
-                "per build. To get more attempts, either raise "
-                "TickConfig.max_attempts (a re-trigger of this same build "
-                'may update it, e.g. tick_kwargs={"max_attempts": 4}) or '
-                "trigger a fresh build, whose count starts at zero. Last "
-                f"failure: {reason}"
+                "To run it again, RE-TRIGGER THIS BUILD — "
+                f"build_trigger(..., build_id={build_id}, reactive=True) — "
+                "which starts a new round and resets every task's attempt "
+                "count to zero. Retrying the task on its own does NOT reset "
+                "the count: a bare retry (the UI's Retry, `stardag tasks "
+                "retry`, the retry API route) makes the task pending again "
+                "but leaves the budget spent, so this scheduler would "
+                "decline to start it. If the task needs more attempts per "
+                "round, re-trigger with a raised budget, e.g. "
+                'tick_kwargs={"max_attempts": 4}. Last failure: '
+                f"{reason}"
             )
         return
 
@@ -1344,17 +1358,23 @@ async def _act_on_frontier(
 
     **The budget gate.** A task arriving PENDING with its budget already
     spent is refused a start and failed again, with a message saying why.
-    That shape is reachable in exactly one way: something reset a
-    budget-exhausted task — an operator's Retry in the UI, ``stardag tasks
-    retry``, the API's retry route, or a re-trigger of this same build id
-    (its discovery resets failed tasks the same way). The reset *succeeds*
-    server-side, so
-    without the gate saying something the operator sees a task go PENDING
-    and then quietly do nothing at all. Resumption of a **SUSPENDED** task
-    is never gated: a dynamic-dependency yield records a fresh start, so
-    gating there would refuse to resume any task that yielded more times
-    than the budget allows — turning a retry policy into a cap on dynamic
-    dependencies.
+    Exactly one thing produces that shape: a **bare retry** of a
+    budget-exhausted task — the UI's Retry button, ``stardag tasks retry``,
+    the API's retry route. Those flip the status without recording
+    BUILD_RESUMED, so the round the count is measured against is unchanged
+    and the task comes back pending with nothing left to spend. The retry
+    *succeeds* server-side, so without the gate saying something the
+    operator sees a task go PENDING and then quietly do nothing at all.
+
+    A **re-trigger** is not this case and never lands here: it records
+    BUILD_RESUMED *before* its discovery retries the failed tasks, so the
+    round boundary is ahead of them and they arrive at zero. That is why
+    the message points at a re-trigger rather than at a retry.
+
+    Resumption of a **SUSPENDED** task is never gated either: a
+    dynamic-dependency yield records a fresh start, so gating there would
+    refuse to resume any task that yielded more times than the budget
+    allows — turning a retry policy into a cap on dynamic dependencies.
 
     **Counters.** ``summary``'s fields and the two returned values are
     mutated from several coroutines. That is safe without a lock because
@@ -1440,8 +1460,10 @@ async def _act_on_frontier(
             item.attempt_count, config.max_attempts
         ):
             # PENDING with the budget already spent — see the docstring's
-            # "budget gate". Only a reset gets a task into this shape, and
-            # the gate exists so that reset is not silently inert.
+            # "budget gate". Only a BARE retry gets a task into this shape
+            # (a re-trigger records BUILD_RESUMED first, so its retried
+            # tasks arrive at zero), and the gate exists so that retry is
+            # not silently inert.
             #
             # SUSPENDED is excluded by the status check above, on purpose:
             # resuming a task that yielded dynamic dependencies records a
@@ -1501,28 +1523,30 @@ async def _act_on_frontier(
         spent = item.attempt_count or 0
         logger.error(
             f"Task {task.id} of build {build_id} is PENDING again with its "
-            "per-build attempt budget already spent "
-            f"({_attempts_phrase(spent, config.max_attempts)}), "
-            "so something reset it — most likely Retry in the UI, `stardag "
-            "tasks retry`, the retry API route, or a re-trigger of this same "
-            "build id. That reset SUCCEEDED, "
-            "but the scheduler will not start the task again: its per-build "
-            "attempt budget is already spent, and retrying a task does not "
-            "reset the budget. Failing it again rather than leaving it "
-            "PENDING and inert, so this is visible instead of looking like "
-            "nothing happened. To actually re-run this task, either raise "
-            "TickConfig.max_attempts (a re-trigger of this same build may "
-            'update it, e.g. tick_kwargs={"max_attempts": 4}) or trigger a '
-            "fresh build — the budget is per build, so a new build's count "
-            "starts at zero."
+            "attempt budget for this build round already spent "
+            f"({_attempts_phrase(spent, config.max_attempts)}), so a BARE "
+            "RETRY put it back — the UI's Retry button, `stardag tasks "
+            "retry`, or the retry API route. That retry SUCCEEDED: the task "
+            "really is pending again. But a bare retry does not start a new "
+            "build round, so the attempt count it is measured against is "
+            "unchanged, and the scheduler will not start it. Failing it "
+            "again rather than leaving it PENDING and inert, so this is "
+            "visible instead of looking like nothing happened. What you "
+            "wanted is a RE-TRIGGER of this build — "
+            f"build_trigger(..., build_id={build_id}, reactive=True) — which "
+            "records BUILD_RESUMED, starts a new round, resets every task's "
+            "attempt count to zero and re-runs exactly this task. Add "
+            'tick_kwargs={"max_attempts": 4} to the re-trigger if it needs '
+            "more attempts per round."
         )
         await _record_task_failure(
             task,
             (
                 f"Attempt budget spent ({spent} of {config.max_attempts} "
-                "allowed attempt(s) in this build). Retrying the task does "
-                "not reset the budget: raise TickConfig.max_attempts, or "
-                "trigger a fresh build."
+                "allowed attempt(s) in this build round). A bare retry does "
+                "not reset it — re-trigger this build "
+                f"(build_id={build_id}) to start a new round, optionally "
+                'with tick_kwargs={"max_attempts": N}.'
             ),
             build_id=build_id,
             registry=registry,

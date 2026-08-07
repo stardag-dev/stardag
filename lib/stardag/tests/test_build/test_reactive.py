@@ -106,13 +106,18 @@ class FakeReactiveRegistry(NoOpRegistry):
         # claim_ttl_seconds as sent on each start: task_id -> list of TTLs
         # (a spawn records two starts — the claim and the post-spawn ref).
         self.sent_claim_ttls: dict[str, list[int | None]] = {}
-        # --- per-build attempt counting (TickConfig.max_attempts) ---
-        # Mirrors the server: runs of CONSECUTIVE starts collapse into one
-        # attempt, so a spawn's two starts (claim + ref) count once, while a
-        # start separated from the previous one by a failure/completion/
-        # retry begins a new attempt.
-        self.attempt_counts: dict[str, int] = {}
-        self._last_event_was_start: dict[str, bool] = {}
+        # --- attempt counting per build ROUND (TickConfig.max_attempts) ---
+        # Rather than keeping a number, keep the lifecycle events and derive
+        # the count the way the server does (see ``attempt_count``): True is
+        # a start, False is anything else. Two rules apply on top —
+        # CONSECUTIVE starts collapse into one attempt (a spawn's claim +
+        # ref starts count once), and only events after the build's most
+        # recent BUILD_RESUMED are counted at all.
+        self.task_events: dict[str, list[bool]] = {}
+        # Where each task's current round begins in its event list — moved
+        # to the end of the list by ``build_resume_aio``. Absent = the build
+        # has never been resumed, so the round is the whole list.
+        self.round_start: dict[str, int] = {}
         # Set False to emulate a server predating attempt_count: the field
         # is absent from the payload, so the model default (None) applies —
         # which is what makes "this registry cannot count" distinguishable
@@ -179,17 +184,37 @@ class FakeReactiveRegistry(NoOpRegistry):
         if expires_at is not None:
             self.expires_at[task_id] = expires_at
         if attempt_count is not None:
-            # Pre-seed the count for a task whose earlier attempts this test
+            # Pre-seed the history of a task whose earlier attempts this test
             # does not simulate start-by-start (the common shape: a task
-            # fabricated straight into RUNNING or PENDING).
-            self.attempt_counts[task_id] = attempt_count
-            self._last_event_was_start[task_id] = status == "running"
+            # fabricated straight into RUNNING or PENDING). Each attempt is
+            # a start followed by something else; a RUNNING task's last
+            # attempt is still open, so it ends on its start.
+            events: list[bool] = []
+            for _ in range(attempt_count):
+                events.extend([True, False])
+            if status == "running" and events:
+                events.pop()
+            self.task_events[task_id] = events
 
     def _count_event(self, task_id: str, *, is_start: bool) -> None:
-        """Count one lifecycle event the way the server does."""
-        if is_start and not self._last_event_was_start.get(task_id, False):
-            self.attempt_counts[task_id] = self.attempt_counts.get(task_id, 0) + 1
-        self._last_event_was_start[task_id] = is_start
+        """Record one lifecycle event (True = a start)."""
+        self.task_events.setdefault(task_id, []).append(is_start)
+
+    def attempt_count(self, task_id: str) -> int:
+        """Starts in the current round, collapsing consecutive ones.
+
+        The server's rule, applied to the recorded history rather than
+        maintained as a counter — so a round boundary needs no bookkeeping
+        beyond noting where it fell.
+        """
+        events = self.task_events.get(task_id, [])
+        count = 0
+        previous_was_start = False
+        for is_start in events[self.round_start.get(task_id, 0) :]:
+            if is_start and not previous_was_start:
+                count += 1
+            previous_was_start = is_start
+        return count
 
     def add_blocking_task(
         self,
@@ -463,6 +488,19 @@ class FakeReactiveRegistry(NoOpRegistry):
             raise NotFoundError(f"Build {build_id} not found", detail="Build not found")
         return BuildInfo(id=build_id, status=self.other_build_statuses[build_id])
 
+    async def build_resume_aio(self, build_id, executor_metadata=None):
+        """BUILD_RESUMED — what a re-trigger of this build id records.
+
+        It starts a new round, and attempt counts are windowed to the
+        round, so every task's count restarts at zero. The tick never calls
+        this; tests use it the way ``_trigger_reactive`` does, BEFORE the
+        discovery retries that reset failed tasks to pending.
+        """
+        self.calls.append(("build_resume", None))
+        self.build_status = "running"
+        for tid, events in self.task_events.items():
+            self.round_start[tid] = len(events)
+
     async def build_notify_aio(self, build_id):
         self.needs_tick = True
 
@@ -483,9 +521,7 @@ class FakeReactiveRegistry(NoOpRegistry):
                 latest_status_at=self.status_at.get(tid),
                 latest_status_expires_at=self.expires_at.get(tid),
                 attempt_count=(
-                    self.attempt_counts.get(tid, 0)
-                    if self.serves_attempt_counts
-                    else None
+                    self.attempt_count(tid) if self.serves_attempt_counts else None
                 ),
             )
 
@@ -1372,7 +1408,7 @@ class TestRunningWithoutRef:
         assert executor.spawned == [root.id]
         # One attempt closed by the expiry, one opened by the respawn — not
         # three. (The respawn's claim + ref starts collapse into one.)
-        assert registry.attempt_counts[str(root.id)] == 2
+        assert registry.attempt_count(str(root.id)) == 2
 
     async def test_live_claim_without_ref_is_left(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -3498,7 +3534,7 @@ class TestAttemptBudget:
         assert registry.build_status == "failed"
         # Each spawn's two starts (claim + ref-recording) collapse into one
         # attempt, so two attempts is what the budget counted.
-        assert registry.attempt_counts[str(root.id)] == 2
+        assert registry.attempt_count(str(root.id)) == 2
 
     async def test_probed_dead_execution_under_budget_is_respawned(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -3543,7 +3579,7 @@ class TestAttemptBudget:
         self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         """Budget spent: no respawn, and a message naming the task, the
-        count, the budget and both ways out."""
+        count, the budget and the escape that actually works."""
         (root,) = _chain("budget-probe-exhausted")
         executor = FakeTickExecutor(
             statuses={"fc-dead": DetachedExecutionStatus.FAILED}
@@ -3578,17 +3614,23 @@ class TestAttemptBudget:
         assert str(root.id) in messages
         assert "will NOT be retried" in messages
         assert "2 of 2 allowed attempt(s) spent" in messages
-        assert "TickConfig.max_attempts" in messages
-        assert "trigger a fresh build" in messages
+        # The escape is the re-trigger, and the message must not leave the
+        # reader thinking a bare retry would have done.
+        assert "RE-TRIGGER THIS BUILD" in messages
+        assert "starts a new round and resets every task's attempt count" in messages
+        assert "Retrying the task on its own does NOT reset the count" in messages
+        assert 'tick_kwargs={"max_attempts": 4}' in messages
 
-    async def test_operator_retry_at_budget_is_refused_with_the_escape(
+    async def test_bare_retry_at_budget_is_refused_and_names_the_re_trigger(
         self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """The trap: an operator clicks Retry on a task already at budget.
+        """The trap: a *bare* retry of a task already at budget.
 
-        The retry succeeds server-side and the task returns to PENDING, so
-        without this the scheduler would simply never start it and nothing
-        would appear to happen at all.
+        The retry succeeds server-side and the task returns to PENDING, but
+        it records no BUILD_RESUMED, so the round the count is measured
+        against is unchanged and the scheduler would never start it. The
+        distinction from a re-trigger (which does reset) is the whole
+        reason this message exists.
         """
         (root,) = _chain("budget-operator-retry")
         registry, locks, executor, store = _setup([root], auto_complete=False)
@@ -3613,15 +3655,67 @@ class TestAttemptBudget:
         assert summary.terminal_status == "failed"
         messages = "\n".join(record.getMessage() for record in caplog.records)
         assert str(root.id) in messages
-        assert "Retry in the UI" in messages
-        assert "That reset SUCCEEDED" in messages
-        assert "retrying a task does not reset the budget" in messages
-        assert "trigger a fresh build" in messages
+        assert "a BARE RETRY put it back" in messages
+        assert "That retry SUCCEEDED" in messages
+        assert "a bare retry does not start a new build round" in messages
+        assert "What you wanted is a RE-TRIGGER of this build" in messages
         # The operator reads the task, not only the tick's logs.
         reason = registry.fail_reasons[str(root.id)][0]
         assert reason is not None
         assert "Attempt budget spent (2 of 2 allowed attempt(s)" in reason
-        assert "trigger a fresh build" in reason
+        assert "A bare retry does not reset it" in reason
+        assert "re-trigger this build" in reason
+
+    async def test_a_re_trigger_starts_a_new_round_and_resets_the_budget(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The escape both exhaustion messages point at, end to end.
+
+        A re-trigger of an existing build id records BUILD_RESUMED *before*
+        its discovery retries the failed tasks, so the round boundary lands
+        ahead of them and they arrive at zero — the same task the tick
+        refused a moment ago is now an ordinary spawn candidate.
+        """
+        build_id = uuid4()
+        (root,) = _chain("budget-round-reset")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(str(root.id), status="pending", attempt_count=2)
+
+        refused = await run_tick_aio(
+            build_id,
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert refused.budget_denied == 1
+        assert executor.spawned == []
+        assert registry.build_status == "failed"
+
+        # Exactly what ``_trigger_reactive`` does, in exactly that order:
+        # resume the build (the round boundary), then let discovery reset
+        # the failed task to pending.
+        await registry.build_resume_aio(build_id)
+        await registry.task_retry_aio(build_id, root)
+        assert registry.attempt_count(str(root.id)) == 0
+
+        resumed = await run_tick_aio(
+            build_id,
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert resumed.budget_denied == 0
+        assert resumed.spawned == 1
+        assert executor.spawned == [root.id]
+        # One attempt into the new round (the spawn's claim + ref starts
+        # collapse), with the previous round's two no longer counted.
+        assert registry.attempt_count(str(root.id)) == 1
 
     async def test_a_zero_attempt_count_never_denies_a_start(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -3695,7 +3789,7 @@ class TestAttemptBudget:
         assert summary.retried == 0
         assert summary.retry_exhausted == 0
         assert ("retry", str(root.id)) not in registry.calls
-        assert registry.attempt_counts.get(str(root.id), 0) == 0
+        assert registry.attempt_count(str(root.id)) == 0
         assert summary.terminal_status == "failed"
 
     async def test_max_attempts_one_records_the_failure_and_never_respawns(
@@ -3755,7 +3849,7 @@ class TestAttemptBudget:
         assert summary.budget_denied == 0
         assert summary.terminal_status == "failed"
         messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert "does not report per-build attempt counts" in messages
+        assert "does not report per-round attempt counts" in messages
         assert "Upgrade stardag-api" in messages
 
     async def test_summary_counters_are_reported_to_the_registry(

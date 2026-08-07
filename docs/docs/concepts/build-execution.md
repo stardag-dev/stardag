@@ -215,7 +215,7 @@ instance preempted mid-run, a worker that died after writing part of its
 output. Under `FAIL_FAST`, one of those used to end the whole build.
 
 A tick therefore keeps its own budget: `TickConfig.max_attempts` (default
-**2**), a lifetime budget **per task per build** on how many executions the
+**2**), a budget **per task per build round** on how many executions the
 scheduler will start. A failure the tick records is reset to pending and
 picked up on the next pass while the budget allows.
 
@@ -240,21 +240,35 @@ change between two passes, so a retry re-reads the same absence.
 
 Because a tick is short-lived and remembers nothing, the count comes from
 the registry (`attempt_count` on the frontier, the per-build task listing
-and task events). Two consequences worth knowing:
+and task events).
 
-- **A retry does not reset the budget.** Clicking Retry in the UI (or
-  running `stardag tasks retry`) on a task that is already at budget
-  succeeds server-side — the task returns to pending — and the scheduler
-  then refuses to start it, failing it again with a message that says
-  exactly this. The ways out are raising `max_attempts` (a re-trigger of
-  the same build may update the tick config) or triggering a **fresh**
-  build, whose count starts at zero.
-- **Resuming a suspended task is never budget-gated.** A dynamic-dependency
-  yield records a fresh start, so a task that yields repeatedly accumulates
-  attempts while being perfectly healthy; gating resumption would cap
-  dynamic dependencies rather than retries. It does mean such a task
-  reaches its _retry_ budget sooner — raise `max_attempts` for DAGs that
-  suspend a lot.
+#### Rounds: what resets the budget, and what does not
+
+A **round** runs from the build's most recent `BUILD_RESUMED` event, or
+from the build's beginning if it has never been resumed, and the count is
+scoped to it. So the two things that look alike from the UI are not:
+
+- **Re-triggering the build resets it.** `build_trigger(..., build_id=<this
+build>, reactive=True)` records `BUILD_RESUMED` _before_ its discovery
+  resets the failed tasks to pending, so the round boundary lands ahead of
+  them and every task starts the new round at zero. This is the recovery
+  path for a build that ran out of attempts, and both exhaustion messages
+  point at it. Add `tick_kwargs={"max_attempts": N}` to the same re-trigger
+  if the task needs more attempts per round.
+- **A bare retry does not.** Clicking Retry in the UI, running `stardag
+tasks retry`, or POSTing the retry route flips the task back to pending
+  without recording `BUILD_RESUMED`, so the count it is measured against is
+  unchanged. On a task that is already at budget the retry _succeeds_ and
+  the scheduler then refuses to start it — which would look like nothing
+  happening at all, so the tick says so explicitly and fails the task again
+  with the re-trigger spelled out.
+
+**Resuming a suspended task is never budget-gated.** A dynamic-dependency
+yield records a fresh start, so a task that yields repeatedly accumulates
+attempts while being perfectly healthy; gating resumption would cap dynamic
+dependencies rather than retries. It does mean such a task reaches its
+_retry_ budget sooner within a round — raise `max_attempts` for DAGs that
+suspend a lot.
 
 Set `max_attempts=1` for the previous behaviour (record the failure, never
 respawn). Against a registry that does not report `attempt_count` no budget
