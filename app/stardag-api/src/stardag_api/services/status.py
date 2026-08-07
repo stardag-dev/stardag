@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import BuildStatus, Event, EventType, Task, TaskStatus
+from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
 from stardag_api.services.claims import claim_expires_at
 
 # Statuses TASK_RETRIED resets to PENDING. Shared by the denormalised path
@@ -201,94 +201,109 @@ def apply_event_to_task(task: Task, event: Event) -> None:
     # (the global semantics treat it as a no-op).
 
 
-async def get_build_status(
-    db: AsyncSession, build_id: UUID
-) -> tuple[BuildStatus, datetime | None, datetime | None, str | None, bool]:
-    """Get derived build status from events.
+# The build-level statuses a terminal event produces, keyed by event type.
+# BUILD_STARTED / BUILD_RESUMED are handled separately: they are the only
+# two that move a build *back* into RUNNING, and they differ from each other
+# (and from the terminals) in which fields they touch.
+_TERMINAL_BUILD_STATUS = {
+    EventType.BUILD_COMPLETED: BuildStatus.COMPLETED,
+    EventType.BUILD_FAILED: BuildStatus.FAILED,
+    EventType.BUILD_CANCELLED: BuildStatus.CANCELLED,
+    EventType.BUILD_EXIT_EARLY: BuildStatus.EXIT_EARLY,
+}
 
-    Returns:
-        Tuple of (status, started_at, completed_at,
-                  status_triggered_by_user_id, is_resumed).
+# Terminals that can carry a "this was a manual override from the UI"
+# attribution. BUILD_EXIT_EARLY is excluded because it is emitted by the
+# SDK itself ("everything left is running in another build") and is never
+# user-triggered — it has no ``triggered_by_user_id`` to read.
+_USER_TRIGGERABLE_BUILD_EVENTS = (
+    EventType.BUILD_COMPLETED,
+    EventType.BUILD_FAILED,
+    EventType.BUILD_CANCELLED,
+)
 
-    ``is_resumed`` is True iff the build has at least one BUILD_RESUMED
-    event AND that event is more recent than any terminal event — i.e. the
-    build was picked up again after finishing/failing and is currently
-    treated as RUNNING under the resume semantics. The UI uses this to
-    surface a "running (resumed)" affordance.
+
+def apply_event_to_build(build: Build, event: Event) -> None:
+    """Mutate a Build's denormalised ``latest_*`` columns for a new event.
+
+    The build-level counterpart of :func:`apply_event_to_task`, and the sole
+    definition of what a build's status is. It implements the same rules the
+    historical ``get_build_status`` event replay did, applied incrementally:
+
+      - BUILD_STARTED / BUILD_RESUMED assert RUNNING. A start records
+        ``latest_started_at``; a resume deliberately does not, because the
+        build started when it first started, and instead clears
+        ``latest_completed_at`` so the UI stops showing a stale "completed
+        at" from the terminal it superseded.
+
+        Note this differs from ``apply_event_to_task``, where a start only
+        fills ``latest_started_at`` if it is unset. A build emits exactly one
+        BUILD_STARTED (at creation), so the two rules can only diverge on a
+        hand-inserted event stream — and there, matching what the replay this
+        replaces would have said is the right default for a refactor.
+      - The four terminals (COMPLETED / FAILED / CANCELLED / EXIT_EARLY) set
+        the status and ``latest_completed_at``, and record the triggering
+        user when the event carries one.
+      - ``latest_is_resumed`` is true only immediately after a BUILD_RESUMED;
+        anything else — including a later BUILD_STARTED — clears it.
+      - Task-level events are no-ops.
+
+    **There is no stickiness here, and that is the difference from tasks.**
+    A completed task cannot un-complete: COMPLETED means the target exists.
+    A build genuinely can go COMPLETED → RUNNING, because
+    ``sd.build(resume_build_id=...)`` picking a finished build back up is a
+    supported operation, so the fold is plain last-event-wins.
+
+    **Tie-break.** "Last" means *arrival* order — the order the server
+    committed the events — not ``created_at`` order. That is not a choice so
+    much as a consequence of folding at write time: the event insert and this
+    mutation share a transaction, so two events are strictly ordered by their
+    commits even when their timestamps collide. It also resolves a
+    disagreement the two previous implementations had: the replay ordered by
+    ``created_at`` and broke ties arbitrarily (whatever the index returned),
+    while the reaper's SQL predicate read a tie as *not* running. Both were
+    guessing, because equal timestamps mean the proxy lost the information
+    the arrival order still has.
+
+    The reaper is unaffected in practice: it can only act on a build whose
+    column says RUNNING *and* which has then been silent for at least
+    ``idle_for_seconds`` (floor: 60 s). A build whose last committed
+    lifecycle event was a start or resume is running by every available
+    reading, and a build that is running and has since gone quiet for the
+    idle window is exactly what the reaper exists to find.
+
+    The caller is responsible for persisting the Build — this function only
+    mutates the in-memory ORM instance — and for holding the row lock that
+    makes the read-modify-write safe (see ``_get_build_for_update``).
     """
-    # Get build-level events (task_id is NULL)
-    result = await db.execute(
-        select(Event)
-        .where(Event.build_id == build_id)
-        .where(Event.task_id.is_(None))
-        .order_by(Event.created_at.desc())
-    )
-    events = result.scalars().all()
+    et = event.event_type
+    metadata = event.event_metadata or {}
 
-    status = BuildStatus.PENDING
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
-    status_triggered_by_user_id: str | None = None
-    is_resumed = False
-
-    # Process events from oldest to newest to build final state
-    for event in reversed(events):
-        if event.event_type == EventType.BUILD_STARTED:
-            status = BuildStatus.RUNNING
-            started_at = event.created_at
-            status_triggered_by_user_id = None  # Not user-triggered
-            # Reset is_resumed so the flag stays consistent with its
-            # documented semantic (latest build-level event is
-            # BUILD_RESUMED). The SDK never emits BUILD_STARTED after a
-            # BUILD_RESUMED in normal flow, but the replay shouldn't rely
-            # on event ordering — admin/manual event inserts could
-            # produce any sequence.
-            is_resumed = False
-        elif event.event_type == EventType.BUILD_RESUMED:
-            # Treat like BUILD_STARTED, but flip the is_resumed flag and
-            # clear completed_at so the UI doesn't keep showing a stale
-            # "completed at" from the previous terminal event.
-            status = BuildStatus.RUNNING
-            completed_at = None
-            status_triggered_by_user_id = None
-            is_resumed = True
-            # Don't overwrite started_at — the build started when it first
-            # started; resume is a separate concept.
-        elif event.event_type == EventType.BUILD_COMPLETED:
-            status = BuildStatus.COMPLETED
-            completed_at = event.created_at
-            is_resumed = False
-            # Check if this was user-triggered (manual override)
-            status_triggered_by_user_id = (
-                event.event_metadata.get("triggered_by_user_id")
-                if event.event_metadata
-                else None
-            )
-        elif event.event_type == EventType.BUILD_FAILED:
-            status = BuildStatus.FAILED
-            completed_at = event.created_at
-            is_resumed = False
-            status_triggered_by_user_id = (
-                event.event_metadata.get("triggered_by_user_id")
-                if event.event_metadata
-                else None
-            )
-        elif event.event_type == EventType.BUILD_CANCELLED:
-            status = BuildStatus.CANCELLED
-            completed_at = event.created_at
-            is_resumed = False
-            status_triggered_by_user_id = (
-                event.event_metadata.get("triggered_by_user_id")
-                if event.event_metadata
-                else None
-            )
-        elif event.event_type == EventType.BUILD_EXIT_EARLY:
-            status = BuildStatus.EXIT_EARLY
-            completed_at = event.created_at
-            is_resumed = False
-            status_triggered_by_user_id = None  # Not user-triggered
-
-    return status, started_at, completed_at, status_triggered_by_user_id, is_resumed
+    if et == EventType.BUILD_STARTED:
+        build.latest_status = BuildStatus.RUNNING
+        build.latest_started_at = event.created_at
+        build.latest_status_triggered_by_user_id = None  # never user-triggered
+        # Clear the flag rather than leave it: the SDK never emits
+        # BUILD_STARTED after a BUILD_RESUMED, but the fold shouldn't depend
+        # on that — a manual/admin event insert could produce any sequence,
+        # and "resumed" must keep meaning "the event that put this build in
+        # its current status was a resume".
+        build.latest_is_resumed = False
+    elif et == EventType.BUILD_RESUMED:
+        build.latest_status = BuildStatus.RUNNING
+        build.latest_completed_at = None
+        build.latest_status_triggered_by_user_id = None
+        build.latest_is_resumed = True
+    elif et in _TERMINAL_BUILD_STATUS:
+        build.latest_status = _TERMINAL_BUILD_STATUS[et]
+        build.latest_completed_at = event.created_at
+        build.latest_is_resumed = False
+        build.latest_status_triggered_by_user_id = (
+            metadata.get("triggered_by_user_id")
+            if et in _USER_TRIGGERABLE_BUILD_EVENTS
+            else None
+        )
+    # Task-level events never affect build status.
 
 
 async def get_task_status_in_build(
