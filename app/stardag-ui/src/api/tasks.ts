@@ -1,8 +1,10 @@
 import type {
   Build,
   BuildCancelResult,
+  BuildFrontier,
   BuildListResponse,
   BuildStatus,
+  BuildTickSummaryListResponse,
   BulkCancelBuildsRequest,
   BulkCancelBuildsResponse,
   Task,
@@ -99,6 +101,57 @@ export async function fetchBuild(
   return response.json();
 }
 
+/**
+ * The build's scheduling frontier — what a reactive scheduler tick sees.
+ *
+ * This is the endpoint that answers "why is this build not progressing?":
+ * it reports what is actionable, what is running, and — when neither is —
+ * which upstreams outside the build are holding it back. See
+ * ``BuildFrontier.blocked_by_external`` for the one ambiguity that matters:
+ * an empty blocker list means "not blocked, OR not stalled".
+ */
+export async function fetchBuildFrontier(
+  buildId: string,
+  environmentId: string,
+): Promise<BuildFrontier> {
+  const params = new URLSearchParams();
+  params.set("environment_id", environmentId);
+
+  const url = `${API_BASE}/builds/${buildId}/frontier?${params.toString()}`;
+  const response = await fetchWithAuth(url);
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, "Failed to fetch build frontier"));
+  }
+  return response.json();
+}
+
+/**
+ * The build's recent reactive-scheduler tick summaries, newest first.
+ *
+ * Returns ``null`` when the server does not have the endpoint (404) — it
+ * postdates the frontier, so a UI pointed at an older API must degrade to
+ * "no tick history" rather than to an error. A missing *build* would have
+ * failed the frontier fetch first, so treating 404 as "unavailable" does
+ * not hide a real problem.
+ */
+export async function fetchBuildTickSummaries(
+  buildId: string,
+  environmentId: string,
+  limit?: number,
+): Promise<BuildTickSummaryListResponse | null> {
+  const params = new URLSearchParams();
+  params.set("environment_id", environmentId);
+  if (limit) params.set("limit", String(limit));
+
+  const url = `${API_BASE}/builds/${buildId}/tick-summaries?${params.toString()}`;
+  const response = await fetchWithAuth(url);
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, "Failed to fetch tick summaries"));
+  }
+  return response.json();
+}
+
 // Task API (build-scoped)
 
 export interface TaskFilters {
@@ -190,8 +243,29 @@ export interface GlobalTaskFilters {
   page_size?: number;
   task_name?: string;
   environment_id?: string;
+  /**
+   * Filter by the task's *global* (environment-wide) status. Repeatable —
+   * `["running", "suspended"]` matches either. This is how "which tasks are
+   * holding an execution claim?" is asked.
+   */
+  status?: TaskStatus[];
+  /**
+   * Only tasks whose current status was recorded strictly before this
+   * ISO-8601 instant. An absolute timestamp rather than a duration so a
+   * paged scan cannot drift between requests. Tasks with no recorded
+   * status timestamp never match.
+   */
+  status_older_than?: string;
 }
 
+/**
+ * List tasks in an environment.
+ *
+ * With a status or staleness filter the server orders **oldest claim
+ * first** (the task RUNNING longest is the most likely to be abandoned and
+ * the most expensive to leave holding a claim); otherwise newest-first by
+ * registration time.
+ */
 export async function fetchTasks(
   filters: GlobalTaskFilters = {},
 ): Promise<{ tasks: Task[]; total: number; page: number; page_size: number }> {
@@ -200,6 +274,9 @@ export async function fetchTasks(
   if (filters.page_size) params.set("page_size", String(filters.page_size));
   if (filters.task_name) params.set("task_name", filters.task_name);
   if (filters.environment_id) params.set("environment_id", filters.environment_id);
+  for (const status of filters.status ?? []) params.append("status", status);
+  if (filters.status_older_than)
+    params.set("status_older_than", filters.status_older_than);
 
   const url = `${API_BASE}/tasks?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -347,6 +424,15 @@ export async function failBuild(
 
 // Task actions (build-scoped)
 
+/**
+ * Cancel a task under a build, releasing the execution claim and any
+ * concurrency-limit slot it holds.
+ *
+ * ``buildId`` addresses the *owning* build — the one whose event produced
+ * the task's current status (``latest_status_build_id``) — which is not
+ * necessarily the build the user is looking at. A task's status is
+ * environment-global, so releasing a claim is inherently a cross-build act.
+ */
 export async function cancelTask(
   buildId: string,
   taskId: string,
@@ -358,7 +444,31 @@ export async function cancelTask(
   const url = `${API_BASE}/builds/${buildId}/tasks/${taskId}/cancel?${params.toString()}`;
   const response = await fetchWithAuth(url, { method: "POST" });
   if (!response.ok) {
-    throw new Error(`Failed to cancel task: ${response.statusText}`);
+    throw new Error(await errorMessage(response, "Failed to cancel task"));
+  }
+}
+
+/**
+ * Reset a failed / cancelled / skipped / **suspended** task to pending.
+ *
+ * Suspended is included: a task suspended for dynamic dependencies is not
+ * executing, so one whose orchestrator died has no path forward except
+ * running again from scratch. RUNNING tasks are deliberately unaffected —
+ * they hold a live claim, and releasing that is `cancelTask`, not a retry.
+ * COMPLETED is sticky. Same ``buildId`` rule as `cancelTask`.
+ */
+export async function retryTask(
+  buildId: string,
+  taskId: string,
+  environmentId?: string,
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (environmentId) params.set("environment_id", environmentId);
+
+  const url = `${API_BASE}/builds/${buildId}/tasks/${taskId}/retry?${params.toString()}`;
+  const response = await fetchWithAuth(url, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, "Failed to retry task"));
   }
 }
 

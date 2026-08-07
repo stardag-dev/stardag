@@ -151,6 +151,108 @@ export interface BuildListResponse {
   page_size: number;
 }
 
+// ---- Build frontier: what a scheduler tick sees ----
+
+// A task in a build's scheduling frontier. Statuses are the task's *global*
+// (environment-wide) status, not "its status in this build".
+export interface FrontierTaskRef {
+  task_id: string;
+  latest_status: TaskStatus;
+  latest_executor?: string | null;
+  latest_executor_ref?: string | null;
+  latest_executor_metadata?: ExecutorMetadata | null;
+  latest_status_at?: string | null;
+}
+
+/**
+ * An upstream *outside* this build that holds one of its tasks back.
+ *
+ * Task rows and their dependency edges are per environment, not per build,
+ * so an upstream left non-COMPLETED by some other build still gates this
+ * build's downstream tasks — silently, since such an upstream need not be
+ * part of this build's task set at all.
+ */
+export interface FrontierExternalBlocker {
+  // The blocked task — always a member of THIS build's task set.
+  task_id: string;
+  // The blocker. Identity is spelled out because the viewer may never have
+  // seen this task. `blocking_task_namespace` is "" for the default namespace.
+  blocking_task_id: string;
+  blocking_task_namespace: string;
+  blocking_task_name: string;
+  // Never "completed" (a completed upstream does not gate anything).
+  blocking_status: TaskStatus;
+  // When the blocker entered that status, and the build whose event put it
+  // there. The build id is null only for rows predating status
+  // denormalisation — with it, there is nothing to address a remedy to.
+  blocking_status_at?: string | null;
+  blocking_status_build_id?: string | null;
+  // Whether the blocker is also part of THIS build's task set. False is the
+  // pathological case: this build has never registered it and can only wait
+  // for whoever owns it. True still blocks, but the task is at least visible
+  // in this build's own table.
+  blocking_in_build: boolean;
+}
+
+export interface BuildFrontier {
+  build_id: string;
+  build_status: BuildStatus;
+  // A scheduler wake-up is pending for this build.
+  needs_tick: boolean;
+  root_task_ids: string[];
+  roots: FrontierTaskRef[];
+  // Global status -> count, over every task the build has events for.
+  status_counts: Record<string, number>;
+  actionable: FrontierTaskRef[];
+  running: FrontierTaskRef[];
+  /**
+   * **Populated only when the build has nothing actionable and nothing
+   * running** — i.e. only when it already looks stalled, which is the only
+   * state in which the answer matters and keeps a per-edge sort off the hot
+   * path of every healthy build's poll.
+   *
+   * So an empty list means *"not externally blocked, OR not stalled"*. Never
+   * render it as "no blockers" while the build is still progressing.
+   */
+  blocked_by_external: FrontierExternalBlocker[];
+  // The blocker list is capped (it is a diagnostic, not a work queue — a
+  // truncated list still proves "waiting, not stuck").
+  blocked_by_external_truncated: boolean;
+  reactive_app_name?: string | null;
+  reactive_tick_kwargs?: Record<string, unknown> | null;
+}
+
+// ---- Persisted reactive-scheduler tick summaries ----
+
+// Why a tick did (or did not) do anything. Widened to `string` at the
+// response boundary so an outcome a newer server adds still renders.
+export type TickOutcome =
+  | "not_reactive"
+  | "lease_held"
+  | "terminal"
+  | "lingered_out"
+  | "foreign_app";
+
+export interface BuildTickSummary {
+  id: string;
+  build_id: string;
+  // A TickOutcome value; typed wide on purpose (see above).
+  outcome: string;
+  /**
+   * The tick's own summary, verbatim and **deliberately open**: the SDK
+   * grows counters (`spawned`, `claim_denied`, `limit_denied`, …) faster
+   * than this UI ships. Render known keys with a label and unknown ones
+   * generically — never drop what you don't recognise.
+   */
+  summary: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface BuildTickSummaryListResponse {
+  build_id: string;
+  summaries: BuildTickSummary[];
+}
+
 // Task with status (from build context)
 export interface Task {
   id: string;
@@ -186,6 +288,27 @@ export interface Task {
   latest_executor?: string | null;
   latest_executor_ref?: string | null;
   latest_executor_metadata?: ExecutorMetadata | null;
+  // ---- Global (environment-wide) status, i.e. "who holds the claim". ----
+  //
+  // A task row is unique per (environment_id, task_id), so `latest_status`
+  // is NOT "the status within some build": a task left RUNNING by any build
+  // denies the execution claim to every other build that needs it, until
+  // something moves it. These three answer "who is holding this claim, and
+  // since when":
+  //
+  //   latest_status          — the environment-wide status.
+  //   latest_status_at       — when it entered that status ("running since").
+  //   latest_status_build_id — the build whose event produced it: the claim
+  //                            holder. Null only on rows predating status
+  //                            denormalisation.
+  //
+  // `GET /tasks` returns these; `GET /tasks/search` does not (it reports the
+  // same status under `status` / `status_build_id` and has no timestamp), so
+  // claim triage reads the former. All optional — purely additive over the
+  // older response shape.
+  latest_status?: TaskStatus | null;
+  latest_status_at?: string | null;
+  latest_status_build_id?: string | null;
 }
 
 export interface TaskListResponse {
