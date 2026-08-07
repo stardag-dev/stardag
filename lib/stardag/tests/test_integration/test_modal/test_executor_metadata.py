@@ -24,6 +24,7 @@ from stardag.build._base import current_build_id_var
 from stardag.integration.modal._app import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
+    STARDAG_CLAIM_TTL_SECONDS_ENV,
     STARDAG_MODAL_APP_ID_ENV,
     STARDAG_MODAL_APP_NAME_ENV,
     STARDAG_MODAL_ENVIRONMENT_ENV,
@@ -314,6 +315,64 @@ class TestWorkerEnvForwarding:
         assert env_overrides is None or STARDAG_MODAL_WORKSPACE_ENV not in env_overrides
 
 
+class TestClaimTtlForwarding:
+    """The worker's own TASK_STARTED is a start like any other, so the
+    orchestrator's derived claim TTL has to reach it — otherwise the worker
+    would re-stamp the claim with the registry's generic default and undo
+    the derivation. Forwarding also re-bases the expiry on the moment
+    execution actually begins, rather than on the pre-spawn claim."""
+
+    async def test_ttl_derived_from_the_workers_timeout_is_forwarded(self):
+        from stardag.build._reactive import _CLAIM_TTL_GRACE_SECONDS
+
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker, worker_timeouts={"default": 3600})
+
+        token = current_build_id_var.set(uuid4())
+        try:
+            await executor.submit_detached(_make_task())
+        finally:
+            current_build_id_var.reset(token)
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] == str(
+            int(3600 + _CLAIM_TTL_GRACE_SECONDS)
+        )
+
+    async def test_no_declared_timeout_forwards_nothing(self):
+        """Without the deployed settings there is no timeout to derive from,
+        and the registry's default is the honest fallback."""
+        worker = FakeWorkerFunction(FakeFunctionCall())
+        executor = _make_executor(worker)
+
+        token = current_build_id_var.set(uuid4())
+        try:
+            await executor.submit_detached(_make_task())
+        finally:
+            current_build_id_var.reset(token)
+
+        _, env_overrides = worker.spawn_calls[0]
+        assert STARDAG_CLAIM_TTL_SECONDS_ENV not in env_overrides
+
+    def test_execution_timeout_comes_from_the_selected_worker(self):
+        executor = _make_executor(
+            FakeWorkerFunction(FakeFunctionCall()),
+            worker_timeouts={"default": 60, "gpu": 7200},
+        )
+        executor.worker_selector = lambda task: "gpu"
+
+        assert executor.execution_timeout_seconds(_make_task()) == 7200.0
+
+    def test_unknown_worker_has_no_timeout(self):
+        executor = _make_executor(
+            FakeWorkerFunction(FakeFunctionCall()),
+            worker_timeouts={"default": 60},
+        )
+        executor.worker_selector = lambda task: "unlisted"
+
+        assert executor.execution_timeout_seconds(_make_task()) is None
+
+
 class MetadataAwareRegistry(NoOpRegistry):
     """Registry whose task_start accepts the executor_metadata kwarg."""
 
@@ -328,12 +387,14 @@ class MetadataAwareRegistry(NoOpRegistry):
         executor=None,
         executor_ref=None,
         executor_metadata=None,
+        claim_ttl_seconds=None,
     ) -> None:
         self.starts.append(
             {
                 "executor": executor,
                 "executor_ref": executor_ref,
                 "executor_metadata": executor_metadata,
+                "claim_ttl_seconds": claim_ttl_seconds,
             }
         )
 
@@ -377,8 +438,27 @@ class TestWorkerReporterMetadata:
                 "executor": MODAL_EXECUTOR_NAME,
                 "executor_ref": "fc-worker-1",
                 "executor_metadata": EXPECTED_WORKER_METADATA,
+                "claim_ttl_seconds": None,
             }
         ]
+
+    def test_started_passes_the_forwarded_claim_ttl(self, monkeypatch):
+        """The orchestrator's derived TTL survives the worker's own start."""
+        monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-worker-1")
+        registry = MetadataAwareRegistry()
+        env = {**_reporter_env(uuid4()), STARDAG_CLAIM_TTL_SECONDS_ENV: "4500"}
+        reporter = self._create_reporter(registry, env)
+
+        reporter.started()
+
+        assert registry.starts[0]["claim_ttl_seconds"] == 4500
+
+    def test_a_malformed_claim_ttl_is_ignored_not_raised(self):
+        """A bound on an expiry must never cost a worker its start event."""
+        env = {**_reporter_env(uuid4()), STARDAG_CLAIM_TTL_SECONDS_ENV: "soon"}
+        reporter = self._create_reporter(MetadataAwareRegistry(), env)
+
+        assert reporter.claim_ttl_seconds is None
 
     def test_metadata_minimal_without_forwarded_env(self):
         """Older orchestrators forward only the build id — the worker still
