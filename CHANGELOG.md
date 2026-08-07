@@ -20,16 +20,28 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   acquiring start still precedes the spawn (a denied task never occupies a
   worker) and the ref-recording start still follows it.
 
-- **A per-tick spawn cap, derived from the executor's timeout.** The old
-  cap was "however many tasks are actionable", which is unrelated to how
-  long the container may live. `TickConfig.max_spawns_per_tick` bounds one
-  pass; left unset it is derived as a duration budget — a fraction of the
-  executor's own `execution_timeout_seconds`, spread over the in-flight
-  bound. Truncation is logged, never silent, and never a stall: the pass
-  acted, so the tick re-evaluates on a fresh frontier immediately and takes
-  the next batch. Set the cap explicitly when the tick function is sized
-  very differently from the workers it spawns. Both knobs are accepted as
-  Modal `tick_kwargs`.
+- **A per-tick spawn cap, derived from the tick container's own timeout.**
+  The old cap was "however many tasks are actionable", which is unrelated
+  to how long the container may live. `TickConfig.max_spawns_per_tick`
+  bounds one pass; left unset it is derived as a duration budget — a
+  fraction of the tick's wall-clock limit, spread over the in-flight bound.
+  The limit is resolved down a ladder: the explicit cap, then
+  `TickConfig.tick_timeout_seconds` (which the Modal integration fills in
+  automatically from the `timeout` the deployed `tick` function carries,
+  falling back to `builder_settings` exactly as function registration
+  does), then the executor's `execution_timeout_seconds` as a fallback
+  proxy, then a conservative default. Every tick logs its cap and which
+  rung produced it. Truncation is logged, never silent, and never a stall:
+  the pass acted, so the tick re-evaluates on a fresh frontier immediately
+  and takes the next batch. `max_spawns_per_tick` and
+  `max_concurrent_actions` are accepted as Modal `tick_kwargs`;
+  `tick_timeout_seconds` deliberately is not — it is a deploy-time fact
+  about the container, not per-build state.
+
+  The watchdog sweeps every running build sequentially inside one
+  container, so it now hands each build a proportional share of that
+  container's budget rather than letting the first wide build size its
+  fan-out as though it owned the whole timeout.
 
 - **Concurrent DAG discovery in reactive mode.**
   `discover_and_register_aio` walked the DAG with a recursive `await

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import typing
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -3176,26 +3177,132 @@ class TestSpawnCap:
         assert summary.spawned == width
         assert summary.iterations == 2
 
-    def test_cap_is_derived_from_the_executors_timeout(self):
-        """No explicit cap → the cap is a duration budget: a fraction of the
-        backend's own execution timeout, spread over the in-flight bound."""
-        tasks = [SyncOnlyTask(name=f"derive-{i}") for i in range(3)]
-        config = TickConfig(max_concurrent_actions=10)
-
-        cap = reactive_module._spawn_cap(
-            tasks, FakeTickExecutor(timeout_seconds=600.0), config
+    async def test_ticks_timeout_bounds_a_real_pass(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """End to end: the tick's own timeout reaches the fan-out and
+        truncates it, rather than only being readable in _spawn_cap."""
+        width = 200
+        leaves, root = _wide_layer("tick-timeout", width)
+        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+        # A tiny container: min cap (50) per pass, so 200 leaves take four.
+        config = TickConfig(
+            linger_seconds=0.0,
+            poll_interval_seconds=30.0,
+            max_concurrent_actions=10,
+            tick_timeout_seconds=1.0,
+            # A backend that would have justified a far larger batch.
+            report_tick_summaries=False,
+        )
+        assert (
+            reactive_module._spawn_cap([], FakeTickExecutor(), config).limit
+            == reactive_module._MIN_SPAWN_CAP
         )
 
-        assert cap == int(
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=config,
+        )
+
+        assert summary.spawned == width
+        assert summary.iterations == width // reactive_module._MIN_SPAWN_CAP + 1
+
+    async def test_the_cap_and_its_source_are_logged_once_per_tick(
+        self,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+        caplog: pytest.LogCaptureFixture,
+    ):
+        """Three of the four rungs produce plausible-looking numbers from
+        very different inputs, so a truncating tick is only diagnosable if
+        the log says which one was read."""
+        leaves, root = _wide_layer("cap-log", 3)
+        registry, locks, executor, store = _setup([*leaves, root], auto_complete=False)
+
+        with caplog.at_level(logging.INFO, logger="stardag.build._reactive"):
+            await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=TickConfig(
+                    linger_seconds=0.0,
+                    poll_interval_seconds=30.0,
+                    tick_timeout_seconds=900.0,
+                ),
+            )
+
+        announcements = [
+            record.message
+            for record in caplog.records
+            if "will spawn at most" in record.message
+        ]
+        assert len(announcements) == 1  # once per tick, not once per pass
+        assert "tick container's own timeout (900s)" in announcements[0]
+
+    def test_cap_prefers_the_ticks_own_timeout_over_the_workers(self):
+        """The rung that matters: a five-minute tick spawning hour-long
+        workers must size its fan-out to the five minutes.
+
+        The two inputs differ by two orders of magnitude here, and the
+        worker-derived cap is the dangerous one — a tick that commits to a
+        container's worth of work it cannot live long enough to finish is
+        exactly the failure the cap exists to prevent. Asserting the cap
+        *tracks the tick's* number (and not merely "is smaller") is what
+        makes a regression to the proxy fail loudly."""
+        tasks = [SyncOnlyTask(name="tick-vs-worker")]
+        # A 24-hour worker under a 5-minute tick.
+        executor = FakeTickExecutor(timeout_seconds=86_400.0)
+        config = TickConfig(max_concurrent_actions=10, tick_timeout_seconds=300.0)
+
+        cap = reactive_module._spawn_cap(tasks, executor, config)
+
+        assert cap.limit == reactive_module._derived_spawn_cap(300.0, config)
+        assert "tick container's own timeout" in cap.source
+        # And it is emphatically not the worker-derived answer, which the
+        # ceiling alone would not have saved us from.
+        worker_derived = reactive_module._spawn_cap(
+            tasks, executor, TickConfig(max_concurrent_actions=10)
+        )
+        assert worker_derived.limit == reactive_module._MAX_SPAWN_CAP
+        assert cap.limit < worker_derived.limit
+
+    def test_cap_is_derived_from_the_ticks_timeout(self):
+        """No explicit cap → the cap is a duration budget: a fraction of the
+        container's own wall clock, spread over the in-flight bound."""
+        tasks = [SyncOnlyTask(name="derive")]
+        config = TickConfig(max_concurrent_actions=10, tick_timeout_seconds=600.0)
+
+        cap = reactive_module._spawn_cap(tasks, FakeTickExecutor(), config)
+
+        assert cap.limit == int(
             reactive_module._SPAWN_BUDGET_FRACTION
             * 600.0
             * 10
             / reactive_module._SECONDS_PER_SPAWN
         )
 
+    def test_executor_timeout_is_the_proxy_when_the_tick_has_none(self):
+        """Rung 3: no tick timeout is known, so the executor's is read —
+        and the source says so, because it is a proxy for a different
+        quantity."""
+        tasks = [SyncOnlyTask(name="proxy")]
+        config = TickConfig(max_concurrent_actions=10)
+
+        cap = reactive_module._spawn_cap(
+            tasks, FakeTickExecutor(timeout_seconds=600.0), config
+        )
+
+        assert cap.limit == reactive_module._derived_spawn_cap(600.0, config)
+        assert "as a proxy" in cap.source
+
     def test_cap_uses_the_tightest_timeout_across_candidates(self):
         """Heterogeneous routing: the smallest backend limit bounds the
-        pass, so the cap is derived from it."""
+        pass, so the proxy rung is derived from it."""
 
         class PerTaskTimeoutExecutor(FakeTickExecutor):
             def execution_timeout_seconds(self, task: BaseTask) -> float | None:
@@ -3206,52 +3313,60 @@ class TestSpawnCap:
 
         cap = reactive_module._spawn_cap(tasks, PerTaskTimeoutExecutor(), config)
 
-        assert cap == reactive_module._spawn_cap(
-            [SyncOnlyTask(name="tight")], PerTaskTimeoutExecutor(), config
+        assert (
+            cap.limit
+            == reactive_module._spawn_cap(
+                [SyncOnlyTask(name="tight")], PerTaskTimeoutExecutor(), config
+            ).limit
         )
-        assert cap < reactive_module._spawn_cap(
-            [SyncOnlyTask(name="loose")], PerTaskTimeoutExecutor(), config
+        assert (
+            cap.limit
+            < reactive_module._spawn_cap(
+                [SyncOnlyTask(name="loose")], PerTaskTimeoutExecutor(), config
+            ).limit
         )
 
-    def test_cap_falls_back_when_no_timeout_is_exposed(self):
-        """An executor enforcing no wall-clock limit leaves nothing to
-        derive from — but the cap is still a cap, never "everything"."""
+    def test_cap_falls_back_when_no_timeout_is_known_anywhere(self):
+        """Bottom rung: neither the tick nor the executor enforces a
+        wall-clock limit — but the cap is still a cap, never "everything"."""
         tasks = [SyncOnlyTask(name="no-timeout")]
 
         cap = reactive_module._spawn_cap(
             tasks, FakeTickExecutor(timeout_seconds=None), TickConfig()
         )
 
-        assert cap == reactive_module._DEFAULT_MAX_SPAWNS_PER_TICK
+        assert cap.limit == reactive_module._DEFAULT_MAX_SPAWNS_PER_TICK
+        assert "no wall-clock limit is known" in cap.source
 
     def test_derived_cap_is_clamped(self):
-        """Floor and ceiling, so neither a 30-second task nor a 30-day one
-        produces a nonsense batch size."""
+        """Floor and ceiling, so neither a 30-second container nor a 30-day
+        one produces a nonsense batch size."""
         tasks = [SyncOnlyTask(name="clamp")]
 
         assert (
             reactive_module._spawn_cap(
                 tasks,
-                FakeTickExecutor(timeout_seconds=1.0),
-                TickConfig(max_concurrent_actions=1),
-            )
+                FakeTickExecutor(),
+                TickConfig(max_concurrent_actions=1, tick_timeout_seconds=1.0),
+            ).limit
             == reactive_module._MIN_SPAWN_CAP
         )
         assert (
             reactive_module._spawn_cap(
                 tasks,
-                FakeTickExecutor(timeout_seconds=2_592_000.0),
-                TickConfig(max_concurrent_actions=50),
-            )
+                FakeTickExecutor(),
+                TickConfig(max_concurrent_actions=50, tick_timeout_seconds=2_592_000.0),
+            ).limit
             == reactive_module._MAX_SPAWN_CAP
         )
 
     def test_explicit_cap_wins(self):
-        assert (
-            reactive_module._spawn_cap(
-                [SyncOnlyTask(name="explicit")],
-                FakeTickExecutor(timeout_seconds=600.0),
-                TickConfig(max_spawns_per_tick=7),
-            )
-            == 7
+        """Top rung: the override beats every derivation below it."""
+        cap = reactive_module._spawn_cap(
+            [SyncOnlyTask(name="explicit")],
+            FakeTickExecutor(timeout_seconds=600.0),
+            TickConfig(max_spawns_per_tick=7, tick_timeout_seconds=600.0),
         )
+
+        assert cap.limit == 7
+        assert "set explicitly" in cap.source

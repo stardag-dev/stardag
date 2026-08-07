@@ -743,12 +743,37 @@ left behind by a dead scheduler heal promptly.
 **Wide layers.** A tick fans out concurrently, up to
 `max_concurrent_actions` spawns in flight (default 50), and caps how many
 tasks one pass commits to via `max_spawns_per_tick`. Left unset, that cap
-is derived from the worker `timeout` above — a fraction of it, spread over
-the in-flight bound — so it scales with how long Modal lets an execution
-live. When a pass truncates at the cap it says so in the tick log and
-immediately re-evaluates on a fresh frontier; the layer goes out in
-batches, not over the watchdog period. Both are `tick_kwargs`, so they can
-be set per build at trigger time:
+is derived from **the `tick` function's own `timeout`** — a fraction of it,
+spread over the in-flight bound — because the cap exists to stop a tick
+starting more work than its container can live long enough to finish. The
+app reads that timeout at deploy time from `tick_settings` (or
+`builder_settings`, which `tick_settings` falls back to), so a deployment
+like
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={
+        "default": sd_modal.FunctionSettings(image=image, timeout=3600)
+    },
+    tick_settings=sd_modal.FunctionSettings(image=image, timeout=600),
+    watchdog_period_minutes=5,
+)
+```
+
+gives the cap the right number with no further configuration: the one-hour
+worker `timeout` is what claim TTLs are derived from, the ten-minute tick
+`timeout` is what the spawn cap is derived from. If neither the tick nor
+the builder declares a `timeout`, the cap falls back to the worker timeout
+as a proxy — a different quantity, and the tick's log line says it is on
+that rung.
+
+When a pass truncates at the cap it says so in the tick log and immediately
+re-evaluates on a fresh frontier; the layer goes out in batches, not over
+the watchdog period. Every tick also logs its cap and which input produced
+it, once per tick. Both knobs are `tick_kwargs`, so they can be overridden
+per build at trigger time:
 
 ```{.python notest}
 app.build_trigger(
@@ -757,10 +782,12 @@ app.build_trigger(
 )
 ```
 
-Set `max_spawns_per_tick` explicitly if you give the `tick` function a much
-shorter `timeout` than your workers (`tick_settings=...`): the derivation
-reads the _worker's_ limit, which is the only wall clock it can see, and a
-cap scaled to an hour-long worker is too generous for a five-minute tick.
+The **watchdog** sweeps every running build sequentially inside a single
+container, so it hands each build a proportional share of that container's
+budget instead of letting the first wide build size its fan-out as though
+it owned the whole timeout. Watchdog passes therefore spawn in smaller
+batches than a build's own ticks do — which is what you want from a safety
+net.
 
 **Seeing what a tick decided.** Every tick reports its summary to the registry
 (`stardag builds ticks <build-id>`), so a build driven by dozens of
