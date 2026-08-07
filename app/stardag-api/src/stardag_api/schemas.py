@@ -849,3 +849,41 @@ class TaskMetadataResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str | None
+
+
+# --- Build Tick Summary Schemas ---
+
+
+class BuildTickSummaryCreate(BaseModel):
+    """One reactive scheduler tick's summary, as reported by the SDK.
+
+    Deliberately open (``extra="allow"``): the summary is an SDK-owned
+    dataclass that keeps growing, and the server stores it verbatim so a
+    new field needs no server release and no migration. ``outcome`` is
+    the only required key — it is promoted to a typed column.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    outcome: str = Field(max_length=32)
+
+
+class BuildTickSummaryResponse(BaseModel):
+    """A persisted tick summary.
+
+    ``summary`` is the reported dict verbatim (``outcome`` included), so
+    a client can render fields this server has never heard of.
+    """
+
+    id: UUID
+    build_id: UUID
+    outcome: str
+    summary: dict
+    created_at: datetime
+
+
+class BuildTickSummaryListResponse(BaseModel):
+    """Retained tick summaries for a build, newest first."""
+
+    build_id: UUID
+    summaries: list[BuildTickSummaryResponse]

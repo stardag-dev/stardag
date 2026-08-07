@@ -8,6 +8,7 @@ from stardag_api.routes.workspaces import router as workspaces_router
 from stardag_api.routes.search import router as search_router
 from stardag_api.routes.target_roots import router as target_roots_router
 from stardag_api.routes.tasks import router as tasks_router
+from stardag_api.routes.tick_summaries import router as tick_summaries_router
 from stardag_api.routes.ui import router as ui_router
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "search_router",
     "target_roots_router",
     "tasks_router",
+    "tick_summaries_router",
     "ui_router",
 ]
