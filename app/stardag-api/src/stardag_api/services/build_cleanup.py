@@ -171,6 +171,47 @@ def last_activity_at(build: Build, last_event_at: datetime | None) -> datetime |
     return max(candidates) if candidates else None
 
 
+def idle_filters(idle_before: datetime) -> list[ColumnElement[bool]]:
+    """SQL for "this build's :func:`last_activity_at` is before ``idle_before``".
+
+    **The single definition of "idle", used by both the reaper
+    (:func:`select_cancellable_builds`) and ``GET /builds?idle_for_seconds=``.**
+    They must not drift: the list endpoint is how an operator previews what
+    the reaper will do, and a list that disagrees with the reaper is worse
+    than no list at all.
+
+    Written as an AND of "every liveness input is old" rather than
+    ``max(inputs) < cutoff``: the two are equivalent, and the AND needs no
+    ``GREATEST()`` (which SQLite lacks) and no dialect switch.
+
+    ``Build.last_active_at < idle_before`` is logically redundant — the real
+    signal is a max() that includes that column — but load-bearing for the
+    plan: it is the only conjunct backed by an index
+    (``ix_builds_environment_last_active``), and because it is one of the
+    inputs to the max it can never exclude a build the full predicate would
+    keep. It narrows the candidate set before the correlated aggregates run.
+    """
+    last_event_at = last_event_at_subquery()
+    return [
+        Build.last_active_at < idle_before,
+        last_event_at < idle_before,
+        or_(Build.needs_tick_at.is_(None), Build.needs_tick_at < idle_before),
+    ]
+
+
+# Ordering used whenever an idleness filter is applied — by both the reaper
+# and GET /builds. ``last_active_at`` is a *proxy* for staleness, not the
+# definition of it: sorting on the full last_activity_at signal would
+# forfeit ix_builds_environment_last_active and sort the whole candidate
+# set for a max over a correlated aggregate. Two builds can therefore
+# appear slightly out of order with respect to the ``last_activity_at``
+# each row reports. That is accepted — ordering only decides which of the
+# already-correctly-filtered builds come first, and correctness lives in
+# the filter. ``Build.id`` (UUID7) breaks ties so server-side pagination
+# can neither duplicate nor skip a row.
+STALEST_FIRST_ORDER = (Build.last_active_at.asc(), Build.id.asc())
+
+
 @dataclass
 class CancelledBuild:
     """One build cancelled by :func:`cancel_builds` (or selected in a dry run)."""
@@ -197,15 +238,10 @@ async def select_cancellable_builds(
     ``limit``. ``environment_id=None`` spans every environment (the
     in-process sweep; the HTTP endpoint always scopes to the caller's).
 
-    Ordered by ``last_active_at`` rather than by the full
-    :func:`last_activity_at` signal: the latter is a max over a correlated
-    aggregate, so sorting on it would forfeit
-    ``ix_builds_environment_last_active`` and sort the whole candidate set.
-    It is a proxy for staleness, not the definition of it — which is fine
-    here, because ordering only decides *which* stale builds a capped call
-    takes first. Correctness comes from the filter, and convergence comes
-    from cancellation itself: a reaped build stops being RUNNING and drops
-    out of the next call.
+    Ordered stalest-first by :data:`STALEST_FIRST_ORDER` — see there for why
+    the sort key is a proxy rather than the full signal. Correctness comes
+    from the filter; convergence comes from cancellation itself, since a
+    reaped build stops being RUNNING and drops out of the next call.
     """
     filters: list[ColumnElement[bool]] = [build_is_running()]
     if environment_id is not None:
@@ -216,31 +252,13 @@ async def select_cancellable_builds(
         filters.append(Build.reactive_app_name == reactive_app_name)
     elif not include_reactive:
         filters.append(Build.reactive_app_name.is_(None))
-
-    last_event_at = last_event_at_subquery()
     if idle_before is not None:
-        # Every liveness input must be old — equivalent to
-        # "max(inputs) < cutoff" (see last_activity_at) but written as an
-        # AND so it needs no GREATEST(), which SQLite does not have.
-        #
-        # `Build.last_active_at < idle_before` is redundant *logically* but
-        # load-bearing for the plan: it is the only conjunct backed by an
-        # index (ix_builds_environment_last_active), and because the real
-        # signal is a max() that includes this column, the index-backed
-        # conjunct can never exclude a build the full predicate would keep.
-        # It narrows the candidate set before the correlated aggregates run.
-        filters.extend(
-            [
-                Build.last_active_at < idle_before,
-                last_event_at < idle_before,
-                or_(Build.needs_tick_at.is_(None), Build.needs_tick_at < idle_before),
-            ]
-        )
+        filters.extend(idle_filters(idle_before))
 
     result = await db.execute(
-        select(Build, last_event_at.label("last_event_at"))
+        select(Build, last_event_at_subquery().label("last_event_at"))
         .where(*filters)
-        .order_by(Build.last_active_at.asc(), Build.id.asc())
+        .order_by(*STALEST_FIRST_ORDER)
         .limit(limit + 1)
     )
     rows = [(build, ts) for build, ts in result.all()]

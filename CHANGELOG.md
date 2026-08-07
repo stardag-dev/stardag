@@ -86,6 +86,17 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 - **`BuildResponse` exposes `last_active_at` and `last_activity_at`** — the
   ordering column and the reaper's idleness signal respectively — so a UI can
   show operators the same number the reaper acts on.
+- **`GET /builds` accepts `idle_for_seconds`**, using the same idleness
+  definition and the same 60s floor as `bulk-cancel` (one shared SQL
+  predicate, not a second implementation) — so a client can list what the
+  reaper would cancel before cancelling it. Because it is a real SQL
+  predicate, `total` is an exact `COUNT(*)` and pagination is server-side
+  and unbounded, unlike the derived-`status` filter's bounded window.
+  Ordering flips to stalest-first when it is given. `status=running` is
+  accepted alongside it and then also resolves in SQL, so the
+  abandoned-build query stays exact past the 500-candidate scan cap; any
+  other `status` value combined with `idle_for_seconds` is rejected with
+  422 rather than served an approximate total that looks exact.
 - **Optional unattended sweep** (`STARDAG_API_REAPER_ENABLED`, off by
   default) runs the same operation on a timer inside the API process. Note
   that every replica runs its own timer with no leader election; cancellation
