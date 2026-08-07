@@ -1,4 +1,9 @@
-"""Postgres-only concurrency tests for the denormalised Task.latest_* columns.
+"""Postgres-only concurrency tests for the denormalised ``latest_*`` columns.
+
+Both ``Task`` and ``Build`` carry a status folded in-transaction from the
+event that produced it, and both folds are read-modify-writes that need the
+row lock to be safe. The task groups come first; the build ones mirror them
+at the end of the file.
 
 Two complementary test groups:
 
@@ -29,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from stardag_api.auth.dependencies import SdkAuth
 from stardag_api.models import (
     Build,
+    BuildStatus,
     Environment,
     Event,
     EventType,
@@ -36,8 +42,14 @@ from stardag_api.models import (
     TaskStatus,
 )
 from stardag_api.models.base import generate_uuid7
-from stardag_api.routes.builds import _create_task_event
-from stardag_api.services.status import apply_event_to_task
+from stardag_api.routes.builds import (
+    _create_task_event,
+    cancel_build,
+    complete_build,
+    fail_build,
+    resume_build,
+)
+from stardag_api.services.status import apply_event_to_build, apply_event_to_task
 from tests.conftest import (
     DEFAULT_ENVIRONMENT_ID,
     DEFAULT_WORKSPACE_ID,
@@ -330,3 +342,195 @@ async def test_with_lock_completed_stays_sticky(
         row = await final.get(Task, task_pk)
         assert row is not None
         assert row.latest_status == TaskStatus.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# The same story for Build.latest_*.
+#
+# The build fold is last-event-wins rather than sticky (a resume legitimately
+# takes a COMPLETED build back to RUNNING), so the failure mode the lock
+# prevents is not a lost terminal — it is a *torn* row. Each session's UPDATE
+# carries only the columns it changed, so two writers that both read the
+# pre-state can each land half of their transition and leave a combination no
+# single event could produce.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_running_build(pg_engine: AsyncEngine, name: str):
+    """Insert a RUNNING build with its BUILD_STARTED event; return its id."""
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with sm() as setup:
+        build = Build(
+            id=generate_uuid7(),
+            environment_id=DEFAULT_ENVIRONMENT_ID,
+            user_id=None,
+            name=name,
+            description=None,
+            commit_hash=None,
+            root_task_ids=[],
+            latest_status=BuildStatus.PENDING,
+            latest_is_resumed=False,
+        )
+        setup.add(build)
+        await setup.flush()
+        event = Event(
+            id=generate_uuid7(),
+            build_id=build.id,
+            task_id=None,
+            event_type=EventType.BUILD_STARTED,
+            created_at=datetime.now(timezone.utc),
+        )
+        setup.add(event)
+        await setup.flush()
+        apply_event_to_build(build, event)
+        # A second event so the resume endpoint sees "activity" and actually
+        # records a BUILD_RESUMED rather than no-opping.
+        setup.add(
+            Event(
+                id=generate_uuid7(),
+                build_id=build.id,
+                task_id=None,
+                event_type=EventType.BUILD_FAILED,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        await setup.commit()
+        return build.id
+
+
+def _is_coherent(build: Build) -> bool:
+    """Every field combination a single event could have produced."""
+    if build.latest_status == BuildStatus.RUNNING:
+        # A start or a resume: nothing has completed since.
+        return build.latest_completed_at is None
+    # A terminal: it stamped completed_at and cleared the resumed flag.
+    return build.latest_completed_at is not None and not build.latest_is_resumed
+
+
+async def _force_overlapping_build_selects(
+    pg_engine: AsyncEngine, build_id, *, use_for_update: bool
+) -> None:
+    """Two read-modify-writes on one build, both SELECTing before either
+    COMMITs: BUILD_COMPLETED from A, BUILD_RESUMED from B, A committing first.
+    """
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with sm() as s_a, sm() as s_b:
+        stmt = select(Build).where(Build.id == build_id)
+        if use_for_update:
+            stmt = stmt.with_for_update()
+
+        async def apply(session, build, event_type) -> None:
+            event = Event(
+                id=generate_uuid7(),
+                build_id=build.id,
+                task_id=None,
+                event_type=event_type,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(event)
+            await session.flush()
+            apply_event_to_build(build, event)
+
+        if use_for_update:
+            # A holds the lock, so B's SELECT blocks until A commits —
+            # gathering them would just deadlock on that lock.
+            b_a = (await s_a.execute(stmt)).scalar_one()
+            await apply(s_a, b_a, EventType.BUILD_COMPLETED)
+            await s_a.commit()
+
+            b_b = (await s_b.execute(stmt)).scalar_one()
+            await apply(s_b, b_b, EventType.BUILD_RESUMED)
+            await s_b.commit()
+        else:
+            r_a, r_b = await asyncio.gather(s_a.execute(stmt), s_b.execute(stmt))
+            b_a, b_b = r_a.scalar_one(), r_b.scalar_one()
+            await apply(s_a, b_a, EventType.BUILD_COMPLETED)
+            await apply(s_b, b_b, EventType.BUILD_RESUMED)
+            await s_a.commit()
+            await s_b.commit()
+
+
+async def test_without_lock_the_build_row_tears(pg_engine: AsyncEngine) -> None:
+    """Without ``SELECT ... FOR UPDATE`` the two writers each land only the
+    columns they changed relative to the *pre*-state, and the row ends as a
+    combination no event could produce: COMPLETED — with a completed_at — yet
+    flagged as resumed. This pins down the bug the production lock fixes."""
+    build_id = await _seed_running_build(pg_engine, "build-race-no-lock")
+
+    await _force_overlapping_build_selects(pg_engine, build_id, use_for_update=False)
+
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with sm() as final:
+        row = await final.get(Build, build_id)
+        assert row is not None
+        assert row.latest_status == BuildStatus.COMPLETED
+        assert row.latest_is_resumed is True  # ...from the resume that lost
+        assert not _is_coherent(row)
+
+
+async def test_with_lock_the_build_row_stays_coherent(pg_engine: AsyncEngine) -> None:
+    """With the lock the second writer observes the first writer's committed
+    state, so the resume applies to a COMPLETED build and produces the whole
+    resume transition: RUNNING, resumed, completed_at cleared."""
+    build_id = await _seed_running_build(pg_engine, "build-race-locked")
+
+    await _force_overlapping_build_selects(pg_engine, build_id, use_for_update=True)
+
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with sm() as final:
+        row = await final.get(Build, build_id)
+        assert row is not None
+        assert row.latest_status == BuildStatus.RUNNING
+        assert row.latest_is_resumed is True
+        assert row.latest_completed_at is None
+        assert _is_coherent(row)
+
+
+async def _call_lifecycle(pg_engine: AsyncEngine, handler, build_id, auth) -> None:
+    """Invoke a production build-lifecycle handler on its own session."""
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with sm() as session:
+        await handler(build_id, session, auth)
+
+
+async def test_production_lifecycle_handlers_never_tear_the_row(
+    pg_engine: AsyncEngine,
+) -> None:
+    """Stress the real handlers — which all go through
+    ``_get_build_for_update`` — with complete/fail/cancel/resume racing on one
+    build. Whichever commits last, the row must be exactly what that one event
+    produces. If anyone drops the lock from a lifecycle path, this starts
+    failing flakily."""
+    build_id = await _seed_running_build(pg_engine, "build-race-stress")
+    auth = await _make_sdk_auth(pg_engine)
+
+    coros = []
+    for _ in range(10):
+        for handler in (complete_build, fail_build, cancel_build, resume_build):
+            coros.append(_call_lifecycle(pg_engine, handler, build_id, auth))
+    await asyncio.gather(*coros)
+
+    sm = async_sessionmaker(pg_engine, expire_on_commit=False)
+    async with sm() as final:
+        row = await final.get(Build, build_id)
+        assert row is not None
+        assert _is_coherent(row)
+        # And the status is one an event actually asserted.
+        types = set(
+            (
+                await final.execute(
+                    select(Event.event_type)
+                    .where(Event.build_id == build_id)
+                    .where(Event.task_id.is_(None))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert EventType.BUILD_RESUMED in types
+        assert row.latest_status in {
+            BuildStatus.RUNNING,
+            BuildStatus.COMPLETED,
+            BuildStatus.FAILED,
+            BuildStatus.CANCELLED,
+        }

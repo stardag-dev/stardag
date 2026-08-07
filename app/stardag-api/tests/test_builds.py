@@ -199,8 +199,8 @@ async def test_resume_build_complete_clears_resumed_flag(client: AsyncClient):
     """A resumed build that subsequently completes shows is_resumed=False.
 
     Once a terminal event lands after BUILD_RESUMED, the resumed-flag
-    semantic is gone — get_build_status only flags is_resumed when the
-    most recent build-level event is BUILD_RESUMED.
+    semantic is gone — is_resumed is only set when the event that produced
+    the build's current status was a BUILD_RESUMED.
     """
     response = await client.post("/api/v1/builds", json={})
     build_id = response.json()["id"]

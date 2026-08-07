@@ -1,12 +1,11 @@
 """Terminating abandoned builds and releasing the claims their tasks hold.
 
-Build status is derived from build-level events, so a build whose
-orchestrator died without emitting a terminal event stays RUNNING forever:
-interrupted local builds, crashed CI runs and failed triggers accumulate
-permanently. Worse, cancelling a build has never cascaded to its tasks, so
-a task left RUNNING keeps denying its execution claim — ``latest_status`` is
-environment-global — to every future build that needs it, and keeps
-occupying its concurrency-limit slots.
+A build whose orchestrator died without emitting a terminal event stays
+RUNNING forever: interrupted local builds, crashed CI runs and failed
+triggers accumulate permanently. Worse, cancelling a build has never
+cascaded to its tasks, so a task left RUNNING keeps denying its execution
+claim — ``latest_status`` is environment-global — to every future build that
+needs it, and keeps occupying its concurrency-limit slots.
 
 This module is the shared machinery for fixing that: selecting builds that
 are genuinely abandoned, and cancelling a build together with the claims it
@@ -27,25 +26,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, func, or_, select, update
+from sqlalchemy import ColumnElement, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from stardag_api.models import Build, Event, EventType, Task, TaskStatus
+from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
 from stardag_api.models.base import as_utc, utc_now
-from stardag_api.services.status import apply_event_to_task
+from stardag_api.services.status import apply_event_to_build, apply_event_to_task
 
 logger = logging.getLogger(__name__)
-
-# Build-level events that end a build, and the two that (re)start it. A
-# build's derived status is decided by whichever of these came last — see
-# services.status.get_build_status.
-_TERMINAL_BUILD_EVENTS = (
-    EventType.BUILD_COMPLETED,
-    EventType.BUILD_FAILED,
-    EventType.BUILD_CANCELLED,
-    EventType.BUILD_EXIT_EARLY,
-)
-_ACTIVE_BUILD_EVENTS = (EventType.BUILD_STARTED, EventType.BUILD_RESUMED)
 
 # Task statuses a build cancel cascades to. RUNNING holds the execution
 # claim and the concurrency-limit slots — that is the whole point. SUSPENDED
@@ -62,56 +50,6 @@ _ACTIVE_BUILD_EVENTS = (EventType.BUILD_STARTED, EventType.BUILD_RESUMED)
 # apart). Cancelling a build must not fail somebody else's. Use
 # POST /builds/{id}/skip-blocked, or the per-task cancel, for pending work.
 CASCADE_CANCEL_STATUSES = (TaskStatus.RUNNING, TaskStatus.SUSPENDED)
-
-
-def build_is_running() -> ColumnElement[bool]:
-    """SQL predicate: the correlated ``Build`` row's derived status is RUNNING.
-
-    Build status is not a column, and the existing ``GET /builds?status=``
-    filter therefore derives it in Python over a bounded scan
-    (``_STATUS_FILTER_SCAN_CAP``). A reaper must not inherit that cap: its
-    job is to find *every* stale RUNNING build, and the ones that matter are
-    precisely the oldest — the ones a "most recently active first, first 500"
-    scan drops first.
-
-    So the rule is expressed in SQL. RUNNING means the most recent
-    build-level event is BUILD_STARTED or BUILD_RESUMED, i.e.::
-
-        max(created_at) over start/resume events  >  max(...) over terminals
-
-    with a missing terminal max meaning "never ended". Two correlated
-    aggregates over ``ix_events_build_created``; build-level events are a
-    handful per build, and callers put a cheap index-backed filter in front
-    (see :func:`select_cancellable_builds`).
-
-    A tie — a terminal event sharing a timestamp with a start/resume — is
-    read as NOT running, so a reaper leaves it alone. ``get_build_status``
-    replays in timestamp order and would resolve the tie arbitrarily; when
-    the two disagree, the conservative reading has to win.
-    """
-    latest_active = (
-        select(func.max(Event.created_at))
-        .where(
-            Event.build_id == Build.id,
-            Event.task_id.is_(None),
-            Event.event_type.in_(_ACTIVE_BUILD_EVENTS),
-        )
-        .correlate(Build)
-        .scalar_subquery()
-    )
-    latest_terminal = (
-        select(func.max(Event.created_at))
-        .where(
-            Event.build_id == Build.id,
-            Event.task_id.is_(None),
-            Event.event_type.in_(_TERMINAL_BUILD_EVENTS),
-        )
-        .correlate(Build)
-        .scalar_subquery()
-    )
-    return latest_active.is_not(None) & or_(
-        latest_terminal.is_(None), latest_terminal < latest_active
-    )
 
 
 def last_event_at_subquery() -> ColumnElement[datetime]:
@@ -226,12 +164,20 @@ async def select_cancellable_builds(
     ``limit``. ``environment_id=None`` spans every environment (the
     in-process sweep; the HTTP endpoint always scopes to the caller's).
 
+    "RUNNING" is a plain column predicate on the denormalised
+    ``Build.latest_status`` — the same column ``GET /builds?status=running``
+    filters on, so the preview and the action cannot disagree, and neither is
+    bounded by a scan window. (Before the column existed this was two
+    correlated aggregates over the event stream, which had to be a *second*
+    encoding of the status rule and disagreed with the event replay on
+    timestamp ties; see ``services.status.apply_event_to_build``.)
+
     Ordered stalest-first by :data:`STALEST_FIRST_ORDER` — see there for why
     the sort key is a proxy rather than the full signal. Correctness comes
     from the filter; convergence comes from cancellation itself, since a
     reaped build stops being RUNNING and drops out of the next call.
     """
-    filters: list[ColumnElement[bool]] = [build_is_running()]
+    filters: list[ColumnElement[bool]] = [Build.latest_status == BuildStatus.RUNNING]
     if environment_id is not None:
         filters.append(Build.environment_id == environment_id)
     if build_ids is not None:
@@ -327,6 +273,13 @@ async def cancel_builds(
     does, and a crash mid-sweep leaves no build cancelled without its
     cascade. Re-running afterwards picks up exactly the builds that are
     still RUNNING.
+
+    Each build row is re-selected ``FOR UPDATE`` before it is folded, for the
+    same reason ``_create_task_event`` locks the task: writing the
+    denormalised status is a read-modify-write, and the lock is what stops a
+    concurrent lifecycle call on the same build from interleaving with it.
+    The build is always locked *before* the tasks it cascades to, matching
+    the order every route handler uses, so the two cannot deadlock.
     """
     event_metadata: dict = {"cancelled_by": source}
     if reason:
@@ -337,27 +290,33 @@ async def cancel_builds(
     results: list[CancelledBuild] = []
     now = utc_now()
     for build, last_event_at in rows:
+        locked = (
+            await db.execute(
+                select(Build).where(Build.id == build.id).with_for_update()
+            )
+        ).scalar_one()
         cancelled_tasks: list[Task] = []
         if cascade:
             cancelled_tasks = await cascade_cancel_build_tasks(
                 db, build.id, event_metadata=event_metadata
             )
-        db.add(
-            Event(
-                build_id=build.id,
-                task_id=None,
-                event_type=EventType.BUILD_CANCELLED,
-                error_message=reason,
-                event_metadata=event_metadata,
-            )
+        event = Event(
+            build_id=build.id,
+            task_id=None,
+            event_type=EventType.BUILD_CANCELLED,
+            error_message=reason,
+            event_metadata=event_metadata,
         )
+        db.add(event)
+        # Flush so event.created_at exists before the fold reads it (same
+        # pattern as the task path).
+        await db.flush()
+        apply_event_to_build(locked, event)
         # Same bookkeeping the single-build cancel endpoint does. Note this
         # moves the build to the top of the last_active_at ordering — correct:
         # its status just changed, and it can no longer be re-selected
-        # (build_is_running() is now false for it).
-        await db.execute(
-            update(Build).where(Build.id == build.id).values(last_active_at=now)
-        )
+        # (its latest_status is no longer RUNNING).
+        locked.last_active_at = now
         results.append(
             CancelledBuild(
                 build=build,

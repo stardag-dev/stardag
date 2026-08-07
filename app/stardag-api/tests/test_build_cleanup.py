@@ -56,9 +56,9 @@ async def _backdate(
     event it owns. Returns the timestamp used.
 
     Event timestamps are rewritten one microsecond apart in their original
-    order rather than all set to the same instant — build status is derived
-    from *which build-level event came last*, so collapsing them would
-    change the build's status, not just its age.
+    order rather than all set to the same instant. Status no longer depends
+    on this — it lives on the build row — but the event stream stays a
+    faithful history, and ``last_activity_at`` is a max over it.
     """
     when = datetime.now(timezone.utc) - age
     pk = UUID(build_id)
@@ -878,23 +878,17 @@ async def test_list_builds_idle_filter_environment_isolation(
 
 
 @pytest.mark.asyncio
-async def test_list_builds_running_and_idle_is_exact_beyond_the_scan_cap(
-    client: AsyncClient, async_session, monkeypatch
+async def test_list_builds_running_and_idle_is_exact_and_unbounded(
+    client: AsyncClient, async_session
 ):
-    """`status=running` alone derives status in Python over the 500
-    most-recently-active candidates. Combined with `idle_for_seconds` that
-    cap would drop precisely the oldest builds — the ones the query exists
-    to find — so the pair uses the SQL RUNNING predicate instead.
+    """ "Running, and idle for a day" — the abandoned-build query — is served
+    entirely in SQL: an exact `COUNT(*)` and a server-side page.
 
-    The cap is monkeypatched down (as the existing truncation test does)
-    rather than building 500 rows.
+    This used to be the one status combination with a SQL predicate, bolted
+    on beside a Python scan of the 500 most-recently-active candidates that
+    would have dropped precisely the oldest builds. With `latest_status` a
+    column there is no window and no cap to escape.
     """
-    from stardag_api.routes import builds as builds_routes
-
-    monkeypatch.setattr(builds_routes, "_STATUS_FILTER_SCAN_CAP", 2)
-
-    # Three old RUNNING builds and one old terminal one. With a cap of 2,
-    # a window scan could see at most two of them.
     old_running = []
     for days in (10, 9, 8):
         build_id = await _new_build(client)
@@ -904,8 +898,8 @@ async def test_list_builds_running_and_idle_is_exact_beyond_the_scan_cap(
     await client.post(f"/api/v1/builds/{old_done}/complete")
     await _backdate(async_session, old_done, age=timedelta(days=7))
 
-    # Two fresh RUNNING builds, which is what the most-recently-active
-    # window would be full of.
+    # Fresh RUNNING builds, which is what a most-recently-active window
+    # would have been full of.
     for _ in range(2):
         await _new_build(client)
 
@@ -919,10 +913,9 @@ async def test_list_builds_running_and_idle_is_exact_beyond_the_scan_cap(
     assert [b["id"] for b in body["builds"]] == old_running  # stalest first
     assert all(b["status"] == "running" for b in body["builds"])
 
-    # The bare status filter is unchanged — still window-scanned, still
-    # truncating at the (patched) cap.
+    # The bare status filter counts every running build, fresh ones included.
     capped = (await client.get("/api/v1/builds", params={"status": "running"})).json()
-    assert capped["total"] <= 2
+    assert capped["total"] == 5
 
 
 @pytest.mark.asyncio

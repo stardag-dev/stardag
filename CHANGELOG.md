@@ -91,12 +91,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   predicate, not a second implementation) — so a client can list what the
   reaper would cancel before cancelling it. Because it is a real SQL
   predicate, `total` is an exact `COUNT(*)` and pagination is server-side
-  and unbounded, unlike the derived-`status` filter's bounded window.
-  Ordering flips to stalest-first when it is given. `status=running` is
-  accepted alongside it and then also resolves in SQL, so the
-  abandoned-build query stays exact past the 500-candidate scan cap; any
-  other `status` value combined with `idle_for_seconds` is rejected with
-  422 rather than served an approximate total that looks exact.
+  and unbounded. Ordering flips to stalest-first when it is given. It
+  combines with any `status` value — see the denormalisation entry below,
+  which made that true for the non-`running` ones too.
 - **Optional unattended sweep** (`STARDAG_API_REAPER_ENABLED`, off by
   default) runs the same operation on a timer inside the API process. Note
   that every replica runs its own timer with no leader election; cancellation
@@ -153,6 +150,42 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
     since — and those still need an operator (cancel, retry, evict) to
     release. Executor probing is unaffected and remains the better evidence
     where it is available.
+- **Build status is now a column, so `GET /builds?status=` is exact for
+  every status** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
+  It was derived by replaying the build's build-level events on every read,
+  which had three consequences, all now gone: every `BuildResponse` cost an
+  event scan; the `status` filter could not run in SQL, so it scanned the 500
+  most-recently-active candidates, filtered in Python, and returned a `total`
+  that was **the matches within that window** while looking like an exact
+  count; and anything needing an unbounded "is this build RUNNING?" — the
+  stale-build reaper — had to carry a second SQL encoding of the same rule,
+  which disagreed with the replay when a terminal event shared a timestamp
+  with a start/resume.
+
+  Five denormalised columns on `builds` (`latest_status`,
+  `latest_started_at`, `latest_completed_at`,
+  `latest_status_triggered_by_user_id`, `latest_is_resumed`) now hold exactly
+  what the replay returned, folded in-transaction by every build lifecycle
+  path — the same pattern already used for `tasks.latest_*`. Backed by a new
+  `(environment_id, latest_status, last_active_at)` index. Migration
+  backfills existing builds by replaying their events, so no build changes
+  status across the upgrade.
+
+  - `status` filtering is a plain column predicate: exact `COUNT(*)`,
+    server-side pagination, no window and no cap, for every status.
+  - `status` combined with `idle_for_seconds` **no longer 422s** for
+    non-`running` statuses. That restriction existed only because `running`
+    was the sole value with a SQL predicate; "failed, and idle for a week" is
+    now a real query.
+  - **Tie-break:** two build-level events sharing a `created_at` resolve in
+    _arrival_ order — the order the server committed them — because the fold
+    shares a transaction with the event insert. Equal timestamps mean the
+    timestamp lost information the commit order still has, and both previous
+    implementations were guessing (the replay arbitrarily, the reaper by
+    always reading a tie as "not running"). The reaper is unaffected in
+    practice: it still only touches builds that are RUNNING _and_ have been
+    silent for at least `idle_for_seconds`.
+  - No response field changed shape or meaning.
 
 ## [0.17.0] — 2026-08-06
 
