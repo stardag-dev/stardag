@@ -35,6 +35,17 @@ with detached support. Requirements and current limitations:
 - On failure (FAIL_FAST) the build is failed, running executions are
   cancelled, and blocked descendants are marked SKIPPED (server-computed;
   older servers without the skip-blocked endpoint are tolerated).
+
+A build with nothing actionable and nothing running is *not* automatically
+stuck. Task rows and dependency edges are per environment, so an upstream
+that some other build left non-COMPLETED gates this build's tasks while
+contributing nothing to the counts this build can see. Terminal detection
+therefore consults the frontier's ``blocked_by_external`` before declaring
+a build dead: a blocker RUNNING under another build is waited on (bounded
+by ``TickConfig.stale_external_blocker_seconds``), while a blocker nobody
+is executing fails the build immediately with a message naming the task
+and the build that owns it. Against servers predating those fields the
+list is always empty and detection degrades to its pre-fix behaviour.
 """
 
 from __future__ import annotations
@@ -64,7 +75,12 @@ from stardag.build._task_modules import import_failure_note
 from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry._api_registry import _is_route_not_found
-from stardag.registry import BuildFrontier, FrontierTaskRef, RegistryABC
+from stardag.registry import (
+    BuildFrontier,
+    FrontierExternalBlocker,
+    FrontierTaskRef,
+    RegistryABC,
+)
 from stardag.registry._base import accepts_executor_metadata_kwarg
 
 logger = logging.getLogger(__name__)
@@ -205,6 +221,30 @@ class TickConfig:
     # its actual execution is unaffected and its completion (sticky) still
     # lands; generous default accordingly.
     stale_running_no_ref_seconds: float | None = 1800.0
+    # How long this build will wait on a blocker that is RUNNING under
+    # ANOTHER build before giving up and failing (see
+    # ``_classify_external_blockers``). Measured on the blocker's status
+    # timestamp — how long it has been RUNNING — not on tick-local time: a
+    # tick is short-lived and the watchdog keeps re-ticking, so a tick-local
+    # bound would never expire and the build would hang silently forever,
+    # which is the failure mode this whole path exists to remove.
+    #
+    # Deliberately generous (6 h). Waiting is the cheap direction: the
+    # blocker's own build has far better information about it (a live
+    # executor ref it can probe) and its completion wakes this build within
+    # a watchdog period, whereas failing a build whose blocker was merely
+    # slow is a regression of exactly the spurious-failure bug being fixed
+    # here. The bound is a backstop for a claim nobody will ever release —
+    # an abandoned RUNNING task whose owning build is gone — not a
+    # scheduling deadline. Raise it if your tasks routinely run longer than
+    # this; None waits indefinitely (pre-fix "hangs quietly" behaviour, with
+    # a per-tick warning naming the blocker).
+    #
+    # A blocker whose ``blocking_status_at`` is None (a task row predating
+    # server-side status denormalisation) cannot be aged, so it is waited on
+    # regardless of this bound — failing on missing information would
+    # reintroduce the spurious failures. The wait is logged as unbounded.
+    stale_external_blocker_seconds: float | None = 21600.0
 
 
 class _MissingTaskRef(typing.NamedTuple):
@@ -217,7 +257,11 @@ class _MissingTaskRef(typing.NamedTuple):
 
 @dataclass
 class TickSummary:
-    """Outcome of one scheduler tick, for logging/observability."""
+    """Outcome of one scheduler tick, for logging/observability.
+
+    Flat and JSON-friendly on purpose: the whole dataclass is serialized
+    with ``dataclasses.asdict`` and reported to the registry.
+    """
 
     outcome: str  # "not_reactive" | "lease_held" | "terminal" | "lingered_out"
     terminal_status: str | None = None
@@ -229,6 +273,20 @@ class TickSummary:
     limit_denied: int = 0
     claim_denied: int = 0
     skipped: int = 0
+    # Cross-build blocking, summed over the terminal evaluations of this
+    # tick (like limit_denied, these are counts of observations, not of
+    # distinct tasks — one blocker seen on three linger passes counts
+    # three times).
+    #
+    # ``external_blockers`` is every entry the frontier reported while the
+    # build looked stalled, including in-build ones; ``waited`` and
+    # ``fatal`` split only the out-of-build entries, so the three do not
+    # add up. A tick with waited > 0 and fatal == 0 is the healthy
+    # "waiting on another build" state; fatal > 0 always accompanies a
+    # failed build.
+    external_blockers: int = 0
+    external_blockers_waited: int = 0
+    external_blockers_fatal: int = 0
 
 
 async def run_tick_aio(
@@ -650,6 +708,154 @@ async def _resolve_running(
     return "leave"
 
 
+class _ExternalBlockers(typing.NamedTuple):
+    """Partition of a frontier's ``blocked_by_external`` (see below)."""
+
+    # Out-of-build and RUNNING within the staleness bound: someone else is
+    # executing it, and their completion frees this build. Wait.
+    waiting: list[FrontierExternalBlocker]
+    # Out-of-build and NOT going to run — either not RUNNING at all, or
+    # RUNNING for longer than ``stale_external_blocker_seconds``. Fail.
+    fatal: list[FrontierExternalBlocker]
+    # In this build's own task set: already accounted for by actionable /
+    # running / status_counts, so it must not influence the wait-or-fail
+    # decision. Kept only to enrich the message.
+    in_build: list[FrontierExternalBlocker]
+
+
+def _blocker_label(blocker: FrontierExternalBlocker) -> str:
+    """``namespace.Name`` of a blocker (namespace is "" by default)."""
+    if blocker.blocking_task_namespace:
+        return f"{blocker.blocking_task_namespace}.{blocker.blocking_task_name}"
+    return blocker.blocking_task_name
+
+
+def _blocker_status_age_seconds(
+    blocker: FrontierExternalBlocker, now: datetime
+) -> float | None:
+    """Seconds the blocker has been in its current status, None if unknown.
+
+    Naive timestamps (a custom registry that drops the offset) are read as
+    UTC rather than raising: this runs on the path that decides whether to
+    fail a build, so a formatting quirk must not become a tick crash.
+    """
+    if blocker.blocking_status_at is None:
+        return None
+    status_at = blocker.blocking_status_at
+    if status_at.tzinfo is None:
+        status_at = status_at.replace(tzinfo=timezone.utc)
+    return (now - status_at).total_seconds()
+
+
+def _classify_external_blockers(
+    frontier: BuildFrontier, config: TickConfig, now: datetime
+) -> _ExternalBlockers:
+    """Split the frontier's external blockers into wait / fail / ignore.
+
+    The frontier reports these only when the build has nothing actionable
+    and nothing running — precisely the state the stuck-build check reads
+    as "this build is dead". The split decides whether it actually is:
+
+    - ``blocking_in_build`` → ignored. The blocker is in this build's own
+      task set, so it is already visible in ``actionable``/``running``/
+      ``status_counts``; letting it also drive this decision would
+      double-count it (and a blocker that is genuinely stuck *in* this
+      build must still fail the build, exactly as before).
+    - out-of-build and RUNNING → **wait**. Another build is executing it;
+      its completion unblocks this build and wakes this scheduler. Treated
+      like a concurrency-limit denial: return, don't fail. Bounded by
+      ``config.stale_external_blocker_seconds`` against the blocker's own
+      status timestamp, since a tick is too short-lived to bound anything
+      itself — see that field for the rationale and the None cases.
+    - out-of-build and anything else (pending/suspended/failed/cancelled/
+      skipped) → **fail now**. Nobody is executing it and this build will
+      never schedule it, so waiting would be waiting forever. (Narrow
+      exception this deliberately does not carve out: a PENDING blocker
+      belonging to another *live* build will be scheduled by that build.
+      It is rare — a build's discovery registers the whole static
+      dependency tree, so out-of-build blockers are dynamic dependencies
+      of an earlier build — and the failure now says exactly which task to
+      retry, unlike the silent hang it replaces.)
+    """
+    waiting: list[FrontierExternalBlocker] = []
+    fatal: list[FrontierExternalBlocker] = []
+    in_build: list[FrontierExternalBlocker] = []
+    stale_after = config.stale_external_blocker_seconds
+    for blocker in frontier.blocked_by_external:
+        if blocker.blocking_in_build:
+            in_build.append(blocker)
+            continue
+        if blocker.blocking_status not in _RUNNING_STATUSES:
+            fatal.append(blocker)
+            continue
+        age = _blocker_status_age_seconds(blocker, now)
+        if stale_after is not None and age is not None and age > stale_after:
+            fatal.append(blocker)
+        else:
+            waiting.append(blocker)
+    return _ExternalBlockers(waiting=waiting, fatal=fatal, in_build=in_build)
+
+
+# How many blockers a log line or build error names before summarising the
+# rest. The server already caps its list (hence blocked_by_external_
+# truncated); this second cap keeps a build's error_message readable when a
+# wide DAG is stalled behind a single upstream.
+_MAX_REPORTED_BLOCKERS = 5
+
+
+def _describe_blockers(
+    blockers: Sequence[FrontierExternalBlocker], now: datetime, truncated: bool
+) -> str:
+    """One-line, user-actionable rendering of blockers (names, not ids only).
+
+    ``truncated`` is the frontier's ``blocked_by_external_truncated``: the
+    server capped its list, so this must not read as an exhaustive account.
+    """
+    described = "; ".join(
+        (
+            f"task {blocker.task_id} is blocked by {_blocker_label(blocker)} "
+            f"({blocker.blocking_task_id}), {blocker.blocking_status.upper()}"
+            + (
+                ""
+                if (age := _blocker_status_age_seconds(blocker, now)) is None
+                else f" for {age:.0f}s"
+            )
+            + (
+                f" under build {blocker.blocking_status_build_id}"
+                if blocker.blocking_status_build_id is not None
+                else " under an unrecorded build"
+            )
+        )
+        for blocker in blockers[:_MAX_REPORTED_BLOCKERS]
+    )
+    remaining = len(blockers) - _MAX_REPORTED_BLOCKERS
+    if remaining > 0:
+        described += f"; and {remaining} more"
+    if truncated:
+        described += (
+            "; the registry capped the blocker list, so there may be further "
+            "blockers not shown"
+        )
+    return described
+
+
+def _blocker_remediation(blockers: Sequence[FrontierExternalBlocker]) -> str:
+    """How to get out of it — the part #208 says today's error lacks."""
+    remedy = (
+        "Retry the blocking task under the build that owns it "
+        "(POST /api/v1/builds/{build_id}/tasks/{task_id}/retry) to reset it "
+        "to pending — this now works from suspended as well as from "
+        "failed/cancelled/skipped — then re-trigger this build"
+    )
+    if any(blocker.blocking_status in _RUNNING_STATUSES for blocker in blockers):
+        remedy += (
+            ". A blocker stuck RUNNING holds an execution claim no retry can "
+            "take: cancel it (POST /api/v1/builds/{build_id}/tasks/{task_id}"
+            "/cancel) to release the claim first"
+        )
+    return remedy + "."
+
+
 async def _handle_terminal(
     frontier: BuildFrontier,
     *,
@@ -661,7 +867,13 @@ async def _handle_terminal(
     summary: TickSummary,
     denied_this_round: int = 0,
 ) -> str | None:
-    """Evaluate terminal conditions; emit build events. Returns terminal status."""
+    """Evaluate terminal conditions; emit build events. Returns terminal status.
+
+    Returning ``None`` means "not terminal — keep waiting", which covers
+    both a build with work in flight and a build with nothing of its own to
+    do that is legitimately waiting on another build (see
+    :func:`_classify_external_blockers`).
+    """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
         if frontier.build_status == "cancelled":
             # Cancelled externally (e.g. UI): stop the running work.
@@ -701,15 +913,79 @@ async def _handle_terminal(
     # Note: spawns within this iteration imply frontier.actionable was
     # non-empty, so this check can't misfire on the pre-spawn snapshot.
     if not frontier.actionable and running == 0:
-        # Nothing runnable and nothing running: the build can't progress
-        # (failed deps in CONTINUE mode, or a lost task pickle). Fail
-        # rather than idle forever.
+        # Nothing runnable and nothing *in this build* running. That is not
+        # the same as "the build can't progress": dependency gating is
+        # environment-global while these counts are build-scoped, so a task
+        # some other build is executing gates this build's tasks while
+        # showing up in neither. Ask the frontier which it is before
+        # declaring the build dead (#208 A1) — the list is populated only in
+        # this exact state, and is empty against servers predating it, in
+        # which case everything below degrades to the old unconditional
+        # failure.
+        now = datetime.now(timezone.utc)
+        truncated = frontier.blocked_by_external_truncated
+        blockers = _classify_external_blockers(frontier, config, now)
+        summary.external_blockers += len(frontier.blocked_by_external)
+        summary.external_blockers_waited += len(blockers.waiting)
+        summary.external_blockers_fatal += len(blockers.fatal)
+
+        if blockers.waiting and not blockers.fatal:
+            # Waiting on work someone else is doing — the same call the
+            # denied_this_round branch above makes, and for the same reason:
+            # running == 0 here does not mean the environment is idle. The
+            # blocker's completion wakes this scheduler; a lost wake-up is
+            # covered by the watchdog. Logged every pass on purpose: a build
+            # that sits here needs to be diagnosable from the tick logs
+            # alone.
+            if config.stale_external_blocker_seconds is None:
+                bound_note = " (staleness bound disabled — this wait is unbounded)"
+            elif any(
+                blocker.blocking_status_at is None for blocker in blockers.waiting
+            ):
+                bound_note = (
+                    " (a blocker carries no status timestamp, so its wait "
+                    "cannot be bounded)"
+                )
+            else:
+                bound_note = ""
+            logger.info(
+                f"Build {build_id} has nothing to schedule but is blocked by "
+                f"{len(blockers.waiting)} task(s) running in other build(s); "
+                f"waiting rather than failing{bound_note}: "
+                f"{_describe_blockers(blockers.waiting, now, truncated)}"
+            )
+            return None
+
         await _skip_blocked(registry, build_id, summary)
-        await registry.build_fail_aio(
-            build_id,
-            "No runnable or running tasks left but roots are not complete "
-            f"(status counts: {counts})",
-        )
+        if blockers.fatal:
+            # Precise, actionable failure: which task, its name, its status,
+            # how long it has been in it, and which build owns it — plus how
+            # to release it. The status counts alone (the whole of the old
+            # message) point nowhere near the cause when the cause is not in
+            # this build's task set at all.
+            reason = (
+                f"Build is blocked by {len(blockers.fatal)} task(s) owned by "
+                "another build that nobody is executing, and has nothing "
+                f"runnable or running of its own (status counts: {counts}). "
+                f"Blocked by: {_describe_blockers(blockers.fatal, now, truncated)}"
+                f". {_blocker_remediation(blockers.fatal)}"
+            )
+        else:
+            # No out-of-build blocker: genuinely stuck (failed deps in
+            # CONTINUE mode, a lost task pickle, or a blocker inside this
+            # build that will never run). Fail rather than idle forever —
+            # naming any in-build blockers, which are otherwise invisible in
+            # the status counts.
+            reason = (
+                "No runnable or running tasks left but roots are not "
+                f"complete (status counts: {counts})"
+            )
+            if blockers.in_build:
+                reason += ". Blocked within this build by: " + _describe_blockers(
+                    blockers.in_build, now, truncated
+                )
+        logger.error(f"Failing build {build_id}: {reason}")
+        await registry.build_fail_aio(build_id, reason)
         return "failed"
 
     return None
