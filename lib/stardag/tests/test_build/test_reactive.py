@@ -106,6 +106,21 @@ class FakeReactiveRegistry(NoOpRegistry):
         # claim_ttl_seconds as sent on each start: task_id -> list of TTLs
         # (a spawn records two starts — the claim and the post-spawn ref).
         self.sent_claim_ttls: dict[str, list[int | None]] = {}
+        # --- per-build attempt counting (TickConfig.max_attempts) ---
+        # Mirrors the server: runs of CONSECUTIVE starts collapse into one
+        # attempt, so a spawn's two starts (claim + ref) count once, while a
+        # start separated from the previous one by a failure/completion/
+        # retry begins a new attempt.
+        self.attempt_counts: dict[str, int] = {}
+        self._last_event_was_start: dict[str, bool] = {}
+        # Set False to emulate a server predating attempt_count: the field
+        # is absent from the payload, so the model default (None) applies —
+        # which is what makes "this registry cannot count" distinguishable
+        # from "this task has not been attempted" (0).
+        self.serves_attempt_counts = True
+        # error_message of every recorded failure, per task — the text an
+        # operator actually reads in the UI.
+        self.fail_reasons: dict[str, list[str | None]] = {}
         # task_id -> task_data body, served by task_get_metadata_aio
         # (rehydration fallback); missing key -> KeyError, like a 404.
         self.metadata_bodies: dict[str, dict] = {}
@@ -153,6 +168,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         executor_ref: str | None = None,
         status_at: "datetime | None" = None,
         expires_at: "datetime | None" = None,
+        attempt_count: int | None = None,
     ) -> None:
         self.statuses[task_id] = status
         self.upstreams.setdefault(task_id, set()).update(upstreams or set())
@@ -162,6 +178,18 @@ class FakeReactiveRegistry(NoOpRegistry):
             self.status_at[task_id] = status_at
         if expires_at is not None:
             self.expires_at[task_id] = expires_at
+        if attempt_count is not None:
+            # Pre-seed the count for a task whose earlier attempts this test
+            # does not simulate start-by-start (the common shape: a task
+            # fabricated straight into RUNNING or PENDING).
+            self.attempt_counts[task_id] = attempt_count
+            self._last_event_was_start[task_id] = status == "running"
+
+    def _count_event(self, task_id: str, *, is_start: bool) -> None:
+        """Count one lifecycle event the way the server does."""
+        if is_start and not self._last_event_was_start.get(task_id, False):
+            self.attempt_counts[task_id] = self.attempt_counts.get(task_id, 0) + 1
+        self._last_event_was_start[task_id] = is_start
 
     def add_blocking_task(
         self,
@@ -236,6 +264,7 @@ class FakeReactiveRegistry(NoOpRegistry):
     ):
         tid = str(task.id)
         self.calls.append(("start", tid))
+        self._count_event(tid, is_start=True)
         self.sent_claim_ttls.setdefault(tid, []).append(claim_ttl_seconds)
         self.statuses[tid] = "running"
         self.refs[tid] = (executor, executor_ref)
@@ -324,11 +353,13 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_complete_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("complete", tid))
+        self._count_event(tid, is_start=False)
         self.statuses[tid] = "completed"
 
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("retry", tid))
+        self._count_event(tid, is_start=False)
         # Same retryable set the server applies (suspended included: a
         # suspended task has no live execution to orphan).
         if self.statuses.get(tid) in _RETRYABLE_STATUSES:
@@ -342,11 +373,14 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_cancel_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("cancel", tid))
+        self._count_event(tid, is_start=False)
         self.statuses[tid] = "cancelled"
 
     async def task_fail_aio(self, build_id, task, error_message=None):
         tid = str(task.id)
         self.calls.append(("fail", tid))
+        self._count_event(tid, is_start=False)
+        self.fail_reasons.setdefault(tid, []).append(error_message)
         self.statuses[tid] = "failed"
 
     async def build_complete_aio(self, build_id):
@@ -448,6 +482,11 @@ class FakeReactiveRegistry(NoOpRegistry):
                 latest_executor_ref=executor_ref,
                 latest_status_at=self.status_at.get(tid),
                 latest_status_expires_at=self.expires_at.get(tid),
+                attempt_count=(
+                    self.attempt_counts.get(tid, 0)
+                    if self.serves_attempt_counts
+                    else None
+                ),
             )
 
         # Build-scoped, like the API: actionable/running/status_counts see
@@ -825,7 +864,14 @@ class TestRunningTaskResolution:
             [root], auto_complete=False, executor=executor
         )
         registry.add_task(
-            str(root.id), status="running", executor="fake", executor_ref="fc-dead"
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            # At the default 2-attempt budget: the failure is final, which
+            # is what this test is about. Retry behaviour below budget has
+            # its own tests (see TestAttemptBudget).
+            attempt_count=2,
         )
 
         summary = await run_tick_aio(
@@ -1273,14 +1319,19 @@ class TestRunningWithoutRef:
     Whether that shape is dead or merely mid-spawn is decided by the
     claim's own expiry, not by how long it has sat there."""
 
-    async def _tick_on_running_root(self, expires_at: "datetime | None"):
-        (root,) = _chain(f"noref-root-{expires_at}")
+    async def _tick_on_running_root(
+        self, expires_at: "datetime | None", attempt_count: int = 2
+    ):
+        # Default: at the default 2-attempt budget, so a lapsed claim ends
+        # as a plain failure. Pass a lower count to exercise the retry.
+        (root,) = _chain(f"noref-root-{expires_at}-{attempt_count}")
         registry, locks, executor, store = _setup([root], auto_complete=False)
         registry.add_task(
             str(root.id),
             status="running",
             status_at=datetime.now(timezone.utc) - timedelta(hours=1),
             expires_at=expires_at,
+            attempt_count=attempt_count,
         )
         summary = await run_tick_aio(
             uuid4(),
@@ -1290,26 +1341,45 @@ class TestRunningWithoutRef:
             task_store=store,
             config=FAST_TICK,
         )
-        return summary, executor
+        return summary, executor, registry, root
 
     async def test_lapsed_claim_without_ref_is_failed(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         """Lapsed claim: the server will hand the task to the next claimant
         anyway, so leaving it RUNNING only leaks the slots it holds."""
-        summary, _ = await self._tick_on_running_root(
+        summary, _, _, _ = await self._tick_on_running_root(
             datetime.now(timezone.utc) - timedelta(minutes=1)
         )
 
         assert summary.failed_recorded == 1
         assert summary.terminal_status == "failed"
 
+    async def test_lapsed_claim_failure_is_retryable_and_counts_once(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A claim lapses precisely when a worker vanished — the OOM /
+        preemption case ``TickConfig.max_attempts`` exists for. The failure
+        it records must be retryable like any other, and expiry and retry
+        must not each charge an attempt."""
+        summary, executor, registry, root = await self._tick_on_running_root(
+            datetime.now(timezone.utc) - timedelta(minutes=1), attempt_count=1
+        )
+
+        assert summary.failed_recorded == 1
+        assert summary.retried == 1
+        assert summary.spawned == 1
+        assert executor.spawned == [root.id]
+        # One attempt closed by the expiry, one opened by the respawn — not
+        # three. (The respawn's claim + ref starts collapse into one.)
+        assert registry.attempt_counts[str(root.id)] == 2
+
     async def test_live_claim_without_ref_is_left(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         """A live claim is left alone however old the status is — the age
         was only ever a proxy for the question the expiry answers."""
-        summary, executor = await self._tick_on_running_root(
+        summary, executor, _, _ = await self._tick_on_running_root(
             datetime.now(timezone.utc) + timedelta(hours=1)
         )
 
@@ -1323,7 +1393,7 @@ class TestRunningWithoutRef:
         """No expiry (older server, or a start predating the column): the
         spawn-in-progress window of a healthy tick looks identical from
         here, so leave it rather than kill a task about to start."""
-        summary, executor = await self._tick_on_running_root(None)
+        summary, executor, _, _ = await self._tick_on_running_root(None)
 
         assert summary.failed_recorded == 0
         assert summary.outcome == "lingered_out"
@@ -3060,6 +3130,7 @@ class TestFanOutConcurrency:
                 status="running",
                 executor="fake",
                 executor_ref=f"dead-{index}",
+                attempt_count=2,  # at budget: probed-dead stays failed
             )
             executor.probe_statuses[f"dead-{index}"] = DetachedExecutionStatus.FAILED
         for task in lost:
@@ -3370,3 +3441,344 @@ class TestSpawnCap:
 
         assert cap.limit == 7
         assert "set explicitly" in cap.source
+
+
+class SpawnFailingExecutor(FakeTickExecutor):
+    """Executor whose detached submit always raises.
+
+    The failure this PR exists for: the backend refused the spawn, so no
+    container ever ran and no function-level retry policy can apply.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.spawn_attempts = 0
+
+    async def submit_detached(self, task: BaseTask) -> DetachedHandle:
+        self.spawn_attempts += 1
+        raise RuntimeError("backend refused the spawn")
+
+
+class TestAttemptBudget:
+    """``TickConfig.max_attempts``: a per-build, per-task budget on starts.
+
+    It exists because a backend's function-level retries only cover
+    exceptions *inside* the container. Everything a tick observes — a spawn
+    that never produced a container, an execution the backend killed, a
+    claim that lapsed under a vanished worker — is outside that, and used
+    to end a FAIL_FAST build on the first occurrence.
+    """
+
+    async def test_spawn_failure_under_budget_is_retried_then_exhausts(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The headline case, both halves: the first spawn failure is
+        retried, the second exhausts the 2-attempt budget and fails the
+        build — bounded, not a loop."""
+        (root,) = _chain("budget-spawn-fail")
+        executor = SpawnFailingExecutor()
+        registry, locks, _, store = _setup(
+            [root], auto_complete=False, executor=executor
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,  # max_attempts=2, FAIL_FAST
+        )
+
+        assert executor.spawn_attempts == 2
+        assert summary.retried == 1
+        assert summary.retry_exhausted == 1
+        assert summary.failed_recorded == 2
+        assert summary.terminal_status == "failed"
+        assert registry.build_status == "failed"
+        # Each spawn's two starts (claim + ref-recording) collapse into one
+        # attempt, so two attempts is what the budget counted.
+        assert registry.attempt_counts[str(root.id)] == 2
+
+    async def test_probed_dead_execution_under_budget_is_respawned(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An execution the backend reports FAILED is retried while the
+        budget allows — and FAIL_FAST does not kill the build over the
+        failure recorded on the way there."""
+        (root,) = _chain("budget-probe-retry")
+        executor = FakeTickExecutor(statuses={"fc-oom": DetachedExecutionStatus.FAILED})
+        registry, locks, _, store = _setup(
+            [root], auto_complete=False, executor=executor
+        )
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-oom",
+            attempt_count=1,
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.retried == 1
+        assert summary.failed_recorded == 1
+        assert summary.spawned == 1
+        assert executor.spawned == [root.id]
+        # FAIL_FAST reads the pre-action frontier snapshot, so the failure
+        # recorded and retried inside one pass never counts as a
+        # build-killing failure.
+        assert summary.terminal_status is None
+        assert registry.build_status == "running"
+        assert registry.statuses[str(root.id)] == "running"
+
+    async def test_at_budget_the_tick_declines_and_says_why(
+        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Budget spent: no respawn, and a message naming the task, the
+        count, the budget and both ways out."""
+        (root,) = _chain("budget-probe-exhausted")
+        executor = FakeTickExecutor(
+            statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+        )
+        registry, locks, _, store = _setup(
+            [root], auto_complete=False, executor=executor
+        )
+        registry.add_task(
+            str(root.id),
+            status="running",
+            executor="fake",
+            executor_ref="fc-dead",
+            attempt_count=2,
+        )
+
+        with caplog.at_level("ERROR"):
+            summary = await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+
+        assert summary.retried == 0
+        assert summary.retry_exhausted == 1
+        assert executor.spawned == []
+        assert summary.terminal_status == "failed"
+        assert ("retry", str(root.id)) not in registry.calls
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert str(root.id) in messages
+        assert "will NOT be retried" in messages
+        assert "2 of 2 allowed attempt(s) spent" in messages
+        assert "TickConfig.max_attempts" in messages
+        assert "trigger a fresh build" in messages
+
+    async def test_operator_retry_at_budget_is_refused_with_the_escape(
+        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The trap: an operator clicks Retry on a task already at budget.
+
+        The retry succeeds server-side and the task returns to PENDING, so
+        without this the scheduler would simply never start it and nothing
+        would appear to happen at all.
+        """
+        (root,) = _chain("budget-operator-retry")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        # Exactly what `stardag tasks retry` / the UI's Retry leaves behind:
+        # pending again, with the attempts already spent.
+        registry.add_task(str(root.id), status="pending", attempt_count=2)
+
+        with caplog.at_level("ERROR"):
+            summary = await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+
+        assert summary.budget_denied == 1
+        assert summary.retried == 0
+        assert executor.spawned == []
+        assert ("start_claim", str(root.id)) not in registry.calls
+        assert summary.terminal_status == "failed"
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert str(root.id) in messages
+        assert "Retry in the UI" in messages
+        assert "That reset SUCCEEDED" in messages
+        assert "retrying a task does not reset the budget" in messages
+        assert "trigger a fresh build" in messages
+        # The operator reads the task, not only the tick's logs.
+        reason = registry.fail_reasons[str(root.id)][0]
+        assert reason is not None
+        assert "Attempt budget spent (2 of 2 allowed attempt(s)" in reason
+        assert "trigger a fresh build" in reason
+
+    async def test_a_zero_attempt_count_never_denies_a_start(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """0 is "not attempted in this build", never "out of budget" — even
+        with retries switched off entirely."""
+        (root,) = _chain("budget-zero-count")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(str(root.id), status="pending", attempt_count=0)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
+            ),
+        )
+
+        assert summary.budget_denied == 0
+        assert summary.spawned == 1
+        assert executor.spawned == [root.id]
+
+    async def test_suspended_resumption_is_never_budget_gated(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Resuming a dynamic-dependency yield records a fresh start, so a
+        suspend-heavy task is "over budget" while perfectly healthy. Gating
+        it would cap dynamic dependencies, not retries."""
+        (root,) = _chain("budget-suspended")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_task(str(root.id), status="suspended", attempt_count=5)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=2
+            ),
+        )
+
+        assert summary.budget_denied == 0
+        assert summary.spawned == 1
+        assert executor.spawned == [root.id]
+
+    async def test_unrehydratable_task_never_spends_the_budget(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A task whose object cannot be resolved fails deterministically:
+        the second reading finds the same absence. Retrying it would burn
+        the budget to arrive at the same failure, later."""
+        (root,) = _chain("budget-no-object")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        store._tasks.pop(str(root.id), None)  # no pickle, no registry data
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.failed_recorded == 1
+        assert summary.retried == 0
+        assert summary.retry_exhausted == 0
+        assert ("retry", str(root.id)) not in registry.calls
+        assert registry.attempt_counts.get(str(root.id), 0) == 0
+        assert summary.terminal_status == "failed"
+
+    async def test_max_attempts_one_records_the_failure_and_never_respawns(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The pre-``max_attempts`` behaviour, still available verbatim."""
+        (root,) = _chain("budget-disabled")
+        executor = SpawnFailingExecutor()
+        registry, locks, _, store = _setup(
+            [root], auto_complete=False, executor=executor
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.0, poll_interval_seconds=0.01, max_attempts=1
+            ),
+        )
+
+        assert executor.spawn_attempts == 1
+        assert summary.retried == 0
+        # Not "exhausted": nothing was budgeted away, retries are off.
+        assert summary.retry_exhausted == 0
+        assert summary.terminal_status == "failed"
+
+    async def test_a_registry_that_cannot_count_attempts_never_retries(
+        self, caplog, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A server predating ``attempt_count`` reports nothing, so no
+        budget can bound a retry loop. Degrade to the old behaviour rather
+        than to an unbounded one — and say so, because a configured retry
+        policy silently doing nothing is its own trap."""
+        (root,) = _chain("budget-old-server")
+        executor = SpawnFailingExecutor()
+        registry, locks, _, store = _setup(
+            [root], auto_complete=False, executor=executor
+        )
+        registry.serves_attempt_counts = False
+
+        with caplog.at_level("WARNING"):
+            summary = await run_tick_aio(
+                uuid4(),
+                registry=registry,
+                task_executor=executor,
+                lock_manager=locks,
+                task_store=store,
+                config=FAST_TICK,
+            )
+
+        assert executor.spawn_attempts == 1
+        assert summary.retried == 0
+        assert summary.retry_exhausted == 0
+        assert summary.budget_denied == 0
+        assert summary.terminal_status == "failed"
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "does not report per-build attempt counts" in messages
+        assert "Upgrade stardag-api" in messages
+
+    async def test_summary_counters_are_reported_to_the_registry(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The budget counters ride the persisted TickSummary, so "why did
+        this build fail on a transient error?" is answerable without logs."""
+        (root,) = _chain("budget-summary")
+        executor = SpawnFailingExecutor()
+        registry, locks, _, store = _setup(
+            [root], auto_complete=False, executor=executor
+        )
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        reported = registry.reported_tick_summaries[-1]
+        assert reported["retried"] == 1
+        assert reported["retry_exhausted"] == 1
+        assert reported["budget_denied"] == 0
