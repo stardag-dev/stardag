@@ -2834,7 +2834,12 @@ async def test_evict_holder_frees_slot(client: AsyncClient):
 
     response = await client.post("/api/v1/concurrency-limits/ev/holders/ev-a/evict")
     assert response.status_code == 200
-    assert response.json() == {"task_id": "ev-a", "status": "failed"}
+    assert response.json() == {
+        "task_id": "ev-a",
+        "status": "failed",
+        # The eviction ends the one attempt the holder made.
+        "attempt_count": 1,
+    }
 
     # Failure recorded with the evictor identity (mocked auth user).
     events = (await client.get("/api/v1/tasks/ev-a/events")).json()
@@ -3016,7 +3021,12 @@ async def test_evicted_then_worker_completes_sticky_completed(client: AsyncClien
     response = await client.post(
         "/api/v1/concurrency-limits/alive/holders/alive-ev/evict"
     )
-    assert response.json() == {"task_id": "alive-ev", "status": "failed"}
+    assert response.json() == {
+        "task_id": "alive-ev",
+        "status": "failed",
+        # The eviction ends the one attempt the holder made.
+        "attempt_count": 1,
+    }
 
     # The (still-alive) worker reports completion afterwards.
     response = await client.post(f"/api/v1/builds/{build_id}/tasks/alive-ev/complete")
@@ -3131,7 +3141,12 @@ async def test_evict_admin_allowed_and_records_admin_identity(client: AsyncClien
         "/api/v1/concurrency-limits/adm/holders/admin-ev/evict"
     )
     assert response.status_code == 200
-    assert response.json() == {"task_id": "admin-ev", "status": "failed"}
+    assert response.json() == {
+        "task_id": "admin-ev",
+        "status": "failed",
+        # The eviction ends the one attempt the holder made.
+        "attempt_count": 1,
+    }
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,47 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Registry API
 
+- **Task refs now carry `attempt_count`, so a scheduler can run a retry
+  policy** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
+  Reactive scheduling records a failed execution and never respawns it —
+  retries are the execution backend's job — but a backend's function-level
+  retries only cover exceptions raised _inside_ a container that started.
+  A spawn that failed before the container existed, an OOM kill, a
+  preemption, or a worker that died after writing partial output are
+  invisible to them, so under fail-fast a single transient failure killed
+  the whole build. Deciding otherwise needs a _durable_ attempt count: a
+  tick is short-lived and cannot remember what it already tried.
+
+  `attempt_count` is how many times execution has been started for a task
+  **in that build**, exposed on `FrontierTaskRef` (all of `actionable`,
+  `running` and `roots`), on `GET /builds/{id}/tasks`, and on every task
+  lifecycle event response so a caller that has just recorded a failure or
+  won a claiming start can apply its budget without a second round-trip.
+
+  Three things it is easy to assume and get wrong:
+
+  - **It counts attempts, not `TASK_STARTED` events.** Engines emit
+    several starts per execution — an acquiring start for the claim /
+    limit slot before the spawn (no executor ref), a second carrying the
+    ref, plus the worker's own start when the executor self-reports
+    lifecycle. A run of consecutive starts collapses to the one execution
+    it describes, which makes the number the same whichever engine and
+    executor ran the task.
+  - **The scope is the build, not the environment** — unlike the
+    `latest_*` fields it travels with. A task that spent two attempts in
+    an earlier build arrives in a fresh trigger with a full budget.
+  - **A retry does not reset it.** A scheduler retries a failed task
+    _through_ `POST .../retry`, so a resetting counter would be cleared by
+    every enforcement of the budget it defines. Within one build the
+    number is a lifetime budget; a re-trigger gets a new build.
+
+  Derived from the event log rather than denormalised — attempts are
+  per-build and there is no per-(build, task) row to hang a column on — as
+  one grouped query bounded to the tasks being reported. No migration; the
+  frontier costs exactly one extra query, and none at all when it has no
+  tasks to report. Purely additive: every existing field keeps its exact
+  semantics.
+
 - **Reactive scheduler tick summaries are now persisted per build**
   (`POST`/`GET /builds/{build_id}/tick-summaries`). A reactive build is
   driven by many short-lived scheduler ticks, each in its own container,
