@@ -408,6 +408,11 @@ _TICK_KWARGS_ALLOWED = (
     # triggered against that deployment is where it can be said.
     "max_concurrent_actions",
     "max_spawns_per_tick",
+    # Per-build attempt budget. Belongs here more than most: the budget is
+    # per build by definition, and a build that has exhausted it is
+    # unblocked by re-triggering *with a raised* max_attempts — which only
+    # works if a re-trigger can say it.
+    "max_attempts",
 )
 
 
