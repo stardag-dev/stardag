@@ -597,6 +597,11 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
                 <button
                   onClick={handleToggleDag}
+                  // A disclosure control whose only state cue was a rotated
+                  // chevron: invisible to assistive tech, and to any test that
+                  // isn't reading CSS classes.
+                  aria-expanded={showDag}
+                  aria-controls="build-dag-panel"
                   className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
                 >
                   <svg
@@ -662,7 +667,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                   onExpand={() => setShowDag(true)}
                 >
                   {showDag && !dagFullscreen && (
-                    <div className="h-full">
+                    <div id="build-dag-panel" className="h-full">
                       <DagGraph
                         tasks={tasksWithContext}
                         graph={graph}
