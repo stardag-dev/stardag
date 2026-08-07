@@ -79,8 +79,11 @@ from stardag_api.schemas import (
 from stardag_api.services import generate_build_slug, get_build_status
 from stardag_api.services.build_cleanup import (
     CASCADE_CANCEL_STATUSES,
+    STALEST_FIRST_ORDER,
+    build_is_running,
     cancel_builds,
     cascade_cancel_build_tasks,
+    idle_filters,
     last_activity_at,
     select_cancellable_builds,
 )
@@ -535,6 +538,19 @@ async def list_builds(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     reactive_app_name: Annotated[str | None, Query()] = None,
     status: Annotated[BuildStatus | None, Query()] = None,
+    idle_for_seconds: Annotated[
+        int | None,
+        Query(
+            ge=60,
+            description=(
+                "Only builds with no activity of any kind for at least this "
+                "many seconds, measured on `last_activity_at`. Same "
+                "definition and same floor as POST /builds/bulk-cancel, so "
+                "the two cannot disagree about what is idle. Ordering "
+                "switches to stalest-first."
+            ),
+        ),
+    ] = None,
 ):
     """List builds in an environment.
 
@@ -548,27 +564,86 @@ async def list_builds(
       watchdog's real question is "RUNNING reactive builds owned by app X".
     - ``status``: only builds with the given derived status (e.g.
       ``running``). Because build status is derived from events (not a
-      column), it can't be paginated in SQL: matching candidates are scanned
-      up to a bounded cap and filtered in Python. Intended to be combined
+      column), it generally can't be paginated in SQL: matching candidates
+      are scanned up to a bounded cap and filtered in Python, so ``total``
+      means "matches within the scanned window". Intended to be combined
       with ``reactive_app_name``, which keeps the candidate set small.
+    - ``idle_for_seconds``: only builds idle for at least that long. **A real
+      SQL predicate**, so ``total`` is an exact ``COUNT(*)`` and pagination
+      is server-side and unbounded — no scan cap, nothing silently dropped.
+
+    Idleness is the same definition the stale-build reaper uses
+    (:func:`~stardag_api.services.build_cleanup.idle_filters`), deliberately
+    shared rather than reimplemented: this endpoint is how an operator
+    previews what ``POST /builds/bulk-cancel`` would do, and a preview that
+    disagrees with the action is worse than no preview. In particular it is
+    measured on ``last_activity_at`` — the newest of the build's whole event
+    stream, its ``last_active_at`` and any pending scheduler wake-up — not on
+    the ``last_active_at`` column alone, which task events never touch.
+
+    **Ordering** is ``last_active_at`` *descending* (most recently active
+    first, so a resumed build jumps to the top) — except with
+    ``idle_for_seconds``, where it flips to stalest-first, since a capped
+    page of a staleness query should contain the builds an operator actually
+    wants to act on. See
+    :data:`~stardag_api.services.build_cleanup.STALEST_FIRST_ORDER` for why
+    the sort key is a proxy for the full signal.
+
+    **Combining ``status`` with ``idle_for_seconds``:** only
+    ``status=running`` is accepted, and it then uses the SQL RUNNING
+    predicate instead of the Python scan, keeping the pair exact and
+    unbounded. That combination — "running, and idle for a day" — is the
+    abandoned-build query, and answering it over the 500 most-recently-active
+    candidates would drop precisely the oldest builds it exists to find. Any
+    other status alongside ``idle_for_seconds`` is rejected with **422**
+    rather than served an approximate ``total`` that looks exact.
     """
     environment_id = auth.environment_id
+    if idle_for_seconds is not None and status not in (None, BuildStatus.RUNNING):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"status={status.value!r} cannot be combined with "
+                "idle_for_seconds: only 'running' has a SQL predicate, and "
+                "the other statuses are derived by scanning a bounded window "
+                "of candidates, which would make `total` and pagination "
+                "approximate without saying so. Filter by idle_for_seconds "
+                "alone and inspect `status` per build, or drop "
+                "idle_for_seconds."
+            ),
+        )
+
     filters = [Build.environment_id == environment_id]
     if reactive_app_name is not None:
         filters.append(Build.reactive_app_name == reactive_app_name)
+
+    # Both filters below are exact SQL, so the derived-status Python scan is
+    # skipped entirely when they cover the request.
+    sql_filtered = idle_for_seconds is not None
+    if idle_for_seconds is not None:
+        filters.extend(idle_filters(utc_now() - timedelta(seconds=idle_for_seconds)))
+        if status == BuildStatus.RUNNING:
+            filters.append(build_is_running())
 
     # Sort by last_active_at so a resumed build (BUILD_RESUMED touches this
     # column) jumps back to the top of the list. ``Build.id`` is a UUID7
     # (time-sortable) so it's a stable tiebreaker for builds that share a
     # timestamp — without it, paginating across a tie can yield duplicates
-    # or skips.
+    # or skips. A staleness query wants the opposite end of the same
+    # ordering.
     ordered = (
         select(Build)
         .where(*filters)
-        .order_by(Build.last_active_at.desc(), Build.id.desc())
+        .order_by(
+            *(
+                STALEST_FIRST_ORDER
+                if idle_for_seconds is not None
+                else (Build.last_active_at.desc(), Build.id.desc())
+            )
+        )
     )
 
-    if status is None:
+    if status is None or sql_filtered:
         count_query = select(func.count()).select_from(Build).where(*filters)
         total = (await db.execute(count_query)).scalar() or 0
         result = await db.execute(

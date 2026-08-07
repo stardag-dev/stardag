@@ -690,3 +690,248 @@ async def test_list_tasks_status_filter_postgres(pg_client):
         )
     ).json()
     assert stale["tasks"] == []
+
+
+# ---------------------------------------------------------------------------
+# GET /builds?idle_for_seconds= — the same idleness predicate, as a filter.
+#
+# The UI's "idle for" control previews what the reaper would cancel, so it
+# must use the reaper's definition and must not be answered over a bounded
+# window: dropping the oldest matches is exactly the failure this filter
+# exists to avoid.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_builds_idle_filter_total_is_exact_and_paginates_server_side(
+    client: AsyncClient, async_session
+):
+    """`total` is a COUNT(*) over a real predicate, not "matches in the
+    window", and the pages partition the matches exactly."""
+    idle = [await _new_build(client) for _ in range(5)]
+    for build_id in idle:
+        await _backdate(async_session, build_id, age=timedelta(days=2))
+    fresh = [await _new_build(client) for _ in range(3)]
+
+    first = (
+        await client.get(
+            "/api/v1/builds", params={"idle_for_seconds": 3600, "page_size": 2}
+        )
+    ).json()
+    assert first["total"] == 5
+    assert len(first["builds"]) == 2
+
+    seen: list[str] = []
+    for page in (1, 2, 3):
+        body = (
+            await client.get(
+                "/api/v1/builds",
+                params={"idle_for_seconds": 3600, "page_size": 2, "page": page},
+            )
+        ).json()
+        assert body["total"] == 5
+        seen.extend(b["id"] for b in body["builds"])
+    assert len(seen) == len(set(seen)) == 5
+    assert set(seen) == set(idle)
+    assert not set(seen) & set(fresh)
+
+    # Unfiltered still sees everything.
+    assert (await client.get("/api/v1/builds")).json()["total"] == 8
+
+
+@pytest.mark.asyncio
+async def test_list_builds_idle_filter_orders_stalest_first(
+    client: AsyncClient, async_session
+):
+    """Stalest first, so a capped page holds what an operator wants to act
+    on — the reverse of the default most-recently-active-first order."""
+    ages: dict[int, str] = {}
+    for days in (2, 5, 9):
+        build_id = await _new_build(client)
+        await _backdate(async_session, build_id, age=timedelta(days=days))
+        ages[days] = build_id
+
+    body = (
+        await client.get("/api/v1/builds", params={"idle_for_seconds": 3600})
+    ).json()
+    assert [b["id"] for b in body["builds"]] == [ages[9], ages[5], ages[2]]
+
+    # Without the filter, the default ordering is unchanged.
+    body = (await client.get("/api/v1/builds")).json()
+    assert [b["id"] for b in body["builds"]] == [ages[2], ages[5], ages[9]]
+
+
+@pytest.mark.asyncio
+async def test_list_builds_idle_filter_ignores_builds_with_recent_task_activity(
+    client: AsyncClient, async_session
+):
+    """Same signal as the reaper, so the same guard: a build whose
+    ``last_active_at`` is ancient but which ran a task seconds ago is not
+    idle. If this filter and the reaper disagreed, the UI would be offering
+    operators a preview of something that will not happen."""
+    busy = await _new_build(client)
+    await _backdate(async_session, busy, age=timedelta(days=2))
+    await _start(client, busy, "list-busy-task")
+
+    abandoned = await _new_build(client)
+    await _start(client, abandoned, "list-abandoned-task")
+    await _backdate(async_session, abandoned, age=timedelta(days=2))
+
+    body = (
+        await client.get("/api/v1/builds", params={"idle_for_seconds": 24 * 3600})
+    ).json()
+    assert [b["id"] for b in body["builds"]] == [abandoned]
+    assert body["total"] == 1
+
+    # And the reaper agrees, which is the point of sharing the predicate.
+    preview = (
+        await client.post(
+            BULK_CANCEL, json={"idle_for_seconds": 24 * 3600, "dry_run": True}
+        )
+    ).json()
+    assert [b["build_id"] for b in preview["builds"]] == [abandoned]
+
+
+@pytest.mark.asyncio
+async def test_list_builds_idle_filter_respects_pending_scheduler_wakeup(
+    client: AsyncClient, async_session
+):
+    build_id = await _new_build(client)
+    await _backdate(async_session, build_id, age=timedelta(days=2))
+    await client.post(f"/api/v1/builds/{build_id}/notify")
+
+    body = (
+        await client.get("/api/v1/builds", params={"idle_for_seconds": 3600})
+    ).json()
+    assert body["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_builds_idle_filter_has_the_same_floor_as_bulk_cancel(
+    client: AsyncClient,
+):
+    """One definition of a legal threshold — the two must not disagree."""
+    assert (
+        await client.get("/api/v1/builds", params={"idle_for_seconds": 5})
+    ).status_code == 422
+    assert (
+        await client.post(BULK_CANCEL, json={"idle_for_seconds": 5})
+    ).status_code == 422
+    assert (
+        await client.get("/api/v1/builds", params={"idle_for_seconds": 60})
+    ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_list_builds_idle_filter_environment_isolation(
+    client: AsyncClient, as_environment_b
+):
+    build_id = await _new_build(client)
+
+    with as_environment_b():
+        body = (
+            await client.get("/api/v1/builds", params={"idle_for_seconds": 60})
+        ).json()
+        assert body == {"builds": [], "total": 0, "page": 1, "page_size": 20}
+
+    assert build_id  # owning environment sees its own builds unchanged
+    assert (await client.get("/api/v1/builds")).json()["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_builds_running_and_idle_is_exact_beyond_the_scan_cap(
+    client: AsyncClient, async_session, monkeypatch
+):
+    """`status=running` alone derives status in Python over the 500
+    most-recently-active candidates. Combined with `idle_for_seconds` that
+    cap would drop precisely the oldest builds — the ones the query exists
+    to find — so the pair uses the SQL RUNNING predicate instead.
+
+    The cap is monkeypatched down (as the existing truncation test does)
+    rather than building 500 rows.
+    """
+    from stardag_api.routes import builds as builds_routes
+
+    monkeypatch.setattr(builds_routes, "_STATUS_FILTER_SCAN_CAP", 2)
+
+    # Three old RUNNING builds and one old terminal one. With a cap of 2,
+    # a window scan could see at most two of them.
+    old_running = []
+    for days in (10, 9, 8):
+        build_id = await _new_build(client)
+        await _backdate(async_session, build_id, age=timedelta(days=days))
+        old_running.append(build_id)
+    old_done = await _new_build(client)
+    await client.post(f"/api/v1/builds/{old_done}/complete")
+    await _backdate(async_session, old_done, age=timedelta(days=7))
+
+    # Two fresh RUNNING builds, which is what the most-recently-active
+    # window would be full of.
+    for _ in range(2):
+        await _new_build(client)
+
+    body = (
+        await client.get(
+            "/api/v1/builds",
+            params={"status": "running", "idle_for_seconds": 24 * 3600},
+        )
+    ).json()
+    assert body["total"] == 3
+    assert [b["id"] for b in body["builds"]] == old_running  # stalest first
+    assert all(b["status"] == "running" for b in body["builds"])
+
+    # The bare status filter is unchanged — still window-scanned, still
+    # truncating at the (patched) cap.
+    capped = (await client.get("/api/v1/builds", params={"status": "running"})).json()
+    assert capped["total"] <= 2
+
+
+@pytest.mark.asyncio
+async def test_list_builds_rejects_other_statuses_with_idle_filter(
+    client: AsyncClient,
+):
+    """Rather than return a plausible-looking approximate `total`."""
+    response = await client.get(
+        "/api/v1/builds", params={"status": "completed", "idle_for_seconds": 3600}
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "idle_for_seconds" in detail and "completed" in detail
+
+    # Each alone is fine.
+    assert (
+        await client.get("/api/v1/builds", params={"status": "completed"})
+    ).status_code == 200
+    assert (
+        await client.get("/api/v1/builds", params={"idle_for_seconds": 3600})
+    ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_list_builds_idle_filter_postgres(pg_client, pg_session):
+    """Correlated aggregates + COUNT(*) over them, on the real dialect."""
+    busy = await _new_build(pg_client)
+    await _backdate(pg_session, busy, age=timedelta(days=2))
+    await _start(pg_client, busy, "pg-list-busy")
+
+    abandoned = await _new_build(pg_client)
+    await _backdate(pg_session, abandoned, age=timedelta(days=2))
+
+    done = await _new_build(pg_client)
+    await pg_client.post(f"/api/v1/builds/{done}/complete")
+    await _backdate(pg_session, done, age=timedelta(days=3))
+
+    body = (
+        await pg_client.get("/api/v1/builds", params={"idle_for_seconds": 3600})
+    ).json()
+    assert body["total"] == 2
+    assert [b["id"] for b in body["builds"]] == [done, abandoned]
+
+    running_only = (
+        await pg_client.get(
+            "/api/v1/builds",
+            params={"status": "running", "idle_for_seconds": 3600},
+        )
+    ).json()
+    assert running_only["total"] == 1
+    assert [b["id"] for b in running_only["builds"]] == [abandoned]
