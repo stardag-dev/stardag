@@ -2689,6 +2689,16 @@ class StardagApp:
         # ordering stays and the terminal event is the fix: any failure
         # emits BUILD_FAILED naming the stage, then re-raises.
         stage = "build resume / root registration"
+        # Emitting the terminal event is only correct once THIS trigger has
+        # put the build into RUNNING. A fresh build was minted and started by
+        # the caller, so it already is. A re-trigger's build may still be
+        # terminal until build_resume succeeds — and a transient error on
+        # that very call would otherwise flip a COMPLETED build to FAILED,
+        # which is strictly worse than the orphan this wrapper exists to
+        # prevent. A re-trigger of an already-RUNNING build is the same case
+        # seen from the other side: it was RUNNING before we touched it, so
+        # it is not an orphan of ours to terminate.
+        build_is_running = not is_retrigger
         try:
             if is_retrigger:
                 # Un-terminal the build (no-op on a fresh/running build) and
@@ -2701,6 +2711,7 @@ class StardagApp:
                     registry.build_resume(build_id, executor_metadata=executor_metadata)
                 else:
                     registry.build_resume(build_id)
+                build_is_running = True
                 registry.build_add_roots(build_id, root_ids)
             stage = "task discovery and registration"
             discovery = asyncio.run(
@@ -2730,7 +2741,8 @@ class StardagApp:
             # of the likelier ways to abandon a trigger, and it wedges the
             # build exactly the same way. The original error always
             # propagates — _fail_build_on_trigger_error never masks it.
-            _fail_build_on_trigger_error(registry, build_id, stage, error)
+            if build_is_running:
+                _fail_build_on_trigger_error(registry, build_id, stage, error)
             raise
         # The spawn is deliberately OUTSIDE the wrapper: by this point the
         # durable state is complete and consistent, and the build carries the

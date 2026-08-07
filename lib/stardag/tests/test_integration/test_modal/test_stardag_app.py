@@ -878,6 +878,44 @@ class TestReactiveTriggerFailureLeavesNoOrphanBuild:
                 with pytest.raises(PermissionError, match="read-only target root"):
                     app.build_trigger(self._root(), reactive=True)
 
+    def test_resume_failure_on_retrigger_does_not_terminate_the_build(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """A re-trigger's build may still be TERMINAL on entry — nothing has
+        started it. Emitting BUILD_FAILED when the resume itself fails would
+        flip a COMPLETED build to FAILED over a transient registry error,
+        which is strictly worse than the orphan this wrapper prevents.
+        """
+        app = self._make_app()
+        build_id = uuid4()
+        registry = self._make_registry(build_id)
+        registry.build_resume.side_effect = RuntimeError("registry down")
+
+        with registry_provider.override(registry):
+            with pytest.raises(RuntimeError, match="registry down"):
+                app.build_trigger(self._root(), reactive=True, build_id=build_id)
+
+        registry.build_fail.assert_not_called()
+
+    def test_failure_after_a_successful_resume_does_terminate_the_build(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The other side of the same coin: once resume has put the build
+        back into RUNNING, this trigger owns it and must not abandon it."""
+        app = self._make_app()
+        build_id = uuid4()
+        registry = self._make_registry(build_id)
+        registry.task_register_bulk_aio.side_effect = RuntimeError("registry down")
+
+        with registry_provider.override(registry):
+            with pytest.raises(RuntimeError, match="registry down"):
+                app.build_trigger(self._root(), reactive=True, build_id=build_id)
+
+        registry.build_resume.assert_called_once()
+        assert (
+            "task discovery and registration" in registry.build_fail.call_args.args[1]
+        )
+
     def test_spawn_failure_leaves_the_build_recoverable(
         self, modal_function_stub, default_in_memory_fs_target, monkeypatch
     ):
