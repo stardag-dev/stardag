@@ -6,6 +6,44 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **`StardagApp(task_modules=[...])`: declare the modules whose import
+  registers your task classes, so reactive scheduler ticks can rebuild
+  tasks from registry data instead of pickles.** A tick reconstructs task
+  objects from the registry's stored payload, which resolves a class
+  through the polymorphic registry — populated only as a side effect of
+  importing the defining module. Without a declaration, whatever a tick
+  container happens to import is arbitrary, so the build task store's
+  pickles were load-bearing (and needed target-root write access at
+  trigger time, and were invalidated by every redeploy).
+
+  Patterns are exact modules (`"my_pkg.tasks.ingest"`) or trailing
+  recursive wildcards (`"my_pkg.tasks.*"`); the default infers the root
+  package of the module defining the app, and `[]` opts out. They are
+  expanded to a concrete module list at deploy time (without importing
+  submodules) and baked into the deployed tick, so **adding or moving task
+  classes requires a redeploy**; `stardag modal deploy` reports the
+  expansion (`--no-check-task-modules` skips the warn-only local import
+  check). Task modules are imported in every tick container, so keep heavy
+  runtime dependencies inside `run()` rather than at module scope.
+
+  With the declaration in place, a reactive trigger writes **no pickle**
+  for any task whose class is covered and whose payload round-trips to the
+  same task id — a fully covered build needs no target-root write access
+  at all. Everything else keeps its pickle exactly as before, including
+  `AliasTask` payloads (pickled `loads_type`, never auto-unpickled from
+  registry data by design) and non-importable classes. The trigger warns
+  about classes the patterns don't cover, naming the pattern to add;
+  `require_pickle_free=True` turns that fallback into a hard error.
+
+  Resident (non-reactive) builds are unaffected, and `task_modules=[]`
+  behaves exactly as before. **Upgrade note for reactive users:** because
+  the default _infers_ patterns, a reactive trigger from the upgraded SDK
+  may skip pickles that the currently _deployed_ tick cannot compensate
+  for — redeploy the app before triggering (reactive mode already requires
+  the deployed app and the SDK to match), or pass `task_modules=[]`.
+
 ### Fixed
 
 - **The reactive watchdog now asks the registry only for the RUNNING builds
