@@ -190,15 +190,22 @@ async def select_cancellable_builds(
     include_reactive: bool = False,
     limit: int = 100,
 ) -> tuple[list[tuple[Build, datetime | None]], bool]:
-    """Find RUNNING builds matching the filter, oldest activity first.
+    """Find RUNNING builds matching the filter, stalest first.
 
     Returns ``(rows, truncated)`` where each row is ``(build,
     last_event_at)`` and ``truncated`` says more builds matched than
     ``limit``. ``environment_id=None`` spans every environment (the
     in-process sweep; the HTTP endpoint always scopes to the caller's).
 
-    Ordering is oldest-first so a capped call reaps the most stale builds
-    and repeated calls converge, rather than churning the same page.
+    Ordered by ``last_active_at`` rather than by the full
+    :func:`last_activity_at` signal: the latter is a max over a correlated
+    aggregate, so sorting on it would forfeit
+    ``ix_builds_environment_last_active`` and sort the whole candidate set.
+    It is a proxy for staleness, not the definition of it — which is fine
+    here, because ordering only decides *which* stale builds a capped call
+    takes first. Correctness comes from the filter, and convergence comes
+    from cancellation itself: a reaped build stops being RUNNING and drops
+    out of the next call.
     """
     filters: list[ColumnElement[bool]] = [build_is_running()]
     if environment_id is not None:
