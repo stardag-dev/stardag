@@ -139,6 +139,24 @@ class BuildResponse(BaseModel):
     # for non-reactive builds (and treated as {} when the marker is set but
     # no kwargs were given).
     reactive_tick_kwargs: dict | None = None
+    # ---- Liveness. Two different numbers; do not confuse them. ----
+    #
+    # ``last_active_at`` is the ``builds`` column that drives list ordering.
+    # It is bumped by build-level LIFECYCLE transitions only (resume,
+    # complete, fail, cancel, exit-early, roots appended) — never by task
+    # events, deliberately, so the per-task hot path doesn't contend on the
+    # build row. It is therefore **not** an activity signal: a build that has
+    # been busily running tasks for three days still shows the timestamp of
+    # its last lifecycle change.
+    #
+    # ``last_activity_at`` is that activity signal: the most recent moment
+    # anything at all happened for this build — max over the build's whole
+    # event stream (task events included), its ``last_active_at``, and any
+    # pending scheduler wake-up. This is the number the stale-build reaper
+    # measures idleness with, exposed so a UI can show operators exactly what
+    # the reaper will act on.
+    last_active_at: datetime | None = None
+    last_activity_at: datetime | None = None
 
 
 class BuildListResponse(BaseModel):
@@ -148,6 +166,20 @@ class BuildListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class BuildCancelResponse(BuildResponse):
+    """Response of ``POST /builds/{id}/cancel``.
+
+    A superset of :class:`BuildResponse` — clients written against the plain
+    build shape are unaffected. ``cascaded_task_ids`` is empty unless the
+    call passed ``cascade=true``.
+    """
+
+    # Tasks this call moved to CANCELLED, releasing their execution claims
+    # and any concurrency-limit slots they occupied.
+    cascaded_task_ids: list[str] = []
+    cascaded_task_count: int = 0
 
 
 # --- Task Schemas ---
@@ -421,6 +453,100 @@ class ConcurrencyLimitHoldersResponse(BaseModel):
     key: str
     holders: list[ConcurrencyLimitHolder]
     total: int
+
+
+class BulkCancelBuildsRequest(BaseModel):
+    """Filter for ``POST /builds/bulk-cancel`` — bulk cleanup and the reaper.
+
+    Bulk cancel and "reap builds idle beyond a threshold" are the same
+    operation with different filters, so they are one endpoint rather than
+    two near-identical code paths: pass ``build_ids`` for an explicit
+    selection, ``idle_for_seconds`` for the reaper, or both.
+
+    **Only RUNNING builds are ever eligible**, whatever the filter says —
+    a build that already reached a terminal build-level event is skipped,
+    which is what makes the call idempotent and safe to retry or run on a
+    timer. At least one of ``build_ids`` / ``idle_for_seconds`` is required:
+    an unqualified "cancel everything running in this environment" is not a
+    cleanup operation and the endpoint refuses it (422).
+    """
+
+    # Explicit selection. Ids in another environment, unknown ids, and
+    # already-terminal builds are silently skipped (reported via `skipped`)
+    # rather than failing the batch — a cleanup that aborts halfway is worse
+    # than one that reports what it did.
+    build_ids: list[UUID] | None = None
+    # The reaper filter: only builds with no activity of any kind for at
+    # least this many seconds. A DURATION, not a timestamp (unlike
+    # `GET /tasks?status_older_than=`), because this threshold is a
+    # recurring policy — "anything quiet for a day is abandoned" — and a
+    # fixed timestamp would go stale on the second invocation of a timer.
+    # The unit is in the name so there is nothing to guess.
+    #
+    # Idleness is measured against `BuildResponse.last_activity_at`, NOT the
+    # `last_active_at` column: see the field docs there and the endpoint
+    # docstring. Minimum 60s — a threshold small enough to race a live build
+    # is a foot-gun, not a feature.
+    idle_for_seconds: int | None = Field(default=None, ge=60)
+    # Restrict to builds driven by this reactive app (implies
+    # include_reactive).
+    reactive_app_name: str | None = None
+    # Reactive builds are EXCLUDED by default. A reactive build is quiet
+    # between ticks by design — the quiet is the feature — and it already
+    # has a watchdog to notice when it wedges. Opt in when you know an app
+    # is gone (e.g. undeployed) and its builds should be cleaned up.
+    include_reactive: bool = False
+    # Also cancel each build's claim-holding tasks. Defaults to TRUE here
+    # (unlike the single-build cancel, where it defaults off to preserve
+    # existing behaviour): releasing leaked claims and concurrency-limit
+    # slots is the entire point of a cleanup pass, and a build cancelled
+    # without it leaves exactly the problem behind that this endpoint exists
+    # to fix.
+    cascade: bool = True
+    # Report what would happen and change nothing.
+    dry_run: bool = False
+    # Cap on builds handled per call. The scan itself is unbounded (the
+    # reaper must be able to *find* every stale build — see the endpoint
+    # docstring), only the write set is capped; `truncated` tells you to
+    # call again.
+    limit: int = Field(default=100, ge=1, le=500)
+    # Free-text note recorded on each BUILD_CANCELLED event.
+    reason: str | None = None
+
+
+class CancelledBuildRef(BaseModel):
+    """One build cancelled (or, in a dry run, selected) by bulk cancel."""
+
+    build_id: UUID
+    name: str
+    # The idleness signal the selection was made on — the same value
+    # ``BuildResponse.last_activity_at`` reports.
+    last_activity_at: datetime | None = None
+    reactive_app_name: str | None = None
+    # Tasks cancelled along with the build (empty when cascade is off).
+    cascaded_task_ids: list[str] = []
+
+
+class BulkCancelBuildsResponse(BaseModel):
+    """Result of ``POST /builds/bulk-cancel``.
+
+    In a dry run, ``builds`` lists exactly what a real run would have
+    cancelled and every count is the count it would have produced —
+    nothing is written.
+    """
+
+    dry_run: bool
+    builds: list[CancelledBuildRef]
+    build_count: int
+    task_count: int
+    # Ids from ``build_ids`` that were not acted on, and why: "not_found"
+    # (unknown, or another environment — the two are deliberately
+    # indistinguishable so the endpoint can't be used to probe for build ids
+    # in other environments), "not_running", "reactive" (excluded, pass
+    # include_reactive), "not_idle".
+    skipped: dict[str, str] = {}
+    # More builds matched the filter than ``limit`` allowed; call again.
+    truncated: bool = False
 
 
 class SkipBlockedResponse(BaseModel):

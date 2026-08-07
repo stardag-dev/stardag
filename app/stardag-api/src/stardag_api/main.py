@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
@@ -7,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.auth.tokens import get_token_manager
-from stardag_api.config import auth_settings, settings
+from stardag_api.config import auth_settings, reaper_settings, settings
 from stardag_api.middleware import GZipRequestMiddleware
 from stardag_api.routes import (
     auth_router,
@@ -46,7 +47,23 @@ async def lifespan(app: FastAPI):
         async with async_session_maker() as session:
             await ensure_bootstrap_admin(session)
             await ensure_primary_workspace(session)
-    yield
+
+    # Optional unattended stale-build reaper. Off unless explicitly enabled
+    # (STARDAG_API_REAPER_ENABLED) — it cancels builds, and every replica
+    # runs its own timer with no leader election. See ReaperSettings.
+    reaper_stop = asyncio.Event()
+    reaper_task: asyncio.Task | None = None
+    if reaper_settings.enabled:
+        from stardag_api.services.build_cleanup import run_periodic_sweep
+
+        reaper_task = asyncio.create_task(run_periodic_sweep(reaper_stop))
+
+    try:
+        yield
+    finally:
+        if reaper_task is not None:
+            reaper_stop.set()
+            await reaper_task
 
 
 app = FastAPI(
