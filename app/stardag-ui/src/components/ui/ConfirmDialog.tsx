@@ -81,7 +81,7 @@ export function ConfirmDialog({
                 : "bg-blue-600 hover:bg-blue-700 focus-visible:ring-blue-500"
             }`}
           >
-            {busy ? (busyLabel ?? `${confirmLabel}…`) : confirmLabel}
+            {busy ? busyLabel ?? `${confirmLabel}…` : confirmLabel}
           </button>
         </div>
       </div>
