@@ -25,6 +25,17 @@ Usage:
     stardag environment target-roots remove <name> [--env <env>]
     stardag environment target-roots set <name=uri ...> [--json <json>] [--env <env>]
 
+    stardag builds list [--status running] [--reactive-app name] [--older-than 24h]
+    stardag builds show <build-id> [--json]
+    stardag builds frontier <build-id> [--json]
+    stardag builds ticks <build-id> [--limit N] [--json]
+    stardag builds cancel <build-id> [--cascade] [--yes]
+    stardag builds cleanup [--older-than 24h] [--build-id id ...] [--apply] [--yes]
+
+    stardag tasks list [--status running] [--older-than 1h] [--json]
+    stardag tasks cancel <build-id> <task-id> [--yes]
+    stardag tasks retry <build-id> <task-id> [--yes]
+
     stardag concurrency-limits list [--holders] [-p profile] [-e env]
     stardag concurrency-limits set <key> <max_concurrent> [-p profile] [-e env]
     stardag concurrency-limits delete <key> [--yes] [-p profile] [-e env]
@@ -42,6 +53,13 @@ Usage:
     stardag self-host status [--server-modal-env env]
     stardag self-host destroy [--delete-secrets] [--server-modal-env env]
 
+Machine-readable output:
+    The registry-backed read commands (`builds list/show/frontier/ticks`,
+    `builds cleanup`, `tasks list`) take `--json`. In that mode stdout
+    carries exactly one JSON document — the SDK's model of the API
+    payload — and every hint, warning and prompt goes to stderr, so
+    piping to `jq` is safe.
+
 Configuration:
     Set STARDAG_PROFILE=<profile-name> to use a specific profile.
     Set STARDAG_API_URL, STARDAG_WORKSPACE_ID, STARDAG_ENVIRONMENT_ID
@@ -51,7 +69,7 @@ Configuration:
 
 import typer
 
-from stardag._cli import auth, config, environment, limits
+from stardag._cli import auth, builds, config, environment, limits, tasks
 
 # Main CLI app
 app = typer.Typer(
@@ -64,6 +82,8 @@ app = typer.Typer(
 app.add_typer(auth.app, name="auth")
 app.add_typer(config.app, name="config")
 app.add_typer(environment.app, name="environment")
+app.add_typer(builds.app, name="builds")
+app.add_typer(tasks.app, name="tasks")
 app.add_typer(limits.app, name="concurrency-limits")
 
 # Add modal subcommand only if modal is installed
