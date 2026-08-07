@@ -24,14 +24,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, Event, EventType, Task, TaskStatus
-from stardag_api.models.base import utc_now
+from stardag_api.models.base import as_utc, utc_now
 from stardag_api.services.status import apply_event_to_task
 
 logger = logging.getLogger(__name__)
@@ -137,18 +137,6 @@ def last_event_at_subquery() -> ColumnElement[datetime]:
     )
 
 
-def _as_utc(value: datetime) -> datetime:
-    """Attach UTC to a naive timestamp.
-
-    Every timestamp we write is UTC (``utc_now``), but SQLite's DATETIME
-    storage format carries no offset, so values read back from the test
-    database are naive while values still in the session are aware. Mixing
-    the two in a comparison raises. Postgres returns aware values
-    throughout, so this is a no-op there.
-    """
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-
-
 def last_activity_at(build: Build, last_event_at: datetime | None) -> datetime | None:
     """The build's idleness signal: the newest of every liveness input.
 
@@ -164,7 +152,7 @@ def last_activity_at(build: Build, last_event_at: datetime | None) -> datetime |
       opposite of abandoned.
     """
     candidates = [
-        _as_utc(ts)
+        as_utc(ts)
         for ts in (last_event_at, build.last_active_at, build.needs_tick_at)
         if ts is not None
     ]
