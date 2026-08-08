@@ -3876,3 +3876,32 @@ class TestAttemptBudget:
         assert reported["retried"] == 1
         assert reported["retry_exhausted"] == 1
         assert reported["budget_denied"] == 0
+
+
+class TestBlockerAgeFormatting:
+    """The blocker message is what a stalled build's owner acts on."""
+
+    def test_age_is_human_readable_not_raw_seconds(self):
+        from stardag.build._reactive import _format_age
+
+        # Found in a live run: "RUNNING for 10889s" made the reader do
+        # arithmetic before they could judge whether it was alarming.
+        assert _format_age(10889) == "3h 1m"
+        assert _format_age(5) == "5s"
+        assert _format_age(95) == "1m"
+        assert _format_age(3600) == "1h"
+        assert _format_age(90000) == "1d 1h"
+
+    def test_discovery_is_bounded_lower_than_frontier_actions(self):
+        """Discovery is limited by the target backend, not the registry.
+
+        Measured live: a 64-task layer against a Modal volume completed at 16
+        in flight, stalled at 32 and failed at 50. Sharing one constant with
+        the registry-bound actions conflated two different ceilings.
+        """
+        from stardag.build._reactive import (
+            _DEFAULT_MAX_CONCURRENCY,
+            _DEFAULT_MAX_CONCURRENT_DISCOVER,
+        )
+
+        assert _DEFAULT_MAX_CONCURRENT_DISCOVER < _DEFAULT_MAX_CONCURRENCY
