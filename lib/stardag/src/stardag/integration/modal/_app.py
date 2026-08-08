@@ -306,8 +306,22 @@ def _run_watchdog_sweep(
     tick: typing.Callable[..., typing.Any],
     sweep_limit: int = 100,
     tick_timeout_seconds: float | None = None,
+    reactive_app_name: str | None = None,
 ) -> None:
-    """One watchdog pass: tick every running build, without lingering.
+    """One watchdog pass: tick every running build this app owns.
+
+    ``reactive_app_name`` scopes the listing to this app's own reactive
+    builds. Without it, ``sweep_limit`` is spent on whatever RUNNING builds
+    happen to be most recently active in the environment — including builds
+    no tick of this app can advance (resident builds, and builds whose
+    orchestrator died without emitting a terminal event, which stay RUNNING
+    forever). Once those exceed the limit the safety net stops reaching
+    genuine reactive builds entirely, and silently.
+
+    The trade-off is losing the incidental cross-app coverage a sweep used to
+    provide. That was accidental and competed for the same limit; an app's own
+    watchdog is the supported mechanism, and ``build_trigger`` already warns
+    when a reactive build is triggered on an app without one.
 
     ``linger_seconds=0`` (one frontier pass per build) is essential: the
     sweep runs ticks sequentially in one function call — persisted linger
@@ -3134,10 +3148,14 @@ class StardagApp:
                 # The watchdog runs on the same settings as `tick`, so its
                 # container has the same timeout — which it then splits
                 # across the builds it sweeps (see _run_watchdog_sweep).
+                # Scoped to this app's own reactive builds, and handed the
+                # container's own timeout to split across them — see
+                # _run_watchdog_sweep for both.
                 _run_watchdog_sweep(
                     registry_provider.get(),
                     _modal_tick,
                     tick_timeout_seconds=tick_timeout_seconds,
+                    reactive_app_name=app_name,
                 )
 
             self.modal_app.function(
