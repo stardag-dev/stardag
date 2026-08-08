@@ -38,7 +38,7 @@ version does not model.
 import json
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 from uuid import UUID
 
 import typer
@@ -55,7 +55,7 @@ from stardag._cli._registry_ctx import (
     console,
     error_console,
 )
-from stardag.exceptions import StardagError
+from stardag.exceptions import NotFoundError, StardagError, is_missing_route_error
 from stardag.registry import BuildFrontier, BuildSummary, FrontierTaskRef
 
 app = typer.Typer(
@@ -128,6 +128,30 @@ def _parse_older_than(value: str | None) -> int | None:
         )
         raise typer.Exit(1)
     return seconds
+
+
+def _fail_missing_route(
+    exc: NotFoundError, command: str, endpoint: str, hint: str | None = None
+) -> NoReturn:
+    """Report a 404 that means "this registry is too old", not "no such thing".
+
+    A registry predating an endpoint serves it as FastAPI's generic
+    missing-route 404, which this CLI otherwise renders as "resource not
+    found" — the user reads that as a bad build id and goes looking for the
+    build. Same distinction the SDK draws everywhere else (see
+    ``is_missing_route_error``); a genuine resource-level 404 still falls
+    through to the normal error path.
+    """
+    if not is_missing_route_error(exc):
+        _fail(exc)
+    error_console.print(
+        f"[bold red]Error:[/bold red] this registry does not support "
+        f"'stardag {command}' — its {endpoint} endpoint is missing. "
+        "Upgrade stardag-api to a version matching this SDK."
+    )
+    if hint:
+        error_console.print(f"[dim]{hint}[/dim]")
+    raise typer.Exit(1)
 
 
 @app.command("list")
@@ -510,6 +534,11 @@ def builds_ticks(
     registry = _resolve_registry(stardag_profile, stardag_env)
     try:
         summaries = registry.build_list_tick_summaries(parsed, limit=limit)
+    except NotFoundError as e:
+        # The reactive scheduler's *reporting* side reads the same signal and
+        # disables itself silently; here the user asked for the data, so they
+        # get told why there is none.
+        _fail_missing_route(e, "builds ticks", "tick-summaries")
     except StardagError as e:
         _fail(e)
     finally:
@@ -522,8 +551,9 @@ def builds_ticks(
     if not summaries:
         console.print(f"No tick summaries recorded for build {build_id}.")
         console.print(
-            "\n[dim]Only reactively-scheduled builds report them, and only "
-            "against a registry API that supports the endpoint.[/dim]"
+            "\n[dim]Only reactively-scheduled builds report them. (A registry "
+            "too old for the endpoint fails above rather than showing "
+            "nothing.)[/dim]"
         )
         return
 
@@ -714,6 +744,16 @@ def builds_cleanup(
             dry_run=not do_apply,
             limit=limit,
             reason=reason,
+        )
+    except NotFoundError as e:
+        # Especially confusing here: a dry run against an old registry reads
+        # as "not found" even though nothing was looked up by id yet.
+        _fail_missing_route(
+            e,
+            "builds cleanup",
+            "bulk-cancel",
+            hint="Until then, cancel abandoned builds one at a time: "
+            "stardag builds cancel <build-id> --cascade",
         )
     except StardagError as e:
         _fail(e)
