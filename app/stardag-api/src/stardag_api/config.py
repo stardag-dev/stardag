@@ -4,6 +4,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag_api.limits import LimitsSettings
+from stardag_api.sdk_compat import SdkCompatSettings
 
 
 class Settings(BaseSettings):
@@ -310,3 +311,4 @@ auth_settings = AuthSettings()
 oidc_settings = OIDCSettings()
 email_settings = EmailSettings()
 limits_settings = LimitsSettings()
+sdk_compat_settings = SdkCompatSettings()

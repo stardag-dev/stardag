@@ -8,8 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from stardag_api.auth.tokens import get_token_manager
-from stardag_api.config import auth_settings, reaper_settings, settings
-from stardag_api.middleware import GZipRequestMiddleware
+from stardag_api.config import (
+    auth_settings,
+    reaper_settings,
+    sdk_compat_settings,
+    settings,
+)
+from stardag_api.middleware import GZipRequestMiddleware, SdkVersionMiddleware
 from stardag_api.routes import (
     auth_router,
     builds_router,
@@ -73,6 +78,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Read (and record) the calling SDK's version, and refuse it when it is
+# below a configured minimum — which is unset by default, so out of the box
+# this rejects nothing. See stardag_api.sdk_compat.
+#
+# Registered *before* CORSMiddleware, and Starlette wraps last-added
+# outermost, so CORS ends up outside this: a 426 still carries the CORS
+# headers a browser needs to read it at all.
+app.add_middleware(SdkVersionMiddleware)
+
 # CORS for frontend
 app.add_middleware(
     CORSMiddleware,
@@ -119,7 +133,14 @@ async def health_check():
 
 @app.get("/api/v1/version")
 async def version():
-    """Server + API package versions.
+    """Server + API package versions, and the SDK compatibility policy.
+
+    ``minimum_sdk_version`` is the oldest stardag SDK this server accepts,
+    or ``null`` — the default — when it accepts every version. It is
+    published here so the SDK, the docs and support all read one number from
+    one place, including the client that was just refused: this endpoint is
+    never gated, precisely so a rejected client can find out what it is
+    being asked to upgrade to. See ``stardag_api.sdk_compat``.
 
     ``server_version`` is the release version of the combined server
     (API + UI) image, injected via the STARDAG_SERVER_VERSION environment
@@ -142,4 +163,5 @@ async def version():
     return {
         "server_version": os.environ.get("STARDAG_SERVER_VERSION", "dev"),
         "api_version": api_version,
+        "minimum_sdk_version": sdk_compat_settings.minimum_version,
     }
