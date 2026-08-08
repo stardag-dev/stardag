@@ -10,6 +10,7 @@ from stardag._cli.credentials import (
     validate_active_profile,
 )
 from stardag.config.loader import get_config
+from stardag.registry._http_client import SDK_CLIENT_HEADERS
 
 
 def validate_active_profile_cli() -> tuple[str, str] | tuple[None, None]:
@@ -60,7 +61,9 @@ def get_authenticated_client(
         )
         raise typer.Exit(1)
 
-    headers = {"Authorization": f"Bearer {access_token}"}
+    # SDK identification rides along here too — this client talks to the same
+    # registry as APIRegistry, just from the admin-ish CLI groups.
+    headers = {"Authorization": f"Bearer {access_token}", **SDK_CLIENT_HEADERS}
     client = httpx.Client(timeout=10.0, headers=headers)
 
     return client, api_url, access_token

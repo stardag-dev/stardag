@@ -16,6 +16,10 @@ from httpx_retries import Retry, RetryTransport
 
 from stardag.config import DEFAULT_API_TIMEOUT, config_provider
 from stardag.registry._auth import StardagAPIKeyAuth, StardagTokenAuth
+from stardag.registry._http_client import (
+    SDK_CLIENT_HEADERS,
+    sdk_version_unsupported_from_detail,
+)
 from stardag.exceptions import (
     APIError,
     AuthorizationError,
@@ -253,6 +257,8 @@ class APIRegistry(RegistryABC):
             EnvironmentAccessError: If environment access denied
             AuthorizationError: If other 403 error
             NotFoundError: If resource not found
+            SDKVersionUnsupportedError: If this SDK is older than the
+                server's configured minimum (426)
             RateLimitError: If per-minute rate limit exceeded (retryable)
             QuotaExceededError: If 24h quota exceeded (not retryable)
             APIError: For other HTTP errors
@@ -302,6 +308,13 @@ class APIRegistry(RegistryABC):
         elif status_code == 404:
             raise NotFoundError(f"{operation}: resource not found", detail=detail)
 
+        elif status_code == 426:
+            # The server compared the ``X-Stardag-SDK-Version`` we send
+            # against its configured minimum and rejected us. Its message
+            # names both versions and the upgrade command — surface it,
+            # don't restate it.
+            raise sdk_version_unsupported_from_detail(raw_detail)
+
         elif status_code == 429:
             if error_code == "RATE_LIMIT":
                 retry_after = int(response.headers.get("Retry-After", 1))
@@ -321,8 +334,16 @@ class APIRegistry(RegistryABC):
     def client(self):
         if self._client is None:
             transport = RetryTransport(retry=_RETRY_CONFIG)
+            # Client-level headers, not per-call: every request the registry
+            # ever makes must carry the SDK version, and a default on the
+            # client is the one place that cannot be forgotten by a new call
+            # site. httpx merges these under any per-request headers, so the
+            # gzip/content-type headers on POST bodies still win.
             self._client = httpx.Client(
-                timeout=self.timeout, auth=self._auth, transport=transport
+                timeout=self.timeout,
+                auth=self._auth,
+                transport=transport,
+                headers=SDK_CLIENT_HEADERS,
             )
         return self._client
 
@@ -1027,6 +1048,7 @@ class APIRegistry(RegistryABC):
                 auth=self._auth,
                 limits=limits,
                 transport=transport,
+                headers=SDK_CLIENT_HEADERS,
             )
             self._async_client_loop = current_loop
         return self._async_client

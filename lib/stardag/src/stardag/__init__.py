@@ -33,8 +33,6 @@ See https://docs.stardag.com for full documentation.
 TODO: Expand docstrings for all public API components.
 """
 
-from importlib.metadata import PackageNotFoundError, version
-
 from stardag._core.alias_task import AliasedMetadata, AliasTask
 from stardag._core.base_task import (
     BaseTask,
@@ -52,6 +50,7 @@ from stardag._core.rehydrate import TaskRehydrationError, task_from_registry_dat
 from stardag._core.task import Task, get_default_relpath
 from stardag._core.validate import LoadValidator
 from stardag._core.task_loads import TaskLoads
+from stardag._version import __version__
 from stardag.base_model import StardagBaseModel, StardagField
 from stardag.build import build, build_aio, build_sequential, build_sequential_aio
 from stardag.config import config_provider
@@ -59,6 +58,7 @@ from stardag.exceptions import (
     APIError,
     AuthenticationError,
     AuthorizationError,
+    SDKVersionUnsupportedError,
     StardagError,
     TokenExpiredError,
 )
@@ -78,13 +78,6 @@ from stardag.target import (
     get_file_target,
     target_factory_provider,
 )
-
-try:
-    __version__ = version("stardag")
-except PackageNotFoundError:
-    # Package not installed (e.g., running from source in Modal container)
-    __version__ = "0.0.0.dev"
-
 
 __all__ = [
     "__version__",
@@ -117,6 +110,7 @@ __all__ = [
     "namespace",
     "Polymorphic",
     "registry_provider",
+    "SDKVersionUnsupportedError",
     "StardagError",
     "StardagBaseModel",
     "StardagField",
