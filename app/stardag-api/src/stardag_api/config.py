@@ -136,17 +136,32 @@ class ClaimSettings(BaseSettings):
 
     # Used when the claiming start supplies no TTL of its own.
     #
-    # Deliberately generous. The two failure modes are not symmetric: expiring
-    # late merely delays the self-heal of a task that is already wedged today
-    # (the status quo is "never"), whereas expiring early hands a *live*
-    # task to a second claimant — a double execution, which is the one thing
-    # the claim exists to prevent. A day also matches
-    # ``ReaperSettings.idle_for_seconds``, so an operator has a single number
-    # in their head for "how long silence means abandoned", and it is at or
-    # above the maximum function timeout of the execution backends stardag
-    # currently drives. Anything longer-running than that must state its own
-    # TTL.
-    default_ttl_seconds: int = 24 * 60 * 60
+    # Deliberately generous, because the two failure modes are not symmetric:
+    # expiring late merely delays the self-heal of a task that is wedged
+    # forever today, whereas expiring early hands a *live* task to a second
+    # claimant — a double execution, the one thing the claim exists to
+    # prevent.
+    #
+    # A week rather than a day specifically because this default is what an
+    # SDK that does NOT derive a TTL falls back to — every SDK released before
+    # claim expiry existed, and any newer one whose executor declares no
+    # timeout. Such a caller gets a bound it never agreed to, so the bound has
+    # to be one no realistic task reaches. A day is not: it is exactly the
+    # maximum function timeout of a backend stardag drives, so a task running
+    # right at that limit would race its own claim.
+    #
+    # This is a backstop, not the primary cleanup path, and reading it as the
+    # latter makes it look far too slow:
+    #
+    # - a claim held by an *abandoned build* is released within
+    #   ``ReaperSettings.idle_for_seconds`` (a day) by the reaper's cascade;
+    # - a claim held by a *live* build whose worker died is released by this
+    #   expiry, or sooner by the scheduler probing the executor ref;
+    # - an operator can always release one immediately (cancel / retry).
+    #
+    # Shortening it is safe once every caller derives its own TTL, which is
+    # what the SDK does from its executor's timeout.
+    default_ttl_seconds: int = 7 * 24 * 60 * 60
 
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_CLAIM_")
 
