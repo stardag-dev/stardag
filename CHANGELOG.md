@@ -8,6 +8,63 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Reactive builds now discover the DAG inside Modal, not on the machine
+  that triggers them.** `build_trigger(..., reactive=True)` used to walk
+  the whole DAG locally, which meant one target existence check per task
+  from the triggering process. For a `modalvol://` target root each of
+  those is a Volume API call from outside Modal, and they are rate
+  limited: triggering a 127-task DAG from a laptop spent ~64 s almost
+  entirely in backoff, and before that was hardened it failed outright
+  with `VolumeListFiles rate limit exceeded`.
+
+  The trigger now mints (or resumes) the build, registers the root tasks —
+  neither of which touches a target — and spawns a new deployed
+  **`bootstrap`** function with the roots passed by value. The bootstrap
+  does the walk, the registration, the task-module coverage check and the
+  task-store writes _in the container_, where the same volume is a mounted
+  filesystem, then arms the build and spawns the first tick. Triggering is
+  fast and needs registry credentials only; it performs no target I/O at
+  all.
+
+  `bootstrap` is its own function rather than work folded into the first
+  tick because the two need different timeouts: a tick is one frontier
+  pass (and its timeout derives the per-pass spawn cap), while discovery
+  is a single whole-DAG walk paid once per trigger. It defaults to
+  `builder_settings` — the same image, secrets and volume mounts as the
+  builder, which runs the same discovery for resident builds — and is
+  configurable with the new `StardagApp(bootstrap_settings=...)`.
+
+  The ordering that makes ticks safe is preserved and now stated in code:
+  the reactive marker (`reactive_app_name`, without which a tick no-ops)
+  is written **last**, after discovery and persistence, so no tick can
+  ever observe a partially-registered DAG. Failure handling is preserved
+  too, on both sides of the spawn — anything that fails once a trigger
+  knows the build is `RUNNING` records a terminal `BUILD_FAILED` before
+  propagating, including failures inside the bootstrap container and a
+  failed first-tick spawn. A re-trigger whose `build_resume` fails is
+  deliberately excluded: until that lands the build may still be terminal.
+
+  `BuildTriggerResult.function_call` now carries the bootstrap call for
+  reactive triggers (previously the first tick's), which is the honest
+  handle: it is what the trigger spawned, and its failure is what means
+  the build never started.
+
+  `require_pickle_free=True` is still enforced and still fails loudly —
+  now from the bootstrap, where the task store is written: it records a
+  terminal `BUILD_FAILED` and re-raises on the bootstrap's Modal call. A
+  side benefit of the move: the coverage check now compares your DAG
+  against the **deployed** `task_modules` list rather than your local one,
+  closing the stale-deploy blind spot it used to carry. The trigger also
+  prints a labelled, roots-only advisory before spawning, so the common
+  "I never declared my package" case still shows up in your terminal.
+
+  Resident (non-reactive) builds are completely unaffected. Set
+  `StardagApp(reactive_discovery="local")` to run the identical bootstrap
+  in the triggering process — the previous behaviour — for apps deployed
+  before the `bootstrap` function existed, or when the target root is
+  reachable from the trigger but not from the Modal app. **Redeploy your
+  app** to get the `bootstrap` function.
+
 - **The SDK now identifies its version to the registry.** Every registry
   request carries `X-Stardag-SDK-Version` (plus a descriptive `User-Agent`
   for logs; the server keys on the header, never on the agent string). This

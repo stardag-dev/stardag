@@ -128,18 +128,59 @@ tick(build_id):
     linger briefly on the wake-up flag; exit when quiet
 ```
 
-Ticks are triggered when the build starts, by workers finishing tasks
-(flag-then-spawn, so wake-ups are never lost), and by an optional periodic
-watchdog that also picks up externally-cancelled builds and silently-lost
-workers. While a DAG churns, one lingering tick behaves like a tight
-scheduling loop; when only long-running tasks remain in flight, **nothing
-runs but your tasks**.
+Ticks are triggered by the build's bootstrap (below), by workers finishing
+tasks (flag-then-spawn, so wake-ups are never lost), and by an optional
+periodic watchdog that also picks up externally-cancelled builds and
+silently-lost workers. While a DAG churns, one lingering tick behaves like
+a tight scheduling loop; when only long-running tasks remain in flight,
+**nothing runs but your tasks**.
+
+### Bootstrap: the one thing that happens before the first tick
+
+A reactive build starts with a **bootstrap** — a single invocation that
+walks the DAG, registers every task and its edges, persists the task
+objects, and only then arms the build and spawns the first tick:
+
+```
+trigger (cheap, no target I/O):
+  mint or resume the build in the registry
+  register the root tasks
+  spawn bootstrap(build_id, roots-by-value, tick_kwargs)
+
+bootstrap:
+  discover: walk requires(), one completion check per task,
+            stopping at already-complete subtrees
+  register the discovered DAG (chunked, post-order)
+  persist the task objects (skipping pickles the tick can rebuild)
+  write the reactive marker  <-- LAST, and the ordering is load-bearing
+  spawn the first tick
+```
+
+**Why the marker is written last.** `reactive_app_name` is what marks a
+build as reactively scheduled, and a tick no-ops on any build without it.
+Registration is chunked and post-order, so the roots land _last_ — which
+means that mid-registration the build presents as "nothing actionable,
+roots not complete", exactly the shape terminal detection fails a build
+on. Writing the marker only after discovery _and_ persistence have
+finished is what guarantees no tick ever observes a partially-registered
+DAG.
+
+**Where it runs, and why that matters.** Discovery is target-root I/O: one
+existence check per task. On a Modal deployment the bootstrap therefore
+runs _inside Modal_, next to the target root, where a `modalvol://` volume
+is a mounted filesystem rather than a rate-limited API — the same walk
+from a laptop spends most of its wall time in backoff. Triggering is then
+just "mint the build, register the roots, spawn", which needs no target
+access at all. The task-store writes move with it for the same reason.
+Anything that fails before the first tick records a terminal
+`BUILD_FAILED`, on whichever side of the spawn it happened, so a build is
+never left `RUNNING` with nothing driving it.
 
 The registry is the scheduler state (the frontier is computed from
 recorded task statuses and dependency edges, and it also carries the
 reactive marker/owner/tick config). Task _objects_ are rehydrated from a
-per-build task store persisted at trigger time, with a pickle-free fallback
-that reconstructs them from the registry's stored task data
+per-build task store persisted by the bootstrap, with a pickle-free
+fallback that reconstructs them from the registry's stored task data
 (`stardag.task_from_registry_data`). The store holds task _objects_ only —
 the orchestration metadata lives in the registry, so re-triggering works
 even when the target root is immutable/append-only. The registry never

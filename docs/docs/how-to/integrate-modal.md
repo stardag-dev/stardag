@@ -430,13 +430,25 @@ workspace comes from a cached Modal token lookup); pass
 ### Reactive scheduling: no resident build function (experimental)
 
 With `build_trigger(..., reactive=True)` the build runs with **no resident
-orchestrator at all**: task discovery happens at the trigger, and the build
-is driven by short-lived scheduler _ticks_ — spawned when the build is
-triggered, whenever a worker finishes a task, and (recommended) by a
-periodic watchdog. Between ticks, nothing runs except your tasks: a
-multi-day build with a few long-running tasks costs no orchestrator
-container time, and there is no orchestrator process whose crash could
-affect the build.
+orchestrator at all**. The trigger mints the build, registers the root
+tasks and spawns one deployed function — `bootstrap` — with those roots
+passed by value; everything else is driven by short-lived scheduler
+_ticks_, spawned by the bootstrap, whenever a worker finishes a task, and
+(recommended) by a periodic watchdog. Between ticks, nothing runs except
+your tasks: a multi-day build with a few long-running tasks costs no
+orchestrator container time, and there is no orchestrator process whose
+crash could affect the build.
+
+**Triggering is fast and does no target I/O.** Discovering a DAG means one
+target existence check per task, and the trigger performs none of them:
+the `bootstrap` container walks the DAG, registers it, persists the task
+objects and only then arms the build and spawns the first tick. The
+difference is not cosmetic for a `modalvol://` target root — inside Modal
+the volume is a mounted filesystem, while from your laptop each check is a
+rate-limited Volume API call. Triggering a wide DAG used to spend most of
+its time in rate-limit backoff; now it returns as soon as the spawn is
+acknowledged. It also means a reactive trigger needs **registry
+credentials only** — no target-root access at all.
 
 ```{.python notest}
 app = sd_modal.StardagApp(
@@ -461,14 +473,16 @@ app.build_trigger(
 Requirements and current limitations: the app must be deployed with this
 stardag version — **both** the Modal app and the registry server (an older
 server fails reactive triggers with a "does not support reactive
-scheduling" error); the triggering process needs registry credentials and
-access to the default target root (task _objects_ are persisted there as
-pickles for the ticks — the reactive marker, owning app, and tick config
-live in the registry, not on the target root, so re-triggering works even
-when the target root is immutable/append-only and a re-trigger may update
-`tick_kwargs`; declaring
+scheduling" error, and an app deployed before the `bootstrap` function
+existed has nothing to spawn — see `reactive_discovery` below); the
+triggering process needs registry credentials (task _objects_ are
+persisted to the target root as pickles for the ticks, but that write now
+happens inside the `bootstrap` container — the reactive marker, owning
+app, and tick config live in the registry, not on the target root, so
+re-triggering works even when the target root is immutable/append-only and
+a re-trigger may update `tick_kwargs`; declaring
 [`task_modules`](#declaring-your-task-modules-recommended) removes the
-target-root write from this path entirely for most builds); the global
+target-root write entirely for most builds); the global
 concurrency lock and build-local
 `ConcurrencyConfig` limits are not applied by ticks (use the
 registry-backed named limits above; Modal's per-function
@@ -476,6 +490,48 @@ registry-backed named limits above; Modal's per-function
 registry UI are picked up by the next tick (within the watchdog period),
 which cancels the running Modal function calls; on failure, tasks
 transitively blocked by the failed task are marked skipped.
+
+**Sizing the bootstrap.** `bootstrap` is a separate deployed function
+rather than work folded into the first tick, because the two want
+different timeouts. A tick is one frontier pass and is meant to be short
+(its timeout also derives the per-pass spawn cap); the bootstrap is a
+single whole-DAG walk whose cost scales with the DAG and is paid once per
+trigger. One number cannot honestly cover both — shortening the tick,
+normally a good idea, would start killing the bootstrap of large DAGs. It
+defaults to `builder_settings` (same image, secrets and target-root
+volume mounts as the builder, which does the same discovery for resident
+builds); override it with `bootstrap_settings`:
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+    tick_settings=sd_modal.FunctionSettings(image=image, timeout=300),
+    # Discovery of a very wide DAG gets its own budget.
+    bootstrap_settings=sd_modal.FunctionSettings(image=image, timeout=1800),
+    watchdog_period_minutes=5,
+)
+```
+
+**Failures leave no orphan builds.** A reactive trigger mints a `RUNNING`
+build and then walks away, so both sides of the spawn record a terminal
+`BUILD_FAILED` before propagating: the trigger for anything that goes
+wrong once it knows the build is running (a re-trigger whose `build_resume`
+fails is deliberately excluded — until that lands the build may still be
+terminal, and failing it would misattribute someone else's outcome), and
+the bootstrap for anything that goes wrong in its container, including a
+failed first-tick spawn. The bootstrap's exception also surfaces on
+`result.function_call.get()`.
+
+**Running discovery locally instead.** `StardagApp(reactive_discovery=
+"local")` runs the identical bootstrap in the triggering process — the
+behaviour reactive triggers had before the `bootstrap` function existed.
+Reach for it when the deployed app predates that function, or when the
+target root is reachable from your machine but not from the Modal app.
+Note that it also puts the coverage pre-flight below on your _local_
+`task_modules` rather than the deployed one, reinstating the stale-deploy
+blind spot.
 
 Two operational notes:
 
@@ -587,21 +643,21 @@ image has, so a local import failure never fails the deploy. Pass
 **What you get.** Once you declare `task_modules` explicitly, every
 discovered task whose class is covered _and_ whose payload round-trips to
 the same task id is persisted **without a pickle**. A build whose classes
-are all covered writes nothing to the target root, so reactive triggering
-stops needing target-root write access at all. Set
+are all covered writes nothing to the target root at all. Set
 `require_pickle_free=True` to turn the fallback into a hard error that
-names every task that would have needed a pickle and why.
+names every task that would have needed a pickle and why — enforced in
+the `bootstrap` container, where the task store is written, and loud:
+it fails the build in the registry _and_ propagates on
+`result.function_call.get()`.
 
 **Skipping pickles requires the explicit declaration** — the inferred
 default never elides on its own. Inference happens for every app,
-including apps written before this feature existed, and the trigger runs
-from your _local_ app definition while the tick runs from the _deployed_
-one. If inference alone skipped pickles, upgrading stardag would silently
-start dropping pickles that an app deployed by an older version has no
-baked-in module list to compensate for. Requiring you to write the
-argument is what puts the redeploy requirement in front of you at the
-moment it matters. Inference still drives the coverage warning below,
-which only observes.
+including apps written before this feature existed. If inference alone
+skipped pickles, upgrading stardag would silently start dropping pickles
+that an app deployed by an older version has no baked-in module list to
+compensate for. Requiring you to write the argument is what puts the
+redeploy requirement in front of you at the moment it matters. Inference
+still drives the coverage warning below, which only observes.
 
 Some payloads stay pickle-bound by design, and always will:
 
@@ -614,10 +670,16 @@ Some payloads stay pickle-bound by design, and always will:
   annotations — a plain task-typed annotation validates children into the
   abstract base class).
 
-The trigger warns — naming the class, the pattern to add, and the redeploy
-requirement — for any discovered class the patterns don't cover. It is a
-warning rather than an error because an uncovered class still works via the
-pickle path, exactly as before this feature existed.
+**The coverage check** warns — naming the class, the pattern to add, and
+the redeploy requirement — for any discovered class the patterns don't
+cover. It is a warning rather than an error because an uncovered class
+still works via the pickle path, exactly as before this feature existed.
+It runs wherever discovery runs, i.e. in the `bootstrap` container, over
+the real discovered set, against the module list **the deployment baked
+in**. The trigger additionally prints a labelled, roots-only advisory
+before spawning, so the common "I never declared my package" case shows
+up in your terminal rather than only in the bootstrap's Modal logs; it is
+by construction a subset of the real check, never a substitute for it.
 
 Two caveats worth designing around:
 
@@ -625,18 +687,19 @@ Two caveats worth designing around:
   container, on every cold start. Keep heavy runtime dependencies inside
   `run()` rather than at module scope — good practice regardless, but here
   it directly buys tick cold-start latency.
-- **Stale-deploy blind spot.** The trigger-time coverage check reads your
-  _local_ app definition, so it cannot tell that the _deployed_ app was
-  built from an older `task_modules`. If you add a pattern and trigger
-  without redeploying, the pre-flight is silent while the tick still can't
-  resolve the class — and because the trigger already skipped the pickle,
-  there is no fallback left. **Redeploy the app whenever you change
-  `task_modules`**, before triggering — which reactive mode already
-  requires for other reasons (see the requirements above). Upgrading
-  stardag alone is safe: elision only follows an explicit declaration, so
-  a newer SDK triggering against an app deployed by an older one still
-  writes pickles. Passing `task_modules=[]` restores the pre-feature
-  behaviour unconditionally.
+- **Redeploy whenever you change `task_modules`**, before triggering —
+  which reactive mode already requires for other reasons (see the
+  requirements above). The coverage check now reads the _deployed_ list,
+  so adding a pattern without redeploying is visible rather than silently
+  agreeable — but the elision decision is made from that same deployed
+  list, so until you redeploy nothing changes. (With
+  `reactive_discovery="local"` the check reads your local app definition
+  instead and the old stale-deploy blind spot returns: the pre-flight goes
+  quiet while the tick still can't resolve the class, with no pickle left
+  as a fallback.) Upgrading stardag alone is safe: elision only follows an
+  explicit declaration, so a newer SDK triggering against an app deployed
+  by an older one still writes pickles. Passing `task_modules=[]` restores
+  the pre-feature behaviour unconditionally.
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment
