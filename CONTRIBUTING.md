@@ -66,6 +66,13 @@ git checkout -b feature/your-feature-name
 - Follow existing code style
 - Add tests for new functionality
 - Update documentation if needed
+- **Registry API changes must stay usable by SDKs already in the wild.** The
+  hosted service always runs the latest API, so an old SDK meeting a new API
+  is the normal case: prefer additive fields, parameters and endpoints, and
+  don't change the shape or meaning of an existing response. If a change
+  genuinely cannot be made compatible, raising the server's minimum SDK
+  version is the supported way out — and it comes with obligations. See
+  ["Dropping support for older SDKs"](DEV_README.md#dropping-support-for-older-sdks).
 
 ### 4. Run Tests and Linting
 

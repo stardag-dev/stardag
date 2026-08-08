@@ -8,6 +8,41 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Registry API
 
+- **The API now knows which SDK is calling it, and can say so when that
+  stops being good enough.** The SDK reports its own version in a dedicated
+  header, `X-Stardag-SDK-Version`; the server parses it, records it (one log
+  line per distinct version per process, so "which SDK versions are actually
+  calling us?" is answerable), and exposes it on `request.state.sdk_version`.
+  A descriptive `User-Agent` rides along for logs, and the server
+  deliberately never parses it — a policy decision must not depend on a
+  free-form string that proxies rewrite.
+
+  Alongside it, a compatibility floor: `STARDAG_API_SDK_MINIMUM_VERSION`.
+  **It is unset by default, and unset means no request is ever rejected** —
+  which is the state this release ships in, because the API remains wire
+  compatible with every SDK released so far (changes have been additive
+  fields, parameters and endpoints; no response has changed shape or
+  meaning). Nothing about any client's behaviour changes here. When it _is_
+  set, an SDK below it gets `426 Upgrade Required` with a body naming the
+  version it is on, the version required, and the `pip install --upgrade`
+  command to get there.
+
+  The rules that make the switch safe to flip later: a **missing** header is
+  never fatal (every SDK released before the header existed sends nothing,
+  and must keep working), a **malformed** value is treated identically to a
+  missing one and never 500s, and comparison is real PEP 440 — with
+  pre-release, dev and local builds counted as their base release, so a
+  `0.18.0.dev1` local build is not told to upgrade to `0.18.0`. `/health`
+  and `GET /api/v1/version` are never gated, so a refused client can always
+  fetch the policy that refused it.
+
+  `GET /api/v1/version` gains `minimum_sdk_version` (`null` by default), so
+  the SDK, the docs and support read one number from one place.
+
+  **Process rule:** an API change that raises `minimum_sdk_version` must
+  state it in `CHANGELOG.md`, in `RELEASE_NOTES.md`, and in the error the
+  server returns. See "Releasing the Server" in `DEV_README.md`.
+
 - **Task refs now carry `attempt_count`, so a scheduler can run a retry
   policy** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
   Reactive scheduling records a failed execution and never respawns it —
