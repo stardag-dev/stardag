@@ -1966,7 +1966,6 @@ class TestWatchdogSweep:
             limit=100, reactive_app_name="an-app"
         )
 
-
     def test_truncation_warning_names_the_scope_and_the_remedy(self, caplog):
         import logging
 

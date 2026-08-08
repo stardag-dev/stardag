@@ -1187,7 +1187,9 @@ class APIRegistry(RegistryABC):
     # sweep cost grow with total build count. Truncation is logged.
     _RUNNING_SWEEP_MAX_PAGES = 10
 
-    def build_list_running(self, limit: int = 100) -> list[UUID]:
+    def build_list_running(
+        self, limit: int = 100, reactive_app_name: str | None = None
+    ) -> list[UUID]:
         """List ids of running builds (most recently active first).
 
         Expressed in terms of :meth:`build_list` with ``status="running"``
@@ -1202,7 +1204,12 @@ class APIRegistry(RegistryABC):
         page = 1
         page_size = 100
         while len(running) < limit:
-            result = self.build_list(page=page, page_size=page_size, status="running")
+            result = self.build_list(
+                page=page,
+                page_size=page_size,
+                status="running",
+                reactive_app_name=reactive_app_name,
+            )
             for build in result.builds:
                 running.append(build.id)
                 if len(running) >= limit:

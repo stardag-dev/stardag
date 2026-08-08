@@ -626,17 +626,27 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support build_list")
 
-    def build_list_running(self, limit: int = 100) -> list[UUID]:
+    def build_list_running(
+        self, limit: int = 100, reactive_app_name: str | None = None
+    ) -> list[UUID]:
         """List ids of builds currently in RUNNING status (most recent first).
 
-        Used by the reactive scheduler watchdog to sweep for builds that
-        may need a tick. Default: empty (no reactive-scheduling support).
+        Used by the reactive scheduler watchdog to sweep for builds that may
+        need a tick. ``reactive_app_name`` narrows the listing to builds
+        reactively scheduled by that app — the watchdog's actual question, and
+        what keeps ``limit`` from being consumed by builds no tick of this app
+        can advance (resident builds, and builds left RUNNING by an
+        orchestrator that died without emitting a terminal event).
+
+        Default: empty (no reactive-scheduling support).
         """
         return []
 
-    async def build_list_running_aio(self, limit: int = 100) -> list[UUID]:
+    async def build_list_running_aio(
+        self, limit: int = 100, reactive_app_name: str | None = None
+    ) -> list[UUID]:
         """Async version of build_list_running."""
-        return self.build_list_running(limit)
+        return self.build_list_running(limit, reactive_app_name)
 
     def build_bulk_cancel(
         self,

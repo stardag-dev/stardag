@@ -334,18 +334,19 @@ def _run_watchdog_sweep(
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
-    # `build_list_running` is now expressed in terms of `build_list`, so the
-    # scoping is server-side and every RegistryABC gets it — the signature
-    # shim this used to need went with it.
+    # Scoping is server-side now that `build_list_running` is expressed in
+    # terms of `build_list`, so every RegistryABC gets it and the signature
+    # shim this used to need went with it. `scoped` still exists because
+    # the truncation remedy below differs by it.
     scoped = reactive_app_name is not None
-    if scoped:
-        running_builds = registry.build_list_running(
-            limit=sweep_limit, reactive_app_name=reactive_app_name
-        )
-        scope = f"reactive builds owned by {reactive_app_name!r}"
-    else:
-        running_builds = registry.build_list_running(limit=sweep_limit)
-        scope = "running builds"
+    running_builds = registry.build_list_running(
+        limit=sweep_limit, reactive_app_name=reactive_app_name
+    )
+    scope = (
+        f"reactive builds owned by {reactive_app_name!r}"
+        if scoped
+        else "running builds"
+    )
     if len(running_builds) >= sweep_limit:
         # The remedy follows `scoped`, not whether a name was *asked* for:
         # a scoping request the registry cannot honour still yields a
