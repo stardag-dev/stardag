@@ -276,6 +276,13 @@ equivalent):
 - **`Modal authentication not set up`** — run `uvx modal token new`.
 - **`Neon API key rejected`** — create a key at
   [console.neon.tech/app/settings/api-keys](https://console.neon.tech/app/settings/api-keys).
+- **SDK and server out of step** — upgrade both together. A newer SDK
+  against an older server fails on whatever endpoint is missing, naming the
+  command and telling you to upgrade `stardag-api`. In the other direction
+  the server can reject the SDK outright (`426 Upgrade Required`,
+  `SDKVersionUnsupportedError`) with the exact `pip install --upgrade` line;
+  it only does so if you configured a minimum SDK version, and by default
+  there is none.
 - **Sign-in loops or 401s right after an upgrade** — stale cached tokens;
   sign out and in again. (The JWT keypair is preserved across upgrades, so
   this should be rare.)

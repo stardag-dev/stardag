@@ -9,6 +9,7 @@ StardagError
 ├── APIError
 │   ├── AuthenticationError
 │   ├── AuthorizationError
+│   ├── SDKVersionUnsupportedError
 │   └── TokenExpiredError
 └── ...
 ```
@@ -72,6 +73,37 @@ Raised when authenticated but not authorized:
 - Insufficient permissions
 - Wrong workspace/environment
 - Resource access denied
+
+### SDKVersionUnsupportedError
+
+```python
+from stardag import SDKVersionUnsupportedError
+```
+
+Raised when the registry refuses the request because this SDK is older than
+the minimum version that registry supports (HTTP `426 Upgrade Required`).
+
+Every request the SDK makes carries its version in an
+`X-Stardag-SDK-Version` header, which is what lets a registry answer this
+way at all. Nothing is enforced unless the registry is configured with a
+minimum; by default any SDK version is accepted.
+
+`message` is the server's own sentence — it names both versions and the
+exact upgrade command — and `sdk_version` / `minimum_sdk_version` carry the
+same two versions for programmatic use:
+
+```python
+try:
+    sd.build(task, registry=registry)
+except SDKVersionUnsupportedError as e:
+    print(e.message)  # e.g. 'pip install --upgrade "stardag>=X"'
+    print(e.sdk_version, "->", e.minimum_sdk_version)
+```
+
+The reverse direction — a **new** SDK against an **old** registry — is not a
+supported combination; upgrade both together. It surfaces as a clear
+"this registry does not support …, upgrade stardag-api" error from whichever
+command needs an endpoint the registry does not have.
 
 ### TokenExpiredError
 

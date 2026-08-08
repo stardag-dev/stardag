@@ -8,6 +8,31 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **The SDK now identifies its version to the registry.** Every registry
+  request carries `X-Stardag-SDK-Version` (plus a descriptive `User-Agent`
+  for logs; the server keys on the header, never on the agent string). This
+  ships ahead of anything that reads it, because the check only works
+  forwards: a server can tell an SDK "you are too old" only if that SDK was
+  already announcing itself when it was released, and no later server change
+  fixes a silent release retroactively.
+
+  When a registry is configured with a minimum SDK version and this SDK is
+  below it, the `426 Upgrade Required` response now raises
+  `SDKVersionUnsupportedError` (exported from `stardag`), carrying the
+  server's own message — which names both versions and the exact
+  `pip install --upgrade` line — plus `sdk_version` and
+  `minimum_sdk_version`. CLI commands print that message as written rather
+  than a repr. No minimum is configured by default, so nothing changes for
+  an up-to-date pair.
+
+- **`stardag builds cleanup` and `stardag builds ticks` say when the
+  registry is too old**, instead of reporting the missing endpoint as
+  "resource not found" — which read as a bad build id and sent people
+  looking for a build that was fine. Both now name the command, the missing
+  endpoint and the upgrade; `cleanup` also points at
+  `stardag builds cancel <build-id>` as the one-at-a-time fallback. A
+  genuine resource-level 404 is unaffected.
+
 - **Reactive builds now have a task-level retry policy.** A reactive tick
   recorded a failed execution and never respawned it, on the reasoning that
   retries are the execution backend's job. They partly are — a backend's
