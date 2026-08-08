@@ -18,6 +18,11 @@ dependencies = [
     "bcrypt>=4.0.0",
     "uuid_utils>=0.9.0",
     "boto3>=1.35.0",
+    # Already installed transitively (gunicorn depends on it); declared
+    # explicitly because sdk_compat imports it directly for PEP 440 version
+    # comparison, and relying on someone else's transitive dep for that is
+    # how it disappears in a future gunicorn release.
+    "packaging>=23.0",
 ]
 
 [dependency-groups]
