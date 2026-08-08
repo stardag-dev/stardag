@@ -117,9 +117,14 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
     executor's own timeout plus a small grace — the caller is the only
     party that knows how long the execution may legitimately take. Omitted,
     it falls back to `STARDAG_API_CLAIM_DEFAULT_TTL_SECONDS` (default
-    24 h, deliberately generous: expiring late merely delays a heal that
-    today never happens, while expiring early hands a live task to a second
-    claimant).
+    7 days). That fallback is deliberately generous because it is what a
+    caller that does _not_ derive a TTL gets — every SDK predating this
+    change, and any newer one whose executor declares no timeout — so it
+    must be a bound no realistic task reaches. Expiring late only delays a
+    heal that today never happens; expiring early hands a live task to a
+    second claimant. It is a backstop, not the cleanup path: a claim held
+    by an abandoned _build_ is released within a day by the reaper's
+    cascade, and an operator can release any claim immediately.
   - **The concurrency-limit count uses the same predicate**, so an expired
     claim releases its slots — otherwise the leak would survive in the one
     place nobody reads. `GET /concurrency-limits/{key}/holders` matches

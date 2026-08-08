@@ -509,8 +509,8 @@ async def test_migration_backfills_claims_that_are_already_running(
     pg_session.expire_all()
     task = await _task_row(pg_session, "pg-ancient")
     expires_at = _utc(task.latest_status_expires_at)
-    # Backfilled to latest_status_at + the default TTL — a day after a
-    # start 90 days ago, so already long past.
+    # Backfilled to latest_status_at + the default TTL, measured from a
+    # start 90 days ago — so already long past, whatever the TTL is set to.
     assert expires_at < datetime.now(timezone.utc)
     assert expires_at == _utc(long_ago) + timedelta(
         seconds=claim_settings.default_ttl_seconds
