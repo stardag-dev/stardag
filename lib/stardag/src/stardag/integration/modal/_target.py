@@ -77,12 +77,63 @@ def get_default_volume_mount_path(volume_name: str) -> Path:
     return Path(VOLUME_MOUNT_PATH_PREFIX) / volume_name
 
 
+# Modal's volume API is rate-limited, and hitting it from *outside* Modal —
+# a local build or a trigger whose target root is a modalvol:// URI — pays
+# full network cost per call on top. A wide DAG asks "does this output
+# exist?" once per task, so the limit is reachable in ordinary use and must
+# degrade into slowness, never into a failed build.
+#
+# Three things this policy gets right that the obvious one does not:
+#
+# - ``reraise=True``. Without it tenacity raises RetryError, which *hides*
+#   the ResourceExhaustedError and its message inside a Future repr — the
+#   caller cannot tell a rate limit from any other failure, and neither can
+#   a log. Diagnosability first.
+# - A budget sized for a rate limit rather than a blip: a stampede of
+#   concurrent callers all back off into the same window, so the last one
+#   through needs far more headroom than the first.
+# - WARNING, not DEBUG, once the wait becomes user-visible. Silently
+#   retrying for half a minute looks like a hang, and the user cannot act on
+#   what they cannot see.
+_MAX_VOLUME_API_ATTEMPTS = 10
+_VOLUME_API_MAX_WAIT_SECONDS = 30
+
 _retry_on_rate_limit = retry(
     retry=retry_if_exception_type(ResourceExhaustedError),
-    wait=wait_exponential_jitter(initial=0.5, max=10),
-    stop=stop_after_attempt(6),
-    before_sleep=before_sleep_log(logger, logging.DEBUG),
+    wait=wait_exponential_jitter(initial=0.5, max=_VOLUME_API_MAX_WAIT_SECONDS),
+    stop=stop_after_attempt(_MAX_VOLUME_API_ATTEMPTS),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
 )
+
+# Bound how many volume-API calls this process has in flight, so concurrent
+# callers cannot stampede the limit in the first place. Backing off *after*
+# the fact converges slowly when N callers keep arriving; refusing to make
+# the N+1th call until one returns converges immediately.
+#
+# This belongs here rather than in whatever is calling: the ceiling is a
+# property of the backend, and a scheduler bounding its own fan-out has no
+# way to know it. It also means a caller that raises its own concurrency
+# still cannot exceed what the backend tolerates.
+_MAX_CONCURRENT_VOLUME_API_CALLS = 8
+_volume_api_semaphores: "dict[int, asyncio.Semaphore]" = {}
+_volume_api_sync_semaphore = threading.Semaphore(_MAX_CONCURRENT_VOLUME_API_CALLS)
+
+
+def _volume_api_semaphore() -> asyncio.Semaphore:
+    """Per-event-loop semaphore for the volume API.
+
+    Keyed by loop because an asyncio.Semaphore binds to the loop that first
+    awaits it, and this package is used from more than one (the registry
+    client already recreates its async client on a loop change for the same
+    reason).
+    """
+    loop = asyncio.get_running_loop()
+    semaphore = _volume_api_semaphores.get(id(loop))
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENT_VOLUME_API_CALLS)
+        _volume_api_semaphores[id(loop)] = semaphore
+    return semaphore
 
 
 def get_volume_name_and_path(uri: str) -> tuple[str, str]:
@@ -260,6 +311,14 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
         """Check if a file exists in the Modal volume via API."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
         volume = _get_volume(volume_name)
+        # Bounded at the source — see _MAX_CONCURRENT_VOLUME_API_CALLS. Held
+        # across the call, not just its start, so the bound is on in-flight
+        # requests rather than on how fast they are issued.
+        with _volume_api_sync_semaphore:
+            return self._exists_uncontended(volume, in_volume_path)
+
+    @staticmethod
+    def _exists_uncontended(volume, in_volume_path: str) -> bool:
         try:
             # recursive=False: we're checking a single file, not listing a subtree
             entry = next(volume.iterdir(in_volume_path, recursive=False))
@@ -292,6 +351,11 @@ class ModalVolumeRemoteFileSystem(RemoteFileSystemABC):
         """Asynchronously check if the file exists in the Modal volume."""
         volume_name, in_volume_path = get_volume_name_and_path(uri)
         volume = _get_volume(volume_name)
+        async with _volume_api_semaphore():
+            return await self._exists_aio_uncontended(volume, in_volume_path)
+
+    @staticmethod
+    async def _exists_aio_uncontended(volume, in_volume_path: str) -> bool:
         try:
             # recursive=False: we're checking a single file, not listing a subtree
             async for entry in volume.iterdir.aio(in_volume_path, recursive=False):
