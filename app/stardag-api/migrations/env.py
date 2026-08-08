@@ -24,9 +24,17 @@ if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", settings.effective_migration_database_url)
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+#
+# disable_existing_loggers=False is load-bearing, not a style choice.
+# fileConfig defaults it to True, which sets .disabled on every logger that
+# already exists and is not named in alembic.ini — i.e. every stardag_api.*
+# logger. Alembic is routinely run *in-process* (the test suite, and any
+# migrate-then-serve startup), so the default silently kills application
+# logging for the rest of that process, long after the migration finished.
+# It surfaced as a test asserting on a log line that was emitted but never
+# recorded, only when a Postgres test had run first.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here for 'autogenerate' support
 target_metadata = Base.metadata
