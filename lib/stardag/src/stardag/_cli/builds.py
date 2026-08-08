@@ -57,6 +57,7 @@ from stardag._cli._registry_ctx import (
 )
 from stardag.exceptions import NotFoundError, StardagError, is_missing_route_error
 from stardag.registry import BuildFrontier, BuildSummary, FrontierTaskRef
+from stardag.build._reactive import _TERMINAL_BUILD_STATUSES
 
 app = typer.Typer(
     help="Inspect, cancel and clean up builds in an environment",
@@ -424,6 +425,14 @@ def _render_task_refs(title: str, refs: Sequence[FrontierTaskRef]) -> None:
     console.print(table)
 
 
+# Build statuses that mean "this build is over". Wider than the scheduler's
+# _TERMINAL_BUILD_STATUSES, which deliberately omits exit_early because a tick
+# still has work to do on such a build. For *reporting*, exit_early is just as
+# finished as the rest — a human asking "why is nothing happening?" about an
+# exited build should not be told it might be stuck.
+_FINISHED_BUILD_STATUSES = (*_TERMINAL_BUILD_STATUSES, "exit_early")
+
+
 def _render_external_blockers(frontier: BuildFrontier) -> None:
     """Render (or honestly explain the absence of) the external blockers.
 
@@ -433,11 +442,22 @@ def _render_external_blockers(frontier: BuildFrontier) -> None:
     "not externally blocked OR not stalled", and printing "no blockers"
     for a build that is merely progressing would be a lie of exactly the
     kind this command exists to stop telling.
+
+    A *terminal* build also has nothing actionable and nothing running, but
+    that is how a finished build looks, not a symptom — so it must not be
+    described as possibly stuck. Emptiness only warrants the caveat while
+    the build could still be going somewhere.
     """
-    stalled = not frontier.actionable and not frontier.running
+    terminal = frontier.build_status in _FINISHED_BUILD_STATUSES
+    stalled = not terminal and not frontier.actionable and not frontier.running
 
     if not frontier.blocked_by_external:
-        if not stalled:
+        if terminal:
+            console.print(
+                f"\n[dim]External blockers: not applicable — this build is "
+                f"{frontier.build_status}.[/dim]"
+            )
+        elif not stalled:
             console.print(
                 "\n[dim]External blockers: not evaluated. The server computes "
                 "them only for a build with nothing actionable and nothing "

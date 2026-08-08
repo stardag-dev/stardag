@@ -583,6 +583,25 @@ class TestErrorHandling:
         assert "Error:" in result.output
         registry.close.assert_called_once()
 
+    def test_a_finished_build_is_not_called_possibly_stuck(self):
+        """A terminal build has nothing actionable and nothing running because
+        it is *over*, not because it is wedged.
+
+        Found in a live E2E run: a build that had completed successfully was
+        reported as "genuinely stuck (a tick will fail it)" — alarming, and
+        exactly the kind of misleading output this command exists to replace.
+        """
+        registry = _mock_registry(
+            build_get_frontier=_frontier(
+                build_status="completed", actionable=[], running=[]
+            )
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["frontier", BUILD_ID])
+        assert result.exit_code == 0, result.output
+        assert "genuinely stuck" not in result.output
+        assert "not applicable" in result.output
+
     def test_frontier_error_reported(self):
         registry = mock.MagicMock()
         registry.build_get_frontier.side_effect = APIError(
