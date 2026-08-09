@@ -8,7 +8,23 @@
 
 const MISSING = "—";
 
-/** "just now" / "12m ago" / "5h ago" / "3d ago" / a locale date beyond a week. */
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/**
+ * `YYYY-MM-DD` in the **viewer's** timezone.
+ *
+ * Not `toISOString().slice(0, 10)`, which is UTC and would show the wrong
+ * day for anyone west of Greenwich for part of their evening. Not
+ * `toLocaleDateString()` either: that renders `8/9/2026` or `9/8/2026`
+ * depending on the browser's locale, and a timestamp whose meaning depends
+ * on who is reading it is worse than useless when two people compare
+ * notes on the same incident.
+ */
+function isoDate(date: Date): string {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** "just now" / "12m ago" / "5h ago" / "3d ago" / "2026-08-09" beyond a week. */
 export function formatRelativeTime(dateString: string | null | undefined): string {
   if (!dateString) return MISSING;
   const date = new Date(dateString);
@@ -24,17 +40,19 @@ export function formatRelativeTime(dateString: string | null | undefined): strin
   if (diffMins < 60) return `${diffMins}m ago`;
   if (diffHours < 24) return `${diffHours}h ago`;
   if (diffDays < 7) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
+  return isoDate(date);
 }
 
-/** Full local timestamp for a `title` attribute; undefined when unknown. */
+/** "2026-08-09 14:32:07" — full local timestamp for a `title` attribute. */
 export function formatAbsoluteTime(
   dateString: string | null | undefined,
 ): string | undefined {
   if (!dateString) return undefined;
   const date = new Date(dateString);
   if (Number.isNaN(date.getTime())) return undefined;
-  return date.toLocaleString();
+  return `${isoDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+    date.getSeconds(),
+  )}`;
 }
 
 /** Seconds since `dateString`, or null when it is missing/unparseable. */
@@ -45,7 +63,7 @@ export function secondsSince(dateString: string | null | undefined): number | nu
   return Math.floor((Date.now() - ms) / 1000);
 }
 
-/** "45s" / "12m 3s" / "2h 07m" — elapsed time between two instants. */
+/** "45s" / "12m 3s" / "2h 07m" / "15d 11h 41m" — elapsed time. */
 export function formatDuration(
   startedAt: string | null | undefined,
   completedAt: string | null | undefined,
@@ -60,7 +78,10 @@ export function formatDuration(
 
   if (diffSecs < 60) return `${diffSecs}s`;
   if (diffMins < 60) return `${diffMins}m ${diffSecs % 60}s`;
-  return `${diffHours}h ${String(diffMins % 60).padStart(2, "0")}m`;
+  if (diffHours < 24) return `${diffHours}h ${pad(diffMins % 60)}m`;
+  // Past a day, hours alone stop being readable: a build abandoned two
+  // weeks ago reads "371h 41m", which nobody converts in their head.
+  return `${Math.floor(diffHours / 24)}d ${diffHours % 24}h ${pad(diffMins % 60)}m`;
 }
 
 /**
