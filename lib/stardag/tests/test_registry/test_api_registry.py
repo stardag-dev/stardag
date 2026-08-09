@@ -240,7 +240,7 @@ class TestAPIRegistryGzipsWireFormat:
 class TestIsRouteNotFound:
     """Narrow-404 detection used by task_add_dependencies for backward compat."""
 
-    def test_fastapi_defaultis_missing_route_error(self):
+    def test_fastapi_default_is_missing_route_error(self):
         """FastAPI's default unknown-path response: detail == 'Not Found'."""
         err = NotFoundError("op: resource not found", detail="Not Found")
         assert is_missing_route_error(err) is True
