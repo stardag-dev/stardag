@@ -2071,18 +2071,37 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason=(
-        "Known deadlock, not yet fixed. A build's plan is not closed over "
-        "dynamic dependency edges recorded by other builds, while gating "
-        "consults all of them — so the build is gated on a task no build "
-        "containing it can schedule. The fix (admit incomplete upstreams "
-        "into the plan at registration) changes what a build's task set IS, "
-        "and with it the graph view's primary/context split, so it is "
-        "deliberately not bundled into a release."
-    ),
-    strict=True,
-)
+async def test_plan_closure_stops_at_complete_upstreams(client):
+    """Closure prunes exactly where discovery does.
+
+    A complete upstream gates nothing, and its own upstreams are assumed
+    complete with it — so the walk stops there rather than dragging a
+    build's whole historical ancestry into its plan.
+    """
+    seed = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{seed}/tasks", json=_register_payload("gp"))
+    await client.post(
+        f"/api/v1/builds/{seed}/tasks", json=_register_payload("mid", deps=["gp"])
+    )
+    await client.post(
+        f"/api/v1/builds/{seed}/tasks", json=_register_payload("leaf", deps=["mid"])
+    )
+    # "mid" is complete, so nothing above it should be inherited.
+    await client.post(f"/api/v1/builds/{seed}/tasks/mid/start")
+    await client.post(f"/api/v1/builds/{seed}/tasks/mid/complete")
+
+    other = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{other}/tasks", json=_register_payload("leaf"))
+
+    frontier = (await client.get(f"/api/v1/builds/{other}/frontier")).json()
+    in_plan = set(frontier["status_counts"])
+    # leaf (pending) is the build's; "gp" must NOT have been pulled in.
+    assert frontier["status_counts"].get("completed") is None, (
+        f"a complete upstream was admitted: {frontier}"
+    )
+    assert frontier["status_counts"] == {"pending": 1}, in_plan
+
+
 async def test_registration_pulls_in_known_upstreams(client):
     """A build's plan must be closed under the dependency relation.
 

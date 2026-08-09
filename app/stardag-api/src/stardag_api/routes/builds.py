@@ -1913,6 +1913,101 @@ async def get_build_frontier(
 # --- Tasks within Builds ---
 
 
+async def _close_plan_over_dependencies(
+    db: AsyncSession,
+    *,
+    build_id: UUID,
+    task_pks: Sequence[UUID],
+) -> int:
+    """Admit incomplete upstreams of ``task_pks`` into this build's plan.
+
+    **A build's plan is every dependency of its roots that was not complete
+    at discovery time**, pruned at complete tasks — whose own upstreams are
+    assumed complete with them. That is not a new rule: it is exactly what
+    discovery does when it walks ``task.requires()``.
+
+    The gap is that discovery walks *static* edges while gating consults
+    every recorded edge, dynamic ones included. A dynamic edge is written by
+    whichever build first ran the task and then outlives it, environment
+    -global and permanent. A later build that statically discovers the same
+    task therefore inherits the dependency without inheriting the task, and
+    is gated on an upstream it never registered — which no build containing
+    it can schedule, because the only thing that would produce it is the
+    very task being gated. A permanent deadlock.
+
+    Admitting an upstream is a status-neutral TASK_REFERENCED: nothing about
+    the upstream's own state changes, it simply becomes part of this build's
+    plan, which is what makes it schedulable here.
+
+    Over-approximating is safe, under-approximating is not. If this run
+    would in fact yield different dynamic dependencies, the build completes
+    an upstream it did not need — wasted work, correct outcome — whereas
+    missing one deadlocks. So no attempt is made to decide whether a
+    recorded edge is still current.
+
+    **RUNNING upstreams are deliberately left out**, and that is the one
+    conservative choice here. A RUNNING task is the single status carrying
+    an execution claim: another build is actively running it, the claim is
+    already coordinating, and nothing deadlocks — the existing cross-build
+    wait handles it. Admitting one would place a task this build did not
+    start into its own ``running`` list, where its liveness heuristics would
+    begin probing an execution belonging to someone else. Strictly, the
+    principle says it belongs in the plan too; that is a further
+    simplification, not a deadlock fix, and it deserves its own change.
+    """
+    if not task_pks:
+        return 0
+
+    admitted = 0
+    frontier_pks = list(task_pks)
+    seen: set[UUID] = set(task_pks)
+    while frontier_pks:
+        in_plan = (
+            select(Event.task_id)
+            .where(Event.build_id == build_id, Event.task_id.is_not(None))
+            .distinct()
+            .scalar_subquery()
+        )
+        rows = (
+            (
+                await db.execute(
+                    select(Task)
+                    .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
+                    .where(
+                        TaskDependency.downstream_task_id.in_(frontier_pks),
+                        Task.latest_status.not_in(
+                            (TaskStatus.COMPLETED, TaskStatus.RUNNING)
+                        ),
+                        Task.id.not_in(in_plan),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        frontier_pks = []
+        for upstream in rows:
+            if upstream.id in seen:
+                continue
+            seen.add(upstream.id)
+            db.add(
+                Event(
+                    build_id=build_id,
+                    task_id=upstream.id,
+                    event_type=EventType.TASK_REFERENCED,
+                )
+            )
+            admitted += 1
+            frontier_pks.append(upstream.id)
+        if frontier_pks:
+            # Flush so the next level's `in_plan` subquery sees these.
+            await db.flush()
+
+    return admitted
+
+
 async def _reconcile_dependency_edges(
     *,
     db: AsyncSession,
@@ -2173,6 +2268,8 @@ async def register_task(
     db.add(event)
     await db.flush()
     apply_event_to_task(db_task, event)
+
+    await _close_plan_over_dependencies(db, build_id=build_id, task_pks=[db_task.id])
 
     await db.commit()
     await db.refresh(db_task)
@@ -2530,6 +2627,12 @@ async def register_tasks_bulk(
         # round-trip needed.
         for t, ev in zip(tasks_in, events):
             apply_event_to_task(db_task_by_task_id[t.task_id], ev)
+
+    await _close_plan_over_dependencies(
+        db,
+        build_id=build_id,
+        task_pks=[t.id for t in db_task_by_task_id.values()],
+    )
 
     # One final flush + commit at the end. Earlier flushes (just the
     # task INSERT batch) populated the rows we need to FK against.
