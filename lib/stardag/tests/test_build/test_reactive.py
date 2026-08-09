@@ -2031,7 +2031,12 @@ class TestExternalBlockers:
         assert registry.build_get_calls == []  # nothing to look up
         message = registry.build_error_message or ""
         assert "no build owns its status" in message
-        assert "/retry" in message
+        # Both documented remedies are addressed to a build, so quoting
+        # them here would hand the reader a URL with no id to put in it.
+        # Say what can actually be done instead.
+        assert "/retry" not in message
+        assert "no build id to address a retry or cancel to" in message
+        assert "stardag tasks list" in message
 
     async def test_failed_owner_lookup_fails_without_propagating(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

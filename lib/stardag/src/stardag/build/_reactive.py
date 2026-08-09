@@ -1003,22 +1003,53 @@ def _describe_blockers(
 
 
 def _blocker_remediation(verdicts: Sequence[_BlockerVerdict]) -> str:
-    """How to get out of it — the part #208 says today's error lacks."""
-    remedy = (
-        "Retry the blocking task under the build that owns it "
-        "(POST /api/v1/builds/{build_id}/tasks/{task_id}/retry) to reset it "
-        "to pending — this now works from suspended as well as from "
-        "failed/cancelled/skipped — then re-trigger this build"
-    )
-    if any(
-        verdict.blocker.blocking_status in _RUNNING_STATUSES for verdict in verdicts
-    ):
-        remedy += (
-            ". A blocker stuck RUNNING holds an execution claim no retry can "
-            "take: cancel it (POST /api/v1/builds/{build_id}/tasks/{task_id}"
-            "/cancel) to release the claim first"
+    """How to get out of it — the part the error used to lack.
+
+    Both documented endpoints are addressed to a *build*, so a blocker
+    whose owning build was never recorded has no build id to substitute
+    into them. Telling that reader to "retry it under the build that owns
+    it" is not a remedy, it is the shape of one — and this function exists
+    precisely for the reader who is stuck.
+    """
+    unowned = [
+        verdict
+        for verdict in verdicts
+        if verdict.blocker.blocking_status_build_id is None
+    ]
+    owned = [
+        verdict
+        for verdict in verdicts
+        if verdict.blocker.blocking_status_build_id is not None
+    ]
+
+    parts: list[str] = []
+    if owned:
+        remedy = (
+            "Retry the blocking task under the build that owns it "
+            "(POST /api/v1/builds/{build_id}/tasks/{task_id}/retry) to reset "
+            "it to pending — this now works from suspended as well as from "
+            "failed/cancelled/skipped — then re-trigger this build"
         )
-    return remedy + "."
+        if any(
+            verdict.blocker.blocking_status in _RUNNING_STATUSES for verdict in owned
+        ):
+            remedy += (
+                ". A blocker stuck RUNNING holds an execution claim no retry "
+                "can take: cancel it (POST /api/v1/builds/{build_id}/tasks/"
+                "{task_id}/cancel) to release the claim first"
+            )
+        parts.append(remedy + ".")
+    if unowned:
+        parts.append(
+            "No build is recorded as having set the status of "
+            f"{'some of these blockers' if owned else 'this blocker'}, so "
+            "there is no build id to address a retry or cancel to. Find the "
+            "task in the registry UI (or `stardag tasks list`), which names "
+            "the build that owns each claim; if nothing owns it, the status "
+            "predates claim recording and the task has to be re-run under a "
+            "new build."
+        )
+    return " ".join(parts)
 
 
 async def _handle_terminal(
