@@ -8,6 +8,7 @@ instantly (simulating worker-side lifecycle reporting + wake-up).
 
 from __future__ import annotations
 
+import asyncio
 import typing
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -31,10 +32,11 @@ from stardag.build._base import (
     LockAcquisitionResult,
     LockAcquisitionStatus,
 )
-from stardag.build._reactive import TickSummary, _skip_blocked
+from stardag.build._reactive import _RETRYABLE_STATUSES, TickSummary, _skip_blocked
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
     BuildFrontier,
+    FrontierExternalBlocker,
     FrontierTaskRef,
     NoOpRegistry,
     RegisteredTaskInfo,
@@ -81,6 +83,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.start_metadata: dict[str, dict | None] = {}
         self.needs_tick = False
         self.build_status = "running"
+        self.build_error_message: str | None = None
         self.calls: list[tuple[str, str | None]] = []
         # Named concurrency limits: key -> cap; holders tracked per task.
         self.limits: dict[str, int] = {}
@@ -89,6 +92,32 @@ class FakeReactiveRegistry(NoOpRegistry):
         # task_id -> task_data body, served by task_get_metadata_aio
         # (rehydration fallback); missing key -> KeyError, like a 404.
         self.metadata_bodies: dict[str, dict] = {}
+        # --- cross-build scope (mirrors the API's two scopes) ---
+        # ``statuses`` is environment-global; these task ids exist in the
+        # environment but are NOT in this build's task set, so they gate
+        # this build's tasks (dependency edges are global too) while
+        # contributing to neither ``actionable`` nor ``status_counts``.
+        self.not_in_build: set[str] = set()
+        # task_id -> the build whose event produced the current status. An
+        # ABSENT key means "this build's own doing" (the common case), which
+        # is what makes a task NOT an external blocker; an explicit None is a
+        # row predating status denormalisation — not this build's doing
+        # either, and with no build to ask about it.
+        self.status_build_id: dict[str, UUID | None] = {}
+        # task_id -> (namespace, name), echoed on blocker entries.
+        self.task_names: dict[str, tuple[str, str]] = {}
+        self.blocked_by_external_truncated = False
+        # Derived status of OTHER builds in the environment, served by
+        # build_get_aio — how the tick decides whether the build owning a
+        # blocker is still going to schedule it. Absent ids 404, and
+        # ``build_get_status`` of None emulates a server that doesn't report
+        # the field.
+        self.other_build_statuses: dict[UUID, str | None] = {}
+        self.build_get_calls: list[UUID] = []
+        # Set False to emulate a server predating blocked_by_external: the
+        # fields stay at their model defaults, as they would deserialising
+        # a response that never carried them.
+        self.serves_blocked_by_external = True
 
     # --- test setup helpers ---
 
@@ -107,6 +136,42 @@ class FakeReactiveRegistry(NoOpRegistry):
             self.refs[task_id] = (executor, executor_ref)
         if status_at is not None:
             self.status_at[task_id] = status_at
+
+    def add_blocking_task(
+        self,
+        task_id: str,
+        *,
+        blocks: "set[str]",
+        status: str = "running",
+        owner_build_id: "UUID | None" = None,
+        owner_build_status: "str | None" = "running",
+        owner_build_known: bool = True,
+        name: str = "BlockingTask",
+        namespace: str = "",
+        status_at: "datetime | None" = None,
+        in_build: bool = False,
+    ) -> None:
+        """Register an upstream whose current status this build did not set.
+
+        Defaults to the #208 A1 shape: RUNNING under some *other* build and
+        absent from this build's task set, so it gates ``blocks`` while
+        appearing in neither this build's ``running`` nor its
+        ``status_counts``. ``owner_build_status`` is what ``build_get`` will
+        report for that other build (None = a server that doesn't report it);
+        ``owner_build_known=False`` makes the lookup 404 instead.
+        """
+        self.statuses[task_id] = status
+        owner_build_id = owner_build_id or uuid4()
+        self.status_build_id[task_id] = owner_build_id
+        if owner_build_known:
+            self.other_build_statuses[owner_build_id] = owner_build_status
+        self.task_names[task_id] = (namespace, name)
+        if status_at is not None:
+            self.status_at[task_id] = status_at
+        if not in_build:
+            self.not_in_build.add(task_id)
+        for downstream in blocks:
+            self.upstreams.setdefault(downstream, set()).add(task_id)
 
     # --- registry surface used by the tick ---
 
@@ -187,7 +252,9 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("retry", tid))
-        if self.statuses.get(tid) in ("failed", "cancelled", "skipped"):
+        # Same retryable set the server applies (suspended included: a
+        # suspended task has no live execution to orphan).
+        if self.statuses.get(tid) in _RETRYABLE_STATUSES:
             self.statuses[tid] = "pending"
             self.refs.pop(tid, None)
 
@@ -212,6 +279,7 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def build_fail_aio(self, build_id, error_message=None):
         self.calls.append(("build_fail", None))
         self.build_status = "failed"
+        self.build_error_message = error_message
 
     async def task_get_metadata_aio(self, task_id):
         from stardag.registry._base import TaskMetadata
@@ -268,6 +336,14 @@ class FakeReactiveRegistry(NoOpRegistry):
         if tick_kwargs is not None:
             self.reactive_tick_kwargs = tick_kwargs
 
+    async def build_get_aio(self, build_id):
+        from stardag.registry import BuildInfo
+
+        self.build_get_calls.append(build_id)
+        if build_id not in self.other_build_statuses:
+            raise NotFoundError(f"Build {build_id} not found", detail="Build not found")
+        return BuildInfo(id=build_id, status=self.other_build_statuses[build_id])
+
     async def build_notify_aio(self, build_id):
         self.needs_tick = True
 
@@ -285,9 +361,16 @@ class FakeReactiveRegistry(NoOpRegistry):
                 latest_status_at=self.status_at.get(tid),
             )
 
+        # Build-scoped, like the API: actionable/running/status_counts see
+        # only this build's task set. Dependency gating below stays global.
+        in_build = {
+            tid: status
+            for tid, status in self.statuses.items()
+            if tid not in self.not_in_build
+        }
         actionable = [
             ref(tid)
-            for tid, status in self.statuses.items()
+            for tid, status in in_build.items()
             if status in ("pending", "suspended", "running")
             and all(
                 self.statuses.get(up) == "completed"
@@ -295,8 +378,40 @@ class FakeReactiveRegistry(NoOpRegistry):
             )
         ]
         counts: dict[str, int] = {}
-        for status in self.statuses.values():
+        for status in in_build.values():
             counts[status] = counts.get(status, 0) + 1
+        running = [ref(tid) for tid, status in in_build.items() if status == "running"]
+        # Mirrors the API: computed ONLY when the build has nothing
+        # actionable and nothing running, so an empty list means "not
+        # blocked externally, OR not stalled".
+        blocked_by_external: list[FrontierExternalBlocker] = []
+        if self.serves_blocked_by_external and not actionable and not running:
+            for tid, status in in_build.items():
+                if status not in ("pending", "suspended", "running"):
+                    continue
+                for up in sorted(self.upstreams.get(tid, set())):
+                    if up not in self.statuses:
+                        continue
+                    if self.statuses[up] == "completed":
+                        continue
+                    if up not in self.status_build_id:
+                        continue  # this build's own doing — not external
+                    owner_id = self.status_build_id[up]
+                    if owner_id == build_id:
+                        continue
+                    namespace, name = self.task_names.get(up, ("", up))
+                    blocked_by_external.append(
+                        FrontierExternalBlocker(
+                            task_id=tid,
+                            blocking_task_id=up,
+                            blocking_task_namespace=namespace,
+                            blocking_task_name=name,
+                            blocking_status=self.statuses[up],
+                            blocking_status_at=self.status_at.get(up),
+                            blocking_status_build_id=owner_id,
+                            blocking_in_build=up not in self.not_in_build,
+                        )
+                    )
         return BuildFrontier(
             build_id=build_id,
             build_status=self.build_status,
@@ -305,9 +420,11 @@ class FakeReactiveRegistry(NoOpRegistry):
             roots=[ref(t) for t in self.root_task_ids if t in self.statuses],
             status_counts=counts,
             actionable=actionable,
-            running=[
-                ref(tid) for tid, status in self.statuses.items() if status == "running"
-            ],
+            running=running,
+            blocked_by_external=blocked_by_external,
+            blocked_by_external_truncated=(
+                self.blocked_by_external_truncated and bool(blocked_by_external)
+            ),
             reactive_app_name=self.reactive_app_name,
             reactive_tick_kwargs=self.reactive_tick_kwargs,
         )
@@ -827,6 +944,51 @@ class TestRetryPath:
         )
         assert summary.terminal_status == "completed"
         assert registry.build_status == "completed"
+
+    async def test_retry_failed_resets_an_abandoned_suspended_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """#208 A2: a task left SUSPENDED — its execution yielded dynamic
+        dependencies and returned, then the build was abandoned — used to be
+        permanently unschedulable, since the re-trigger's retry skipped it.
+        It is now reset like any other non-completed status."""
+        (root,) = _chain("suspended-retry-root")
+        registry, locks, executor, store = _setup([root])
+        registry.add_task(str(root.id), status="suspended")
+
+        result = await discover_and_register_aio(
+            registry, uuid4(), root, retry_failed=True
+        )
+
+        assert [t.id for t in result.retried] == [root.id]
+        assert registry.statuses[str(root.id)] == "pending"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+        assert summary.terminal_status == "completed"
+
+    async def test_worker_dynamic_dep_registration_never_resets_suspended(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The other caller of discover_and_register_aio is a worker
+        registering its dynamically yielded deps — it takes the default
+        retry_failed=False, so widening the retryable set cannot make a
+        suspending worker reset its own task."""
+        (root,) = _chain("suspended-worker-root")
+        registry, _, _, _ = _setup([root], auto_complete=False)
+        registry.add_task(str(root.id), status="suspended")
+
+        result = await discover_and_register_aio(registry, uuid4(), root)
+
+        assert result.retried == []
+        assert registry.statuses[str(root.id)] == "suspended"
+        assert not any(method == "retry" for (method, _) in registry.calls)
 
     async def test_without_retry_failed_build_fail_fasts(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -1627,3 +1789,545 @@ class TestTickClaims:
 
         assert summary.terminal_status == "completed"
         assert not any(m == "start_claim" for (m, _) in registry.calls)
+
+
+class TestExternalBlockers:
+    """Terminal detection when the blocker lives outside this build (#208 A1).
+
+    Dependency gating is environment-global while ``running`` and
+    ``status_counts`` are build-scoped, so a task another build is executing
+    gates this build's tasks while appearing in neither count. Read as
+    "nothing runnable, nothing running", that shape used to fail the build
+    outright.
+    """
+
+    BLOCKER_ID = "blocking-task-id"
+
+    def _blocked_build(
+        self,
+        *,
+        blocker_status: str = "running",
+        blocker_age_seconds: float | None = 60.0,
+        in_build: bool = False,
+        owner_build_id: "UUID | None" = None,
+        owner_build_status: "str | None" = "running",
+        owner_build_known: bool = True,
+    ):
+        """A build whose only task is gated by an upstream it does not own."""
+        (root,) = _chain("ext-blocked-root")
+        registry, locks, executor, store = _setup([root], auto_complete=False)
+        registry.add_blocking_task(
+            self.BLOCKER_ID,
+            blocks={str(root.id)},
+            status=blocker_status,
+            status_at=(
+                None
+                if blocker_age_seconds is None
+                else datetime.now(timezone.utc) - timedelta(seconds=blocker_age_seconds)
+            ),
+            in_build=in_build,
+            owner_build_id=owner_build_id,
+            owner_build_status=owner_build_status,
+            owner_build_known=owner_build_known,
+            namespace="pipelines",
+            name="Ingest",
+        )
+        return root, registry, locks, executor, store
+
+    async def test_running_blocker_in_another_build_waits_instead_of_failing(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The exact A1 repro: this build has nothing actionable and nothing
+        running because its task waits on an upstream another build is
+        executing. That upstream's completion will unblock it, so the tick
+        must wait (as it does for a concurrency-limit denial) rather than
+        fail the build."""
+        _, registry, locks, executor, store = self._blocked_build()
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert registry.build_status == "running"
+        assert not any(method == "build_fail" for (method, _) in registry.calls)
+        assert executor.spawned == []
+        assert (summary.external_blockers, summary.external_blockers_waited) == (1, 1)
+        assert summary.external_blockers_fatal == 0
+
+    async def test_wait_is_bounded_by_the_blockers_status_age(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A blocker RUNNING far longer than the bound is a claim nobody is
+        going to release — waiting again would hang the build silently, so
+        the tick fails it with the full explanation."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_age_seconds=60 * 60 * 24  # a day; default bound is 6h
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert summary.external_blockers_waited == 0
+        message = registry.build_error_message or ""
+        assert "pipelines.Ingest" in message
+        assert self.BLOCKER_ID in message
+        assert "RUNNING for 86400s" in message
+        assert str(registry.status_build_id[self.BLOCKER_ID]) in message
+        # The stale-claim escape hatch, which #208 A2 notes was undocumented.
+        assert "release the claim" in message
+
+    async def test_a_generous_bound_keeps_waiting_on_a_long_running_blocker(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Control for the bound: the same age with a larger bound waits."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_age_seconds=60 * 60 * 24
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                stale_external_blocker_seconds=60 * 60 * 24 * 7,
+            ),
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert summary.external_blockers_waited == 1
+        assert registry.build_status == "running"
+
+    @pytest.mark.parametrize(
+        "blocker_status", ["pending", "suspended", "failed", "cancelled", "skipped"]
+    )
+    async def test_non_running_external_blocker_fails_immediately(
+        self,
+        blocker_status: str,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """Nobody is executing the blocker, the build that owns it has gone
+        terminal, and this build will never schedule it (it is not in this
+        build's task set) — so waiting would be waiting forever. Fail now,
+        naming the task and the build that owns it."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status=blocker_status, owner_build_status="completed"
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert summary.external_blockers_waited == 0
+        message = registry.build_error_message or ""
+        assert "pipelines.Ingest" in message
+        assert blocker_status.upper() in message
+        assert f"under build {registry.status_build_id[self.BLOCKER_ID]}" in message
+        # Actionable: retry now covers suspended too (#208 A2), and only a
+        # RUNNING blocker needs the cancel-first hint.
+        assert "/retry" in message
+        assert "release the claim" not in message
+
+    @pytest.mark.parametrize("owner_build_status", ["running", "pending"])
+    async def test_non_running_blocker_of_a_live_build_waits(
+        self,
+        owner_build_status: str,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """A PENDING blocker belonging to a build that is still live *will* be
+        scheduled by that build — failing here would be a brand-new spurious
+        failure, the very class of bug being fixed. A build the server still
+        reports as pending counts as live too: it may yet start, and the
+        staleness bound is what keeps that from being an unbounded wait."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_status=owner_build_status
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert registry.build_status == "running"
+        assert summary.external_blockers_waited == 1
+        assert summary.external_blockers_fatal == 0
+
+    async def test_non_running_blocker_of_a_live_build_is_still_bounded(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The owner being live is not a licence to wait forever: a build that
+        has left a task pending past the bound is not making progress on it."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending",
+            owner_build_status="running",
+            blocker_age_seconds=60 * 60 * 24,
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert "staleness bound" in (registry.build_error_message or "")
+
+    async def test_blocker_with_no_status_owning_build_fails(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """No build owns the blocker's status (a row predating status
+        denormalisation), so no status-moving event was ever recorded against
+        it — there is no evidence anyone intends to run it, and no build to
+        ask. Fail, with the remediation intact."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending"
+        )
+        registry.status_build_id[self.BLOCKER_ID] = None
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert registry.build_get_calls == []  # nothing to look up
+        message = registry.build_error_message or ""
+        assert "no build owns its status" in message
+        # Both documented remedies are addressed to a build, so quoting
+        # them here would hand the reader a URL with no id to put in it.
+        # Say what can actually be done instead.
+        assert "/retry" not in message
+        assert "no build id to address a retry or cancel to" in message
+        assert "stardag tasks list" in message
+
+    async def test_failed_owner_lookup_fails_without_propagating(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An unresolvable owner (deleted build, unreachable registry) is not
+        evidence of life: the build fails with a precise message rather than
+        the lookup error escaping the tick."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_known=False
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers_fatal == 1
+        assert "status is unknown" in (registry.build_error_message or "")
+
+    async def test_server_not_reporting_build_status_fails(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Same treatment for a server (or custom registry) that doesn't
+        report the derived build status: the field defaults to None, unknown
+        is not evidence of life, and the message says so."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_status=None
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert "status is unknown" in (registry.build_error_message or "")
+
+    async def test_owner_status_is_resolved_once_per_build(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A wide DAG stalled behind one build yields one blocker entry per
+        blocked edge, all naming the same owner — that must cost one request,
+        not one per entry."""
+        root, registry, locks, executor, store = self._blocked_build(
+            blocker_status="pending", owner_build_id=(owner := uuid4())
+        )
+        sibling = SyncOnlyTask(name="ext-memo-sibling")
+        store.save_task(sibling)
+        registry.add_task(str(sibling.id), status="pending")
+        registry.add_blocking_task(
+            "second-blocker",
+            blocks={str(sibling.id)},
+            status="pending",
+            owner_build_id=owner,  # same owner as the first blocker
+            namespace="pipelines",
+            name="Transform",
+        )
+        registry.build_get_calls.clear()
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(linger_seconds=0.0, poll_interval_seconds=0.01),
+        )
+
+        assert summary.external_blockers_waited == 2
+        assert registry.build_get_calls == [owner]
+
+    async def test_in_build_blocker_does_not_cause_a_wait(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A blocker inside this build's own task set is already modelled by
+        actionable/running/status_counts, so it must not buy the build a
+        wait — but it does get named, since the status counts alone never
+        said which task was holding things up."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="cancelled", in_build=True
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers == 1
+        assert summary.external_blockers_waited == 0
+        assert summary.external_blockers_fatal == 0
+        message = registry.build_error_message or ""
+        assert "No runnable or running tasks left" in message
+        assert "Blocked within this build by" in message
+        assert "pipelines.Ingest" in message
+
+    async def test_unknown_blocker_age_waits_unbounded(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """No ``blocking_status_at`` (a task row predating server-side status
+        denormalisation) → the wait cannot be aged. Waiting is the safe
+        direction: failing on missing information would reintroduce exactly
+        the spurious failure this path removes."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_age_seconds=None
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                stale_external_blocker_seconds=0.0,  # would expire anything
+            ),
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert summary.external_blockers_waited == 1
+        assert registry.build_status == "running"
+
+    async def test_bound_disabled_waits_indefinitely(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_age_seconds=60 * 60 * 24 * 365
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                stale_external_blocker_seconds=None,
+            ),
+        )
+
+        assert summary.outcome == "lingered_out"
+        assert summary.external_blockers_waited == 1
+
+    async def test_a_fatal_blocker_wins_over_a_waitable_one(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """One blocker nothing will ever run means the build cannot complete,
+        whatever else it is also waiting on."""
+        root, registry, locks, executor, store = self._blocked_build()
+        registry.add_blocking_task(
+            "dead-blocker",
+            blocks={str(root.id)},
+            status="suspended",
+            owner_build_status="cancelled",
+            namespace="pipelines",
+            name="Abandoned",
+            status_at=datetime.now(timezone.utc),
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers == 2
+        assert summary.external_blockers_waited == 1
+        assert summary.external_blockers_fatal == 1
+        # Only the fatal one is named as the reason to fail.
+        message = registry.build_error_message or ""
+        assert "pipelines.Abandoned" in message
+        assert "pipelines.Ingest" not in message
+
+    async def test_truncated_blocker_list_is_flagged_in_the_message(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The server caps its blocker list; the failure must not read as an
+        exhaustive account of what is holding the build back."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="suspended", owner_build_status="failed"
+        )
+        registry.blocked_by_external_truncated = True
+
+        await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        message = registry.build_error_message or ""
+        assert "capped the blocker list" in message
+
+    async def test_older_server_without_the_fields_behaves_exactly_as_before(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A server predating blocked_by_external leaves the fields at their
+        defaults, and terminal detection degrades to the pre-fix failure —
+        the bug is unfixable client-side there, but nothing regresses."""
+        _, registry, locks, executor, store = self._blocked_build()
+        registry.serves_blocked_by_external = False
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "failed"
+        assert summary.external_blockers == 0
+        assert summary.external_blockers_waited == 0
+        assert summary.external_blockers_fatal == 0
+        assert "No runnable or running tasks left" in (
+            registry.build_error_message or ""
+        )
+
+    async def test_healthy_build_never_evaluates_blockers(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The frontier reports blockers only while a build looks stalled, so
+        a build that runs to completion records none."""
+        dep, root = _chain("ext-healthy-dep", "ext-healthy-root")
+        registry, locks, executor, store = _setup([dep, root])
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.terminal_status == "completed"
+        assert summary.external_blockers == 0
+
+    async def test_blocker_completion_releases_the_waiting_build(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """End of the wait: once the owning build completes the blocker (and
+        wakes this scheduler), the same lingering tick schedules the task it
+        would previously have failed the build over."""
+        root, registry, locks, executor, store = self._blocked_build()
+        registry.auto_complete = True
+
+        async def complete_blocker_soon() -> None:
+            await asyncio.sleep(0.05)
+            registry.statuses[self.BLOCKER_ID] = "completed"
+            registry.needs_tick = True
+
+        waiter = asyncio.create_task(complete_blocker_soon())
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(linger_seconds=1.0, poll_interval_seconds=0.01),
+        )
+        await waiter
+
+        assert summary.terminal_status == "completed"
+        assert executor.spawned == [root.id]
+        assert summary.external_blockers_waited >= 1

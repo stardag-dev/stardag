@@ -109,6 +109,51 @@ class FrontierTaskRef(StardagBaseModel):
     latest_status_at: datetime | None = None
 
 
+class FrontierExternalBlocker(StardagBaseModel):
+    """An upstream outside this build that holds one of its tasks back.
+
+    Task rows (and their dependency edges) are per *environment*, not per
+    build, so an upstream left non-COMPLETED by some *other* build still
+    gates this build's downstream tasks — silently, since such an upstream
+    need not be part of this build's task set at all (a dynamic dependency
+    registered under an earlier build is the common case). Each entry pairs
+    one blocked task of this build with one such blocker.
+
+    "Not this build's doing" is decided server-side by the build whose
+    event produced the blocker's current status: if that is not this build,
+    this build did not put the blocker in that state and cannot generally
+    get it out of it.
+
+    The blocked side carries only ``task_id`` (the caller registered it, and
+    every other frontier field is task_id-keyed too); the *blocking* side
+    carries name/namespace because it may be entirely unknown to the caller,
+    and a diagnostic is useless without something human-readable.
+    """
+
+    # Blocked task — always a member of this build's task set.
+    task_id: str
+    # The blocking upstream. Identity is spelled out because this build may
+    # never have seen this task.
+    blocking_task_id: str
+    blocking_task_namespace: str
+    blocking_task_name: str
+    # Task status value; never "completed" (a completed upstream blocks
+    # nothing).
+    blocking_status: str
+    # When the blocker entered its current status, and the build whose event
+    # put it there ("running under build Z since T"). Both are None only for
+    # rows predating status denormalisation server-side — a scheduler that
+    # bounds its wait on the age must handle the None (see
+    # ``TickConfig.stale_external_blocker_seconds``).
+    blocking_status_at: datetime | None = None
+    blocking_status_build_id: UUID | None = None
+    # Whether the blocker is also part of *this* build's task set. False is
+    # the pathological case: this build will never schedule it, so it can
+    # only wait for whoever owns it. True still blocks, but the blocker also
+    # shows up in this build's own ``actionable``/``running``.
+    blocking_in_build: bool
+
+
 class BuildFrontier(StardagBaseModel):
     """Scheduling state of a build, consumed by reactive scheduler ticks.
 
@@ -117,6 +162,12 @@ class BuildFrontier(StardagBaseModel):
     scheduler partitions them: pending/suspended → spawn; running → probe
     the detached execution ref. ``status_counts`` covers all tasks in the
     build (terminal detection).
+
+    ``blocked_by_external`` explains the gap between the two scopes this
+    payload mixes: dependency gating is environment-global while ``running``
+    and ``status_counts`` cover only tasks this build has events for, so a
+    build can have nothing actionable and nothing running yet still be
+    legitimately waiting. See :class:`FrontierExternalBlocker`.
     """
 
     build_id: UUID
@@ -130,6 +181,20 @@ class BuildFrontier(StardagBaseModel):
     # inside the dynamic-dep registration window) — cancellation targets.
     # Defaults to empty for servers predating the field.
     running: list[FrontierTaskRef] = []
+    # Non-terminal tasks of this build held back by an upstream this build
+    # does not own, capped server-side (hence the truncation flag — the list
+    # is a diagnostic, not a work queue; a truncated list still proves
+    # "waiting, not stuck").
+    #
+    # Populated ONLY when the build has nothing actionable and nothing
+    # running, i.e. only when it looks stalled — which keeps a per-edge join
+    # off the hot path of every healthy build's linger polls. So an EMPTY
+    # list means "not externally blocked, OR not stalled"; never read it as
+    # proof that no external blocker exists. Also empty on servers predating
+    # the fields, where the tick's terminal detection degrades to exactly its
+    # pre-fix behaviour.
+    blocked_by_external: list[FrontierExternalBlocker] = []
+    blocked_by_external_truncated: bool = False
     # Reactive-scheduling marker/owner, moved off the target root into the
     # registry. None means the build is NOT reactively scheduled (a stray
     # tick must no-op on it, so a resident-orchestrator build is never
@@ -155,6 +220,12 @@ class BuildInfo(StardagBaseModel):
     """
 
     id: UUID
+    # The build's *derived* status (computed server-side from its recorded
+    # events, same values as ``BuildFrontier.build_status``): pending /
+    # running / completed / failed / cancelled. None on servers or custom
+    # registries that don't report it — a consumer asking "is this build
+    # still live?" must treat None as unknown rather than as terminal.
+    status: str | None = None
     # Reactive-scheduling marker/owner (see ``BuildFrontier``). None = not
     # reactively scheduled.
     reactive_app_name: str | None = None

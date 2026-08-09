@@ -46,6 +46,69 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   `task_modules=[]` behaves exactly as before. **Redeploy the app whenever
   you change `task_modules`**, before triggering.
 
+- **Fixed: a reactive build no longer fails because another build is
+  running one of its upstreams.** Task state is per environment, so an
+  upstream some other build left RUNNING gates this build's tasks — while
+  contributing nothing to the `running` count and status counts a tick
+  sees, which are scoped to this build. That shape read as "nothing
+  runnable, nothing running, so this build is dead", and the build was
+  failed within seconds of triggering with an error naming only status
+  counts. Common whenever DAGs overlap, and especially when the blocker is
+  a dynamic dependency registered under an earlier build, so it is not in
+  the new build's task set at all.
+
+  A tick now reads the frontier's blocking upstreams and asks, for each,
+  whether anyone is going to move it. A blocker **another build is
+  executing** is waited out (like a busy concurrency-limit slot — its
+  completion wakes this scheduler), and so is one **a still-live build has
+  yet to schedule**: that build is going to run it, and failing here would
+  only trade one spurious failure for another. A blocker **no live build is
+  going to run** — its owning build has gone terminal, no build owns its
+  status, or that status could not be resolved — fails the build
+  immediately, naming the task, its namespace/name, its status, how long it
+  has been in it, the build that owns it, why that owner will not move it,
+  and how to release it. A blocker inside this build's own task set is
+  unchanged: it is already visible in the counts, and still fails the build
+  when it can never run.
+
+  Both waits are bounded by the new
+  `TickConfig.stale_external_blocker_seconds` (default 6 hours), measured on
+  how long the blocker has sat in its status rather than on the tick, which
+  is too short-lived to bound anything: past the bound the blocker is
+  presumed abandoned and the build fails with the full explanation instead
+  of hanging silently. `None` waits indefinitely. `TickSummary` gains
+  `external_blockers`, `external_blockers_waited` and
+  `external_blockers_fatal`, and `BuildInfo` gains `status` (the build's
+  derived status, `None` when a server or custom registry does not report
+  it). Owner liveness is resolved only when a build actually looks stalled,
+  and once per owning build per pass, so a healthy build issues no extra
+  requests however often it polls. Requires a stardag-api version matching
+  this SDK; against an older server the blocker list is always empty and
+  terminal detection behaves exactly as before.
+
+- **Fixed: re-triggering a reactive build now recovers tasks left
+  `SUSPENDED`.** A task that suspended for dynamic dependencies and was
+  then abandoned (its orchestrator died, or the build was cancelled) was
+  permanently unschedulable: the re-trigger's retry pass skipped it, and
+  the only escape was to cancel it purely to reach a status that _was_
+  retryable and then retry. `suspended` joins failed/cancelled/skipped in
+  the set a re-trigger resets to pending. Safe because a suspended task has
+  no live execution — the suspension means the execution yielded and
+  returned — so nothing can be orphaned. Workers registering dynamically
+  yielded dependencies do not retry at all and are unaffected. `running`
+  remains deliberately non-retryable: it holds a live execution claim, and
+  releasing that claim is cancellation, not retry.
+
+- **`TickConfig.stale_running_no_ref_seconds` takes effect for the first
+  time**, now that the frontier actually populates
+  `FrontierTaskRef.latest_status_at`. The field was declared and documented
+  as the input to that bound but never sent by the server — it silently
+  serialised as `null` on every ref, leaving the guard dead. Against a
+  matching server, a task stuck RUNNING without an executor ref for longer
+  than the bound (default 30 minutes) is now failed as intended. Raise the
+  bound if you run long ref-less tasks — e.g. a resident build sharing
+  tasks with a concurrently ticking reactive one.
+
 ### Fixed
 
 - **The reactive watchdog now asks the registry only for the RUNNING builds

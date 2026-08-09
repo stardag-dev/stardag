@@ -121,7 +121,8 @@ tick(build_id):
          probe running refs — leave live ones; self-heal completions
          (target existence is ground truth); record failures
     handle terminal states (all roots complete / failure — with blocked
-    tasks marked skipped / cancelled)
+    tasks marked skipped / cancelled; wait rather than fail when the
+    only thing missing is a task another build is executing)
     linger briefly on the wake-up flag; exit when quiet
 ```
 
@@ -151,6 +152,52 @@ worker still running under a previous owner — forwards the wake-up to the
 owner's tick instead of driving the build with the wrong code. Ownership
 moves only by an explicit re-trigger from the new app, which also updates
 the tick config.
+
+### Cross-build blocking
+
+Task state is **per environment**, not per build: a task id has one status,
+and its dependency edges are shared. Two builds over overlapping DAGs
+therefore see each other — which is what makes "don't re-run what another
+build already completed" work, and equally means an upstream some _other_
+build is executing holds this build's downstream tasks back.
+
+A build can consequently have nothing runnable and nothing running of its
+own and still be perfectly healthy. Terminal detection distinguishes the
+two cases from the frontier's list of blocking upstreams this build does
+not own:
+
+- **A blocker another build is running** — the build waits, exactly as it
+  waits for a busy concurrency-limit slot. The blocker's completion wakes
+  this scheduler, and the watchdog covers a lost wake-up.
+- **A blocker another build has yet to schedule** (pending or suspended,
+  under a build that is itself still live) — the build waits too. That
+  build is going to run it; failing here would just trade one spurious
+  failure for another.
+- **A blocker no live build is going to run** — its owning build has gone
+  terminal, no build owns its status at all, or that status could not be
+  resolved. Nothing is going to move it, so the build fails immediately,
+  naming the blocking task, its status, how long it has been in it, the
+  build that owns it, and why that owner will not move it.
+
+Both waits are bounded by `TickConfig.stale_external_blocker_seconds`
+(default 6 hours, measured on how long the blocker has sat in its status,
+not on this tick): past the bound the blocker is presumed abandoned and the
+build fails rather than hanging silently. Raise it if your tasks routinely
+run longer; `None` waits indefinitely. Owner liveness is resolved only when
+a build actually looks stalled, and once per owning build, so a healthy
+build never pays for it.
+
+**Recovering a build blocked on a task from another build.** Retry the
+blocking task (`POST /api/v1/builds/{build_id}/tasks/{task_id}/retry`,
+using the owning build's id) to reset it to PENDING, then re-trigger your
+build — a re-trigger resets blocking tasks in any retryable status for you.
+Retry covers **suspended** as well as failed/cancelled/skipped: a task left
+SUSPENDED (its execution registered dynamic dependencies, yielded and
+returned, and then its build was abandoned) used to have no supported way
+back, and needed an undocumented cancel-then-retry dance. A task stuck
+RUNNING is the one exception — it holds a live execution claim, so
+**cancel** it (`.../cancel`) to release the claim; retry deliberately does
+not, since that would risk a second concurrent execution.
 
 Reactive scheduling is experimental and currently Modal-first — see
 [Integrate with Modal](../how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental)
