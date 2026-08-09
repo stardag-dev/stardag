@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { BuildTickSummary } from "../types/task";
 import { formatAbsoluteTime, formatRelativeTime } from "../utils/time";
 
@@ -124,12 +124,23 @@ function summaryEntries(summary: Record<string, unknown>): Entry[] {
   });
 }
 
-function SummaryChips({ summary }: { summary: Record<string, unknown> }) {
-  const entries = summaryEntries(summary);
+/**
+ * The counters worth reading: the ones that are not zero.
+ *
+ * A tick reports its whole counter set every time, so most of a summary is
+ * "this did not happen" — `spawned 0, skipped 0, claim denied 0` on every
+ * row, drowning the one counter that moved. What a tick *did* is the
+ * signal; what it did not do is the absence of one.
+ */
+function signalEntries(summary: Record<string, unknown>): Entry[] {
+  return summaryEntries(summary).filter((entry) => !entry.muted);
+}
+
+function SummaryChips({ entries }: { entries: Entry[] }) {
   if (entries.length === 0) {
     return (
       <span className="text-xs text-gray-500 dark:text-gray-400">
-        No counters reported.
+        Nothing happened on this tick.
       </span>
     );
   }
@@ -139,18 +150,10 @@ function SummaryChips({ summary }: { summary: Record<string, unknown> }) {
         <span
           key={entry.key}
           title={entry.help ?? `${entry.key}: ${entry.value}`}
-          className={`inline-flex items-baseline gap-1 rounded px-1.5 py-0.5 text-xs ${
-            entry.muted
-              ? "bg-gray-50 text-gray-400 dark:bg-gray-800 dark:text-gray-500"
-              : "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200"
-          }`}
+          className="inline-flex items-baseline gap-1 rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-700 dark:bg-gray-700 dark:text-gray-200"
         >
           <span>{entry.label}</span>
-          <span
-            className={
-              entry.muted ? "" : "font-medium text-gray-900 dark:text-gray-100"
-            }
-          >
+          <span className="font-medium text-gray-900 dark:text-gray-100">
             {entry.value}
           </span>
         </span>
@@ -173,19 +176,85 @@ function OutcomeBadge({ outcome }: { outcome: string }) {
   );
 }
 
-function SummaryRow({ summary }: { summary: BuildTickSummary }) {
+interface TickGroup {
+  id: string;
+  outcome: string;
+  entries: Entry[];
+  count: number;
+  /** Newest tick in the group. */
+  latest: string;
+  /** Oldest tick in the group; equal to `latest` for a group of one. */
+  earliest: string;
+}
+
+/** The identity a run of ticks is collapsed on: same outcome, same signal. */
+function groupKey(summary: BuildTickSummary, entries: Entry[]): string {
+  return [summary.outcome, ...entries.map((e) => `${e.key}=${e.value}`)].join("|");
+}
+
+/**
+ * Collapse consecutive ticks that reported the same thing.
+ *
+ * A stalled build is stalled *repetitively*: the same outcome with the
+ * same counters, every few seconds, for as long as it has been stuck.
+ * Twenty rows of "lease held" is twenty ways of saying one thing. Grouped,
+ * the repetition becomes the diagnosis — "lingered out ×6, claim denied 3
+ * every time" — and it fits on one line.
+ *
+ * Only *consecutive* runs collapse, so the order in which outcomes
+ * alternated is still visible; this is a summary of the trail, not a
+ * histogram over it.
+ */
+function groupTicks(summaries: BuildTickSummary[]): TickGroup[] {
+  const groups: TickGroup[] = [];
+  let key: string | null = null;
+  for (const summary of summaries) {
+    const entries = signalEntries(summary.summary);
+    const thisKey = groupKey(summary, entries);
+    const last = groups[groups.length - 1];
+    if (last && thisKey === key) {
+      last.count += 1;
+      last.earliest = summary.created_at;
+      continue;
+    }
+    key = thisKey;
+    groups.push({
+      id: summary.id,
+      outcome: summary.outcome,
+      entries,
+      count: 1,
+      latest: summary.created_at,
+      earliest: summary.created_at,
+    });
+  }
+  return groups;
+}
+
+function SummaryRow({ group }: { group: TickGroup }) {
   return (
-    <li className="space-y-1 py-1.5">
-      <div className="flex items-center gap-2">
-        <OutcomeBadge outcome={summary.outcome} />
+    <li className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1">
+      <OutcomeBadge outcome={group.outcome} />
+      {group.count > 1 && (
         <span
-          className="text-xs text-gray-500 dark:text-gray-400"
-          title={formatAbsoluteTime(summary.created_at)}
+          className="text-xs font-medium text-gray-700 dark:text-gray-300"
+          title={`${group.count} consecutive ticks reported this`}
         >
-          {formatRelativeTime(summary.created_at)}
+          ×{group.count}
         </span>
-      </div>
-      <SummaryChips summary={summary.summary} />
+      )}
+      <span
+        className="text-xs text-gray-500 dark:text-gray-400"
+        title={
+          group.count > 1
+            ? `${formatAbsoluteTime(group.earliest)} — ${formatAbsoluteTime(
+                group.latest,
+              )}`
+            : formatAbsoluteTime(group.latest)
+        }
+      >
+        {formatRelativeTime(group.latest)}
+      </span>
+      <SummaryChips entries={group.entries} />
     </li>
   );
 }
@@ -196,7 +265,7 @@ interface TickSummaryTrailProps {
   /** True when the server has no tick-summaries endpoint (404). */
   unavailable: boolean;
   error: string | null;
-  /** Ticks shown before the "show earlier" disclosure. */
+  /** Tick *groups* shown before the "show earlier" disclosure. */
   compactCount?: number;
 }
 
@@ -205,8 +274,10 @@ interface TickSummaryTrailProps {
  *
  * A stalled build repeats the same outcome tick after tick, so the trail
  * reads far better than a single row: "lingered out ×6, claim denied 3
- * every time" is a diagnosis, while one row of it is an anecdote. Kept to
- * the two most recent by default and expandable from there.
+ * every time" is a diagnosis, while one row of it is an anecdote. Runs of
+ * identical ticks are collapsed into one row each (see `groupTicks`), and
+ * only the counters that actually moved are shown, so the repetition reads
+ * as a count rather than as twenty rows of noise.
  */
 export function TickSummaryTrail({
   summaries,
@@ -216,6 +287,7 @@ export function TickSummaryTrail({
   compactCount = 2,
 }: TickSummaryTrailProps) {
   const [expanded, setExpanded] = useState(false);
+  const groups = useMemo(() => groupTicks(summaries), [summaries]);
 
   if (loading) {
     return (
@@ -245,14 +317,14 @@ export function TickSummaryTrail({
     );
   }
 
-  const shown = expanded ? summaries : summaries.slice(0, compactCount);
-  const hidden = summaries.length - shown.length;
+  const shown = expanded ? groups : groups.slice(0, compactCount);
+  const hidden = groups.length - shown.length;
 
   return (
     <div>
       <ul className="divide-y divide-gray-200 dark:divide-gray-700">
-        {shown.map((summary) => (
-          <SummaryRow key={summary.id} summary={summary} />
+        {shown.map((group) => (
+          <SummaryRow key={group.id} group={group} />
         ))}
       </ul>
       {(hidden > 0 || expanded) && (
@@ -264,7 +336,7 @@ export function TickSummaryTrail({
         >
           {expanded
             ? "Show fewer ticks"
-            : `Show ${hidden} earlier tick${hidden === 1 ? "" : "s"}`}
+            : `Show ${hidden} earlier outcome${hidden === 1 ? "" : "s"}`}
         </button>
       )}
     </div>

@@ -29,6 +29,10 @@ import { ResultBanner } from "./ui/ResultBanner";
 // turning the panel into a log viewer.
 const TICK_LIMIT = 20;
 
+// Blockers shown before the panel has to be expanded. Two is enough to
+// see whether they share a cause; past that it is a work queue.
+const COMPACT_BLOCKERS = 2;
+
 // Order the status chips read in, rather than whatever order the server's
 // GROUP BY produced. Unknown statuses (a newer SDK) are appended.
 const STATUS_ORDER: TaskStatus[] = [
@@ -96,6 +100,7 @@ function BlockerCard({
   onNavigateToBuild,
   onAct,
 }: BlockerCardProps) {
+  const [open, setOpen] = useState(false);
   const ownerBuildId = blocker.blocking_status_build_id ?? null;
   const ownedByThisBuild = ownerBuildId === buildId;
   const held = heldFor(blocker.blocking_status_at);
@@ -118,58 +123,73 @@ function BlockerCard({
   }
 
   return (
-    <li className="rounded-md border border-amber-200 bg-white/70 p-2.5 dark:border-amber-900/60 dark:bg-gray-800/60">
-      <p className="text-xs text-gray-600 dark:text-gray-400">
-        This build&rsquo;s task{" "}
-        <code
-          title={blocker.task_id}
-          className="rounded bg-gray-100 px-1 py-0.5 font-mono text-gray-800 dark:bg-gray-700 dark:text-gray-200"
+    <li className="border-t border-amber-200/70 first:border-t-0 dark:border-amber-900/50">
+      {/* The whole blocker on one line: which task, waiting on what, in
+          what status, for how long, under whose build — and the remedy.
+          Everything that explains *why* sits behind the disclosure, since
+          it is the same three sentences every time and this panel shares
+          the viewport with the DAG and the task table. */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1 text-xs">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-label={`Explain why ${blocker.blocking_task_name} is blocking`}
+          className="rounded text-amber-900/70 hover:text-amber-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-amber-200/70 dark:hover:text-amber-100"
         >
-          {blocker.task_id}
-        </code>{" "}
-        is waiting on:
-      </p>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
+          <svg
+            className={`h-3 w-3 transition-transform ${open ? "rotate-90" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M9 5l7 7-7 7"
+            />
+          </svg>
+        </button>
+        <code
+          title={`This build's task ${blocker.task_id}`}
+          className="rounded bg-amber-100/60 px-1 py-0.5 font-mono text-[11px] text-gray-700 dark:bg-gray-700/60 dark:text-gray-200"
+        >
+          {shortId(blocker.task_id)}
+        </code>
+        <span className="text-gray-600 dark:text-gray-400">waits on</span>
+        <span
+          title={blocker.blocking_task_id}
+          className="max-w-[18rem] truncate font-medium text-gray-900 dark:text-gray-100"
+        >
           {qualifiedName}
         </span>
         <StatusBadge status={blocker.blocking_status} />
-        {held ? (
+        {held && (
           <span
-            className="text-xs text-gray-600 dark:text-gray-400"
+            className="text-gray-600 dark:text-gray-400"
             title={formatAbsoluteTime(blocker.blocking_status_at)}
           >
-            for {held}
-          </span>
-        ) : (
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            since an unrecorded time
+            {held}
           </span>
         )}
         {ownerBuildId ? (
-          <span className="text-xs text-gray-600 dark:text-gray-400">
-            held by build{" "}
-            <BuildLink buildId={ownerBuildId} onNavigateToBuild={onNavigateToBuild} />
-            {ownedByThisBuild ? " (this build)" : ""}
-          </span>
+          <BuildLink buildId={ownerBuildId} onNavigateToBuild={onNavigateToBuild} />
         ) : (
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            owning build not recorded
+          <span className="text-gray-500 dark:text-gray-400">no owning build</span>
+        )}
+        {!blocker.blocking_in_build && (
+          <span
+            title="The blocking task is not part of this build at all"
+            className="rounded bg-amber-100 px-1 py-0.5 text-[11px] text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
+          >
+            outside this build
           </span>
         )}
-      </div>
-      <p className="mt-1.5 text-xs text-gray-600 dark:text-gray-400">{explanation}</p>
-      <p
-        className="mt-1 truncate font-mono text-[11px] text-gray-500 dark:text-gray-500"
-        title={blocker.blocking_task_id}
-      >
-        {blocker.blocking_task_id}
-      </p>
-
-      {actions.length > 0 && (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          {isAdmin && ownerBuildId ? (
-            actions.map((action) => (
+        {actions.length > 0 && isAdmin && ownerBuildId && (
+          <span className="ml-auto flex items-center gap-1.5">
+            {actions.map((action) => (
               <button
                 key={action}
                 type="button"
@@ -178,21 +198,35 @@ function BlockerCard({
                 // Several identical-looking buttons can sit in this list,
                 // so each names its target rather than just its verb.
                 aria-label={`${CLAIM_ACTION_LABELS[action]} on ${blocker.blocking_task_name}`}
-                className="rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/30"
+                className="rounded border border-red-300 px-1.5 py-0.5 font-medium text-red-700 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/30"
               >
                 {CLAIM_ACTION_LABELS[action]}
               </button>
-            ))
-          ) : !ownerBuildId ? (
-            <span className="text-xs text-gray-500 dark:text-gray-400">
+            ))}
+          </span>
+        )}
+      </div>
+
+      {open && (
+        <div className="pb-1.5 pl-5 text-xs text-gray-600 dark:text-gray-400">
+          <p>{explanation}</p>
+          <p className="mt-1 font-mono text-[11px] text-gray-500 dark:text-gray-500">
+            {blocker.task_id} → {blocker.blocking_task_id}
+          </p>
+          {ownedByThisBuild && (
+            <p className="mt-1">This build owns the blocking status itself.</p>
+          )}
+          {actions.length > 0 && !ownerBuildId && (
+            <p className="mt-1">
               No remedy can be offered: the build that set this status was not recorded,
               so there is nothing to address a cancel or retry to.
-            </span>
-          ) : (
-            <span className="text-xs text-gray-500 dark:text-gray-400">
+            </p>
+          )}
+          {actions.length > 0 && ownerBuildId && !isAdmin && (
+            <p className="mt-1">
               Releasing or resetting another build&rsquo;s task requires the workspace
               admin role.
-            </span>
+            </p>
           )}
         </div>
       )}
@@ -244,9 +278,14 @@ export function BuildSchedulingPanel({
   const [ticksUnavailable, setTicksUnavailable] = useState(false);
   const [ticksError, setTicksError] = useState<string | null>(null);
 
-  // Collapsed-form disclosure. Only meaningful in the "collapsed" form;
-  // the stalled form is always open.
+  // Collapsed-form disclosure.
   const [stripOpen, setStripOpen] = useState(false);
+  // Stalled-form disclosure. The verdict, the task-status breakdown and
+  // the scheduler's tick trail are all *explanation*; the headline and the
+  // blockers themselves are the answer. Only the answer is on screen by
+  // default — this panel sits above the DAG and the task table, and at
+  // full height it pushed both off the viewport.
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   // In-flight remedy.
   const [pending, setPending] = useState<{
@@ -292,6 +331,7 @@ export function BuildSchedulingPanel({
     setTicksUnavailable(false);
     setTicksError(null);
     setStripOpen(false);
+    setDetailsOpen(false);
     setNotice(null);
     setActionError(null);
   }, [buildId]);
@@ -299,7 +339,8 @@ export function BuildSchedulingPanel({
   const form = frontier ? schedulingPanelForm(frontier, buildStatus) : "hidden";
   // Tick history is fetched only when it will actually be read: always for
   // a stalled build, and on demand behind the collapsed form's disclosure.
-  const wantTicks = form === "stalled" || (form === "collapsed" && stripOpen);
+  const wantTicks =
+    (form === "stalled" && detailsOpen) || (form === "collapsed" && stripOpen);
 
   useEffect(() => {
     if (!wantTicks || !buildId || !environmentId) return;
@@ -343,7 +384,21 @@ export function BuildSchedulingPanel({
     setActionError(null);
     try {
       if (action === "release") {
-        await cancelTask(ownerBuildId, blocker.blocking_task_id, environmentId);
+        const resulting = await cancelTask(
+          ownerBuildId,
+          blocker.blocking_task_id,
+          environmentId,
+        );
+        // See TaskDetail: the event is recorded whatever the task's status,
+        // but only a task that was actually holding the claim ends up
+        // CANCELLED. Reporting a release that did not happen would send
+        // someone off looking for a second cause.
+        if (resulting !== "cancelled") {
+          setActionError(
+            `${blocker.blocking_task_name} is already ${resulting}, so there was no claim to release. If this build is still stuck, something else is holding it.`,
+          );
+          return;
+        }
       } else {
         await retryTask(ownerBuildId, blocker.blocking_task_id, environmentId);
       }
@@ -383,11 +438,15 @@ export function BuildSchedulingPanel({
   if (!frontier || form === "hidden") return null;
 
   const blockers = frontier.blocked_by_external;
-  const counts = Object.entries(frontier.status_counts).sort((a, b) => {
-    const ai = STATUS_ORDER.indexOf(a[0] as TaskStatus);
-    const bi = STATUS_ORDER.indexOf(b[0] as TaskStatus);
-    return (ai < 0 ? STATUS_ORDER.length : ai) - (bi < 0 ? STATUS_ORDER.length : bi);
-  });
+  const totalTasks = Object.values(frontier.status_counts).reduce((a, b) => a + b, 0);
+  // A status nothing is in is not information about this build.
+  const counts = Object.entries(frontier.status_counts)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => {
+      const ai = STATUS_ORDER.indexOf(a[0] as TaskStatus);
+      const bi = STATUS_ORDER.indexOf(b[0] as TaskStatus);
+      return (ai < 0 ? STATUS_ORDER.length : ai) - (bi < 0 ? STATUS_ORDER.length : bi);
+    });
 
   const countChips = (
     <div className="flex flex-wrap items-center gap-1">
@@ -480,6 +539,25 @@ export function BuildSchedulingPanel({
   const blockedTaskCount = new Set(blockers.map((b) => b.task_id)).size;
   const externalCount = blockers.filter((b) => !b.blocking_in_build).length;
 
+  // One line that says what is wrong. The paragraph-length version is
+  // still below, behind the disclosure, for when the headline is not
+  // enough — but the headline is what has to survive being read at a
+  // glance above a DAG.
+  let headline: string;
+  if (blockers.length > 0) {
+    headline =
+      `${blockedTaskCount} task${blockedTaskCount === 1 ? "" : "s"} blocked by ` +
+      `${blockers.length} upstream${blockers.length === 1 ? "" : "s"} ` +
+      `held outside this build` +
+      (externalCount > 0 ? `, ${externalCount} not part of it` : "");
+  } else if (frontier.needs_tick) {
+    headline = "Nothing runnable — a scheduler wake-up is still pending";
+  } else if (frontier.reactive_app_name) {
+    headline = "Nothing runnable, and no wake-up pending — needs intervention";
+  } else {
+    headline = "Nothing runnable — this build is not reactively scheduled";
+  }
+
   let verdict: string;
   if (blockers.length > 0) {
     verdict =
@@ -510,11 +588,18 @@ export function BuildSchedulingPanel({
   }
 
   return (
-    <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-900/60 dark:bg-amber-950/30">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-          Why is this build not progressing?
+    <div className="border-b border-amber-200 bg-amber-50 px-4 py-1.5 dark:border-amber-900/60 dark:bg-amber-950/30">
+      {/* Headline row: the answer, plus the way to the reasoning. */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span aria-hidden="true" className="text-amber-700 dark:text-amber-400">
+          ⚠
+        </span>
+        <h3 className="text-xs font-semibold text-amber-900 dark:text-amber-200">
+          Not progressing
         </h3>
+        <span className="text-xs text-amber-900/90 dark:text-amber-100/90">
+          — {headline}
+        </span>
         {appChip}
         {frontier.needs_tick && (
           <span
@@ -524,34 +609,53 @@ export function BuildSchedulingPanel({
             wake-up pending
           </span>
         )}
+        <button
+          type="button"
+          onClick={() => setDetailsOpen((v) => !v)}
+          aria-expanded={detailsOpen}
+          className="ml-auto flex items-center gap-1 rounded text-xs font-medium text-amber-900/80 hover:text-amber-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-amber-200/80 dark:hover:text-amber-100"
+        >
+          <svg
+            className={`h-3 w-3 transition-transform ${detailsOpen ? "rotate-90" : ""}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M9 5l7 7-7 7"
+            />
+          </svg>
+          {totalTasks} task{totalTasks === 1 ? "" : "s"} · details
+        </button>
       </div>
 
-      <p className="mt-1 text-sm text-amber-900/90 dark:text-amber-100/90">{verdict}</p>
-
-      <div className="mt-2">{countChips}</div>
-
       {notice && (
-        <ResultBanner tone="success" className="mt-2" onDismiss={() => setNotice(null)}>
+        <ResultBanner tone="success" className="mt-1" onDismiss={() => setNotice(null)}>
           {notice}
         </ResultBanner>
       )}
       {actionError && !pending && (
         <ResultBanner
           tone="error"
-          className="mt-2"
+          className="mt-1"
           onDismiss={() => setActionError(null)}
         >
           {actionError}
         </ResultBanner>
       )}
 
+      {/* Blockers stay visible: they carry the remedy, which is the whole
+          point of noticing a stalled build. Only a couple are shown until
+          the panel is expanded — past two, it is a list to work through
+          rather than something to read in place. */}
       {blockers.length > 0 && (
-        <div className="mt-3">
-          <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-amber-900/80 dark:text-amber-200/80">
-            Blocked by upstreams outside this build ({blockers.length})
-          </h4>
-          <ul className="space-y-2">
-            {blockers.map((blocker) => (
+        <ul className="mt-1">
+          {(detailsOpen ? blockers : blockers.slice(0, COMPACT_BLOCKERS)).map(
+            (blocker) => (
               <BlockerCard
                 key={`${blocker.task_id}->${blocker.blocking_task_id}`}
                 blocker={blocker}
@@ -561,24 +665,40 @@ export function BuildSchedulingPanel({
                 onNavigateToBuild={onNavigateToBuild}
                 onAct={handleAct}
               />
-            ))}
-          </ul>
+            ),
+          )}
+        </ul>
+      )}
+      {!detailsOpen && blockers.length > COMPACT_BLOCKERS && (
+        <button
+          type="button"
+          onClick={() => setDetailsOpen(true)}
+          className="rounded text-xs text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:text-blue-300"
+        >
+          Show {blockers.length - COMPACT_BLOCKERS} more blocker
+          {blockers.length - COMPACT_BLOCKERS === 1 ? "" : "s"}
+        </button>
+      )}
+
+      {detailsOpen && (
+        <div className="mt-2 space-y-2 border-t border-amber-200/70 pt-2 dark:border-amber-900/50">
+          <p className="text-xs text-amber-900/90 dark:text-amber-100/90">{verdict}</p>
+          {countChips}
           {frontier.blocked_by_external_truncated && (
-            <p className="mt-1.5 text-xs text-amber-900/80 dark:text-amber-200/80">
+            <p className="text-xs text-amber-900/80 dark:text-amber-200/80">
               More blockers were found than are listed here — the list is capped because
               it is a diagnostic, not a work queue. Clearing the ones shown will reveal
               the rest.
             </p>
           )}
+          <div>
+            <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-900/80 dark:text-amber-200/80">
+              Recent scheduler ticks
+            </h4>
+            {tickTrail}
+          </div>
         </div>
       )}
-
-      <div className="mt-3">
-        <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-900/80 dark:text-amber-200/80">
-          Recent scheduler ticks
-        </h4>
-        {tickTrail}
-      </div>
 
       {pending && pending.blocker.blocking_status_build_id && (
         <ClaimActionDialog

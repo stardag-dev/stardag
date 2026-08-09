@@ -216,16 +216,68 @@ describe("BuildSchedulingPanel", () => {
     const user = userEvent.setup();
     renderPanel({ onNavigate });
 
-    expect(
-      await screen.findByText("Why is this build not progressing?"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Not progressing")).toBeInTheDocument();
     expect(screen.getByText("GrindBeans")).toBeInTheDocument();
     expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.getByText("for 3h 00m")).toBeInTheDocument();
-    expect(screen.getByText("tid-espresso-downstream")).toBeInTheDocument();
+    expect(screen.getByText("3h 00m")).toBeInTheDocument();
+    // The blocked task is identified by a short id with the whole thing in
+    // a title — the full id is 60 characters of noise on a summary line.
+    expect(
+      screen.getByTitle("This build's task tid-espresso-downstream"),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: OWNER_BUILD.slice(0, 8) }));
     expect(onNavigate).toHaveBeenCalledWith(OWNER_BUILD);
+  });
+
+  it("stays compact until asked to explain itself", async () => {
+    // The panel sits above the DAG and the task table. Everything that is
+    // explanation rather than answer has to be behind a disclosure, or the
+    // build view is unusable on the builds this panel exists to diagnose.
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ blocked_by_external: [makeBlocker()] }),
+    );
+    const user = userEvent.setup();
+    renderPanel();
+
+    // Visible: the headline and the blocker itself, with its remedy.
+    expect(await screen.findByText("Not progressing")).toBeInTheDocument();
+    expect(
+      screen.getByText(/1 task blocked by 1 upstream held outside this build/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Release claim on GrindBeans" }),
+    ).toBeInTheDocument();
+
+    // Hidden: the prose, the status breakdown, and the tick trail — which
+    // is not even fetched until someone asks for it.
+    expect(screen.queryByText(/Nothing in this build is actionable/)).toBeNull();
+    expect(screen.queryByText("completed")).toBeNull();
+    expect(screen.queryByText("Recent scheduler ticks")).toBeNull();
+    expect(fetchBuildTickSummaries).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: /3 tasks · details/ }));
+
+    expect(
+      await screen.findByText(/Nothing in this build is actionable/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("completed")).toBeInTheDocument();
+    expect(screen.getByText("Recent scheduler ticks")).toBeInTheDocument();
+    await waitFor(() => expect(fetchBuildTickSummaries).toHaveBeenCalledTimes(1));
+  });
+
+  it("suppresses task statuses that nothing is in", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({ status_counts: { completed: 2, failed: 0, skipped: 0 } }),
+    );
+    const user = userEvent.setup();
+    renderPanel();
+
+    await user.click(await screen.findByRole("button", { name: /2 tasks · details/ }));
+    expect(await screen.findByText("completed")).toBeInTheDocument();
+    // "failed 0" is not information about this build.
+    expect(screen.queryByText("failed")).toBeNull();
+    expect(screen.queryByText("skipped")).toBeNull();
   });
 
   it("distinguishes a blocker outside this build from one inside it", async () => {
@@ -234,7 +286,14 @@ describe("BuildSchedulingPanel", () => {
         blocked_by_external: [makeBlocker({ blocking_in_build: false })],
       }),
     );
+    const user = userEvent.setup();
     const { unmount } = renderPanel();
+    // Visible without expanding anything: a blocker that is not part of
+    // this build at all is the case with no local remedy.
+    expect(await screen.findByText("outside this build")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Explain why GrindBeans is blocking" }),
+    );
     expect(await screen.findByText(/has never registered/i)).toBeInTheDocument();
     unmount();
 
@@ -242,6 +301,11 @@ describe("BuildSchedulingPanel", () => {
       makeFrontier({ blocked_by_external: [makeBlocker({ blocking_in_build: true })] }),
     );
     renderPanel();
+    expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
+    expect(screen.queryByText("outside this build")).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: "Explain why GrindBeans is blocking" }),
+    );
     expect(
       await screen.findByText(/in this build's own task set/i),
     ).toBeInTheDocument();
@@ -255,7 +319,9 @@ describe("BuildSchedulingPanel", () => {
         blocked_by_external_truncated: true,
       }),
     );
+    const user = userEvent.setup();
     renderPanel();
+    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
     expect(
       await screen.findByText(/More blockers were found than are listed here/),
     ).toBeInTheDocument();
@@ -274,7 +340,9 @@ describe("BuildSchedulingPanel", () => {
         }),
       ],
     });
+    const user = userEvent.setup();
     renderPanel();
+    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
 
     expect(await screen.findByText("lingered out")).toBeInTheDocument();
     // Known key: rendered with its friendly label.
@@ -284,22 +352,49 @@ describe("BuildSchedulingPanel", () => {
     expect(screen.getByText("7")).toBeInTheDocument();
   });
 
+  it("collapses a run of identical ticks, and drops the counters that stayed at zero", async () => {
+    // What a stalled build actually produces: the same tick, over and over.
+    vi.mocked(fetchBuildTickSummaries).mockResolvedValue({
+      build_id: VIEWED_BUILD,
+      summaries: [
+        makeSummary({ id: "t1", summary: { spawned: 0, claim_denied: 3 } }),
+        makeSummary({ id: "t2", summary: { spawned: 0, claim_denied: 3 } }),
+        makeSummary({ id: "t3", summary: { spawned: 0, claim_denied: 3 } }),
+        // A different outcome breaks the run rather than merging into it.
+        makeSummary({ id: "t4", outcome: "lease_held", summary: { spawned: 0 } }),
+      ],
+    });
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
+
+    expect(await screen.findByText("×3")).toBeInTheDocument();
+    expect(screen.getByText("claim denied")).toBeInTheDocument();
+    // "spawned 0" is the tick saying nothing happened; it is not a finding.
+    expect(screen.queryByText("spawned")).toBeNull();
+    // The run that follows is still its own row.
+    expect(screen.getByText("lease held")).toBeInTheDocument();
+    expect(screen.getByText("Nothing happened on this tick.")).toBeInTheDocument();
+  });
+
   it("degrades gracefully when the server has no tick-summaries endpoint", async () => {
     vi.mocked(fetchBuildTickSummaries).mockResolvedValue(null);
+    const user = userEvent.setup();
     renderPanel();
+    await user.click(await screen.findByRole("button", { name: /3 tasks · details/ }));
 
     expect(
       await screen.findByText(/does not record tick history/i),
     ).toBeInTheDocument();
     // The rest of the panel is unaffected.
-    expect(screen.getByText("Why is this build not progressing?")).toBeInTheDocument();
+    expect(screen.getByText("Not progressing")).toBeInTheDocument();
   });
 
   it("releases a claim under the owning build after confirmation, then refetches", async () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({ blocked_by_external: [makeBlocker()] }),
     );
-    vi.mocked(cancelTask).mockResolvedValue(undefined);
+    vi.mocked(cancelTask).mockResolvedValue("cancelled");
     const user = userEvent.setup();
     renderPanel();
 
@@ -359,15 +454,19 @@ describe("BuildSchedulingPanel", () => {
         blocked_by_external: [makeBlocker({ blocking_status_build_id: null })],
       }),
     );
+    const user = userEvent.setup();
     renderPanel();
 
-    expect(await screen.findByText(/owning build not recorded/)).toBeInTheDocument();
-    expect(
-      screen.getByText(/there is nothing to address a cancel or retry to/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("no owning build")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Release claim on/ }),
     ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Explain why GrindBeans is blocking" }),
+    );
+    expect(
+      await screen.findByText(/there is nothing to address a cancel or retry to/),
+    ).toBeInTheDocument();
   });
 
   it("hides cross-build remedies from non-admin members", async () => {
@@ -377,13 +476,19 @@ describe("BuildSchedulingPanel", () => {
     );
     renderPanel();
 
+    const user = userEvent.setup();
     // The diagnosis is for everyone...
     expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
     // ...the destructive cross-build remedy is not.
     expect(
       screen.queryByRole("button", { name: /Release claim on/ }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText(/requires the\s+workspace admin role/)).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Explain why GrindBeans is blocking" }),
+    );
+    expect(
+      await screen.findByText(/requires the\s+workspace admin role/),
+    ).toBeInTheDocument();
   });
 
   it("reports a frontier read failure instead of failing silently", async () => {
@@ -397,16 +502,32 @@ describe("BuildSchedulingPanel", () => {
 
   it("says what is pending when a stalled build still has a wake-up queued", async () => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(makeFrontier({ needs_tick: true }));
+    const user = userEvent.setup();
     renderPanel();
 
+    // The headline says it without being expanded — it is the difference
+    // between "wait" and "intervene".
     expect(await screen.findByText("wake-up pending")).toBeInTheDocument();
     expect(
-      screen.getByText(/A scheduler wake-up is pending, so the next tick may still/),
+      screen.getByText(/Nothing runnable — a scheduler wake-up is still pending/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /3 tasks · details/ }));
+    expect(
+      await screen.findByText(
+        /A scheduler wake-up is pending, so the next tick may still/,
+      ),
     ).toBeInTheDocument();
   });
 
   it("says nothing will happen when a stalled reactive build has no wake-up queued", async () => {
+    const user = userEvent.setup();
     renderPanel();
+    expect(
+      await screen.findByText(/no wake-up pending — needs intervention/),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /3 tasks · details/ }));
     expect(
       await screen.findByText(/Nothing is going to happen without intervention/),
     ).toBeInTheDocument();
