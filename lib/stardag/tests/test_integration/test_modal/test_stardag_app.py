@@ -31,6 +31,63 @@ def _make_image() -> modal.Image:
     return modal.Image.debian_slim()
 
 
+def _finalize_capturing_functions(app: StardagApp) -> dict:
+    """finalize() ``app`` with ``modal.App.function`` stubbed out.
+
+    Returns the registered callables by function name, so a test can
+    invoke the deployed ``bootstrap`` / ``tick`` bodies in-process.
+    """
+    captured: dict = {}
+
+    def capture_function(**kwargs):
+        def decorator(fn):
+            captured[kwargs.get("name", "unknown")] = fn
+            return fn
+
+        return decorator
+
+    app.modal_app.function = capture_function  # type: ignore[assignment]
+    with patch("stardag.integration.modal._app.get_target_roots_volumes") as mv:
+        mv.return_value = MagicMock(by_volume_name={}, by_root_key={})
+        app.finalize()
+    return captured
+
+
+def _trigger_reactive(
+    app: StardagApp,
+    tasks,
+    *,
+    stub: dict,
+    registry=None,
+    build_id=None,
+    tick_kwargs=None,
+    run_bootstrap: bool = True,
+):
+    """Trigger reactively, then run the spawned ``bootstrap`` in-process.
+
+    The trigger only spawns now, so a test that wants the DAG registered
+    and the task store written has to run the bootstrap the trigger
+    spawned — which is what this does, with exactly the kwargs the
+    trigger passed. ``run_bootstrap=False`` stops at the spawn, which is
+    how tests assert that the trigger itself does no discovery.
+
+    Returns ``(result, registry, bootstrap_kwargs)``.
+    """
+    if registry is None:
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id or uuid4()
+        registry.task_register_bulk_aio.return_value = None
+    bootstrap = _finalize_capturing_functions(app)["bootstrap"]
+    with registry_provider.override(registry):
+        result = app.build_trigger(
+            tasks, reactive=True, build_id=build_id, tick_kwargs=tick_kwargs
+        )
+        bootstrap_kwargs = dict(stub["kwargs"])
+        if run_bootstrap:
+            bootstrap(**bootstrap_kwargs)
+    return result, registry, bootstrap_kwargs
+
+
 class TestStardagAppCustomFunctions:
     def test_defaults_to_builder_and_runner_instances(self):
         """When no custom functions given, defaults are Builder() and Runner()."""
@@ -715,7 +772,132 @@ class TestStardagAppReactiveTrigger:
             worker_settings={"default": FunctionSettings(image=_make_image())},
         )
 
-    def test_reactive_trigger_discovers_persists_and_spawns_tick(
+    def test_trigger_spawns_bootstrap_with_the_roots_by_value(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The trigger's whole job: mint the build, register the roots,
+        hand the root tasks to the deployed ``bootstrap`` by value."""
+        from uuid import uuid4 as _uuid4
+
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = _uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        dep = SyncOnlyTask(name="reactive-dep")
+        root = SyncOnlyTask(name="reactive-root", deps=(dep,))
+
+        result, _, bootstrap_kwargs = _trigger_reactive(
+            app,
+            root,
+            stub=modal_function_stub,
+            registry=registry,
+            tick_kwargs={"linger_seconds": 30},
+            run_bootstrap=False,
+        )
+
+        assert result.build_id == build_id
+        assert modal_function_stub["from_name"] == {
+            "app_name": app.name,
+            "name": "bootstrap",
+        }
+        assert modal_function_stub["op"] == "spawn"
+        # Roots ride along BY VALUE (cloudpickled into the call), exactly
+        # as build_spawn passes ``tasks=`` to the builder.
+        assert bootstrap_kwargs["tasks"] == [root]
+        assert bootstrap_kwargs["build_id"] == str(build_id)
+        assert bootstrap_kwargs["tick_kwargs"] == {"linger_seconds": 30}
+        # The returned handle is the bootstrap call — the one thing this
+        # trigger actually spawned.
+        assert result.function_call == "spawn-handle"
+
+    def test_trigger_does_no_discovery_locally(
+        self, monkeypatch, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The regression this whole change exists for.
+
+        Discovery is one ``complete_aio()`` — a target existence check —
+        per task. Against a ``modalvol://`` root that is a rate-limited
+        volume API call from the triggering machine, so the trigger must
+        not perform a single one; the bootstrap performs them all, next
+        to the mounted volume.
+        """
+        from stardag._core.base_task import TargetTask
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        checked: list = []
+        original = TargetTask.complete_aio
+
+        async def spy(self):
+            checked.append(self.id)
+            return await original(self)
+
+        monkeypatch.setattr(TargetTask, "complete_aio", spy)
+
+        app = self._make_app()
+        dep = SyncOnlyTask(name="no-local-io-dep")
+        root = SyncOnlyTask(name="no-local-io-root", deps=(dep,))
+
+        _, _, bootstrap_kwargs = _trigger_reactive(
+            app, root, stub=modal_function_stub, run_bootstrap=False
+        )
+        assert checked == []
+
+        # …and the very same walk does happen once the bootstrap runs.
+        bootstrap = _finalize_capturing_functions(self._make_app())["bootstrap"]
+        registry = MagicMock(spec=RegistryABC)
+        registry.task_register_bulk_aio.return_value = None
+        with registry_provider.override(registry):
+            bootstrap(**bootstrap_kwargs)
+        assert set(checked) == {root.id, dep.id}
+
+    @pytest.mark.parametrize("retrigger", [False, True])
+    def test_roots_are_registered_before_the_bootstrap_is_spawned(
+        self, monkeypatch, default_in_memory_fs_target, retrigger
+    ):
+        """The roots must be in the registry before anything is spawned.
+
+        Fresh builds carry them on ``build_start``; a re-trigger appends
+        them with ``build_add_roots``. Either way the bootstrap must not
+        be airborne first — a concurrent tick would otherwise be free to
+        complete-and-terminal the build on a root set the new subtree is
+        not part of.
+        """
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = uuid4()
+        order: list[str] = []
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.side_effect = lambda **kw: (
+            order.append("build_start"),
+            build_id,
+        )[1]
+        registry.build_add_roots.side_effect = lambda *a, **kw: order.append(
+            "build_add_roots"
+        )
+
+        class _Stub:
+            def spawn(self, **kwargs):
+                order.append("spawn")
+                return "spawn-handle"
+
+        monkeypatch.setattr(
+            modal.Function, "from_name", staticmethod(lambda **kw: _Stub())
+        )
+
+        root = SyncOnlyTask(name="order-root")
+        with registry_provider.override(registry):
+            app.build_trigger(
+                root, reactive=True, build_id=build_id if retrigger else None
+            )
+
+        assert order == (
+            ["build_add_roots", "spawn"] if retrigger else ["build_start", "spawn"]
+        )
+
+    def test_bootstrap_discovers_persists_sets_marker_and_spawns_tick(
         self, modal_function_stub, default_in_memory_fs_target
     ):
         from uuid import uuid4 as _uuid4
@@ -727,21 +909,18 @@ class TestStardagAppReactiveTrigger:
         build_id = _uuid4()
         registry = MagicMock(spec=RegistryABC)
         registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.return_value = None
         dep = SyncOnlyTask(name="reactive-dep")
         root = SyncOnlyTask(name="reactive-root", deps=(dep,))
 
-        with registry_provider.override(registry):
-            result = app.build_trigger(
-                root, reactive=True, tick_kwargs={"linger_seconds": 30}
-            )
+        _trigger_reactive(
+            app,
+            root,
+            stub=modal_function_stub,
+            registry=registry,
+            tick_kwargs={"linger_seconds": 30},
+        )
 
-        assert result.build_id == build_id
-        # First tick spawned with only the build id (config comes from the
-        # registry reactive_tick_kwargs so ALL ticks — worker wake-ups,
-        # watchdog — share it).
-        assert modal_function_stub["from_name"]["name"] == "tick"
-        assert modal_function_stub["op"] == "spawn"
-        assert modal_function_stub["kwargs"] == {"build_id": str(build_id)}
         # Discovery registered the DAG…
         registry.task_register_bulk_aio.assert_called()
         # …the reactive marker/owner/config were written to the REGISTRY
@@ -749,11 +928,57 @@ class TestStardagAppReactiveTrigger:
         registry.build_set_reactive_meta.assert_called_once_with(
             build_id, app_name=app.name, tick_kwargs={"linger_seconds": 30}
         )
-        # …and the task store holds the rehydratable pickles (objects only).
+        # …the task store holds the rehydratable pickles (objects only)…
         store = BuildTaskStore(build_id)
         loaded_root = store.load_task(root.id)
         assert loaded_root is not None and loaded_root.id == root.id
         assert store.load_task(dep.id) is not None
+        # …and the first tick was spawned with only the build id (config
+        # comes from the registry reactive_tick_kwargs so ALL ticks —
+        # worker wake-ups, watchdog — share it).
+        assert modal_function_stub["from_name"] == {
+            "app_name": app.name,
+            "name": "tick",
+        }
+        assert modal_function_stub["op"] == "spawn"
+        assert modal_function_stub["kwargs"] == {"build_id": str(build_id)}
+
+    def test_marker_is_written_only_after_discovery_and_persistence(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The ordering guarantee: ``reactive_app_name`` is the "this
+        build is reactively scheduled" marker, and a tick no-ops without
+        it. Written before the DAG is fully registered, it would expose a
+        window in which a tick sees "nothing actionable, roots not
+        complete" — exactly the shape terminal detection fails a build on
+        (registration is chunked post-order, so the roots land last).
+        """
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.return_value = None
+        dep = SyncOnlyTask(name="marker-order-dep")
+        root = SyncOnlyTask(name="marker-order-root", deps=(dep,))
+
+        observed: dict = {}
+
+        def observe_marker(*args, **kwargs):
+            store = BuildTaskStore(build_id)
+            observed["registered"] = registry.task_register_bulk_aio.call_count
+            observed["persisted"] = [
+                store.load_task(t.id) is not None for t in (root, dep)
+            ]
+
+        registry.build_set_reactive_meta.side_effect = observe_marker
+
+        _trigger_reactive(app, root, stub=modal_function_stub, registry=registry)
+
+        assert observed["registered"] > 0
+        assert observed["persisted"] == [True, True]
 
     def test_reactive_rejects_build_kwargs(self, modal_function_stub):
         app = self._make_app()
@@ -798,9 +1023,298 @@ class TestStardagAppReactiveTrigger:
                 )
 
 
+class TestReactiveTriggerFailureLeavesNoOrphanBuild:
+    """A reactive trigger mints a RUNNING build and then walks away. Every
+    way the work can die before the first tick must therefore record a
+    terminal BUILD_FAILED — on both sides of the spawn."""
+
+    def _make_app(self, **kwargs):
+        return StardagApp(
+            "test-orphan-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            **kwargs,
+        )
+
+    def test_spawn_failure_at_the_trigger_fails_the_build(
+        self, monkeypatch, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        monkeypatch.setattr(
+            modal.Function,
+            "from_name",
+            staticmethod(MagicMock(side_effect=RuntimeError("no such app"))),
+        )
+
+        with registry_provider.override(registry):
+            with pytest.raises(RuntimeError, match="no such app"):
+                app.build_trigger(SyncOnlyTask(name="orphan-root"), reactive=True)
+
+        registry.build_fail.assert_called_once()
+        assert registry.build_fail.call_args.args[0] == build_id
+        assert "no such app" in registry.build_fail.call_args.kwargs["error_message"]
+
+    def test_a_failed_resume_does_not_fail_the_build(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The arming point matters. On a re-trigger the build may still
+        be *terminal* until ``build_resume`` lands, so a resume that
+        failed must not have this trigger stamp BUILD_FAILED over
+        somebody else's outcome."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_resume.side_effect = RuntimeError("resume rejected")
+
+        with registry_provider.override(registry):
+            with pytest.raises(RuntimeError, match="resume rejected"):
+                app.build_trigger(
+                    SyncOnlyTask(name="resume-fail-root"),
+                    build_id=build_id,
+                    reactive=True,
+                )
+
+        registry.build_fail.assert_not_called()
+
+    def test_bootstrap_failure_fails_the_build_and_propagates(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """Failures on the far side of the spawn are the bootstrap's to
+        report: nobody else is watching that container."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.side_effect = RuntimeError("registry down")
+
+        with pytest.raises(RuntimeError, match="registry down"):
+            _trigger_reactive(
+                app,
+                SyncOnlyTask(name="bootstrap-fail-root"),
+                stub=modal_function_stub,
+                registry=registry,
+            )
+
+        registry.build_fail.assert_called_once()
+        assert registry.build_fail.call_args.args[0] == build_id
+        assert "registry down" in registry.build_fail.call_args.kwargs["error_message"]
+        # The build was never armed: no marker, so no tick can act on the
+        # half-registered DAG this failure left behind.
+        registry.build_set_reactive_meta.assert_not_called()
+
+    def test_a_failed_first_tick_spawn_fails_the_build(
+        self, monkeypatch, default_in_memory_fs_target
+    ):
+        """An un-spawned first tick is not a partial success — without a
+        watchdog nothing would ever move the build."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.task_register_bulk_aio.return_value = None
+        bootstrap = _finalize_capturing_functions(app)["bootstrap"]
+        monkeypatch.setattr(
+            modal.Function,
+            "from_name",
+            staticmethod(MagicMock(side_effect=RuntimeError("tick gone"))),
+        )
+
+        with registry_provider.override(registry):
+            with pytest.raises(RuntimeError, match="tick gone"):
+                bootstrap(
+                    build_id=str(build_id),
+                    tasks=[SyncOnlyTask(name="tick-spawn-fail-root")],
+                )
+
+        registry.build_fail.assert_called_once()
+
+    def test_a_registry_that_cannot_record_the_failure_never_masks_it(
+        self, monkeypatch, default_in_memory_fs_target, caplog
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+        registry.build_fail.side_effect = RuntimeError("also down")
+        monkeypatch.setattr(
+            modal.Function,
+            "from_name",
+            staticmethod(MagicMock(side_effect=RuntimeError("no such app"))),
+        )
+
+        with registry_provider.override(registry):
+            with caplog.at_level("ERROR"):
+                # The ORIGINAL error propagates, not the bookkeeping one.
+                with pytest.raises(RuntimeError, match="no such app"):
+                    app.build_trigger(
+                        SyncOnlyTask(name="double-fault-root"), reactive=True
+                    )
+        assert "Could not record BUILD_FAILED" in caplog.text
+
+
+class TestReactiveDiscoveryPlacement:
+    """``reactive_discovery`` decides *where* the identical bootstrap
+    runs; ``"modal"`` is the default and ``"local"`` is the opt-out."""
+
+    def _make_app(self, **kwargs):
+        return StardagApp(
+            "test-placement-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            **kwargs,
+        )
+
+    def test_default_is_modal(self):
+        assert self._make_app().reactive_discovery == "modal"
+
+    def test_unknown_placement_is_rejected_eagerly(self):
+        with pytest.raises(ValueError, match="reactive_discovery"):
+            self._make_app(reactive_discovery="remote")  # type: ignore[arg-type]
+
+    def test_local_runs_the_same_bootstrap_in_process(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app(reactive_discovery="local")
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.return_value = None
+        root = SyncOnlyTask(name="local-discovery-root")
+
+        with registry_provider.override(registry):
+            result = app.build_trigger(root, reactive=True)
+
+        # Discovery, persistence and the marker all happened right here…
+        registry.task_register_bulk_aio.assert_called()
+        registry.build_set_reactive_meta.assert_called_once_with(
+            build_id, app_name=app.name, tick_kwargs=None
+        )
+        assert BuildTaskStore(build_id).load_task(root.id) is not None
+        # …and the handle is the first tick, since no bootstrap was spawned.
+        assert modal_function_stub["from_name"] == {
+            "app_name": app.name,
+            "name": "tick",
+        }
+        assert result.function_call == "spawn-handle"
+
+    def test_local_failure_also_leaves_no_orphan_build(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._make_app(reactive_discovery="local")
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.side_effect = RuntimeError("registry down")
+
+        with registry_provider.override(registry):
+            with pytest.raises(RuntimeError, match="registry down"):
+                app.build_trigger(SyncOnlyTask(name="local-fail-root"), reactive=True)
+
+        registry.build_fail.assert_called_once()
+
+
+class TestReactiveTriggerRootCoverageAdvisory:
+    """Additive early feedback at the trigger: roots only, advisory, and
+    never the check itself (that one runs over the whole discovered DAG,
+    wherever discovery runs)."""
+
+    def _app(self, **kwargs):
+        return StardagApp(
+            "test-advisory-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            **kwargs,
+        )
+
+    def test_uncovered_root_is_reported_before_anything_is_spawned(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._app(task_modules=[_UNCOVERING_PATTERN])
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+
+        with caplog.at_level("WARNING"):
+            with registry_provider.override(registry):
+                app.build_trigger(SyncOnlyTask(name="advisory-root"), reactive=True)
+
+        assert "not covered by this app's task_modules" in caplog.text
+        assert "ROOT-TASKS-ONLY" in caplog.text
+
+    def test_covered_root_says_nothing(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._app(task_modules=[SyncOnlyTask.__module__])
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+
+        with caplog.at_level("WARNING"):
+            with registry_provider.override(registry):
+                app.build_trigger(SyncOnlyTask(name="advisory-ok-root"), reactive=True)
+
+        assert "not covered" not in caplog.text
+
+    def test_it_never_walks_the_dag(
+        self, monkeypatch, modal_function_stub, default_in_memory_fs_target
+    ):
+        """Roots only, by construction: an advisory that traversed
+        ``requires()`` would reintroduce the local walk this whole change
+        removes, and could disagree with the real check."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = self._app(task_modules=[_UNCOVERING_PATTERN])
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+        dep = SyncOnlyTask(name="advisory-dep")
+        root = SyncOnlyTask(name="advisory-walk-root", deps=(dep,))
+
+        requires_calls: list = []
+        original = SyncOnlyTask.requires
+
+        def spy(self):
+            requires_calls.append(self.id)
+            return original(self)
+
+        monkeypatch.setattr(SyncOnlyTask, "requires", spy)
+
+        with registry_provider.override(registry):
+            app.build_trigger(root, reactive=True)
+
+        assert requires_calls == []
+
+
 # ---------------------------------------------------------------------------
 # task_modules: declaration, deploy-time expansion, pre-flight, pickle elision
 # ---------------------------------------------------------------------------
+
+
+_UNCOVERING_PATTERN = "stardag.registry.*"
+"""A pattern that covers none of the task classes used in these tests.
+
+Real and importable on purpose: ``finalize()`` expands the declared
+patterns (that is how the deployed module list is frozen), so a fictional
+package cannot be used by any test that goes through a deploy — which,
+now that the coverage check runs from the *deployed* list, is all of them.
+"""
 
 
 def _app_with_task_modules(name: str, **kwargs) -> StardagApp:
@@ -1001,32 +1515,28 @@ class TestFinalizeBakesTaskModules:
 
 
 class TestReactiveTriggerCoveragePreflight:
-    """The trigger holds both the real DAG and the app, so it is the only
-    place that can tell the user a scheduler tick won't be able to rebuild
-    one of their task classes — before a single container starts."""
+    """The authoritative coverage check. It runs where discovery runs
+    (the bootstrap container by default) over the real discovered set, and
+    tells the user a scheduler tick won't be able to rebuild one of their
+    task classes — against the module list the deployment actually baked
+    in, not the caller's local app definition."""
 
-    def _trigger(self, app, root):
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_start.return_value = uuid4()
-        registry.task_register_bulk_aio.return_value = None
-        with registry_provider.override(registry):
-            return app.build_trigger(root, reactive=True), registry
+    def _trigger(self, app, root, stub):
+        return _trigger_reactive(app, root, stub=stub)[:2]
 
     def test_uncovered_class_warns_with_the_pattern_to_add(
         self, caplog, modal_function_stub, default_in_memory_fs_target
     ):
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
-        app = _app_with_task_modules(
-            "tm-preflight", task_modules=["acme_pipelines.tasks.*"]
-        )
+        app = _app_with_task_modules("tm-preflight", task_modules=[_UNCOVERING_PATTERN])
         root = SyncOnlyTask(name="preflight-uncovered")
 
         with caplog.at_level("WARNING"):
-            self._trigger(app, root)
+            self._trigger(app, root, modal_function_stub)
 
         assert "not covered by this app's task_modules" in caplog.text
-        assert "['acme_pipelines.tasks.*']" in caplog.text
+        assert f"['{_UNCOVERING_PATTERN}']" in caplog.text
         # The exact pattern that would fix it, and the redeploy requirement.
         assert f"{SyncOnlyTask.__module__.rsplit('.', 1)[0]}.*" in caplog.text
         assert "redeploy" in caplog.text
@@ -1040,7 +1550,9 @@ class TestReactiveTriggerCoveragePreflight:
             "tm-preflight-ok", task_modules=[SyncOnlyTask.__module__]
         )
         with caplog.at_level("WARNING"):
-            self._trigger(app, SyncOnlyTask(name="preflight-covered"))
+            self._trigger(
+                app, SyncOnlyTask(name="preflight-covered"), modal_function_stub
+            )
 
         assert "not covered" not in caplog.text
 
@@ -1053,7 +1565,9 @@ class TestReactiveTriggerCoveragePreflight:
 
         app = _app_with_task_modules("tm-preflight-optout", task_modules=[])
         with caplog.at_level("WARNING"):
-            self._trigger(app, SyncOnlyTask(name="preflight-optout"))
+            self._trigger(
+                app, SyncOnlyTask(name="preflight-optout"), modal_function_stub
+            )
 
         assert "not covered" not in caplog.text
 
@@ -1069,16 +1583,18 @@ class TestReactiveTriggerCoveragePreflight:
         dep.run()  # writes its target -> discovery treats it as complete
         root = SyncOnlyTask(name="preflight-root", deps=(dep,))
         app = _app_with_task_modules(
-            "tm-preflight-incomplete", task_modules=["acme_pipelines.*"]
+            "tm-preflight-incomplete", task_modules=[_UNCOVERING_PATTERN]
         )
 
         with caplog.at_level("WARNING"):
-            _, registry = self._trigger(app, root)
+            _, registry = self._trigger(app, root, modal_function_stub)
 
-        # One warning for the class, naming only the root's occurrence: the
-        # class is reported once regardless, but the point is the completed
-        # dep never entered the checked set.
-        assert caplog.text.count("not covered by this app's task_modules") == 1
+        # One warning from the authoritative check (the trigger's
+        # roots-only advisory is a separate, clearly-labelled line —
+        # match on the authoritative remedy to tell them apart). The
+        # class is reported once regardless; the point is that the
+        # completed dep never entered the checked set.
+        assert caplog.text.count("build-task-store pickles") == 1
 
 
 class _ElisionAliasedSource(_sd.Task[int]):
@@ -1103,16 +1619,17 @@ class _ElisionAliasConsumer(_sd.Task[int]):
 
 
 class TestReactivePickleElision:
-    """With task_modules covering the classes, the trigger writes no
-    pickles: a scheduler tick rebuilds the tasks from registry data."""
+    """With task_modules covering the classes, a reactive build writes no
+    pickles: a scheduler tick rebuilds the tasks from registry data.
 
-    def _trigger(self, app, root, build_id=None):
-        build_id = build_id or uuid4()
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_start.return_value = build_id
-        registry.task_register_bulk_aio.return_value = None
-        with registry_provider.override(registry):
-            result = app.build_trigger(root, reactive=True)
+    The store is written by the bootstrap — in-container by default,
+    where a ``modalvol://`` target root is a mounted filesystem — so
+    these drive the trigger *and* the bootstrap it spawned. The module
+    list the elision is decided from is the one baked in at deploy time.
+    """
+
+    def _trigger(self, app, root, stub, build_id=None):
+        result, registry, _ = _trigger_reactive(app, root, stub=stub, build_id=build_id)
         return result, registry
 
     def test_covered_round_tripping_tasks_get_no_pickle(
@@ -1126,7 +1643,7 @@ class TestReactivePickleElision:
         root = SyncOnlyTask(name="elide-root", deps=(dep,))
 
         with caplog.at_level("INFO"):
-            result, _ = self._trigger(app, root)
+            result, _ = self._trigger(app, root, modal_function_stub)
 
         store = BuildTaskStore(result.build_id)
         assert store.load_task(root.id) is None
@@ -1140,11 +1657,11 @@ class TestReactivePickleElision:
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         app = _app_with_task_modules(
-            "tm-elide-uncovered", task_modules=["acme_pipelines.*"]
+            "tm-elide-uncovered", task_modules=[_UNCOVERING_PATTERN]
         )
         root = SyncOnlyTask(name="elide-uncovered-root")
 
-        result, _ = self._trigger(app, root)
+        result, _ = self._trigger(app, root, modal_function_stub)
 
         store = BuildTaskStore(result.build_id)
         loaded = store.load_task(root.id)
@@ -1175,7 +1692,7 @@ class TestReactivePickleElision:
         assert app.task_modules == ("stardag.*",)
         root = SyncOnlyTask(name="elide-inferred-root")
 
-        result, _ = self._trigger(app, root)
+        result, _ = self._trigger(app, root, modal_function_stub)
 
         assert BuildTaskStore(result.build_id).load_task(root.id) is not None
 
@@ -1189,7 +1706,7 @@ class TestReactivePickleElision:
         app = _app_with_task_modules("tm-elide-explicit", task_modules=["stardag.*"])
         root = SyncOnlyTask(name="elide-explicit-root")
 
-        result, _ = self._trigger(app, root)
+        result, _ = self._trigger(app, root, modal_function_stub)
 
         assert BuildTaskStore(result.build_id).load_task(root.id) is None
 
@@ -1202,7 +1719,7 @@ class TestReactivePickleElision:
         app = _app_with_task_modules("tm-elide-optout", task_modules=[])
         root = SyncOnlyTask(name="elide-optout-root")
 
-        result, _ = self._trigger(app, root)
+        result, _ = self._trigger(app, root, modal_function_stub)
 
         assert BuildTaskStore(result.build_id).load_task(root.id) is not None
 
@@ -1220,7 +1737,7 @@ class TestReactivePickleElision:
         root = _ElisionAliasConsumer(loads_int=alias)
         app = _app_with_task_modules("tm-elide-alias", task_modules=[__name__])
 
-        result, _ = self._trigger(app, root)
+        result, _ = self._trigger(app, root, modal_function_stub)
 
         store = BuildTaskStore(result.build_id)
         # The consumer embeds the alias payload, so it too fails the
@@ -1230,25 +1747,37 @@ class TestReactivePickleElision:
     def test_require_pickle_free_raises_naming_every_task(
         self, modal_function_stub, default_in_memory_fs_target
     ):
+        """Still enforced, and still loud — now from the bootstrap, where
+        the store is written. It propagates on the bootstrap's Modal call
+        AND records a terminal BUILD_FAILED, so the build never sits
+        RUNNING behind a storage preference the operator asked for."""
         from stardag.build import TaskModulesError
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         app = _app_with_task_modules(
             "tm-require-pickle-free",
-            task_modules=["acme_pipelines.*"],
+            task_modules=[_UNCOVERING_PATTERN],
             require_pickle_free=True,
         )
         dep = SyncOnlyTask(name="require-dep")
         root = SyncOnlyTask(name="require-root", deps=(dep,))
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.return_value = None
 
         with pytest.raises(TaskModulesError) as exc:
-            self._trigger(app, root)
+            _trigger_reactive(app, root, stub=modal_function_stub, registry=registry)
 
         message = str(exc.value)
         assert "require_pickle_free=True" in message
         assert "2 task(s)" in message
         assert str(root.id) in message and str(dep.id) in message
         assert "not covered by task_modules" in message
+        registry.build_fail.assert_called_once()
+        assert registry.build_fail.call_args.args[0] == build_id
+        # Never armed: no marker, so no tick acts on the half-built state.
+        registry.build_set_reactive_meta.assert_not_called()
 
     def test_require_pickle_free_passes_when_everything_is_covered(
         self, modal_function_stub, default_in_memory_fs_target
@@ -1263,7 +1792,7 @@ class TestReactivePickleElision:
         )
         root = SyncOnlyTask(name="require-ok-root")
 
-        result, _ = self._trigger(app, root)
+        result, _ = self._trigger(app, root, modal_function_stub)
 
         assert BuildTaskStore(result.build_id).load_task(root.id) is None
 
@@ -1359,150 +1888,6 @@ class TestDynamicDepPickleElision:
         reporter._register_dynamic_deps((dyn,))
 
         assert BuildTaskStore(build_id).load_task(dyn.id) is not None
-
-
-class TestReactiveTriggerFailureLeavesNoOrphanBuild:
-    """A build minted by ``build_start`` is RUNNING until a terminal EVENT
-    says otherwise — and no orchestrator exists yet to emit one. So a
-    trigger that dies after minting must emit ``BUILD_FAILED`` itself, or
-    it leaves a build that is RUNNING forever and (because the reactive
-    marker is written last) not even attributable to an app.
-    """
-
-    def _make_app(self):
-        return StardagApp(
-            "test-reactive-app",
-            builder_settings=FunctionSettings(image=_make_image()),
-            worker_settings={"default": FunctionSettings(image=_make_image())},
-        )
-
-    def _make_registry(self, build_id):
-        registry = MagicMock(spec=RegistryABC)
-        registry.build_start.return_value = build_id
-        return registry
-
-    def _root(self):
-        from stardag.utils.testing.helper_tasks import SyncOnlyTask
-
-        return SyncOnlyTask(name="reactive-root")
-
-    def test_task_store_write_failure_fails_the_build(
-        self, modal_function_stub, default_in_memory_fs_target
-    ):
-        app = self._make_app()
-        build_id = uuid4()
-        registry = self._make_registry(build_id)
-
-        with patch(
-            "stardag.integration.modal._app.BuildTaskStore.save_tasks",
-            side_effect=PermissionError("read-only target root"),
-        ):
-            with registry_provider.override(registry):
-                with pytest.raises(PermissionError, match="read-only target root"):
-                    app.build_trigger(self._root(), reactive=True)
-
-        registry.build_fail.assert_called_once()
-        message = registry.build_fail.call_args.args[1]
-        assert "task store write" in message
-        assert "read-only target root" in message
-        # The marker is written after the store, so this build would have
-        # been an unattributable orphan; it must not be left RUNNING.
-        registry.build_set_reactive_meta.assert_not_called()
-
-    def test_discovery_failure_fails_the_build(
-        self, modal_function_stub, default_in_memory_fs_target
-    ):
-        """Reordering the store write ahead of ``build_start`` would not
-        cover this: discovery runs against the build id too."""
-        app = self._make_app()
-        build_id = uuid4()
-        registry = self._make_registry(build_id)
-        registry.task_register_bulk_aio.side_effect = RuntimeError("registry down")
-
-        with registry_provider.override(registry):
-            with pytest.raises(RuntimeError, match="registry down"):
-                app.build_trigger(self._root(), reactive=True)
-
-        assert (
-            "task discovery and registration" in registry.build_fail.call_args.args[1]
-        )
-
-    def test_secondary_build_fail_error_never_masks_the_root_cause(
-        self, modal_function_stub, default_in_memory_fs_target
-    ):
-        app = self._make_app()
-        build_id = uuid4()
-        registry = self._make_registry(build_id)
-        registry.build_fail.side_effect = RuntimeError("registry unreachable too")
-
-        with patch(
-            "stardag.integration.modal._app.BuildTaskStore.save_tasks",
-            side_effect=PermissionError("read-only target root"),
-        ):
-            with registry_provider.override(registry):
-                # The ORIGINAL error propagates, not the bookkeeping one.
-                with pytest.raises(PermissionError, match="read-only target root"):
-                    app.build_trigger(self._root(), reactive=True)
-
-    def test_resume_failure_on_retrigger_does_not_terminate_the_build(
-        self, modal_function_stub, default_in_memory_fs_target
-    ):
-        """A re-trigger's build may still be TERMINAL on entry — nothing has
-        started it. Emitting BUILD_FAILED when the resume itself fails would
-        flip a COMPLETED build to FAILED over a transient registry error,
-        which is strictly worse than the orphan this wrapper prevents.
-        """
-        app = self._make_app()
-        build_id = uuid4()
-        registry = self._make_registry(build_id)
-        registry.build_resume.side_effect = RuntimeError("registry down")
-
-        with registry_provider.override(registry):
-            with pytest.raises(RuntimeError, match="registry down"):
-                app.build_trigger(self._root(), reactive=True, build_id=build_id)
-
-        registry.build_fail.assert_not_called()
-
-    def test_failure_after_a_successful_resume_does_terminate_the_build(
-        self, modal_function_stub, default_in_memory_fs_target
-    ):
-        """The other side of the same coin: once resume has put the build
-        back into RUNNING, this trigger owns it and must not abandon it."""
-        app = self._make_app()
-        build_id = uuid4()
-        registry = self._make_registry(build_id)
-        registry.task_register_bulk_aio.side_effect = RuntimeError("registry down")
-
-        with registry_provider.override(registry):
-            with pytest.raises(RuntimeError, match="registry down"):
-                app.build_trigger(self._root(), reactive=True, build_id=build_id)
-
-        registry.build_resume.assert_called_once()
-        assert (
-            "task discovery and registration" in registry.build_fail.call_args.args[1]
-        )
-
-    def test_spawn_failure_leaves_the_build_recoverable(
-        self, modal_function_stub, default_in_memory_fs_target, monkeypatch
-    ):
-        """The spawn is outside the wrapper on purpose: the durable state is
-        complete and the build carries the reactive marker, so the app's
-        watchdog recovers it. Failing it would remove that recovery path."""
-        app = self._make_app()
-        build_id = uuid4()
-        registry = self._make_registry(build_id)
-
-        def _boom(*args, **kwargs):
-            raise RuntimeError("modal spawn failed")
-
-        with registry_provider.override(registry):
-            with patch("modal.Function.from_name") as from_name:
-                from_name.return_value.spawn = _boom
-                with pytest.raises(RuntimeError, match="modal spawn failed"):
-                    app.build_trigger(self._root(), reactive=True)
-
-        registry.build_set_reactive_meta.assert_called_once()
-        registry.build_fail.assert_not_called()
 
 
 @pytest.fixture(autouse=True)
@@ -1670,6 +2055,46 @@ class TestFinalizeRegistersTick:
         schedule = registered["tick_watchdog"]["schedule"]
         assert isinstance(schedule, modal.Period)
         assert "tick_watchdog" in result.functions
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_bootstrap_registered(self, mock_volumes):
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+        app, registered = self._capture_app()
+
+        result = app.finalize()
+
+        assert "bootstrap" in registered
+        assert "bootstrap" in result.functions
+        assert registered["bootstrap"]["serialized"] is True
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_bootstrap_defaults_to_builder_settings_not_tick_settings(
+        self, mock_volumes
+    ):
+        """Its timeout budget is independent of the tick's on purpose:
+        one frontier pass and one whole-DAG discovery are different
+        questions, and shortening the tick must not shorten discovery."""
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+        app, registered = self._capture_app(
+            tick_settings=FunctionSettings(image=_make_image(), timeout=60)
+        )
+        app._builder_settings = FunctionSettings(image=_make_image(), timeout=3600)
+
+        app.finalize()
+
+        assert registered["tick"]["timeout"] == 60
+        assert registered["bootstrap"]["timeout"] == 3600
+
+    @patch("stardag.integration.modal._app.get_target_roots_volumes")
+    def test_bootstrap_settings_override(self, mock_volumes):
+        mock_volumes.return_value = MagicMock(by_volume_name={}, by_root_key={})
+        app, registered = self._capture_app(
+            bootstrap_settings=FunctionSettings(image=_make_image(), timeout=900)
+        )
+
+        app.finalize()
+
+        assert registered["bootstrap"]["timeout"] == 900
 
 
 class TestTickAppOwnership:
@@ -1849,15 +2274,21 @@ class TestReactiveRetrigger:
         registry.task_register_bulk_aio.return_value = None
         original_root = SyncOnlyTask(name="rt-orig")
         new_root = SyncOnlyTask(name="rt-new")
+        bootstrap = _finalize_capturing_functions(app)["bootstrap"]
+
+        def trigger(root, **kwargs):
+            """Trigger, then run the bootstrap the trigger spawned.
+
+            The reactive metadata is written by the bootstrap now (last,
+            after discovery and persistence), so a re-trigger's effect on
+            it is only observable once that runs.
+            """
+            with registry_provider.override(registry):
+                app.build_trigger(root, build_id=build_id, reactive=True, **kwargs)
+                bootstrap(**modal_function_stub["kwargs"])
 
         # Initial trigger persists the reactive marker/config with tick_kwargs.
-        with registry_provider.override(registry):
-            app.build_trigger(
-                original_root,
-                build_id=build_id,
-                reactive=True,
-                tick_kwargs={"fail_mode": "continue"},
-            )
+        trigger(original_root, tick_kwargs={"fail_mode": "continue"})
         # Initial trigger with an explicit id is treated as re-trigger for
         # resume/add-roots (harmless no-ops server-side on a fresh build).
         # The resume carries the reactive trigger's executor metadata.
@@ -1866,7 +2297,7 @@ class TestReactiveRetrigger:
             executor_metadata={
                 "kind": "modal",
                 "app_name": app.name,
-                "function_name": "tick",
+                "function_name": "bootstrap",
                 "reactive": True,
                 "workspace": "test-workspace",
                 "environment": "test-env",
@@ -1877,14 +2308,9 @@ class TestReactiveRetrigger:
         )
 
         registry.reset_mock()
+        registry.task_register_bulk_aio.return_value = None
         # Re-trigger with a NEW root and UPDATED tick_kwargs.
-        with registry_provider.override(registry):
-            app.build_trigger(
-                new_root,
-                build_id=build_id,
-                reactive=True,
-                tick_kwargs={"linger_seconds": 5},
-            )
+        trigger(new_root, tick_kwargs={"linger_seconds": 5})
 
         assert registry.build_resume.call_count == 1
         assert registry.build_resume.call_args.args == (build_id,)
@@ -1900,13 +2326,13 @@ class TestReactiveRetrigger:
         )
 
         registry.reset_mock()
+        registry.task_register_bulk_aio.return_value = None
         # A BARE re-trigger (no explicit tick_kwargs) must PRESERVE the
         # stored config, not wipe it: the SDK passes tick_kwargs=None, which
         # the server interprets as "leave the stored config untouched" (the
         # 0.10.1 merge-semantics guarantee). Regression: a bare re-trigger
         # used to reset tick_kwargs to {}.
-        with registry_provider.override(registry):
-            app.build_trigger(new_root, build_id=build_id, reactive=True)
+        trigger(new_root)
         registry.build_set_reactive_meta.assert_called_once_with(
             build_id, app_name=app.name, tick_kwargs=None
         )
@@ -2024,6 +2450,38 @@ class TestWatchdogSweep:
         # operator needs to know the cap was hit on RELEVANT builds.
         assert "2+ reactive builds owned by 'an-app'" in caplog.text
         assert "reduce the number of concurrent reactive builds" in caplog.text
+
+
+class TestTriggerExecutorMetadata:
+    """`function_name` records what the trigger actually spawned.
+
+    Operator and UI surfaces render it as "what was invoked", so naming a
+    function that did not run sends a reader to the wrong logs for the
+    failure that stopped the build from starting.
+    """
+
+    @staticmethod
+    def _app(**kwargs) -> StardagApp:
+        return StardagApp(
+            "an-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            **kwargs,
+        )
+
+    def test_reactive_trigger_records_bootstrap(self):
+        metadata = self._app()._build_executor_metadata(reactive=True)
+        assert metadata["function_name"] == "bootstrap"
+
+    def test_local_discovery_records_tick(self):
+        """Local discovery has no bootstrap to spawn — the trigger goes
+        straight to the first tick."""
+        app = self._app(reactive_discovery="local")
+        assert app._build_executor_metadata(reactive=True)["function_name"] == "tick"
+
+    def test_resident_trigger_records_build(self):
+        metadata = self._app()._build_executor_metadata(reactive=False)
+        assert metadata["function_name"] == "build"
 
 
 class TestTickFunctionTimeout:

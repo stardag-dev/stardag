@@ -227,9 +227,10 @@ def test_reactive_build_completes_without_resident_orchestrator():
     store = BuildTaskStore(build_id)
 
     async def trigger():
-        # What build_trigger(reactive=True) does: discover + register +
-        # persist task objects + set the reactive marker/config in the
-        # registry.
+        # What the reactive bootstrap does (in-container behind
+        # build_trigger(reactive=True); see run_reactive_bootstrap):
+        # discover + register + persist task objects, and only THEN set
+        # the reactive marker/config in the registry.
         discovery = await discover_and_register_aio(registry, build_id, task)
         store.save_tasks(discovery.incomplete.values())
         await registry.build_set_reactive_meta_aio(
