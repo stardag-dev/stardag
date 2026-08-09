@@ -113,7 +113,7 @@ function BlockerCard({
   let explanation: string;
   if (!blocker.blocking_in_build) {
     explanation =
-      "This build has never registered the blocking task, so it will never schedule it — it can only wait for whoever owns it.";
+      "This build never registered the blocking task, so it cannot schedule it. Builds registered since plan closure landed always include their incomplete upstreams, so re-triggering this build brings the task into its plan and lets it run.";
   } else if (ownedByThisBuild) {
     explanation =
       "The blocking task is in this build's own task set and this build put it into that status, but it is not actionable, so nothing here will move it on.";

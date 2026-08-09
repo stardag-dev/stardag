@@ -26,6 +26,62 @@ Four facts about stardag force the shape of everything below.
    containers that read the frontier, act, and exit. Nothing on the
    scheduling side stays alive for the duration of a task.
 
+## Builds collaborate; the claim is the only coordination
+
+Everything below rests on one principle, worth stating before the mechanics
+because most of the bugs in this area came from quietly violating it:
+
+> **A build is a request for a set of root tasks to be materialised, not an
+> owner of the tasks that materialise them.** The execution claim is the
+> only cross-build coordination primitive. Which build completes a task is
+> otherwise irrelevant.
+
+That follows from the constraints above rather than being a preference.
+Tasks are content-addressed, so the output is a property of the environment;
+within one deployed app the worker selector and resources are a pure
+function of the task, so _which_ build ran it cannot change the result. What
+must not happen is two builds executing the same task at once — and that is
+exactly, and only, what the claim prevents.
+
+Two consequences are load-bearing, and both were violated by earlier
+versions of this code:
+
+**A build's plan is closed under the dependency relation.** It contains
+every dependency of its roots that was not complete at discovery time,
+pruned at complete tasks — whose own upstreams are assumed complete with
+them. Discovery enforces this for `requires()`; registration extends it to
+every recorded edge, because dynamic dependency edges are written by
+whichever build first ran the task and then outlive it. A build gated by
+something outside its own plan can never clear it: nothing else is going to
+run it, and the only thing that would produce it is the task being gated.
+That was a permanent deadlock.
+
+**A build acts on everything in its plan, whatever build last touched it.**
+A shared task another build cancelled — the fail-fast cascade is the common
+way — holds no claim and has no live execution. Deferring to the build that
+cancelled it turned one build's fail-fast into every overlapping build's
+failure. The scheduler resets such a task and runs it, bounded by the
+per-task retry budget.
+
+What stays build-scoped is **authority to revoke**: cascade-cancel touches
+only tasks whose current status this build produced, so cancelling build B
+cannot release claims held by build C's live workers. Authority to revoke
+and permission to complete are different questions, and only the first
+belongs to a build.
+
+### What this makes unnecessary
+
+A body of machinery exists to describe a build blocked by a task outside its
+plan: blocker classification, owning-build liveness lookups, wait-or-fail
+verdicts, and remediation copy naming another build. With the plan closed,
+that state is unreachable for anything registered under the current rule —
+a gating upstream is in the plan, so the build is either running it, about
+to run it, or resetting it.
+
+The machinery is retained, not deleted, for one honest reason: builds
+registered _before_ closure existed still have open plans, and the handling
+remains their only safety net. New code should not add to it.
+
 ## The design: the claim is a status, not a lease
 
 `Task.latest_status == RUNNING` _is_ the execution claim. It is arbitrated in

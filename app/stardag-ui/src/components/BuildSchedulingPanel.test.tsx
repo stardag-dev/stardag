@@ -294,7 +294,11 @@ describe("BuildSchedulingPanel", () => {
     await user.click(
       screen.getByRole("button", { name: "Explain why GrindBeans is blocking" }),
     );
-    expect(await screen.findByText(/has never registered/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/never registered the blocking task/i),
+    ).toBeInTheDocument();
+    // The remedy is named, not a dead end: re-triggering closes the plan.
+    expect(screen.getByText(/re-triggering this build/i)).toBeInTheDocument();
     unmount();
 
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
@@ -309,7 +313,7 @@ describe("BuildSchedulingPanel", () => {
     expect(
       await screen.findByText(/in this build's own task set/i),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/has never registered/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/never registered the blocking task/i)).toBeNull();
   });
 
   it("says so when the blocker list was truncated", async () => {

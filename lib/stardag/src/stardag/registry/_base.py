@@ -121,10 +121,13 @@ class FrontierExternalBlocker(StardagBaseModel):
     # "never lapses". Always None for a non-RUNNING blocker: it holds no
     # claim, so "will anyone move it?" must be asked of its owning build.
     blocking_status_expires_at: datetime | None = None
-    # Whether the blocker is also part of *this* build's task set. False is
-    # the pathological case: this build will never schedule it, so it can
-    # only wait for whoever owns it. True still blocks, but the blocker also
-    # shows up in this build's own ``actionable``/``running``.
+    # Whether the blocker is also part of *this* build's task set. True is
+    # the normal case, and the only one reachable for a build registered
+    # under plan closure: a build's plan holds every dependency that was not
+    # complete at discovery, so the blocker is this build's own task and
+    # shows up in its ``actionable``/``running`` too. False survives for
+    # builds registered before closure existed — this build cannot schedule
+    # it, and re-triggering is what brings it into the plan.
     blocking_in_build: bool
     # Attempts this blocker has already spent **in this build's round**,
     # when the blocker is in this build's plan (None otherwise, and on

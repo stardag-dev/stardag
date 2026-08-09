@@ -1945,15 +1945,20 @@ async def _close_plan_over_dependencies(
     missing one deadlocks. So no attempt is made to decide whether a
     recorded edge is still current.
 
-    **RUNNING upstreams are deliberately left out**, and that is the one
-    conservative choice here. A RUNNING task is the single status carrying
-    an execution claim: another build is actively running it, the claim is
-    already coordinating, and nothing deadlocks — the existing cross-build
-    wait handles it. Admitting one would place a task this build did not
-    start into its own ``running`` list, where its liveness heuristics would
-    begin probing an execution belonging to someone else. Strictly, the
-    principle says it belongs in the plan too; that is a further
-    simplification, not a deadlock fix, and it deserves its own change.
+    **RUNNING upstreams are admitted like any other.** Excluding them was
+    tempting — another build is executing it, so nothing is deadlocked
+    *right now* — but closure runs once, at registration, while RUNNING is
+    transient. The moment the task stops running the exclusion becomes a
+    permanent hole, and the likeliest way for it to stop running is an
+    operator releasing a stale claim: the documented remedy would strand
+    every build that inherited the dependency while it was running.
+
+    A task this build did not start therefore appears in its own
+    ``running``, and its liveness heuristics may act on it. That is correct:
+    the destructive action is gated on the claim's expiry, and past that
+    expiry the server no longer honours the claim and will hand the task to
+    the next claimant whoever asks. Which build started it was never what
+    made recovery safe — the claim is.
     """
     if not task_pks:
         return 0
@@ -1975,9 +1980,7 @@ async def _close_plan_over_dependencies(
                     .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
                     .where(
                         TaskDependency.downstream_task_id.in_(frontier_pks),
-                        Task.latest_status.not_in(
-                            (TaskStatus.COMPLETED, TaskStatus.RUNNING)
-                        ),
+                        Task.latest_status != TaskStatus.COMPLETED,
                         Task.id.not_in(in_plan),
                     )
                     .distinct()

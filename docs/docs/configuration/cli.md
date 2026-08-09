@@ -457,12 +457,16 @@ nothing to the counts this build can see. The command names the blocking task
 (namespace and name, not just an id), its status, how long it has been in it,
 and the build that owns it — plus which of the two remedies applies:
 
-- **Not in this build's task set.** This build will never schedule it; it can
-  only wait for the owner. If the owner is gone, release the claim with
-  `stardag tasks cancel <owning-build-id> <task-id>`.
-- **In this build's task set, but another build produced its status.** It
-  resolves when that build finishes it; retrying from here would not release
-  the claim.
+- **In this build's task set, but another build produced its status.** The
+  normal case, and the only one a build registered today can reach: a build's
+  plan includes every dependency that was not complete when it was
+  discovered. If the task is running, it resolves when the holder finishes or
+  its claim expires. If it is cancelled, failed or skipped, this build resets
+  it and runs it itself — a shared task another build cancelled is still this
+  build's to run.
+- **Not in this build's task set.** Only reachable for builds registered
+  before plan closure existed. This build cannot schedule it; re-trigger the
+  build to bring the task into its plan.
 
 One important caveat the output states explicitly: the registry computes the
 blocker list **only for a build with nothing actionable and nothing running**.

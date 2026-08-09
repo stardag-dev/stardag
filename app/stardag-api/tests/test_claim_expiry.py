@@ -424,7 +424,17 @@ async def test_frontier_surfaces_the_claim_expiry(client: AsyncClient):
 async def test_expired_cross_build_blocker_is_still_a_blocker(
     client: AsyncClient, async_session: AsyncSession
 ):
-    """The correction worth encoding as a test: proving a blocker dead does
+    """An expired claim on an upstream is this build's to recover.
+
+    It used to be reported as a blocker outside the plan, with the expiry as
+    evidence the holder was gone — evidence the build could read but not act
+    on. With the plan closed over dependency edges the upstream is simply a
+    RUNNING task *in this build*, carrying a lapsed claim, which the
+    scheduler's ordinary recovery path handles: past the expiry the server
+    hands the task to the next claimant, whoever asks.
+
+    The old wording, kept because the reasoning still holds: proving a
+    blocker dead does
     NOT unblock the build. An upstream that is not in this build's task set
     is not in its plan either, so this build still cannot run it — what the
     expiry buys is certainty in place of inference, not one less blocker."""
@@ -442,14 +452,15 @@ async def test_expired_cross_build_blocker_is_still_a_blocker(
     await client.post(f"{BUILDS}/{build_b}/tasks", json=_register("blk-down"))
 
     frontier = (await client.get(f"{BUILDS}/{build_b}/frontier")).json()
-    assert frontier["actionable"] == []
-    blockers = frontier["blocked_by_external"]
-    assert [b["blocking_task_id"] for b in blockers] == ["blk-up"]
-    # ...but build B is now *told* the holder is gone, instead of having to
-    # infer it from blocking_status_at.
-    expires_at = datetime.fromisoformat(blockers[0]["blocking_status_expires_at"])
+    # In this build's plan and running, so nothing is "blocking from
+    # outside" and the build is not stalled.
+    running = {t["task_id"]: t for t in frontier["running"]}
+    assert "blk-up" in running, frontier
+    assert frontier["blocked_by_external"] == []
+    # The expiry rides along, so the scheduler is *told* the holder is gone
+    # rather than inferring it from latest_status_at.
+    expires_at = datetime.fromisoformat(running["blk-up"]["latest_status_expires_at"])
     assert _utc(expires_at) < datetime.now(timezone.utc)
-    assert blockers[0]["blocking_in_build"] is False
 
 
 # --- Postgres ------------------------------------------------------------
