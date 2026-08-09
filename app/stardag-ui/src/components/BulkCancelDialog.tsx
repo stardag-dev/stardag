@@ -120,6 +120,13 @@ export function BulkCancelDialog({
       .finally(() => {
         if (fresh()) setPreviewLoading(false);
       });
+    // Unmount invalidates the request too. Closing the dialog while a dry
+    // run is in flight would otherwise let the response resolve into
+    // `setState` on a component that no longer exists — the same staleness
+    // the epoch guards against, arriving by a different route.
+    return () => {
+      previewEpochRef.current += 1;
+    };
   }, [filters, environmentId]);
 
   const handleConfirm = async () => {
