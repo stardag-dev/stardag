@@ -543,7 +543,8 @@ class BulkCancelBuildsResponse(BaseModel):
     # (unknown, or another environment — the two are deliberately
     # indistinguishable so the endpoint can't be used to probe for build ids
     # in other environments), "not_running", "reactive" (excluded, pass
-    # include_reactive), "not_idle".
+    # include_reactive), "not_idle", and "limit_reached" (eligible, but the
+    # batch hit ``limit`` — the one reason worth retrying on).
     skipped: dict[str, str] = {}
     # More builds matched the filter than ``limit`` allowed; call again.
     truncated: bool = False

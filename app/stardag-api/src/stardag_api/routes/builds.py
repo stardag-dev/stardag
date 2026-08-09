@@ -927,6 +927,7 @@ async def _explain_skipped_build_ids(
     )
     visible = {b.id: b for b in rows}
     running_ids: set[UUID] = set()
+    eligible_ids: set[UUID] = set()
     if visible:
         running_rows, _ = await select_cancellable_builds(
             db,
@@ -936,6 +937,24 @@ async def _explain_skipped_build_ids(
             limit=len(visible),
         )
         running_ids = {build.id for build, _ in running_rows}
+        # A second pass under the request's *own* filters, so "would this
+        # have been cancelled if the batch had room?" can be answered
+        # separately from "was it running at all?". Without it, a build
+        # skipped for not being idle is reported as `limit_reached` the
+        # moment any truncation happens — telling the caller to retry for a
+        # build no retry will ever select.
+        if payload.idle_for_seconds is None:
+            eligible_ids = running_ids
+        else:
+            eligible_rows, _ = await select_cancellable_builds(
+                db,
+                environment_id=auth.environment_id,
+                build_ids=list(visible),
+                idle_before=utc_now() - timedelta(seconds=payload.idle_for_seconds),
+                include_reactive=True,
+                limit=len(visible),
+            )
+            eligible_ids = {build.id for build, _ in eligible_rows}
     reasons: dict[str, str] = {}
     for build_id in requested:
         build = visible.get(build_id)
@@ -947,6 +966,11 @@ async def _explain_skipped_build_ids(
             payload.include_reactive or payload.reactive_app_name is not None
         ):
             reason = "reactive"
+        elif build_id not in eligible_ids:
+            # Running, and not excluded for being reactive, but it failed
+            # the idle cut. Checked before truncation: this build would not
+            # be selected however many times the caller retries.
+            reason = "not_idle"
         elif truncated:
             # Eligible, but the batch hit `limit`. Call again.
             reason = "limit_reached"
@@ -1193,7 +1217,12 @@ async def cancel_build(
                     auth.workspace_id,
                     "events",
                     limits_settings,
-                    amount=len(cascaded_task_ids),
+                    # +1 for the BUILD_CANCELLED event written below.
+                    # `check_entity_creation_limit` reserves nothing, so the
+                    # earlier single-event check has not held any capacity —
+                    # counting only the cascade lets `1 + len(cascade)` cross
+                    # the limit.
+                    amount=len(cascaded_task_ids) + 1,
                 )
             )
 

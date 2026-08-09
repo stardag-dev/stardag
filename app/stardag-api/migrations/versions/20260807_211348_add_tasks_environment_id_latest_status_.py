@@ -1,7 +1,7 @@
 """add tasks (environment_id, latest_status, latest_status_at) index
 
 Revision ID: 11716b1f4c1a
-Revises: 792fb8ab3c3c
+Revises: 0807aacc230e
 Create Date: 2026-08-07 21:13:48.480923
 
 """
