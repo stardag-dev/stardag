@@ -220,6 +220,31 @@ semver, independent of the SDK. API and UI share a single joint version.
 Before tagging, make sure `CHANGELOG.md` has an entry covering the
 release's Registry API / UI / Deployment changes (move them out of
 `[Unreleased]`) — the GitHub release links to it.
+
+### Dropping support for older SDKs
+
+The hosted service always runs the latest API, so the compatibility case
+that actually happens is an **old SDK against a new API**. The server
+accepts every SDK version by default; the floor lives in
+`STARDAG_API_SDK_MINIMUM_VERSION` (see
+`app/stardag-api/src/stardag_api/sdk_compat.py`) and is published as
+`minimum_sdk_version` on `GET /api/v1/version`.
+
+Raising that floor is a product decision, not an implementation detail: it
+breaks working deployments on purpose. **An API change that raises
+`minimum_sdk_version` must say so in all three places a user could look:**
+
+1. `CHANGELOG.md` — under the release's Registry API section, with the new
+   minimum and what stopped working below it.
+2. `RELEASE_NOTES.md` — under the SDK release that clears the bar, as a
+   migration note. This is the file users are pointed at when they upgrade.
+3. **The error the server returns** — which is automatic, provided you set
+   the value rather than special-casing anything: the 426 body names the
+   client's version, the required version and the upgrade command.
+
+A newer SDK against an older self-hosted API is not a supported
+configuration and nothing tries to keep it working — self-hosters upgrade
+the server and the SDK together.
 The image definition is `app/server.Dockerfile` (build context = repo root):
 
 ```bash
