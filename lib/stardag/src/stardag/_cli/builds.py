@@ -704,7 +704,12 @@ def builds_cleanup(
             build_ids=build_ids or None,
             idle_for_seconds=idle_seconds,
             reactive_app_name=reactive_app,
-            include_reactive=include_reactive,
+            # Naming a reactive app *is* the request to include reactive
+            # builds — the flag's help says so. Forwarding a False here
+            # would let the server exclude precisely the builds the user
+            # asked for by name, and report zero matches for a filter that
+            # matched.
+            include_reactive=include_reactive or reactive_app is not None,
             cascade=cascade,
             dry_run=not do_apply,
             limit=limit,

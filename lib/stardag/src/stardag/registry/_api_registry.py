@@ -1157,10 +1157,16 @@ class APIRegistry(RegistryABC):
 
         All filters are server-side. Older servers ignore query params
         they don't know, so a filter this server predates comes back
-        *unapplied* rather than as an error — callers that must not act on
-        an unfiltered list should re-check the returned rows (the CLI
-        re-applies the idle cut on ``last_activity_at`` for exactly this
-        reason).
+        *unapplied* rather than as an error, and silently: the rows look
+        like a filtered answer.
+
+        Callers that must not act on an unfiltered list have to detect
+        this themselves. Note that re-filtering the page locally does not
+        fix it — ``total`` and the page boundaries were computed by the
+        server over the unfiltered set, so a locally-trimmed page reports
+        a count that is wrong and paginates over the wrong population.
+        ``stardag builds list --older-than`` therefore warns rather than
+        trimming.
         """
         params = {
             **self._get_params(),
