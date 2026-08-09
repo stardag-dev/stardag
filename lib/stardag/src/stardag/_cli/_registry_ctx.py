@@ -20,6 +20,7 @@ import typer
 from rich.console import Console
 
 from stardag.config.loader import clear_config_cache, get_config
+from stardag.exceptions import SDKVersionUnsupportedError
 from stardag.registry import APIRegistry
 
 console = Console()
@@ -109,5 +110,16 @@ def _resolve_registry(profile: str | None, env_override: str | None) -> APIRegis
 
 def _fail(exc: Exception) -> NoReturn:
     """Print a friendly error for a registry/API failure and exit."""
+    if isinstance(exc, SDKVersionUnsupportedError):
+        # The one error whose text is authored by the *server*: it knows both
+        # versions and the exact upgrade command. Print it on its own line
+        # with markup disabled — a version specifier like ``stardag>=1.2``
+        # is fine, but rich would silently eat anything bracketed, and this
+        # is the one message a user has to be able to copy verbatim.
+        error_console.print(
+            "[bold red]Error:[/bold red] SDK too old for this registry."
+        )
+        error_console.print(exc.message, markup=False, highlight=False)
+        raise typer.Exit(1)
     error_console.print(f"[bold red]Error:[/bold red] {exc}")
     raise typer.Exit(1)

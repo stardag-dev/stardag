@@ -156,15 +156,46 @@ _TERMINAL_BUILD_STATUSES = ("completed", "failed", "cancelled")
 # abandoned claim merely heals later than it could have.
 _CLAIM_TTL_GRACE_SECONDS = 900.0
 
-# Default in-flight bound for everything a tick does per task: the frontier
-# actions (load / probe / claim / spawn / record) and discovery's completion
-# checks. 50 is not a new number — it is the resident engine's own
-# ``max_concurrent_discover`` default (see ``build/_concurrent.py``), which
-# has been driving the same registry and the same targets from a single
-# process since long before ticks existed. The two paths perform the same
-# logical work, so they should not disagree about how much of it may be in
-# flight; keeping one number is also what stops them drifting apart again.
+# Default in-flight bound for the frontier actions a tick performs per task
+# (load / probe / claim / spawn / record). These are registry HTTP calls, and
+# 50 is the resident engine's long-standing bound against the same registry.
 _DEFAULT_MAX_CONCURRENCY = 50
+
+# Discovery gets its own, lower bound, because it is limited by something
+# else entirely: ``complete_aio()`` asks the *target backend* whether an
+# output exists, so the ceiling is that backend's tolerance, not the
+# registry's. Object stores and network volumes are far less forgiving than
+# an HTTP API, and a trigger running outside the execution environment pays
+# full network cost for every check.
+#
+# Measured against a Modal volume target root from a laptop, discovering a
+# 64-task layer: 16 in flight completed in ~26 s; 32 had not finished after
+# 240 s; 50 failed outright with Modal's ResourceExhaustedError. Sharing one
+# constant with the actions above looked tidy but conflated two different
+# limits, and only the slower one is load-bearing.
+#
+# Tunable per call — a deployment whose target root is a fast local
+# filesystem can raise it, and one on a stricter backend can lower it.
+_DEFAULT_MAX_CONCURRENT_DISCOVER = 16
+
+
+def _format_age(seconds: float) -> str:
+    """Render an age the way an operator reads it.
+
+    The blocker message is the one a stalled build's owner acts on, and
+    "RUNNING for 10889s" makes them do arithmetic before they can judge
+    whether that is alarming. Coarse on purpose — nobody needs seconds
+    once it has been running for hours.
+    """
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m".replace(" 0m", "")
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h".replace(" 0h", "")
+
 
 # --- Per-tick spawn cap ------------------------------------------------
 #
@@ -380,7 +411,7 @@ async def discover_and_register_aio(
     tasks: TaskStruct,
     retry_failed: bool = False,
     _chunk_size: int = 50,
-    max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENCY,
+    max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENT_DISCOVER,
 ) -> DiscoveryResult:
     """Walk ``tasks``' dependency trees, register everything, return state.
 
@@ -2039,7 +2070,7 @@ def _describe_blockers(
             + (
                 ""
                 if (age := _blocker_status_age_seconds(verdict.blocker, now)) is None
-                else f" for {age:.0f}s"
+                else f" for {_format_age(age)}"
             )
             + (
                 f" under build {verdict.blocker.blocking_status_build_id}"

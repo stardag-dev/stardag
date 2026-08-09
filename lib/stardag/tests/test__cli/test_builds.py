@@ -12,7 +12,7 @@ from uuid import uuid4
 from typer.testing import CliRunner
 
 from stardag._cli.builds import app
-from stardag.exceptions import APIError
+from stardag.exceptions import APIError, NotFoundError, SDKVersionUnsupportedError
 from stardag.registry import (
     BuildCancelResult,
     BuildFrontier,
@@ -583,6 +583,25 @@ class TestErrorHandling:
         assert "Error:" in result.output
         registry.close.assert_called_once()
 
+    def test_a_finished_build_is_not_called_possibly_stuck(self):
+        """A terminal build has nothing actionable and nothing running because
+        it is *over*, not because it is wedged.
+
+        Found in a live E2E run: a build that had completed successfully was
+        reported as "genuinely stuck (a tick will fail it)" — alarming, and
+        exactly the kind of misleading output this command exists to replace.
+        """
+        registry = _mock_registry(
+            build_get_frontier=_frontier(
+                build_status="completed", actionable=[], running=[]
+            )
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["frontier", BUILD_ID])
+        assert result.exit_code == 0, result.output
+        assert "genuinely stuck" not in result.output
+        assert "not applicable" in result.output
+
     def test_frontier_error_reported(self):
         registry = mock.MagicMock()
         registry.build_get_frontier.side_effect = APIError(
@@ -592,4 +611,72 @@ class TestErrorHandling:
             result = runner.invoke(app, ["frontier", BUILD_ID])
         assert result.exit_code == 1
         assert "Error:" in result.output
+        registry.close.assert_called_once()
+
+
+class TestRegistryTooOld:
+    """A registry predating an endpoint must not read as "not found".
+
+    FastAPI answers an unknown path with the generic ``{"detail": "Not
+    Found"}``, which this CLI otherwise renders as "resource not found" —
+    so the user reads a version-skew problem as a bad build id and goes
+    looking for a build that is fine. Both commands name the real cause.
+    """
+
+    def test_ticks_says_the_registry_is_too_old(self):
+        registry = mock.MagicMock()
+        registry.build_list_tick_summaries.side_effect = NotFoundError(
+            "List tick summaries: resource not found", detail="Not Found"
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["ticks", BUILD_ID])
+        assert result.exit_code == 1
+        assert "does not support 'stardag builds ticks'" in result.output
+        assert "tick-summaries endpoint is missing" in result.output
+        assert "Upgrade stardag-api" in result.output
+        registry.close.assert_called_once()
+
+    def test_cleanup_says_the_registry_is_too_old_and_offers_the_fallback(self):
+        registry = mock.MagicMock()
+        registry.build_bulk_cancel.side_effect = NotFoundError(
+            "Bulk-cancel builds: resource not found", detail="Not Found"
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["cleanup", "--older-than", "24h"])
+        assert result.exit_code == 1
+        assert "does not support 'stardag builds cleanup'" in result.output
+        assert "bulk-cancel endpoint is missing" in result.output
+        # A one-at-a-time workaround exists, so say so rather than leaving
+        # the user with only "upgrade".
+        assert "stardag builds cancel" in result.output
+        registry.close.assert_called_once()
+
+    def test_a_real_missing_build_still_reads_as_not_found(self):
+        """The narrow check must not swallow app-level 404s."""
+        registry = mock.MagicMock()
+        registry.build_list_tick_summaries.side_effect = NotFoundError(
+            "List tick summaries: resource not found", detail="Build not found"
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["ticks", BUILD_ID])
+        assert result.exit_code == 1
+        assert "Build not found" in result.output
+        assert "does not support" not in result.output
+
+    def test_sdk_too_old_prints_the_servers_own_sentence(self):
+        """The 426 message is authored server-side; print it, don't repr it."""
+        message = (
+            "This Stardag server requires stardag SDK 2.0.0 or newer, but this "
+            "request came from stardag 1.2.3. Upgrade with: pip install "
+            '--upgrade "stardag>=2.0.0"'
+        )
+        registry = mock.MagicMock()
+        registry.build_list.side_effect = SDKVersionUnsupportedError(
+            message=message, sdk_version="1.2.3", minimum_sdk_version="2.0.0"
+        )
+        with _patch_resolve(registry):
+            result = runner.invoke(app, ["list"])
+        assert result.exit_code == 1
+        assert "SDK too old for this registry" in result.output
+        assert message in result.output
         registry.close.assert_called_once()

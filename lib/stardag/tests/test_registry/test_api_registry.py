@@ -8,11 +8,18 @@ from uuid import UUID
 
 import pytest
 
-from stardag.exceptions import APIError, NotFoundError, is_missing_route_error
+from stardag._version import __version__
+from stardag.exceptions import (
+    APIError,
+    NotFoundError,
+    SDKVersionUnsupportedError,
+    is_missing_route_error,
+)
 from stardag.registry._api_registry import (
     _GZIP_REQUEST_THRESHOLD_BYTES,
     _maybe_gzip_json_body,
 )
+from stardag.registry._http_client import SDK_VERSION_HEADER
 
 
 class TestMaybeGzipJsonBody:
@@ -605,7 +612,12 @@ class _CapturingRegistry:
     request is the whole fixture.
     """
 
-    def __init__(self, response_json: dict, status_code: int = 200):
+    def __init__(
+        self,
+        response_json: dict | None = None,
+        status_code: int = 200,
+        response_text: str | None = None,
+    ):
         import httpx
 
         from stardag.registry._api_registry import APIRegistry
@@ -614,13 +626,18 @@ class _CapturingRegistry:
 
         def handler(request: httpx.Request) -> httpx.Response:
             self.requests.append(request)
-            return httpx.Response(status_code, json=response_json)
+            # `response_text` models a body that is not JSON at all — a
+            # proxy or gateway answering on the server's behalf.
+            if response_text is not None:
+                return httpx.Response(status_code, text=response_text)
+            return httpx.Response(status_code, json=response_json or {})
 
         self.registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
-        self.registry._client = httpx.Client(
-            transport=httpx.MockTransport(handler),
-            auth=self.registry._auth,
-        )
+        # Swap the *transport*, not the whole client: default headers (auth,
+        # SDK version, User-Agent) are configured on the client the SDK
+        # builds, so replacing it would leave these tests asserting against a
+        # client the SDK never constructs.
+        self.registry.client._transport = httpx.MockTransport(handler)
 
     @property
     def request(self):
@@ -925,3 +942,122 @@ class TestTickSummaries:
         assert records[0].outcome == "lingered_out"
         # The blob is kept whole, unknown keys included.
         assert records[0].summary["some_future_counter"] == 7
+
+
+class TestSDKVersionHeader:
+    """The SDK announces its version on every registry request.
+
+    This ships before anything reads it, and that is the point: a server
+    can only tell an SDK "you are too old" if that SDK was already
+    identifying itself when it was released. A release that goes out silent
+    is permanently un-diagnosable — no later server change fixes it
+    retroactively. Hence these tests guard a header nothing enforces yet.
+    """
+
+    def test_sync_request_carries_version_and_user_agent(self):
+        cap = _CapturingRegistry({"build_id": _BUILD_ID, "summaries": []})
+        cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+
+        headers = cap.request.headers
+        assert headers[SDK_VERSION_HEADER] == __version__
+        # User-Agent is for humans reading logs; the server keys on the
+        # dedicated header, so this only has to name the SDK and version.
+        assert headers["user-agent"].startswith(f"stardag/{__version__}")
+
+    @pytest.mark.asyncio
+    async def test_async_request_carries_version_and_user_agent(self):
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(200, json={})
+
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        # Touch the property inside the coroutine so the lazily-built client
+        # binds to *this* loop, then swap only its transport (see
+        # ``_CapturingRegistry``).
+        registry.async_client._transport = httpx.MockTransport(handler)
+        await registry.build_add_roots_aio(UUID(_BUILD_ID), ["root-task-1"])
+
+        assert len(captured) == 1
+        headers = captured[0].headers
+        assert headers[SDK_VERSION_HEADER] == __version__
+        assert headers["user-agent"].startswith(f"stardag/{__version__}")
+
+    def test_version_header_survives_per_request_headers(self):
+        """Per-request headers must not clobber the client's defaults.
+
+        POSTs with a body pass their own Content-Type (and Content-Encoding
+        when gzipped); httpx merges those *over* the client defaults, so the
+        identification headers have to survive the merge.
+        """
+        cap = _CapturingRegistry({})
+        cap.registry.build_add_roots(UUID(_BUILD_ID), ["root-task-1"])
+
+        headers = cap.request.headers
+        assert headers["content-type"] == "application/json"
+        assert headers[SDK_VERSION_HEADER] == __version__
+
+
+class TestSDKVersionUnsupported:
+    """426 Upgrade Required → a typed error carrying the server's own words."""
+
+    _DETAIL = {
+        "error_code": "SDK_VERSION_UNSUPPORTED",
+        "message": (
+            "This Stardag server requires stardag SDK 2.0.0 or newer, but "
+            "this request came from stardag 1.2.3. Upgrade with: "
+            'pip install --upgrade "stardag>=2.0.0"'
+        ),
+        "sdk_version": "1.2.3",
+        "minimum_sdk_version": "2.0.0",
+    }
+
+    def test_raises_typed_error_with_the_servers_message_verbatim(self):
+        cap = _CapturingRegistry({"detail": self._DETAIL}, status_code=426)
+
+        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+
+        err = excinfo.value
+        # Verbatim, not paraphrased: the server knows both versions and the
+        # exact upgrade command, and a second wording here would drift.
+        assert err.message == self._DETAIL["message"]
+        assert self._DETAIL["message"] in str(err)
+        assert err.sdk_version == "1.2.3"
+        assert err.minimum_sdk_version == "2.0.0"
+        assert err.status_code == 426
+        assert err.payload == self._DETAIL
+
+    def test_is_an_api_error_so_cli_error_paths_catch_it(self):
+        # Every registry-backed CLI command funnels StardagError into a
+        # friendly exit; a 426 must not escape as a traceback.
+        cap = _CapturingRegistry({"detail": self._DETAIL}, status_code=426)
+        with pytest.raises(APIError):
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+
+    def test_unstructured_426_still_gets_the_typed_error(self):
+        # e.g. a proxy's own 426, with no structured detail. Better a
+        # generic upgrade sentence than an opaque APIError.
+        cap = _CapturingRegistry({"detail": "Upgrade Required"}, status_code=426)
+        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+        assert excinfo.value.minimum_sdk_version is None
+        assert "Upgrade Required" in str(excinfo.value)
+
+    def test_a_non_json_426_still_surfaces_the_body(self):
+        """A proxy's 426 has no JSON at all, so there is no `detail` key to
+        read — and that is precisely when the upstream's own words are the
+        only clue about which hop rejected the request. Losing them to the
+        generic sentence sends the reader to the wrong server."""
+        cap = _CapturingRegistry(
+            status_code=426,
+            response_text="nginx: client SDK too old for this gateway",
+        )
+        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+        assert "nginx: client SDK too old for this gateway" in str(excinfo.value)
