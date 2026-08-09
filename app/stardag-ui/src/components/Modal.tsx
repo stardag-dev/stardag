@@ -1,5 +1,14 @@
 import { useEffect, type ReactNode } from "react";
 
+// TODO(a11y): this modal does not trap focus. Escape closes it and the
+// body is scroll-locked, but Tab walks straight out of the dialog into the
+// page behind it, and focus is not restored to the trigger on close. Every
+// caller (ChangePasswordModal, OnboardingModal, ConfirmDialog, …) inherits
+// the gap. Fixing it means cycling Tab/Shift-Tab within the dialog,
+// marking the rest of the page `aria-hidden`/`inert` while open, and
+// remembering `document.activeElement` — a change to shared behaviour that
+// deserves its own PR rather than riding along with a feature.
+
 interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -9,6 +18,12 @@ interface ModalProps {
   closeOnOverlay?: boolean;
   /** Whether to show the close button */
   showCloseButton?: boolean;
+  /**
+   * Tailwind max-width class for the dialog. Defaults to the narrow
+   * form-sized dialog; widen it for content that has to be read and
+   * compared (e.g. a dry-run preview listing what is about to change).
+   */
+  maxWidthClass?: string;
 }
 
 export function Modal({
@@ -18,6 +33,7 @@ export function Modal({
   children,
   closeOnOverlay = true,
   showCloseButton = true,
+  maxWidthClass = "max-w-md",
 }: ModalProps) {
   // Handle escape key
   useEffect(() => {
@@ -56,7 +72,9 @@ export function Modal({
       />
 
       {/* Modal content */}
-      <div className="relative z-10 w-full max-w-md rounded-lg bg-white dark:bg-gray-800 shadow-xl mx-4">
+      <div
+        className={`relative z-10 w-full ${maxWidthClass} rounded-lg bg-white dark:bg-gray-800 shadow-xl mx-4`}
+      >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 px-6 py-4">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">

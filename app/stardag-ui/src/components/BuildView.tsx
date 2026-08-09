@@ -25,6 +25,7 @@ import type {
   TaskWithContext,
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
+import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildExecutorChips } from "./ExecutorBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
@@ -36,6 +37,7 @@ import {
 } from "./dagLayout";
 import { TaskDetail } from "./TaskDetail";
 import { TaskFilters } from "./TaskFilters";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { TaskTable } from "./TaskTable";
 
 interface BuildViewProps {
@@ -77,11 +79,20 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   const [showOverrideMenu, setShowOverrideMenu] = useState(false);
   const [overriding, setOverriding] = useState(false);
   const [overrideError, setOverrideError] = useState<string | null>(null);
+  const [overrideNotice, setOverrideNotice] = useState<string | null>(null);
   const overrideMenuRef = useRef<HTMLDivElement>(null);
+  // Cascading cancel is a different operation from plain cancel — it also
+  // releases the claims this build's tasks hold — so it gets a real
+  // confirmation dialog that says so, rather than a `window.confirm`.
+  const [cascadeConfirmOpen, setCascadeConfirmOpen] = useState(false);
 
   // Refresh state
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  // Bumped on every build refresh (manual, auto or post-mutation). The
+  // scheduling panel refetches off this rather than running its own timer,
+  // so the 5s auto-refresh drives one request stream, not two.
+  const [refreshToken, setRefreshToken] = useState(0);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastClickRef = useRef<number>(0);
 
@@ -157,6 +168,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // Refresh handler
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
+    setRefreshToken((token) => token + 1);
     await loadBuild();
     setRefreshing(false);
   }, [loadBuild]);
@@ -197,6 +209,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
       setShowOverrideMenu(false);
       setOverriding(true);
       setOverrideError(null);
+      setOverrideNotice(null);
 
       const userId = user?.profile?.sub;
 
@@ -222,6 +235,41 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
     },
     [activeEnvironment?.id, buildId, user?.profile?.sub],
   );
+
+  // Cancel the build AND release the claims its tasks hold. Plain cancel
+  // writes only a build-level event, so a task the build left RUNNING
+  // keeps denying its execution claim to every future build that needs
+  // it — cascading is what actually cleans that up. Kept as a separate
+  // action rather than a changed default so existing behaviour is
+  // untouched and the difference is visible in the menu.
+  const handleCascadeCancel = useCallback(async () => {
+    if (!activeEnvironment?.id || !buildId) return;
+    setOverriding(true);
+    setOverrideError(null);
+    setOverrideNotice(null);
+    try {
+      const result = await cancelBuild(
+        buildId,
+        activeEnvironment.id,
+        user?.profile?.sub,
+        true,
+      );
+      setCascadeConfirmOpen(false);
+      setOverrideNotice(
+        result.cascaded_task_count === 0
+          ? "Build cancelled — it held no execution claims."
+          : `Build cancelled — released ${result.cascaded_task_count} execution claim${
+              result.cascaded_task_count === 1 ? "" : "s"
+            }.`,
+      );
+      // Refetch so the task table and DAG show the cancelled tasks.
+      await loadBuild();
+    } catch (err) {
+      setOverrideError(err instanceof Error ? err.message : "Failed to cancel build");
+    } finally {
+      setOverriding(false);
+    }
+  }, [activeEnvironment?.id, buildId, user?.profile?.sub, loadBuild]);
 
   // ESC to exit DAG fullscreen
   useEffect(() => {
@@ -494,7 +542,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                         </svg>
                       </button>
                       {showOverrideMenu && (
-                        <div className="absolute right-0 z-10 mt-1 w-40 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 dark:bg-gray-800 dark:ring-gray-700">
+                        <div className="absolute right-0 z-10 mt-1 w-56 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 dark:bg-gray-800 dark:ring-gray-700">
                           <div className="py-1">
                             <button
                               onClick={() => handleOverride("complete")}
@@ -517,6 +565,19 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                               <span className="h-2 w-2 rounded-full bg-gray-500" />
                               Cancel
                             </button>
+                            <button
+                              onClick={() => {
+                                setShowOverrideMenu(false);
+                                setOverrideError(null);
+                                setOverrideNotice(null);
+                                setCascadeConfirmOpen(true);
+                              }}
+                              title="Cancel the build and release the execution claims its tasks hold"
+                              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                            >
+                              <span className="h-2 w-2 flex-shrink-0 rounded-full bg-red-400" />
+                              Cancel &amp; Release Claims
+                            </button>
                           </div>
                         </div>
                       )}
@@ -527,13 +588,40 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                       {overrideError}
                     </span>
                   )}
+                  {overrideNotice && (
+                    <span
+                      role="status"
+                      className="text-xs text-green-700 dark:text-green-400"
+                    >
+                      {overrideNotice}
+                    </span>
+                  )}
                 </div>
               </div>
+
+              {/* Scheduler state. Renders itself only when it has something
+                  to say — see `schedulingPanelForm`. Placed above the DAG so
+                  a stalled build's explanation is the first thing read. */}
+              {activeEnvironment?.id && (
+                <BuildSchedulingPanel
+                  buildId={buildId}
+                  environmentId={activeEnvironment.id}
+                  buildStatus={build.status}
+                  refreshToken={refreshToken}
+                  onNavigateToBuild={onNavigateToBuild}
+                  onChanged={handleRefresh}
+                />
+              )}
 
               {/* DAG header - always visible */}
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">
                 <button
                   onClick={handleToggleDag}
+                  // A disclosure control whose only state cue was a rotated
+                  // chevron: invisible to assistive tech, and to any test that
+                  // isn't reading CSS classes.
+                  aria-expanded={showDag}
+                  aria-controls="build-dag-panel"
                   className="flex items-center gap-2 text-sm text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
                 >
                   <svg
@@ -599,7 +687,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                   onExpand={() => setShowDag(true)}
                 >
                   {showDag && !dagFullscreen && (
-                    <div className="h-full">
+                    <div id="build-dag-panel" className="h-full">
                       <DagGraph
                         tasks={tasksWithContext}
                         graph={graph}
@@ -711,6 +799,37 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={cascadeConfirmOpen}
+        title="Cancel build and release its claims"
+        destructive
+        confirmLabel="Cancel build & release claims"
+        busyLabel="Cancelling…"
+        cancelLabel="Close"
+        busy={overriding}
+        error={overrideError}
+        onConfirm={handleCascadeCancel}
+        onCancel={() => {
+          setCascadeConfirmOpen(false);
+          setOverrideError(null);
+        }}
+      >
+        <p className="text-sm text-gray-600 dark:text-gray-400">
+          Cancels this build and — unlike plain <em>Cancel</em> — also cancels its
+          running and suspended tasks, freeing the execution claims and
+          concurrency-limit slots they hold. A task left running by this build denies
+          its claim to every future build that needs it until something releases it.
+        </p>
+        <p className="text-sm text-gray-600 dark:text-gray-400">
+          Pending tasks are left alone (they hold no claim and may be referenced by
+          other builds), as are tasks another build put into running.
+        </p>
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          The server cannot stop anything: a worker whose task is cancelled here keeps
+          going until it notices, and if it completes anyway, completed wins.
+        </p>
+      </ConfirmDialog>
     </div>
   );
 }

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { cancelTask, fetchTaskArtifacts, fetchTaskEvents } from "../api/tasks";
+import {
+  cancelTask,
+  fetchTaskArtifacts,
+  fetchTaskEvents,
+  retryTask,
+} from "../api/tasks";
+import { useEnvironment } from "../context/EnvironmentContext";
 import type {
   Task,
   TaskArtifact,
@@ -8,13 +14,20 @@ import type {
   ExecutorMetadata,
 } from "../types/task";
 import {
+  availableClaimActions,
+  CLAIM_ACTION_LABELS,
+  type ClaimAction,
+} from "../utils/claims";
+import {
   isModalMetadata,
   modalAppUrl,
   modalEnvironmentUrl,
   modalFunctionCallUrl,
   modalFunctionUrl,
 } from "../utils/modalLinks";
+import { formatAbsoluteTime, formatDuration } from "../utils/time";
 import { ArtifactList, ExpandButton } from "./ArtifactViewer";
+import { ClaimActionDialog } from "./ClaimActionDialog";
 import { ExecutorBadge } from "./ExecutorBadge";
 import { FullscreenModal } from "./FullscreenModal";
 import { StatusBadge } from "./StatusBadge";
@@ -306,8 +319,37 @@ export function TaskDetail({
   const [eventsLoading, setEventsLoading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [claimAction, setClaimAction] = useState<ClaimAction | null>(null);
+  const [claimNotice, setClaimNotice] = useState<string | null>(null);
 
-  const canCancel = buildId && (task.status === "pending" || task.status === "running");
+  const { activeWorkspaceRole } = useEnvironment();
+  const isAdmin = activeWorkspaceRole === "owner" || activeWorkspaceRole === "admin";
+
+  // ---- Claim holder ----
+  //
+  // A task's status is environment-global, so a task left RUNNING (or
+  // SUSPENDED) by some build denies its execution claim to every build
+  // that needs it, indefinitely. `StatusBadge` already hints at a
+  // cross-build status with an icon; that is not enough to act on, so
+  // when the holder is a *different* build from the one being viewed we
+  // say it in words, with the elapsed time and the remedies.
+  const holderBuildId = task.latest_status_build_id ?? task.status_build_id ?? null;
+  const globalStatus = task.latest_status ?? task.status;
+  const holdsClaim = globalStatus === "running" || globalStatus === "suspended";
+  // In the task explorer there is no build in view, so every holder is
+  // "elsewhere" — which is exactly the claim-holder question being asked
+  // there. The copy below adapts rather than the condition.
+  const crossBuild = Boolean(holderBuildId && buildId && holderBuildId !== buildId);
+  const showClaimHolder = holdsClaim && Boolean(holderBuildId);
+  const claimSince =
+    task.latest_status_at ?? (globalStatus === "running" ? task.started_at : null);
+  const heldFor = claimSince ? formatDuration(claimSince, null) : null;
+
+  // The plain Cancel button addresses the *viewed* build. When the claim
+  // is held by a different one, that is the wrong build to address, so the
+  // claim callout below owns the action instead of offering two.
+  const canCancel =
+    buildId && !crossBuild && (task.status === "pending" || task.status === "running");
 
   const loadEvents = useCallback(async () => {
     setEventsLoading(true);
@@ -327,6 +369,50 @@ export function TaskDetail({
     loadEvents();
   }, [loadEvents]);
 
+  // The one place a task mutation is issued from this panel. `targetBuildId`
+  // is whichever build the action belongs to: the viewed build for the plain
+  // Cancel, the *claim holder* for a cross-build release/reset.
+  const runTaskAction = useCallback(
+    async (action: ClaimAction, targetBuildId: string) => {
+      setCancelling(true);
+      setCancelError(null);
+      try {
+        if (action === "release") {
+          const resulting = await cancelTask(
+            targetBuildId,
+            task.task_id,
+            task.environment_id,
+          );
+          // The write always succeeds; the release does not. A task that
+          // completed since this panel loaded keeps COMPLETED, and saying
+          // "released" would send the user away believing the claim is
+          // free when it never was theirs to free.
+          if (resulting !== "cancelled") {
+            setCancelError(
+              `This task is already ${resulting}, so there was no claim to release.`,
+            );
+            return false;
+          }
+        } else {
+          await retryTask(targetBuildId, task.task_id, task.environment_id);
+        }
+        return true;
+      } catch (err) {
+        setCancelError(
+          err instanceof Error
+            ? err.message
+            : action === "release"
+              ? "Failed to cancel task"
+              : "Failed to retry task",
+        );
+        return false;
+      } finally {
+        setCancelling(false);
+      }
+    },
+    [task.task_id, task.environment_id],
+  );
+
   const handleCancel = async () => {
     if (!buildId || !canCancel) return;
 
@@ -335,17 +421,23 @@ export function TaskDetail({
     );
     if (!confirmed) return;
 
-    setCancelling(true);
-    setCancelError(null);
-    try {
-      await cancelTask(buildId, task.task_id, task.environment_id);
+    if (await runTaskAction("release", buildId)) {
       onTaskCancelled?.();
-    } catch (err) {
-      setCancelError(err instanceof Error ? err.message : "Failed to cancel task");
-    } finally {
-      setCancelling(false);
     }
   };
+
+  const handleClaimAction = useCallback(async () => {
+    if (!claimAction || !holderBuildId) return;
+    if (await runTaskAction(claimAction, holderBuildId)) {
+      setClaimNotice(
+        claimAction === "release"
+          ? `Released the claim under build ${holderBuildId.slice(0, 8)}.`
+          : `Reset to pending under build ${holderBuildId.slice(0, 8)}.`,
+      );
+      setClaimAction(null);
+      onTaskCancelled?.();
+    }
+  }, [claimAction, holderBuildId, runTaskAction, onTaskCancelled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -444,8 +536,74 @@ export function TaskDetail({
               </button>
             )}
           </div>
-          {cancelError && (
+          {cancelError && !claimAction && (
             <p className="mt-1 text-xs text-red-600 dark:text-red-400">{cancelError}</p>
+          )}
+          {claimNotice && (
+            <p
+              role="status"
+              className="mt-1 text-xs text-green-700 dark:text-green-400"
+            >
+              {claimNotice}
+            </p>
+          )}
+
+          {/* Claim holder: who is sitting on this task, and for how long. */}
+          {showClaimHolder && holderBuildId && (
+            <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-2.5 dark:border-amber-900/60 dark:bg-amber-950/30">
+              <p className="text-xs font-semibold text-amber-900 dark:text-amber-200">
+                {crossBuild
+                  ? "Execution claim held by another build"
+                  : "Holding an execution claim"}
+              </p>
+              <p className="mt-1 text-xs text-amber-900/90 dark:text-amber-100/90">
+                This task has been <em>{globalStatus}</em>
+                {heldFor && heldFor !== "—" ? (
+                  <span title={formatAbsoluteTime(claimSince)}> for {heldFor}</span>
+                ) : null}{" "}
+                under build{" "}
+                {onStatusBuildClick ? (
+                  <button
+                    type="button"
+                    onClick={() => onStatusBuildClick(holderBuildId)}
+                    title={`Go to build ${holderBuildId}`}
+                    className="rounded bg-amber-100 px-1 py-0.5 font-mono text-blue-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 dark:bg-amber-900/40 dark:text-blue-300"
+                  >
+                    {holderBuildId.slice(0, 8)}
+                  </button>
+                ) : (
+                  <code className="rounded bg-amber-100 px-1 py-0.5 font-mono dark:bg-amber-900/40">
+                    {holderBuildId.slice(0, 8)}
+                  </code>
+                )}
+                {crossBuild ? ", not the build you are viewing." : "."} A task&rsquo;s
+                status is environment-wide, so until this claim is released every build
+                that needs this task waits on it.
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {isAdmin ? (
+                  availableClaimActions(globalStatus).map((action) => (
+                    <button
+                      key={action}
+                      type="button"
+                      disabled={cancelling}
+                      onClick={() => {
+                        setCancelError(null);
+                        setClaimNotice(null);
+                        setClaimAction(action);
+                      }}
+                      className="rounded-md border border-red-300 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-900/30"
+                    >
+                      {CLAIM_ACTION_LABELS[action]}
+                    </button>
+                  ))
+                ) : (
+                  <span className="text-xs text-amber-900/80 dark:text-amber-200/80">
+                    Releasing a claim requires the workspace admin role.
+                  </span>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
@@ -605,6 +763,24 @@ export function TaskDetail({
           <ArtifactList artifacts={artifacts} />
         )}
       </div>
+
+      {holderBuildId && (
+        <ClaimActionDialog
+          action={claimAction}
+          taskName={task.task_name}
+          taskId={task.task_id}
+          ownerBuildId={holderBuildId}
+          currentBuildId={buildId}
+          status={globalStatus}
+          busy={cancelling}
+          error={cancelError}
+          onConfirm={handleClaimAction}
+          onCancel={() => {
+            setClaimAction(null);
+            setCancelError(null);
+          }}
+        />
+      )}
 
       {/* Task Parameters Fullscreen Modal */}
       <FullscreenModal

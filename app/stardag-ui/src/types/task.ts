@@ -72,6 +72,76 @@ export interface Build {
   // older API responses and null for builds without a recorded trigger
   // executor.
   executor_metadata?: ExecutorMetadata | null;
+  // Reactive-scheduling owner: the app whose ticks drive this build. Null
+  // for ordinary (resident) builds — its presence is the reactive marker.
+  reactive_app_name?: string | null;
+  // ---- Liveness. Two different numbers; do not confuse them. ----
+  //
+  // `last_active_at` is the column the API orders the build list by. It is
+  // bumped by build-level LIFECYCLE transitions only (resume, complete,
+  // fail, cancel, exit-early, roots appended) — never by task events — so
+  // it is NOT an activity signal: a build that has been running tasks for
+  // three days still reports its BUILD_STARTED timestamp here.
+  //
+  // `last_activity_at` is the activity signal: the newest of the build's
+  // whole event stream (task events included), its `last_active_at`, and
+  // any pending scheduler wake-up. This is what the stale-build reaper
+  // measures idleness against, so it is the one to show and filter on.
+  // Both are optional: absent on API responses predating them.
+  last_active_at?: string | null;
+  last_activity_at?: string | null;
+}
+
+// Response of POST /builds/{id}/cancel — a superset of Build. The cascade
+// fields are empty/zero unless the call passed cascade=true.
+export interface BuildCancelResult extends Build {
+  cascaded_task_ids: string[];
+  cascaded_task_count: number;
+}
+
+// Why bulk-cancel did not act on an explicitly requested build id. Kept as
+// a union of the reasons the API documents today, widened to `string` at
+// the response boundary so an unknown future reason still renders.
+export type BulkCancelSkipReason =
+  | "not_found"
+  | "not_running"
+  | "reactive"
+  | "not_idle"
+  | "limit_reached";
+
+// Body of POST /builds/bulk-cancel. At least one of `build_ids` /
+// `idle_for_seconds` is required — the API answers 422 otherwise.
+export interface BulkCancelBuildsRequest {
+  build_ids?: string[];
+  // Idleness measured against `last_activity_at`, not `last_active_at`.
+  idle_for_seconds?: number;
+  reactive_app_name?: string | null;
+  include_reactive?: boolean;
+  // Also cancel the build's RUNNING/SUSPENDED tasks, releasing the
+  // execution claims and concurrency slots they hold.
+  cascade?: boolean;
+  dry_run?: boolean;
+  limit?: number;
+  reason?: string | null;
+}
+
+export interface CancelledBuildRef {
+  build_id: string;
+  name: string;
+  last_activity_at: string | null;
+  reactive_app_name: string | null;
+  cascaded_task_ids: string[];
+}
+
+export interface BulkCancelBuildsResponse {
+  dry_run: boolean;
+  builds: CancelledBuildRef[];
+  build_count: number;
+  task_count: number;
+  // build_id -> reason (see BulkCancelSkipReason).
+  skipped: Record<string, string>;
+  // More builds matched the filter than `limit` allowed; call again.
+  truncated: boolean;
 }
 
 export interface BuildListResponse {
@@ -79,6 +149,108 @@ export interface BuildListResponse {
   total: number;
   page: number;
   page_size: number;
+}
+
+// ---- Build frontier: what a scheduler tick sees ----
+
+// A task in a build's scheduling frontier. Statuses are the task's *global*
+// (environment-wide) status, not "its status in this build".
+export interface FrontierTaskRef {
+  task_id: string;
+  latest_status: TaskStatus;
+  latest_executor?: string | null;
+  latest_executor_ref?: string | null;
+  latest_executor_metadata?: ExecutorMetadata | null;
+  latest_status_at?: string | null;
+}
+
+/**
+ * An upstream *outside* this build that holds one of its tasks back.
+ *
+ * Task rows and their dependency edges are per environment, not per build,
+ * so an upstream left non-COMPLETED by some other build still gates this
+ * build's downstream tasks — silently, since such an upstream need not be
+ * part of this build's task set at all.
+ */
+export interface FrontierExternalBlocker {
+  // The blocked task — always a member of THIS build's task set.
+  task_id: string;
+  // The blocker. Identity is spelled out because the viewer may never have
+  // seen this task. `blocking_task_namespace` is "" for the default namespace.
+  blocking_task_id: string;
+  blocking_task_namespace: string;
+  blocking_task_name: string;
+  // Never "completed" (a completed upstream does not gate anything).
+  blocking_status: TaskStatus;
+  // When the blocker entered that status, and the build whose event put it
+  // there. The build id is null only for rows predating status
+  // denormalisation — with it, there is nothing to address a remedy to.
+  blocking_status_at?: string | null;
+  blocking_status_build_id?: string | null;
+  // Whether the blocker is also part of THIS build's task set. False is the
+  // pathological case: this build has never registered it and can only wait
+  // for whoever owns it. True still blocks, but the task is at least visible
+  // in this build's own table.
+  blocking_in_build: boolean;
+}
+
+export interface BuildFrontier {
+  build_id: string;
+  build_status: BuildStatus;
+  // A scheduler wake-up is pending for this build.
+  needs_tick: boolean;
+  root_task_ids: string[];
+  roots: FrontierTaskRef[];
+  // Global status -> count, over every task the build has events for.
+  status_counts: Record<string, number>;
+  actionable: FrontierTaskRef[];
+  running: FrontierTaskRef[];
+  /**
+   * **Populated only when the build has nothing actionable and nothing
+   * running** — i.e. only when it already looks stalled, which is the only
+   * state in which the answer matters and keeps a per-edge sort off the hot
+   * path of every healthy build's poll.
+   *
+   * So an empty list means *"not externally blocked, OR not stalled"*. Never
+   * render it as "no blockers" while the build is still progressing.
+   */
+  blocked_by_external: FrontierExternalBlocker[];
+  // The blocker list is capped (it is a diagnostic, not a work queue — a
+  // truncated list still proves "waiting, not stuck").
+  blocked_by_external_truncated: boolean;
+  reactive_app_name?: string | null;
+  reactive_tick_kwargs?: Record<string, unknown> | null;
+}
+
+// ---- Persisted reactive-scheduler tick summaries ----
+
+// Why a tick did (or did not) do anything. Widened to `string` at the
+// response boundary so an outcome a newer server adds still renders.
+export type TickOutcome =
+  | "not_reactive"
+  | "lease_held"
+  | "terminal"
+  | "lingered_out"
+  | "foreign_app";
+
+export interface BuildTickSummary {
+  id: string;
+  build_id: string;
+  // A TickOutcome value; typed wide on purpose (see above).
+  outcome: string;
+  /**
+   * The tick's own summary, verbatim and **deliberately open**: the SDK
+   * grows counters (`spawned`, `claim_denied`, `limit_denied`, …) faster
+   * than this UI ships. Render known keys with a label and unknown ones
+   * generically — never drop what you don't recognise.
+   */
+  summary: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface BuildTickSummaryListResponse {
+  build_id: string;
+  summaries: BuildTickSummary[];
 }
 
 // Task with status (from build context)
@@ -116,6 +288,27 @@ export interface Task {
   latest_executor?: string | null;
   latest_executor_ref?: string | null;
   latest_executor_metadata?: ExecutorMetadata | null;
+  // ---- Global (environment-wide) status, i.e. "who holds the claim". ----
+  //
+  // A task row is unique per (environment_id, task_id), so `latest_status`
+  // is NOT "the status within some build": a task left RUNNING by any build
+  // denies the execution claim to every other build that needs it, until
+  // something moves it. These three answer "who is holding this claim, and
+  // since when":
+  //
+  //   latest_status          — the environment-wide status.
+  //   latest_status_at       — when it entered that status ("running since").
+  //   latest_status_build_id — the build whose event produced it: the claim
+  //                            holder. Null only on rows predating status
+  //                            denormalisation.
+  //
+  // `GET /tasks` returns these; `GET /tasks/search` does not (it reports the
+  // same status under `status` / `status_build_id` and has no timestamp), so
+  // claim triage reads the former. All optional — purely additive over the
+  // older response shape.
+  latest_status?: TaskStatus | null;
+  latest_status_at?: string | null;
+  latest_status_build_id?: string | null;
 }
 
 export interface TaskListResponse {
