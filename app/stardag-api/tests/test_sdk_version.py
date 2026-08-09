@@ -322,3 +322,32 @@ async def test_no_minimum_configured_refuses_nothing(client: AsyncClient):
     assert sdk_compat_settings.minimum_version is None
     response = await client.get(SDK_ENDPOINT, headers={SDK_VERSION_HEADER: "0.0.1"})
     assert response.status_code == 200
+
+
+def test_health_is_exempt_with_and_without_a_trailing_slash():
+    """`redirect_slashes` sends `/health/` through the router, which runs
+    *after* this middleware — so the canonical spelling alone would gate the
+    variant with a 426 before the redirect could happen."""
+    from stardag_api.middleware.sdk_version import _EXEMPT_PATHS
+
+    for path in ("/health", "/health/", "/api/v1/version", "/api/v1/version/"):
+        assert path in _EXEMPT_PATHS
+
+
+def test_an_absent_header_is_recorded_not_skipped():
+    """Allowed, but observed: "how many callers do not send the header yet"
+    is the number a floor has to be set against."""
+    from stardag_api.sdk_compat import (
+        _seen_sdk_versions,
+        clear_seen_sdk_versions,
+        record_sdk_version,
+    )
+
+    clear_seen_sdk_versions()
+    record_sdk_version(None, None)
+    assert _seen_sdk_versions == {"<absent>"}
+
+    # Deduped like any other label, so it cannot flood the log.
+    record_sdk_version(None, None)
+    assert _seen_sdk_versions == {"<absent>"}
+    clear_seen_sdk_versions()
