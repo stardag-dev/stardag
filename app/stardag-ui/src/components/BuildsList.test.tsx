@@ -206,9 +206,7 @@ describe("BuildsList", () => {
         }),
       ),
     );
-    expect(
-      await screen.findByText(/1 build idle ≥ 24h, stalest first/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/1 build running, idle ≥ 24h/)).toBeInTheDocument();
     // No over-fetching and no local caveat: `total` is exact and
     // pagination is server-side for this filter.
     expect(fetchBuilds).not.toHaveBeenCalledWith(
@@ -236,9 +234,7 @@ describe("BuildsList", () => {
     );
 
     await waitFor(() =>
-      expect(
-        screen.getByText("2 builds idle ≥ 24h, stalest first"),
-      ).toBeInTheDocument(),
+      expect(screen.getByText("2 builds running, idle ≥ 24h")).toBeInTheDocument(),
     );
     const names = screen
       .getAllByRole("row")

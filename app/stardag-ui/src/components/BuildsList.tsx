@@ -62,10 +62,8 @@ const STATUS_LABELS: Record<BuildStatus, string> = {
 const STALE_HINT_SECONDS = 24 * 3600;
 
 const LAST_ACTIVITY_EXPLAINER =
-  "Newest of the build's whole event stream (task events included), its " +
-  "last lifecycle transition, and any pending scheduler wake-up. This is " +
-  "the signal stale-build cleanup measures idleness against — not the " +
-  "build's last lifecycle change, which stays put while tasks are running.";
+  "The last thing that happened anywhere in this build — including its " +
+  "tasks, and any scheduler wake-up already queued.";
 
 // With an idle filter the API returns stalest-first, but it sorts on the
 // index-backed `last_active_at` proxy rather than on the composed
@@ -74,21 +72,18 @@ const LAST_ACTIVITY_EXPLAINER =
 // rather than "fixed" by re-sorting the page, which would only impose a
 // local ordering on one page of a server-side result set.
 const STALEST_FIRST_CAVEAT =
-  "Stalest first. The server orders on the build's last lifecycle change, " +
-  "an index-backed proxy for last activity, so this column runs close to — " +
-  "but not strictly — oldest-first.";
+  "Stalest first, approximately — ordered on the " +
+  "build's last lifecycle change rather than this composed timestamp.";
 
-// Statuses other than "running" cannot be combined with an idle filter:
-// only RUNNING has a SQL predicate, so the API answers 422 rather than
-// serving an approximate `total` that looks exact. The controls below make
-// that combination unreachable instead of letting a user click into it.
+// An idle filter means "running, but stuck", so the server already implies
+// RUNNING and rejects any other status as a contradiction. The controls
+// below make that pairing unreachable rather than letting a user click
+// into a 422.
 const IDLE_COMPATIBLE_STATUSES: (BuildStatus | "")[] = ["", "running"];
 
 const STATUS_WITH_IDLE_HINT =
-  "An idle filter can only be combined with All statuses or Running. The " +
-  "other statuses are derived by scanning a bounded window of builds, so " +
-  "pairing them with idleness would silently drop the oldest matches — " +
-  "exactly the builds a staleness query is looking for.";
+  "“Idle for” finds builds that are still running but stuck, so it only " +
+  "combines with Running (or All). A build that finished isn’t idle.";
 
 export function BuildsList({ onSelectBuild }: BuildsListProps) {
   const { activeEnvironment, activeWorkspaceRole } = useEnvironment();
@@ -312,7 +307,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
                   title={blocked ? STATUS_WITH_IDLE_HINT : undefined}
                 >
                   {STATUS_LABELS[status]}
-                  {blocked ? " — n/a with an idle filter" : ""}
+                  {blocked ? " — not idle-filterable" : ""}
                 </option>
               );
             })}
@@ -373,7 +368,7 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
               ? "Loading…"
               : `${total} build${total === 1 ? "" : "s"}` +
                 (idleFilterActive
-                  ? ` idle ≥ ${formatIdleThreshold(idleForSeconds)}, stalest first`
+                  ? ` running, idle ≥ ${formatIdleThreshold(idleForSeconds)}`
                   : "")}
           </span>
           {isAdmin ? (
