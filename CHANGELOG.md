@@ -468,6 +468,7 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   before the original exception propagates (a failure to record that event
   is logged, never allowed to mask the root cause).
   ([#208](https://github.com/stardag-dev/stardag/issues/208) A4)
+
 ### Registry API
 
 - **The API now knows which SDK is calling it, and can say so when that
