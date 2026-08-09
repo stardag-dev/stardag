@@ -56,10 +56,13 @@ export type SchedulingPanelForm = "hidden" | "collapsed" | "stalled";
  * or running tasks left but roots are not complete" even when an upstream
  * owned by another build is legitimately holding it up.
  *
- * Terminal states are qualified rather than blanket-included:
+ * Terminal states are qualified rather than blanket-included. Note this
+ * whole paragraph is about the **`"stalled"`** form only — a terminal
+ * reactive build still gets the quiet `"collapsed"` strip, which is the
+ * one route to its tick trail and says nothing about blockers:
  *
- * - `completed` / `cancelled`: never. The build is not "not progressing",
- *   it is done, or a user stopped it on purpose.
+ * - `completed` / `cancelled`: never *stalled*. The build is not "not
+ *   progressing", it is done, or a user stopped it on purpose.
  * - `failed`: only when the failure has the stuck-build shape — an
  *   external blocker was reported, or the build failed while *nothing in
  *   it failed*. An ordinary DAG failure (a task raised) explains itself

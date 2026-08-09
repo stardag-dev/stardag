@@ -337,8 +337,10 @@ export function BuildSchedulingPanel({
   }, [buildId]);
 
   const form = frontier ? schedulingPanelForm(frontier, buildStatus) : "hidden";
-  // Tick history is fetched only when it will actually be read: always for
-  // a stalled build, and on demand behind the collapsed form's disclosure.
+  // Tick history is fetched only when it will actually be read, which in
+  // both forms now means "the disclosure is open" — the stalled form keeps
+  // its trail behind `details` so the panel stays short enough to leave the
+  // DAG and the task table on screen.
   const wantTicks =
     (form === "stalled" && detailsOpen) || (form === "collapsed" && stripOpen);
 
