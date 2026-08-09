@@ -202,6 +202,29 @@ describe("ClaimTriage", () => {
     });
   });
 
+  it("reads the global status, not this build's, when judging a release", async () => {
+    // The server reports both: `status` is what *this build* did (it did
+    // cancel), `latest_status` is what the claim says (COMPLETED is sticky,
+    // so nothing was held). Reading the former reports every no-op as a
+    // success — the bug this whole guard exists to prevent.
+    vi.mocked(cancelTask).mockResolvedValue("completed");
+    const user = userEvent.setup();
+    renderTriage();
+    await screen.findByText("GrindBeans");
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select all claims on this page" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Release claims" }));
+    await user.click(
+      screen.getAllByRole("button", { name: "Release claims" }).slice(-1)[0],
+    );
+
+    const banner = await screen.findByRole("status");
+    expect(banner).toHaveTextContent("Released 0 of 2 claims.");
+    expect(banner).toHaveTextContent(/already completed — no claim to release/);
+  });
+
   it("says so when a task finished before its claim could be released", async () => {
     // The race that survives the guard above: held when listed, finished
     // by the time the release lands. The write succeeds; COMPLETED is

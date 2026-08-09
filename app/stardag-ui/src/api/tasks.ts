@@ -446,13 +446,18 @@ export async function cancelTask(
   if (!response.ok) {
     throw new Error(await errorMessage(response, "Failed to cancel task"));
   }
-  // The resulting status, which is not always `cancelled`: the server
-  // records the event unconditionally — that is what makes a cancel racing
-  // a completion benign — but COMPLETED is sticky and wins. A caller that
-  // reports "released" without looking is lying in exactly the case the
-  // user most needs told about.
-  const body: unknown = await response.json();
-  return (body as { status: TaskStatus }).status;
+  // `latest_status`, NOT `status`. `status` is the task's status *within
+  // this build*, so cancelling a task that another build already completed
+  // comes back "cancelled" — this build did cancel it — while the claim was
+  // never held and nothing was released. `latest_status` is the
+  // environment-global answer, which is what "did the release work?" means.
+  // Older servers omit it; fall back rather than reporting a failure that
+  // did not happen.
+  const body = (await response.json()) as {
+    status: TaskStatus;
+    latest_status?: TaskStatus | null;
+  };
+  return body.latest_status ?? body.status;
 }
 
 /**
