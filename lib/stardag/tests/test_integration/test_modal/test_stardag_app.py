@@ -2297,7 +2297,7 @@ class TestReactiveRetrigger:
             executor_metadata={
                 "kind": "modal",
                 "app_name": app.name,
-                "function_name": "tick",
+                "function_name": "bootstrap",
                 "reactive": True,
                 "workspace": "test-workspace",
                 "environment": "test-env",
@@ -2450,6 +2450,38 @@ class TestWatchdogSweep:
         # operator needs to know the cap was hit on RELEVANT builds.
         assert "2+ reactive builds owned by 'an-app'" in caplog.text
         assert "reduce the number of concurrent reactive builds" in caplog.text
+
+
+class TestTriggerExecutorMetadata:
+    """`function_name` records what the trigger actually spawned.
+
+    Operator and UI surfaces render it as "what was invoked", so naming a
+    function that did not run sends a reader to the wrong logs for the
+    failure that stopped the build from starting.
+    """
+
+    @staticmethod
+    def _app(**kwargs) -> StardagApp:
+        return StardagApp(
+            "an-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            **kwargs,
+        )
+
+    def test_reactive_trigger_records_bootstrap(self):
+        metadata = self._app()._build_executor_metadata(reactive=True)
+        assert metadata["function_name"] == "bootstrap"
+
+    def test_local_discovery_records_tick(self):
+        """Local discovery has no bootstrap to spawn — the trigger goes
+        straight to the first tick."""
+        app = self._app(reactive_discovery="local")
+        assert app._build_executor_metadata(reactive=True)["function_name"] == "tick"
+
+    def test_resident_trigger_records_build(self):
+        metadata = self._app()._build_executor_metadata(reactive=False)
+        assert metadata["function_name"] == "build"
 
 
 class TestTickFunctionTimeout:

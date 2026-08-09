@@ -504,7 +504,10 @@ class BuildTriggerResult(typing.NamedTuple):
         function_call: The Modal ``FunctionCall`` handle for the one
             invocation this trigger spawned — the ``build`` function for a
             resident build, and the ``bootstrap`` function for a reactive
-            one. Call ``.get()`` to block on the result if needed.
+            one. The exception is ``reactive_discovery="local"``, which
+            discovers on the triggering machine and therefore has no
+            bootstrap to spawn: the handle is the first ``tick`` instead.
+            Call ``.get()`` to block on the result if needed.
 
             For reactive builds the bootstrap call is the honest handle:
             it is what the trigger actually spawned, and it is the call
@@ -3363,11 +3366,28 @@ class StardagApp:
         return BuildTriggerResult(build_id=build_id, function_call=function_call)
 
     def _build_executor_metadata(self, *, reactive: bool) -> dict[str, typing.Any]:
-        """Build-level executor metadata for a trigger (best-effort)."""
+        """Build-level executor metadata for a trigger (best-effort).
+
+        ``function_name`` is the function the trigger actually spawns, not
+        the one that does most of the work afterwards: operator and UI
+        surfaces render it as "what was invoked", and a reactive build
+        discovered in Modal is spawned as ``bootstrap`` (which then arms the
+        build and spawns the first tick). Naming ``tick`` there would send a
+        reader looking through the wrong function's logs for the failure
+        that stopped the build from starting.
+        """
+        if not reactive:
+            spawned = "build"
+        elif self.reactive_discovery == "local":
+            # Local discovery skips the bootstrap and spawns the first tick
+            # directly, so `tick` is the honest answer in that mode.
+            spawned = "tick"
+        else:
+            spawned = "bootstrap"
         metadata: dict[str, typing.Any] = {
             "kind": MODAL_EXECUTOR_NAME,
             "app_name": self.name,
-            "function_name": "tick" if reactive else "build",
+            "function_name": spawned,
             "reactive": reactive,
         }
         try:
