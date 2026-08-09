@@ -143,6 +143,12 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
 
   const loadBuilds = useCallback(async () => {
     if (!activeEnvironment?.id) {
+      // Invalidate any in-flight request before bailing. Without this an
+      // earlier fetch can still satisfy its own `fresh()` check and write
+      // the previous environment's builds into state *after* the UI has
+      // been gated — the exact leak the epoch exists to prevent, on the
+      // one path that skipped bumping it.
+      fetchEpochRef.current += 1;
       // Don't flip loading=false here — the parent gate handles the
       // no-environment case, and clearing loading would briefly leak
       // the empty-state UI on env transitions.
@@ -162,6 +168,9 @@ export function BuildsList({ onSelectBuild }: BuildsListProps) {
       lastFetchedEnvIdRef.current !== activeEnvironment.id &&
       page !== 1
     ) {
+      // Same reasoning as above: this bail-out abandons the current
+      // render's fetch intent, so anything already in flight is stale.
+      fetchEpochRef.current += 1;
       setPage(1);
       return;
     }
