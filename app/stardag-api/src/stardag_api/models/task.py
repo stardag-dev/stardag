@@ -51,6 +51,30 @@ class Task(Base, TimestampMixin):
         # Covers the common "list/search tasks in env, newest first" pattern
         # used by the Task Explorer UI and /tasks/values, /tasks/keys.
         Index("ix_tasks_environment_created", "environment_id", "created_at"),
+        # Serves the claim-triage query: "tasks in THIS environment with
+        # status X, oldest first" (GET /tasks?status=running, and the same
+        # shape with status_older_than).
+        #
+        # Neither existing index covers it. The single-column index on
+        # latest_status spans every environment, so in a multi-tenant
+        # deployment "RUNNING" selects every workspace's running tasks
+        # before the environment filter narrows them; the environment-keyed
+        # composites don't mention status at all. The status distribution is
+        # also badly skewed — COMPLETED dominates a mature environment while
+        # RUNNING is a handful of rows — which is exactly the case a
+        # composite turns from a heap scan into a few index tuples.
+        #
+        # latest_status_at is the third column, not a separate index: it
+        # makes the range predicate (status_older_than) and the ORDER BY of
+        # a single-status query resolvable from the index alone. A
+        # multi-value status filter still needs a sort, but over an already
+        # tiny row set.
+        Index(
+            "ix_tasks_environment_status",
+            "environment_id",
+            "latest_status",
+            "latest_status_at",
+        ),
     )
 
     # UUID7 primary key for time-sortable, globally unique IDs

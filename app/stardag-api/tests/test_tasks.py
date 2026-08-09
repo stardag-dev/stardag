@@ -212,3 +212,193 @@ async def test_get_task_metadata_empty_version(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert data["version"] == ""  # Empty string for missing version
+
+
+# ---------------------------------------------------------------------------
+# Enumerating tasks by status: "which tasks are holding an execution claim?"
+# ---------------------------------------------------------------------------
+
+
+def _register(task_id: str) -> dict:
+    return {
+        "task_id": task_id,
+        "task_namespace": "ns",
+        "task_name": "T",
+        "task_data": {},
+    }
+
+
+async def _seed_statuses(client: AsyncClient) -> str:
+    """One task per interesting status, all in one build. Returns build id."""
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for task_id in ("st-pending", "st-running", "st-suspended", "st-done"):
+        await client.post(f"/api/v1/builds/{build_id}/tasks", json=_register(task_id))
+    await client.post(f"/api/v1/builds/{build_id}/tasks/st-running/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/st-suspended/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/st-suspended/suspend")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/st-done/start")
+    await client.post(f"/api/v1/builds/{build_id}/tasks/st-done/complete")
+    return build_id
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_status_filter_single_and_multi(client: AsyncClient):
+    """?status=running finds claim holders; the param repeats for a union."""
+    await _seed_statuses(client)
+
+    running = (await client.get("/api/v1/tasks", params={"status": "running"})).json()
+    assert [t["task_id"] for t in running["tasks"]] == ["st-running"]
+    assert running["total"] == 1
+
+    # Repeated values union. Suspended matters too: an abandoned suspension
+    # is equally unschedulable, and retryable since #208 A2.
+    both = (
+        await client.get(
+            "/api/v1/tasks", params=[("status", "running"), ("status", "suspended")]
+        )
+    ).json()
+    assert sorted(t["task_id"] for t in both["tasks"]) == ["st-running", "st-suspended"]
+    assert both["total"] == 2
+
+    # Unfiltered still returns everything (no behaviour change).
+    assert (await client.get("/api/v1/tasks")).json()["total"] == 4
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_status_filter_rejects_unknown_status(client: AsyncClient):
+    response = await client.get("/api/v1/tasks", params={"status": "not-a-status"})
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_task_response_carries_latest_status_fields(client: AsyncClient):
+    """latest_status / latest_status_at / latest_status_build_id — the last
+    is the claim holder, and without it a blocked build cannot say who to
+    ask."""
+    build_id = await _seed_statuses(client)
+
+    listed = (await client.get("/api/v1/tasks", params={"status": "running"})).json()
+    task = listed["tasks"][0]
+    assert task["latest_status"] == "running"
+    assert task["latest_status_at"] is not None
+    assert task["latest_status_build_id"] == build_id
+
+    # Same on the single-task read and on registration.
+    single = (await client.get("/api/v1/tasks/st-running")).json()
+    assert single["latest_status"] == "running"
+    assert single["latest_status_build_id"] == build_id
+
+    registered = (
+        await client.post(
+            f"/api/v1/builds/{build_id}/tasks", json=_register("st-fresh")
+        )
+    ).json()
+    assert registered["latest_status"] == "pending"
+    assert registered["latest_status_build_id"] == build_id
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_status_older_than_is_a_strict_boundary(
+    client: AsyncClient, async_session
+):
+    """`status_older_than` is `<`, not `<=`: a task whose status landed
+    exactly at the cutoff is not stale yet."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from stardag_api.models import Task
+
+    await _seed_statuses(client)
+
+    cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = (await async_session.execute(select(Task))).scalars().all()
+    stamps = {
+        "st-running": cutoff - timedelta(seconds=1),  # older → matches
+        "st-suspended": cutoff,  # exactly at cutoff → does not
+        "st-pending": cutoff + timedelta(seconds=1),  # newer → does not
+    }
+    for row in rows:
+        if row.task_id in stamps:
+            row.latest_status_at = stamps[row.task_id]
+    await async_session.commit()
+
+    stale = (
+        await client.get(
+            "/api/v1/tasks", params={"status_older_than": cutoff.isoformat()}
+        )
+    ).json()
+    assert [t["task_id"] for t in stale["tasks"]] == ["st-running"]
+
+    # Composes with the status filter.
+    stale_suspended = (
+        await client.get(
+            "/api/v1/tasks",
+            params={"status_older_than": cutoff.isoformat(), "status": "suspended"},
+        )
+    ).json()
+    assert stale_suspended["tasks"] == []
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_status_filter_orders_oldest_claim_first(
+    client: AsyncClient, async_session
+):
+    """Triage order: the longest-held claim is the most likely abandoned."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from stardag_api.models import Task
+
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    for task_id in ("claim-new", "claim-old", "claim-mid"):
+        await client.post(f"/api/v1/builds/{build_id}/tasks", json=_register(task_id))
+        await client.post(f"/api/v1/builds/{build_id}/tasks/{task_id}/start")
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ages = {"claim-old": 0, "claim-mid": 10, "claim-new": 20}
+    for row in (await async_session.execute(select(Task))).scalars().all():
+        row.latest_status_at = base + timedelta(minutes=ages[row.task_id])
+    await async_session.commit()
+
+    listed = (await client.get("/api/v1/tasks", params={"status": "running"})).json()
+    assert [t["task_id"] for t in listed["tasks"]] == [
+        "claim-old",
+        "claim-mid",
+        "claim-new",
+    ]
+
+    # Unfiltered keeps the historical newest-registered-first order.
+    unfiltered = (await client.get("/api/v1/tasks")).json()
+    assert [t["task_id"] for t in unfiltered["tasks"]] == [
+        "claim-mid",
+        "claim-old",
+        "claim-new",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_status_filter_environment_isolation(
+    client: AsyncClient, as_environment_b
+):
+    """Claim enumeration is environment-scoped — a shared workspace must not
+    leak another environment's running tasks."""
+    await _seed_statuses(client)
+
+    with as_environment_b():
+        other = (await client.get("/api/v1/tasks", params={"status": "running"})).json()
+        assert other == {"tasks": [], "total": 0, "page": 1, "page_size": 20}
+
+    mine = (await client.get("/api/v1/tasks", params={"status": "running"})).json()
+    assert [t["task_id"] for t in mine["tasks"]] == ["st-running"]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_status_filter_requires_auth(
+    unauthenticated_client: AsyncClient,
+):
+    response = await unauthenticated_client.get(
+        "/api/v1/tasks", params={"status": "running"}
+    )
+    assert response.status_code in (401, 403)

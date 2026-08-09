@@ -1,5 +1,6 @@
 """Task routes - workspace-scoped task queries."""
 
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.auth import SdkAuth, require_sdk_auth
 from stardag_api.db import get_db
-from stardag_api.models import Event, Task, TaskArtifact
+from stardag_api.models import Event, Task, TaskArtifact, TaskStatus
 from stardag_api.schemas import (
     EventResponse,
     TaskGraphExtendedResponse,
@@ -33,11 +34,61 @@ async def list_tasks(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     task_name: str | None = None,
     task_namespace: str | None = None,
+    status: Annotated[
+        list[TaskStatus] | None,
+        Query(
+            description=(
+                "Filter by the task's *global* (environment-wide) status. "
+                "Repeatable — `?status=running&status=suspended` matches "
+                "either."
+            ),
+        ),
+    ] = None,
+    status_older_than: Annotated[
+        datetime | None,
+        Query(
+            description=(
+                "Only tasks whose current status was recorded strictly "
+                "before this ISO-8601 timestamp (`latest_status_at < "
+                "status_older_than`). Tasks with no recorded "
+                "`latest_status_at` never match."
+            ),
+        ),
+    ] = None,
 ):
     """List tasks in an environment.
 
     Requires authentication via API key or JWT token with environment_id.
     The workspace is determined from the authentication context.
+
+    The ``status`` filter answers the operational question "which tasks in
+    this environment are holding an execution claim?" — i.e.
+    ``?status=running``. ``latest_status`` is environment-global (task rows
+    are unique per ``(environment_id, task_id)``), so a task left RUNNING by
+    a build whose orchestrator died denies the claim to *every* future build
+    that needs it, indefinitely. ``suspended`` matters for the same reason:
+    it is an abandoned execution that gates everything downstream of it.
+
+    ``status_older_than`` is the staleness cut for triage. It takes an
+    **absolute ISO-8601 timestamp**, not a duration, for two reasons:
+
+    - It is reproducible. Paging through matches with a duration would move
+      the cutoff on every request (the server re-evaluates ``now() -
+      duration`` each time), so rows can drift in and out between pages.
+    - It is exact. "What did I ask for?" is answerable from the request
+      alone, and the same cutoff can be replayed later against the log.
+
+    The counter-argument is client/server clock skew, since the client
+    computes the timestamp — but skew is seconds under NTP while realistic
+    staleness thresholds are hours to days. A CLI wanting ``--older-than
+    24h`` converts locally. (Contrast the build reaper, whose threshold is a
+    recurring *policy* and therefore a duration: ``idle_for_seconds``.)
+
+    Ordering: newest-first by registration time, as always — **except**
+    when a status/staleness filter is applied, where it becomes oldest
+    claim first (``latest_status_at`` ascending). That is the triage order:
+    the task that has been RUNNING longest is the most likely to be
+    abandoned and the most expensive to leave holding a claim.
     """
     environment_id = auth.environment_id
     query = select(Task).where(Task.environment_id == environment_id)
@@ -53,13 +104,34 @@ async def list_tasks(
     if task_namespace:
         query = query.where(Task.task_namespace == task_namespace)
         count_query = count_query.where(Task.task_namespace == task_namespace)
+    if status:
+        # Dedup so a repeated value doesn't widen the IN list pointlessly.
+        status_filter = Task.latest_status.in_(list(dict.fromkeys(status)))
+        query = query.where(status_filter)
+        count_query = count_query.where(status_filter)
+    if status_older_than is not None:
+        # Strictly older. A NULL latest_status_at (a row predating status
+        # denormalisation, or a phantom that never had an event) is excluded
+        # by SQL's NULL comparison semantics — correct here: we cannot claim
+        # such a row is stale, and a cleanup workflow must not act on rows
+        # whose age is unknown.
+        staleness_filter = Task.latest_status_at < status_older_than
+        query = query.where(staleness_filter)
+        count_query = count_query.where(staleness_filter)
 
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
+    if status or status_older_than is not None:
+        # Oldest claim first (see docstring). NULLS LAST explicitly rather
+        # than by dialect default — Postgres and SQLite disagree on where
+        # NULLs sort in ASC, and a paginated list must not depend on that.
+        # ``Task.id`` (UUID7) breaks timestamp ties deterministically so
+        # pagination can't duplicate or skip rows.
+        ordering = (Task.latest_status_at.asc().nulls_last(), Task.id.asc())
+    else:
+        ordering = (Task.created_at.desc(),)
     result = await db.execute(
-        query.order_by(Task.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+        query.order_by(*ordering).offset((page - 1) * page_size).limit(page_size)
     )
     tasks = result.scalars().all()
 
@@ -79,6 +151,9 @@ async def list_tasks(
                 latest_executor=t.latest_executor,
                 latest_executor_ref=t.latest_executor_ref,
                 latest_executor_metadata=t.latest_executor_metadata,
+                latest_status=t.latest_status,
+                latest_status_at=t.latest_status_at,
+                latest_status_build_id=t.latest_status_build_id,
             )
             for t in tasks
         ],
@@ -173,6 +248,9 @@ async def get_task(
         latest_executor=task.latest_executor,
         latest_executor_ref=task.latest_executor_ref,
         latest_executor_metadata=task.latest_executor_metadata,
+        latest_status=task.latest_status,
+        latest_status_at=task.latest_status_at,
+        latest_status_build_id=task.latest_status_build_id,
     )
 
 

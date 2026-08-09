@@ -61,6 +61,48 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
+class ReaperSettings(BaseSettings):
+    """Optional in-process sweep that cancels abandoned RUNNING builds.
+
+    Same operation as ``POST /builds/bulk-cancel`` with ``idle_for_seconds``
+    — the endpoint is the supported, auditable way to drive it (a CLI
+    ``builds cleanup`` sits on top). This is for deployments that want it to
+    happen unattended, with nothing scheduled outside the API process.
+
+    **Off by default**, and deliberately so: a reaper cancels other people's
+    work, and whether a build quiet for N hours is abandoned or merely slow
+    is a judgement only the operator of that environment can make. Turn it
+    on once you have run the endpoint with ``dry_run`` and agree with what
+    it selects.
+
+    **Multi-replica caveat.** Every replica runs its own timer; there is no
+    leader election. Cancelling an already-terminal build is a no-op, so
+    concurrent sweeps are wasteful, not wrong — they duplicate the scan and
+    race harmlessly on the same rows. With more than a couple of replicas,
+    prefer an external scheduler calling the endpoint once.
+    """
+
+    enabled: bool = False
+    # Seconds between sweeps. The first runs one interval after startup, so
+    # a crash-looping process never reaps.
+    interval_seconds: int = 900
+    # A build with no activity for this long is considered abandoned. The
+    # default is deliberately generous: a day of complete silence is hard to
+    # explain for a live build, and the cost of reaping too eagerly (killing
+    # real work) is far higher than reaping late.
+    idle_for_seconds: int = 24 * 60 * 60
+    # Include reactive builds. Off: they are quiet between ticks by design
+    # and have their own watchdog.
+    include_reactive: bool = False
+    # Also release the claims the reaped builds hold. On — the whole point.
+    cascade: bool = True
+    # Builds cancelled per sweep, across all environments. Bounds the write
+    # set of a single transaction; a backlog drains over successive sweeps.
+    max_builds_per_sweep: int = 100
+
+    model_config = SettingsConfigDict(env_prefix="STARDAG_API_REAPER_")
+
+
 class JWTSettings(BaseSettings):
     """Settings for internal JWT signing and validation."""
 
@@ -198,6 +240,7 @@ class OIDCSettings(BaseSettings):
 
 
 settings = Settings()
+reaper_settings = ReaperSettings()
 jwt_settings = JWTSettings()
 auth_settings = AuthSettings()
 oidc_settings = OIDCSettings()

@@ -42,6 +42,65 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   undocumented cancel-then-retry. `running` remains non-retryable on
   purpose: it holds a live execution claim, and releasing that is
   cancellation, not retry.
+- **`GET /tasks` can enumerate claim holders**
+  ([#208](https://github.com/stardag-dev/stardag/issues/208)). New
+  `status` filter (repeatable, so `?status=running&status=suspended`
+  works) and `status_older_than` (an absolute ISO-8601 cutoff) answer
+  "which tasks in this environment are holding an execution claim, and for
+  how long?". `latest_status` is environment-global, so a task left RUNNING
+  by a build whose orchestrator died denies the claim to every future build
+  that needs it. When either filter is applied the list is ordered oldest
+  claim first; unfiltered ordering is unchanged. Backed by a new
+  `(environment_id, latest_status, latest_status_at)` index.
+- **`TaskResponse` now carries `latest_status`, `latest_status_at` and
+  `latest_status_build_id`.** The last is the claim holder — "running under
+  build Y since T" — and was previously unavailable outside the build
+  frontier. Purely additive.
+- **`POST /builds/{id}/cancel` accepts `cascade=true`.** Cancelling a build
+  wrote a single build-level event and nothing else, so the claims and
+  concurrency-limit slots its tasks held survived it indefinitely. With
+  `cascade` the build's RUNNING/SUSPENDED tasks are cancelled in the same
+  transaction. Scoped to tasks whose current status _this_ build produced,
+  so it can never declare another build's live execution dead; PENDING tasks
+  are left alone for the same reason. Default off — it is a behaviour change,
+  and the SDK's fail-fast path cancels its own running tasks.
+  The response gains `cascaded_task_ids` / `cascaded_task_count`.
+- **New `POST /builds/bulk-cancel`: bulk cleanup and a stale-build reaper.**
+  Nothing terminated abandoned builds: build status is derived from events,
+  so a build whose orchestrator died without emitting a terminal one stays
+  RUNNING forever, and interrupted local runs, crashed CI jobs and failed
+  triggers accumulate permanently. One endpoint serves both shapes —
+  `build_ids` for an explicit set, `idle_for_seconds` for staleness — with
+  `dry_run`, `cascade` (on by default here), and reactive builds excluded
+  unless asked for. Only builds whose derived status is RUNNING are ever
+  touched, so it is idempotent.
+
+  **Idleness is measured on activity, not on `last_active_at`.** That column
+  is bumped by build-level lifecycle transitions only — task events skip it
+  so worker traffic doesn't contend on the build row — so a build running
+  tasks for three days still shows its BUILD_STARTED timestamp there, and
+  reaping on it would cancel live work. The signal used is the newest of the
+  build's entire event stream, its `last_active_at`, and any pending
+  scheduler wake-up (`needs_tick_at`).
+
+- **`BuildResponse` exposes `last_active_at` and `last_activity_at`** — the
+  ordering column and the reaper's idleness signal respectively — so a UI can
+  show operators the same number the reaper acts on.
+- **`GET /builds` accepts `idle_for_seconds`**, using the same idleness
+  definition and the same 60s floor as `bulk-cancel` (one shared SQL
+  predicate, not a second implementation) — so a client can list what the
+  reaper would cancel before cancelling it. Because it is a real SQL
+  predicate, `total` is an exact `COUNT(*)` and pagination is server-side
+  and unbounded, unlike the derived-`status` filter's bounded window.
+  Ordering flips to stalest-first when it is given. `status=running` is
+  accepted alongside it and then also resolves in SQL, so the
+  abandoned-build query stays exact past the 500-candidate scan cap; any
+  other `status` value combined with `idle_for_seconds` is rejected with
+  422 rather than served an approximate total that looks exact.
+- **Optional unattended sweep** (`STARDAG_API_REAPER_ENABLED`, off by
+  default) runs the same operation on a timer inside the API process. Note
+  that every replica runs its own timer with no leader election; cancellation
+  is idempotent, so concurrent sweeps are wasteful rather than wrong.
 
 ### SDK
 
