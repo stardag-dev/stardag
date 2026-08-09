@@ -1,5 +1,6 @@
-from typing import Literal
+from typing import Annotated, Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stardag_api.limits import LimitsSettings
@@ -28,6 +29,14 @@ class Settings(BaseSettings):
 
     # CORS origins (comma-separated)
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
+
+    # How many reactive scheduler tick summaries to retain per build.
+    # Older ones are pruned on insert (see routes/tick_summaries.py). Not
+    # a SaaS guardrail (those live in LimitsSettings and default to
+    # "unlimited") — an always-on retention window, since the point of
+    # the table is a bounded trail, and the useful window is the recent
+    # past: a stalled build repeats the same outcome forever.
+    max_tick_summaries_per_build: Annotated[int, Field(ge=1)] = 50
 
     model_config = SettingsConfigDict(env_prefix="STARDAG_API_")
 

@@ -18,6 +18,7 @@ from stardag_api.routes import (
     search_router,
     target_roots_router,
     tasks_router,
+    tick_summaries_router,
     ui_router,
 )
 
@@ -82,6 +83,9 @@ app.include_router(workspaces_router, prefix="/api/v1")
 
 # SDK routes (API key or internal JWT auth)
 app.include_router(builds_router, prefix="/api/v1")
+# Build sub-resource, same /builds prefix — its own module only because
+# routes/builds.py is already large.
+app.include_router(tick_summaries_router, prefix="/api/v1")
 app.include_router(locks_router, prefix="/api/v1")
 app.include_router(concurrency_limits_router, prefix="/api/v1")
 # search_router must come before tasks_router because tasks_router has /{task_id}
