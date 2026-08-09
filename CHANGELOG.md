@@ -55,7 +55,9 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   absolute cutoff for tasks. It is applied server-side by the same predicate
   the reaper uses, so `builds list --older-than 24h` and
   `builds cleanup --older-than 24h` agree on what is stale; on `builds list`
-  it may only be combined with `--status running`. A registry older than the
+  it **implies** `--status running` and may not be combined with any other
+  status (idleness only means anything for a build that has not finished —
+  a completed one has no activity by definition, and always will). A registry older than the
   CLI silently ignores the filter, so the command detects that and warns on
   stderr that the results are unfiltered rather than quietly filtering the
   page itself (which would under-report exactly the oldest builds).

@@ -408,9 +408,16 @@ staleness threshold is 60 seconds.
 The filter is applied **server-side** — by the same predicate the reaper and
 `builds cleanup` use, so a build that `builds list --older-than 24h` shows is
 a build `builds cleanup --older-than 24h` would act on. Paging and totals stay
-exact, and with the filter set the server orders stalest-first. On
-`builds list` it can only be combined with `--status running`: idleness is
-only meaningful for a build that has not finished.
+exact, and with the filter set the server orders stalest-first.
+
+On `builds list` the filter **implies** `--status running`, whether or not
+you pass it: idleness only means anything for a build that has not
+finished. A completed build has no activity by definition and always
+will, so including terminal builds would fill a staleness listing with
+history — sorted stalest-first, which is to say the oldest completed
+builds above the running ones you are looking for. Pairing `--older-than`
+with any other status is therefore a contradiction rather than a narrower
+query, and is rejected.
 
 If the registry is older than the CLI it will silently ignore the filter — the
 command detects that (a returned build newer than the cutoff, or one with no
