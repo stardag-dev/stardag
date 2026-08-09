@@ -56,10 +56,6 @@ from stardag.build._concurrency import (
     build_concurrency_limiter,
 )
 from stardag.registry import RegistryABC, registry_provider
-from stardag.registry._base import (
-    accepts_executor_kwargs,
-    accepts_executor_metadata_kwarg,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -613,19 +609,6 @@ async def build_aio(
 
     # --- Per-task execution claims (default exactly-once) ---
     claim_cfg = claim_config or ClaimConfig()
-    # Claims require a registry that actually implements arbitration (the
-    # ABC default records a plain start and always reports "won") —
-    # claiming through it would only add a pointless duplicate start.
-    # Override detection doubles as graceful degradation for custom
-    # registries written before claims existed.
-    _registry_supports_claim = (
-        type(registry).task_start_claim_aio is not RegistryABC.task_start_claim_aio
-    )
-    if claim is True and not _registry_supports_claim:
-        logger.warning(
-            f"claim=True requested but {type(registry).__name__} does not "
-            "implement task_start_claim_aio — proceeding without claims."
-        )
 
     def claim_enabled_for(task: BaseTask) -> bool:
         """Whether to claim-start this task (see build_aio's ``claim``).
@@ -635,7 +618,7 @@ async def build_aio(
         executions (local executors) would need TTL liveness the claim
         doesn't have; the (deprecated) global lock still covers those.
         """
-        if claim is False or not _registry_supports_claim:
+        if claim is False:
             return False
         if claim is True:
             return True
@@ -1184,15 +1167,6 @@ async def build_aio(
             await asyncio.sleep(current_interval)
             current_interval = min(current_interval * backoff_factor, max_interval)
 
-    # Custom RegistryABC implementations written against the pre-detached
-    # task_start_aio(build_id, task) signature can't receive executor refs.
-    # Detected once via signature inspection (not try/except TypeError, which
-    # would also mask unrelated TypeErrors raised inside an implementation).
-    registry_accepts_executor_kwargs = accepts_executor_kwargs(registry.task_start_aio)
-    registry_accepts_executor_metadata = accepts_executor_metadata_kwarg(
-        registry.task_start_aio
-    )
-
     def _start_lock_renewal(task_id_str: str) -> None:
         """Keep the (deprecated) global lock alive under long tasks.
 
@@ -1251,24 +1225,35 @@ async def build_aio(
             )
             return DetachedExecutionStatus.UNKNOWN
 
-    def _claim_holder_is_stale(latest_status_at: str | None) -> bool:
-        """Whether a ref-less claim holder exceeded the optional staleness
-        bound (ClaimConfig.stale_running_no_ref_seconds).
+    def _claim_holder_has_lapsed(latest_status_expires_at: str | None) -> bool:
+        """Whether the winning claim is past its own expiry.
 
-        Compares the server-issued timestamp against the local clock, so
-        client-server clock skew shifts the effective bound — keep it well
-        above plausible skew (tens of seconds+).
+        Evidence, not inference: the server stamped this claim with the
+        moment it stops being honoured, and past it the claim is
+        re-claimable anyway. None ("never lapses" — an older server, or a
+        start recorded before the column) is not evidence of death, so the
+        loser keeps waiting exactly as it always has.
+
+        Compares a server-issued timestamp against the local clock, so
+        client-server skew shifts the effective moment by that skew; TTLs
+        are minutes-to-hours, so seconds of skew are immaterial.
         """
-        bound = claim_cfg.stale_running_no_ref_seconds
-        if bound is None or not latest_status_at:
+        if not latest_status_expires_at:
             return False
         try:
-            status_at = datetime.fromisoformat(latest_status_at)
+            # `fromisoformat` only learned to accept a trailing "Z" in 3.11,
+            # and this project supports 3.10. The registry serialises UTC
+            # timestamps in exactly that form, so on 3.10 every expiry would
+            # fail to parse — and an unparsed expiry reads as *not lapsed*,
+            # leaving the loser waiting out a claim nobody holds.
+            expires_at = datetime.fromisoformat(
+                latest_status_expires_at.replace("Z", "+00:00")
+            )
         except ValueError:
             return False
-        if status_at.tzinfo is None:
-            status_at = status_at.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - status_at).total_seconds() > bound
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) > expires_at
 
     async def acquire_claim(
         task: BaseTask,
@@ -1296,9 +1281,9 @@ async def build_aio(
         probes FAILED on **two probes** (corroborated after a short delay,
         so a single transient error can't kill a live winner) is recorded
         failed and the claim re-tried; a ref-less winner is waited on with
-        backoff — with optional staleness recovery via
-        ``ClaimConfig.stale_running_no_ref_seconds`` for the winner's
-        claim→ref-record crash window. Every branch — including dead-winner
+        backoff, unless its claim has lapsed — which covers the winner's
+        claim→ref-record crash window without any locally configured guess
+        at how long "too long" is. Every branch — including dead-winner
         retries — is bounded by ``wait_timeout_seconds``.
         """
         state = task_states[task.id]
@@ -1413,19 +1398,20 @@ async def build_aio(
                         await asyncio.sleep(claim_cfg.wait_initial_interval_seconds)
                         continue
                     suspected_dead_ref = None
-                elif _claim_holder_is_stale(result.latest_status_at):
-                    # Ref-less holder past the (opt-in) staleness bound —
-                    # e.g. a winner that crashed between its claim and its
-                    # ref-recording start. Recover like a dead ref.
+                elif _claim_holder_has_lapsed(result.latest_status_expires_at):
+                    # Ref-less holder whose claim has lapsed — e.g. a winner
+                    # that crashed between its claim and its ref-recording
+                    # start. The expiry is the server's own statement that
+                    # the claim is no longer honoured, so recover like a
+                    # dead ref rather than waiting out the timeout.
                     if await task.complete_aio():
                         return ("already_completed", _ALREADY_COMPLETED_RESULT)
                     try:
                         await registry.task_fail_aio(
                             build_id,
                             task,
-                            "Ref-less claimed execution exceeded the "
-                            "staleness bound (observed by a competing "
-                            "claimant)",
+                            "Ref-less claimed execution's claim has lapsed "
+                            "(observed by a competing claimant)",
                         )
                     except Exception as reg_err:
                         handle_registry_error(
@@ -1465,29 +1451,15 @@ async def build_aio(
         task: BaseTask, handle: DetachedHandle | None
     ) -> None:
         """Emit TASK_STARTED, with the detached-execution ref when present."""
-        if handle is None or not registry_accepts_executor_kwargs:
-            if handle is not None:
-                logger.warning(
-                    f"Registry {type(registry).__name__} does not accept "
-                    "executor refs on task_start_aio; detached execution "
-                    f"{handle.ref!r} for task {task.id} will not be "
-                    "re-attachable."
-                )
+        if handle is None:
             await registry.task_start_aio(build_id, task)
             return
-        # Metadata is dropped (not warned) for registries predating the
-        # kwarg — it's descriptive only, unlike the ref above.
-        if handle.executor_metadata is not None and registry_accepts_executor_metadata:
-            await registry.task_start_aio(
-                build_id,
-                task,
-                executor=handle.executor,
-                executor_ref=handle.ref,
-                executor_metadata=handle.executor_metadata,
-            )
-            return
         await registry.task_start_aio(
-            build_id, task, executor=handle.executor, executor_ref=handle.ref
+            build_id,
+            task,
+            executor=handle.executor,
+            executor_ref=handle.ref,
+            executor_metadata=handle.executor_metadata,
         )
 
     async def submit_with_lock(

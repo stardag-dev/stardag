@@ -64,6 +64,19 @@ from stardag.build import (
 )
 from stardag.build._base import GlobalLockConfig
 from stardag.build._base import BuildSummary
+from stardag.build._reactive import claim_ttl_seconds
+from stardag.build._task_modules import (
+    PickleElisionPlan,
+    TaskModulesError,
+    declared_task_module_patterns,
+    expand_task_module_patterns,
+    format_uncovered_message,
+    import_task_modules,
+    plan_pickle_elision,
+    set_declared_task_module_patterns,
+    uncovered_task_classes,
+    validate_task_module_patterns,
+)
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
@@ -72,7 +85,6 @@ from stardag.integration.modal._target import (
 )
 from stardag.registry._base import (
     NoOpRegistry,
-    accepts_executor_metadata_kwarg,
     get_git_commit_hash,
     registry_provider,
 )
@@ -254,12 +266,17 @@ class FinalizeResult(typing.NamedTuple):
         functions: List of created Modal function names.
         volume_mounts: Dict of mount_path -> volume_name for auto-mounted volumes.
         auto_volumes: Dict of mount_path -> Volume for auto-mounted volumes.
+        task_modules: The app's ``task_modules`` patterns expanded to the
+            concrete, sorted module list baked into the deployed scheduler
+            tick (empty when the app opted out). Surfaced so the CLI can
+            report what the deployment will import.
     """
 
     volumes: dict[str, modal.Volume]
     functions: list[str]
     volume_mounts: dict[str, str] = {}
     auto_volumes: dict[str, modal.Volume] = {}
+    task_modules: list[str] = []
 
 
 # --- Function settings ---
@@ -288,37 +305,141 @@ def _run_watchdog_sweep(
     registry: typing.Any,
     tick: typing.Callable[..., typing.Any],
     sweep_limit: int = 100,
+    tick_timeout_seconds: float | None = None,
+    reactive_app_name: str | None = None,
 ) -> None:
-    """One watchdog pass: tick every running build, without lingering.
+    """One watchdog pass: tick every running build this app owns.
+
+    ``reactive_app_name`` scopes the listing to this app's own reactive
+    builds. Without it, ``sweep_limit`` is spent on whatever RUNNING builds
+    happen to be most recently active in the environment — including builds
+    no tick of this app can advance (resident builds, and builds whose
+    orchestrator died without emitting a terminal event, which stay RUNNING
+    forever). Once those exceed the limit the safety net stops reaching
+    genuine reactive builds entirely, and silently.
+
+    The trade-off is losing the incidental cross-app coverage a sweep used to
+    provide. That was accidental and competed for the same limit; an app's own
+    watchdog is the supported mechanism, and ``build_trigger`` already warns
+    when a reactive build is triggered on an app without one.
 
     ``linger_seconds=0`` (one frontier pass per build) is essential: the
     sweep runs ticks sequentially in one function call — persisted linger
     settings (default 120 s) would blow through the function timeout after
     a couple of builds and starve the rest of the safety-net tick.
+
+    The same "one container, many builds" property applies to the per-pass
+    spawn cap, which is derived from how long the container may live: every
+    build in the sweep would otherwise size its fan-out as though it had
+    the whole container to itself, and the first wide build would spend the
+    entire timeout while the rest of the sweep never ran. Each build is
+    therefore handed its **share** of the budget. Truncating here is
+    cheap and self-correcting — the watchdog is a safety net, builds are
+    normally driven by their own ticks, and a truncated pass re-acts on a
+    fresh frontier immediately.
     """
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
-    running_builds = registry.build_list_running(limit=sweep_limit)
+    # Scoping is server-side now that `build_list_running` is expressed in
+    # terms of `build_list`, so every RegistryABC gets it and the signature
+    # shim this used to need went with it. `scoped` still exists because
+    # the truncation remedy below differs by it.
+    scoped = reactive_app_name is not None
+    running_builds = registry.build_list_running(
+        limit=sweep_limit, reactive_app_name=reactive_app_name
+    )
+    scope = (
+        f"reactive builds owned by {reactive_app_name!r}"
+        if scoped
+        else "running builds"
+    )
     if len(running_builds) >= sweep_limit:
+        # The remedy follows `scoped`, not whether a name was *asked* for:
+        # a scoping request the registry cannot honour still yields a
+        # listing capped by RUNNING builds of every kind, and "run fewer
+        # reactive builds per app" would then be advice about the wrong
+        # population.
+        remedy = (
+            "Cancel or clean up builds that are RUNNING but abandoned, or "
+            "reduce the number of concurrent reactive builds for this app."
+            if scoped
+            else "This listing was not scoped to a reactive app, so the cap "
+            "was consumed by RUNNING builds of every kind — most likely "
+            "abandoned ones. Clean those up (`stardag builds cleanup`); an "
+            "upgraded registry would also scope this listing."
+        )
         logger.warning(
-            f"Tick watchdog: {sweep_limit}+ running builds; only the "
-            f"{sweep_limit} most recently active are swept."
+            f"Tick watchdog: {sweep_limit}+ {scope}; only the {sweep_limit} "
+            "most recently active are swept, so a less-recently-active build "
+            f"may not be ticked this period. {remedy}"
+        )
+    sweep_kwargs: dict[str, typing.Any] = {"linger_seconds": 0}
+    if tick_timeout_seconds is not None and running_builds:
+        sweep_kwargs["tick_timeout_seconds"] = tick_timeout_seconds / len(
+            running_builds
         )
     for running_build_id in running_builds:
         try:
-            tick(str(running_build_id), tick_kwargs={"linger_seconds": 0})
+            tick(str(running_build_id), tick_kwargs=dict(sweep_kwargs))
         except Exception:
             logger.exception(f"Watchdog tick failed for build {running_build_id}")
 
 
-_TICK_KWARGS_ALLOWED = ("linger_seconds", "poll_interval_seconds", "fail_mode")
+_TICK_KWARGS_ALLOWED = (
+    "linger_seconds",
+    "poll_interval_seconds",
+    "fail_mode",
+    # Fan-out throttles. Both default to something derived (see TickConfig
+    # and stardag.build._reactive._spawn_cap) and both are here because the
+    # thing the derivation cannot see — how the *tick* function is sized
+    # relative to its workers, and how much concurrency the registry
+    # deployment behind it will take — is per-deployment, and a build
+    # triggered against that deployment is where it can be said.
+    "max_concurrent_actions",
+    "max_spawns_per_tick",
+    # Per-build attempt budget. Belongs here more than most: the budget is
+    # per build by definition, and a build that has exhausted it is
+    # unblocked by re-triggering *with a raised* max_attempts — which only
+    # works if a re-trigger can say it.
+    "max_attempts",
+)
+
+
+def _tick_function_timeout_seconds(
+    tick_settings: "FunctionSettings | None",
+    builder_settings: "FunctionSettings | None",
+) -> float | None:
+    """The Modal ``timeout`` the deployed ``tick`` function will carry.
+
+    Resolved from **whichever settings actually register the function** —
+    ``tick_settings`` when given, otherwise ``builder_settings``, which is
+    the same fallback ``finalize`` applies. Reading ``tick_settings`` alone
+    would silently yield "unknown" for every app that does not configure
+    the tick separately (the common case), and a spawn cap derived from a
+    timeout the function was not registered with is precisely the mistake
+    this plumbing exists to remove.
+
+    ``None`` when neither declares one: Modal's own default is not a
+    promise this SDK should encode, and the cap has further rungs to fall
+    back to (see ``stardag.build._reactive._spawn_cap``).
+    """
+    # An empty `tick_settings` falls back deliberately — it declares
+    # nothing, and `finalize` resolves it the same way.
+    settings = tick_settings if tick_settings else builder_settings
+    # `is not None`, not truthiness: `timeout=0` is a value someone
+    # configured, and reporting it as "not declared" would hand the spawn
+    # cap a different rung to fall back to than the one the function was
+    # actually registered with.
+    timeout = (settings or {}).get("timeout")
+    return float(timeout) if timeout is not None else None
 
 
 def _build_tick_config(
     stored_tick_kwargs: dict[str, typing.Any] | None,
     tick_kwargs: dict[str, typing.Any] | None,
     limit_key_selector: "typing.Callable[[BaseTask], typing.Sequence[str]] | None",
+    tick_timeout_seconds: float | None = None,
 ) -> TickConfig:
     """Assemble a TickConfig for one tick invocation.
 
@@ -327,6 +448,15 @@ def _build_tick_config(
     registry — shared by all ticks) over TickConfig defaults. The
     concurrency-limit key selector is deployed-app configuration (callables
     can't ride in the JSON tick config).
+
+    ``tick_timeout_seconds`` is the deployed ``tick`` function's own Modal
+    ``timeout`` — how long this container may live, which is what the
+    per-pass spawn cap is derived from. It is applied as a *default* rather
+    than an override so a caller that runs several ticks in one container
+    can pass its own share of the budget (the watchdog sweep does), and it
+    is deliberately absent from ``_TICK_KWARGS_ALLOWED``: persisting it in
+    a build's stored tick config would freeze a deploy-time fact into
+    per-build state and go stale on the next redeploy.
     """
     config_kwargs: dict[str, typing.Any] = {
         **(stored_tick_kwargs or {}),
@@ -334,6 +464,7 @@ def _build_tick_config(
     }
     if "fail_mode" in config_kwargs:
         config_kwargs["fail_mode"] = FailMode(config_kwargs["fail_mode"])
+    config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
     return TickConfig(limit_key_selector=limit_key_selector, **config_kwargs)
 
 
@@ -370,9 +501,24 @@ class BuildTriggerResult(typing.NamedTuple):
         build_id: The registry build id minted (or reused) at the trigger
             point. Pass it back to ``build_trigger(..., build_id=...)`` to
             re-attach/resume the same build.
-        function_call: The Modal ``FunctionCall`` handle for the spawned
-            build function invocation. Call ``.get()`` to block on the
-            result if needed.
+        function_call: The Modal ``FunctionCall`` handle for the one
+            invocation this trigger spawned — the ``build`` function for a
+            resident build, and the ``bootstrap`` function for a reactive
+            one. The exception is ``reactive_discovery="local"``, which
+            discovers on the triggering machine and therefore has no
+            bootstrap to spawn: the handle is the first ``tick`` instead.
+            Call ``.get()`` to block on the result if needed.
+
+            For reactive builds the bootstrap call is the honest handle:
+            it is what the trigger actually spawned, and it is the call
+            whose failure means the build never started (it discovers the
+            DAG, persists it, arms the build and spawns the first tick —
+            see :func:`run_reactive_bootstrap`). It is *not* a handle on
+            the build: a reactive build outlives it by design, and its
+            result is the bootstrap summary, not a ``BuildSummary``. It
+            previously carried the first tick's call, which resolved as
+            soon as that tick lingered out and said nothing about whether
+            the DAG had been registered at all.
     """
 
     build_id: UUID
@@ -524,6 +670,18 @@ STARDAG_REACTIVE_ENV = "STARDAG_REACTIVE"
 In reactive mode the worker additionally registers dynamically yielded
 deps (with task-store persistence) and wakes the scheduler after terminal
 events — there is no resident orchestrator to do either.
+"""
+
+STARDAG_CLAIM_TTL_SECONDS_ENV = "STARDAG_CLAIM_TTL_SECONDS"
+"""Env var carrying the claim TTL the orchestrator derived for this task.
+
+The worker's own TASK_STARTED is a start like any other, so without this
+it would re-stamp the claim with the registry's generic default and undo
+the orchestrator's derivation (see
+``stardag.build._reactive.claim_ttl_seconds``). Forwarding it also *improves*
+the bound: the worker's start is recorded when execution actually begins, so
+the expiry is re-based off the real start rather than off the pre-spawn
+claim, which absorbed however long the call sat queued.
 """
 
 STARDAG_MODAL_WORKSPACE_ENV = "STARDAG_MODAL_WORKSPACE"
@@ -742,6 +900,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         worker_reports_lifecycle: bool = True,
         reactive: bool = False,
         modal_workspace: str | None = None,
+        worker_timeouts: dict[str, int] | None = None,
     ):
         """Initialize Modal executor.
 
@@ -762,10 +921,18 @@ class ModalTaskExecutor(TaskExecutorABC):
             modal_workspace: Explicit Modal workspace name for the executor
                 metadata recorded with task starts (UI deep links). Default:
                 resolved once from the configured Modal token, best-effort.
+            worker_timeouts: Per-worker Modal function ``timeout`` (seconds),
+                as declared in the app's ``worker_settings``. Only the
+                deploy process can see those settings, so they are passed in
+                rather than looked up. Used to derive the execution-claim
+                TTL recorded with every start (see
+                :meth:`execution_timeout_seconds`); an absent worker simply
+                yields no timeout and the registry's default applies.
         """
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
         self.detached = detached
+        self.worker_timeouts = dict(worker_timeouts or {})
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so
         # workers register their dynamic deps and wake the scheduler tick.
@@ -889,6 +1056,32 @@ class ModalTaskExecutor(TaskExecutorABC):
             return None
         return await self._metadata_for_worker(worker_name)
 
+    def execution_timeout_seconds(self, task: BaseTask) -> float | None:
+        """The Modal ``timeout`` of the worker function this task routes to.
+
+        Modal kills a function call at its ``timeout``, so this is a hard
+        upper bound on how long an execution of ``task`` can be alive — the
+        one fact that makes an execution claim's expiry defensible rather
+        than a guess.
+
+        Returns None when the deployed settings were not passed in (see
+        ``worker_timeouts``), when the selected worker declares no timeout,
+        or when worker selection fails: none of those is a reason to fail a
+        start, and the registry's own default covers them.
+        """
+        if not self.worker_timeouts:
+            return None
+        try:
+            worker_name, _ = _normalize_worker_selection(self.worker_selector(task))
+        except Exception:
+            logger.debug(
+                "Worker selection failed while resolving the execution timeout",
+                exc_info=True,
+            )
+            return None
+        timeout = self.worker_timeouts.get(worker_name)
+        return float(timeout) if timeout is not None else None
+
     async def _prepare_invocation(
         self, task: BaseTask
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
@@ -898,7 +1091,9 @@ class ModalTaskExecutor(TaskExecutorABC):
         the build id is injected as the ``STARDAG_BUILD_ID`` env override so
         the worker-side :class:`Runner` can report lifecycle events. The
         resolved executor metadata rides along the same channel
-        (``STARDAG_MODAL_*``) so worker self-reported starts carry it too.
+        (``STARDAG_MODAL_*``) so worker self-reported starts carry it too —
+        as does the derived claim TTL, so the worker's own start does not
+        re-stamp the claim with the registry's generic default.
         """
         worker_name, env_overrides = _normalize_worker_selection(
             self.worker_selector(task)
@@ -913,6 +1108,9 @@ class ModalTaskExecutor(TaskExecutorABC):
                     STARDAG_BUILD_ID_ENV: str(build_id),
                     STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
                 }
+                ttl_seconds = claim_ttl_seconds(task, self)
+                if ttl_seconds is not None:
+                    env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
                 if executor_metadata is not None:
                     for env_name, key in (
                         (STARDAG_MODAL_WORKSPACE_ENV, "workspace"),
@@ -1368,6 +1566,7 @@ class _WorkerLifecycleReporter:
         reactive: bool = False,
         app_name: str | None = None,
         executor_metadata: dict[str, typing.Any] | None = None,
+        claim_ttl_seconds: int | None = None,
     ):
         self.registry = registry
         self.build_id = build_id
@@ -1375,6 +1574,7 @@ class _WorkerLifecycleReporter:
         self.reactive = reactive
         self.app_name = app_name
         self.executor_metadata = executor_metadata
+        self.claim_ttl_seconds = claim_ttl_seconds
 
     @classmethod
     def create(
@@ -1413,6 +1613,26 @@ class _WorkerLifecycleReporter:
             value = _get(env_name)
             if value:
                 executor_metadata[key] = value
+        # The orchestrator's derived claim TTL, if it sent one. Malformed
+        # values are ignored rather than raised on: this is a bound on an
+        # expiry, and no worker should fail to report its own start over it.
+        raw_ttl = _get(STARDAG_CLAIM_TTL_SECONDS_ENV)
+        try:
+            ttl_seconds = int(raw_ttl) if raw_ttl else None
+        except ValueError:
+            logger.warning(f"Invalid {STARDAG_CLAIM_TTL_SECONDS_ENV}: {raw_ttl!r}")
+            ttl_seconds = None
+        # A syntactically valid but out-of-range value is the same problem
+        # as a malformed one, and worse in effect: the server rejects it
+        # (422) on `task_start`, so the worker loses its whole lifecycle
+        # report over a bound on an expiry. Drop it and let the server pick
+        # its default.
+        if ttl_seconds is not None and ttl_seconds <= 0:
+            logger.warning(
+                f"Ignoring {STARDAG_CLAIM_TTL_SECONDS_ENV}={raw_ttl!r}: a claim "
+                "TTL must be positive. The server's default applies instead."
+            )
+            ttl_seconds = None
         return cls(
             registry,
             build_id,
@@ -1420,6 +1640,7 @@ class _WorkerLifecycleReporter:
             reactive=_get(STARDAG_REACTIVE_ENV) == "1",
             app_name=app_name,
             executor_metadata=executor_metadata,
+            claim_ttl_seconds=ttl_seconds,
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -1437,17 +1658,14 @@ class _WorkerLifecycleReporter:
                 ref = modal.current_function_call_id()
             except Exception:
                 pass
-            kwargs: dict[str, typing.Any] = {
-                "executor": MODAL_EXECUTOR_NAME,
-                "executor_ref": ref,
-            }
-            # Dropped (not warned) for registries predating the kwarg —
-            # descriptive only, unlike the executor ref.
-            if self.executor_metadata is not None and accepts_executor_metadata_kwarg(
-                self.registry.task_start
-            ):
-                kwargs["executor_metadata"] = self.executor_metadata
-            self.registry.task_start(self.build_id, self.task, **kwargs)
+            self.registry.task_start(
+                self.build_id,
+                self.task,
+                executor=MODAL_EXECUTOR_NAME,
+                executor_ref=ref,
+                executor_metadata=self.executor_metadata,
+                claim_ttl_seconds=self.claim_ttl_seconds,
+            )
 
         self._guard(_do, "start")
 
@@ -1494,7 +1712,40 @@ class _WorkerLifecycleReporter:
             discover_and_register_aio(self.registry, self.build_id, task_struct)
         )
         store = BuildTaskStore(self.build_id)
-        store.save_tasks(result.incomplete.values())
+        # The trigger's pre-flight structurally cannot see dynamically
+        # yielded deps — they don't exist until their parent runs — so the
+        # coverage check is re-run here, on the app's patterns as published
+        # by the deployed worker wrapper. Once per class per process: this
+        # runs on every suspending worker invocation.
+        #
+        # The same elision applies (see StardagApp._persist_discovered_tasks):
+        # without it the pickle-free property would hold only until a task
+        # yielded its first dynamic dependency, and a build with dynamic
+        # deps would still need target-root write access.
+        patterns = declared_task_module_patterns()
+        if patterns:
+            uncovered = uncovered_task_classes(
+                result.incomplete.values(), patterns, only_unwarned=True
+            )
+            if uncovered:
+                logger.warning(
+                    format_uncovered_message(
+                        uncovered,
+                        patterns,
+                        remedy=(
+                            "These were registered as dynamic dependencies, "
+                            "so the trigger's pre-flight could not see them."
+                        ),
+                    )
+                )
+            plan = plan_pickle_elision(result.incomplete.values(), patterns)
+            store.save_tasks(task for task, _ in plan.pickled)
+            logger.info(
+                f"Build {self.build_id} dynamic deps of task "
+                f"{self.task.id}: {plan.summary()}"
+            )
+        else:
+            store.save_tasks(result.incomplete.values())
         deps = flatten_task_struct(task_struct)
         self.registry.task_add_dependencies(
             self.build_id, self.task, deps, is_dynamic=True
@@ -1809,7 +2060,320 @@ def _setup_logging():
     logging.basicConfig(level=logging.INFO)
 
 
+# --- Reactive bootstrap (normally runs INSIDE Modal; see
+# StardagApp._trigger_reactive and run_reactive_bootstrap) ---
+
+
+def _preflight_task_modules(
+    tasks: typing.Iterable[BaseTask], task_modules: typing.Sequence[str]
+) -> None:
+    """Warn about discovered task classes ``task_modules`` doesn't cover.
+
+    **The authoritative coverage check.** It runs wherever discovery runs
+    — normally the bootstrap container — on the set discovery just walked:
+    those are exactly the tasks a tick may have to rehydrate, and reusing
+    discovery's (pruned) walk avoids a second traversal of the DAG. It is
+    never skipped, and it is what gates ``require_pickle_free`` (via the
+    persistence step, which additionally knows about round-trip failures,
+    not just coverage).
+
+    **Severity is a warning, not an error** (unless
+    ``require_pickle_free``). An uncovered class is not broken: it falls
+    back to the pickle path, which is exactly how every reactive build
+    worked before ``task_modules`` existed. Failing would therefore break
+    working setups the moment they upgrade, which is precisely what "this
+    feature is additive" forbids.
+
+    In the default (bootstrap) placement ``task_modules`` is the list
+    **baked into the deployment at ``finalize()``** — not the caller's
+    local app definition. That closes the stale-deploy blind spot this
+    check used to carry: it compares the DAG against the module list the
+    ticks will actually import, so "you changed ``task_modules`` but
+    didn't redeploy" is visible rather than silently agreeable.
+
+    Skipped entirely when the app opted out of ``task_modules`` — an app
+    that never declared any would otherwise warn about every class in
+    every DAG, on every trigger.
+    """
+    if not task_modules:
+        return
+    uncovered = uncovered_task_classes(tasks, task_modules)
+    if not uncovered:
+        return
+    logger.warning(
+        format_uncovered_message(
+            uncovered,
+            task_modules,
+            remedy=(
+                "Until then these tasks stay dependent on their "
+                "build-task-store pickles, which need target-root "
+                "write access and are invalidated by a redeploy."
+            ),
+        )
+    )
+
+
+def _advise_uncovered_root_task_modules(
+    root_tasks: typing.Sequence[BaseTask], task_modules: typing.Sequence[str]
+) -> None:
+    """Advisory, roots-only coverage note emitted at the trigger.
+
+    Purely additive early feedback, and deliberately **not** a check in
+    its own right: :func:`_preflight_task_modules` is the authoritative
+    one and always runs over the full discovered set wherever discovery
+    runs. This looks at the **root tasks only** — a fixed, tiny set the
+    trigger already holds — so it costs no ``requires()`` traversal, no
+    target I/O and no measurable time, and it is by construction a
+    *subset* of what the real check sees. Two checks that can disagree
+    would be worse than one; a subset can only ever be quieter.
+
+    Why it earns its place anyway: the dominant ``task_modules``
+    misconfiguration is "I never declared my package", and in that case
+    the roots are uncovered too. Saying so in the operator's terminal, at
+    the moment they trigger, beats saying it a container start later in a
+    log they have to go and find.
+    """
+    if not task_modules or not root_tasks:
+        return
+    uncovered = uncovered_task_classes(root_tasks, task_modules)
+    if not uncovered:
+        return
+    logger.warning(
+        format_uncovered_message(
+            uncovered,
+            task_modules,
+            remedy=(
+                "This is an early, ROOT-TASKS-ONLY note from the trigger; "
+                "the full check runs over the whole discovered DAG where "
+                "discovery runs and may name more classes."
+            ),
+        )
+    )
+
+
+def _persist_discovered_tasks(
+    build_id: UUID,
+    tasks: typing.Iterable[BaseTask],
+    *,
+    task_modules: typing.Sequence[str],
+    elide_pickles: bool,
+    require_pickle_free: bool,
+) -> None:
+    """Write the build task store, skipping pickles that aren't needed.
+
+    Unless the app *opted in* (``elide_pickles``), this is byte-for-byte
+    the old behaviour: pickle everything. With opt-in, each task gets a
+    dry run of what a tick will do — reconstruct it from exactly the
+    payload registration stored — and only the ones that fail keep a
+    pickle. A build whose classes are all covered writes nothing to the
+    target root at all.
+
+    Runs **inside the bootstrap container**, which is a large part of why
+    the move is worth doing: for a ``modalvol://`` target root the store
+    is a mounted filesystem here and a rate-limited volume API from a
+    laptop. The same writes that used to be N remote calls from the
+    trigger are now N local ones.
+
+    ``elide_pickles`` is the app's opt-in — ``task_modules`` passed
+    explicitly (or ``require_pickle_free``), NOT merely inferred —
+    resolved at ``finalize()`` and baked in alongside the module list.
+    Inference must stay observation-only: it happens for every app,
+    including apps written before the feature existed, and an SDK upgrade
+    must never start dropping pickles on its own.
+    """
+    store = BuildTaskStore(build_id)
+    if not task_modules or not elide_pickles:
+        store.save_tasks(tasks)
+        return
+    plan: PickleElisionPlan = plan_pickle_elision(tasks, task_modules)
+    if require_pickle_free:
+        error = plan.require_pickle_free_error()
+        if error is not None:
+            raise TaskModulesError(error)
+    store.save_tasks(task for task, _ in plan.pickled)
+    logger.info(f"Build {build_id} task store: {plan.summary()}")
+
+
+def _fail_build_best_effort(
+    registry: typing.Any, build_id: UUID, exception: BaseException
+) -> None:
+    """Record a terminal BUILD_FAILED for ``build_id``, never raising.
+
+    The caller is already propagating ``exception``; this exists only so
+    the propagation doesn't leave a build sitting RUNNING forever with
+    nothing driving it. A failure to record the failure is logged and
+    swallowed — masking the real cause with a registry error would be a
+    strictly worse outcome.
+    """
+    try:
+        registry.build_fail(
+            build_id,
+            error_message=f"{type(exception).__name__}: {exception}",
+        )
+    except Exception:
+        logger.exception(
+            f"Could not record BUILD_FAILED for build {build_id} after "
+            f"{type(exception).__name__}; the build may be left RUNNING "
+            "with nothing driving it (re-trigger it, or cancel it from "
+            "the UI)."
+        )
+
+
+ReactiveDiscovery = typing.Literal["modal", "local"]
+"""Where a reactive trigger discovers the DAG (see ``StardagApp``).
+
+``"modal"`` (the default) spawns the deployed ``bootstrap`` function;
+``"local"`` runs the identical bootstrap in the triggering process.
+"""
+
+
+class ReactiveBootstrapResult(typing.NamedTuple):
+    """Result of :func:`run_reactive_bootstrap`.
+
+    Attributes:
+        summary: JSON-able account of what the bootstrap did. This is what
+            the deployed ``bootstrap`` function returns to Modal.
+        tick_call: The ``FunctionCall`` handle of the first scheduler tick
+            the bootstrap spawned. Only useful in-process (it does not
+            survive a Modal return value), so the deployed function drops
+            it and the local-discovery trigger path keeps it.
+    """
+
+    summary: dict[str, typing.Any]
+    tick_call: typing.Any
+
+
+def run_reactive_bootstrap(
+    build_id: UUID,
+    task_list: list[BaseTask],
+    *,
+    registry: typing.Any,
+    app_name: str,
+    tick_kwargs: dict[str, typing.Any] | None,
+    task_modules: typing.Sequence[str],
+    elide_pickles: bool,
+    require_pickle_free: bool,
+) -> ReactiveBootstrapResult:
+    """Discover the DAG, persist it, arm the build, spawn the first tick.
+
+    Everything a reactive build needs before it can be scheduled, except
+    minting the build and registering its roots — those cost no target
+    I/O and must happen at the trigger, before anything is spawned.
+
+    Normally this runs **inside Modal**, as the body of the deployed
+    ``bootstrap`` function, because discovery is target-root I/O:
+    ``complete_aio()`` is one target existence check per task, and for a
+    ``modalvol://`` root that is a rate-limited Volume *API* call from
+    outside Modal versus a ``stat`` on a mounted filesystem inside it.
+    The task-store writes below move with it for the same reason. The
+    same code also runs at the trigger when an app opts out with
+    ``StardagApp(reactive_discovery="local")``.
+
+    **The ordering guarantee — do not "tidy" this.** The reactive marker
+    (``build_set_reactive_meta``, which is what makes ``reactive_app_name``
+    non-None) is written **last**, after discovery *and* persistence have
+    completed, and a tick no-ops on any build whose ``reactive_app_name``
+    is None. That ordering is the whole reason no tick can ever observe a
+    partially-registered DAG. It is load-bearing, not stylistic:
+    registration is chunked post-order, so the roots land *last*, and
+    mid-registration a build presents as "nothing actionable, roots not
+    complete" — exactly the shape terminal detection fails a build on.
+    Moving the marker earlier (or spawning a tick before it) reopens
+    precisely that window.
+
+    Raises on any failure without touching the build's status: recording
+    the terminal BUILD_FAILED belongs to the caller, which is the one
+    that knows whether *it* put the build into RUNNING (see
+    :meth:`StardagApp._trigger_reactive`). The first tick's spawn is part
+    of the work rather than an afterthought: an un-spawned tick is not a
+    partial success, it is a build nothing will ever move (a watchdog
+    would eventually adopt it; an app without one would simply stall).
+    """
+    discovery = asyncio.run(
+        discover_and_register_aio(
+            registry, build_id, tuple(task_list), retry_failed=True
+        )
+    )
+    # --- task-module coverage pre-flight (see _preflight_task_modules) ---
+    _preflight_task_modules(discovery.incomplete.values(), task_modules)
+    # --- task persistence, with conditional pickle elision ---
+    _persist_discovered_tasks(
+        build_id,
+        discovery.incomplete.values(),
+        task_modules=task_modules,
+        elide_pickles=elide_pickles,
+        require_pickle_free=require_pickle_free,
+    )
+    # The reactive marker/owner/config, written LAST — see the ordering
+    # guarantee in this function's docstring. This is an upsert: because
+    # the registry is mutable — unlike a possibly immutable target root —
+    # a re-trigger MAY update tick_kwargs. tick_kwargs is passed through
+    # as-is: None (a bare re-trigger) preserves the stored config
+    # server-side rather than wiping it.
+    registry.build_set_reactive_meta(
+        build_id, app_name=app_name, tick_kwargs=tick_kwargs
+    )
+    tick_function = modal.Function.from_name(app_name=app_name, name="tick")
+    tick_call = tick_function.spawn(build_id=str(build_id))
+    summary = {
+        "build_id": str(build_id),
+        "roots": len(task_list),
+        "incomplete": len(discovery.incomplete),
+        "previously_completed": len(discovery.previously_completed),
+        "retried": len(discovery.retried),
+    }
+    logger.info(f"Reactive bootstrap for build {build_id}: {summary}")
+    return ReactiveBootstrapResult(summary=summary, tick_call=tick_call)
+
+
 # --- Stardag App ---
+
+
+def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
+    """Infer ``task_modules`` from the module that constructs the app.
+
+    The default declaration is "the root package of the module defining
+    this app, recursively" — which is right far more often than not: an
+    app and the tasks it schedules almost always live in the same
+    distribution, and a whole-package wildcard costs only import time.
+
+    Inference is impossible for a module that is not part of a package —
+    ``__main__``, or a loose script that Modal loads as a top-level module.
+    Such a module isn't importable in a container under a stable name in
+    the first place, so a pattern derived from it would be a lie. We warn
+    and opt out (the pickle path still works), rather than baking in a
+    module list that would fail to import in every tick container.
+
+    Args:
+        _depth: Stack frames back to the user's call site (``__init__``'s
+            caller by default). Not part of the public contract.
+    """
+    # Frames hold their locals and globals alive and participate in
+    # reference cycles, so the walk is scoped and the references dropped
+    # rather than left for the collector — this runs in long-lived
+    # scheduler containers.
+    frame = inspect.currentframe()
+    try:
+        for _ in range(_depth):
+            frame = frame.f_back if frame is not None else None
+        module_name = frame.f_globals.get("__name__") if frame is not None else None
+        package = frame.f_globals.get("__package__") if frame is not None else None
+    finally:
+        del frame
+    if not module_name or module_name == "__main__" or not package:
+        logger.warning(
+            "Could not infer StardagApp(task_modules=...): the app is "
+            f"defined in {module_name or 'an unknown module'!r}, which is "
+            "not part of an importable package. Reactive scheduler ticks "
+            "will therefore fall back to the build task store's pickles "
+            "(which need target-root write access at trigger time and are "
+            "invalidated by a redeploy). Declare the modules explicitly — "
+            'e.g. task_modules=["my_pkg.tasks.*"] — to let ticks '
+            "reconstruct tasks from registry data instead, or pass "
+            "task_modules=[] to silence this warning."
+        )
+        return ()
+    return (f"{module_name.split('.')[0]}.*",)
 
 
 class StardagApp:
@@ -1852,6 +2416,12 @@ class StardagApp:
         modal_app: The underlying modal.App instance.
         name: The app name.
         is_finalized: Whether finalize() has been called.
+        task_modules: The validated task-module patterns (see the
+            ``task_modules`` argument); empty when opted out.
+        require_pickle_free: Whether a reactive build refuses to fall
+            back to writing task pickles.
+        reactive_discovery: Where a reactive trigger discovers the DAG
+            (``"modal"`` by default; see the argument of the same name).
     """
 
     def __init__(
@@ -1864,9 +2434,13 @@ class StardagApp:
         worker_settings: dict[str, FunctionSettings],
         worker_selector: WorkerSelector | None = None,
         tick_settings: FunctionSettings | None = None,
+        bootstrap_settings: FunctionSettings | None = None,
+        reactive_discovery: ReactiveDiscovery = "modal",
         watchdog_period_minutes: int | None = None,
         limit_key_selector: typing.Callable[[BaseTask], typing.Sequence[str]]
         | None = None,
+        task_modules: typing.Sequence[str] | None = None,
+        require_pickle_free: bool = False,
         modal_workspace: str | None = None,
         stardag_api_key_secret: "modal.Secret | str | None" = "stardag-api-key",
     ):
@@ -1906,6 +2480,46 @@ class StardagApp:
             tick_settings: Settings for the reactive-scheduling ``tick`` /
                 ``tick_watchdog`` functions. Defaults to ``builder_settings``
                 when not given.
+            bootstrap_settings: Settings for the reactive-scheduling
+                ``bootstrap`` function — the container that discovers a
+                triggered build's DAG, registers it, persists the task
+                store and spawns the first tick. Defaults to
+                ``builder_settings`` (**not** ``tick_settings``) when not
+                given.
+
+                It needs the same image, secrets and target-root volume
+                mounts as the builder — it runs the same discovery a
+                resident build does — but it wants its **own timeout**,
+                which is the main reason it is a separate function rather
+                than work done inside the first tick. The two budgets
+                answer different questions: a tick is sized for one
+                frontier pass and is expected to be short (its timeout
+                also derives the per-pass spawn cap), whereas discovery is
+                a single whole-DAG walk whose cost scales with the DAG and
+                is paid once per trigger. Folding discovery into the tick
+                would force one number to cover both, and shortening the
+                tick — normally a good idea — would start killing the
+                bootstrap of large DAGs.
+            reactive_discovery: Where a reactive trigger discovers the
+                DAG. ``"modal"`` (the default) spawns the deployed
+                ``bootstrap`` function with the root tasks by value and
+                returns immediately; ``"local"`` runs the identical
+                bootstrap in the triggering process, which is what
+                reactive triggers did before the ``bootstrap`` function
+                existed.
+
+                ``"modal"`` is the default because discovery is target-root
+                I/O — one existence check per task — and inside Modal a
+                ``modalvol://`` root is a mounted filesystem rather than a
+                rate-limited API. Only the placement changes: the same code
+                runs, in the same order, with the same failure handling.
+
+                Reach for ``"local"`` when the deployed app predates the
+                ``bootstrap`` function, or when the target root is
+                reachable from the triggering process but not from the
+                Modal app. Note that ``"local"`` also puts the coverage
+                pre-flight on the *local* ``task_modules`` rather than the
+                deployed one, reinstating the stale-deploy blind spot.
             watchdog_period_minutes: If set, register a scheduled watchdog
                 that periodically re-ticks running reactive builds (the
                 safety net for lost wake-ups, UI-cancelled builds, and stale
@@ -1915,6 +2529,54 @@ class StardagApp:
                 concurrency-limit keys it runs under in reactive scheduling
                 (deployed-app configuration applied by every tick). Default:
                 no limits.
+            task_modules: Modules whose import registers the task classes
+                this app may schedule. **Only reactive scheduling needs
+                this**: a scheduler tick reconstructs tasks from registry
+                data and can resolve only classes that are already
+                registered in its process (registration happens at class
+                definition time). Resident builds hold the real task
+                objects and are entirely unaffected.
+
+                Each entry is an exact module (``"my_pkg.tasks.ingest"``)
+                or a package with a trailing recursive wildcard
+                (``"my_pkg.tasks.*"``); anything else raises. The patterns
+                are expanded to a concrete module list at ``finalize()``
+                and baked into the deployed tick, so **adding or moving
+                task classes requires a redeploy**. Declared modules become
+                import-hot — they are imported in every tick container —
+                so keep heavy runtime dependencies inside ``run()`` rather
+                than at module scope.
+
+                Default (``None``): infer ``"<root package of the module
+                defining this app>.*"``. Pass ``[]`` to opt out.
+
+                **Declaring this explicitly is also the opt-in to skipping
+                pickles** — the inferred default only drives the coverage
+                warning. The trigger reads the local app definition while
+                the tick runs the deployed one, so if inference alone
+                elided, upgrading stardag would start dropping pickles that
+                an app deployed by an older version cannot compensate for.
+            require_pickle_free: Turn the pickle fallback from a silent
+                safety net into a hard error. With ``task_modules``
+                covering a build's classes, a reactive build writes no
+                task pickles at all and therefore needs no target-root
+                *write* access; with this flag, a build that *would* have
+                fallen back to pickling fails instead, naming every task
+                and why. Off by default (the fallback is what keeps the
+                feature additive).
+
+                Enforced by the reactive bootstrap, where the task
+                store is written — normally in the ``bootstrap``
+                container. It fails loudly: the ``TaskModulesError``
+                records a terminal BUILD_FAILED and is re-raised on the
+                bootstrap's Modal call, so it surfaces both in the
+                registry and on
+                ``BuildTriggerResult.function_call.get()``. Dynamic
+                dependencies registered from inside a worker apply the
+                same elision but never raise: their task has already run,
+                and failing its bookkeeping to enforce a storage
+                preference would be a strictly worse outcome than one
+                extra pickle.
             modal_workspace: Explicit Modal workspace name recorded in the
                 executor metadata of triggered builds and started tasks
                 (used by the UI for Modal dashboard deep links). Default:
@@ -1955,6 +2617,26 @@ class StardagApp:
         # cancelled builds). Set watchdog_period_minutes when using
         # build_trigger(reactive=True).
         self._tick_settings = tick_settings
+        # The reactive ``bootstrap`` function's settings. Defaults to
+        # builder_settings rather than tick_settings on purpose: the
+        # bootstrap does the same whole-DAG discovery a resident build
+        # does, and an app that shortened its tick (a sensible thing to
+        # do — the tick is one frontier pass) must not thereby shorten
+        # the budget for discovering a large DAG.
+        self._bootstrap_settings = bootstrap_settings
+        # Where a reactive trigger discovers the DAG. Deployment-level
+        # configuration rather than a per-trigger flag, and deliberately
+        # so: the reasons to opt out are properties of the deployment (an
+        # app deployed before the bootstrap function existed; a target
+        # root the Modal app cannot reach), not of one invocation — and
+        # this is where every other reactive knob already lives.
+        if reactive_discovery not in typing.get_args(ReactiveDiscovery):
+            raise ValueError(
+                f"reactive_discovery must be one of "
+                f"{list(typing.get_args(ReactiveDiscovery))}, got "
+                f"{reactive_discovery!r}"
+            )
+        self.reactive_discovery: ReactiveDiscovery = reactive_discovery
         self.watchdog_period_minutes = watchdog_period_minutes
         # Maps a task to the named concurrency-limit keys it runs under in
         # reactive scheduling (see the registry's environment concurrency
@@ -1963,6 +2645,31 @@ class StardagApp:
         # consistently (callables can't be persisted in the JSON build
         # meta like the scalar tick_kwargs).
         self.limit_key_selector = limit_key_selector
+        # Task-module declaration for reactive scheduling: the patterns
+        # whose expansion is imported by every scheduler tick so it can
+        # rebuild task objects from registry data (see
+        # stardag.build._task_modules). Validated eagerly — a malformed
+        # pattern must fail here, not silently match nothing and surface
+        # hours later as a tick that cannot reconstruct a task.
+        #
+        # Whether the patterns were *declared* or merely inferred decides
+        # whether pickles may be elided — see _persist_discovered_tasks.
+        # Inference must stay observation-only: it happens on every app,
+        # including apps written before this feature existed.
+        self._task_modules_declared = task_modules is not None
+        if task_modules is None:
+            task_modules = _infer_task_module_patterns()
+        self.task_modules: tuple[str, ...] = validate_task_module_patterns(task_modules)
+        if require_pickle_free and not self.task_modules:
+            raise TaskModulesError(
+                "require_pickle_free=True is meaningless without "
+                "task_modules: with no declared modules, no task can be "
+                "reconstructed from registry data and every task would "
+                "need a pickle. Declare task_modules explicitly (if you "
+                "left it at the default, inference was not possible — see "
+                "the warning above), or drop require_pickle_free."
+            )
+        self.require_pickle_free = require_pickle_free
         # Explicit Modal workspace name for executor metadata (UI deep
         # links). Default: resolved from the Modal token, best-effort.
         # Used by build_trigger and by the tick's executor; the resident
@@ -2042,10 +2749,13 @@ class StardagApp:
                 target roots if they don't exist.
 
         Returns:
-            FinalizeResult with created volumes, function names, and mount info.
+            FinalizeResult with created volumes, function names, mount info,
+            and the expanded ``task_modules`` baked into the tick.
 
         Raises:
             RuntimeError: If finalize() has already been called.
+            TaskModulesError: If a ``task_modules`` pattern cannot be
+                expanded (e.g. its root package is not importable here).
         """
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
@@ -2121,6 +2831,17 @@ class StardagApp:
                         f"proceeding: {e}"
                     )
             extra_secrets.append(self.stardag_api_key_secret)
+        # Expand the declared task-module patterns to a concrete, sorted
+        # module list ONCE, here, and bake it into the deployed functions
+        # below. Deploy-time expansion (rather than in-container) keeps the
+        # deployed set explicit and auditable, keeps container startup off
+        # the filesystem, and makes the deployment reproducible: a module
+        # added after this deploy is not silently picked up by a running
+        # tick — it needs a redeploy, which is also when the operator gets
+        # to see the list change. Only name expansion happens here (no
+        # submodule imports): the CLI does the optional local import check.
+        task_module_patterns = self.task_modules
+        task_modules = expand_task_module_patterns(task_module_patterns)
         # Wrap callables in real functions for Modal compatibility.
         # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
         # not callable class instances. The wrappers delegate to the actual callable
@@ -2145,6 +2866,15 @@ class StardagApp:
         def _modal_run(
             task: BaseTask, *, env_overrides: dict[str, str] | None = None
         ) -> typing.Any:
+            # Publish the app's task-module patterns for the worker-side
+            # code that needs them but is nowhere near the app object:
+            # _WorkerLifecycleReporter._register_dynamic_deps checks the
+            # coverage of dynamically yielded deps, which the trigger's
+            # pre-flight cannot see. The worker does not IMPORT the
+            # modules: its task arrived by value (self-importing) and its
+            # dynamic deps were just constructed by user code, so their
+            # classes are registered by definition.
+            set_declared_task_module_patterns(task_module_patterns)
             if run_fn_accepts_env:
                 run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
                 return run_fn_with_env(task, env_overrides=env_overrides)
@@ -2193,6 +2923,25 @@ class StardagApp:
         default_worker_selector = self.worker_selector
         limit_key_selector = self.limit_key_selector
         modal_workspace = self.modal_workspace
+        # Per-worker Modal timeouts, captured here because this is the only
+        # place they exist: the tick runs in a deployed container with no
+        # access to the app object, and the claim TTL it records for a task
+        # is derived from the timeout of the worker that task routes to.
+        # Workers without an explicit timeout are simply absent (Modal's own
+        # default is not a promise this SDK should encode).
+        worker_timeouts = {
+            worker_name: timeout
+            for worker_name, settings in self._worker_settings.items()
+            if (timeout := settings.get("timeout")) is not None
+        }
+        # The timeout of the ``tick`` function itself — i.e. how long a tick
+        # container may live. Captured here for the same reason as
+        # ``worker_timeouts``: the deployed tick has no access to the app
+        # object, and this is the number its per-pass spawn cap is derived
+        # from (see stardag.build._reactive._spawn_cap).
+        tick_timeout_seconds = _tick_function_timeout_seconds(
+            self._tick_settings, self._builder_settings
+        )
 
         def _modal_tick(
             build_id: str,
@@ -2284,14 +3033,31 @@ class StardagApp:
             # Explicit tick_kwargs (tests/manual invocations) win over
             # persisted ones; the limit key selector is deployed-app config.
             config = _build_tick_config(
-                build_info.reactive_tick_kwargs, tick_kwargs, limit_key_selector
+                build_info.reactive_tick_kwargs,
+                tick_kwargs,
+                limit_key_selector,
+                tick_timeout_seconds=tick_timeout_seconds,
             )
+
+            # Register the app's task classes in THIS container before the
+            # tick reconstructs anything: rehydrating a task from registry
+            # data is a dict lookup in the polymorphic registry, which is
+            # populated only as a side effect of importing the defining
+            # modules (unlike pickle, which self-imports). The list was
+            # expanded and frozen at deploy time; the import is cached per
+            # module list, so a container serving many ticks pays it once.
+            # Failures warn rather than abort — and are retained, so a
+            # later "could not rehydrate" error can name them.
+            if task_modules:
+                set_declared_task_module_patterns(task_module_patterns)
+                import_task_modules(task_modules)
 
             executor = ModalTaskExecutor(
                 modal_app_name=app_name,
                 worker_selector=default_worker_selector,
                 reactive=True,
                 modal_workspace=modal_workspace,
+                worker_timeouts=worker_timeouts,
             )
             lock_manager = RegistryGlobalConcurrencyLockManager(
                 # No waiting on the scheduler lease: a held lease means
@@ -2324,11 +3090,76 @@ class StardagApp:
         )(_modal_tick)
         function_names.append("tick")
 
+        # Reactive bootstrap (see run_reactive_bootstrap). Spawned by
+        # build_trigger(reactive=True) with the root tasks BY VALUE —
+        # cloudpickled into the call exactly as build_spawn passes
+        # ``tasks=`` to the builder — so the DAG is walked here, next to
+        # the mounted target root, instead of on the triggering machine.
+        elide_pickles = self._task_modules_declared or self.require_pickle_free
+        require_pickle_free = self.require_pickle_free
+
+        def _modal_bootstrap(
+            build_id: str,
+            tasks: typing.Sequence[BaseTask] | BaseTask,
+            tick_kwargs: dict[str, typing.Any] | None = None,
+        ) -> dict[str, typing.Any]:
+            _setup_logging()
+            build_uuid = UUID(build_id)
+            task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
+            registry = registry_provider.get()
+            try:
+                result = run_reactive_bootstrap(
+                    build_uuid,
+                    task_list,
+                    registry=registry,
+                    app_name=app_name,
+                    tick_kwargs=tick_kwargs,
+                    # The DEPLOYED module list and elision opt-in, frozen
+                    # here alongside the tick's. The trigger does not
+                    # supply them, which is what makes the coverage
+                    # pre-flight compare the DAG against what the ticks
+                    # will actually import rather than against the
+                    # caller's local app definition.
+                    task_modules=task_module_patterns,
+                    elide_pickles=elide_pickles,
+                    require_pickle_free=require_pickle_free,
+                )
+            except BaseException as e:
+                # The trigger handed this container a RUNNING build and
+                # returned. Nothing else will notice it died, so a failed
+                # bootstrap must not leave an orphan RUNNING build.
+                _fail_build_best_effort(registry, build_uuid, e)
+                raise
+            # The tick handle is process-local; only the summary crosses
+            # back to the caller as the Modal return value.
+            return result.summary
+
+        bootstrap_settings = self._prepare_function_settings(
+            self._bootstrap_settings or self._builder_settings,
+            extra_secrets=extra_secrets,
+            auto_volumes=auto_volumes,
+        )
+        self.modal_app.function(
+            **{**bootstrap_settings, "name": "bootstrap", "serialized": True}
+        )(_modal_bootstrap)
+        function_names.append("bootstrap")
+
         if self.watchdog_period_minutes is not None:
 
             def _modal_tick_watchdog() -> None:
                 _setup_logging()
-                _run_watchdog_sweep(registry_provider.get(), _modal_tick)
+                # The watchdog runs on the same settings as `tick`, so its
+                # container has the same timeout — which it then splits
+                # across the builds it sweeps (see _run_watchdog_sweep).
+                # Scoped to this app's own reactive builds, and handed the
+                # container's own timeout to split across them — see
+                # _run_watchdog_sweep for both.
+                _run_watchdog_sweep(
+                    registry_provider.get(),
+                    _modal_tick,
+                    tick_timeout_seconds=tick_timeout_seconds,
+                    reactive_app_name=app_name,
+                )
 
             self.modal_app.function(
                 **{
@@ -2347,6 +3178,7 @@ class StardagApp:
             functions=function_names,
             volume_mounts=volume_mounts,
             auto_volumes=auto_volumes,
+            task_modules=task_modules,
         )
 
     def build_spawn(
@@ -2434,23 +3266,28 @@ class StardagApp:
             description: Optional description for the new build (ignored when
                 ``build_id`` is given).
             reactive: **Experimental.** Schedule the build reactively (no
-                resident orchestrator): discovery runs here at the trigger,
-                task objects are persisted to the build task store under the
-                default target root, and short-lived scheduler *ticks*
-                (spawned now, by workers finishing tasks, and by the optional
-                watchdog) drive the build — see ``stardag.build.run_tick_aio``
-                for semantics and current limitations. Requires the app to be
-                deployed with this stardag version (the ``tick`` function and
-                self-reporting workers), and registry + target-root access in
-                the calling process. Re-trigger with the returned ``build_id``
-                to wake a stalled build or add new root tasks to it.
+                resident orchestrator): the deployed ``bootstrap`` function
+                discovers the DAG, registers it and persists the task
+                objects *inside Modal*, then short-lived scheduler *ticks*
+                (spawned by the bootstrap, by workers finishing tasks, and
+                by the optional watchdog) drive the build — see
+                ``stardag.build.run_tick_aio`` for semantics and current
+                limitations. Requires the app to be deployed with this
+                stardag version (the ``bootstrap`` and ``tick`` functions
+                and self-reporting workers) and registry credentials in the
+                calling process — but **no target-root access**: this call
+                mints the build, registers the roots and spawns, and
+                performs no target I/O at all (unless the app opted out
+                with ``reactive_discovery="local"``). Re-trigger with the
+                returned ``build_id`` to wake a stalled build or add new
+                root tasks to it.
             tick_kwargs: Optional kwargs for the reactive ``TickConfig``
                 (e.g. ``{"linger_seconds": 30}``).
 
         Returns:
             BuildTriggerResult with the ``build_id`` and the spawned Modal
-            ``FunctionCall`` handle (the build function, or the first
-            scheduler tick when ``reactive=True``).
+            ``FunctionCall`` handle (the ``build`` function, or the
+            ``bootstrap`` function when ``reactive=True``).
         """
         merged_kwargs = dict(build_kwargs or {})
         if "resume_build_id" in merged_kwargs:
@@ -2476,8 +3313,9 @@ class StardagApp:
             tick_kwargs = _validate_tick_kwargs(tick_kwargs)
 
         registry = registry_provider.get()
-        # A configured registry is needed to mint a new build id, and always
-        # in reactive mode (discovery/registration runs at the trigger).
+        # A configured registry is needed to mint a new build id, and
+        # always in reactive mode: the registry IS the scheduler state,
+        # and the roots are registered here before anything is spawned.
         if (build_id is None or reactive) and isinstance(registry, NoOpRegistry):
             raise RuntimeError(
                 "build_trigger requires a configured registry to mint the "
@@ -2489,16 +3327,11 @@ class StardagApp:
         explicit_build_id = build_id is not None
         executor_metadata = self._build_executor_metadata(reactive=reactive)
         if build_id is None:
-            if accepts_executor_metadata_kwarg(registry.build_start):
-                build_id = registry.build_start(
-                    root_tasks=task_list,
-                    description=description,
-                    executor_metadata=executor_metadata,
-                )
-            else:
-                build_id = registry.build_start(
-                    root_tasks=task_list, description=description
-                )
+            build_id = registry.build_start(
+                root_tasks=task_list,
+                description=description,
+                executor_metadata=executor_metadata,
+            )
 
         if reactive:
             if self.watchdog_period_minutes is None:
@@ -2533,11 +3366,28 @@ class StardagApp:
         return BuildTriggerResult(build_id=build_id, function_call=function_call)
 
     def _build_executor_metadata(self, *, reactive: bool) -> dict[str, typing.Any]:
-        """Build-level executor metadata for a trigger (best-effort)."""
+        """Build-level executor metadata for a trigger (best-effort).
+
+        ``function_name`` is the function the trigger actually spawns, not
+        the one that does most of the work afterwards: operator and UI
+        surfaces render it as "what was invoked", and a reactive build
+        discovered in Modal is spawned as ``bootstrap`` (which then arms the
+        build and spawns the first tick). Naming ``tick`` there would send a
+        reader looking through the wrong function's logs for the failure
+        that stopped the build from starting.
+        """
+        if not reactive:
+            spawned = "build"
+        elif self.reactive_discovery == "local":
+            # Local discovery skips the bootstrap and spawns the first tick
+            # directly, so `tick` is the honest answer in that mode.
+            spawned = "tick"
+        else:
+            spawned = "bootstrap"
         metadata: dict[str, typing.Any] = {
             "kind": MODAL_EXECUTOR_NAME,
             "app_name": self.name,
-            "function_name": "tick" if reactive else "build",
+            "function_name": spawned,
             "reactive": reactive,
         }
         try:
@@ -2565,7 +3415,33 @@ class StardagApp:
         is_retrigger: bool,
         executor_metadata: dict[str, typing.Any] | None = None,
     ) -> BuildTriggerResult:
-        """Reactive trigger: discover + persist here, then spawn the first tick.
+        """Reactive trigger: register the roots, then spawn ``bootstrap``.
+
+        Everything expensive happens in Modal. What is left here is the
+        work that either costs no target I/O or must precede any spawn:
+
+        - mint (or resume) the build, so it exists before a container does;
+        - register the roots server-side. This is genuinely free of target
+          I/O — ``_get_task_data_for_registration`` reads ``target().uri``,
+          which *constructs* a URI and performs no existence check;
+        - spawn ``bootstrap`` with the roots **by value** (cloudpickled
+          into the call, exactly as :meth:`build_spawn` passes ``tasks=``
+          to the builder) and return.
+
+        The DAG walk, the task-module coverage pre-flight, the task-store
+        writes, the reactive marker and the first tick all live in the
+        bootstrap container — see :func:`run_reactive_bootstrap`, which
+        also documents the ordering guarantee that keeps a tick from ever
+        seeing a partially-registered DAG. Triggering is therefore fast
+        and touches no target root, which for a ``modalvol://`` root is
+        the difference between one spawn and one rate-limited volume API
+        call per task in the DAG.
+
+        With ``StardagApp(reactive_discovery="local")`` the very same
+        :func:`run_reactive_bootstrap` runs here instead, against the
+        local app's task-module list. Everything below — ordering,
+        failure handling, re-trigger semantics — is identical either way;
+        only the machine changes.
 
         Re-triggering an existing build id is fully supported:
 
@@ -2577,53 +3453,81 @@ class StardagApp:
           completion of the original roots would strand re-triggered
           subtrees silently).
         - Previously failed/cancelled/skipped tasks in the (re-)discovered
-          DAG are reset to pending (``retry_failed``) — the retry path for
-          reactive builds.
+          DAG are reset to pending (``retry_failed``, applied by the
+          bootstrap's discovery) — the retry path for reactive builds.
         - The reactive metadata is updated in the registry: because the
           registry is mutable (unlike an immutable target root), a
-          re-trigger MAY now change ``tick_kwargs`` (a bare re-trigger with
-          no explicit tick_kwargs preserves the existing ones); the roots
-          live in the registry too (``build_add_roots`` above).
+          re-trigger MAY change ``tick_kwargs`` (a bare re-trigger with no
+          explicit tick_kwargs preserves the existing ones).
 
-        ``tick_kwargs`` are persisted in the build's ``reactive_tick_kwargs``
-        in the registry so that EVERY tick — including worker wake-ups and
-        watchdog sweeps, which spawn with only the build id — runs with the
-        same configuration.
+        ``tick_kwargs`` ride along to the bootstrap, which persists them in
+        the build's ``reactive_tick_kwargs`` so that EVERY tick — including
+        worker wake-ups and watchdog sweeps, which spawn with only the
+        build id — runs with the same configuration.
+
+        **No orphan RUNNING builds.** Once this trigger knows the build is
+        RUNNING, any failure before the bootstrap is airborne records a
+        terminal BUILD_FAILED before propagating. The arming point is
+        deliberate: on a re-trigger the build may still be *terminal* until
+        ``build_resume`` succeeds, and failing a build that this trigger
+        never managed to resume would be a lie about which attempt died.
+        Failures on the other side of the spawn are the bootstrap's to
+        report, and it does.
         """
         root_ids = [str(t.id) for t in task_list]
         if is_retrigger:
-            # Un-terminal the build (no-op on a fresh/running build) and
-            # register the (possibly new) roots BEFORE discovery, so a
-            # concurrent tick can't complete-and-terminal the build on the
-            # old root set while we're adding to it.
-            if executor_metadata is not None and accepts_executor_metadata_kwarg(
-                registry.build_resume
-            ):
-                registry.build_resume(build_id, executor_metadata=executor_metadata)
-            else:
-                registry.build_resume(build_id)
-            registry.build_add_roots(build_id, root_ids)
-        discovery = asyncio.run(
-            discover_and_register_aio(
-                registry, build_id, tuple(task_list), retry_failed=True
+            # Un-terminal the build (no-op on a fresh/running build).
+            # Deliberately OUTSIDE the failure guard below: until this
+            # succeeds the build may still be terminal, and marking a
+            # terminal build failed on behalf of a resume that never
+            # landed would misattribute someone else's outcome.
+            registry.build_resume(build_id, executor_metadata=executor_metadata)
+        # From here the build is RUNNING (fresh builds since build_start,
+        # re-triggers since the resume above) and this trigger owns it.
+        try:
+            if is_retrigger:
+                # Register the (possibly new) roots BEFORE the bootstrap is
+                # spawned, so a concurrent tick can't complete-and-terminal
+                # the build on the old root set while the new subtree is
+                # still being discovered.
+                registry.build_add_roots(build_id, root_ids)
+            if self.reactive_discovery == "local":
+                # No advisory here: the authoritative check is about to
+                # run in this very process, microseconds from now. Two
+                # messages saying overlapping things would be noise.
+                return BuildTriggerResult(
+                    build_id=build_id,
+                    function_call=run_reactive_bootstrap(
+                        build_id,
+                        task_list,
+                        registry=registry,
+                        app_name=self.name,
+                        tick_kwargs=tick_kwargs,
+                        task_modules=self.task_modules,
+                        elide_pickles=(
+                            self._task_modules_declared or self.require_pickle_free
+                        ),
+                        require_pickle_free=self.require_pickle_free,
+                    ).tick_call,
+                )
+            # Early, roots-only advisory (see the function's docstring):
+            # additive feedback in the operator's terminal, never the
+            # coverage check itself — that one runs over the full
+            # discovered DAG inside run_reactive_bootstrap. Only worth
+            # emitting when the real check lands in another process's
+            # logs, i.e. exactly here.
+            _advise_uncovered_root_task_modules(task_list, self.task_modules)
+            bootstrap_function = modal.Function.from_name(
+                app_name=self.name, name="bootstrap"
             )
-        )
-        store = BuildTaskStore(build_id)
-        store.save_tasks(discovery.incomplete.values())
-        # Persist the reactive marker/owner/config in the registry
-        # (``reactive_app_name`` is the "this build is reactively scheduled"
-        # marker read by every tick). This is an upsert: because the registry
-        # is mutable — unlike a possibly-immutable target root — a re-trigger
-        # MAY update tick_kwargs. tick_kwargs is passed through as-is: None
-        # (a bare re-trigger) preserves the stored config server-side rather
-        # than wiping it, so the 0.10.1 merge-semantics guarantee holds.
-        # Build roots are tracked in the registry too (build_add_roots above
-        # — the scheduler reads them from the frontier).
-        registry.build_set_reactive_meta(
-            build_id, app_name=self.name, tick_kwargs=tick_kwargs
-        )
-        tick_function = modal.Function.from_name(app_name=self.name, name="tick")
-        function_call = tick_function.spawn(build_id=str(build_id))
+            function_call = bootstrap_function.spawn(
+                build_id=str(build_id),
+                tasks=task_list,
+                tick_kwargs=tick_kwargs,
+            )
+        except BaseException as e:
+            _fail_build_best_effort(registry, build_id, e)
+            raise
         return BuildTriggerResult(build_id=build_id, function_call=function_call)
 
     def build_remote(

@@ -49,19 +49,19 @@ class ClaimRegistry(RecordingRegistry):
         # task_id(str) -> status; refs: task_id -> (executor, ref)
         self.statuses: dict[str, str] = {}
         self.refs: dict[str, tuple[str | None, str | None]] = {}
-        self.status_at: dict[str, str] = {}
+        self.expires_at: dict[str, str] = {}
 
     def seed_running(
         self,
         task: BaseTask,
         executor: str | None,
         ref: str | None,
-        latest_status_at: str | None = None,
+        latest_status_expires_at: str | None = None,
     ) -> None:
         self.statuses[str(task.id)] = "running"
         self.refs[str(task.id)] = (executor, ref)
-        if latest_status_at is not None:
-            self.status_at[str(task.id)] = latest_status_at
+        if latest_status_expires_at is not None:
+            self.expires_at[str(task.id)] = latest_status_expires_at
 
     async def task_start_claim_aio(
         self,
@@ -71,6 +71,7 @@ class ClaimRegistry(RecordingRegistry):
         executor_ref=None,
         executor_metadata=None,
         limit_keys=None,
+        claim_ttl_seconds=None,
     ) -> StartClaimResult:
         tid = str(task.id)
         self._record("task_start_claim_aio", task.id)
@@ -82,7 +83,7 @@ class ClaimRegistry(RecordingRegistry):
                 denied_reason="already_running",
                 executor=stored_executor,
                 executor_ref=stored_ref,
-                latest_status_at=self.status_at.get(tid),
+                latest_status_expires_at=self.expires_at.get(tid),
             )
         if status == "completed":
             return StartClaimResult(started=False, denied_reason="already_completed")
@@ -97,6 +98,7 @@ class ClaimRegistry(RecordingRegistry):
         executor=None,
         executor_ref=None,
         executor_metadata=None,
+        claim_ttl_seconds=None,
     ):
         await super().task_start_aio(
             build_id,
@@ -201,13 +203,14 @@ class TestClaimWinner:
         assert summary.status == BuildExitStatus.SUCCESS
         assert registry.claim_calls(task) == 0
 
-    async def test_claim_skipped_without_registry_support(
+    async def test_claim_through_registry_less_path(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """Registries without claim arbitration (ABC default) are never
-        claimed through — even with claim=True (warned, not failed)."""
-        task = SyncOnlyTask(name="claim-unsupported")
-        registry = RecordingRegistry()  # no task_start_claim_aio override
+        """The registry-less path stays claimable: NoOpRegistry grants every
+        claim (nothing shared to arbitrate against), so a claim=True build
+        runs exactly as it would without claims."""
+        task = SyncOnlyTask(name="claim-registry-less")
+        registry = RecordingRegistry()  # NoOpRegistry subclass, no arbitration
 
         summary = await build_aio(
             [task],
@@ -217,7 +220,9 @@ class TestClaimWinner:
         )
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert not registry.has_call("task_start_claim_aio", task.id)
+        assert task.complete()
+        # The engine's own ref-carrying start still lands.
+        assert registry.has_call("task_start_aio", task.id)
 
 
 class TestClaimLoser:
@@ -523,18 +528,18 @@ class TestClaimRobustness:
         assert len(starts) == 1
         assert starts[0]["executor_ref"] == f"spawned-{task.id}"
 
-    async def test_stale_refless_holder_recovered(
+    async def test_lapsed_refless_holder_recovered(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """Opt-in staleness bound: a ref-less holder whose status hasn't
-        moved past the bound (winner's claim→ref-record crash window) is
-        recorded failed and the claim re-taken."""
+        """A ref-less holder whose claim has lapsed (the winner's
+        claim→ref-record crash window) is recorded failed and the claim
+        re-taken — on the server's own expiry, with no local bound."""
         from datetime import datetime, timedelta, timezone
 
-        task = SyncOnlyTask(name="claim-stale-holder")
+        task = SyncOnlyTask(name="claim-lapsed-holder")
         registry = ClaimRegistry()
-        stale_at = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
-        registry.seed_running(task, None, None, latest_status_at=stale_at)
+        lapsed = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        registry.seed_running(task, None, None, latest_status_expires_at=lapsed)
         executor = FakeDetachedExecutor()
 
         summary = await build_aio(
@@ -545,14 +550,42 @@ class TestClaimRobustness:
                 wait_timeout_seconds=2.0,
                 wait_initial_interval_seconds=0.02,
                 wait_max_interval_seconds=0.05,
-                stale_running_no_ref_seconds=1.0,
             ),
         )
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert registry.has_call("task_fail_aio", task.id)  # stale holder recorded
+        assert registry.has_call("task_fail_aio", task.id)  # lapsed holder recorded
         assert executor.spawn_calls == [task.id]
         assert task.complete()
+
+    async def test_live_refless_holder_is_waited_on(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Control: a ref-less holder whose claim is still live is waited
+        on, not recovered — the expiry is the whole decision, so an
+        unexpired one must keep the loser off the task."""
+        from datetime import datetime, timedelta, timezone
+
+        task = SyncOnlyTask(name="claim-live-holder")
+        registry = ClaimRegistry()
+        live = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        registry.seed_running(task, None, None, latest_status_expires_at=live)
+        executor = FakeDetachedExecutor()
+
+        with pytest.raises(Exception, match="Claim wait timed out"):
+            await build_aio(
+                [task],
+                task_executor=executor,
+                registry=registry,
+                claim_config=ClaimConfig(
+                    wait_timeout_seconds=0.2,
+                    wait_initial_interval_seconds=0.02,
+                    wait_max_interval_seconds=0.05,
+                ),
+            )
+
+        assert not registry.has_call("task_fail_aio", task.id)
+        assert executor.spawn_calls == []
 
     async def test_no_warning_for_manager_without_enabled_lock(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]

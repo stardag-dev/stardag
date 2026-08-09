@@ -430,13 +430,25 @@ workspace comes from a cached Modal token lookup); pass
 ### Reactive scheduling: no resident build function (experimental)
 
 With `build_trigger(..., reactive=True)` the build runs with **no resident
-orchestrator at all**: task discovery happens at the trigger, and the build
-is driven by short-lived scheduler _ticks_ — spawned when the build is
-triggered, whenever a worker finishes a task, and (recommended) by a
-periodic watchdog. Between ticks, nothing runs except your tasks: a
-multi-day build with a few long-running tasks costs no orchestrator
-container time, and there is no orchestrator process whose crash could
-affect the build.
+orchestrator at all**. The trigger mints the build, registers the root
+tasks and spawns one deployed function — `bootstrap` — with those roots
+passed by value; everything else is driven by short-lived scheduler
+_ticks_, spawned by the bootstrap, whenever a worker finishes a task, and
+(recommended) by a periodic watchdog. Between ticks, nothing runs except
+your tasks: a multi-day build with a few long-running tasks costs no
+orchestrator container time, and there is no orchestrator process whose
+crash could affect the build.
+
+**Triggering is fast and does no target I/O.** Discovering a DAG means one
+target existence check per task, and the trigger performs none of them:
+the `bootstrap` container walks the DAG, registers it, persists the task
+objects and only then arms the build and spawns the first tick. The
+difference is not cosmetic for a `modalvol://` target root — inside Modal
+the volume is a mounted filesystem, while from your laptop each check is a
+rate-limited Volume API call. Triggering a wide DAG used to spend most of
+its time in rate-limit backoff; now it returns as soon as the spawn is
+acknowledged. It also means a reactive trigger needs **registry
+credentials only** — no target-root access at all.
 
 ```{.python notest}
 app = sd_modal.StardagApp(
@@ -461,18 +473,65 @@ app.build_trigger(
 Requirements and current limitations: the app must be deployed with this
 stardag version — **both** the Modal app and the registry server (an older
 server fails reactive triggers with a "does not support reactive
-scheduling" error); the triggering process needs registry credentials and
-access to the default target root (task _objects_ are persisted there as
-pickles for the ticks — the reactive marker, owning app, and tick config
-live in the registry, not on the target root, so re-triggering works even
-when the target root is immutable/append-only and a re-trigger may update
-`tick_kwargs`); the global concurrency lock and build-local
+scheduling" error, and an app deployed before the `bootstrap` function
+existed has nothing to spawn — see `reactive_discovery` below); the
+triggering process needs registry credentials (task _objects_ are
+persisted to the target root as pickles for the ticks, but that write now
+happens inside the `bootstrap` container — the reactive marker, owning
+app, and tick config live in the registry, not on the target root, so
+re-triggering works even when the target root is immutable/append-only and
+a re-trigger may update `tick_kwargs`; declaring
+[`task_modules`](#declaring-your-task-modules-recommended) removes the
+target-root write entirely for most builds); the global
+concurrency lock and build-local
 `ConcurrencyConfig` limits are not applied by ticks (use the
 registry-backed named limits above; Modal's per-function
 `concurrency_limit` also still applies). Builds cancelled from the
 registry UI are picked up by the next tick (within the watchdog period),
 which cancels the running Modal function calls; on failure, tasks
 transitively blocked by the failed task are marked skipped.
+
+**Sizing the bootstrap.** `bootstrap` is a separate deployed function
+rather than work folded into the first tick, because the two want
+different timeouts. A tick is one frontier pass and is meant to be short
+(its timeout also derives the per-pass spawn cap); the bootstrap is a
+single whole-DAG walk whose cost scales with the DAG and is paid once per
+trigger. One number cannot honestly cover both — shortening the tick,
+normally a good idea, would start killing the bootstrap of large DAGs. It
+defaults to `builder_settings` (same image, secrets and target-root
+volume mounts as the builder, which does the same discovery for resident
+builds); override it with `bootstrap_settings`:
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+    tick_settings=sd_modal.FunctionSettings(image=image, timeout=300),
+    # Discovery of a very wide DAG gets its own budget.
+    bootstrap_settings=sd_modal.FunctionSettings(image=image, timeout=1800),
+    watchdog_period_minutes=5,
+)
+```
+
+**Failures leave no orphan builds.** A reactive trigger mints a `RUNNING`
+build and then walks away, so both sides of the spawn record a terminal
+`BUILD_FAILED` before propagating: the trigger for anything that goes
+wrong once it knows the build is running (a re-trigger whose `build_resume`
+fails is deliberately excluded — until that lands the build may still be
+terminal, and failing it would misattribute someone else's outcome), and
+the bootstrap for anything that goes wrong in its container, including a
+failed first-tick spawn. The bootstrap's exception also surfaces on
+`result.function_call.get()`.
+
+**Running discovery locally instead.** `StardagApp(reactive_discovery=
+"local")` runs the identical bootstrap in the triggering process — the
+behaviour reactive triggers had before the `bootstrap` function existed.
+Reach for it when the deployed app predates that function, or when the
+target root is reachable from your machine but not from the Modal app.
+Note that it also puts the coverage pre-flight below on your _local_
+`task_modules` rather than the deployed one, reinstating the stale-deploy
+blind spot.
 
 Two operational notes:
 
@@ -484,9 +543,19 @@ Two operational notes:
   still importable and its fields are compatible (nested task fields
   must use `sd.TaskLoads`/`sd.SubClass` annotations). Only if both paths
   fail is the task failed by the next tick (never a silent stall).
-- **The watchdog sweep runs one quick scheduling pass per running build**
-  (it skips the linger), so its per-period cost is one short function
-  invocation plus a frontier query per running build.
+  Declaring [`task_modules`](#declaring-your-task-modules-recommended) is
+  what makes "still importable" true by construction — and lets stardag
+  skip the pickle in the first place.
+- **The watchdog sweep runs one quick scheduling pass per running build
+  that this app owns** (it skips the linger), so its per-period cost is
+  one short function invocation plus a frontier query per such build.
+  The sweep asks the registry only for RUNNING builds whose reactive
+  owner is this app, so unrelated builds in the environment — resident
+  builds, and builds left RUNNING by an orchestrator that died without
+  emitting a terminal event — cost nothing and cannot crowd out the
+  sweep's per-period cap. A build owned by an app deployed _without_
+  `watchdog_period_minutes` therefore has no watchdog covering it, even
+  if another app in the environment has one.
 - **Define the callables you pass to `StardagApp` in an importable
   module.** `worker_selector`, `limit_key_selector`, and any custom
   build/run functions are captured by the serialized Modal functions
@@ -514,6 +583,124 @@ Two operational notes:
   ≤ 0.10.1 you instead had to put the secret on the builder — 0.10.1 —
   or on every worker — 0.10.0.)
 
+#### Declaring your task modules (recommended)
+
+A scheduler tick is a fresh, short-lived process. It learns _which_ tasks
+are actionable from the registry, but to spawn a worker it needs the actual
+task _object_ — and it has two ways to get one:
+
+1. unpickle it from the build task store (needs target-root access, and is
+   only valid for the deployment that wrote it), or
+2. rebuild it from the payload the registry already stores.
+
+The second path is the good one, but it has a catch: rebuilding a task
+resolves its class through stardag's polymorphic registry, and classes land
+in that registry **as a side effect of importing the module that defines
+them**. A pickle carries `module.QualName` and self-imports; the registry
+payload carries no module locator at all. So the tick can only rebuild
+classes whose modules its container happened to import — which, without
+help, is essentially arbitrary.
+
+`task_modules` is that help:
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+    watchdog_period_minutes=5,
+    # Modules whose import registers the task classes this app may
+    # schedule. Default: the root package of the module defining the app.
+    # Pass [] to opt out (resident builds never need this).
+    task_modules=["my_pkg.tasks.*", "my_pkg.pipelines.*"],
+)
+```
+
+**Pattern grammar.** Each entry is either an exact module
+(`"my_pkg.tasks.ingest"`) or a package followed by a trailing recursive
+wildcard (`"my_pkg.tasks.*"`, matching `my_pkg.tasks` and everything below
+it). A `*` anywhere but the final component, or a malformed path, raises
+from `StardagApp(...)` — a typo must not degrade into a silent no-match.
+Left unset, the default is `"<root package of the module defining the
+app>.*"`; if the app lives in `__main__` or a loose script (no importable
+package), inference is impossible and stardag warns and falls back to the
+pickle path.
+
+**A redeploy is required** when you add or move task classes. The patterns
+are expanded to a concrete module list at deploy time and baked into the
+deployed tick, so the deployed set is explicit and auditable and container
+startup does no filesystem walking. `stardag modal deploy` reports it:
+
+```text
+Task modules: 37 discovered from "my_pkg.*"  ->  128 task classes registered
+```
+
+The class count requires importing the modules locally, which the CLI does
+by default but **warn-only** — your deploy environment may lack extras the
+image has, so a local import failure never fails the deploy. Pass
+`--no-check-task-modules` to skip the check and report names only.
+
+**What you get.** Once you declare `task_modules` explicitly, every
+discovered task whose class is covered _and_ whose payload round-trips to
+the same task id is persisted **without a pickle**. A build whose classes
+are all covered writes nothing to the target root at all. Set
+`require_pickle_free=True` to turn the fallback into a hard error that
+names every task that would have needed a pickle and why — enforced in
+the `bootstrap` container, where the task store is written, and loud:
+it fails the build in the registry _and_ propagates on
+`result.function_call.get()`.
+
+**Skipping pickles requires the explicit declaration** — the inferred
+default never elides on its own. Inference happens for every app,
+including apps written before this feature existed. If inference alone
+skipped pickles, upgrading stardag would silently start dropping pickles
+that an app deployed by an older version has no baked-in module list to
+compensate for. Requiring you to write the argument is what puts the
+redeploy requirement in front of you at the moment it matters. Inference
+still drives the coverage warning below, which only observes.
+
+Some payloads stay pickle-bound by design, and always will:
+
+- **`AliasTask`**, whose `loads_type` is pickled bytes — auto-unpickling
+  registry-supplied bytes inside a scheduler tick would be a remote code
+  execution vector, so rehydration refuses those payloads outright;
+- **dynamically generated or otherwise non-importable classes**;
+- **anything whose serialization is not losslessly round-trippable** (in
+  particular, nested task fields must use `sd.TaskLoads` / `sd.SubClass`
+  annotations — a plain task-typed annotation validates children into the
+  abstract base class).
+
+**The coverage check** warns — naming the class, the pattern to add, and
+the redeploy requirement — for any discovered class the patterns don't
+cover. It is a warning rather than an error because an uncovered class
+still works via the pickle path, exactly as before this feature existed.
+It runs wherever discovery runs, i.e. in the `bootstrap` container, over
+the real discovered set, against the module list **the deployment baked
+in**. The trigger additionally prints a labelled, roots-only advisory
+before spawning, so the common "I never declared my package" case shows
+up in your terminal rather than only in the bootstrap's Modal logs; it is
+by construction a subset of the real check, never a substitute for it.
+
+Two caveats worth designing around:
+
+- **Task modules become import-hot.** They are imported in every tick
+  container, on every cold start. Keep heavy runtime dependencies inside
+  `run()` rather than at module scope — good practice regardless, but here
+  it directly buys tick cold-start latency.
+- **Redeploy whenever you change `task_modules`**, before triggering —
+  which reactive mode already requires for other reasons (see the
+  requirements above). The coverage check now reads the _deployed_ list,
+  so adding a pattern without redeploying is visible rather than silently
+  agreeable — but the elision decision is made from that same deployed
+  list, so until you redeploy nothing changes. (With
+  `reactive_discovery="local"` the check reads your local app definition
+  instead and the old stale-deploy blind spot returns: the pre-flight goes
+  quiet while the tick still can't resolve the class, with no pickle left
+  as a fallback.) Upgrading stardag alone is safe: elision only follows an
+  explicit declaration, so a newer SDK triggering against an app deployed
+  by an older one still writes pickles. Passing `task_modules=[]` restores
+  the pre-feature behaviour unconditionally.
+
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment
 (`PUT /api/v1/concurrency-limits/{key}` with `{"max_concurrent": N}`) and
@@ -538,9 +725,9 @@ When limits are enforced, **the watchdog is strongly recommended**
 (`watchdog_period_minutes=5`): a slot is freed by the holder reaching a
 terminal status, and the watchdog is the safety net that keeps statuses
 honest when wake-ups are lost — including the escape hatch that fails a
-task stuck RUNNING without an execution ref (default after 30 minutes,
-`TickConfig.stale_running_no_ref_seconds`), which would otherwise hold
-its slots indefinitely. Also note that limit-key tags recorded at a
+task stuck RUNNING without an execution ref once its **execution claim
+lapses** (see below), which would otherwise hold its slots indefinitely.
+Also note that limit-key tags recorded at a
 task's start persist until its next start _with_ keys — a later build
 re-running the same task id without tags briefly counts under the old
 keys while RUNNING.
@@ -553,15 +740,16 @@ server before relying on limits.
 **App ownership.** Each reactive build is owned by the `StardagApp`
 that triggered it (`app_name` recorded in the build's reactive metadata in
 the registry, read by every tick from the build frontier). With
-several apps deployed in one environment, every watchdog sweeps all
-running reactive builds — but a tick from a non-owning app never drives
-the build with its own commit's code and selectors (or unpickles the
-owner's task store, which may not match its code). Instead it
-**forwards**: it spawns the owner app's tick (best-effort) and returns
-`outcome="foreign_app"` — so wake-ups that land on the wrong app are
-not lost, and every app's watchdog doubles as cross-app coverage (the
-owner-side scheduler lease collapses duplicate forwards). Redeploying
-the **same** app name is the normal upgrade path and unaffected.
+several apps deployed in one environment, each app's watchdog sweeps only
+the builds that app owns. A tick from a non-owning app can still be
+triggered — typically a wake-up from a worker still running under a
+previous owner — and it never drives the build with its own commit's code
+and selectors (or unpickles the owner's task store, which may not match
+its code). Instead it **forwards**: it spawns the owner app's tick
+(best-effort) and returns `outcome="foreign_app"` — so wake-ups that land
+on the wrong app are not lost (the owner-side scheduler lease collapses
+duplicate forwards). Redeploying the **same** app name is the normal
+upgrade path and unaffected.
 
 To migrate a build to a different app, re-trigger it from that app
 (`build_trigger(tasks, reactive=True, build_id=<existing id>)`): the
@@ -582,10 +770,146 @@ the slots. Two caveats when mixing modes: a crashed _resident_ build has
 no automatic healer (its RUNNING task holds the slot until explicitly
 failed/cancelled via the API/UI — the worker-reporting/tick self-healing
 story above is reactive-only), and a legitimately long-running ref-less
-resident task that also appears in a concurrently ticking reactive build
-can be force-failed by that build's `stale_running_no_ref_seconds`
-escape hatch — raise the bound if you mix modes over the same long
-tasks.
+resident task can be force-failed once its claim lapses if it also appears
+in a concurrently ticking reactive build. Resident builds do not derive a
+claim TTL from an executor timeout, so such a task gets the registry's
+default expiry — keep that in mind if you mix modes over tasks that run
+longer than it.
+
+**Builds that overlap.** Task state is per environment, so a task another
+build owns blocks yours. A tick waits that out — whether the other build is
+executing the task under a live execution claim, or has yet to schedule it
+— instead of failing the build. A blocker whose claim has **lapsed**, or a
+non-running blocker no _live_ build is going to run, fails the build with a
+message naming the task, the build that owns it and why that owner will not
+move it. Symptom worth knowing: a tick log line saying the build is _"waiting on
+N upstream task(s) owned by other builds … waiting rather than failing"_
+means your build is fine and waiting on a neighbour. See
+[Cross-build blocking](../concepts/build-execution.md#cross-build-blocking)
+for the recovery path when the blocker is abandoned — including a task left
+SUSPENDED, which a retry (and therefore a re-trigger) now resets.
+`stardag builds frontier <build-id>` shows this directly, naming the blocking
+task and the build that owns it — see
+[Reading the frontier](../configuration/cli.md#reading-the-frontier).
+
+**Task retries: `retries=` and `max_attempts` are not the same knob.**
+`FunctionSettings(retries=N)` on a worker is Modal's own retry policy: it
+covers an exception raised _inside_ the container, and it is the right tool
+for that. It cannot cover a spawn that failed before the container existed,
+a container Modal killed (OOM, timeout), or a preempted worker — from
+Modal's side there is nothing to retry, and from the build's side those
+used to end a `FAIL_FAST` build outright.
+
+Reactive ticks therefore carry `TickConfig.max_attempts` (default **2**), a
+per-task budget on how many executions the _scheduler_ starts in one build
+round. It applies only to failures a tick records itself — a failed spawn,
+an execution Modal reports as failed, and a task whose execution claim
+lapsed with no ref left to probe (the preemption/OOM shape). A task that
+simply raises never reaches it: the worker self-reports the failure, which
+is what `retries=` is for. Set the two together — `retries=` for flaky task
+code, `max_attempts` for flaky infrastructure:
+
+```{.python notest}
+app.build_trigger(
+    root_task, reactive=True, tick_kwargs={"max_attempts": 3}
+)
+```
+
+`max_attempts=1` restores the previous behaviour (record the failure, never
+respawn).
+
+**A build that ran out of attempts is recovered by re-triggering it.** The
+budget is scoped to a build _round_, and re-triggering an existing build id
+records `BUILD_RESUMED` ahead of its discovery retries, so every task
+starts the new round at zero:
+
+```{.python notest}
+# Resets the attempt budget and re-runs what failed. Optionally raise the
+# budget for the new round at the same time.
+app.build_trigger(
+    root_task, build_id=result.build_id, reactive=True,
+    tick_kwargs={"max_attempts": 4},
+)
+```
+
+A **bare** retry does not do this. Clicking Retry in the UI (or running
+`stardag tasks retry`) flips the task to pending without starting a new
+round, so on a task already at budget the retry succeeds and the scheduler
+still refuses to start it. The tick logs that case explicitly, names the
+re-trigger, and fails the task again rather than leaving it pending and
+inert. See
+[Task retries](../concepts/build-execution.md#task-retries-the-failures-no-backend-can-retry-for-you).
+
+**Claim expiry and your worker `timeout`.** Every start a tick records
+carries a claim TTL derived from the `timeout` of the worker function the
+task routes to (`FunctionSettings(timeout=...)`), plus a grace margin — so
+the claim outlives the execution it guards by a small margin and no more,
+and other builds can tell an abandoned claim from a live one without
+probing Modal themselves. Workers that declare no `timeout` fall back to
+the registry's default expiry. This is the main reason to set an explicit
+`timeout` on long-running workers: it is what keeps a claim from being
+taken while the execution is still alive, and equally what lets a claim
+left behind by a dead scheduler heal promptly.
+
+**Wide layers.** A tick fans out concurrently, up to
+`max_concurrent_actions` spawns in flight (default 50), and caps how many
+tasks one pass commits to via `max_spawns_per_tick`. Left unset, that cap
+is derived from **the `tick` function's own `timeout`** — a fraction of it,
+spread over the in-flight bound — because the cap exists to stop a tick
+starting more work than its container can live long enough to finish. The
+app reads that timeout at deploy time from `tick_settings` (or
+`builder_settings`, which `tick_settings` falls back to), so a deployment
+like
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={
+        "default": sd_modal.FunctionSettings(image=image, timeout=3600)
+    },
+    tick_settings=sd_modal.FunctionSettings(image=image, timeout=600),
+    watchdog_period_minutes=5,
+)
+```
+
+gives the cap the right number with no further configuration: the one-hour
+worker `timeout` is what claim TTLs are derived from, the ten-minute tick
+`timeout` is what the spawn cap is derived from. If neither the tick nor
+the builder declares a `timeout`, the cap falls back to the worker timeout
+as a proxy — a different quantity, and the tick's log line says it is on
+that rung.
+
+When a pass truncates at the cap it says so in the tick log and immediately
+re-evaluates on a fresh frontier; the layer goes out in batches, not over
+the watchdog period. Every tick also logs its cap and which input produced
+it, once per tick. Both knobs are `tick_kwargs`, so they can be overridden
+per build at trigger time:
+
+```{.python notest}
+app.build_trigger(
+    root_task, reactive=True,
+    tick_kwargs={"max_concurrent_actions": 100, "max_spawns_per_tick": 2000},
+)
+```
+
+The **watchdog** sweeps every running build sequentially inside a single
+container, so it hands each build a proportional share of that container's
+budget instead of letting the first wide build size its fan-out as though
+it owned the whole timeout. Watchdog passes therefore spawn in smaller
+batches than a build's own ticks do — which is what you want from a safety
+net.
+
+**Seeing what a tick decided.** Every tick reports its summary to the registry
+(`stardag builds ticks <build-id>`), so a build driven by dozens of
+short-lived tick containers does not leave its reasoning scattered across as
+many logs. A tick that _crashes_ is reported too, as `outcome="error"` with
+the exception's type and message — usually the most informative thing a "why
+did this build stall?" question can turn up. Reporting is best-effort
+throughout: it can never fail a tick, change its outcome or mask its
+exception, and it is tolerated by servers that predate the endpoint. Turn it
+off for a whole deployment with `TickConfig(report_tick_summaries=False)`;
+it is app-level configuration, not a per-trigger `tick_kwarg`.
 
 Requirements and current limitations: the app must be deployed with this
 stardag version (scheduler `tick` function + self-reporting workers); the

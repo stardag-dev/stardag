@@ -169,6 +169,52 @@ def is_missing_route_error(err: "NotFoundError") -> bool:
     return getattr(err, "detail", None) == "Not Found"
 
 
+class SDKVersionUnsupportedError(APIError):
+    """This SDK is older than the registry's minimum supported version (426).
+
+    Raised when the server answers ``426 Upgrade Required`` to the
+    ``X-Stardag-SDK-Version`` this SDK sends on every request. The server
+    knows both versions *and* the exact upgrade command, so it composes the
+    user-facing sentence; we carry it through verbatim rather than
+    paraphrasing it — a paraphrase is a second source of truth that starts
+    drifting the day the server's wording changes.
+
+    ``sdk_version`` / ``minimum_sdk_version`` are the same two versions in
+    machine-readable form, for callers that want to branch rather than print.
+
+    Attributes:
+        message: The server's sentence, unadorned — what a UI should show.
+            ``str(exc)`` is the same text with ``(HTTP 426)`` appended by
+            :class:`APIError`.
+        sdk_version: The version this SDK reported, as the server saw it.
+        minimum_sdk_version: The oldest version the server accepts.
+    """
+
+    # Only used if a 426 somehow arrives without the structured detail —
+    # the server always sends one, so this is a floor, not the normal path.
+    _FALLBACK_MESSAGE = (
+        "This Stardag registry requires a newer stardag SDK than the one "
+        'installed. Upgrade with: pip install --upgrade "stardag"'
+    )
+
+    def __init__(
+        self,
+        message: str | None = None,
+        sdk_version: str | None = None,
+        minimum_sdk_version: str | None = None,
+        payload: dict | None = None,
+    ):
+        self.message = message or self._FALLBACK_MESSAGE
+        self.sdk_version = sdk_version
+        self.minimum_sdk_version = minimum_sdk_version
+        super().__init__(
+            self.message,
+            status_code=426,
+            detail=None,
+            payload=payload,
+        )
+
+
 class RateLimitError(APIError):
     """Per-minute rate limit exceeded (retryable).
 

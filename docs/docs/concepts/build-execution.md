@@ -117,26 +117,70 @@ tick(build_id):
   loop:
     clear the build's wake-up flag
     frontier = registry state: tasks whose upstreams are all complete
-    act: spawn pending/suspended tasks detached (recording refs)
+    act (bounded-concurrent, up to a per-tick spawn cap):
+         spawn pending/suspended tasks detached (recording refs)
          probe running refs — leave live ones; self-heal completions
-         (target existence is ground truth); record failures
+         (target existence is ground truth); record failures, and
+         respawn the retryable ones within the attempt budget
     handle terminal states (all roots complete / failure — with blocked
-    tasks marked skipped / cancelled)
+    tasks marked skipped / cancelled; wait rather than fail when the
+    only thing missing is a task another build is executing)
     linger briefly on the wake-up flag; exit when quiet
 ```
 
-Ticks are triggered when the build starts, by workers finishing tasks
-(flag-then-spawn, so wake-ups are never lost), and by an optional periodic
-watchdog that also picks up externally-cancelled builds and silently-lost
-workers. While a DAG churns, one lingering tick behaves like a tight
-scheduling loop; when only long-running tasks remain in flight, **nothing
-runs but your tasks**.
+Ticks are triggered by the build's bootstrap (below), by workers finishing
+tasks (flag-then-spawn, so wake-ups are never lost), and by an optional
+periodic watchdog that also picks up externally-cancelled builds and
+silently-lost workers. While a DAG churns, one lingering tick behaves like
+a tight scheduling loop; when only long-running tasks remain in flight,
+**nothing runs but your tasks**.
+
+### Bootstrap: the one thing that happens before the first tick
+
+A reactive build starts with a **bootstrap** — a single invocation that
+walks the DAG, registers every task and its edges, persists the task
+objects, and only then arms the build and spawns the first tick:
+
+```
+trigger (cheap, no target I/O):
+  mint or resume the build in the registry
+  register the root tasks
+  spawn bootstrap(build_id, roots-by-value, tick_kwargs)
+
+bootstrap:
+  discover: walk requires(), one completion check per task,
+            stopping at already-complete subtrees
+  register the discovered DAG (chunked, post-order)
+  persist the task objects (skipping pickles the tick can rebuild)
+  write the reactive marker  <-- LAST, and the ordering is load-bearing
+  spawn the first tick
+```
+
+**Why the marker is written last.** `reactive_app_name` is what marks a
+build as reactively scheduled, and a tick no-ops on any build without it.
+Registration is chunked and post-order, so the roots land _last_ — which
+means that mid-registration the build presents as "nothing actionable,
+roots not complete", exactly the shape terminal detection fails a build
+on. Writing the marker only after discovery _and_ persistence have
+finished is what guarantees no tick ever observes a partially-registered
+DAG.
+
+**Where it runs, and why that matters.** Discovery is target-root I/O: one
+existence check per task. On a Modal deployment the bootstrap therefore
+runs _inside Modal_, next to the target root, where a `modalvol://` volume
+is a mounted filesystem rather than a rate-limited API — the same walk
+from a laptop spends most of its wall time in backoff. Triggering is then
+just "mint the build, register the roots, spawn", which needs no target
+access at all. The task-store writes move with it for the same reason.
+Anything that fails before the first tick records a terminal
+`BUILD_FAILED`, on whichever side of the spawn it happened, so a build is
+never left `RUNNING` with nothing driving it.
 
 The registry is the scheduler state (the frontier is computed from
 recorded task statuses and dependency edges, and it also carries the
 reactive marker/owner/tick config). Task _objects_ are rehydrated from a
-per-build task store persisted at trigger time, with a pickle-free fallback
-that reconstructs them from the registry's stored task data
+per-build task store persisted by the bootstrap, with a pickle-free
+fallback that reconstructs them from the registry's stored task data
 (`stardag.task_from_registry_data`). The store holds task _objects_ only —
 the orchestration metadata lives in the registry, so re-triggering works
 even when the target root is immutable/append-only. The registry never
@@ -145,10 +189,226 @@ DAG-defining code) spawns work.
 
 Each reactive build is **owned by the app that triggered it** (the owning
 app name is stored in the registry with the build's reactive metadata):
-ticks from any other deployed app in the environment — typically another
-app's watchdog sweep — forward the wake-up to the owner's tick instead of
-driving the build with the wrong code. Ownership moves only by an explicit
-re-trigger from the new app, which also updates the tick config.
+each app's watchdog sweeps only its own builds, and a tick that reaches
+any other deployed app in the environment — typically a wake-up from a
+worker still running under a previous owner — forwards the wake-up to the
+owner's tick instead of driving the build with the wrong code. Ownership
+moves only by an explicit re-trigger from the new app, which also updates
+the tick config.
+
+### Wide layers: what one tick commits to
+
+Acting on a frontier is bounded-concurrent. Putting a single task on a
+worker costs a task-store read, an execution-claim acquisition, an executor
+spawn and a start recording the execution ref — so a layer thousands of
+tasks wide is thousands of independent round-trips, and doing them one
+after another in one short-lived container is a scaling wall with nothing
+behind it. A tick runs `TickConfig.max_concurrent_actions` of them at a
+time (default 50, the same bound the resident engine has always used for
+its own discovery). Bounded, not unbounded: firing a whole layer at the
+registry at once would only move the failure.
+
+A tick also caps how much work **one pass** commits to, via
+`TickConfig.max_spawns_per_tick`. Left unset, the cap is derived rather
+than guessed: it is a duration budget — a fraction of how long the tick's
+own container may live, spread over the in-flight bound — because the cap
+exists to stop a tick starting more work than it can survive to finish.
+
+Which duration gets read is a ladder, most specific first:
+
+1. `max_spawns_per_tick`, if you set it. The override always wins.
+2. `TickConfig.tick_timeout_seconds` — **this container's** wall-clock
+   limit. The Modal integration fills this in automatically from the
+   `timeout` its `tick` function was deployed with, so in practice this is
+   the rung you are on.
+3. The executor's `execution_timeout_seconds`, as a fallback proxy. It
+   measures how long the spawned _executions_ may run, which is a different
+   quantity — a 24-hour worker under a 5-minute tick would derive a cap the
+   tick cannot possibly work through — so it is only used when nothing
+   knows the tick's own limit, and the tick's log line says so.
+4. A conservative default, when no wall clock is known anywhere.
+
+Every tick logs its cap and which rung produced it once per tick, so a
+truncating tick is diagnosable without guessing which number it read.
+
+Hitting the cap is not a stall and is never silent: the tick logs the
+truncation, and because the pass _acted_, it immediately re-evaluates on a
+fresh frontier and takes the next batch — no wake-up, no linger, no
+watchdog. The only case where it waits instead is the one where waiting is
+correct: every task it attempted was denied a concurrency-limit slot, so
+what the build needs is a slot to free up, not another round of denials.
+
+Discovery — the DAG walk at trigger time, and the same walk every worker
+runs when it registers dynamically yielded dependencies — is bounded-
+concurrent on the same default. Its ordering guarantees are unaffected:
+dependencies are still registered before the tasks that depend on them (the
+bulk endpoint resolves `dependency_task_ids` against rows that must already
+exist), and the walk's result is identical to the serial one for any DAG.
+Only the completion checks overlap.
+
+### Task retries: the failures no backend can retry for you
+
+An execution backend's function-level retries (Modal's `retries=`, say)
+cover exceptions raised _inside_ the container. That leaves a class of
+failures they structurally cannot reach: a spawn that failed before any
+container existed, an execution the backend killed (OOM, timeout), a spot
+instance preempted mid-run, a worker that died after writing part of its
+output. Under `FAIL_FAST`, one of those used to end the whole build.
+
+A tick therefore keeps its own budget: `TickConfig.max_attempts` (default
+**2**), a budget **per task per build round** on how many executions the
+scheduler will start. A failure the tick records is reset to pending and
+picked up on the next pass while the budget allows.
+
+The split is deliberate and narrow:
+
+| Failure                                                             | Retried? |
+| ------------------------------------------------------------------- | -------- |
+| Spawn raised — no container ever ran                                | yes      |
+| Backend reports the execution failed (OOM, kill, preemption)        | yes      |
+| Execution claim lapsed with nothing left to probe (worker vanished) | yes      |
+| Task object missing and not rehydratable from the registry          | **no**   |
+| Exception inside your task                                          | n/a      |
+
+The last row is the important one: a task that raises reports its own
+`TASK_FAILED` and leaves the frontier, so a tick never sees it. Genuinely
+deterministic failures are therefore out of reach of this budget by
+construction, not by a judgement call — which is why defaulting it above 1
+cannot turn "fails fast on a bug" into "runs the bug three times". The
+`no` row is the one deterministic failure a tick _does_ see, and it is
+excluded explicitly: the task store and the imported task classes do not
+change between two passes, so a retry re-reads the same absence.
+
+Because a tick is short-lived and remembers nothing, the count comes from
+the registry (`attempt_count` on the frontier, the per-build task listing
+and task events).
+
+#### Rounds: what resets the budget, and what does not
+
+A **round** runs from the build's most recent `BUILD_RESUMED` event, or
+from the build's beginning if it has never been resumed, and the count is
+scoped to it. So the two things that look alike from the UI are not:
+
+- **Re-triggering the build resets it.** `build_trigger(..., build_id=<this
+build>, reactive=True)` records `BUILD_RESUMED` _before_ its discovery
+  resets the failed tasks to pending, so the round boundary lands ahead of
+  them and every task starts the new round at zero. This is the recovery
+  path for a build that ran out of attempts, and both exhaustion messages
+  point at it. Add `tick_kwargs={"max_attempts": N}` to the same re-trigger
+  if the task needs more attempts per round.
+- **A bare retry does not.** Clicking Retry in the UI, running `stardag
+tasks retry`, or POSTing the retry route flips the task back to pending
+  without recording `BUILD_RESUMED`, so the count it is measured against is
+  unchanged. On a task that is already at budget the retry _succeeds_ and
+  the scheduler then refuses to start it — which would look like nothing
+  happening at all, so the tick says so explicitly and fails the task again
+  with the re-trigger spelled out.
+
+**Resuming a suspended task is never budget-gated.** A dynamic-dependency
+yield records a fresh start, so a task that yields repeatedly accumulates
+attempts while being perfectly healthy; gating resumption would cap dynamic
+dependencies rather than retries. It does mean such a task reaches its
+_retry_ budget sooner within a round — raise `max_attempts` for DAGs that
+suspend a lot.
+
+Set `max_attempts=1` for the previous behaviour (record the failure, never
+respawn). Against a registry that does not report `attempt_count` no budget
+can bound a retry loop, so retries are disabled and the tick logs that.
+
+### Cross-build blocking
+
+Task state is **per environment**, not per build: a task id has one status,
+and its dependency edges are shared. Two builds over overlapping DAGs
+therefore see each other — which is what makes "don't re-run what another
+build already completed" work, and equally means an upstream some _other_
+build is executing holds this build's downstream tasks back.
+
+A build can consequently have nothing runnable and nothing running of its
+own and still be perfectly healthy. Terminal detection distinguishes the
+two cases from the frontier's list of blocking upstreams this build does
+not own:
+
+- **A RUNNING blocker whose execution claim is still live** — the build
+  waits, exactly as it waits for a busy concurrency-limit slot. The
+  blocker's completion wakes this scheduler, and the watchdog covers a lost
+  wake-up.
+- **A RUNNING blocker whose execution claim has lapsed** — the build fails.
+  Not "presumed abandoned": the claim's expiry has passed, so the registry
+  no longer honours it, has stopped counting it against concurrency limits,
+  and will hand the task to the next claimant.
+- **A blocker another build has yet to schedule** (pending or suspended,
+  under a build that is itself still live) — the build waits too. That
+  build is going to run it; failing here would just trade one spurious
+  failure for another.
+- **A non-RUNNING blocker no live build is going to run** — its owning
+  build has gone terminal, no build owns its status at all, or that status
+  could not be resolved. Nothing is going to move it, so the build fails
+  immediately, naming the blocking task, its status, how long it has been
+  in it, the build that owns it, and why that owner will not move it.
+
+The two questions are answered from different evidence, on purpose. A
+RUNNING task holds an **execution claim**, and every start records that
+claim with an expiry (see [Claim expiry](#claim-expiry)) — so "is anyone
+still executing this?" is something a build in another scheduler can simply
+read, without probing an executor it has no access to. Every other status
+holds no claim and therefore carries no expiry, so the only available
+evidence is whether the build that owns the blocker's status is itself
+still live; that lookup happens only when a build actually looks stalled,
+and once per owning build, so a healthy build never pays for it.
+
+A RUNNING blocker whose claim carries **no** expiry — an older registry, or
+a start recorded before expiry existed — is waited on indefinitely, and the
+tick logs that the wait cannot be shown to end. That is deliberate: a
+missing expiry means "never lapses", not "dead", and failing on it would
+reintroduce exactly the spurious failures this path exists to remove.
+Cancel the blocking task to break such a wait.
+
+Note what proving a blocker dead does **not** buy you: if the blocker is not
+in your build's task set, your build can never run it however dead it is, so
+the build still fails. What changes is the certainty and the message — it
+names the claim that lapsed instead of quoting a timeout.
+
+#### Claim expiry
+
+Every start a reactive tick records carries a claim TTL derived from the
+**executor's own timeout** (for Modal, the worker function's `timeout` from
+its `FunctionSettings`) plus a grace margin, so the claim outlives the
+execution it guards by a small margin and no more. Where no timeout is
+known the registry's own default applies.
+
+The derivation matters. Granting an expiry on every start is what makes an
+abandoned claim heal at all, but it also means a task that outlives its TTL
+could have its claim taken while it is still alive — a duplicate execution.
+Tying the TTL to the limit the backend itself enforces is what keeps that
+from being a real risk: the backend will have killed the execution before
+its claim lapses.
+
+**Seeing it.** `stardag builds frontier <build-id>` renders the blocking
+upstreams: which task of your build is held up, by which task (namespace and
+name), in what status, for how long, and which build owns it — plus which of
+the two remedies below applies. `stardag tasks list --status running` asks the
+same question claim-first: which tasks in this environment are holding an
+execution claim, and since when. See the
+[CLI reference](../configuration/cli.md#reading-the-frontier).
+
+**Recovering a build blocked on a task from another build.** Retry the
+blocking task (`stardag tasks retry <owning-build-id> <task-id>`, or `POST
+/api/v1/builds/{build_id}/tasks/{task_id}/retry`, using the owning build's id)
+to reset it to PENDING, then re-trigger your build — a re-trigger resets
+blocking tasks in any retryable status for you.
+Retry covers **suspended** as well as failed/cancelled/skipped: a task left
+SUSPENDED (its execution registered dynamic dependencies, yielded and
+returned, and then its build was abandoned) used to have no supported way
+back, and needed an undocumented cancel-then-retry dance. A task stuck
+RUNNING is the one exception — it holds a live execution claim, so
+**cancel** it (`stardag tasks cancel <owning-build-id> <task-id>`) to release
+the claim; retry deliberately does not, since that would risk a second
+concurrent execution.
+
+If the owning build is abandoned altogether — its orchestrator died without
+emitting a terminal event, so it is `RUNNING` forever and holding every claim
+its tasks had — `stardag builds cleanup` is the bulk recovery; see
+[Cleaning up abandoned builds](../configuration/cli.md#cleaning-up-abandoned-builds).
 
 Reactive scheduling is experimental and currently Modal-first — see
 [Integrate with Modal](../how-to/integrate-modal.md#reactive-scheduling-no-resident-build-function-experimental)
@@ -174,14 +434,13 @@ reactive scheduling):
   external completion with backoff.
 - Control it with `build(..., claim=...)`: `None` (default) claims
   probeable executions; `True` forces claiming (losers without a ref
-  wait); `False` disables. Reactive ticks claim via
-  `TickConfig.claim` (default on). Older registry servers and custom
-  registry backends without claim support degrade gracefully to the
-  pre-claim behavior (duplicates remain _safe_ — idempotent re-execution
-  and sticky completion — just wasteful).
+  wait); `False` disables. Reactive scheduler ticks always claim.
 - Custom arbitration backends implement
   `RegistryABC.task_start_claim_aio` — keeping claim, status and
-  completion consistent in one backend.
+  completion consistent in one backend. There is no default
+  implementation: without a registry (`NoOpRegistry`) there is no shared
+  state to arbitrate against and every claim is granted; any other
+  backend must arbitrate for real.
 - The claim is taken **before** the build-local concurrency-limiter slot
   (the registry-backed limiter counts RUNNING tasks, so claiming inside
   the slot would deny itself). Consequence: a claimed task can appear

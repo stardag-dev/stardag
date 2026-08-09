@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import gzip
 import json
+from uuid import UUID
 
 import pytest
 
-from stardag.exceptions import APIError, NotFoundError
+from stardag._version import __version__
+from stardag.exceptions import (
+    APIError,
+    NotFoundError,
+    SDKVersionUnsupportedError,
+    is_missing_route_error,
+)
 from stardag.registry._api_registry import (
     _GZIP_REQUEST_THRESHOLD_BYTES,
-    _is_route_not_found,
     _maybe_gzip_json_body,
 )
+from stardag.registry._http_client import SDK_VERSION_HEADER
 
 
 class TestMaybeGzipJsonBody:
@@ -240,37 +247,37 @@ class TestAPIRegistryGzipsWireFormat:
 class TestIsRouteNotFound:
     """Narrow-404 detection used by task_add_dependencies for backward compat."""
 
-    def test_fastapi_default_is_route_not_found(self):
+    def test_fastapi_default_is_missing_route_error(self):
         """FastAPI's default unknown-path response: detail == 'Not Found'."""
         err = NotFoundError("op: resource not found", detail="Not Found")
-        assert _is_route_not_found(err) is True
+        assert is_missing_route_error(err) is True
 
     def test_build_not_found_is_not_route(self):
         """An app-level 'Build not found' must NOT be treated as route-missing."""
         err = NotFoundError("op: resource not found", detail="Build not found")
-        assert _is_route_not_found(err) is False
+        assert is_missing_route_error(err) is False
 
     def test_task_not_registered_is_not_route(self):
         err = NotFoundError(
             "op: resource not found",
             detail="Task abc not registered in this environment",
         )
-        assert _is_route_not_found(err) is False
+        assert is_missing_route_error(err) is False
 
     def test_none_detail_is_not_route(self):
         err = NotFoundError("op: resource not found", detail=None)
-        assert _is_route_not_found(err) is False
+        assert is_missing_route_error(err) is False
 
     def test_empty_detail_is_not_route(self):
         err = NotFoundError("op: resource not found", detail="")
-        assert _is_route_not_found(err) is False
+        assert is_missing_route_error(err) is False
 
     def test_structured_detail_is_not_route(self):
         # When detail is a dict stringified by _handle_response_error
         err = NotFoundError(
             "op: resource not found", detail="{'error_code': 'X', 'message': 'Y'}"
         )
-        assert _is_route_not_found(err) is False
+        assert is_missing_route_error(err) is False
 
     def test_accepts_notfounderror_only(self):
         # Signature sanity: helper takes NotFoundError; APIError with a 404 status
@@ -279,7 +286,7 @@ class TestIsRouteNotFound:
         # The helper reads .detail directly, so a non-NotFoundError would still
         # return True if detail matches — not our concern; call sites only pass
         # NotFoundError. This test documents the contract.
-        assert _is_route_not_found(err) is True  # type: ignore[arg-type]
+        assert is_missing_route_error(err) is True  # type: ignore[arg-type]
 
 
 class TestTaskSkip404Swallow:
@@ -594,3 +601,463 @@ class TestConcurrencyLimitPathEncoding:
             self._encoded_path(captured[0])
             == "/api/v1/concurrency-limits/a%2Fb/holders/id%2F1/evict"
         )
+
+
+class _CapturingRegistry:
+    """An APIRegistry whose sync client is a MockTransport recorder.
+
+    Shared by the operator-surface tests below: they are all about what
+    goes on the wire (query params, request body, path) and what comes
+    back off it (model parsing), so a canned response plus the captured
+    request is the whole fixture.
+    """
+
+    def __init__(
+        self,
+        response_json: dict | None = None,
+        status_code: int = 200,
+        response_text: str | None = None,
+    ):
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        self.requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.requests.append(request)
+            # `response_text` models a body that is not JSON at all — a
+            # proxy or gateway answering on the server's behalf.
+            if response_text is not None:
+                return httpx.Response(status_code, text=response_text)
+            return httpx.Response(status_code, json=response_json or {})
+
+        self.registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        # Swap the *transport*, not the whole client: default headers (auth,
+        # SDK version, User-Agent) are configured on the client the SDK
+        # builds, so replacing it would leave these tests asserting against a
+        # client the SDK never constructs.
+        self.registry.client._transport = httpx.MockTransport(handler)
+
+    @property
+    def request(self):
+        assert len(self.requests) == 1, f"expected 1 request, got {len(self.requests)}"
+        return self.requests[0]
+
+
+_BUILD_ID = "11111111-1111-1111-1111-111111111111"
+_OTHER_BUILD_ID = "22222222-2222-2222-2222-222222222222"
+
+
+class TestBuildList:
+    """``GET /builds`` — filters go server-side, unknown fields are ignored."""
+
+    def _page(self, **build_overrides):
+        build = {
+            "id": _BUILD_ID,
+            "name": "spring-otter-42",
+            "status": "running",
+            "last_active_at": "2026-07-01T10:00:00+00:00",
+            "last_activity_at": "2026-07-04T11:30:00+00:00",
+            # A field this SDK version does not model: forward compatibility
+            # requires it to be ignored, not to raise.
+            "some_future_field": {"nested": True},
+        }
+        build.update(build_overrides)
+        return {"builds": [build], "total": 7, "page": 2, "page_size": 5}
+
+    def test_filters_ride_as_query_params(self):
+        cap = _CapturingRegistry(self._page())
+        result = cap.registry.build_list(
+            page=2,
+            page_size=5,
+            status="running",
+            reactive_app_name="my-app",
+            idle_for_seconds=86400,
+        )
+        params = cap.request.url.params
+        assert params["page"] == "2"
+        assert params["page_size"] == "5"
+        assert params["status"] == "running"
+        assert params["reactive_app_name"] == "my-app"
+        assert params["idle_for_seconds"] == "86400"
+        assert result.total == 7
+        assert result.page == 2
+        assert result.builds[0].name == "spring-otter-42"
+
+    def test_unset_filters_are_omitted(self):
+        cap = _CapturingRegistry(self._page())
+        cap.registry.build_list()
+        params = cap.request.url.params
+        assert "status" not in params
+        assert "reactive_app_name" not in params
+        assert "idle_for_seconds" not in params
+
+    def test_unknown_response_fields_are_ignored(self):
+        cap = _CapturingRegistry(self._page())
+        result = cap.registry.build_list()
+        build = result.builds[0]
+        assert not hasattr(build, "some_future_field")
+        # Both liveness timestamps are parsed and kept distinct.
+        assert build.last_active_at is not None
+        assert build.last_activity_at is not None
+        assert build.last_active_at != build.last_activity_at
+
+    def test_missing_liveness_fields_default_to_none(self):
+        """An older server sends neither timestamp; parsing must not fail."""
+        cap = _CapturingRegistry(
+            {
+                "builds": [{"id": _BUILD_ID, "name": "old-server-build"}],
+                "total": 1,
+                "page": 1,
+                "page_size": 20,
+            }
+        )
+        build = cap.registry.build_list().builds[0]
+        assert build.last_activity_at is None
+        assert build.status is None
+
+
+class TestBuildListRunning:
+    """The watchdog sweep must filter server-side, not client-side."""
+
+    def test_passes_status_running_to_the_server(self):
+        cap = _CapturingRegistry(
+            {
+                "builds": [{"id": _BUILD_ID, "name": "b1", "status": "running"}],
+                "total": 1,
+                "page": 1,
+                "page_size": 100,
+            }
+        )
+        running = cap.registry.build_list_running(limit=10)
+        assert running == [UUID(_BUILD_ID)]
+        # Server-side filter: the sweep must not page an unfiltered list and
+        # match in Python, or an environment full of non-running builds can
+        # starve it of the running ones it exists to find.
+        assert cap.request.url.params["status"] == "running"
+
+    def test_stops_paging_on_a_short_page(self):
+        cap = _CapturingRegistry(
+            {
+                "builds": [{"id": _BUILD_ID, "name": "b1", "status": "running"}],
+                "total": 1,
+                "page": 1,
+                "page_size": 100,
+            }
+        )
+        cap.registry.build_list_running(limit=100)
+        assert len(cap.requests) == 1
+
+
+class TestBuildCancelCascade:
+    def test_cascade_param_and_parsed_result(self):
+        cap = _CapturingRegistry(
+            {
+                "id": _BUILD_ID,
+                "name": "spring-otter-42",
+                "cascaded_task_ids": ["task-a", "task-b"],
+                "cascaded_task_count": 2,
+            }
+        )
+        result = cap.registry.build_cancel(UUID(_BUILD_ID), cascade=True)
+        assert cap.request.url.params["cascade"] == "true"
+        assert result is not None
+        assert result.cascaded_task_ids == ["task-a", "task-b"]
+
+    def test_cascade_omitted_by_default(self):
+        cap = _CapturingRegistry({"id": _BUILD_ID, "name": "b"})
+        result = cap.registry.build_cancel(UUID(_BUILD_ID))
+        assert "cascade" not in cap.request.url.params
+        # A server predating the cascade returns no cascade fields; they
+        # default, which reads as "nothing was cascaded".
+        assert result is not None
+        assert result.cascaded_task_ids == []
+        assert result.cascaded_task_count == 0
+
+
+class TestBuildBulkCancel:
+    def _response(self, **overrides):
+        payload = {
+            "dry_run": True,
+            "builds": [
+                {
+                    "build_id": _BUILD_ID,
+                    "name": "spring-otter-42",
+                    "last_activity_at": "2026-07-01T10:00:00+00:00",
+                    "cascaded_task_ids": ["task-a"],
+                }
+            ],
+            "build_count": 1,
+            "task_count": 1,
+            "skipped": {_OTHER_BUILD_ID: "not_running"},
+            "truncated": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_body_carries_only_the_filters_that_were_set(self):
+        cap = _CapturingRegistry(self._response())
+        cap.registry.build_bulk_cancel(idle_for_seconds=86400, dry_run=True)
+        body = json.loads(cap.request.content)
+        assert body["idle_for_seconds"] == 86400
+        assert body["dry_run"] is True
+        # Defaults the caller did not touch are still sent explicitly (the
+        # SDK's defaults and the server's must not silently diverge), but
+        # unset optional filters are absent so the server decides.
+        assert body["cascade"] is True
+        assert "build_ids" not in body
+        assert "reactive_app_name" not in body
+        assert "reason" not in body
+
+    def test_build_ids_are_stringified(self):
+        cap = _CapturingRegistry(self._response())
+        cap.registry.build_bulk_cancel(build_ids=[UUID(_BUILD_ID), _OTHER_BUILD_ID])
+        body = json.loads(cap.request.content)
+        assert body["build_ids"] == [_BUILD_ID, _OTHER_BUILD_ID]
+
+    def test_result_is_parsed_including_skipped_and_truncated(self):
+        cap = _CapturingRegistry(self._response())
+        result = cap.registry.build_bulk_cancel(idle_for_seconds=60)
+        assert result.dry_run is True
+        assert result.build_count == 1
+        assert result.task_count == 1
+        assert result.skipped == {_OTHER_BUILD_ID: "not_running"}
+        assert result.truncated is True
+        assert result.builds[0].cascaded_task_ids == ["task-a"]
+
+
+class TestTaskList:
+    def _response(self, **overrides):
+        payload = {
+            "tasks": [
+                {
+                    "id": "33333333-3333-3333-3333-333333333333",
+                    "task_id": "task-abc",
+                    "task_namespace": "demo.pipeline",
+                    "task_name": "TrainModel",
+                    "latest_status": "running",
+                    "latest_status_at": "2026-07-04T09:00:00+00:00",
+                    "latest_status_build_id": _OTHER_BUILD_ID,
+                }
+            ],
+            "total": 1,
+            "page": 1,
+            "page_size": 20,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_status_is_a_repeated_query_param(self):
+        """A dict cannot express two values for one key; a pair list can."""
+        cap = _CapturingRegistry(self._response())
+        cap.registry.task_list(status=["running", "suspended"])
+        assert cap.request.url.params.get_list("status") == ["running", "suspended"]
+
+    def test_status_older_than_is_sent_as_iso8601(self):
+        from datetime import datetime, timezone
+
+        cap = _CapturingRegistry(self._response())
+        cutoff = datetime(2026, 7, 4, 9, 0, tzinfo=timezone.utc)
+        cap.registry.task_list(status_older_than=cutoff)
+        assert (
+            cap.request.url.params["status_older_than"] == "2026-07-04T09:00:00+00:00"
+        )
+
+    def test_claim_holder_fields_are_parsed(self):
+        cap = _CapturingRegistry(self._response())
+        task = cap.registry.task_list(status=["running"]).tasks[0]
+        assert task.latest_status == "running"
+        assert task.latest_status_at is not None
+        assert str(task.latest_status_build_id) == _OTHER_BUILD_ID
+
+    def test_unset_filters_are_omitted(self):
+        cap = _CapturingRegistry(self._response())
+        cap.registry.task_list()
+        params = cap.request.url.params
+        assert "status" not in params
+        assert "status_older_than" not in params
+        assert "task_name" not in params
+
+
+class TestTaskByIdEndpoints:
+    """Cancel/retry addressed by id hit the same routes as the task-object variants."""
+
+    def test_cancel_by_id_path(self):
+        cap = _CapturingRegistry({})
+        cap.registry.task_cancel_by_id(UUID(_BUILD_ID), "task-abc")
+        assert (
+            cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tasks/task-abc/cancel"
+        )
+
+    def test_retry_by_id_path(self):
+        cap = _CapturingRegistry({})
+        cap.registry.task_retry_by_id(UUID(_BUILD_ID), "task-abc")
+        assert (
+            cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tasks/task-abc/retry"
+        )
+
+
+class TestTickSummaries:
+    def test_report_posts_the_summary_verbatim(self):
+        cap = _CapturingRegistry(
+            {
+                "id": "44444444-4444-4444-4444-444444444444",
+                "build_id": _BUILD_ID,
+                "outcome": "terminal",
+                "summary": {"outcome": "terminal"},
+                "created_at": "2026-07-04T09:00:00+00:00",
+            },
+            status_code=201,
+        )
+        summary = {"outcome": "terminal", "spawned": 3, "some_future_counter": 1}
+        cap.registry.build_report_tick_summary(UUID(_BUILD_ID), summary)
+        assert cap.request.url.path == f"/api/v1/builds/{_BUILD_ID}/tick-summaries"
+        # The body is the summary as given — the server stores unknown keys
+        # verbatim, which is what lets the SDK grow the summary without a
+        # server release.
+        assert json.loads(cap.request.content) == summary
+
+    def test_list_parses_records_with_open_summaries(self):
+        cap = _CapturingRegistry(
+            {
+                "build_id": _BUILD_ID,
+                "summaries": [
+                    {
+                        "id": "44444444-4444-4444-4444-444444444444",
+                        "build_id": _BUILD_ID,
+                        "outcome": "lingered_out",
+                        "summary": {
+                            "outcome": "lingered_out",
+                            "some_future_counter": 7,
+                        },
+                        "created_at": "2026-07-04T09:00:00+00:00",
+                    }
+                ],
+            }
+        )
+        records = cap.registry.build_list_tick_summaries(UUID(_BUILD_ID), limit=5)
+        assert cap.request.url.params["limit"] == "5"
+        assert len(records) == 1
+        assert records[0].outcome == "lingered_out"
+        # The blob is kept whole, unknown keys included.
+        assert records[0].summary["some_future_counter"] == 7
+
+
+class TestSDKVersionHeader:
+    """The SDK announces its version on every registry request.
+
+    This ships before anything reads it, and that is the point: a server
+    can only tell an SDK "you are too old" if that SDK was already
+    identifying itself when it was released. A release that goes out silent
+    is permanently un-diagnosable — no later server change fixes it
+    retroactively. Hence these tests guard a header nothing enforces yet.
+    """
+
+    def test_sync_request_carries_version_and_user_agent(self):
+        cap = _CapturingRegistry({"build_id": _BUILD_ID, "summaries": []})
+        cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+
+        headers = cap.request.headers
+        assert headers[SDK_VERSION_HEADER] == __version__
+        # User-Agent is for humans reading logs; the server keys on the
+        # dedicated header, so this only has to name the SDK and version.
+        assert headers["user-agent"].startswith(f"stardag/{__version__}")
+
+    @pytest.mark.asyncio
+    async def test_async_request_carries_version_and_user_agent(self):
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(200, json={})
+
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        # Touch the property inside the coroutine so the lazily-built client
+        # binds to *this* loop, then swap only its transport (see
+        # ``_CapturingRegistry``).
+        registry.async_client._transport = httpx.MockTransport(handler)
+        await registry.build_add_roots_aio(UUID(_BUILD_ID), ["root-task-1"])
+
+        assert len(captured) == 1
+        headers = captured[0].headers
+        assert headers[SDK_VERSION_HEADER] == __version__
+        assert headers["user-agent"].startswith(f"stardag/{__version__}")
+
+    def test_version_header_survives_per_request_headers(self):
+        """Per-request headers must not clobber the client's defaults.
+
+        POSTs with a body pass their own Content-Type (and Content-Encoding
+        when gzipped); httpx merges those *over* the client defaults, so the
+        identification headers have to survive the merge.
+        """
+        cap = _CapturingRegistry({})
+        cap.registry.build_add_roots(UUID(_BUILD_ID), ["root-task-1"])
+
+        headers = cap.request.headers
+        assert headers["content-type"] == "application/json"
+        assert headers[SDK_VERSION_HEADER] == __version__
+
+
+class TestSDKVersionUnsupported:
+    """426 Upgrade Required → a typed error carrying the server's own words."""
+
+    _DETAIL = {
+        "error_code": "SDK_VERSION_UNSUPPORTED",
+        "message": (
+            "This Stardag server requires stardag SDK 2.0.0 or newer, but "
+            "this request came from stardag 1.2.3. Upgrade with: "
+            'pip install --upgrade "stardag>=2.0.0"'
+        ),
+        "sdk_version": "1.2.3",
+        "minimum_sdk_version": "2.0.0",
+    }
+
+    def test_raises_typed_error_with_the_servers_message_verbatim(self):
+        cap = _CapturingRegistry({"detail": self._DETAIL}, status_code=426)
+
+        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+
+        err = excinfo.value
+        # Verbatim, not paraphrased: the server knows both versions and the
+        # exact upgrade command, and a second wording here would drift.
+        assert err.message == self._DETAIL["message"]
+        assert self._DETAIL["message"] in str(err)
+        assert err.sdk_version == "1.2.3"
+        assert err.minimum_sdk_version == "2.0.0"
+        assert err.status_code == 426
+        assert err.payload == self._DETAIL
+
+    def test_is_an_api_error_so_cli_error_paths_catch_it(self):
+        # Every registry-backed CLI command funnels StardagError into a
+        # friendly exit; a 426 must not escape as a traceback.
+        cap = _CapturingRegistry({"detail": self._DETAIL}, status_code=426)
+        with pytest.raises(APIError):
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+
+    def test_unstructured_426_still_gets_the_typed_error(self):
+        # e.g. a proxy's own 426, with no structured detail. Better a
+        # generic upgrade sentence than an opaque APIError.
+        cap = _CapturingRegistry({"detail": "Upgrade Required"}, status_code=426)
+        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+        assert excinfo.value.minimum_sdk_version is None
+        assert "Upgrade Required" in str(excinfo.value)
+
+    def test_a_non_json_426_still_surfaces_the_body(self):
+        """A proxy's 426 has no JSON at all, so there is no `detail` key to
+        read — and that is precisely when the upstream's own words are the
+        only clue about which hop rejected the request. Losing them to the
+        generic sentence sends the reader to the wrong server."""
+        cap = _CapturingRegistry(
+            status_code=426,
+            response_text="nginx: client SDK too old for this gateway",
+        )
+        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+        assert "nginx: client SDK too old for this gateway" in str(excinfo.value)

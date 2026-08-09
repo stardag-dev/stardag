@@ -6,6 +6,468 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### SDK
+
+- **Reactive builds now discover the DAG inside Modal, not on the machine
+  that triggers them.** `build_trigger(..., reactive=True)` used to walk
+  the whole DAG locally, which meant one target existence check per task
+  from the triggering process. For a `modalvol://` target root each of
+  those is a Volume API call from outside Modal, and they are rate
+  limited: triggering a 127-task DAG from a laptop spent ~64 s almost
+  entirely in backoff, and before that was hardened it failed outright
+  with `VolumeListFiles rate limit exceeded`.
+
+  The trigger now mints (or resumes) the build, registers the root tasks —
+  neither of which touches a target — and spawns a new deployed
+  **`bootstrap`** function with the roots passed by value. The bootstrap
+  does the walk, the registration, the task-module coverage check and the
+  task-store writes _in the container_, where the same volume is a mounted
+  filesystem, then arms the build and spawns the first tick. Triggering is
+  fast and needs registry credentials only; it performs no target I/O at
+  all.
+
+  `bootstrap` is its own function rather than work folded into the first
+  tick because the two need different timeouts: a tick is one frontier
+  pass (and its timeout derives the per-pass spawn cap), while discovery
+  is a single whole-DAG walk paid once per trigger. It defaults to
+  `builder_settings` — the same image, secrets and volume mounts as the
+  builder, which runs the same discovery for resident builds — and is
+  configurable with the new `StardagApp(bootstrap_settings=...)`.
+
+  The ordering that makes ticks safe is preserved and now stated in code:
+  the reactive marker (`reactive_app_name`, without which a tick no-ops)
+  is written **last**, after discovery and persistence, so no tick can
+  ever observe a partially-registered DAG. Failure handling is preserved
+  too, on both sides of the spawn — anything that fails once a trigger
+  knows the build is `RUNNING` records a terminal `BUILD_FAILED` before
+  propagating, including failures inside the bootstrap container and a
+  failed first-tick spawn. A re-trigger whose `build_resume` fails is
+  deliberately excluded: until that lands the build may still be terminal.
+
+  `BuildTriggerResult.function_call` now carries the bootstrap call for
+  reactive triggers (previously the first tick's), which is the honest
+  handle: it is what the trigger spawned, and its failure is what means
+  the build never started.
+
+  `require_pickle_free=True` is still enforced and still fails loudly —
+  now from the bootstrap, where the task store is written: it records a
+  terminal `BUILD_FAILED` and re-raises on the bootstrap's Modal call. A
+  side benefit of the move: the coverage check now compares your DAG
+  against the **deployed** `task_modules` list rather than your local one,
+  closing the stale-deploy blind spot it used to carry. The trigger also
+  prints a labelled, roots-only advisory before spawning, so the common
+  "I never declared my package" case still shows up in your terminal.
+
+  Resident (non-reactive) builds are completely unaffected. Set
+  `StardagApp(reactive_discovery="local")` to run the identical bootstrap
+  in the triggering process — the previous behaviour — for apps deployed
+  before the `bootstrap` function existed, or when the target root is
+  reachable from the trigger but not from the Modal app. **Redeploy your
+  app** to get the `bootstrap` function.
+
+- **The SDK now identifies its version to the registry.** Every registry
+  request carries `X-Stardag-SDK-Version` (plus a descriptive `User-Agent`
+  for logs; the server keys on the header, never on the agent string). This
+  ships ahead of anything that reads it, because the check only works
+  forwards: a server can tell an SDK "you are too old" only if that SDK was
+  already announcing itself when it was released, and no later server change
+  fixes a silent release retroactively.
+
+  When a registry is configured with a minimum SDK version and this SDK is
+  below it, the `426 Upgrade Required` response now raises
+  `SDKVersionUnsupportedError` (exported from `stardag`), carrying the
+  server's own message — which names both versions and the exact
+  `pip install --upgrade` line — plus `sdk_version` and
+  `minimum_sdk_version`. CLI commands print that message as written rather
+  than a repr. No minimum is configured by default, so nothing changes for
+  an up-to-date pair.
+
+- **`stardag builds cleanup` and `stardag builds ticks` say when the
+  registry is too old**, instead of reporting the missing endpoint as
+  "resource not found" — which read as a bad build id and sent people
+  looking for a build that was fine. Both now name the command, the missing
+  endpoint and the upgrade; `cleanup` also points at
+  `stardag builds cancel <build-id>` as the one-at-a-time fallback. A
+  genuine resource-level 404 is unaffected.
+
+- **Reactive builds now have a task-level retry policy.** A reactive tick
+  recorded a failed execution and never respawned it, on the reasoning that
+  retries are the execution backend's job. They partly are — a backend's
+  function-level retries (Modal's `retries=`) cover exceptions raised
+  _inside_ the container — but they cannot cover a spawn that failed before
+  any container existed, an execution the backend killed (OOM, timeout), a
+  preempted worker, or one that died after writing partial output. Under
+  `FAIL_FAST`, any one of those ended the whole build.
+
+  `TickConfig.max_attempts` (default **2**, also accepted as a Modal
+  `tick_kwarg`) is a budget, per task per build _round_, on how many
+  executions the scheduler starts. A failure the tick records is reset to
+  pending and picked up on the next pass while the budget allows. The
+  budget covers exactly the failures no backend can retry: a failed spawn,
+  an execution the backend reports failed, and a task whose execution claim
+  lapsed with nothing left to probe. It deliberately does **not** cover a
+  task whose object cannot be rehydrated — the same absence on the second
+  reading — and it never sees an exception inside a task at all, since the
+  worker self-reports that and the task leaves the frontier. Set
+  `max_attempts=1` for the previous behaviour.
+
+  A **round** runs from the build's most recent `BUILD_RESUMED` event, which
+  makes the recovery path the one you already reach for: **re-triggering the
+  build** (`build_trigger(..., build_id=<this build>, reactive=True)`)
+  records `BUILD_RESUMED` ahead of its discovery retries, so every task
+  starts the new round at zero — optionally with a raised budget via
+  `tick_kwargs={"max_attempts": N}`. A **bare** retry (the UI's Retry,
+  `stardag tasks retry`, the retry route) does not start a round and does
+  not reset anything.
+
+  Exhaustion is loud in both directions. A tick that declines to respawn
+  names the task, the attempts spent, the budget and the re-trigger. And on
+  a task already at budget, a bare retry succeeds server-side while the
+  scheduler still refuses to start it — previously a silent no-op; now the
+  tick says exactly that, distinguishes it from a re-trigger, fails the task
+  again rather than leaving it pending and inert, and spells out the
+  re-trigger that would work. New `TickSummary` counters `retried`,
+  `retry_exhausted` and `budget_denied` carry the same facts into the
+  persisted per-build summary.
+
+  Resuming a **suspended** task is never budget-gated: a dynamic-dependency
+  yield records a fresh start, so gating resumption would cap dynamic
+  dependencies rather than retries. Server support is required
+  (`attempt_count` on the frontier); against a registry that does not report
+  it, no budget can bound a retry loop, so retries stay off and the tick
+  says why.
+
+- **Reactive ticks fan out concurrently.** Acting on a frontier was a plain
+  `for` loop with awaits inside it: per actionable task, a task-store read,
+  an execution-claim acquisition, an executor spawn and a start recording
+  the ref — 2–3 registry round-trips plus a spawn, strictly serialised. A
+  layer thousands of tasks wide was therefore thousands of sequential HTTP
+  calls in one short-lived container, racing a function timeout nothing
+  related it to. Each pass now runs those actions with bounded concurrency
+  (`TickConfig.max_concurrent_actions`, default 50 — the bound the resident
+  engine has always used). Ordering _within_ a task is unchanged: the
+  acquiring start still precedes the spawn (a denied task never occupies a
+  worker) and the ref-recording start still follows it.
+
+- **A per-tick spawn cap, derived from the tick container's own timeout.**
+  The old cap was "however many tasks are actionable", which is unrelated
+  to how long the container may live. `TickConfig.max_spawns_per_tick`
+  bounds one pass; left unset it is derived as a duration budget — a
+  fraction of the tick's wall-clock limit, spread over the in-flight bound.
+  The limit is resolved down a ladder: the explicit cap, then
+  `TickConfig.tick_timeout_seconds` (which the Modal integration fills in
+  automatically from the `timeout` the deployed `tick` function carries,
+  falling back to `builder_settings` exactly as function registration
+  does), then the executor's `execution_timeout_seconds` as a fallback
+  proxy, then a conservative default. Every tick logs its cap and which
+  rung produced it. Truncation is logged, never silent, and never a stall:
+  the pass acted, so the tick re-evaluates on a fresh frontier immediately
+  and takes the next batch. `max_spawns_per_tick` and
+  `max_concurrent_actions` are accepted as Modal `tick_kwargs`;
+  `tick_timeout_seconds` deliberately is not — it is a deploy-time fact
+  about the container, not per-build state.
+
+  The watchdog sweeps every running build sequentially inside one
+  container, so it now hands each build a proportional share of that
+  container's budget rather than letting the first wide build size its
+  fan-out as though it owned the whole timeout.
+
+- **Concurrent DAG discovery in reactive mode.**
+  `discover_and_register_aio` walked the DAG with a recursive `await
+task.complete_aio()` and no concurrency, while the resident engine did
+  the same work 50 at a time. That cost was not paid once per build: this
+  walk runs at every reactive trigger _and_ in every worker registering
+  dynamically yielded dependencies, i.e. on the hot path of every dynamic
+  dependency. It is now bounded-concurrent on the same default
+  (`max_concurrent_discover=50`). The completion checks overlap; the
+  ordering does not — post-order registration (dependencies before the
+  tasks that need them, so the bulk endpoint never creates phantom rows),
+  diamond deduplication, `retry_failed` behaviour and all three
+  `DiscoveryResult` collections come out identical to the serial walk's,
+  element for element.
+
+- **Blocker liveness is now read from the execution claim's expiry, not
+  inferred.** A reactive tick decided whether to wait on a RUNNING upstream
+  owned by another build from a table over `(in-build, status, owning-build
+liveness)` plus a staleness bound on how long the blocker had sat in its
+  status — an educated guess, since no build can probe another build's
+  executor. The registry now stamps every execution claim with an expiry, so
+  the question is answered by a read: a RUNNING blocker whose claim is live
+  is waited on; one whose claim has **lapsed** fails the build, with the
+  message saying the claim is provably abandoned rather than presumed so.
+
+  What this does **not** change: proving a blocker dead still does not let
+  your build run it — a blocker outside your build's task set has to be
+  released under the build that owns it, so the build still fails, just with
+  certainty about why. And the collapse applies to RUNNING blockers only: a
+  SUSPENDED or PENDING blocker holds no claim and therefore carries no
+  expiry, so "will anyone move it?" is still asked of its owning build (an
+  abandoned-SUSPENDED upstream remains a real wedge, recovered by retrying
+  it under its owner).
+
+- **Every start records a claim TTL derived from the executor's own
+  timeout.** For Modal that is the worker function's `timeout` from its
+  `FunctionSettings`, plus a grace margin; where no timeout is known the
+  registry's default applies. Granting an expiry on every start is what
+  makes an abandoned claim heal, but it also means a task outliving its TTL
+  could have its claim taken while alive — deriving the TTL from the limit
+  the backend itself enforces is what keeps that from being a real risk.
+  Setting an explicit `timeout` on long-running Modal workers is therefore
+  worth doing.
+
+- **Removed: `TickConfig.stale_external_blocker_seconds`,
+  `TickConfig.stale_running_no_ref_seconds` and
+  `ClaimConfig.stale_running_no_ref_seconds`.** All three configured a local
+  guess at how long "too long" is, which the claim's own expiry now answers.
+  A task RUNNING without an executor ref (a scheduler that died between the
+  claiming start and the spawn) is failed when its claim lapses instead of
+  after a fixed bound, and a competing claimant recovers a ref-less winner
+  on the same evidence. Against a registry that does not report expiry,
+  every one of these paths waits rather than failing — a missing expiry
+  means "never lapses", not "dead".
+
+- `FrontierTaskRef.latest_status_expires_at` and
+  `FrontierExternalBlocker.blocking_status_expires_at` model the new server
+  field; `task_start`/`task_start_aio`/`task_start_claim_aio` accept
+  `claim_ttl_seconds`; `TaskExecutorABC.execution_timeout_seconds` is the
+  new (optional, default `None`) hook an executor implements to expose its
+  wall-clock limit. `StartClaimResult.latest_status_at` is replaced by
+  `latest_status_expires_at`.
+
+- **New `stardag builds` and `stardag tasks` CLI groups.** There was no way
+  to list builds, inspect a build's scheduling frontier, cancel a build or
+  task, or clean up abandoned state without writing a script against the
+  registry API — which is what made a wedged or spuriously-failed build hard
+  to diagnose: the failure was visible in logs and in the UI, but "what does
+  the scheduler actually think the state is?" required hand-rolled calls.
+
+  ```
+  stardag builds list [--status running] [--reactive-app NAME] [--older-than 24h]
+  stardag builds show <build-id>
+  stardag builds frontier <build-id>
+  stardag builds ticks <build-id> [--limit N]
+  stardag builds cancel <build-id> [--cascade] [--yes]
+  stardag builds cleanup [--older-than 24h] [--build-id ID ...] [--apply] [--yes]
+  stardag tasks list [--status running] [--older-than 1h]
+  stardag tasks cancel <build-id> <task-id> [--yes]
+  stardag tasks retry <build-id> <task-id> [--yes]
+  ```
+
+  `builds frontier` is the diagnostic one: besides the actionable/running
+  partitions it renders the build's **external blockers** — tasks of this
+  build held back by an upstream whose current status _another_ build
+  produced — naming the blocking task's namespace/name (not just an id), its
+  status, how long it has been in it, the owning build, and which of the two
+  remedies applies (a blocker outside this build's task set can only be
+  waited on or released; one inside it resolves when its owner finishes it).
+  It also states honestly that the registry computes that list only for a
+  build with nothing actionable and nothing running, so an empty list never
+  reads as "no blockers" for a build that is merely progressing.
+
+  `builds cleanup` is the recovery for builds abandoned by a process that
+  died: build status is derived from build-level events, so such a build
+  stays `RUNNING` forever while holding every execution claim and
+  concurrency-limit slot its tasks had. It **defaults to a dry run** — the
+  server's own selection, so what you review is what you get — printing the
+  builds, the claims that would be released and any per-build skip reasons.
+  **`--apply` is the only thing that makes it act**; `-y/--yes` only skips
+  the confirmation prompt, so `cleanup -y` on its own is still a dry run.
+  Cascade is on by default here, and reactive builds are excluded unless
+  asked for.
+
+  `--older-than` accepts `24h` / `90m` / `3d` (one number, one optional unit
+  of `s`/`m`/`h`/`d`/`w`; bare numbers are seconds) and converts at the
+  boundary to whatever the endpoint takes — a duration for builds, an
+  absolute cutoff for tasks. It is applied server-side by the same predicate
+  the reaper uses, so `builds list --older-than 24h` and
+  `builds cleanup --older-than 24h` agree on what is stale; on `builds list`
+  it **implies** `--status running` and may not be combined with any other
+  status (idleness only means anything for a build that has not finished —
+  a completed one has no activity by definition, and always will). A registry older than the
+  CLI silently ignores the filter, so the command detects that and warns on
+  stderr that the results are unfiltered rather than quietly filtering the
+  page itself (which would under-report exactly the oldest builds).
+
+  The read-only commands — and `cleanup`'s dry run — take **`--json`**, a new
+  convention for the CLI: stdout carries exactly one JSON document (the SDK's
+  model of the API payload) and every hint, warning and prompt goes to
+  stderr, so piping to `jq` is safe.
+
+- **Reactive scheduler ticks now report their `TickSummary` to the
+  registry** (`stardag builds ticks <build-id>`). A reactive build is driven
+  by many short-lived ticks, each in its own container, so the summary — the
+  scheduler's own account of what it did and why — used to reach nobody but
+  that container's log, and reconstructing why a build stalled meant reading
+  logs across dozens of them. Reporting is strictly best-effort: it sits at
+  the end of every tick and can never fail one, change its outcome or mask
+  its exception; it tolerates a registry that predates the endpoint (and
+  stops retrying a route that 404s); and every outcome except `not_reactive`
+  is recorded. A tick that **crashes** is recorded too, under a new
+  `"error"` outcome carrying `TickSummary.error_type` and a length-bounded
+  `error_message` — the most informative thing a "why did this build stall?"
+  query can find — after which the original exception is re-raised
+  untouched. Turn reporting off for a deployment with
+  `TickConfig(report_tick_summaries=False)` — app-level configuration, like
+  the other staleness knobs, not a per-trigger `tick_kwarg`. The summary is
+  stored verbatim server-side, so future `TickSummary` fields need no server
+  release.
+
+- **The reactive watchdog's build sweep now filters server-side.**
+  `build_list_running` passed no `status` and matched on the derived status
+  in Python, so an environment holding more non-running builds than the
+  sweep's page budget could starve it of the running builds it exists to
+  find — silently disabling the safety net exactly when a backlog makes it
+  necessary. Same ordering, page budget and truncation warning as before.
+
+- **New registry-client methods** for the operational surface, all on
+  `RegistryABC` (with safe defaults) and `APIRegistry`: `build_list`,
+  `build_get_summary`, `build_bulk_cancel`, `build_report_tick_summary[_aio]`,
+  `build_list_tick_summaries`, `task_list`, and id-addressed
+  `task_cancel_by_id[_aio]` / `task_retry_by_id[_aio]` (operator tooling only
+  ever has the id, and rehydrating a task object to cancel it would fail for
+  exactly the abandoned tasks that most need cancelling). `build_cancel` gains
+  a `cascade` keyword and now returns the cancelled build plus the claims the
+  cascade released, or `None` for backends that don't report it — the same
+  optional-return convention as `task_register_bulk`. New response models
+  `BuildSummary`, `BuildListPage`, `BuildCancelResult`, `BulkCancelResult`,
+  `BulkCancelBuildRef`, `TaskSummary`, `TaskListPage` and `TickSummaryRecord`
+  are exported from `stardag.registry` and ignore unknown response fields.
+  `build_list` takes the server's `status`, `reactive_app_name` and
+  `idle_for_seconds` filters.
+
+- **`StardagApp(task_modules=[...])`: declare the modules whose import
+  registers your task classes, so reactive scheduler ticks can rebuild
+  tasks from registry data instead of pickles.** A tick reconstructs task
+  objects from the registry's stored payload, which resolves a class
+  through the polymorphic registry — populated only as a side effect of
+  importing the defining module. Without a declaration, whatever a tick
+  container happens to import is arbitrary, so the build task store's
+  pickles were load-bearing (and needed target-root write access at
+  trigger time, and were invalidated by every redeploy).
+
+  Patterns are exact modules (`"my_pkg.tasks.ingest"`) or trailing
+  recursive wildcards (`"my_pkg.tasks.*"`); the default infers the root
+  package of the module defining the app, and `[]` opts out. They are
+  expanded to a concrete module list at deploy time (without importing
+  submodules) and baked into the deployed tick, so **adding or moving task
+  classes requires a redeploy**; `stardag modal deploy` reports the
+  expansion (`--no-check-task-modules` skips the warn-only local import
+  check). Task modules are imported in every tick container, so keep heavy
+  runtime dependencies inside `run()` rather than at module scope.
+
+  With the declaration in place, a reactive trigger writes **no pickle**
+  for any task whose class is covered and whose payload round-trips to the
+  same task id — a fully covered build needs no target-root write access
+  at all. Everything else keeps its pickle exactly as before, including
+  `AliasTask` payloads (pickled `loads_type`, never auto-unpickled from
+  registry data by design) and non-importable classes. The trigger warns
+  about classes the patterns don't cover, naming the pattern to add;
+  `require_pickle_free=True` turns that fallback into a hard error.
+
+  Skipping pickles requires declaring `task_modules` explicitly; the
+  inferred default only drives the coverage warning. Upgrading stardag
+  therefore changes nothing on its own — a newer SDK triggering against an
+  app deployed by an older one still writes pickles, because eliding them
+  would depend on a baked-in module list that deployment does not have.
+  Resident (non-reactive) builds are unaffected either way, and
+  `task_modules=[]` behaves exactly as before. **Redeploy the app whenever
+  you change `task_modules`**, before triggering.
+
+- **Fixed: a reactive build no longer fails because another build is
+  running one of its upstreams.** Task state is per environment, so an
+  upstream some other build left RUNNING gates this build's tasks — while
+  contributing nothing to the `running` count and status counts a tick
+  sees, which are scoped to this build. That shape read as "nothing
+  runnable, nothing running, so this build is dead", and the build was
+  failed within seconds of triggering with an error naming only status
+  counts. Common whenever DAGs overlap, and especially when the blocker is
+  a dynamic dependency registered under an earlier build, so it is not in
+  the new build's task set at all.
+
+  A tick now reads the frontier's blocking upstreams and asks, for each,
+  whether anyone is going to move it. A blocker **another build is
+  executing** is waited out (like a busy concurrency-limit slot — its
+  completion wakes this scheduler), and so is one **a still-live build has
+  yet to schedule**: that build is going to run it, and failing here would
+  only trade one spurious failure for another. A blocker **no live build is
+  going to run** — its owning build has gone terminal, no build owns its
+  status, or that status could not be resolved — fails the build
+  immediately, naming the task, its namespace/name, its status, how long it
+  has been in it, the build that owns it, why that owner will not move it,
+  and how to release it. A blocker inside this build's own task set is
+  unchanged: it is already visible in the counts, and still fails the build
+  when it can never run.
+
+  Both waits are bounded by the new
+  `TickConfig.stale_external_blocker_seconds` (default 6 hours), measured on
+  how long the blocker has sat in its status rather than on the tick, which
+  is too short-lived to bound anything: past the bound the blocker is
+  presumed abandoned and the build fails with the full explanation instead
+  of hanging silently. `None` waits indefinitely. `TickSummary` gains
+  `external_blockers`, `external_blockers_waited` and
+  `external_blockers_fatal`, and `BuildInfo` gains `status` (the build's
+  derived status, `None` when a server or custom registry does not report
+  it). Owner liveness is resolved only when a build actually looks stalled,
+  and once per owning build per pass, so a healthy build issues no extra
+  requests however often it polls. Requires a stardag-api version matching
+  this SDK; against an older server the blocker list is always empty and
+  terminal detection behaves exactly as before.
+
+- **Fixed: re-triggering a reactive build now recovers tasks left
+  `SUSPENDED`.** A task that suspended for dynamic dependencies and was
+  then abandoned (its orchestrator died, or the build was cancelled) was
+  permanently unschedulable: the re-trigger's retry pass skipped it, and
+  the only escape was to cancel it purely to reach a status that _was_
+  retryable and then retry. `suspended` joins failed/cancelled/skipped in
+  the set a re-trigger resets to pending. Safe because a suspended task has
+  no live execution — the suspension means the execution yielded and
+  returned — so nothing can be orphaned. Workers registering dynamically
+  yielded dependencies do not retry at all and are unaffected. `running`
+  remains deliberately non-retryable: it holds a live execution claim, and
+  releasing that claim is cancellation, not retry.
+
+- **`TickConfig.stale_running_no_ref_seconds` takes effect for the first
+  time**, now that the frontier actually populates
+  `FrontierTaskRef.latest_status_at`. The field was declared and documented
+  as the input to that bound but never sent by the server — it silently
+  serialised as `null` on every ref, leaving the guard dead. Against a
+  matching server, a task stuck RUNNING without an executor ref for longer
+  than the bound (default 30 minutes) is now failed as intended. Raise the
+  bound if you run long ref-less tasks — e.g. a resident build sharing
+  tasks with a concurrently ticking reactive one.
+
+### Fixed
+
+- **The reactive watchdog now asks the registry only for the RUNNING builds
+  its own app owns** (`GET /builds?status=running&reactive_app_name=...`,
+  filters the API has supported since the reactive-metadata release but the
+  SDK never used). Previously each sweep paged the whole build listing,
+  filtered the derived status client-side, and then spent a full `tick`
+  invocation on every RUNNING build in the environment just to discover
+  most were not reactive. Worse, the sweep's per-period cap was consumed by
+  those irrelevant builds: an environment holding more stale RUNNING builds
+  than the cap could stop reaching genuine reactive builds entirely, and
+  silently — disabling the safety net exactly when it was needed. The
+  truncation warning now says how many _reactive_ builds owned by _which
+  app_ it truncated, and what to do about it. `build_list_running` gained an
+  optional `reactive_app_name` argument; the client-side status re-check is
+  retained so a server predating the filters degrades to a wider listing
+  rather than to ticking terminal builds. Note that scoping removes the
+  incidental cross-app coverage a sweep used to provide: a build owned by
+  an app deployed without a watchdog is no longer swept by another app's
+  watchdog. ([#208](https://github.com/stardag-dev/stardag/issues/208) A3)
+- **A reactive trigger that fails part-way no longer leaves a build stuck
+  in RUNNING forever.** `build_trigger(reactive=True)` mints the build
+  before running discovery and persisting the task store, and a build's
+  status is derived from its events — so a failure in between (most often a
+  target-root permission or storage error on the task-store write) left a
+  RUNNING build that nothing would ever terminate and that carried no
+  reactive owner, so it was invisible to its own app's sweep and pure
+  overhead for every other one. All post-mint trigger work is now wrapped:
+  any failure emits a terminal `BUILD_FAILED` naming the stage that failed
+  before the original exception propagates (a failure to record that event
+  is logged, never allowed to mask the root cause).
+  ([#208](https://github.com/stardag-dev/stardag/issues/208) A4)
 ### Registry API
 
 - **The API now knows which SDK is calling it, and can say so when that
