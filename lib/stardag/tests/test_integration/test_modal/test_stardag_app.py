@@ -1439,7 +1439,33 @@ class TestWatchdogSweep:
         # "2+ reactive builds owned by X", not "2+ running builds": the
         # operator needs to know the cap was hit on RELEVANT builds.
         assert "2+ reactive builds owned by 'an-app'" in caplog.text
-        assert "Cancel or clean up builds" in caplog.text
+        assert "reduce the number of concurrent reactive builds" in caplog.text
+
+    def test_truncation_warning_remedy_differs_when_the_listing_is_unscoped(
+        self, caplog
+    ):
+        """An unscoped listing hit its cap on RUNNING builds of every kind,
+        so "run fewer reactive builds per app" is advice about the wrong
+        population — and the real remedy includes upgrading the registry."""
+        import logging
+
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        class OldRegistry(NoOpRegistry):
+            def build_list_running(self, limit: int = 100):  # type: ignore[override]
+                return [uuid4(), uuid4()]
+
+        with caplog.at_level(logging.WARNING):
+            _run_watchdog_sweep(
+                OldRegistry(),
+                lambda *a, **k: None,
+                sweep_limit=2,
+                reactive_app_name="an-app",
+            )
+
+        assert "2+ running builds" in caplog.text
+        assert "not scoped to a reactive app" in caplog.text
+        assert "reduce the number of concurrent reactive builds" not in caplog.text
 
 
 class TestBuildTickConfig:

@@ -386,11 +386,17 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self, limit: int = 100, reactive_app_name: str | None = None
     ) -> list[UUID]:
         """Async version of build_list_running."""
-        if reactive_app_name is not None and not accepts_reactive_app_name_kwarg(
+        # Only forward the kwarg when there is something to forward *and*
+        # the implementation takes it. An unscoped sweep must reach a
+        # pre-kwarg implementation unchanged — passing `None` positionally
+        # would raise TypeError on the very call that needs no scoping.
+        # Keyword, not positional: an implementation is free to make it
+        # keyword-only.
+        if reactive_app_name is None or not accepts_reactive_app_name_kwarg(
             self.build_list_running
         ):
             return self.build_list_running(limit)
-        return self.build_list_running(limit, reactive_app_name)
+        return self.build_list_running(limit, reactive_app_name=reactive_app_name)
 
     def build_add_roots(self, build_id: UUID, root_task_ids: list[str]) -> None:
         """Append root task ids to a build (reactive re-trigger with new roots).

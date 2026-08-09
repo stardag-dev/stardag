@@ -320,9 +320,10 @@ def _run_watchdog_sweep(
         return
     # Old custom RegistryABC implementations predate the kwarg; degrade to
     # an unscoped listing rather than breaking the sweep entirely.
-    if reactive_app_name is not None and accepts_reactive_app_name_kwarg(
+    scoped = reactive_app_name is not None and accepts_reactive_app_name_kwarg(
         registry.build_list_running
-    ):
+    )
+    if scoped:
         running_builds = registry.build_list_running(
             limit=sweep_limit, reactive_app_name=reactive_app_name
         )
@@ -331,12 +332,24 @@ def _run_watchdog_sweep(
         running_builds = registry.build_list_running(limit=sweep_limit)
         scope = "running builds"
     if len(running_builds) >= sweep_limit:
+        # The remedy follows `scoped`, not whether a name was *asked* for:
+        # a scoping request the registry cannot honour still yields a
+        # listing capped by RUNNING builds of every kind, and "run fewer
+        # reactive builds per app" would then be advice about the wrong
+        # population.
+        remedy = (
+            "Cancel or clean up builds that are RUNNING but abandoned, or "
+            "reduce the number of concurrent reactive builds for this app."
+            if scoped
+            else "This listing was not scoped to a reactive app, so the cap "
+            "was consumed by RUNNING builds of every kind — most likely "
+            "abandoned ones. Clean those up (`stardag builds cleanup`); an "
+            "upgraded registry would also scope this listing."
+        )
         logger.warning(
             f"Tick watchdog: {sweep_limit}+ {scope}; only the {sweep_limit} "
             "most recently active are swept, so a less-recently-active build "
-            "may not be ticked this period. Cancel or clean up builds that "
-            "are RUNNING but abandoned, or reduce the number of concurrent "
-            "reactive builds per app."
+            f"may not be ticked this period. {remedy}"
         )
     # Each tick re-reads the build's reactive metadata (GET /builds/{id}) to
     # resolve the owner app and the stored tick_kwargs, so that probe is not

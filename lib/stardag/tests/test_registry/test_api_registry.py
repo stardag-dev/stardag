@@ -664,3 +664,64 @@ class TestBuildListRunningFilters:
         )
         assert len(registry.build_list_running(limit=2)) == 2
         assert len(captured) == 1  # limit reached mid-page: no second request
+
+
+class TestBuildListRunningAioDelegate:
+    """`RegistryABC.build_list_running_aio` forwards to the sync method.
+
+    How it forwards is a compatibility surface: `reactive_app_name` was
+    added to the ABC after implementations existed, so the delegate must
+    still reach an implementation that predates it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unscoped_call_reaches_an_implementation_without_the_kwarg(self):
+        """An unscoped sweep has nothing to forward, so it must not try.
+
+        Passing `reactive_app_name=None` through anyway raises TypeError on
+        a pre-kwarg implementation — on precisely the call that asked for
+        no scoping and therefore needs no new parameter.
+        """
+        from stardag.registry import NoOpRegistry
+
+        seen: list[int] = []
+
+        class OldRegistry(NoOpRegistry):
+            def build_list_running(self, limit: int = 100):  # type: ignore[override]
+                seen.append(limit)
+                return []
+
+        assert await OldRegistry().build_list_running_aio(limit=7) == []
+        assert seen == [7]
+
+    @pytest.mark.asyncio
+    async def test_scoped_call_forwards_by_keyword(self):
+        """Keyword, not positional: an implementation may make it
+        keyword-only, and a positional forward would then fail."""
+        from stardag.registry import NoOpRegistry
+
+        seen: list[tuple] = []
+
+        class NewRegistry(NoOpRegistry):
+            def build_list_running(  # type: ignore[override]
+                self, limit: int = 100, *, reactive_app_name: str | None = None
+            ):
+                seen.append((limit, reactive_app_name))
+                return []
+
+        await NewRegistry().build_list_running_aio(limit=3, reactive_app_name="an-app")
+        assert seen == [(3, "an-app")]
+
+    @pytest.mark.asyncio
+    async def test_scoped_call_degrades_when_the_kwarg_is_unsupported(self):
+        from stardag.registry import NoOpRegistry
+
+        seen: list[int] = []
+
+        class OldRegistry(NoOpRegistry):
+            def build_list_running(self, limit: int = 100):  # type: ignore[override]
+                seen.append(limit)
+                return []
+
+        await OldRegistry().build_list_running_aio(limit=5, reactive_app_name="an-app")
+        assert seen == [5]
