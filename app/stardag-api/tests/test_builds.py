@@ -2040,11 +2040,20 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
             "blocking_status_at": frontier_b["blocked_by_external"][0][
                 "blocking_status_at"
             ],
+            "blocking_status_expires_at": frontier_b["blocked_by_external"][0][
+                "blocking_status_expires_at"
+            ],
             "blocking_status_build_id": build_a,
             "blocking_in_build": False,
         }
     ]
     assert frontier_b["blocked_by_external"][0]["blocking_status_at"] is not None
+    # The blocker holds a live claim, so build B is told when it lapses —
+    # the one liveness question B cannot answer for itself (it cannot probe
+    # build A's executor).
+    assert (
+        frontier_b["blocked_by_external"][0]["blocking_status_expires_at"] is not None
+    )
 
     # Build A owns the blocker, so from its side nothing is external — and
     # its own liveness signal (`running`) covers the same task.

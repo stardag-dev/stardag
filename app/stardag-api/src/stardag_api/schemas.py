@@ -300,6 +300,20 @@ class FrontierTaskRef(BaseModel):
     # staleness bounds (e.g. fail a long-RUNNING task with no executor
     # ref, which would otherwise hold concurrency-limit slots forever).
     latest_status_at: datetime | None = None
+    # When a RUNNING task's execution claim stops being believable. Past
+    # it, the server itself lets the next claiming start take the task
+    # over, and the task stops counting against its concurrency limits —
+    # so a scheduler can act on this instead of inferring death from
+    # elapsed time. Meaningless unless latest_status is RUNNING.
+    #
+    # Null means "no expiry known" and must be treated as a claim that
+    # never lapses — waiting, not failing. It is a narrower population than
+    # it looks: claims already RUNNING when the expiry shipped were
+    # backfilled, so a null here is a claim stamped by a server predating
+    # the column and not re-started since (or one with no status timestamp
+    # to date it). Those need an operator to release; there is no timestamp
+    # that would let a client conclude anything else.
+    latest_status_expires_at: datetime | None = None
 
 
 class FrontierExternalBlocker(BaseModel):
@@ -336,6 +350,16 @@ class FrontierExternalBlocker(BaseModel):
     # only for rows predating status denormalisation.
     blocking_status_at: datetime | None = None
     blocking_status_build_id: UUID | None = None
+    # When the blocker's execution claim lapses, if it is RUNNING (null
+    # otherwise, and for the narrow set of claims nothing can date — see
+    # FrontierTaskRef.latest_status_expires_at; treat null as "wait"). This is
+    # the one thing about a cross-build blocker a consumer could not
+    # previously establish: it cannot probe another build's executor, so
+    # "is that holder still alive?" was pure inference from
+    # blocking_status_at. Note what it still does NOT give you — proving
+    # the blocker dead does not let this build run it, because a blocker
+    # with blocking_in_build=False is not in this build's plan at all.
+    blocking_status_expires_at: datetime | None = None
     # Whether the blocker is also part of *this* build's task set. False is
     # the pathological case: this build will never schedule it, so it can
     # only wait for whoever owns it. True still blocks, but the blocker
@@ -431,13 +455,18 @@ class ConcurrencyLimitUpsert(BaseModel):
 
 
 class ConcurrencyLimitHolder(BaseModel):
-    """A RUNNING task currently occupying one slot of a concurrency-limit key."""
+    """A task whose live execution claim occupies one slot of a limit key."""
 
     task_id: str
     task_namespace: str
     task_name: str
     # When the task's RUNNING status was recorded ("running since").
     latest_status_at: datetime | None = None
+    # When this holder's claim lapses, releasing the slot with no
+    # intervention. Null = never, which after the backfill means a claim
+    # nothing can date (see FrontierTaskRef.latest_status_expires_at) —
+    # precisely the case eviction still exists for.
+    latest_status_expires_at: datetime | None = None
     latest_executor: str | None = None
     latest_executor_ref: str | None = None
     latest_executor_metadata: dict | None = None

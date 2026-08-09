@@ -101,6 +101,58 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   default) runs the same operation on a timer inside the API process. Note
   that every replica runs its own timer with no leader election; cancellation
   is idempotent, so concurrent sweeps are wasteful rather than wrong.
+- **The execution claim now has an expiry, so an abandoned claim heals
+  itself** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
+  `Task.latest_status == RUNNING` _is_ the claim, and it recorded no
+  liveness evidence a third party could evaluate: a holder that vanished
+  denied the task to every future build indefinitely and leaked its
+  concurrency-limit slots with it. New nullable column
+  `tasks.latest_status_expires_at`, written once when a start grants the
+  claim — **not** a lease, nothing heartbeats it. A claim past its expiry
+  simply is not a claim: the next claiming start takes the task over,
+  replacing the dead holder's build, executor fields and expiry together.
+  No reaper, no release call, no new status a user has to understand.
+  - `POST /builds/{id}/tasks/{task_id}/start` accepts
+    `claim_ttl_seconds` (60 s … 30 days, 422 outside that). Set it from the
+    executor's own timeout plus a small grace — the caller is the only
+    party that knows how long the execution may legitimately take. Omitted,
+    it falls back to `STARDAG_API_CLAIM_DEFAULT_TTL_SECONDS` (default
+    7 days). That fallback is deliberately generous because it is what a
+    caller that does _not_ derive a TTL gets — every SDK predating this
+    change, and any newer one whose executor declares no timeout — so it
+    must be a bound no realistic task reaches. Expiring late only delays a
+    heal that today never happens; expiring early hands a live task to a
+    second claimant. It is a backstop, not the cleanup path: a claim held
+    by an abandoned _build_ is released within a day by the reaper's
+    cascade, and an operator can release any claim immediately.
+  - **The concurrency-limit count uses the same predicate**, so an expired
+    claim releases its slots — otherwise the leak would survive in the one
+    place nobody reads. `GET /concurrency-limits/{key}/holders` matches
+    (eviction deliberately still reaches an expired holder, whose task is
+    RUNNING to every status reader until an event says otherwise).
+  - Surfaced as `latest_status_expires_at` on frontier task refs and on
+    `ConcurrencyLimitHolder`, as `blocking_status_expires_at` on
+    `blocked_by_external` entries, and in the `task_already_running` 409
+    detail — so a scheduler can act on evidence instead of inferring death
+    from elapsed time.
+  - **The migration backfills the claims that are already RUNNING**, as
+    `latest_status_at + <default TTL>`. Those rows are the population this
+    feature exists to heal — a task RUNNING since three months ago is an
+    abandoned claim, not one that "never lapses" — and leaving them null
+    would have shipped the fix while excluding every case that motivated
+    it. The value is correct in both directions without guessing: a claim
+    abandoned long ago backfills to a timestamp already past, so it is
+    immediately re-claimable; one genuinely running across the deploy
+    backfills to a future timestamp and is untouched, and its next
+    `TASK_STARTED` re-stamps it from the caller's TTL anyway. Rows with no
+    `latest_status_at` to measure from are left null.
+  - Purely additive otherwise: `NULL` means "no expiry known" and is
+    treated as a claim that never lapses, exactly as before this column.
+    After the backfill that is a much narrower population than it sounds —
+    a claim stamped by a server predating the column and not re-started
+    since — and those still need an operator (cancel, retry, evict) to
+    release. Executor probing is unaffected and remains the better evidence
+    where it is available.
 
 ### UI
 

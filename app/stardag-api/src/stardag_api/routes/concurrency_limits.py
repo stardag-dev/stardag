@@ -47,6 +47,7 @@ from stardag_api.schemas import (
     ConcurrencyLimitUpsert,
     TaskEventResponse,
 )
+from stardag_api.services.claims import live_claim_filter
 from stardag_api.services.status import apply_event_to_task
 
 router = APIRouter(prefix="/concurrency-limits", tags=["concurrency-limits"])
@@ -190,19 +191,29 @@ async def delete_concurrency_limit(
     await db.commit()
 
 
-def _holders_filter(key: str, environment_id):
+def _holders_filter(key: str, environment_id, *, live_only: bool = True):
     """WHERE clause fragments selecting a key's current slot holders.
 
-    A holder is a task in the environment that is RUNNING and has the key
-    recorded (see ``TaskLimitKey``) — the same definition the enforcement
-    count in ``routes/builds.py::_check_concurrency_limits`` uses. Note
-    that holders can exist for keys without a configured limit row (the
-    key is then unlimited but slots are still tracked).
+    A holder is a task in the environment that holds a *live* execution
+    claim and has the key recorded (see ``TaskLimitKey``) — the same
+    definition the enforcement count in
+    ``routes/builds.py::_check_concurrency_limits`` uses, and it has to
+    stay the same one: this listing is how an operator sees why a limit is
+    full, and a listing that disagrees with the enforcement count sends
+    them hunting for a slot nobody is holding. Note that holders can exist
+    for keys without a configured limit row (the key is then unlimited but
+    slots are still tracked).
+
+    ``live_only=False`` drops the expiry test, leaving plain RUNNING. Only
+    the eviction path wants that: an expired claim already released its
+    slots, but the task still *reads* RUNNING to every status consumer
+    until some event moves it, and recording that event is what eviction
+    is for.
     """
     return (
         TaskLimitKey.key == key,
         Task.environment_id == environment_id,
-        Task.latest_status == TaskStatus.RUNNING,
+        live_claim_filter() if live_only else Task.latest_status == TaskStatus.RUNNING,
     )
 
 
@@ -213,10 +224,16 @@ async def list_concurrency_limit_holders(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ):
-    """List the RUNNING tasks currently holding slots of a limit key.
+    """List the tasks currently holding slots of a limit key.
 
     Ordered oldest-running first (eviction candidates on top); ``total``
     carries the full holder count when it exceeds ``limit``.
+
+    A task whose execution claim has expired is not listed: it no longer
+    counts against the limit, so listing it would overstate the occupied
+    slots. It is still RUNNING to every status reader until something moves
+    it — ``GET /tasks?status=running`` finds those — and can still be
+    evicted by task id.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
 
@@ -251,6 +268,7 @@ async def list_concurrency_limit_holders(
                 task_namespace=t.task_namespace,
                 task_name=t.task_name,
                 latest_status_at=t.latest_status_at,
+                latest_status_expires_at=t.latest_status_expires_at,
                 latest_executor=t.latest_executor,
                 latest_executor_ref=t.latest_executor_ref,
                 latest_executor_metadata=t.latest_executor_metadata,
@@ -313,7 +331,12 @@ async def evict_concurrency_limit_holder(
             select(Task)
             .join(TaskLimitKey, TaskLimitKey.task_pk == Task.id)
             .where(
-                *_holders_filter(key, auth.environment_id),
+                # live_only=False: an expired claim occupies no slot, but
+                # its task is still RUNNING to everything that reads
+                # status, and clearing that is precisely this endpoint's
+                # job. Refusing to evict it would leave the operator with
+                # a RUNNING task and no way to say otherwise.
+                *_holders_filter(key, auth.environment_id, live_only=False),
                 Task.task_id == task_id,
             )
             .with_for_update(of=Task)

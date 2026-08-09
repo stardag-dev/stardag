@@ -148,6 +148,43 @@ class Task(Base, TimestampMixin):
     latest_status_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
     )
+    # Expiry of the execution claim that ``latest_status == RUNNING`` *is*
+    # (see services/claims.py for both predicates). Written once, at
+    # claim time, from the caller's ``claim_ttl_seconds`` or the server
+    # default; cleared on every move out of RUNNING. NOT a lease: nothing
+    # renews it mid-execution, so it is sized from the executor's own
+    # timeout, not from a heartbeat interval.
+    #
+    # NULL means "no expiry known", and every predicate treats it as a
+    # claim that never lapses — the pre-expiry behaviour, so the column is
+    # additive by construction.
+    #
+    # Read that narrowly. The migration backfilled every row that was
+    # RUNNING when it ran and had a latest_status_at to measure from
+    # (status_at + the default TTL), because those rows ARE the abandoned
+    # claims this exists to heal — leaving them NULL would have shipped the
+    # fix while excluding every case that motivated it. So NULL on a
+    # RUNNING task does not mean "an old claim, so probably dead"; it means
+    # the claim was stamped by a server predating this column and has not
+    # been re-started since — a pre-denormalisation row with no
+    # latest_status_at to date it, or a straggler from a rolling deploy.
+    # Nothing can date those, so they genuinely never lapse and still need
+    # an operator (cancel, retry, evict) to release.
+    #
+    # Its whole purpose is that a *third party* can evaluate it. Within a
+    # build the claim already carries an executor ref that can be probed,
+    # and probing stays the better evidence; across builds there was
+    # previously nothing at all, so a holder that vanished wedged the task
+    # for every future build forever and leaked its concurrency-limit slots
+    # with it. A claim past its expiry is simply re-claimable — that is the
+    # entire healing mechanism; no reaper, no release call, no new status.
+    #
+    # Deliberately not indexed: every reader already narrows on
+    # ``latest_status`` (or on the task's own row) first, and the expiry is
+    # then a comparison on the handful of RUNNING rows that survive that.
+    latest_status_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
     latest_status_event_id: Mapped[UUID | None] = mapped_column(Uuid)
     latest_status_build_id: Mapped[UUID | None] = mapped_column(
         Uuid,
