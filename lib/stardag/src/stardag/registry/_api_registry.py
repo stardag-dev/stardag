@@ -313,7 +313,13 @@ class APIRegistry(RegistryABC):
             # against its configured minimum and rejected us. Its message
             # names both versions and the upgrade command — surface it,
             # don't restate it.
-            raise sdk_version_unsupported_from_detail(raw_detail)
+            # `raw_detail` is None when the body was not JSON — a
+            # proxy-generated 426 is the realistic case, and it is exactly
+            # when the upstream's own words matter most. Fall back to the
+            # text detail rather than losing it to the generic message.
+            raise sdk_version_unsupported_from_detail(
+                raw_detail if raw_detail is not None else detail
+            )
 
         elif status_code == 429:
             if error_code == "RATE_LIMIT":

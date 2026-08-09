@@ -612,7 +612,12 @@ class _CapturingRegistry:
     request is the whole fixture.
     """
 
-    def __init__(self, response_json: dict, status_code: int = 200):
+    def __init__(
+        self,
+        response_json: dict | None = None,
+        status_code: int = 200,
+        response_text: str | None = None,
+    ):
         import httpx
 
         from stardag.registry._api_registry import APIRegistry
@@ -621,7 +626,11 @@ class _CapturingRegistry:
 
         def handler(request: httpx.Request) -> httpx.Response:
             self.requests.append(request)
-            return httpx.Response(status_code, json=response_json)
+            # `response_text` models a body that is not JSON at all — a
+            # proxy or gateway answering on the server's behalf.
+            if response_text is not None:
+                return httpx.Response(status_code, text=response_text)
+            return httpx.Response(status_code, json=response_json or {})
 
         self.registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
         # Swap the *transport*, not the whole client: default headers (auth,
@@ -1039,3 +1048,16 @@ class TestSDKVersionUnsupported:
             cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
         assert excinfo.value.minimum_sdk_version is None
         assert "Upgrade Required" in str(excinfo.value)
+
+    def test_a_non_json_426_still_surfaces_the_body(self):
+        """A proxy's 426 has no JSON at all, so there is no `detail` key to
+        read — and that is precisely when the upstream's own words are the
+        only clue about which hop rejected the request. Losing them to the
+        generic sentence sends the reader to the wrong server."""
+        cap = _CapturingRegistry(
+            status_code=426,
+            response_text="nginx: client SDK too old for this gateway",
+        )
+        with pytest.raises(SDKVersionUnsupportedError) as excinfo:
+            cap.registry.build_list_tick_summaries(UUID(_BUILD_ID))
+        assert "nginx: client SDK too old for this gateway" in str(excinfo.value)

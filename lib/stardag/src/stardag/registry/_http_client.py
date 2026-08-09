@@ -172,6 +172,12 @@ def handle_response_error(
         return
 
     if status_code == 426:
-        raise sdk_version_unsupported_from_detail(raw_detail)
+        # `raw_detail` is None when the body was not JSON — a
+        # proxy-generated 426 is the realistic case, and it is exactly
+        # when the upstream's own words matter most. Fall back to the
+        # text detail rather than losing it to the generic message.
+        raise sdk_version_unsupported_from_detail(
+            raw_detail if raw_detail is not None else detail
+        )
 
     raise APIError(f"{operation} failed", status_code=status_code, detail=detail)
