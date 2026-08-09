@@ -484,9 +484,16 @@ Two operational notes:
   still importable and its fields are compatible (nested task fields
   must use `sd.TaskLoads`/`sd.SubClass` annotations). Only if both paths
   fail is the task failed by the next tick (never a silent stall).
-- **The watchdog sweep runs one quick scheduling pass per running build**
-  (it skips the linger), so its per-period cost is one short function
-  invocation plus a frontier query per running build.
+- **The watchdog sweep runs one quick scheduling pass per running build
+  that this app owns** (it skips the linger), so its per-period cost is
+  one short function invocation plus a frontier query per such build.
+  The sweep asks the registry only for RUNNING builds whose reactive
+  owner is this app, so unrelated builds in the environment — resident
+  builds, and builds left RUNNING by an orchestrator that died without
+  emitting a terminal event — cost nothing and cannot crowd out the
+  sweep's per-period cap. A build owned by an app deployed _without_
+  `watchdog_period_minutes` therefore has no watchdog covering it, even
+  if another app in the environment has one.
 - **Define the callables you pass to `StardagApp` in an importable
   module.** `worker_selector`, `limit_key_selector`, and any custom
   build/run functions are captured by the serialized Modal functions
@@ -553,15 +560,16 @@ server before relying on limits.
 **App ownership.** Each reactive build is owned by the `StardagApp`
 that triggered it (`app_name` recorded in the build's reactive metadata in
 the registry, read by every tick from the build frontier). With
-several apps deployed in one environment, every watchdog sweeps all
-running reactive builds — but a tick from a non-owning app never drives
-the build with its own commit's code and selectors (or unpickles the
-owner's task store, which may not match its code). Instead it
-**forwards**: it spawns the owner app's tick (best-effort) and returns
-`outcome="foreign_app"` — so wake-ups that land on the wrong app are
-not lost, and every app's watchdog doubles as cross-app coverage (the
-owner-side scheduler lease collapses duplicate forwards). Redeploying
-the **same** app name is the normal upgrade path and unaffected.
+several apps deployed in one environment, each app's watchdog sweeps only
+the builds that app owns. A tick from a non-owning app can still be
+triggered — typically a wake-up from a worker still running under a
+previous owner — and it never drives the build with its own commit's code
+and selectors (or unpickles the owner's task store, which may not match
+its code). Instead it **forwards**: it spawns the owner app's tick
+(best-effort) and returns `outcome="foreign_app"` — so wake-ups that land
+on the wrong app are not lost (the owner-side scheduler lease collapses
+duplicate forwards). Redeploying the **same** app name is the normal
+upgrade path and unaffected.
 
 To migrate a build to a different app, re-trigger it from that app
 (`build_trigger(tasks, reactive=True, build_id=<existing id>)`): the

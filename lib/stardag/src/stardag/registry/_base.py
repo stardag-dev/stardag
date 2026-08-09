@@ -79,6 +79,21 @@ def accepts_executor_metadata_kwarg(fn: Any) -> bool:
     return has_var_keyword or "executor_metadata" in params
 
 
+def accepts_reactive_app_name_kwarg(fn: Any) -> bool:
+    """Whether a ``build_list_running[_aio]`` impl accepts ``reactive_app_name``.
+
+    Same signature-inspection rationale as :func:`accepts_executor_kwargs`.
+    The watchdog degrades to an unscoped listing for older implementations
+    rather than raising: a tick no-ops on a non-reactive build, so a wider
+    listing only costs invocations, it does not misbehave.
+    """
+    info = _param_info(fn)
+    if info is None:
+        return False
+    params, has_var_keyword = info
+    return has_var_keyword or "reactive_app_name" in params
+
+
 class FrontierTaskRef(StardagBaseModel):
     """A task in a build's scheduling frontier (see :class:`BuildFrontier`)."""
 
@@ -354,17 +369,34 @@ class RegistryABC(metaclass=abc.ABCMeta):
             self.task_register(build_id, task)
         return None
 
-    def build_list_running(self, limit: int = 100) -> list[UUID]:
+    def build_list_running(
+        self, limit: int = 100, reactive_app_name: str | None = None
+    ) -> list[UUID]:
         """List ids of builds currently in RUNNING status (most recent first).
 
         Used by the reactive scheduler watchdog to sweep for builds that
-        may need a tick. Default: empty (no reactive-scheduling support).
+        may need a tick. ``reactive_app_name`` narrows the listing to builds
+        reactively scheduled by that app — the watchdog's actual question,
+        and what keeps ``limit`` from being consumed by unrelated builds.
+        Default: empty (no reactive-scheduling support).
         """
         return []
 
-    async def build_list_running_aio(self, limit: int = 100) -> list[UUID]:
+    async def build_list_running_aio(
+        self, limit: int = 100, reactive_app_name: str | None = None
+    ) -> list[UUID]:
         """Async version of build_list_running."""
-        return self.build_list_running(limit)
+        # Only forward the kwarg when there is something to forward *and*
+        # the implementation takes it. An unscoped sweep must reach a
+        # pre-kwarg implementation unchanged — passing `None` positionally
+        # would raise TypeError on the very call that needs no scoping.
+        # Keyword, not positional: an implementation is free to make it
+        # keyword-only.
+        if reactive_app_name is None or not accepts_reactive_app_name_kwarg(
+            self.build_list_running
+        ):
+            return self.build_list_running(limit)
+        return self.build_list_running(limit, reactive_app_name=reactive_app_name)
 
     def build_add_roots(self, build_id: UUID, root_task_ids: list[str]) -> None:
         """Append root task ids to a build (reactive re-trigger with new roots).

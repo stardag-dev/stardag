@@ -594,3 +594,134 @@ class TestConcurrencyLimitPathEncoding:
             self._encoded_path(captured[0])
             == "/api/v1/concurrency-limits/a%2Fb/holders/id%2F1/evict"
         )
+
+
+class TestBuildListRunningFilters:
+    """``build_list_running`` narrows ``GET /builds`` server-side.
+
+    The watchdog's question is "RUNNING reactive builds owned by app X".
+    Asking it unfiltered and answering it client-side lets unrelated builds
+    consume ``limit`` — an environment that accumulates stale RUNNING builds
+    then silently starves the reactive ones. The client-side status re-check
+    stays as the graceful-degradation guard for servers predating the
+    filters (unknown query params are ignored, not rejected).
+    """
+
+    def _make_registry_and_capture(self, pages):
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        captured: list[httpx.Request] = []
+        remaining = list(pages)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            builds = remaining.pop(0) if remaining else []
+            return httpx.Response(200, json={"builds": builds})
+
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        registry._client = httpx.Client(
+            transport=httpx.MockTransport(handler),
+            auth=registry._auth,
+        )
+        return registry, captured
+
+    @staticmethod
+    def _build(status: str) -> dict:
+        from uuid import uuid4
+
+        return {"id": str(uuid4()), "status": status}
+
+    def test_status_filter_always_sent(self):
+        registry, captured = self._make_registry_and_capture([[self._build("running")]])
+        assert len(registry.build_list_running()) == 1
+        assert captured[0].url.params["status"] == "running"
+        assert "reactive_app_name" not in captured[0].url.params
+
+    def test_reactive_app_name_forwarded_when_given(self):
+        registry, captured = self._make_registry_and_capture([[self._build("running")]])
+        registry.build_list_running(limit=10, reactive_app_name="an-app")
+        assert captured[0].url.params["reactive_app_name"] == "an-app"
+        assert captured[0].url.params["status"] == "running"
+
+    def test_old_server_ignoring_filters_still_yields_only_running(self):
+        """Graceful degradation: a server that ignores the query params
+        answers with the unfiltered listing — the client-side re-check must
+        keep terminal builds out of the result."""
+        page = [
+            self._build("completed"),
+            self._build("running"),
+            self._build("failed"),
+        ]
+        registry, _ = self._make_registry_and_capture([page])
+        result = registry.build_list_running()
+        assert [str(b) for b in result] == [page[1]["id"]]
+
+    def test_limit_stops_paging(self):
+        registry, captured = self._make_registry_and_capture(
+            [[self._build("running") for _ in range(100)]]
+        )
+        assert len(registry.build_list_running(limit=2)) == 2
+        assert len(captured) == 1  # limit reached mid-page: no second request
+
+
+class TestBuildListRunningAioDelegate:
+    """`RegistryABC.build_list_running_aio` forwards to the sync method.
+
+    How it forwards is a compatibility surface: `reactive_app_name` was
+    added to the ABC after implementations existed, so the delegate must
+    still reach an implementation that predates it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unscoped_call_reaches_an_implementation_without_the_kwarg(self):
+        """An unscoped sweep has nothing to forward, so it must not try.
+
+        Passing `reactive_app_name=None` through anyway raises TypeError on
+        a pre-kwarg implementation — on precisely the call that asked for
+        no scoping and therefore needs no new parameter.
+        """
+        from stardag.registry import NoOpRegistry
+
+        seen: list[int] = []
+
+        class OldRegistry(NoOpRegistry):
+            def build_list_running(self, limit: int = 100):  # type: ignore[override]
+                seen.append(limit)
+                return []
+
+        assert await OldRegistry().build_list_running_aio(limit=7) == []
+        assert seen == [7]
+
+    @pytest.mark.asyncio
+    async def test_scoped_call_forwards_by_keyword(self):
+        """Keyword, not positional: an implementation may make it
+        keyword-only, and a positional forward would then fail."""
+        from stardag.registry import NoOpRegistry
+
+        seen: list[tuple] = []
+
+        class NewRegistry(NoOpRegistry):
+            def build_list_running(  # type: ignore[override]
+                self, limit: int = 100, *, reactive_app_name: str | None = None
+            ):
+                seen.append((limit, reactive_app_name))
+                return []
+
+        await NewRegistry().build_list_running_aio(limit=3, reactive_app_name="an-app")
+        assert seen == [(3, "an-app")]
+
+    @pytest.mark.asyncio
+    async def test_scoped_call_degrades_when_the_kwarg_is_unsupported(self):
+        from stardag.registry import NoOpRegistry
+
+        seen: list[int] = []
+
+        class OldRegistry(NoOpRegistry):
+            def build_list_running(self, limit: int = 100):  # type: ignore[override]
+                seen.append(limit)
+                return []
+
+        await OldRegistry().build_list_running_aio(limit=5, reactive_app_name="an-app")
+        assert seen == [5]
