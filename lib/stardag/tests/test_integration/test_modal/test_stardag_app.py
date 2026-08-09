@@ -10,6 +10,7 @@ except ImportError:
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import stardag as _sd
 from stardag import BaseTask
 from stardag.build._base import BuildSummary
 from stardag.integration.modal import (
@@ -793,6 +794,569 @@ class TestStardagAppReactiveTrigger:
                     build_id=uuid4(),  # explicit id is NOT enough in reactive
                     reactive=True,
                 )
+
+
+# ---------------------------------------------------------------------------
+# task_modules: declaration, deploy-time expansion, pre-flight, pickle elision
+# ---------------------------------------------------------------------------
+
+
+def _app_with_task_modules(name: str, **kwargs) -> StardagApp:
+    return StardagApp(
+        name,
+        builder_settings=FunctionSettings(image=_make_image()),
+        worker_settings={"default": FunctionSettings(image=_make_image())},
+        **kwargs,
+    )
+
+
+class TestTaskModulesDeclaration:
+    """`StardagApp(task_modules=...)` validation and inference."""
+
+    def test_patterns_are_validated_eagerly(self):
+        from stardag.build import TaskModulesError
+
+        with pytest.raises(TaskModulesError, match="only allowed as the final"):
+            _app_with_task_modules("tm-bad", task_modules=["my_pkg.*.tasks"])
+
+    def test_empty_list_opts_out_silently(self, caplog):
+        with caplog.at_level("WARNING"):
+            app = _app_with_task_modules("tm-optout", task_modules=[])
+        assert app.task_modules == ()
+        assert "task_modules" not in caplog.text
+
+    def test_declared_patterns_are_deduped_and_sorted(self):
+        app = _app_with_task_modules(
+            "tm-declared", task_modules=["b_pkg.*", "a_pkg.tasks", "b_pkg.*"]
+        )
+        assert app.task_modules == ("a_pkg.tasks", "b_pkg.*")
+
+    def test_default_infers_from_the_defining_module(self):
+        """The default is "the root package of the module defining the app,
+        recursively" — resolved from the caller's frame, so it matches what
+        inference sees from this very test function."""
+        from stardag.integration.modal._app import _infer_task_module_patterns
+
+        expected = _infer_task_module_patterns(_depth=1)
+        app = _app_with_task_modules("tm-inferred")
+        assert app.task_modules == expected
+
+    def test_inference_uses_the_callers_root_package(self):
+        from stardag.integration.modal._app import _infer_task_module_patterns
+
+        namespace = {
+            "__name__": "acme_pipelines.deploy.app",
+            "__package__": "acme_pipelines.deploy",
+            "_infer": _infer_task_module_patterns,
+        }
+        exec("result = _infer(_depth=1)", namespace)  # noqa: S102
+        assert namespace["result"] == ("acme_pipelines.*",)
+
+    @pytest.mark.parametrize(
+        "module_name,package",
+        [("__main__", None), ("loose_deploy_script", ""), ("__main__", "")],
+    )
+    def test_inference_opts_out_with_a_warning_for_unpackaged_modules(
+        self, caplog, module_name, package
+    ):
+        """A module that isn't part of a package has no importable name in a
+        container, so a pattern derived from it would be a lie: warn (naming
+        the fallback and the fix) and opt out."""
+        from stardag.integration.modal._app import _infer_task_module_patterns
+
+        namespace = {
+            "__name__": module_name,
+            "__package__": package,
+            "_infer": _infer_task_module_patterns,
+        }
+        with caplog.at_level("WARNING"):
+            exec("result = _infer(_depth=1)", namespace)  # noqa: S102
+
+        assert namespace["result"] == ()
+        assert "Could not infer StardagApp(task_modules=...)" in caplog.text
+        assert "fall back to the build task store's pickles" in caplog.text
+        assert 'task_modules=["my_pkg.tasks.*"]' in caplog.text
+
+    def test_require_pickle_free_without_task_modules_is_rejected(self):
+        from stardag.build import TaskModulesError
+
+        with pytest.raises(TaskModulesError, match="meaningless without"):
+            _app_with_task_modules(
+                "tm-contradiction", task_modules=[], require_pickle_free=True
+            )
+
+
+class TestFinalizeBakesTaskModules:
+    """finalize() expands the patterns once and freezes the result into the
+    deployed tick — so the deployed set is explicit, auditable, and only
+    changes on redeploy."""
+
+    def _finalize(self, **app_kwargs):
+        app = _app_with_task_modules("tm-finalize", **app_kwargs)
+        captured: dict = {}
+
+        def capture_function(**kwargs):
+            def decorator(fn):
+                captured[kwargs.get("name", "unknown")] = fn
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        with patch("stardag.integration.modal._app.get_target_roots_volumes") as mv:
+            mv.return_value = MagicMock(by_volume_name={}, by_root_key={})
+            result = app.finalize()
+        return app, result, captured
+
+    def test_expansion_is_surfaced_on_the_finalize_result(self):
+        _, result, _ = self._finalize(task_modules=["stardag.utils.*"])
+
+        assert "stardag.utils" in result.task_modules
+        assert "stardag.utils.testing.helper_tasks" in result.task_modules
+        assert result.task_modules == sorted(set(result.task_modules))
+
+    def test_opted_out_app_bakes_nothing(self):
+        _, result, _ = self._finalize(task_modules=[])
+        assert result.task_modules == []
+
+    def test_tick_imports_the_baked_list(self, default_in_memory_fs_target):
+        from stardag.build import TickSummary
+        from stardag.registry import BuildInfo
+
+        _, result, captured = self._finalize(task_modules=["stardag.utils.*"])
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(
+            id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+        )
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            return TickSummary(outcome="noop")
+
+        with (
+            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch(
+                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+            ),
+            patch(
+                "stardag.integration.modal._app.import_task_modules"
+            ) as import_modules,
+        ):
+            rp.get.return_value = registry
+            captured["tick"](str(build_id))
+
+        # Exactly the list frozen at deploy time — not re-derived in the
+        # container, where the filesystem walk would cost cold-start time.
+        import_modules.assert_called_once_with(result.task_modules)
+
+    def test_opted_out_tick_imports_nothing(self, default_in_memory_fs_target):
+        from stardag.build import TickSummary
+        from stardag.registry import BuildInfo
+
+        _, _, captured = self._finalize(task_modules=[])
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(
+            id=build_id, reactive_app_name="tm-finalize", reactive_tick_kwargs=None
+        )
+
+        async def stub_tick_aio(build_uuid, **kwargs):
+            return TickSummary(outcome="noop")
+
+        with (
+            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch(
+                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+            ),
+            patch(
+                "stardag.integration.modal._app.import_task_modules"
+            ) as import_modules,
+        ):
+            rp.get.return_value = registry
+            captured["tick"](str(build_id))
+
+        import_modules.assert_not_called()
+
+    def test_worker_publishes_the_patterns_for_dynamic_dep_registration(self):
+        """The worker doesn't import the modules (its task arrived by value,
+        self-importing) but it does need the patterns: dynamic deps are
+        persisted with the same elision as the trigger's discovered set."""
+        from stardag.build import declared_task_module_patterns
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app, _, captured = self._finalize(task_modules=["stardag.utils.*"])
+        from stardag.build import set_declared_task_module_patterns
+
+        set_declared_task_module_patterns([])
+        try:
+            with patch.object(Runner, "run", return_value=None):
+                captured["worker_default"](SyncOnlyTask(name="publishes"))
+            assert declared_task_module_patterns() == app.task_modules
+        finally:
+            set_declared_task_module_patterns([])
+
+
+class TestReactiveTriggerCoveragePreflight:
+    """The trigger holds both the real DAG and the app, so it is the only
+    place that can tell the user a scheduler tick won't be able to rebuild
+    one of their task classes — before a single container starts."""
+
+    def _trigger(self, app, root):
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = uuid4()
+        registry.task_register_bulk_aio.return_value = None
+        with registry_provider.override(registry):
+            return app.build_trigger(root, reactive=True), registry
+
+    def test_uncovered_class_warns_with_the_pattern_to_add(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-preflight", task_modules=["acme_pipelines.tasks.*"]
+        )
+        root = SyncOnlyTask(name="preflight-uncovered")
+
+        with caplog.at_level("WARNING"):
+            self._trigger(app, root)
+
+        assert "not covered by this app's task_modules" in caplog.text
+        assert "['acme_pipelines.tasks.*']" in caplog.text
+        # The exact pattern that would fix it, and the redeploy requirement.
+        assert f"{SyncOnlyTask.__module__.rsplit('.', 1)[0]}.*" in caplog.text
+        assert "redeploy" in caplog.text
+
+    def test_covered_class_does_not_warn(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-preflight-ok", task_modules=[SyncOnlyTask.__module__]
+        )
+        with caplog.at_level("WARNING"):
+            self._trigger(app, SyncOnlyTask(name="preflight-covered"))
+
+        assert "not covered" not in caplog.text
+
+    def test_opted_out_app_never_warns(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        """An app that declared nothing would otherwise warn about every
+        class in every DAG, on every trigger."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules("tm-preflight-optout", task_modules=[])
+        with caplog.at_level("WARNING"):
+            self._trigger(app, SyncOnlyTask(name="preflight-optout"))
+
+        assert "not covered" not in caplog.text
+
+    def test_only_incomplete_tasks_are_checked(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        """Discovery stops at complete tasks and only incomplete ones are
+        ever rehydrated by a tick — so a completed dep's class is
+        irrelevant, and checking it would be a false alarm."""
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        dep = SyncOnlyTask(name="preflight-complete-dep")
+        dep.run()  # writes its target -> discovery treats it as complete
+        root = SyncOnlyTask(name="preflight-root", deps=(dep,))
+        app = _app_with_task_modules(
+            "tm-preflight-incomplete", task_modules=["acme_pipelines.*"]
+        )
+
+        with caplog.at_level("WARNING"):
+            _, registry = self._trigger(app, root)
+
+        # One warning for the class, naming only the root's occurrence: the
+        # class is reported once regardless, but the point is the completed
+        # dep never entered the checked set.
+        assert caplog.text.count("not covered by this app's task_modules") == 1
+
+
+class _ElisionAliasedSource(_sd.Task[int]):
+    """Module-level (pickle-able) source for the AliasTask elision test."""
+
+    def run(self) -> None:
+        self._save(7)
+
+
+class _ElisionIntAlias(_sd.AliasTask[int]):
+    """Concrete alias class (module-level so the store can pickle it)."""
+
+
+class _ElisionAliasConsumer(_sd.Task[int]):
+    """Consumes an aliased upstream — its payload therefore embeds the
+    ``__aliased`` marker that rehydration refuses."""
+
+    loads_int: _sd.TaskLoads[int]
+
+    def run(self) -> None:
+        self._save(self.loads_int.load() + 1)
+
+
+class TestReactivePickleElision:
+    """With task_modules covering the classes, the trigger writes no
+    pickles: a scheduler tick rebuilds the tasks from registry data."""
+
+    def _trigger(self, app, root, build_id=None):
+        build_id = build_id or uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_start.return_value = build_id
+        registry.task_register_bulk_aio.return_value = None
+        with registry_provider.override(registry):
+            result = app.build_trigger(root, reactive=True)
+        return result, registry
+
+    def test_covered_round_tripping_tasks_get_no_pickle(
+        self, caplog, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules("tm-elide", task_modules=[SyncOnlyTask.__module__])
+        dep = SyncOnlyTask(name="elide-dep")
+        root = SyncOnlyTask(name="elide-root", deps=(dep,))
+
+        with caplog.at_level("INFO"):
+            result, _ = self._trigger(app, root)
+
+        store = BuildTaskStore(result.build_id)
+        assert store.load_task(root.id) is None
+        assert store.load_task(dep.id) is None
+        assert "2 task(s) pickle-free, 0 pickled" in caplog.text
+
+    def test_uncovered_tasks_still_get_their_pickle(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-elide-uncovered", task_modules=["acme_pipelines.*"]
+        )
+        root = SyncOnlyTask(name="elide-uncovered-root")
+
+        result, _ = self._trigger(app, root)
+
+        store = BuildTaskStore(result.build_id)
+        loaded = store.load_task(root.id)
+        assert loaded is not None and loaded.id == root.id
+
+    def test_inferred_task_modules_do_not_elide(
+        self, monkeypatch, modal_function_stub, default_in_memory_fs_target
+    ):
+        """Inference is observation-only; only an explicit declaration elides.
+
+        The trigger reads the LOCAL app definition while the tick runs the
+        DEPLOYED one, and nothing lets the trigger see the deployed app's
+        baked module list. If inference alone enabled elision, merely
+        upgrading the SDK would start dropping pickles that an app deployed
+        by an older SDK has no module list to compensate for — an upgrade
+        that breaks builds.
+        """
+        from stardag.build import BuildTaskStore
+        from stardag.integration.modal import _app as app_module
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        monkeypatch.setattr(
+            app_module, "_infer_task_module_patterns", lambda *a, **k: ("stardag.*",)
+        )
+        app = _app_with_task_modules("tm-elide-inferred")
+        # The inferred patterns DO cover the task class — coverage is not
+        # what is being withheld here, the opt-in is.
+        assert app.task_modules == ("stardag.*",)
+        root = SyncOnlyTask(name="elide-inferred-root")
+
+        result, _ = self._trigger(app, root)
+
+        assert BuildTaskStore(result.build_id).load_task(root.id) is not None
+
+    def test_the_same_patterns_declared_explicitly_do_elide(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """The opt-in is the user's act, not the patterns' content."""
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules("tm-elide-explicit", task_modules=["stardag.*"])
+        root = SyncOnlyTask(name="elide-explicit-root")
+
+        result, _ = self._trigger(app, root)
+
+        assert BuildTaskStore(result.build_id).load_task(root.id) is None
+
+    def test_opted_out_app_pickles_everything_exactly_as_before(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules("tm-elide-optout", task_modules=[])
+        root = SyncOnlyTask(name="elide-optout-root")
+
+        result, _ = self._trigger(app, root)
+
+        assert BuildTaskStore(result.build_id).load_task(root.id) is not None
+
+    def test_alias_task_dag_keeps_its_pickle(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        """AliasTask is pickle-bound by design: its ``loads_type`` is pickled
+        bytes that a scheduler tick must never auto-unpickle from registry
+        data. The self-check fails, so the pickle is written."""
+        from stardag.build import BuildTaskStore
+
+        source = _ElisionAliasedSource()
+        source.run()
+        alias = _ElisionIntAlias(aliased=_sd.AliasedMetadata.from_task(source))
+        root = _ElisionAliasConsumer(loads_int=alias)
+        app = _app_with_task_modules("tm-elide-alias", task_modules=[__name__])
+
+        result, _ = self._trigger(app, root)
+
+        store = BuildTaskStore(result.build_id)
+        # The consumer embeds the alias payload, so it too fails the
+        # round-trip and keeps its pickle.
+        assert store.load_task(root.id) is not None
+
+    def test_require_pickle_free_raises_naming_every_task(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.build import TaskModulesError
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-require-pickle-free",
+            task_modules=["acme_pipelines.*"],
+            require_pickle_free=True,
+        )
+        dep = SyncOnlyTask(name="require-dep")
+        root = SyncOnlyTask(name="require-root", deps=(dep,))
+
+        with pytest.raises(TaskModulesError) as exc:
+            self._trigger(app, root)
+
+        message = str(exc.value)
+        assert "require_pickle_free=True" in message
+        assert "2 task(s)" in message
+        assert str(root.id) in message and str(dep.id) in message
+        assert "not covered by task_modules" in message
+
+    def test_require_pickle_free_passes_when_everything_is_covered(
+        self, modal_function_stub, default_in_memory_fs_target
+    ):
+        from stardag.build import BuildTaskStore
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        app = _app_with_task_modules(
+            "tm-require-ok",
+            task_modules=[SyncOnlyTask.__module__],
+            require_pickle_free=True,
+        )
+        root = SyncOnlyTask(name="require-ok-root")
+
+        result, _ = self._trigger(app, root)
+
+        assert BuildTaskStore(result.build_id).load_task(root.id) is None
+
+
+class TestDynamicDepPickleElision:
+    """Dynamic deps registered from inside a worker get the same treatment —
+    without it, ``require_pickle_free`` would hold only until a task yielded
+    its first dynamic dependency."""
+
+    def _reporter(self, build_id):
+        from stardag.integration.modal._app import _WorkerLifecycleReporter
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        registry = MagicMock(spec=RegistryABC)
+        registry.task_register_bulk_aio.return_value = None
+        return (
+            _WorkerLifecycleReporter(
+                registry,
+                build_id,
+                SyncOnlyTask(name="dyn-parent"),
+                reactive=True,
+                app_name="tm-dynamic",
+            ),
+            registry,
+        )
+
+    def test_covered_dynamic_deps_are_not_pickled(self, default_in_memory_fs_target):
+        from stardag.build import (
+            BuildTaskStore,
+            set_declared_task_module_patterns,
+        )
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        build_id = uuid4()
+        reporter, _ = self._reporter(build_id)
+        dyn = SyncOnlyTask(name="dyn-dep-covered")
+
+        set_declared_task_module_patterns([SyncOnlyTask.__module__])
+        try:
+            reporter._register_dynamic_deps((dyn,))
+        finally:
+            set_declared_task_module_patterns([])
+
+        assert BuildTaskStore(build_id).load_task(dyn.id) is None
+
+    def test_uncovered_dynamic_deps_are_pickled_and_warned_once(
+        self, caplog, default_in_memory_fs_target
+    ):
+        from stardag.build import (
+            BuildTaskStore,
+            set_declared_task_module_patterns,
+        )
+        from stardag.build._task_modules import _warned_classes
+        from stardag.utils.testing.helper_tasks import AsyncOnlyTask
+
+        build_id = uuid4()
+        reporter, _ = self._reporter(build_id)
+        first = AsyncOnlyTask(name="dyn-dep-uncovered-1")
+        second = AsyncOnlyTask(name="dyn-dep-uncovered-2")
+
+        _warned_classes.discard(
+            f"{AsyncOnlyTask.__module__}.{AsyncOnlyTask.__qualname__}"
+        )
+        set_declared_task_module_patterns(["acme_pipelines.*"])
+        try:
+            with caplog.at_level("WARNING"):
+                reporter._register_dynamic_deps((first,))
+                reporter._register_dynamic_deps((second,))
+        finally:
+            set_declared_task_module_patterns([])
+
+        store = BuildTaskStore(build_id)
+        assert store.load_task(first.id) is not None
+        assert store.load_task(second.id) is not None
+        # Once per class per process — this runs on every suspending worker.
+        assert caplog.text.count("not covered by this app's task_modules") == 1
+        assert "the trigger's pre-flight could not see them" in caplog.text
+
+    def test_without_declared_patterns_behaviour_is_unchanged(
+        self, default_in_memory_fs_target
+    ):
+        from stardag.build import (
+            BuildTaskStore,
+            set_declared_task_module_patterns,
+        )
+        from stardag.utils.testing.helper_tasks import SyncOnlyTask
+
+        build_id = uuid4()
+        reporter, _ = self._reporter(build_id)
+        dyn = SyncOnlyTask(name="dyn-dep-no-patterns")
+
+        set_declared_task_module_patterns([])
+        reporter._register_dynamic_deps((dyn,))
+
+        assert BuildTaskStore(build_id).load_task(dyn.id) is not None
 
 
 class TestReactiveTriggerFailureLeavesNoOrphanBuild:

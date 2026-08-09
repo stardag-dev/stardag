@@ -466,7 +466,10 @@ access to the default target root (task _objects_ are persisted there as
 pickles for the ticks — the reactive marker, owning app, and tick config
 live in the registry, not on the target root, so re-triggering works even
 when the target root is immutable/append-only and a re-trigger may update
-`tick_kwargs`); the global concurrency lock and build-local
+`tick_kwargs`; declaring
+[`task_modules`](#declaring-your-task-modules-recommended) removes the
+target-root write from this path entirely for most builds); the global
+concurrency lock and build-local
 `ConcurrencyConfig` limits are not applied by ticks (use the
 registry-backed named limits above; Modal's per-function
 `concurrency_limit` also still applies). Builds cancelled from the
@@ -484,6 +487,9 @@ Two operational notes:
   still importable and its fields are compatible (nested task fields
   must use `sd.TaskLoads`/`sd.SubClass` annotations). Only if both paths
   fail is the task failed by the next tick (never a silent stall).
+  Declaring [`task_modules`](#declaring-your-task-modules-recommended) is
+  what makes "still importable" true by construction — and lets stardag
+  skip the pickle in the first place.
 - **The watchdog sweep runs one quick scheduling pass per running build
   that this app owns** (it skips the linger), so its per-period cost is
   one short function invocation plus a frontier query per such build.
@@ -520,6 +526,117 @@ Two operational notes:
   on the default and don't declare a registry secret at all. (On stardag
   ≤ 0.10.1 you instead had to put the secret on the builder — 0.10.1 —
   or on every worker — 0.10.0.)
+
+#### Declaring your task modules (recommended)
+
+A scheduler tick is a fresh, short-lived process. It learns _which_ tasks
+are actionable from the registry, but to spawn a worker it needs the actual
+task _object_ — and it has two ways to get one:
+
+1. unpickle it from the build task store (needs target-root access, and is
+   only valid for the deployment that wrote it), or
+2. rebuild it from the payload the registry already stores.
+
+The second path is the good one, but it has a catch: rebuilding a task
+resolves its class through stardag's polymorphic registry, and classes land
+in that registry **as a side effect of importing the module that defines
+them**. A pickle carries `module.QualName` and self-imports; the registry
+payload carries no module locator at all. So the tick can only rebuild
+classes whose modules its container happened to import — which, without
+help, is essentially arbitrary.
+
+`task_modules` is that help:
+
+```{.python notest}
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+    watchdog_period_minutes=5,
+    # Modules whose import registers the task classes this app may
+    # schedule. Default: the root package of the module defining the app.
+    # Pass [] to opt out (resident builds never need this).
+    task_modules=["my_pkg.tasks.*", "my_pkg.pipelines.*"],
+)
+```
+
+**Pattern grammar.** Each entry is either an exact module
+(`"my_pkg.tasks.ingest"`) or a package followed by a trailing recursive
+wildcard (`"my_pkg.tasks.*"`, matching `my_pkg.tasks` and everything below
+it). A `*` anywhere but the final component, or a malformed path, raises
+from `StardagApp(...)` — a typo must not degrade into a silent no-match.
+Left unset, the default is `"<root package of the module defining the
+app>.*"`; if the app lives in `__main__` or a loose script (no importable
+package), inference is impossible and stardag warns and falls back to the
+pickle path.
+
+**A redeploy is required** when you add or move task classes. The patterns
+are expanded to a concrete module list at deploy time and baked into the
+deployed tick, so the deployed set is explicit and auditable and container
+startup does no filesystem walking. `stardag modal deploy` reports it:
+
+```text
+Task modules: 37 discovered from "my_pkg.*"  ->  128 task classes registered
+```
+
+The class count requires importing the modules locally, which the CLI does
+by default but **warn-only** — your deploy environment may lack extras the
+image has, so a local import failure never fails the deploy. Pass
+`--no-check-task-modules` to skip the check and report names only.
+
+**What you get.** Once you declare `task_modules` explicitly, every
+discovered task whose class is covered _and_ whose payload round-trips to
+the same task id is persisted **without a pickle**. A build whose classes
+are all covered writes nothing to the target root, so reactive triggering
+stops needing target-root write access at all. Set
+`require_pickle_free=True` to turn the fallback into a hard error that
+names every task that would have needed a pickle and why.
+
+**Skipping pickles requires the explicit declaration** — the inferred
+default never elides on its own. Inference happens for every app,
+including apps written before this feature existed, and the trigger runs
+from your _local_ app definition while the tick runs from the _deployed_
+one. If inference alone skipped pickles, upgrading stardag would silently
+start dropping pickles that an app deployed by an older version has no
+baked-in module list to compensate for. Requiring you to write the
+argument is what puts the redeploy requirement in front of you at the
+moment it matters. Inference still drives the coverage warning below,
+which only observes.
+
+Some payloads stay pickle-bound by design, and always will:
+
+- **`AliasTask`**, whose `loads_type` is pickled bytes — auto-unpickling
+  registry-supplied bytes inside a scheduler tick would be a remote code
+  execution vector, so rehydration refuses those payloads outright;
+- **dynamically generated or otherwise non-importable classes**;
+- **anything whose serialization is not losslessly round-trippable** (in
+  particular, nested task fields must use `sd.TaskLoads` / `sd.SubClass`
+  annotations — a plain task-typed annotation validates children into the
+  abstract base class).
+
+The trigger warns — naming the class, the pattern to add, and the redeploy
+requirement — for any discovered class the patterns don't cover. It is a
+warning rather than an error because an uncovered class still works via the
+pickle path, exactly as before this feature existed.
+
+Two caveats worth designing around:
+
+- **Task modules become import-hot.** They are imported in every tick
+  container, on every cold start. Keep heavy runtime dependencies inside
+  `run()` rather than at module scope — good practice regardless, but here
+  it directly buys tick cold-start latency.
+- **Stale-deploy blind spot.** The trigger-time coverage check reads your
+  _local_ app definition, so it cannot tell that the _deployed_ app was
+  built from an older `task_modules`. If you add a pattern and trigger
+  without redeploying, the pre-flight is silent while the tick still can't
+  resolve the class — and because the trigger already skipped the pickle,
+  there is no fallback left. **Redeploy the app whenever you change
+  `task_modules`**, before triggering — which reactive mode already
+  requires for other reasons (see the requirements above). Upgrading
+  stardag alone is safe: elision only follows an explicit declaration, so
+  a newer SDK triggering against an app deployed by an older one still
+  writes pickles. Passing `task_modules=[]` restores the pre-feature
+  behaviour unconditionally.
 
 Named concurrency limits are enforced registry-side in reactive mode —
 across builds, not just within one. Configure caps per environment

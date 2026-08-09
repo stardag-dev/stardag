@@ -22,6 +22,16 @@ immutable object), so the store is compatible with immutable/append-only
 target roots. Same-deployment guarantee applies: a pickle is only loaded by
 containers of the same deployed app version that wrote it — the same
 constraint as passing tasks to workers by value.
+
+The store is a *fallback*, not the primary path. When the app declares its
+task modules (see ``stardag.build._task_modules``) the writer skips every
+task a scheduler tick can rebuild from the registry's stored data, and a
+fully covered build writes nothing here at all — no target-root write
+access needed, and no same-deployment constraint to trip over. What
+remains are the payloads that genuinely cannot be reconstructed:
+``AliasTask`` (pickled ``loads_type``, deliberately never auto-unpickled
+from registry data), dynamically generated classes, and anything whose
+serialization does not round-trip to the same task id.
 """
 
 from __future__ import annotations

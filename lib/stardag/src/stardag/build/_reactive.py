@@ -23,7 +23,11 @@ with detached support. Requirements and current limitations:
 - A real registry (frontier computation is registry-backed; the reactive
   marker/owner live in the frontier's ``reactive_app_name``).
 - Task objects are rehydrated from the :class:`BuildTaskStore` — written by
-  the trigger (initial discovery) and by workers (dynamic deps).
+  the trigger (initial discovery) and by workers (dynamic deps) — or, when
+  the pickle is absent, reconstructed from the registry's stored task data.
+  The latter resolves only *registered* classes, i.e. classes whose
+  defining module the tick process has imported; see
+  ``stardag.build._task_modules`` for how an app declares those.
 - The global concurrency lock and build-local ``ConcurrencyConfig`` limits
   are not applied by ticks (infra-level limits, e.g. Modal per-function
   ``concurrency_limit``, still apply). Registry-backed named limits *are*
@@ -56,6 +60,7 @@ from stardag.build._base import (
     TaskExecutorABC,
     current_build_id_var,
 )
+from stardag.build._task_modules import import_failure_note
 from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError, is_missing_route_error
 from stardag.registry._api_registry import _is_route_not_found
@@ -360,6 +365,15 @@ async def _load_task(
     the stack trace — for callers where a missing object is tolerated (a
     RUNNING task resolves via its worker's self-reporting), the repeated
     per-tick ``logger.exception`` would be noise.
+
+    A rehydration failure is annotated with any declared task modules that
+    failed to import in this process (see
+    ``stardag.build._task_modules``): "no task class registered for X" and
+    "the module defining X blew up on import" are the same incident seen
+    from two ends, and only the annotation connects them. The annotation is
+    read from the task-module registry rather than plumbed through
+    ``rehydrate.py``, which stays a pure reconstruction primitive with no
+    notion of how its classes got imported.
     """
     task = task_store.load_task(task_id)
     if task is not None:
@@ -372,10 +386,11 @@ async def _load_task(
             f"Task {task_id} is missing from the task store and could not "
             f"be rehydrated from registry data"
         )
+        note = import_failure_note()
         if quiet:
-            logger.warning(f"{message}: {e}")
+            logger.warning(f"{message}: {e}{note}")
         else:
-            logger.exception(f"{message}.")
+            logger.exception(f"{message}.{note}")
         return None
     logger.info(f"Rehydrated task {task_id} from registry data.")
     try:

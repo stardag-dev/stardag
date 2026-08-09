@@ -24,6 +24,12 @@ Global concurrency locking:
 Granular concurrency limiting:
 - ConcurrencyConfig: Overall and named limits on concurrently executing tasks
 - ConcurrencyLimiter: Protocol for custom/distributed limiters
+
+Task-module declaration (reactive scheduling only):
+- expand_task_module_patterns()/import_task_modules(): make a scheduler
+    process able to reconstruct a build's task classes from registry data
+- plan_pickle_elision(): decide which tasks still need a build-task-store
+    pickle (see stardag.build._task_modules for the full rationale)
 """
 
 from stardag.build._base import (
@@ -57,6 +63,20 @@ from stardag.build._reactive import (
     run_tick_aio,
 )
 from stardag.build._task_store import BuildTaskStore
+from stardag.build._task_modules import (
+    PickleElisionPlan,
+    TaskModuleImportReport,
+    TaskModulesError,
+    declared_task_module_patterns,
+    expand_task_module_patterns,
+    import_task_modules,
+    last_import_failures,
+    module_is_covered,
+    plan_pickle_elision,
+    set_declared_task_module_patterns,
+    uncovered_task_classes,
+    validate_task_module_patterns,
+)
 from stardag.build._concurrency import (
     ConcurrencyConfig,
     ConcurrencyKeySelector,
@@ -108,6 +128,19 @@ __all__ = [
     "RoutedTaskExecutor",
     "TaskExecutionError",
     "BuildTaskStore",
+    # Task-module declaration (reactive scheduling)
+    "PickleElisionPlan",
+    "TaskModuleImportReport",
+    "TaskModulesError",
+    "declared_task_module_patterns",
+    "expand_task_module_patterns",
+    "import_task_modules",
+    "last_import_failures",
+    "module_is_covered",
+    "plan_pickle_elision",
+    "set_declared_task_module_patterns",
+    "uncovered_task_classes",
+    "validate_task_module_patterns",
     "ClaimConfig",
     "DetachedExecutionStatus",
     "DiscoveryResult",

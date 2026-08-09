@@ -214,6 +214,16 @@ class _TypeRegistry:
             raise KeyError(f"No class registered for type id: {type_id}")
         return cls
 
+    def classes(self) -> tuple[Type[BaseModel], ...]:
+        """Snapshot of every registered class.
+
+        Read-only introspection (e.g. "how many task classes did importing
+        these modules register?"). A tuple rather than a view: registration
+        happens at class-definition time, so an import triggered while
+        iterating would otherwise mutate the mapping mid-loop.
+        """
+        return tuple(self._type_id_to_class.values())
+
     def get_type_id(self, cls: Type[BaseModel]) -> TypeId:
         """Get registered type id for a model class."""
         type_id = self._class_to_type_id.get(cls)

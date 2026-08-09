@@ -64,6 +64,18 @@ from stardag.build import (
 )
 from stardag.build._base import GlobalLockConfig
 from stardag.build._base import BuildSummary
+from stardag.build._task_modules import (
+    PickleElisionPlan,
+    TaskModulesError,
+    declared_task_module_patterns,
+    expand_task_module_patterns,
+    format_uncovered_message,
+    import_task_modules,
+    plan_pickle_elision,
+    set_declared_task_module_patterns,
+    uncovered_task_classes,
+    validate_task_module_patterns,
+)
 from stardag.config import clear_config_cache, config_provider, load_config
 from stardag.integration.modal._target import (
     MODAL_VOLUME_URI_PREFIX,
@@ -255,12 +267,17 @@ class FinalizeResult(typing.NamedTuple):
         functions: List of created Modal function names.
         volume_mounts: Dict of mount_path -> volume_name for auto-mounted volumes.
         auto_volumes: Dict of mount_path -> Volume for auto-mounted volumes.
+        task_modules: The app's ``task_modules`` patterns expanded to the
+            concrete, sorted module list baked into the deployed scheduler
+            tick (empty when the app opted out). Surfaced so the CLI can
+            report what the deployment will import.
     """
 
     volumes: dict[str, modal.Volume]
     functions: list[str]
     volume_mounts: dict[str, str] = {}
     auto_volumes: dict[str, modal.Volume] = {}
+    task_modules: list[str] = []
 
 
 # --- Function settings ---
@@ -1582,7 +1599,40 @@ class _WorkerLifecycleReporter:
             discover_and_register_aio(self.registry, self.build_id, task_struct)
         )
         store = BuildTaskStore(self.build_id)
-        store.save_tasks(result.incomplete.values())
+        # The trigger's pre-flight structurally cannot see dynamically
+        # yielded deps — they don't exist until their parent runs — so the
+        # coverage check is re-run here, on the app's patterns as published
+        # by the deployed worker wrapper. Once per class per process: this
+        # runs on every suspending worker invocation.
+        #
+        # The same elision applies (see StardagApp._persist_discovered_tasks):
+        # without it the pickle-free property would hold only until a task
+        # yielded its first dynamic dependency, and a build with dynamic
+        # deps would still need target-root write access.
+        patterns = declared_task_module_patterns()
+        if patterns:
+            uncovered = uncovered_task_classes(
+                result.incomplete.values(), patterns, only_unwarned=True
+            )
+            if uncovered:
+                logger.warning(
+                    format_uncovered_message(
+                        uncovered,
+                        patterns,
+                        remedy=(
+                            "These were registered as dynamic dependencies, "
+                            "so the trigger's pre-flight could not see them."
+                        ),
+                    )
+                )
+            plan = plan_pickle_elision(result.incomplete.values(), patterns)
+            store.save_tasks(task for task, _ in plan.pickled)
+            logger.info(
+                f"Build {self.build_id} dynamic deps of task "
+                f"{self.task.id}: {plan.summary()}"
+            )
+        else:
+            store.save_tasks(result.incomplete.values())
         deps = flatten_task_struct(task_struct)
         self.registry.task_add_dependencies(
             self.build_id, self.task, deps, is_dynamic=True
@@ -1900,6 +1950,53 @@ def _setup_logging():
 # --- Stardag App ---
 
 
+def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
+    """Infer ``task_modules`` from the module that constructs the app.
+
+    The default declaration is "the root package of the module defining
+    this app, recursively" — which is right far more often than not: an
+    app and the tasks it schedules almost always live in the same
+    distribution, and a whole-package wildcard costs only import time.
+
+    Inference is impossible for a module that is not part of a package —
+    ``__main__``, or a loose script that Modal loads as a top-level module.
+    Such a module isn't importable in a container under a stable name in
+    the first place, so a pattern derived from it would be a lie. We warn
+    and opt out (the pickle path still works), rather than baking in a
+    module list that would fail to import in every tick container.
+
+    Args:
+        _depth: Stack frames back to the user's call site (``__init__``'s
+            caller by default). Not part of the public contract.
+    """
+    # Frames hold their locals and globals alive and participate in
+    # reference cycles, so the walk is scoped and the references dropped
+    # rather than left for the collector — this runs in long-lived
+    # scheduler containers.
+    frame = inspect.currentframe()
+    try:
+        for _ in range(_depth):
+            frame = frame.f_back if frame is not None else None
+        module_name = frame.f_globals.get("__name__") if frame is not None else None
+        package = frame.f_globals.get("__package__") if frame is not None else None
+    finally:
+        del frame
+    if not module_name or module_name == "__main__" or not package:
+        logger.warning(
+            "Could not infer StardagApp(task_modules=...): the app is "
+            f"defined in {module_name or 'an unknown module'!r}, which is "
+            "not part of an importable package. Reactive scheduler ticks "
+            "will therefore fall back to the build task store's pickles "
+            "(which need target-root write access at trigger time and are "
+            "invalidated by a redeploy). Declare the modules explicitly — "
+            'e.g. task_modules=["my_pkg.tasks.*"] — to let ticks '
+            "reconstruct tasks from registry data instead, or pass "
+            "task_modules=[] to silence this warning."
+        )
+        return ()
+    return (f"{module_name.split('.')[0]}.*",)
+
+
 class StardagApp:
     """Wrapper around modal.App for Stardag task execution.
 
@@ -1940,6 +2037,10 @@ class StardagApp:
         modal_app: The underlying modal.App instance.
         name: The app name.
         is_finalized: Whether finalize() has been called.
+        task_modules: The validated task-module patterns (see the
+            ``task_modules`` argument); empty when opted out.
+        require_pickle_free: Whether a reactive trigger refuses to fall
+            back to writing task pickles.
     """
 
     def __init__(
@@ -1955,6 +2056,8 @@ class StardagApp:
         watchdog_period_minutes: int | None = None,
         limit_key_selector: typing.Callable[[BaseTask], typing.Sequence[str]]
         | None = None,
+        task_modules: typing.Sequence[str] | None = None,
+        require_pickle_free: bool = False,
         modal_workspace: str | None = None,
         stardag_api_key_secret: "modal.Secret | str | None" = "stardag-api-key",
     ):
@@ -2003,6 +2106,47 @@ class StardagApp:
                 concurrency-limit keys it runs under in reactive scheduling
                 (deployed-app configuration applied by every tick). Default:
                 no limits.
+            task_modules: Modules whose import registers the task classes
+                this app may schedule. **Only reactive scheduling needs
+                this**: a scheduler tick reconstructs tasks from registry
+                data and can resolve only classes that are already
+                registered in its process (registration happens at class
+                definition time). Resident builds hold the real task
+                objects and are entirely unaffected.
+
+                Each entry is an exact module (``"my_pkg.tasks.ingest"``)
+                or a package with a trailing recursive wildcard
+                (``"my_pkg.tasks.*"``); anything else raises. The patterns
+                are expanded to a concrete module list at ``finalize()``
+                and baked into the deployed tick, so **adding or moving
+                task classes requires a redeploy**. Declared modules become
+                import-hot — they are imported in every tick container —
+                so keep heavy runtime dependencies inside ``run()`` rather
+                than at module scope.
+
+                Default (``None``): infer ``"<root package of the module
+                defining this app>.*"``. Pass ``[]`` to opt out.
+
+                **Declaring this explicitly is also the opt-in to skipping
+                pickles** — the inferred default only drives the coverage
+                warning. The trigger reads the local app definition while
+                the tick runs the deployed one, so if inference alone
+                elided, upgrading stardag would start dropping pickles that
+                an app deployed by an older version cannot compensate for.
+            require_pickle_free: Turn the pickle fallback from a silent
+                safety net into a hard error. With ``task_modules``
+                covering a build's classes, a reactive trigger writes no
+                task pickles at all and therefore needs no target-root
+                *write* access; with this flag, a trigger that *would* have
+                fallen back to pickling raises instead, naming every task
+                and why. Off by default (the fallback is what keeps the
+                feature additive).
+
+                Enforced at the trigger only. Dynamic dependencies
+                registered from inside a worker apply the same elision but
+                never raise: their task has already run, and failing its
+                bookkeeping to enforce a storage preference would be a
+                strictly worse outcome than one extra pickle.
             modal_workspace: Explicit Modal workspace name recorded in the
                 executor metadata of triggered builds and started tasks
                 (used by the UI for Modal dashboard deep links). Default:
@@ -2051,6 +2195,31 @@ class StardagApp:
         # consistently (callables can't be persisted in the JSON build
         # meta like the scalar tick_kwargs).
         self.limit_key_selector = limit_key_selector
+        # Task-module declaration for reactive scheduling: the patterns
+        # whose expansion is imported by every scheduler tick so it can
+        # rebuild task objects from registry data (see
+        # stardag.build._task_modules). Validated eagerly — a malformed
+        # pattern must fail here, not silently match nothing and surface
+        # hours later as a tick that cannot reconstruct a task.
+        #
+        # Whether the patterns were *declared* or merely inferred decides
+        # whether pickles may be elided — see _persist_discovered_tasks.
+        # Inference must stay observation-only: it happens on every app,
+        # including apps written before this feature existed.
+        self._task_modules_declared = task_modules is not None
+        if task_modules is None:
+            task_modules = _infer_task_module_patterns()
+        self.task_modules: tuple[str, ...] = validate_task_module_patterns(task_modules)
+        if require_pickle_free and not self.task_modules:
+            raise TaskModulesError(
+                "require_pickle_free=True is meaningless without "
+                "task_modules: with no declared modules, no task can be "
+                "reconstructed from registry data and every task would "
+                "need a pickle. Declare task_modules explicitly (if you "
+                "left it at the default, inference was not possible — see "
+                "the warning above), or drop require_pickle_free."
+            )
+        self.require_pickle_free = require_pickle_free
         # Explicit Modal workspace name for executor metadata (UI deep
         # links). Default: resolved from the Modal token, best-effort.
         # Used by build_trigger and by the tick's executor; the resident
@@ -2130,10 +2299,13 @@ class StardagApp:
                 target roots if they don't exist.
 
         Returns:
-            FinalizeResult with created volumes, function names, and mount info.
+            FinalizeResult with created volumes, function names, mount info,
+            and the expanded ``task_modules`` baked into the tick.
 
         Raises:
             RuntimeError: If finalize() has already been called.
+            TaskModulesError: If a ``task_modules`` pattern cannot be
+                expanded (e.g. its root package is not importable here).
         """
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
@@ -2209,6 +2381,17 @@ class StardagApp:
                         f"proceeding: {e}"
                     )
             extra_secrets.append(self.stardag_api_key_secret)
+        # Expand the declared task-module patterns to a concrete, sorted
+        # module list ONCE, here, and bake it into the deployed functions
+        # below. Deploy-time expansion (rather than in-container) keeps the
+        # deployed set explicit and auditable, keeps container startup off
+        # the filesystem, and makes the deployment reproducible: a module
+        # added after this deploy is not silently picked up by a running
+        # tick — it needs a redeploy, which is also when the operator gets
+        # to see the list change. Only name expansion happens here (no
+        # submodule imports): the CLI does the optional local import check.
+        task_module_patterns = self.task_modules
+        task_modules = expand_task_module_patterns(task_module_patterns)
         # Wrap callables in real functions for Modal compatibility.
         # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
         # not callable class instances. The wrappers delegate to the actual callable
@@ -2233,6 +2416,15 @@ class StardagApp:
         def _modal_run(
             task: BaseTask, *, env_overrides: dict[str, str] | None = None
         ) -> typing.Any:
+            # Publish the app's task-module patterns for the worker-side
+            # code that needs them but is nowhere near the app object:
+            # _WorkerLifecycleReporter._register_dynamic_deps checks the
+            # coverage of dynamically yielded deps, which the trigger's
+            # pre-flight cannot see. The worker does not IMPORT the
+            # modules: its task arrived by value (self-importing) and its
+            # dynamic deps were just constructed by user code, so their
+            # classes are registered by definition.
+            set_declared_task_module_patterns(task_module_patterns)
             if run_fn_accepts_env:
                 run_fn_with_env = typing.cast(_RunFunctionWithEnv, run_fn)
                 return run_fn_with_env(task, env_overrides=env_overrides)
@@ -2375,6 +2567,19 @@ class StardagApp:
                 build_info.reactive_tick_kwargs, tick_kwargs, limit_key_selector
             )
 
+            # Register the app's task classes in THIS container before the
+            # tick reconstructs anything: rehydrating a task from registry
+            # data is a dict lookup in the polymorphic registry, which is
+            # populated only as a side effect of importing the defining
+            # modules (unlike pickle, which self-imports). The list was
+            # expanded and frozen at deploy time; the import is cached per
+            # module list, so a container serving many ticks pays it once.
+            # Failures warn rather than abort — and are retained, so a
+            # later "could not rehydrate" error can name them.
+            if task_modules:
+                set_declared_task_module_patterns(task_module_patterns)
+                import_task_modules(task_modules)
+
             executor = ModalTaskExecutor(
                 modal_app_name=app_name,
                 worker_selector=default_worker_selector,
@@ -2442,6 +2647,7 @@ class StardagApp:
             functions=function_names,
             volume_mounts=volume_mounts,
             auto_volumes=auto_volumes,
+            task_modules=task_modules,
         )
 
     def build_spawn(
@@ -2650,6 +2856,92 @@ class StardagApp:
             )
         return metadata
 
+    def _preflight_task_modules(self, tasks: typing.Iterable[BaseTask]) -> None:
+        """Warn about discovered task classes ``task_modules`` doesn't cover.
+
+        The trigger is the one place that holds both the real DAG and the
+        app, so it is the only place that can catch a class no scheduler
+        tick will be able to reconstruct — before a single container
+        starts, rather than as a mystifying tick failure hours later.
+
+        **Severity is a warning, not an error** (unless
+        ``require_pickle_free``). An uncovered class is not broken: it
+        falls back to the pickle path, which is exactly how every reactive
+        build worked before ``task_modules`` existed. Failing the trigger
+        would therefore break working setups the moment they upgrade,
+        which is precisely what "this feature is additive" forbids. The
+        hard failure lives behind ``require_pickle_free=True``, raised
+        from the persistence step below (which additionally knows about
+        round-trip failures, not just coverage).
+
+        Known limitation: this reads the *local* app definition, so it
+        cannot detect that the deployed app was built from an older
+        ``task_modules``. Closing that needs the deployed list exposed for
+        comparison.
+
+        Skipped entirely when the app opted out of ``task_modules`` — an
+        app that never declared any would otherwise warn about every class
+        in every DAG, on every trigger.
+        """
+        if not self.task_modules:
+            return
+        uncovered = uncovered_task_classes(tasks, self.task_modules)
+        if not uncovered:
+            return
+        logger.warning(
+            format_uncovered_message(
+                uncovered,
+                self.task_modules,
+                remedy=(
+                    "Until then these tasks stay dependent on their "
+                    "build-task-store pickles, which need target-root "
+                    "write access and are invalidated by a redeploy."
+                ),
+            )
+        )
+
+    def _persist_discovered_tasks(
+        self, build_id: UUID, tasks: typing.Iterable[BaseTask]
+    ) -> None:
+        """Write the build task store, skipping pickles that aren't needed.
+
+        Unless the app *opted in*, this is byte-for-byte the old
+        behaviour: pickle everything. With opt-in, each task gets a local
+        dry run of what a tick will do — reconstruct it from exactly the
+        payload registration stored — and only the ones that fail keep a
+        pickle. A build whose classes are all covered writes nothing to
+        the target root at all, so the trigger stops needing write access
+        there (and stops being vulnerable to a storage error minting an
+        orphan RUNNING build).
+
+        Opt-in means ``task_modules`` was passed explicitly (or
+        ``require_pickle_free`` was), NOT merely inferred. This matters:
+        the trigger runs from the local app definition while the tick runs
+        from the *deployed* one, and nothing lets the trigger see the
+        deployed app's task modules (the stale-deploy blind spot). If
+        inference alone enabled elision, then simply upgrading the SDK
+        would start eliding pickles that an app deployed by an older SDK
+        has no baked-in module list to compensate for — turning an upgrade
+        into a broken build. Elision therefore requires an act by the user,
+        which is also what makes the "redeploy after changing
+        ``task_modules``" requirement land at a moment they are paying
+        attention. Inference still drives the coverage warning, which is
+        pure observation and safe to do everywhere.
+        """
+        store = BuildTaskStore(build_id)
+        if not self.task_modules or not (
+            self._task_modules_declared or self.require_pickle_free
+        ):
+            store.save_tasks(tasks)
+            return
+        plan: PickleElisionPlan = plan_pickle_elision(tasks, self.task_modules)
+        if self.require_pickle_free:
+            error = plan.require_pickle_free_error()
+            if error is not None:
+                raise TaskModulesError(error)
+        store.save_tasks(task for task, _ in plan.pickled)
+        logger.info(f"Build {build_id} task store: {plan.summary()}")
+
     def _trigger_reactive(
         self,
         task_list: list[BaseTask],
@@ -2732,9 +3024,13 @@ class StardagApp:
                     registry, build_id, tuple(task_list), retry_failed=True
                 )
             )
+            stage = "task-module coverage pre-flight"
+            # Runs on the DISCOVERED incomplete set: those are exactly the
+            # tasks a tick may have to rehydrate, and reusing discovery's
+            # walk avoids a second local traversal of the DAG.
+            self._preflight_task_modules(discovery.incomplete.values())
             stage = "task store write"
-            store = BuildTaskStore(build_id)
-            store.save_tasks(discovery.incomplete.values())
+            self._persist_discovered_tasks(build_id, discovery.incomplete.values())
             stage = "reactive metadata write"
             # Persist the reactive marker/owner/config in the registry
             # (``reactive_app_name`` is the "this build is reactively
