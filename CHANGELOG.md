@@ -8,6 +8,54 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Blocker liveness is now read from the execution claim's expiry, not
+  inferred.** A reactive tick decided whether to wait on a RUNNING upstream
+  owned by another build from a table over `(in-build, status, owning-build
+liveness)` plus a staleness bound on how long the blocker had sat in its
+  status — an educated guess, since no build can probe another build's
+  executor. The registry now stamps every execution claim with an expiry, so
+  the question is answered by a read: a RUNNING blocker whose claim is live
+  is waited on; one whose claim has **lapsed** fails the build, with the
+  message saying the claim is provably abandoned rather than presumed so.
+
+  What this does **not** change: proving a blocker dead still does not let
+  your build run it — a blocker outside your build's task set has to be
+  released under the build that owns it, so the build still fails, just with
+  certainty about why. And the collapse applies to RUNNING blockers only: a
+  SUSPENDED or PENDING blocker holds no claim and therefore carries no
+  expiry, so "will anyone move it?" is still asked of its owning build (an
+  abandoned-SUSPENDED upstream remains a real wedge, recovered by retrying
+  it under its owner).
+
+- **Every start records a claim TTL derived from the executor's own
+  timeout.** For Modal that is the worker function's `timeout` from its
+  `FunctionSettings`, plus a grace margin; where no timeout is known the
+  registry's default applies. Granting an expiry on every start is what
+  makes an abandoned claim heal, but it also means a task outliving its TTL
+  could have its claim taken while alive — deriving the TTL from the limit
+  the backend itself enforces is what keeps that from being a real risk.
+  Setting an explicit `timeout` on long-running Modal workers is therefore
+  worth doing.
+
+- **Removed: `TickConfig.stale_external_blocker_seconds`,
+  `TickConfig.stale_running_no_ref_seconds` and
+  `ClaimConfig.stale_running_no_ref_seconds`.** All three configured a local
+  guess at how long "too long" is, which the claim's own expiry now answers.
+  A task RUNNING without an executor ref (a scheduler that died between the
+  claiming start and the spawn) is failed when its claim lapses instead of
+  after a fixed bound, and a competing claimant recovers a ref-less winner
+  on the same evidence. Against a registry that does not report expiry,
+  every one of these paths waits rather than failing — a missing expiry
+  means "never lapses", not "dead".
+
+- `FrontierTaskRef.latest_status_expires_at` and
+  `FrontierExternalBlocker.blocking_status_expires_at` model the new server
+  field; `task_start`/`task_start_aio`/`task_start_claim_aio` accept
+  `claim_ttl_seconds`; `TaskExecutorABC.execution_timeout_seconds` is the
+  new (optional, default `None`) hook an executor implements to expose its
+  wall-clock limit. `StartClaimResult.latest_status_at` is replaced by
+  `latest_status_expires_at`.
+
 - **New `stardag builds` and `stardag tasks` CLI groups.** There was no way
   to list builds, inspect a build's scheduling frontier, cancel a build or
   task, or clean up abandoned state without writing a script against the

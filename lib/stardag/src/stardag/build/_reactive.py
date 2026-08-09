@@ -41,13 +41,19 @@ stuck. Task rows and dependency edges are per environment, so an upstream
 that some other build left non-COMPLETED gates this build's tasks while
 contributing nothing to the counts this build can see. Terminal detection
 therefore consults the frontier's ``blocked_by_external`` before declaring
-a build dead: a blocker another build is executing — or one a still-live
-build has yet to schedule — is waited on (bounded by
-``TickConfig.stale_external_blocker_seconds``), while a blocker no live
-build is going to run fails the build immediately, with a message naming
-the task, the build that owns it and why that owner will not move it.
-Against servers predating those fields the list is always empty and
-detection degrades to its pre-fix behaviour.
+a build dead. For a RUNNING blocker the answer is *read*, not inferred:
+the execution claim carries an expiry, so a live claim means wait and a
+lapsed one means fail. For every other blocker status no claim is held and
+no expiry exists, so the question "is anyone going to move it?" is put to
+the build that owns the blocker's status. Either way a fatal blocker fails
+the build with a message naming the task, the build that owns it and why
+that owner will not move it. Against servers predating those fields the
+list is always empty and detection degrades to its pre-fix behaviour.
+
+Every start this tick records carries a claim TTL derived from the
+executor's own timeout (see :func:`claim_ttl_seconds`), so the expiry other
+schedulers read is tied to the moment the execution is actually killed
+rather than to a generic server-side default.
 
 Each tick reports its :class:`TickSummary` to the registry on the way out
 (``TickConfig.report_tick_summaries``), so the scheduler's own account of
@@ -98,6 +104,67 @@ SCHEDULER_LOCK_PREFIX = "__scheduler__:"
 # Statuses considered "in flight" for terminal detection.
 _RUNNING_STATUSES = ("running",)
 _TERMINAL_BUILD_STATUSES = ("completed", "failed", "cancelled")
+
+# Slack added to an executor's own timeout when deriving a claim TTL. It
+# covers the ways the claim's clock and the execution's clock differ: the
+# claim is recorded at *acquire* time, BEFORE the spawn, so it absorbs
+# queueing and cold-start latency the timeout clock has not started
+# counting yet; a backend does not kill an execution the instant its
+# timeout elapses; and client and server clocks are not identical.
+#
+# Deliberately generous, because the two errors are not symmetric: too
+# short and a live execution's claim becomes stealable (a duplicate
+# execution, which is what claims exist to prevent); too long and an
+# abandoned claim merely heals later than it could have.
+_CLAIM_TTL_GRACE_SECONDS = 900.0
+
+# The server's accepted range for claim_ttl_seconds (outside it: 422).
+# Clamped rather than raised on — a 30-second task and a 60-day task are
+# both legitimate, and each should get the closest expiry the server can
+# express rather than a failed start.
+_MIN_CLAIM_TTL_SECONDS = 60
+_MAX_CLAIM_TTL_SECONDS = 2592000  # 30 days
+
+
+def claim_ttl_seconds(task: BaseTask, task_executor: TaskExecutorABC) -> int | None:
+    """Claim TTL for ``task``, derived from the executor's own timeout.
+
+    Returns None when the executor exposes no timeout for the task, which
+    leaves the expiry to the registry's default.
+
+    **Why derive it rather than take the default.** Putting an expiry on
+    *every* start is what maximises healing: an execution claim with no
+    expiry records no liveness evidence a third party can evaluate, which
+    is precisely the gap that makes an abandoned RUNNING task wedge every
+    other build downstream of it. But an expiry also makes a task that
+    outlives its TTL *stealable while it is still alive* — a duplicate
+    execution, i.e. the failure mode claims exist to prevent.
+
+    Deriving the TTL from the backend's own wall-clock limit is what keeps
+    that from being a real risk: the backend will have killed the execution
+    before its claim lapses, so the executions whose claims can lapse are
+    the ones that are already dead. A generic server-side default cannot
+    make that promise for a task whose timeout it does not know — which is
+    why "the server has a default" is not a reason to omit this.
+
+    The executor is asked, never guessed at: an executor that enforces no
+    limit says so by returning None, and a resolution failure is swallowed
+    (this runs on the spawn path of every task and must not fail a start
+    over a diagnostic).
+    """
+    try:
+        timeout = task_executor.execution_timeout_seconds(task)
+    except Exception:
+        logger.debug(
+            f"Execution timeout resolution failed for task {task.id}; "
+            "claiming with the registry's default TTL.",
+            exc_info=True,
+        )
+        return None
+    if timeout is None:
+        return None
+    ttl = int(timeout + _CLAIM_TTL_GRACE_SECONDS)
+    return max(_MIN_CLAIM_TTL_SECONDS, min(_MAX_CLAIM_TTL_SECONDS, ttl))
 
 
 def scheduler_lock_name(build_id: UUID) -> str:
@@ -230,42 +297,6 @@ class TickConfig:
     # stays in the frontier — a slot-holder's completion wakes the
     # scheduler (cross-build slot releases are covered by the watchdog).
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None
-    # Staleness escape hatch for RUNNING tasks WITHOUT an executor ref
-    # (e.g. a tick that crashed between limit-slot acquisition and spawn):
-    # such a task can never resolve on its own — no worker reports it, no
-    # ref can be probed — and while RUNNING it holds any concurrency-limit
-    # slots it acquired, starving those keys env-wide. Tasks older than
-    # this bound (by status timestamp) are failed. None disables. Note: a
-    # task legitimately RUNNING via an old-version orchestrator (which
-    # records no refs) in ANOTHER build could be status-failed by this —
-    # its actual execution is unaffected and its completion (sticky) still
-    # lands; generous default accordingly.
-    stale_running_no_ref_seconds: float | None = 1800.0
-    # How long this build will wait on a blocker owned by ANOTHER build —
-    # one that build is executing, or one it has yet to schedule — before
-    # giving up and failing (see ``_classify_external_blockers``). Measured
-    # on the blocker's status timestamp — how long it has sat in that status
-    # — not on tick-local time: a tick is short-lived and the watchdog keeps
-    # re-ticking, so a tick-local bound would never expire and the build
-    # would hang silently forever, which is the failure mode this whole path
-    # exists to remove.
-    #
-    # Deliberately generous (6 h). Waiting is the cheap direction: the
-    # blocker's own build has far better information about it (a live
-    # executor ref it can probe) and its completion wakes this build within
-    # a watchdog period, whereas failing a build whose blocker was merely
-    # slow is a regression of exactly the spurious-failure bug being fixed
-    # here. The bound is a backstop for a claim nobody will ever release —
-    # an abandoned RUNNING task whose owning build is gone — not a
-    # scheduling deadline. Raise it if your tasks routinely run longer than
-    # this; None waits indefinitely (pre-fix "hangs quietly" behaviour, with
-    # a per-tick warning naming the blocker).
-    #
-    # A blocker whose ``blocking_status_at`` is None (a task row predating
-    # server-side status denormalisation) cannot be aged, so it is waited on
-    # regardless of this bound — failing on missing information would
-    # reintroduce the spurious failures. The wait is logged as unbounded.
-    stale_external_blocker_seconds: float | None = 21600.0
     # Report each tick's :class:`TickSummary` to the registry, so "why is
     # this build not progressing?" is answerable without reading logs
     # across many short-lived tick containers. Strictly best-effort: a
@@ -275,9 +306,7 @@ class TickConfig:
     # ``_TICK_KWARGS_ALLOWED``): the reasons to turn this off — a registry
     # without the endpoint, or a deployment that keeps its observability
     # elsewhere — are properties of the whole deployment, never of one
-    # build. Following ``stale_running_no_ref_seconds`` and
-    # ``stale_external_blocker_seconds``, which are app-level for the same
-    # reason. Widening the allowlist later is additive; narrowing it is not.
+    # build. Widening the allowlist later is additive; narrowing it is not.
     report_tick_summaries: bool = True
 
 
@@ -693,7 +722,7 @@ async def _act_on_frontier(
             continue
 
         if item.latest_status in _RUNNING_STATUSES:
-            resolution = await _resolve_running(item, task, task_executor, config)
+            resolution = await _resolve_running(item, task, task_executor)
             if resolution == "complete":
                 await registry.task_complete_aio(build_id, task)
                 summary.self_healed += 1
@@ -734,11 +763,17 @@ async def _act_on_frontier(
                 f"{task.id}; acquiring without it.",
                 exc_info=True,
             )
+        # Both starts below carry the same derived TTL. The post-spawn one
+        # needs it as much as the claiming one: the TTL applies to every
+        # start, so omitting it there would hand the claim straight back to
+        # the registry's generic default and undo the derivation.
+        ttl_seconds = claim_ttl_seconds(task, task_executor)
         claim_result = await registry.task_start_claim_aio(
             build_id,
             task,
             executor_metadata=acquire_metadata,
             limit_keys=limit_keys or None,
+            claim_ttl_seconds=ttl_seconds,
         )
         if not claim_result.started:
             if claim_result.denied_reason == "limit":
@@ -773,48 +808,81 @@ async def _act_on_frontier(
             executor=handle.executor,
             executor_ref=handle.ref,
             executor_metadata=handle.executor_metadata,
+            claim_ttl_seconds=ttl_seconds,
         )
         summary.spawned += 1
         acted = True
     return acted, denied_this_round
 
 
+def _claim_has_lapsed(expires_at: datetime | None, now: datetime) -> bool:
+    """Whether an execution claim is past its own expiry.
+
+    None — "never lapses", i.e. an older server, a start recorded before
+    the column existed, or a caller that asked for no expiry — is False.
+    Absence of evidence is not evidence of death, and every caller here is
+    deciding whether to kill something.
+
+    Naive timestamps (a custom registry that drops the offset) are read as
+    UTC rather than raising: this runs on paths that decide a task's or a
+    build's fate, so a formatting quirk must not become a tick crash.
+    """
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return now > expires_at
+
+
 async def _resolve_running(
     item: "FrontierTaskRef",
     task: BaseTask,
     task_executor: TaskExecutorABC,
-    config: TickConfig,
 ) -> str:
     """Decide what to do with a RUNNING task: leave/complete/failed.
 
     Self-heal precedence: the target is the ground truth — if it exists the
     task is complete regardless of what happened to the execution (e.g. the
-    worker wrote the output, then died before reporting).
+    worker wrote the output, then died before reporting). Then the executor
+    is asked. A claim expiry is only a *floor* on liveness; the backend's
+    own answer about the execution is the truth, so probing keeps
+    precedence over anything the expiry says wherever a ref exists.
     """
     executor_name, ref = item.latest_executor, item.latest_executor_ref
     if await task.complete_aio():
         return "complete"
     if executor_name is None or ref is None:
-        # RUNNING with no ref: can't probe, no worker will report. Fresh
-        # occurrences are left alone (could be the spawn-in-progress window
-        # of a live tick, or an old-version orchestrator's task), but past
-        # the staleness bound the task is failed — otherwise it never
-        # resolves and holds any concurrency-limit slots forever.
-        stale_after = config.stale_running_no_ref_seconds
-        if (
-            stale_after is not None
-            and item.latest_status_at is not None
-            and (datetime.now(timezone.utc) - item.latest_status_at).total_seconds()
-            > stale_after
-        ):
+        # RUNNING with no ref: nothing to probe, and no worker to report it.
+        # The window is still reachable — the claiming start is recorded
+        # BEFORE the spawn, so a tick that dies in between leaves exactly
+        # this shape — and it does still need handling: while RUNNING the
+        # task holds any concurrency-limit slots it acquired, starving those
+        # keys environment-wide.
+        #
+        # What it no longer needs is a locally configured guess at how long
+        # is too long. The claim carries its own expiry; past it the claim
+        # is not honoured by anyone, which is the fact the old bound was
+        # approximating. Lapsed → fail. Otherwise leave it: the
+        # spawn-in-progress window of a perfectly healthy tick looks
+        # identical from here, and failing that would kill a task that is
+        # about to start.
+        if _claim_has_lapsed(item.latest_status_expires_at, datetime.now(timezone.utc)):
             logger.error(
-                f"Task {task.id} has been RUNNING without an executor ref "
-                f"for over {stale_after:.0f}s; failing it (stale — likely a "
-                "scheduler crash between slot acquisition and spawn)."
+                f"Task {task.id} is RUNNING without an executor ref and its "
+                f"execution claim lapsed at {item.latest_status_expires_at}; "
+                "failing it (nothing can probe it and no worker will report "
+                "it — most likely a scheduler crash between the claiming "
+                "start and the spawn)."
             )
             return "failed"
         logger.warning(
-            f"Task {task.id} is RUNNING without an executor ref; leaving it."
+            f"Task {task.id} is RUNNING without an executor ref; leaving it"
+            + (
+                " (its claim has not lapsed)."
+                if item.latest_status_expires_at is not None
+                else " (its claim carries no expiry, so it cannot be shown "
+                "abandoned from here — cancel the task to release it)."
+            )
         )
         return "leave"
     status = await task_executor.detached_status(task, executor_name, ref)
@@ -851,11 +919,12 @@ class _BlockerVerdict(typing.NamedTuple):
 class _ExternalBlockers(typing.NamedTuple):
     """Partition of a frontier's ``blocked_by_external`` (see below)."""
 
-    # Out-of-build, RUNNING, within the staleness bound: someone else is
-    # executing it, and their completion frees this build. Wait.
+    # Out-of-build, RUNNING, claim not lapsed: someone else is executing
+    # it, and their completion frees this build. Wait.
     executing: list[_BlockerVerdict]
-    # Out-of-build, not running, but owned by a build that is still live —
-    # that build is going to schedule it. Wait, on the same bound.
+    # Out-of-build, not running (so holding no claim, so carrying no
+    # expiry), but owned by a build that is still live — that build is
+    # going to schedule it. Wait.
     queued: list[_BlockerVerdict]
     # Out-of-build and nothing is going to run it. Fail.
     fatal: list[_BlockerVerdict]
@@ -894,27 +963,8 @@ def _blocker_status_age_seconds(
     return (now - status_at).total_seconds()
 
 
-def _blocker_is_stale(
-    blocker: FrontierExternalBlocker, config: TickConfig, now: datetime
-) -> bool:
-    """Whether the blocker has sat in its status longer than the bound.
-
-    False when the bound is disabled or the blocker carries no status
-    timestamp: an unageable blocker is waited on rather than failed, since
-    failing on missing information would reintroduce exactly the spurious
-    failures this path removes (see
-    ``TickConfig.stale_external_blocker_seconds``).
-    """
-    stale_after = config.stale_external_blocker_seconds
-    if stale_after is None:
-        return False
-    age = _blocker_status_age_seconds(blocker, now)
-    return age is not None and age > stale_after
-
-
 async def _classify_external_blockers(
     frontier: BuildFrontier,
-    config: TickConfig,
     now: datetime,
     *,
     registry: RegistryABC,
@@ -927,38 +977,57 @@ async def _classify_external_blockers(
     questions: is the blocker in this build's own task set, and is anyone
     going to move it?
 
-    - ``blocking_in_build`` → **ignored**. The blocker is in this build's
-      own task set, so it is already visible in ``actionable`` /
-      ``running`` / ``status_counts``; letting it also drive this decision
-      would double-count it (and a blocker that is genuinely stuck *in*
-      this build must still fail the build, exactly as before).
-    - out-of-build and RUNNING → **wait**. Another build is executing it;
-      its completion unblocks this build and wakes this scheduler. Treated
-      like a concurrency-limit denial: return, don't fail.
-    - out-of-build, not RUNNING, but its status-owning build is still live
-      → **wait**. That build is going to schedule it. Without this a
-      PENDING dynamic dependency of a healthy concurrent build would fail
-      this build — a *new* spurious failure, which is the very class of bug
-      being fixed here, so the liveness question is asked rather than
-      assumed.
-    - out-of-build with no live owner → **fail now**: its owning build has
-      gone terminal, no build owns its status at all, or the owner's status
-      could not be resolved. Nothing is going to run it and this build
-      never will, so waiting would be waiting forever.
+    ``blocking_in_build`` → **ignored**: already visible in ``actionable`` /
+    ``running`` / ``status_counts``, so letting it drive this decision would
+    double-count it (a blocker genuinely stuck *in* this build still fails
+    the build, exactly as before).
 
-    Both waits are bounded by ``config.stale_external_blocker_seconds``
-    against the blocker's own status timestamp, since a tick is too
-    short-lived to bound anything itself — see that field for the rationale
-    and the unageable cases.
+    Out-of-build, the second question is answered from different evidence in
+    the two halves of the table.
 
-    A blocker with ``blocking_status_build_id is None`` is fatal without a
-    lookup: no build owns its status, meaning no status-moving event was
-    ever recorded against it, so there is no evidence anyone intends to run
-    it — and a silent indefinite hang is the failure mode #208 exists to
-    kill. The same goes for an owner status of None, whether because the
-    lookup failed or because the server doesn't report the field: unknown
-    is not evidence of life. Every one of those still fails with the full
-    remediation, so the operator is never left without a next step.
+    **RUNNING — read the claim's expiry.** A RUNNING task holds an execution
+    claim, and the claim's expiry is the one piece of liveness evidence a
+    third party can evaluate without probing an executor it has no access to:
+
+    - live expiry → **wait** (treated like a concurrency-limit denial:
+      return, don't fail; the blocker's completion wakes this scheduler).
+    - lapsed expiry → **fail**. Not *presumed* abandoned: the server no
+      longer honours the claim, has stopped counting it against concurrency
+      limits, and will hand it to the next claimant.
+    - no expiry (``None``) → **wait**, unbounded, logged as such. Chosen
+      deliberately: ``None`` is the server's encoding of "never lapses"
+      (older server, or a start predating the column), and reading missing
+      evidence as death would fail builds whose blocker is perfectly alive —
+      the exact spurious failure this path exists to remove. The window is
+      self-closing (new starts all carry an expiry) and the escape hatch is
+      a task cancel, which the log line names.
+
+    **Everything else — ask the owning build.** A PENDING/SUSPENDED/terminal
+    task holds no claim, so the server clears the expiry with it and there
+    is nothing to read. The wedge is real (a task abandoned SUSPENDED blocks
+    every downstream build), so this half still decides, the only way it can:
+
+    - owning build still live → **wait**; it is going to schedule it.
+      Without this a PENDING dynamic dependency of a healthy concurrent
+      build would fail this build.
+    - owning build terminal → **fail**; nothing will move it.
+    - ``blocking_status_build_id is None`` → **fail** without a lookup: no
+      status-moving event was ever recorded against it, so there is nobody
+      to ask.
+    - owner status unresolvable (deleted build, unreachable registry, a
+      registry that doesn't report it) → **fail**: unknown is not evidence
+      of life, and a silent indefinite hang is the failure mode #208 exists
+      to kill.
+
+    So the owning-build lookup survives, for non-RUNNING blockers **only** —
+    not out of caution but because it is the only evidence that exists for a
+    status carrying no claim. What a live owner does not buy is a deadline:
+    a build gone silent without transitioning is reaped server-side, not
+    guessed at here from a task's age.
+
+    None of this changes the outcome for a dead blocker outside this build's
+    task set: this build can never run it, so the build still fails. What
+    the expiry buys is certainty about *why*, and a message that says so.
     """
     executing: list[_BlockerVerdict] = []
     queued: list[_BlockerVerdict] = []
@@ -973,9 +1042,10 @@ async def _classify_external_blockers(
     #
     # The whole lookup only happens on the stalled path — the frontier
     # populates blocked_by_external solely when the build has nothing
-    # actionable and nothing running — so a healthy build issues zero extra
-    # requests, however often it polls. Please don't "optimise" this away on
-    # the assumption that it runs per tick in steady state; it does not.
+    # actionable and nothing running — and now only for the non-RUNNING
+    # blockers within it, so a healthy build issues zero extra requests,
+    # however often it polls. Please don't "optimise" this away on the
+    # assumption that it runs per tick in steady state; it does not.
     owner_statuses: dict[UUID, str | None] = {}
 
     async def owner_status(owner_id: UUID) -> str | None:
@@ -1001,23 +1071,42 @@ async def _classify_external_blockers(
             continue
 
         if blocker.blocking_status in _RUNNING_STATUSES:
-            if _blocker_is_stale(blocker, config, now):
+            # Two rows and no lookup: the claim says whether anyone is still
+            # executing it. The owning build's status is not consulted even
+            # when it is known — a live build proves nothing about one of its
+            # claims, and a terminal one does not release them.
+            expires_at = blocker.blocking_status_expires_at
+            if _claim_has_lapsed(expires_at, now):
                 fatal.append(
                     _BlockerVerdict(
                         blocker,
-                        "RUNNING past the "
-                        f"{config.stale_external_blocker_seconds:.0f}s staleness "
-                        "bound, so its execution claim is presumed abandoned",
+                        f"its execution claim lapsed at {expires_at}, so the "
+                        "claim is abandoned and re-claimable — but not by "
+                        "this build",
+                    )
+                )
+            elif expires_at is None:
+                executing.append(
+                    _BlockerVerdict(
+                        blocker,
+                        "another build claims to be executing it, and the "
+                        "claim carries no expiry, so nothing here can show "
+                        "it abandoned",
                     )
                 )
             else:
                 executing.append(
-                    _BlockerVerdict(blocker, "another build is executing it")
+                    _BlockerVerdict(
+                        blocker,
+                        "another build is executing it under a claim live "
+                        f"until {expires_at}",
+                    )
                 )
             continue
 
-        # Not running: it moves only if the build owning its status is still
-        # going to schedule it.
+        # Not running: no claim is held, so there is no expiry to read. It
+        # moves only if the build owning its status is still going to
+        # schedule it.
         owner_id = blocker.blocking_status_build_id
         if owner_id is None:
             fatal.append(
@@ -1039,20 +1128,11 @@ async def _classify_external_blockers(
             )
         elif status in _TERMINAL_BUILD_STATUSES:
             fatal.append(_BlockerVerdict(blocker, f"its owning build is {status}"))
-        elif _blocker_is_stale(blocker, config, now):
-            fatal.append(
-                _BlockerVerdict(
-                    blocker,
-                    f"its owning build is still {status} but has left it in "
-                    "this status past the "
-                    f"{config.stale_external_blocker_seconds:.0f}s staleness "
-                    "bound",
-                )
-            )
         else:
             # Includes an owner still PENDING: a build that has not started
-            # yet may still start, and the staleness bound above is what
-            # stops that from being an unbounded wait.
+            # yet may still start. A build that has gone silent *without*
+            # transitioning is reaped server-side; a tick cannot tell the
+            # difference from here and must not guess.
             queued.append(
                 _BlockerVerdict(blocker, f"its owning build is still {status}")
             )
@@ -1141,8 +1221,10 @@ def _blocker_remediation(verdicts: Sequence[_BlockerVerdict]) -> str:
         ):
             remedy += (
                 ". A blocker stuck RUNNING holds an execution claim no retry "
-                "can take: cancel it (POST /api/v1/builds/{build_id}/tasks/"
-                "{task_id}/cancel) to release the claim first"
+                "can take — and while a lapsed claim is re-claimable, no "
+                "build is claiming it: cancel it (POST /api/v1/builds/"
+                "{build_id}/tasks/{task_id}/cancel) to release the claim "
+                "first"
             )
         parts.append(remedy + ".")
     if unowned:
@@ -1226,9 +1308,7 @@ async def _handle_terminal(
         # failure.
         now = datetime.now(timezone.utc)
         truncated = frontier.blocked_by_external_truncated
-        blockers = await _classify_external_blockers(
-            frontier, config, now, registry=registry
-        )
+        blockers = await _classify_external_blockers(frontier, now, registry=registry)
         waiting = blockers.waiting
         summary.external_blockers += len(frontier.blocked_by_external)
         summary.external_blockers_waited += len(waiting)
@@ -1242,12 +1322,22 @@ async def _handle_terminal(
             # wake-up is covered by the watchdog. Logged every pass on
             # purpose: a build that sits here needs to be diagnosable from
             # the tick logs alone.
-            if config.stale_external_blocker_seconds is None:
-                bound_note = " (staleness bound disabled — this wait is unbounded)"
-            elif any(verdict.blocker.blocking_status_at is None for verdict in waiting):
+            # A RUNNING blocker whose claim carries no expiry cannot be shown
+            # abandoned from here, so this particular wait has no end the tick
+            # can see. Called out every pass rather than silently: it is the
+            # one shape where waiting is a choice rather than a reading, and
+            # the operator is the only one who can break the tie (by
+            # cancelling the blocker) or remove the shape (by upgrading the
+            # server, after which new starts carry an expiry).
+            if any(
+                verdict.blocker.blocking_status in _RUNNING_STATUSES
+                and verdict.blocker.blocking_status_expires_at is None
+                for verdict in waiting
+            ):
                 bound_note = (
-                    " (a blocker carries no status timestamp, so its wait "
-                    "cannot be bounded)"
+                    " (a RUNNING blocker's claim carries no expiry, so this "
+                    "wait cannot be shown to end — cancel the blocking task "
+                    "to release its claim)"
                 )
             else:
                 bound_note = ""
@@ -1284,8 +1374,11 @@ async def _handle_terminal(
             reason = (
                 f"Build cannot progress: it has nothing runnable or running "
                 f"of its own, and {len(blockers.fatal)} of its task(s) are "
-                "blocked by an upstream owned by another build that no live "
-                f"build is going to run (status counts: {counts}). Blocked "
+                "blocked by an upstream owned by another build that will not "
+                f"move it (status counts: {counts}). Knowing the blocker is "
+                "dead does not unblock this build — the blocker is not in "
+                "this build's task set, so this build can never run it; it "
+                "has to be released under the build that owns it. Blocked "
                 f"by: {_describe_blockers(blockers.fatal, now, truncated)}"
                 f". {_blocker_remediation(blockers.fatal)}"
             )

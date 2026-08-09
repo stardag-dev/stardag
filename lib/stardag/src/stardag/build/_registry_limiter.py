@@ -41,14 +41,14 @@ Operational caveats:
 - The acquiring start is recorded without an executor ref. If the same
   task is RUNNING with a ref in another build, this transiently clears
   ``latest_executor_ref`` (until the engine's ref-recording start lands)
-  and refreshes the staleness clock other ticks are watching — a small
+  and re-stamps the execution claim other ticks are watching — a small
   churn-only window.
 - Conversely, a legitimately long-running limited resident task (no
   executor ref — local executors never record one) that also appears in
-  a concurrently *ticking reactive* build can be force-failed by that
-  build's ``stale_running_no_ref_seconds`` heal once it exceeds the
-  bound. Raise the bound in that build's ``TickConfig`` if you mix modes
-  over the same long tasks.
+  a concurrently *ticking reactive* build is force-failed by that build
+  once its execution claim lapses. Resident builds derive no claim TTL
+  from an executor timeout, so such a task gets the registry's default
+  expiry; mind that if you mix modes over tasks that run longer than it.
 
 Requires a registry server with concurrency-limit support; against an
 older server, enforcement parameters are ignored and acquisition always

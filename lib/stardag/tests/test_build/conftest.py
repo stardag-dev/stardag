@@ -107,6 +107,7 @@ class RecordingRegistry(NoOpRegistry):
         executor: str | None = None,
         executor_ref: str | None = None,
         executor_metadata: dict | None = None,
+        claim_ttl_seconds: int | None = None,
     ) -> None:
         self._record(
             "task_start_aio",

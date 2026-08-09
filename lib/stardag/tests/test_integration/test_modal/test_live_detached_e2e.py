@@ -102,7 +102,9 @@ class FileRefRegistry(NoOpRegistry):
         super().__init__()
         self.path = path
 
-    async def task_start_aio(self, build_id, task, executor=None, executor_ref=None):
+    async def task_start_aio(
+        self, build_id, task, executor=None, executor_ref=None, **kwargs
+    ):
         with open(self.path, "w") as f:
             json.dump(
                 {

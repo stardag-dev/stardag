@@ -123,7 +123,13 @@ class MiniReactiveRegistry(NoOpRegistry):
         return None
 
     async def task_start_aio(
-        self, build_id, task, executor=None, executor_ref=None, executor_metadata=None
+        self,
+        build_id,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
+        claim_ttl_seconds=None,
     ):
         self.statuses[str(task.id)] = "running"
         self.refs[str(task.id)] = (executor, executor_ref)

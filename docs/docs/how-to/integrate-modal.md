@@ -662,9 +662,9 @@ When limits are enforced, **the watchdog is strongly recommended**
 (`watchdog_period_minutes=5`): a slot is freed by the holder reaching a
 terminal status, and the watchdog is the safety net that keeps statuses
 honest when wake-ups are lost — including the escape hatch that fails a
-task stuck RUNNING without an execution ref (default after 30 minutes,
-`TickConfig.stale_running_no_ref_seconds`), which would otherwise hold
-its slots indefinitely. Also note that limit-key tags recorded at a
+task stuck RUNNING without an execution ref once its **execution claim
+lapses** (see below), which would otherwise hold its slots indefinitely.
+Also note that limit-key tags recorded at a
 task's start persist until its next start _with_ keys — a later build
 re-running the same task id without tags briefly counts under the old
 keys while RUNNING.
@@ -707,18 +707,19 @@ the slots. Two caveats when mixing modes: a crashed _resident_ build has
 no automatic healer (its RUNNING task holds the slot until explicitly
 failed/cancelled via the API/UI — the worker-reporting/tick self-healing
 story above is reactive-only), and a legitimately long-running ref-less
-resident task that also appears in a concurrently ticking reactive build
-can be force-failed by that build's `stale_running_no_ref_seconds`
-escape hatch — raise the bound if you mix modes over the same long
-tasks.
+resident task can be force-failed once its claim lapses if it also appears
+in a concurrently ticking reactive build. Resident builds do not derive a
+claim TTL from an executor timeout, so such a task gets the registry's
+default expiry — keep that in mind if you mix modes over tasks that run
+longer than it.
 
 **Builds that overlap.** Task state is per environment, so a task another
 build owns blocks yours. A tick waits that out — whether the other build is
-executing the task or has yet to schedule it — instead of failing the build
-(bounded by `TickConfig.stale_external_blocker_seconds`, default 6 hours);
-a blocker no _live_ build is going to run fails the build with a message
-naming the task, the build that owns it and why that owner will not move
-it. Symptom worth knowing: a tick log line saying the build is _"waiting on
+executing the task under a live execution claim, or has yet to schedule it
+— instead of failing the build. A blocker whose claim has **lapsed**, or a
+non-running blocker no _live_ build is going to run, fails the build with a
+message naming the task, the build that owns it and why that owner will not
+move it. Symptom worth knowing: a tick log line saying the build is _"waiting on
 N upstream task(s) owned by other builds … waiting rather than failing"_
 means your build is fine and waiting on a neighbour. See
 [Cross-build blocking](../concepts/build-execution.md#cross-build-blocking)
@@ -727,6 +728,17 @@ SUSPENDED, which a retry (and therefore a re-trigger) now resets.
 `stardag builds frontier <build-id>` shows this directly, naming the blocking
 task and the build that owns it — see
 [Reading the frontier](../configuration/cli.md#reading-the-frontier).
+
+**Claim expiry and your worker `timeout`.** Every start a tick records
+carries a claim TTL derived from the `timeout` of the worker function the
+task routes to (`FunctionSettings(timeout=...)`), plus a grace margin — so
+the claim outlives the execution it guards by a small margin and no more,
+and other builds can tell an abandoned claim from a live one without
+probing Modal themselves. Workers that declare no `timeout` fall back to
+the registry's default expiry. This is the main reason to set an explicit
+`timeout` on long-running workers: it is what keeps a claim from being
+taken while the execution is still alive, and equally what lets a claim
+left behind by a dead scheduler heal promptly.
 
 **Seeing what a tick decided.** Every tick reports its summary to the registry
 (`stardag builds ticks <build-id>`), so a build driven by dozens of
@@ -737,8 +749,7 @@ did this build stall?" question can turn up. Reporting is best-effort
 throughout: it can never fail a tick, change its outcome or mask its
 exception, and it is tolerated by servers that predate the endpoint. Turn it
 off for a whole deployment with `TickConfig(report_tick_summaries=False)`;
-like the other staleness knobs it is app-level configuration, not a
-per-trigger `tick_kwarg`.
+it is app-level configuration, not a per-trigger `tick_kwarg`.
 
 Requirements and current limitations: the app must be deployed with this
 stardag version (scheduler `tick` function + self-reporting workers); the

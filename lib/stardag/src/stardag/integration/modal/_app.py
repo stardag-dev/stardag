@@ -64,6 +64,7 @@ from stardag.build import (
 )
 from stardag.build._base import GlobalLockConfig
 from stardag.build._base import BuildSummary
+from stardag.build._reactive import claim_ttl_seconds
 from stardag.build._task_modules import (
     PickleElisionPlan,
     TaskModulesError,
@@ -629,6 +630,18 @@ deps (with task-store persistence) and wakes the scheduler after terminal
 events — there is no resident orchestrator to do either.
 """
 
+STARDAG_CLAIM_TTL_SECONDS_ENV = "STARDAG_CLAIM_TTL_SECONDS"
+"""Env var carrying the claim TTL the orchestrator derived for this task.
+
+The worker's own TASK_STARTED is a start like any other, so without this
+it would re-stamp the claim with the registry's generic default and undo
+the orchestrator's derivation (see
+``stardag.build._reactive.claim_ttl_seconds``). Forwarding it also *improves*
+the bound: the worker's start is recorded when execution actually begins, so
+the expiry is re-based off the real start rather than off the pre-spawn
+claim, which absorbed however long the call sat queued.
+"""
+
 STARDAG_MODAL_WORKSPACE_ENV = "STARDAG_MODAL_WORKSPACE"
 """Env var carrying the resolved Modal workspace name to workers.
 
@@ -845,6 +858,7 @@ class ModalTaskExecutor(TaskExecutorABC):
         worker_reports_lifecycle: bool = True,
         reactive: bool = False,
         modal_workspace: str | None = None,
+        worker_timeouts: dict[str, int] | None = None,
     ):
         """Initialize Modal executor.
 
@@ -865,10 +879,18 @@ class ModalTaskExecutor(TaskExecutorABC):
             modal_workspace: Explicit Modal workspace name for the executor
                 metadata recorded with task starts (UI deep links). Default:
                 resolved once from the configured Modal token, best-effort.
+            worker_timeouts: Per-worker Modal function ``timeout`` (seconds),
+                as declared in the app's ``worker_settings``. Only the
+                deploy process can see those settings, so they are passed in
+                rather than looked up. Used to derive the execution-claim
+                TTL recorded with every start (see
+                :meth:`execution_timeout_seconds`); an absent worker simply
+                yields no timeout and the registry's default applies.
         """
         self.modal_app_name = modal_app_name
         self.worker_selector = worker_selector
         self.detached = detached
+        self.worker_timeouts = dict(worker_timeouts or {})
         self.worker_reports_lifecycle = worker_reports_lifecycle
         # Reactive scheduling: forward the app name + reactive flag so
         # workers register their dynamic deps and wake the scheduler tick.
@@ -992,6 +1014,32 @@ class ModalTaskExecutor(TaskExecutorABC):
             return None
         return await self._metadata_for_worker(worker_name)
 
+    def execution_timeout_seconds(self, task: BaseTask) -> float | None:
+        """The Modal ``timeout`` of the worker function this task routes to.
+
+        Modal kills a function call at its ``timeout``, so this is a hard
+        upper bound on how long an execution of ``task`` can be alive — the
+        one fact that makes an execution claim's expiry defensible rather
+        than a guess.
+
+        Returns None when the deployed settings were not passed in (see
+        ``worker_timeouts``), when the selected worker declares no timeout,
+        or when worker selection fails: none of those is a reason to fail a
+        start, and the registry's own default covers them.
+        """
+        if not self.worker_timeouts:
+            return None
+        try:
+            worker_name, _ = _normalize_worker_selection(self.worker_selector(task))
+        except Exception:
+            logger.debug(
+                "Worker selection failed while resolving the execution timeout",
+                exc_info=True,
+            )
+            return None
+        timeout = self.worker_timeouts.get(worker_name)
+        return float(timeout) if timeout is not None else None
+
     async def _prepare_invocation(
         self, task: BaseTask
     ) -> tuple[modal.Function, dict[str, str] | None, dict[str, typing.Any] | None]:
@@ -1001,7 +1049,9 @@ class ModalTaskExecutor(TaskExecutorABC):
         the build id is injected as the ``STARDAG_BUILD_ID`` env override so
         the worker-side :class:`Runner` can report lifecycle events. The
         resolved executor metadata rides along the same channel
-        (``STARDAG_MODAL_*``) so worker self-reported starts carry it too.
+        (``STARDAG_MODAL_*``) so worker self-reported starts carry it too —
+        as does the derived claim TTL, so the worker's own start does not
+        re-stamp the claim with the registry's generic default.
         """
         worker_name, env_overrides = _normalize_worker_selection(
             self.worker_selector(task)
@@ -1016,6 +1066,9 @@ class ModalTaskExecutor(TaskExecutorABC):
                     STARDAG_BUILD_ID_ENV: str(build_id),
                     STARDAG_MODAL_APP_NAME_ENV: self.modal_app_name,
                 }
+                ttl_seconds = claim_ttl_seconds(task, self)
+                if ttl_seconds is not None:
+                    env_overrides[STARDAG_CLAIM_TTL_SECONDS_ENV] = str(ttl_seconds)
                 if executor_metadata is not None:
                     for env_name, key in (
                         (STARDAG_MODAL_WORKSPACE_ENV, "workspace"),
@@ -1471,6 +1524,7 @@ class _WorkerLifecycleReporter:
         reactive: bool = False,
         app_name: str | None = None,
         executor_metadata: dict[str, typing.Any] | None = None,
+        claim_ttl_seconds: int | None = None,
     ):
         self.registry = registry
         self.build_id = build_id
@@ -1478,6 +1532,7 @@ class _WorkerLifecycleReporter:
         self.reactive = reactive
         self.app_name = app_name
         self.executor_metadata = executor_metadata
+        self.claim_ttl_seconds = claim_ttl_seconds
 
     @classmethod
     def create(
@@ -1516,6 +1571,26 @@ class _WorkerLifecycleReporter:
             value = _get(env_name)
             if value:
                 executor_metadata[key] = value
+        # The orchestrator's derived claim TTL, if it sent one. Malformed
+        # values are ignored rather than raised on: this is a bound on an
+        # expiry, and no worker should fail to report its own start over it.
+        raw_ttl = _get(STARDAG_CLAIM_TTL_SECONDS_ENV)
+        try:
+            ttl_seconds = int(raw_ttl) if raw_ttl else None
+        except ValueError:
+            logger.warning(f"Invalid {STARDAG_CLAIM_TTL_SECONDS_ENV}: {raw_ttl!r}")
+            ttl_seconds = None
+        # A syntactically valid but out-of-range value is the same problem
+        # as a malformed one, and worse in effect: the server rejects it
+        # (422) on `task_start`, so the worker loses its whole lifecycle
+        # report over a bound on an expiry. Drop it and let the server pick
+        # its default.
+        if ttl_seconds is not None and ttl_seconds <= 0:
+            logger.warning(
+                f"Ignoring {STARDAG_CLAIM_TTL_SECONDS_ENV}={raw_ttl!r}: a claim "
+                "TTL must be positive. The server's default applies instead."
+            )
+            ttl_seconds = None
         return cls(
             registry,
             build_id,
@@ -1523,6 +1598,7 @@ class _WorkerLifecycleReporter:
             reactive=_get(STARDAG_REACTIVE_ENV) == "1",
             app_name=app_name,
             executor_metadata=executor_metadata,
+            claim_ttl_seconds=ttl_seconds,
         )
 
     def _guard(self, fn: typing.Callable[[], None], what: str) -> None:
@@ -1546,6 +1622,7 @@ class _WorkerLifecycleReporter:
                 executor=MODAL_EXECUTOR_NAME,
                 executor_ref=ref,
                 executor_metadata=self.executor_metadata,
+                claim_ttl_seconds=self.claim_ttl_seconds,
             )
 
         self._guard(_do, "start")
@@ -2467,6 +2544,17 @@ class StardagApp:
         default_worker_selector = self.worker_selector
         limit_key_selector = self.limit_key_selector
         modal_workspace = self.modal_workspace
+        # Per-worker Modal timeouts, captured here because this is the only
+        # place they exist: the tick runs in a deployed container with no
+        # access to the app object, and the claim TTL it records for a task
+        # is derived from the timeout of the worker that task routes to.
+        # Workers without an explicit timeout are simply absent (Modal's own
+        # default is not a promise this SDK should encode).
+        worker_timeouts = {
+            worker_name: timeout
+            for worker_name, settings in self._worker_settings.items()
+            if (timeout := settings.get("timeout")) is not None
+        }
 
         def _modal_tick(
             build_id: str,
@@ -2579,6 +2667,7 @@ class StardagApp:
                 worker_selector=default_worker_selector,
                 reactive=True,
                 modal_workspace=modal_workspace,
+                worker_timeouts=worker_timeouts,
             )
             lock_manager = RegistryGlobalConcurrencyLockManager(
                 # No waiting on the scheduler lease: a held lease means
