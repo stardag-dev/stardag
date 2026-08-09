@@ -8,6 +8,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import BuildStatus, Event, EventType, Task, TaskStatus
 
+# Statuses TASK_RETRIED resets to PENDING. Shared by the denormalised path
+# (apply_event_to_task) and the two per-build event replays below, which
+# must agree — they answer the same question for different readers.
+#
+# SUSPENDED is in the set because it is a dead end otherwise: a task
+# suspended for dynamic dependencies whose orchestrator then died stays
+# suspended forever, and no supported operation makes it schedulable again
+# (the only escape was to cancel it first, purely to reach a status that
+# *was* retryable). Nothing is running at that point — the suspension
+# itself means the execution yielded and returned — so resetting it cannot
+# orphan an execution.
+#
+# RUNNING is deliberately NOT retryable: it holds a live execution claim,
+# and releasing that is cancellation, not retry. Flipping it to PENDING
+# would let a scheduler spawn a second execution of a task that is still
+# running. COMPLETED is excluded by stickiness.
+_RETRYABLE_STATUSES = (
+    TaskStatus.FAILED,
+    TaskStatus.CANCELLED,
+    TaskStatus.SKIPPED,
+    TaskStatus.SUSPENDED,
+)
+
 
 def apply_event_to_task(task: Task, event: Event) -> None:
     """Mutate a Task's denormalised latest_* columns to reflect a new event.
@@ -68,20 +91,21 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         task.latest_executor_ref = metadata.get("executor_ref")
         task.latest_executor_metadata = metadata.get("executor_metadata")
     elif et == EventType.TASK_RETRIED:
-        # Reset terminal-but-retryable statuses to PENDING (see the event
-        # scan above); sticky-COMPLETED is already handled by the early
-        # return, and RUNNING is never downgraded by a retry.
-        if task.latest_status in (
-            TaskStatus.FAILED,
-            TaskStatus.CANCELLED,
-            TaskStatus.SKIPPED,
-        ):
+        # Reset a retryable status to PENDING (see _RETRYABLE_STATUSES);
+        # sticky-COMPLETED is already handled by the early return, and
+        # RUNNING is never downgraded by a retry.
+        if task.latest_status in _RETRYABLE_STATUSES:
             task.latest_status = TaskStatus.PENDING
             task.latest_status_at = event.created_at
             task.latest_status_event_id = event.id
             task.latest_status_build_id = event.build_id
             task.latest_completed_at = None
             task.latest_error_message = None
+            # The executor fields describe the run that reached the
+            # retryable status — including a suspended one, which keeps the
+            # ref of the execution that yielded. A retry re-runs from
+            # scratch, so clearing them is what stops a scheduler from
+            # re-attaching to an execution that will never resume.
             task.latest_executor = None
             task.latest_executor_ref = None
             task.latest_executor_metadata = None
@@ -262,15 +286,12 @@ async def get_task_status_in_build(
         elif event.event_type == EventType.TASK_RESUMED:
             status = TaskStatus.RUNNING
         elif event.event_type == EventType.TASK_RETRIED:
-            # Retry: reset a terminal-but-retryable status back to PENDING so
-            # the task is schedulable again (a re-trigger of a failed build,
-            # or a new build referencing a previously-failed task). No-op for
-            # completed/running — a retry never downgrades those.
-            if status in (
-                TaskStatus.FAILED,
-                TaskStatus.CANCELLED,
-                TaskStatus.SKIPPED,
-            ):
+            # Retry: reset a retryable status back to PENDING so the task is
+            # schedulable again (a re-trigger of a failed build, a new build
+            # referencing a previously-failed task, or an abandoned
+            # suspension). No-op for completed/running — a retry never
+            # downgrades those. See _RETRYABLE_STATUSES.
+            if status in _RETRYABLE_STATUSES:
                 status = TaskStatus.PENDING
                 completed_at = None
                 error_message = None
@@ -336,15 +357,12 @@ async def get_all_task_statuses_in_build(
         elif event.event_type == EventType.TASK_RESUMED:
             status = TaskStatus.RUNNING
         elif event.event_type == EventType.TASK_RETRIED:
-            # Retry: reset a terminal-but-retryable status back to PENDING so
-            # the task is schedulable again (a re-trigger of a failed build,
-            # or a new build referencing a previously-failed task). No-op for
-            # completed/running — a retry never downgrades those.
-            if status in (
-                TaskStatus.FAILED,
-                TaskStatus.CANCELLED,
-                TaskStatus.SKIPPED,
-            ):
+            # Retry: reset a retryable status back to PENDING so the task is
+            # schedulable again (a re-trigger of a failed build, a new build
+            # referencing a previously-failed task, or an abandoned
+            # suspension). No-op for completed/running — a retry never
+            # downgrades those. See _RETRYABLE_STATUSES.
+            if status in _RETRYABLE_STATUSES:
                 status = TaskStatus.PENDING
                 completed_at = None
                 error_message = None

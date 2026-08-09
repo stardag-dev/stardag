@@ -52,6 +52,7 @@ from stardag_api.schemas import (
     BuildListResponse,
     BuildNotifyResponse,
     BuildResponse,
+    FrontierExternalBlocker,
     FrontierTaskRef,
     EventResponse,
     SetReactiveMetaRequest,
@@ -104,6 +105,22 @@ def _raise_if_limit_exceeded(error: LimitExceededError | None) -> None:
 # every read. Enforced consistently on the query-param paths (task start,
 # build resume) and the build-create body path.
 _MAX_EXECUTOR_METADATA_BYTES = 2048
+
+# Task statuses the build frontier considers still in play: neither
+# COMPLETED nor a failure terminal, so the build either can act on them or
+# is waiting for someone who can.
+_FRONTIER_NON_TERMINAL_STATUSES = (
+    TaskStatus.PENDING,
+    TaskStatus.SUSPENDED,
+    TaskStatus.RUNNING,
+)
+
+# Cap on BuildFrontierResponse.blocked_by_external. A wide DAG stalled
+# behind another build can produce one entry per blocked edge; the list is
+# a diagnostic ("you are waiting, and here is on what"), so a bounded
+# sample plus the truncation flag carries the same signal at a fixed
+# payload size. Deliberately not silent — see blocked_by_external_truncated.
+_MAX_FRONTIER_EXTERNAL_BLOCKERS = 50
 
 
 def _validate_executor_metadata_size(metadata: dict) -> None:
@@ -1323,6 +1340,11 @@ async def get_build_frontier(
     denormalised statuses — a task completed or running in another build
     counts as such here too (which is exactly what a scheduler wants:
     don't re-run what's done, re-attach to what's running).
+
+    ``blocked_by_external`` reconciles the two scopes this endpoint mixes:
+    dependency gating is environment-global, while ``running`` and
+    ``status_counts`` cover only tasks this build has events for. See
+    :class:`FrontierExternalBlocker`.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
@@ -1367,13 +1389,7 @@ async def get_build_frontier(
                 select(Task)
                 .where(
                     Task.id.in_(build_task_ids),
-                    Task.latest_status.in_(
-                        [
-                            TaskStatus.PENDING,
-                            TaskStatus.SUSPENDED,
-                            TaskStatus.RUNNING,
-                        ]
-                    ),
+                    Task.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
                     ~has_incomplete_upstream,
                 )
                 .order_by(Task.created_at)
@@ -1400,6 +1416,99 @@ async def get_build_frontier(
         .all()
     )
 
+    # Why a build with nothing actionable and nothing running can still be
+    # perfectly healthy: `has_incomplete_upstream` above joins Task
+    # *globally* (task rows and dependency edges are per-environment), while
+    # `running` / `status_counts` are scoped to this build's task set. An
+    # upstream that some other build left RUNNING therefore gates this
+    # build's downstream tasks while contributing nothing this build can
+    # see — and it need not be in this build's task set at all (a dynamic
+    # dependency registered under an earlier build is the usual case).
+    # Reported explicitly rather than folded into `running`, which must keep
+    # meaning "RUNNING tasks of *this* build" (it is the cancellation
+    # target list).
+    #
+    # Computed ONLY when this build has nothing actionable and nothing
+    # running — i.e. exactly when it looks stuck, which is the only state in
+    # which either consumer asks the question. That is not an optimisation
+    # detail to gloss over: the frontier is re-read on every linger poll
+    # (~3 s per active build), and this query sorts over the build's
+    # dependency edges, so computing it unconditionally would put a
+    # per-edge sort on the hot path of every healthy build. A build that is
+    # visibly progressing does not need to be told what it is waiting on.
+    #
+    # The gate mirrors the SDK's own stuck check (`not actionable and
+    # running == 0`) so the two cannot disagree about when the diagnostic
+    # is meaningful. Consequence for consumers: an EMPTY list means "not
+    # blocked externally, or not stalled" — never read it as proof that no
+    # external blocker exists while the build is still making progress.
+    #
+    # One flat (blocked, blocker) query — resolving blockers per blocked
+    # task would be N+1. It mirrors the join `actionable` already performs,
+    # so the added cost is ~one more pass over this build's dependency
+    # edges (ix_task_dep_downstream), bounded by LIMIT.
+    blocked_by_external: list[FrontierExternalBlocker] = []
+    blocked_by_external_truncated = False
+    if not actionable_tasks and not running_tasks:
+        blocked = aliased(Task)
+        blocker = aliased(Task)
+        blocker_rows = (
+            await db.execute(
+                select(
+                    blocked.task_id,
+                    blocker.task_id,
+                    blocker.task_namespace,
+                    blocker.task_name,
+                    blocker.latest_status,
+                    blocker.latest_status_at,
+                    blocker.latest_status_build_id,
+                    blocker.id.in_(build_task_ids),
+                )
+                .select_from(TaskDependency)
+                .join(blocked, TaskDependency.downstream_task_id == blocked.id)
+                .join(blocker, TaskDependency.upstream_task_id == blocker.id)
+                .where(
+                    blocked.id.in_(build_task_ids),
+                    blocked.latest_status.in_(_FRONTIER_NON_TERMINAL_STATUSES),
+                    blocker.latest_status != TaskStatus.COMPLETED,
+                    # Null-safe inequality (renders IS DISTINCT FROM on
+                    # Postgres, IS NOT on SQLite): a blocker with no recorded
+                    # status build — a pre-denormalisation row — is likewise
+                    # not something this build put there.
+                    blocker.latest_status_build_id.is_distinct_from(build_id),
+                )
+                # Registration order, matching `actionable`. Deterministic,
+                # so a truncated list is stable across the polls of one tick.
+                .order_by(blocked.created_at, blocker.created_at)
+                .limit(_MAX_FRONTIER_EXTERNAL_BLOCKERS + 1)
+            )
+        ).all()
+        blocked_by_external_truncated = (
+            len(blocker_rows) > _MAX_FRONTIER_EXTERNAL_BLOCKERS
+        )
+        blocked_by_external = [
+            FrontierExternalBlocker(
+                task_id=blocked_task_id,
+                blocking_task_id=blocking_task_id,
+                blocking_task_namespace=blocking_namespace,
+                blocking_task_name=blocking_name,
+                blocking_status=blocking_status,
+                blocking_status_at=blocking_status_at,
+                blocking_status_build_id=blocking_status_build_id,
+                blocking_in_build=bool(blocking_in_build),
+            )
+            for (
+                blocked_task_id,
+                blocking_task_id,
+                blocking_namespace,
+                blocking_name,
+                blocking_status,
+                blocking_status_at,
+                blocking_status_build_id,
+                blocking_in_build,
+            ) in blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
+        ]
+
     root_task_ids: list[str] = list(build.root_task_ids or [])
     roots: list[Task] = []
     if root_task_ids:
@@ -1425,6 +1534,10 @@ async def get_build_frontier(
             latest_executor=t.latest_executor,
             latest_executor_ref=t.latest_executor_ref,
             latest_executor_metadata=t.latest_executor_metadata,
+            # Schedulers bound staleness with this (e.g. "RUNNING for too
+            # long with no executor ref"); omitting it silently disabled
+            # those guards, since the field defaults to None.
+            latest_status_at=t.latest_status_at,
         )
 
     return BuildFrontierResponse(
@@ -1436,6 +1549,8 @@ async def get_build_frontier(
         status_counts=status_counts,
         actionable=[_ref(t) for t in actionable_tasks],
         running=[_ref(t) for t in running_tasks],
+        blocked_by_external=blocked_by_external,
+        blocked_by_external_truncated=blocked_by_external_truncated,
         reactive_app_name=build.reactive_app_name,
         reactive_tick_kwargs=build.reactive_tick_kwargs,
     )
@@ -2428,14 +2543,25 @@ async def retry_task(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     commit_hash: str | None = None,
 ):
-    """Reset a failed/cancelled/skipped task to pending (retry).
+    """Reset a failed/cancelled/skipped/suspended task to pending (retry).
 
-    Emits TASK_RETRIED; status derivation flips only terminal-but-
-    retryable statuses back to PENDING — completed and running tasks are
-    unaffected (the event is still recorded, making concurrent
-    trigger/retry races benign). Used by reactive triggers so a
-    re-triggered failed build (or a new build referencing a previously
-    failed task) becomes schedulable again.
+    Emits TASK_RETRIED; status derivation flips only retryable statuses
+    back to PENDING. Used by reactive triggers so a re-triggered failed
+    build (or a new build referencing a previously failed task) becomes
+    schedulable again.
+
+    **Suspended tasks are retryable.** A task suspended for dynamic
+    dependencies is not executing — the execution yielded and returned —
+    so a task whose orchestrator then died has no path forward except
+    running again from scratch, which is what a retry means. Without this
+    it would be permanently unschedulable.
+
+    **Completed and running tasks are unaffected.** COMPLETED is sticky.
+    RUNNING is excluded on purpose: it holds a live execution claim, and
+    releasing that claim is cancellation (POST .../cancel), not retry —
+    resetting it to PENDING would invite a second, concurrent execution of
+    the same task. The event is recorded either way, which is what makes
+    concurrent trigger/retry races benign.
     """
     return await _create_task_event(
         build_id, task_id, EventType.TASK_RETRIED, db, auth, commit_hash=commit_hash
