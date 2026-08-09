@@ -471,3 +471,50 @@ def test_base_task_registry_exposes_registered_classes():
     """``count_registered_task_classes`` relies on this accessor."""
     classes = BaseTask._registry().classes()
     assert SyncOnlyTask in classes
+
+
+class TestDeclarationHygiene:
+    def test_a_whitespace_padded_pattern_is_normalised(self):
+        from stardag.build._task_modules import (
+            _reset_import_state_for_tests,
+            declared_task_module_patterns,
+            set_declared_task_module_patterns,
+        )
+
+        _reset_import_state_for_tests()
+        set_declared_task_module_patterns([" pkg.tasks ", "pkg.more"])
+        assert declared_task_module_patterns() == ("pkg.tasks", "pkg.more")
+        _reset_import_state_for_tests()
+
+    def test_an_empty_pattern_is_refused_rather_than_stored(self):
+        """It would match no module while still reading as a declaration,
+        quietly returning ticks to the pickle path."""
+        import pytest
+
+        from stardag.build._task_modules import (
+            _reset_import_state_for_tests,
+            set_declared_task_module_patterns,
+        )
+
+        _reset_import_state_for_tests()
+        with pytest.raises(ValueError, match="non-empty"):
+            set_declared_task_module_patterns(["pkg.tasks", "   "])
+        _reset_import_state_for_tests()
+
+    def test_the_test_reset_hook_clears_every_piece_of_ambient_state(self):
+        """Otherwise a declaration or a one-shot warning leaks into the next
+        test and results depend on execution order."""
+        from stardag.build._task_modules import (
+            _reset_import_state_for_tests,
+            _warned_classes,
+            declared_task_module_patterns,
+            set_declared_task_module_patterns,
+        )
+
+        set_declared_task_module_patterns(["pkg.tasks"])
+        _warned_classes.add("some.Class")
+
+        _reset_import_state_for_tests()
+
+        assert declared_task_module_patterns() == ()
+        assert _warned_classes == set()

@@ -1969,11 +1969,18 @@ def _infer_task_module_patterns(_depth: int = 2) -> tuple[str, ...]:
         _depth: Stack frames back to the user's call site (``__init__``'s
             caller by default). Not part of the public contract.
     """
+    # Frames hold their locals and globals alive and participate in
+    # reference cycles, so the walk is scoped and the references dropped
+    # rather than left for the collector — this runs in long-lived
+    # scheduler containers.
     frame = inspect.currentframe()
-    for _ in range(_depth):
-        frame = frame.f_back if frame is not None else None
-    module_name = frame.f_globals.get("__name__") if frame is not None else None
-    package = frame.f_globals.get("__package__") if frame is not None else None
+    try:
+        for _ in range(_depth):
+            frame = frame.f_back if frame is not None else None
+        module_name = frame.f_globals.get("__name__") if frame is not None else None
+        package = frame.f_globals.get("__package__") if frame is not None else None
+    finally:
+        del frame
     if not module_name or module_name == "__main__" or not package:
         logger.warning(
             "Could not infer StardagApp(task_modules=...): the app is "

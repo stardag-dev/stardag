@@ -358,9 +358,18 @@ def count_registered_task_classes(modules: typing.Iterable[str]) -> int:
 
 
 def _reset_import_state_for_tests() -> None:
-    """Clear the per-process import cache/failure record (tests only)."""
+    """Reset **all** module-level state (tests only).
+
+    Every piece of ambient state this module keeps, not just the import
+    cache: a declaration or a one-shot warning surviving into the next test
+    makes results depend on execution order, and `only_unwarned=True` in
+    particular is silently order-sensitive.
+    """
     _import_cache.clear()
     _last_failures.clear()
+    _warned_classes.clear()
+    global _declared_patterns
+    _declared_patterns = ()
 
 
 # =============================================================================
@@ -379,7 +388,20 @@ def set_declared_task_module_patterns(patterns: typing.Sequence[str]) -> None:
     several frames below any reference to the app object.
     """
     global _declared_patterns
-    _declared_patterns = tuple(patterns)
+    # Normalised, not stored verbatim: these patterns drive coverage checks
+    # and the pickle-elision decision, and a stray space makes a pattern
+    # match nothing while still reading as a declaration at the call site.
+    # A silently-inert declaration is the worst outcome here — it turns
+    # "ticks reconstruct tasks by import" back into "ticks need the
+    # pickles" with no signal.
+    cleaned = tuple(p.strip() for p in patterns)
+    if any(not p for p in cleaned):
+        raise ValueError(
+            f"task-module patterns must be non-empty: {list(patterns)!r}. "
+            "An empty or whitespace-only pattern matches no module, so the "
+            "declaration would be silently inert."
+        )
+    _declared_patterns = cleaned
 
 
 def declared_task_module_patterns() -> tuple[str, ...]:
