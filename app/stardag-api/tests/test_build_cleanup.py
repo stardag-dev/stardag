@@ -887,10 +887,50 @@ async def test_list_builds_running_and_idle_is_exact_beyond_the_scan_cap(
 
 
 @pytest.mark.asyncio
+async def test_list_builds_idle_filter_implies_running(
+    client: AsyncClient, async_session
+):
+    """A finished build is not idle, however long ago it finished.
+
+    Without this the filter degrades into "builds nothing has happened to
+    lately", which every completed build satisfies permanently — so the
+    listing fills with history exactly as the operator is trying to find
+    the handful of builds that are stuck. It also has to hold for the
+    listing to preview `POST /builds/bulk-cancel`, which only ever cancels
+    running builds.
+    """
+    abandoned = await _new_build(client)
+    await _backdate(async_session, abandoned, age=timedelta(days=2))
+
+    for endpoint in ("complete", "fail"):
+        finished = await _new_build(client)
+        await client.post(f"/api/v1/builds/{finished}/{endpoint}")
+        # Older than the abandoned one, so a pure-idleness query would sort
+        # it *first* rather than merely include it.
+        await _backdate(async_session, finished, age=timedelta(days=30))
+
+    body = (
+        await client.get("/api/v1/builds", params={"idle_for_seconds": 3600})
+    ).json()
+    assert [b["id"] for b in body["builds"]] == [abandoned]
+    assert body["total"] == 1
+
+    # All three are still listed when idleness is not what is being asked.
+    assert (await client.get("/api/v1/builds")).json()["total"] == 3
+
+    # And the reaper's dry run picks the same single build — the parity
+    # that makes this listing a usable preview.
+    preview = (
+        await client.post(BULK_CANCEL, json={"idle_for_seconds": 3600, "dry_run": True})
+    ).json()
+    assert [b["build_id"] for b in preview["builds"]] == [abandoned]
+
+
+@pytest.mark.asyncio
 async def test_list_builds_rejects_other_statuses_with_idle_filter(
     client: AsyncClient,
 ):
-    """Rather than return a plausible-looking approximate `total`."""
+    """A contradiction, not a narrower query: idle already means running."""
     response = await client.get(
         "/api/v1/builds", params={"status": "completed", "idle_for_seconds": 3600}
     )
@@ -924,9 +964,12 @@ async def test_list_builds_idle_filter_postgres(pg_client, pg_session):
     body = (
         await pg_client.get("/api/v1/builds", params={"idle_for_seconds": 3600})
     ).json()
-    assert body["total"] == 2
-    assert [b["id"] for b in body["builds"]] == [done, abandoned]
+    # `done` is older than `abandoned` and has had no activity for longer,
+    # but it finished — it is not idle, it is over.
+    assert body["total"] == 1
+    assert [b["id"] for b in body["builds"]] == [abandoned]
 
+    # Asking for running as well is redundant, and answers the same.
     running_only = (
         await pg_client.get(
             "/api/v1/builds",
