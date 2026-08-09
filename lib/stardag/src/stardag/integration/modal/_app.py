@@ -467,9 +467,15 @@ def _tick_function_timeout_seconds(
     promise this SDK should encode, and the cap has further rungs to fall
     back to (see ``stardag.build._reactive._spawn_cap``).
     """
+    # An empty `tick_settings` falls back deliberately — it declares
+    # nothing, and `finalize` resolves it the same way.
     settings = tick_settings if tick_settings else builder_settings
+    # `is not None`, not truthiness: `timeout=0` is a value someone
+    # configured, and reporting it as "not declared" would hand the spawn
+    # cap a different rung to fall back to than the one the function was
+    # actually registered with.
     timeout = (settings or {}).get("timeout")
-    return float(timeout) if timeout else None
+    return float(timeout) if timeout is not None else None
 
 
 def _build_tick_config(

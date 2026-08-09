@@ -2059,6 +2059,14 @@ class TestTickFunctionTimeout:
         assert _tick_function_timeout_seconds(None, builder) == 3600.0
         assert _tick_function_timeout_seconds(self._settings(), builder) == 3600.0
 
+    def test_a_configured_zero_is_a_value_not_an_absence(self):
+        """`timeout=0` was reported as "not declared", which sends the spawn
+        cap to a different fallback rung than the one the function was
+        registered with."""
+        from stardag.integration.modal._app import _tick_function_timeout_seconds
+
+        assert _tick_function_timeout_seconds(self._settings(timeout=0), None) == 0.0
+
     def test_none_when_neither_declares_one(self):
         from stardag.integration.modal._app import _tick_function_timeout_seconds
 
