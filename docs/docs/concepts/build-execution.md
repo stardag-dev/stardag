@@ -117,7 +117,8 @@ tick(build_id):
   loop:
     clear the build's wake-up flag
     frontier = registry state: tasks whose upstreams are all complete
-    act: spawn pending/suspended tasks detached (recording refs)
+    act (bounded-concurrent, up to a per-tick spawn cap):
+         spawn pending/suspended tasks detached (recording refs)
          probe running refs — leave live ones; self-heal completions
          (target existence is ground truth); record failures
     handle terminal states (all roots complete / failure — with blocked
@@ -152,6 +153,56 @@ worker still running under a previous owner — forwards the wake-up to the
 owner's tick instead of driving the build with the wrong code. Ownership
 moves only by an explicit re-trigger from the new app, which also updates
 the tick config.
+
+### Wide layers: what one tick commits to
+
+Acting on a frontier is bounded-concurrent. Putting a single task on a
+worker costs a task-store read, an execution-claim acquisition, an executor
+spawn and a start recording the execution ref — so a layer thousands of
+tasks wide is thousands of independent round-trips, and doing them one
+after another in one short-lived container is a scaling wall with nothing
+behind it. A tick runs `TickConfig.max_concurrent_actions` of them at a
+time (default 50, the same bound the resident engine has always used for
+its own discovery). Bounded, not unbounded: firing a whole layer at the
+registry at once would only move the failure.
+
+A tick also caps how much work **one pass** commits to, via
+`TickConfig.max_spawns_per_tick`. Left unset, the cap is derived rather
+than guessed: it is a duration budget — a fraction of how long the tick's
+own container may live, spread over the in-flight bound — because the cap
+exists to stop a tick starting more work than it can survive to finish.
+
+Which duration gets read is a ladder, most specific first:
+
+1. `max_spawns_per_tick`, if you set it. The override always wins.
+2. `TickConfig.tick_timeout_seconds` — **this container's** wall-clock
+   limit. The Modal integration fills this in automatically from the
+   `timeout` its `tick` function was deployed with, so in practice this is
+   the rung you are on.
+3. The executor's `execution_timeout_seconds`, as a fallback proxy. It
+   measures how long the spawned _executions_ may run, which is a different
+   quantity — a 24-hour worker under a 5-minute tick would derive a cap the
+   tick cannot possibly work through — so it is only used when nothing
+   knows the tick's own limit, and the tick's log line says so.
+4. A conservative default, when no wall clock is known anywhere.
+
+Every tick logs its cap and which rung produced it once per tick, so a
+truncating tick is diagnosable without guessing which number it read.
+
+Hitting the cap is not a stall and is never silent: the tick logs the
+truncation, and because the pass _acted_, it immediately re-evaluates on a
+fresh frontier and takes the next batch — no wake-up, no linger, no
+watchdog. The only case where it waits instead is the one where waiting is
+correct: every task it attempted was denied a concurrency-limit slot, so
+what the build needs is a slot to free up, not another round of denials.
+
+Discovery — the DAG walk at trigger time, and the same walk every worker
+runs when it registers dynamically yielded dependencies — is bounded-
+concurrent on the same default. Its ordering guarantees are unaffected:
+dependencies are still registered before the tasks that depend on them (the
+bulk endpoint resolves `dependency_task_ids` against rows that must already
+exist), and the walk's result is identical to the serial one for any DAG.
+Only the completion checks overlap.
 
 ### Cross-build blocking
 

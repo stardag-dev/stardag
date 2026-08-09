@@ -306,6 +306,7 @@ def _run_watchdog_sweep(
     tick: typing.Callable[..., typing.Any],
     sweep_limit: int = 100,
     reactive_app_name: str | None = None,
+    tick_timeout_seconds: float | None = None,
 ) -> None:
     """One watchdog pass: tick every running build, without lingering.
 
@@ -330,6 +331,15 @@ def _run_watchdog_sweep(
     wake-ups from workers of a previous owner. The one case that regresses
     is a build owned by an app deployed WITHOUT a watchdog, which
     build_trigger already warns about at trigger time.
+    The same "one container, many builds" property applies to the per-pass
+    spawn cap, which is derived from how long the container may live: every
+    build in the sweep would otherwise size its fan-out as though it had
+    the whole container to itself, and the first wide build would spend the
+    entire timeout while the rest of the sweep never ran. Each build is
+    therefore handed its **share** of the budget. Truncating here is
+    cheap and self-correcting — the watchdog is a safety net, builds are
+    normally driven by their own ticks, and a truncated pass re-acts on a
+    fresh frontier immediately.
     """
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
@@ -374,11 +384,31 @@ def _run_watchdog_sweep(
     # the environment. It also stays the correctness backstop: a tick on a
     # non-reactive build (which a degraded, unfiltered listing can still
     # yield) no-ops on that gate.
+    sweep_kwargs: dict[str, typing.Any] = {"linger_seconds": 0}
+    if tick_timeout_seconds is not None and running_builds:
+        sweep_kwargs["tick_timeout_seconds"] = tick_timeout_seconds / len(
+            running_builds
+        )
     for running_build_id in running_builds:
         try:
-            tick(str(running_build_id), tick_kwargs={"linger_seconds": 0})
+            tick(str(running_build_id), tick_kwargs=dict(sweep_kwargs))
         except Exception:
             logger.exception(f"Watchdog tick failed for build {running_build_id}")
+
+
+_TICK_KWARGS_ALLOWED = (
+    "linger_seconds",
+    "poll_interval_seconds",
+    "fail_mode",
+    # Fan-out throttles. Both default to something derived (see TickConfig
+    # and stardag.build._reactive._spawn_cap) and both are here because the
+    # thing the derivation cannot see — how the *tick* function is sized
+    # relative to its workers, and how much concurrency the registry
+    # deployment behind it will take — is per-deployment, and a build
+    # triggered against that deployment is where it can be said.
+    "max_concurrent_actions",
+    "max_spawns_per_tick",
+)
 
 
 def _fail_build_on_trigger_error(
@@ -419,10 +449,40 @@ def _fail_build_on_trigger_error(
 _TICK_KWARGS_ALLOWED = ("linger_seconds", "poll_interval_seconds", "fail_mode")
 
 
+def _tick_function_timeout_seconds(
+    tick_settings: "FunctionSettings | None",
+    builder_settings: "FunctionSettings | None",
+) -> float | None:
+    """The Modal ``timeout`` the deployed ``tick`` function will carry.
+
+    Resolved from **whichever settings actually register the function** —
+    ``tick_settings`` when given, otherwise ``builder_settings``, which is
+    the same fallback ``finalize`` applies. Reading ``tick_settings`` alone
+    would silently yield "unknown" for every app that does not configure
+    the tick separately (the common case), and a spawn cap derived from a
+    timeout the function was not registered with is precisely the mistake
+    this plumbing exists to remove.
+
+    ``None`` when neither declares one: Modal's own default is not a
+    promise this SDK should encode, and the cap has further rungs to fall
+    back to (see ``stardag.build._reactive._spawn_cap``).
+    """
+    # An empty `tick_settings` falls back deliberately — it declares
+    # nothing, and `finalize` resolves it the same way.
+    settings = tick_settings if tick_settings else builder_settings
+    # `is not None`, not truthiness: `timeout=0` is a value someone
+    # configured, and reporting it as "not declared" would hand the spawn
+    # cap a different rung to fall back to than the one the function was
+    # actually registered with.
+    timeout = (settings or {}).get("timeout")
+    return float(timeout) if timeout is not None else None
+
+
 def _build_tick_config(
     stored_tick_kwargs: dict[str, typing.Any] | None,
     tick_kwargs: dict[str, typing.Any] | None,
     limit_key_selector: "typing.Callable[[BaseTask], typing.Sequence[str]] | None",
+    tick_timeout_seconds: float | None = None,
 ) -> TickConfig:
     """Assemble a TickConfig for one tick invocation.
 
@@ -431,6 +491,15 @@ def _build_tick_config(
     registry — shared by all ticks) over TickConfig defaults. The
     concurrency-limit key selector is deployed-app configuration (callables
     can't ride in the JSON tick config).
+
+    ``tick_timeout_seconds`` is the deployed ``tick`` function's own Modal
+    ``timeout`` — how long this container may live, which is what the
+    per-pass spawn cap is derived from. It is applied as a *default* rather
+    than an override so a caller that runs several ticks in one container
+    can pass its own share of the budget (the watchdog sweep does), and it
+    is deliberately absent from ``_TICK_KWARGS_ALLOWED``: persisting it in
+    a build's stored tick config would freeze a deploy-time fact into
+    per-build state and go stale on the next redeploy.
     """
     config_kwargs: dict[str, typing.Any] = {
         **(stored_tick_kwargs or {}),
@@ -438,6 +507,7 @@ def _build_tick_config(
     }
     if "fail_mode" in config_kwargs:
         config_kwargs["fail_mode"] = FailMode(config_kwargs["fail_mode"])
+    config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
     return TickConfig(limit_key_selector=limit_key_selector, **config_kwargs)
 
 
@@ -2555,6 +2625,14 @@ class StardagApp:
             for worker_name, settings in self._worker_settings.items()
             if (timeout := settings.get("timeout")) is not None
         }
+        # The timeout of the ``tick`` function itself — i.e. how long a tick
+        # container may live. Captured here for the same reason as
+        # ``worker_timeouts``: the deployed tick has no access to the app
+        # object, and this is the number its per-pass spawn cap is derived
+        # from (see stardag.build._reactive._spawn_cap).
+        tick_timeout_seconds = _tick_function_timeout_seconds(
+            self._tick_settings, self._builder_settings
+        )
 
         def _modal_tick(
             build_id: str,
@@ -2646,7 +2724,10 @@ class StardagApp:
             # Explicit tick_kwargs (tests/manual invocations) win over
             # persisted ones; the limit key selector is deployed-app config.
             config = _build_tick_config(
-                build_info.reactive_tick_kwargs, tick_kwargs, limit_key_selector
+                build_info.reactive_tick_kwargs,
+                tick_kwargs,
+                limit_key_selector,
+                tick_timeout_seconds=tick_timeout_seconds,
             )
 
             # Register the app's task classes in THIS container before the
@@ -2704,13 +2785,14 @@ class StardagApp:
 
             def _modal_tick_watchdog() -> None:
                 _setup_logging()
-                # Scoped to this app's own reactive builds: see
-                # _run_watchdog_sweep for why sweeping the environment's
-                # whole RUNNING set is both wasteful and unsafe at scale.
+                # Scoped to this app's own reactive builds, and handed the
+                # container's own timeout to split across them — see
+                # _run_watchdog_sweep for both.
                 _run_watchdog_sweep(
                     registry_provider.get(),
                     _modal_tick,
                     reactive_app_name=app_name,
+                    tick_timeout_seconds=tick_timeout_seconds,
                 )
 
             self.modal_app.function(

@@ -11,6 +11,16 @@ reactive scheduling runs short-lived, idempotent **ticks**:
    running refs, self-heal completions, handle terminal states) → linger
    briefly polling the wake-up flag → exit when quiet.
 
+Acting on a frontier is **bounded-concurrent**, not serial: a wide layer
+is thousands of independent registry round-trips and executor spawns, and
+doing them one after another in a single container is the difference
+between a tick that finishes and a tick that is killed by its function
+timeout mid-fan-out. The bound (``TickConfig.max_concurrent_actions``) and
+the per-tick spawn cap (``TickConfig.max_spawns_per_tick``) are what keep
+"concurrent" from meaning "unbounded" — see :func:`_act_on_frontier` and
+:func:`_spawn_cap`. Truncating at the cap is not a stall: the tick acted,
+so it re-evaluates immediately on a fresh frontier rather than lingering.
+
 Workers self-report their lifecycle (see the Modal ``Runner``) and wake the
 scheduler when they finish, so no process needs to stay alive while
 long-running tasks execute. A periodic watchdog tick covers lost wake-ups
@@ -71,7 +81,8 @@ import logging
 import typing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Sequence
+from functools import partial
+from typing import Callable, Coroutine, Sequence
 from uuid import UUID
 
 from stardag import (
@@ -117,6 +128,58 @@ _TERMINAL_BUILD_STATUSES = ("completed", "failed", "cancelled")
 # execution, which is what claims exist to prevent); too long and an
 # abandoned claim merely heals later than it could have.
 _CLAIM_TTL_GRACE_SECONDS = 900.0
+
+# Default in-flight bound for everything a tick does per task: the frontier
+# actions (load / probe / claim / spawn / record) and discovery's completion
+# checks. 50 is not a new number — it is the resident engine's own
+# ``max_concurrent_discover`` default (see ``build/_concurrent.py``), which
+# has been driving the same registry and the same targets from a single
+# process since long before ticks existed. The two paths perform the same
+# logical work, so they should not disagree about how much of it may be in
+# flight; keeping one number is also what stops them drifting apart again.
+_DEFAULT_MAX_CONCURRENCY = 50
+
+# --- Per-tick spawn cap ------------------------------------------------
+#
+# A tick runs in a container with a finite life, so "spawn everything that
+# is actionable" is a bound on nothing: a wide enough layer outlives the
+# container and the tick is killed mid-fan-out. These constants turn the
+# cap into a duration budget instead of a magic count — see
+# :func:`_spawn_cap`, which also documents the ladder of inputs the budget
+# is derived from.
+
+# Fraction of the container's wall-clock limit that one fan-out pass may
+# spend. Well under half, because the pass is not all a tick does: the
+# frontier fetch, terminal evaluation, the summary report and (usually) a
+# second pass on a fresh frontier all have to fit in the same container.
+_SPAWN_BUDGET_FRACTION = 0.25
+
+# Wall-clock cost of putting ONE actionable task on a worker: a task-store
+# read, the acquiring start, the executor spawn, and the ref-recording
+# start — three network round-trips and a local read. Deliberately
+# pessimistic (a p99 round-trip, not a median), because underestimating it
+# inflates the cap, and an inflated cap is the failure this exists to
+# prevent.
+_SECONDS_PER_SPAWN = 2.0
+
+# Used when NO wall-clock limit is known at all — neither the tick's own
+# nor the executor's. There is nothing to derive from, so this is the one
+# place a plain number is unavoidable. Chosen so that the pass stays short
+# on any plausible container: 500 spawns x 2 s / 50 in flight is ~20 s of
+# round-trips.
+_DEFAULT_MAX_SPAWNS_PER_TICK = 500
+
+# Floor and ceiling on the derived cap. The floor keeps a tight timeout
+# from producing a cap so small that a build advances by dribs; the ceiling
+# is where the fan-out stops being the limiting factor anyway (a frontier
+# carrying 10k actionable refs is itself the expensive part of the tick).
+#
+# Note what the ceiling is NOT: a substitute for reading the right timeout.
+# It bounds the absurd, not the merely wrong — 10k spawns is still far more
+# than a five-minute container can do, so a cap derived from the wrong
+# duration is not rescued by clamping it.
+_MIN_SPAWN_CAP = 50
+_MAX_SPAWN_CAP = 10_000
 
 # The server's accepted range for claim_ttl_seconds (outside it: 422).
 # Clamped rather than raised on — a 30-second task and a 60-day task are
@@ -173,6 +236,83 @@ def scheduler_lock_name(build_id: UUID) -> str:
 
 
 # =============================================================================
+# Bounded concurrency (shared by discovery and the tick)
+# =============================================================================
+
+
+# A unit of concurrent work: a zero-argument callable producing the
+# coroutine, not the coroutine itself (see :func:`_run_concurrently`).
+_ActionFactory = Callable[[], Coroutine[typing.Any, typing.Any, typing.Any]]
+
+
+def _first_leaf_exception(error: BaseException) -> BaseException:
+    """The first non-group exception inside a (possibly nested) group."""
+    exceptions = getattr(error, "exceptions", None)
+    if not exceptions:
+        return error
+    return _first_leaf_exception(exceptions[0])
+
+
+async def _run_concurrently(
+    factories: "Sequence[_ActionFactory]",
+) -> None:
+    """Run ``factories``' coroutines concurrently; wait for all of them.
+
+    The resident engine's idiom (``asyncio.TaskGroup``; see
+    ``build/_concurrent.py``), factored out so the tick and discovery use
+    exactly one pattern between them rather than growing a second. This
+    helper carries **no** bound of its own — every caller supplies one,
+    either by passing a shared semaphore through :func:`_run_bounded` or,
+    where the fan-out is recursive, by gating the expensive await inside
+    the coroutine with a semaphore that spans the whole walk. A per-call
+    semaphore would be no bound at all under recursion: each nesting level
+    would mint a fresh one.
+
+    **Factories, not coroutines.** TaskGroup cancels its siblings the
+    moment one of them raises, and a sibling cancelled before it started
+    would leave an already-constructed coroutine un-awaited — a "coroutine
+    was never awaited" warning attached to the *unrelated* failure that
+    triggered the cancellation. Nothing is constructed until it runs, so
+    there is nothing to leak.
+
+    **Failures surface as themselves.** TaskGroup wraps everything in an
+    ``ExceptionGroup``; the tick's error handling — and the ``error_type``
+    a crashed tick reports in its :class:`TickSummary` — is meant to name
+    the thing that actually broke (a registry timeout, say), exactly as it
+    did when this work ran in a plain ``for`` loop. The group is therefore
+    unwrapped to its first leaf, with the group kept as the cause so
+    siblings that failed at the same moment are still in the traceback.
+    """
+    if not factories:
+        return
+    try:
+        async with asyncio.TaskGroup() as task_group:
+            for factory in factories:
+                task_group.create_task(factory())
+    except BaseExceptionGroup as group:  # noqa: F821 (3.11+; TaskGroup is too)
+        raise _first_leaf_exception(group) from group
+
+
+async def _run_bounded(
+    factories: "Sequence[_ActionFactory]",
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """:func:`_run_concurrently` with ``semaphore`` held for each coroutine.
+
+    For flat fan-outs, where "at most N in flight" and "at most N of these
+    coroutines running" are the same statement. The semaphore is passed in
+    rather than created here so a caller can share one bound across
+    several fan-outs (or across a recursion).
+    """
+
+    async def run_one(factory: "_ActionFactory") -> None:
+        async with semaphore:
+            await factory()
+
+    await _run_concurrently([partial(run_one, factory) for factory in factories])
+
+
+# =============================================================================
 # Discovery (shared by trigger and workers)
 # =============================================================================
 
@@ -213,6 +353,7 @@ async def discover_and_register_aio(
     tasks: TaskStruct,
     retry_failed: bool = False,
     _chunk_size: int = 50,
+    max_concurrent_discover: int = _DEFAULT_MAX_CONCURRENCY,
 ) -> DiscoveryResult:
     """Walk ``tasks``' dependency trees, register everything, return state.
 
@@ -223,7 +364,34 @@ async def discover_and_register_aio(
     reflects them (in reactive mode the registry *is* the scheduler state).
 
     Used by the reactive trigger (initial discovery) and by workers
-    registering dynamically yielded deps.
+    registering dynamically yielded deps. That second caller is why the
+    I/O here is worth bounded concurrency rather than a plain recursive
+    ``await``: it is not a once-per-build cost, it is paid on the hot path
+    of *every* dynamic-dependency yield, in every worker, on top of every
+    reactive re-trigger.
+
+    **Two phases, on purpose.** The expensive part of the walk is the
+    per-task ``complete_aio()`` — a target existence check, i.e. remote
+    I/O. That is what runs concurrently (``max_concurrent_discover``
+    checks in flight, matching the resident engine's default so the two
+    discovery paths stop being an order of magnitude apart). The
+    *ordering* is then reconstructed by a second, purely local, strictly
+    sequential post-order pass over the memoised results. Nothing about
+    the returned :class:`DiscoveryResult` or the registration order
+    therefore depends on which completion check happened to answer first:
+    ``post_order``, ``incomplete``, ``previously_completed`` and
+    ``retried`` come out exactly as the serial walk produced them, for any
+    DAG — diamonds included. Concurrency buys throughput here and nothing
+    else, which is the only way to add it to a path whose whole job is to
+    get an ordering right.
+
+    Bulk registration stays sequential across chunks for the same reason
+    the walk is post-order: chunk *n* may contain the dependencies of
+    chunk *n+1*, and overlapping them would reintroduce exactly the
+    phantom-row window the ordering exists to close. Only the per-task
+    calls that are independent of each other — the retry resets and the
+    completion marks — are run concurrently, and both preserve their
+    result order.
 
     With ``retry_failed=True``, incomplete tasks whose registry status is
     failed/cancelled/skipped/suspended (from a previous build) are reset to
@@ -236,38 +404,100 @@ async def discover_and_register_aio(
     """
     result = DiscoveryResult()
     post_order: list[BaseTask] = []
+
+    # --- phase 1: concurrent completion checks -------------------------
+    # Memoised per task id: whether it is complete, and (only when it is
+    # not) its static dependencies. Both are exactly what the serial walk
+    # computed inline; phase 2 replays the same recursion over them.
+    is_complete: dict[UUID, bool] = {}
+    deps_of: dict[UUID, list[BaseTask]] = {}
+    # Guards the visited set. A task reached from two parents at once must
+    # be checked once and recursed into once — the dedupe the serial walk
+    # got for free from being serial. Held across no await but the set
+    # mutation itself, so it never serialises the I/O below.
+    visit_lock = asyncio.Lock()
+    visited: set[UUID] = set()
+    # ONE semaphore for the whole walk (not one per recursion level, which
+    # would bound nothing), gating exactly the remote call: the target
+    # existence check. Mirrors ``build/_concurrent.py``'s
+    # ``discover_semaphore``.
+    discover_semaphore = asyncio.Semaphore(max(1, max_concurrent_discover))
+
+    async def visit(task: BaseTask) -> None:
+        """Check ``task`` for completion and recurse into its deps.
+
+        Order-free by construction: it records facts about tasks and never
+        appends to an ordered collection, so sibling subtrees may finish in
+        any interleaving. The set of tasks it visits is a property of the
+        DAG and the completion predicate, not of the traversal order, so it
+        is the same set the serial walk visited.
+        """
+        async with visit_lock:
+            if task.id in visited:
+                return
+            visited.add(task.id)
+        async with discover_semaphore:
+            complete = await task.complete_aio()
+        is_complete[task.id] = complete
+        if complete:
+            return  # don't recurse below complete tasks
+        deps = flatten_task_struct(task.requires())
+        deps_of[task.id] = deps
+        await _run_concurrently([partial(visit, dep) for dep in deps])
+
+    roots = flatten_task_struct(tasks)
+    await _run_concurrently([partial(visit, task) for task in roots])
+
+    # --- phase 2: sequential post-order over the memoised results ------
+    # No I/O, no awaits: the same recursion the serial implementation ran,
+    # with the completion check replaced by a dict lookup. This is what
+    # makes the result byte-identical to the serial version's.
     seen: set[UUID] = set()
 
-    async def walk(task: BaseTask) -> None:
+    def emit(task: BaseTask) -> None:
         if task.id in seen:
             return
         seen.add(task.id)
-        if await task.complete_aio():
+        if is_complete[task.id]:
             result.previously_completed.append(task)
             post_order.append(task)
-            return  # don't recurse below complete tasks
-        for dep in flatten_task_struct(task.requires()):
-            await walk(dep)
+            return
+        for dep in deps_of[task.id]:
+            emit(dep)
         result.incomplete[task.id] = task
         post_order.append(task)
 
-    for task in flatten_task_struct(tasks):
-        await walk(task)
+    for task in roots:
+        emit(task)
 
     for chunk_start in range(0, len(post_order), _chunk_size):
         chunk = post_order[chunk_start : chunk_start + _chunk_size]
         infos = await registry.task_register_bulk_aio(build_id, chunk)
-        if retry_failed:
-            for info in infos or []:
-                if (
-                    info.latest_status in _RETRYABLE_STATUSES
-                    and UUID(info.task_id) in result.incomplete
-                ):
-                    task = result.incomplete[UUID(info.task_id)]
-                    await registry.task_retry_aio(build_id, task)
-                    result.retried.append(task)
-    for task in result.previously_completed:
-        await registry.task_complete_aio(build_id, task)
+        if not retry_failed:
+            continue
+        # Resets are independent of each other (each addresses one task
+        # row), so they run concurrently — but ``retried`` is appended in
+        # ``infos`` order, not completion order, so the caller sees the
+        # same list the serial version returned.
+        to_retry = [
+            result.incomplete[UUID(info.task_id)]
+            for info in infos or []
+            if info.latest_status in _RETRYABLE_STATUSES
+            and UUID(info.task_id) in result.incomplete
+        ]
+        await _run_bounded(
+            [partial(registry.task_retry_aio, build_id, task) for task in to_retry],
+            discover_semaphore,
+        )
+        result.retried.extend(to_retry)
+
+    await _run_bounded(
+        [
+            partial(registry.task_complete_aio, build_id, task)
+            for task in result.previously_completed
+        ],
+        discover_semaphore,
+    )
 
     return result
 
@@ -291,6 +521,39 @@ class TickConfig:
     linger_seconds: float = 120.0
     poll_interval_seconds: float = 3.0
     fail_mode: FailMode = FailMode.FAIL_FAST
+    # How many of a pass's per-task actions may be in flight at once. Each
+    # actionable task costs a task-store read, an acquiring start, an
+    # executor spawn and a ref-recording start; doing that serially makes a
+    # wide layer a queue of thousands of round-trips in one container.
+    #
+    # Bounded rather than unbounded because the failure mode of "spawn
+    # everything at once" is not better than the failure mode of "spawn
+    # them one at a time" — it just moves it from the tick's own clock to
+    # the registry's connection pool. The default is the resident engine's
+    # (see ``_DEFAULT_MAX_CONCURRENCY``).
+    max_concurrent_actions: int = _DEFAULT_MAX_CONCURRENCY
+    # Hard cap on how many tasks ONE pass may spawn, i.e. how much work a
+    # single container commits to. ``None`` (the default) derives it from a
+    # wall-clock limit — see :func:`_spawn_cap` for the ladder.
+    #
+    # Truncation is never silent, and never a stall: the pass acted, so the
+    # tick re-evaluates immediately on a fresh frontier (see
+    # ``_run_tick_body_aio``'s ``if acted:`` branch) and picks up the rest.
+    max_spawns_per_tick: int | None = None
+    # The wall-clock limit of the container running THIS tick, when the
+    # caller knows it (e.g. the Modal integration knows the ``timeout`` its
+    # ``tick`` function was registered with). This is the quantity the
+    # spawn cap actually wants: how long this process may live, not how
+    # long the executions it spawns may run.
+    #
+    # Deployment infrastructure, not per-build configuration — deliberately
+    # NOT in the Modal ``_TICK_KWARGS_ALLOWED`` allowlist, because a value
+    # persisted in a build's stored tick config at trigger time would go
+    # stale the moment the app is redeployed with a different timeout. The
+    # one legitimate override is a caller that runs several ticks inside
+    # one container and is passing on a *share* of it (the Modal watchdog
+    # sweep does exactly this).
+    tick_timeout_seconds: float | None = None
     # Maps a task to the named concurrency-limit keys it runs under (see
     # the registry's environment concurrency limits). Acquisition happens
     # atomically at task start, before the spawn: a denied task simply
@@ -590,6 +853,17 @@ async def _run_tick_body_aio(
                     # frontier instead of waiting for an external wake-up
                     # (terminal detection above ran on the pre-action
                     # snapshot).
+                    #
+                    # This is also what makes the per-tick spawn cap a
+                    # throttle rather than a stall: a pass that truncated at
+                    # the cap necessarily spawned (or failed to spawn, or
+                    # was denied) every task it did attempt, so either it
+                    # acted — and lands here, taking the next batch off a
+                    # fresh frontier without waiting for anything — or every
+                    # attempt was denied by a concurrency limit, in which
+                    # case lingering for a slot to free up is precisely the
+                    # right thing to do and re-acting immediately would be a
+                    # hot loop against the registry.
                     deadline = loop.time() + config.linger_seconds
                     continue
 
@@ -662,6 +936,109 @@ async def _load_task(
     return task
 
 
+class _SpawnCap(typing.NamedTuple):
+    """A per-pass spawn cap and a plain-English account of where it came from.
+
+    The source is carried, not re-derived at logging time, because the one
+    question an operator has when a tick truncates is "which number did it
+    read?" — and the ladder in :func:`_spawn_cap` has four rungs, three of
+    which produce plausible-looking caps from very different inputs.
+    """
+
+    limit: int
+    source: str
+
+
+def _derived_spawn_cap(budget_source_seconds: float, config: TickConfig) -> int:
+    """Cap from a wall-clock limit: how many spawns fit in a fraction of it.
+
+    Putting one task on a worker costs a bounded amount of round-trips
+    (``_SECONDS_PER_SPAWN``) and ``max_concurrent_actions`` of them are in
+    flight at once, so the largest batch a pass can finish inside its
+    budget is ``budget * concurrency / cost``, clamped.
+    """
+    budget_seconds = _SPAWN_BUDGET_FRACTION * budget_source_seconds
+    derived = int(
+        budget_seconds * max(1, config.max_concurrent_actions) / _SECONDS_PER_SPAWN
+    )
+    return max(_MIN_SPAWN_CAP, min(_MAX_SPAWN_CAP, derived))
+
+
+def _spawn_cap(
+    candidates: Sequence[BaseTask],
+    task_executor: TaskExecutorABC,
+    config: TickConfig,
+) -> _SpawnCap:
+    """How many tasks this pass may spawn, and why.
+
+    The number that matters is not a count at all — it is a duration. A
+    tick lives in a container with a wall-clock limit, and the cap exists
+    to stop it starting more work than it can live long enough to finish.
+    So the whole question is *which* duration to read, resolved down this
+    ladder, most specific first:
+
+    1. **``TickConfig.max_spawns_per_tick``** — an explicit answer, taken
+       as given. The override always wins.
+    2. **``TickConfig.tick_timeout_seconds``** — the wall-clock limit of
+       *this* container, when the caller knows it (the Modal integration
+       reads the ``timeout`` its ``tick`` function was registered with).
+       This is the quantity the cap is actually about, so it is preferred
+       over anything below it.
+    3. **The executor's ``execution_timeout_seconds``** — a *proxy*, used
+       only when rung 2 is unavailable. It measures how long the spawned
+       executions may run, which is a different quantity and can differ by
+       orders of magnitude (a 24-hour worker under a 5-minute tick would
+       derive a cap the tick cannot possibly work through). It is still
+       better than a bare constant for the common case of a tick sized
+       like the work it schedules, and the log line says which rung
+       produced the cap so a truncating tick is diagnosable. The
+       **smallest** timeout among the candidates is used: with
+       heterogeneous routing the tightest backend limit is the one that
+       bounds the pass.
+    4. **``_DEFAULT_MAX_SPAWNS_PER_TICK``** — no wall clock is known
+       anywhere. Never unbounded: "however many are actionable" is exactly
+       what this replaces.
+    """
+    if config.max_spawns_per_tick is not None:
+        return _SpawnCap(
+            max(1, config.max_spawns_per_tick),
+            "TickConfig.max_spawns_per_tick (set explicitly)",
+        )
+    if config.tick_timeout_seconds is not None:
+        return _SpawnCap(
+            _derived_spawn_cap(config.tick_timeout_seconds, config),
+            f"this tick container's own timeout ({config.tick_timeout_seconds:.0f}s)",
+        )
+    timeouts: list[float] = []
+    for task in candidates:
+        try:
+            timeout = task_executor.execution_timeout_seconds(task)
+        except Exception:
+            # The ABC says this must not raise, but a spawn cap is not
+            # worth failing a tick over — an executor that misbehaves here
+            # simply contributes no timeout.
+            logger.debug(
+                f"Execution timeout resolution failed for task {task.id} "
+                "while sizing the spawn cap; ignoring it.",
+                exc_info=True,
+            )
+            continue
+        if timeout is not None:
+            timeouts.append(timeout)
+    if not timeouts:
+        return _SpawnCap(
+            _DEFAULT_MAX_SPAWNS_PER_TICK,
+            "the default (no wall-clock limit is known for this tick or its executor)",
+        )
+    return _SpawnCap(
+        _derived_spawn_cap(min(timeouts), config),
+        f"the executor's tightest execution timeout ({min(timeouts):.0f}s) "
+        "as a proxy — this tick does not know its own container's timeout; "
+        "set TickConfig.tick_timeout_seconds (or max_spawns_per_tick) if "
+        "the tick is sized differently from its workers",
+    )
+
+
 async def _act_on_frontier(
     frontier: BuildFrontier,
     *,
@@ -672,73 +1049,166 @@ async def _act_on_frontier(
     config: TickConfig,
     summary: TickSummary,
 ) -> tuple[bool, int]:
-    """Spawn/probe/heal the actionable tasks.
+    """Spawn/probe/heal the actionable tasks, with bounded concurrency.
 
     Returns ``(acted, denied_this_round)``: whether anything acted, and how
     many tasks were denied by concurrency limits in THIS pass (used by
     terminal detection — a cumulative count would keep suppressing the
     stuck-build check long after the denied tasks have run).
+
+    **Three phases, each bounded by ``max_concurrent_actions``.** Resolve
+    every actionable task's object; probe the ones already RUNNING; spawn
+    the rest. Phases exist because the spawn cap has to be sized against
+    the tasks that are actually spawn candidates, which is not knowable
+    until the objects are loaded. Within a phase the work is independent
+    per task; between phases nothing is.
+
+    **What concurrency does NOT change.** Each spawn coroutine still runs
+    its three steps in order — acquiring start, spawn, ref-recording start
+    — so a task denied by a concurrency limit or by a competing claim never
+    reaches ``submit_detached`` and never occupies a worker, and no
+    executor ref is ever recorded for an execution that does not exist.
+    Ordering *between* tasks was never guaranteed and is not relied upon:
+    the frontier's actionable set is by definition a set of tasks whose
+    dependencies are all satisfied.
+
+    **Nor does it change the claim.** Every task here is claimed at most
+    once per pass — the frontier lists a task once, and phases do not
+    overlap — so these coroutines are not racing each other for the same
+    claim. Nor is this tick racing another tick of the same build: it holds
+    the build's scheduler lease. The claim is still what arbitrates against
+    *other builds* (and against a tick of this build that the lease
+    manager's own failure modes let through), which is exactly the job it
+    had before, unchanged.
+
+    **Counters.** ``summary``'s fields and the two returned values are
+    mutated from several coroutines. That is safe without a lock because
+    every mutation is a bare ``+=`` on the same event loop with no
+    ``await`` between the read and the write — asyncio switches tasks only
+    at suspension points. Please keep it that way: a counter update that
+    grows an ``await`` in the middle stops being atomic.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
         return False, 0  # terminal handling deals with it
     acted = False
     denied_this_round = 0
-    for item in frontier.actionable:
+    semaphore = asyncio.Semaphore(max(1, config.max_concurrent_actions))
+
+    # --- phase 1: resolve task objects --------------------------------
+    # Results are written by index, not appended, so the partition below
+    # follows the frontier's own order regardless of which loads finished
+    # first — a tick's logs stay readable in the order the registry
+    # reported.
+    resolved: list[BaseTask | None] = [None] * len(frontier.actionable)
+
+    async def resolve(index: int, item: FrontierTaskRef) -> None:
+        nonlocal acted
         task = await _load_task(
             item.task_id,
             registry,
             task_store,
             quiet=item.latest_status in _RUNNING_STATUSES,
         )
-        if task is None:
-            if item.latest_status in _RUNNING_STATUSES:
-                # Can't probe without the object, but the worker reports its
-                # own terminal events — leave it to resolve itself.
-                continue
-            # A pending/suspended task with no stored object AND no
-            # rehydratable registry data can never be scheduled: fail it
-            # (rather than leaving it in the frontier forever, where it
-            # would block terminal detection and stall the build across
-            # endless watchdog ticks).
-            logger.error(
-                f"Task {item.task_id} of build {build_id} has no stored "
-                "task object and could not be rehydrated; failing it."
-            )
-            try:
-                from uuid import UUID as _UUID
-
-                await registry.task_fail_aio(
-                    build_id,
-                    typing.cast(BaseTask, _MissingTaskRef(id=_UUID(item.task_id))),
-                    "Task object missing from the build task store",
-                )
-                summary.failed_recorded += 1
-                acted = True
-            except Exception as e:
-                logger.error(
-                    f"Failed to record store-missing failure for task "
-                    f"{item.task_id}: {e}"
-                )
-            continue
-
+        if task is not None:
+            resolved[index] = task
+            return
         if item.latest_status in _RUNNING_STATUSES:
-            resolution = await _resolve_running(item, task, task_executor)
-            if resolution == "complete":
-                await registry.task_complete_aio(build_id, task)
-                summary.self_healed += 1
-                acted = True
-            elif resolution == "failed":
-                # Failed executions are recorded, not respawned — retries
-                # are the execution backend's job (e.g. Modal function
-                # retries); a fresh attempt needs an explicit re-trigger.
-                await registry.task_fail_aio(
-                    build_id, task, "Detached execution failed (observed by tick)"
-                )
-                summary.failed_recorded += 1
-                acted = True
-            # "leave": still running (or unprobeable) — nothing to do.
-            continue
+            # Can't probe without the object, but the worker reports its
+            # own terminal events — leave it to resolve itself.
+            return
+        # A pending/suspended task with no stored object AND no
+        # rehydratable registry data can never be scheduled: fail it
+        # (rather than leaving it in the frontier forever, where it
+        # would block terminal detection and stall the build across
+        # endless watchdog ticks).
+        logger.error(
+            f"Task {item.task_id} of build {build_id} has no stored "
+            "task object and could not be rehydrated; failing it."
+        )
+        try:
+            await registry.task_fail_aio(
+                build_id,
+                typing.cast(BaseTask, _MissingTaskRef(id=UUID(item.task_id))),
+                "Task object missing from the build task store",
+            )
+            summary.failed_recorded += 1
+            acted = True
+        except Exception as e:
+            logger.error(
+                f"Failed to record store-missing failure for task {item.task_id}: {e}"
+            )
 
+    await _run_bounded(
+        [
+            partial(resolve, index, item)
+            for index, item in enumerate(frontier.actionable)
+        ],
+        semaphore,
+    )
+
+    running_items: list[tuple[FrontierTaskRef, BaseTask]] = []
+    spawn_candidates: list[BaseTask] = []
+    for item, task in zip(frontier.actionable, resolved):
+        if task is None:
+            continue
+        if item.latest_status in _RUNNING_STATUSES:
+            running_items.append((item, task))
+        else:
+            spawn_candidates.append(task)
+
+    # --- phase 2: probe the RUNNING ones ------------------------------
+    async def probe(item: FrontierTaskRef, task: BaseTask) -> None:
+        nonlocal acted
+        resolution = await _resolve_running(item, task, task_executor)
+        if resolution == "complete":
+            await registry.task_complete_aio(build_id, task)
+            summary.self_healed += 1
+            acted = True
+        elif resolution == "failed":
+            # Failed executions are recorded, not respawned — retries
+            # are the execution backend's job (e.g. Modal function
+            # retries); a fresh attempt needs an explicit re-trigger.
+            await registry.task_fail_aio(
+                build_id, task, "Detached execution failed (observed by tick)"
+            )
+            summary.failed_recorded += 1
+            acted = True
+        # "leave": still running (or unprobeable) — nothing to do.
+
+    await _run_bounded(
+        [partial(probe, item, task) for item, task in running_items],
+        semaphore,
+    )
+
+    # --- phase 3: spawn, up to this pass's cap ------------------------
+    cap = _spawn_cap(spawn_candidates, task_executor, config)
+    if summary.iterations <= 1:
+        # Once per tick, at INFO: the cap and — more importantly — which of
+        # :func:`_spawn_cap`'s four rungs produced it. Three of them yield
+        # plausible-looking numbers from very different inputs, so a
+        # truncating tick is only diagnosable if the log says which was
+        # read. Subsequent passes of the same tick re-derive the same
+        # answer and would only repeat themselves.
+        logger.info(
+            f"Tick for build {build_id} will spawn at most {cap.limit} "
+            f"task(s) per pass, from {cap.source}."
+        )
+    if len(spawn_candidates) > cap.limit:
+        # Loud, always: a build that spawns in batches is a build whose
+        # logs must say so, or the next reader concludes the frontier is
+        # shrinking for some other reason. Not a stall — see the
+        # ``if acted:`` branch in ``_run_tick_body_aio``.
+        logger.info(
+            f"Build {build_id} has {len(spawn_candidates)} spawnable tasks "
+            f"this pass, more than the per-tick cap of {cap.limit} (from "
+            f"{cap.source}); spawning the first {cap.limit} and "
+            "re-evaluating on a fresh frontier immediately. Set "
+            "TickConfig.max_spawns_per_tick to change the cap."
+        )
+        spawn_candidates = spawn_candidates[: cap.limit]
+
+    async def spawn(task: BaseTask) -> None:
+        nonlocal acted, denied_this_round
         limit_keys: list[str] = (
             list(config.limit_key_selector(task))
             if config.limit_key_selector is not None
@@ -793,7 +1263,7 @@ async def _act_on_frontier(
                 )
                 summary.claim_denied += 1
             denied_this_round += 1
-            continue
+            return
         try:
             handle = await task_executor.submit_detached(task)
         except Exception as e:
@@ -801,7 +1271,7 @@ async def _act_on_frontier(
             await registry.task_fail_aio(build_id, task, f"Spawn failed: {e}")
             summary.failed_recorded += 1
             acted = True
-            continue
+            return
         await registry.task_start_aio(
             build_id,
             task,
@@ -812,6 +1282,8 @@ async def _act_on_frontier(
         )
         summary.spawned += 1
         acted = True
+
+    await _run_bounded([partial(spawn, task) for task in spawn_candidates], semaphore)
     return acted, denied_this_round
 
 

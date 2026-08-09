@@ -1,5 +1,7 @@
 """Tests for StardagApp build_function and run_function customization."""
 
+import typing
+
 import pytest
 
 try:
@@ -1929,6 +1931,42 @@ class TestWatchdogSweep:
             (str(build_ids[1]), {"linger_seconds": 0}),
         ]
 
+    def test_sweep_splits_the_container_budget_across_builds(self):
+        """The sweep runs every build's tick sequentially in ONE container,
+        so each build gets a share of its wall clock — otherwise the first
+        wide build would size its fan-out as though it owned the whole
+        timeout and the rest of the sweep would never run."""
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        build_ids = [uuid4(), uuid4(), uuid4(), uuid4()]
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_list_running.return_value = build_ids
+        ticked: list = []
+
+        def tick(build_id, tick_kwargs=None):
+            ticked.append(tick_kwargs)
+
+        _run_watchdog_sweep(registry, tick, tick_timeout_seconds=600.0)
+
+        assert ticked == [{"linger_seconds": 0, "tick_timeout_seconds": 150.0}] * len(
+            build_ids
+        )
+
+    def test_sweep_omits_the_budget_when_the_timeout_is_unknown(self):
+        """No declared tick timeout — nothing to split, and the spawn cap
+        falls to its next rung rather than being handed a made-up number."""
+        from stardag.integration.modal._app import _run_watchdog_sweep
+
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_list_running.return_value = [uuid4()]
+        ticked: list = []
+
+        _run_watchdog_sweep(
+            registry, lambda build_id, tick_kwargs=None: ticked.append(tick_kwargs)
+        )
+
+        assert ticked == [{"linger_seconds": 0}]
+
     def test_sweep_survives_individual_tick_failures(self):
         from stardag.integration.modal._app import _run_watchdog_sweep
 
@@ -1988,6 +2026,57 @@ class TestWatchdogSweep:
         assert "reduce the number of concurrent reactive builds" in caplog.text
 
 
+class TestTickFunctionTimeout:
+    """Which settings the tick's own container timeout is read from.
+
+    It is the input the per-pass spawn cap is derived from, so reading it
+    from the wrong place is not a cosmetic error.
+    """
+
+    @staticmethod
+    def _settings(**kwargs) -> "FunctionSettings":
+        # `image` is Required on the TypedDict but irrelevant here.
+        return typing.cast("FunctionSettings", kwargs)
+
+    def test_reads_tick_settings_when_given(self):
+        from stardag.integration.modal._app import _tick_function_timeout_seconds
+
+        assert (
+            _tick_function_timeout_seconds(
+                self._settings(timeout=300), self._settings(timeout=3600)
+            )
+            == 300.0
+        )
+
+    def test_falls_back_to_builder_settings(self):
+        """tick_settings defaults to builder_settings in finalize(), so the
+        timeout must follow the same fallback — otherwise every app that
+        does not configure the tick separately (the common case) would
+        report "unknown"."""
+        from stardag.integration.modal._app import _tick_function_timeout_seconds
+
+        builder = self._settings(timeout=3600)
+        assert _tick_function_timeout_seconds(None, builder) == 3600.0
+        assert _tick_function_timeout_seconds(self._settings(), builder) == 3600.0
+
+    def test_a_configured_zero_is_a_value_not_an_absence(self):
+        """`timeout=0` was reported as "not declared", which sends the spawn
+        cap to a different fallback rung than the one the function was
+        registered with."""
+        from stardag.integration.modal._app import _tick_function_timeout_seconds
+
+        assert _tick_function_timeout_seconds(self._settings(timeout=0), None) == 0.0
+
+    def test_none_when_neither_declares_one(self):
+        from stardag.integration.modal._app import _tick_function_timeout_seconds
+
+        assert _tick_function_timeout_seconds(None, None) is None
+        assert (
+            _tick_function_timeout_seconds(self._settings(cpu=2), self._settings(cpu=4))
+            is None
+        )
+
+
 class TestBuildTickConfig:
     """Config assembly for scheduler ticks: stored tick_kwargs shared by all
     ticks, explicit kwargs win, app-level limit key selector injected."""
@@ -2022,3 +2111,36 @@ class TestBuildTickConfig:
 
         config = _build_tick_config(None, None, None)
         assert config.linger_seconds == TickConfig().linger_seconds
+        assert config.tick_timeout_seconds is None
+
+    def test_tick_function_timeout_applied_as_a_default(self):
+        """The deployed tick's own Modal ``timeout`` — how long this
+        container may live — is what the per-pass spawn cap is derived
+        from, so it has to reach the TickConfig."""
+        from stardag.integration.modal._app import _build_tick_config
+
+        config = _build_tick_config(None, None, None, tick_timeout_seconds=300.0)
+
+        assert config.tick_timeout_seconds == 300.0
+
+    def test_caller_supplied_budget_wins_over_the_function_timeout(self):
+        """A default, not an override: the watchdog sweep runs several
+        ticks in one container and passes on its own share of the budget."""
+        from stardag.integration.modal._app import _build_tick_config
+
+        config = _build_tick_config(
+            None,
+            {"linger_seconds": 0, "tick_timeout_seconds": 60.0},
+            None,
+            tick_timeout_seconds=600.0,
+        )
+
+        assert config.tick_timeout_seconds == 60.0
+
+    def test_tick_timeout_is_not_a_persistable_tick_kwarg(self):
+        """It is a deploy-time fact about the container, not per-build
+        config: persisting it in a build's stored tick_kwargs would go
+        stale on the next redeploy."""
+        from stardag.integration.modal._app import _TICK_KWARGS_ALLOWED
+
+        assert "tick_timeout_seconds" not in _TICK_KWARGS_ALLOWED

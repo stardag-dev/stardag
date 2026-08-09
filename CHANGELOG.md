@@ -8,6 +8,55 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Reactive ticks fan out concurrently.** Acting on a frontier was a plain
+  `for` loop with awaits inside it: per actionable task, a task-store read,
+  an execution-claim acquisition, an executor spawn and a start recording
+  the ref — 2–3 registry round-trips plus a spawn, strictly serialised. A
+  layer thousands of tasks wide was therefore thousands of sequential HTTP
+  calls in one short-lived container, racing a function timeout nothing
+  related it to. Each pass now runs those actions with bounded concurrency
+  (`TickConfig.max_concurrent_actions`, default 50 — the bound the resident
+  engine has always used). Ordering _within_ a task is unchanged: the
+  acquiring start still precedes the spawn (a denied task never occupies a
+  worker) and the ref-recording start still follows it.
+
+- **A per-tick spawn cap, derived from the tick container's own timeout.**
+  The old cap was "however many tasks are actionable", which is unrelated
+  to how long the container may live. `TickConfig.max_spawns_per_tick`
+  bounds one pass; left unset it is derived as a duration budget — a
+  fraction of the tick's wall-clock limit, spread over the in-flight bound.
+  The limit is resolved down a ladder: the explicit cap, then
+  `TickConfig.tick_timeout_seconds` (which the Modal integration fills in
+  automatically from the `timeout` the deployed `tick` function carries,
+  falling back to `builder_settings` exactly as function registration
+  does), then the executor's `execution_timeout_seconds` as a fallback
+  proxy, then a conservative default. Every tick logs its cap and which
+  rung produced it. Truncation is logged, never silent, and never a stall:
+  the pass acted, so the tick re-evaluates on a fresh frontier immediately
+  and takes the next batch. `max_spawns_per_tick` and
+  `max_concurrent_actions` are accepted as Modal `tick_kwargs`;
+  `tick_timeout_seconds` deliberately is not — it is a deploy-time fact
+  about the container, not per-build state.
+
+  The watchdog sweeps every running build sequentially inside one
+  container, so it now hands each build a proportional share of that
+  container's budget rather than letting the first wide build size its
+  fan-out as though it owned the whole timeout.
+
+- **Concurrent DAG discovery in reactive mode.**
+  `discover_and_register_aio` walked the DAG with a recursive `await
+task.complete_aio()` and no concurrency, while the resident engine did
+  the same work 50 at a time. That cost was not paid once per build: this
+  walk runs at every reactive trigger _and_ in every worker registering
+  dynamically yielded dependencies, i.e. on the hot path of every dynamic
+  dependency. It is now bounded-concurrent on the same default
+  (`max_concurrent_discover=50`). The completion checks overlap; the
+  ordering does not — post-order registration (dependencies before the
+  tasks that need them, so the bulk endpoint never creates phantom rows),
+  diamond deduplication, `retry_failed` behaviour and all three
+  `DiscoveryResult` collections come out identical to the serial walk's,
+  element for element.
+
 - **Blocker liveness is now read from the execution claim's expiry, not
   inferred.** A reactive tick decided whether to wait on a RUNNING upstream
   owned by another build from a table over `(in-build, status, owning-build
