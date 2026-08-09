@@ -1,6 +1,10 @@
 import type {
   Build,
+  BuildCancelResult,
   BuildListResponse,
+  BuildStatus,
+  BulkCancelBuildsRequest,
+  BulkCancelBuildsResponse,
   Task,
   TaskArtifactListResponse,
   TaskEvent,
@@ -13,12 +17,49 @@ import { API_V1 } from "./config";
 
 const API_BASE = API_V1;
 
+/**
+ * Best-effort error message for a failed response.
+ *
+ * FastAPI puts the useful part in a JSON ``detail`` (the 422 "provide
+ * build_ids and/or idle_for_seconds" and the 403 admin gate both say
+ * exactly what went wrong), while ``statusText`` says only
+ * "Unprocessable Entity". Falls back to the status line when the body is
+ * missing or not JSON.
+ */
+async function errorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const body = await response.json();
+    const detail = (body as { detail?: unknown }).detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0] as { msg?: unknown };
+      if (typeof first?.msg === "string") return first.msg;
+    }
+  } catch {
+    // Not JSON (or already consumed) — fall through to the status line.
+  }
+  return `${fallback}: ${response.statusText}`;
+}
+
 // Build API
 
 export interface BuildFilters {
   page?: number;
   page_size?: number;
   environment_id?: string;
+  // Derived build status, filtered server-side.
+  status?: BuildStatus;
+  // Only builds reactively scheduled by the named app.
+  reactive_app_name?: string;
+  // Only builds with no activity for at least this long, measured on
+  // `last_activity_at`. Same definition and same 60s floor as
+  // POST /builds/bulk-cancel — deliberately the one predicate, so what a
+  // list shows and what a cleanup would act on cannot disagree. Ordering
+  // flips to stalest-first when it is set.
+  //
+  // Only `status=running` may accompany it (that pair is the
+  // abandoned-build query and stays exact); any other status is a 422.
+  idle_for_seconds?: number;
 }
 
 export async function fetchBuilds(
@@ -28,6 +69,11 @@ export async function fetchBuilds(
   if (filters.page) params.set("page", String(filters.page));
   if (filters.page_size) params.set("page_size", String(filters.page_size));
   if (filters.environment_id) params.set("environment_id", filters.environment_id);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.reactive_app_name)
+    params.set("reactive_app_name", filters.reactive_app_name);
+  if (filters.idle_for_seconds)
+    params.set("idle_for_seconds", String(filters.idle_for_seconds));
 
   const url = `${API_BASE}/builds?${params.toString()}`;
   const response = await fetchWithAuth(url);
@@ -208,19 +254,59 @@ export async function fetchTaskEvents(
 
 // Build actions
 
+/**
+ * Cancel a single build.
+ *
+ * ``cascade`` additionally emits TASK_CANCELLED for the build's
+ * RUNNING/SUSPENDED tasks, releasing the execution claims and
+ * concurrency-limit slots they hold. It defaults to false server-side, so
+ * an omitted argument keeps the historical behaviour (a build-level event
+ * and nothing else).
+ */
 export async function cancelBuild(
   buildId: string,
   environmentId?: string,
   triggeredByUserId?: string,
-): Promise<Build> {
+  cascade = false,
+): Promise<BuildCancelResult> {
   const params = new URLSearchParams();
   if (environmentId) params.set("environment_id", environmentId);
   if (triggeredByUserId) params.set("triggered_by_user_id", triggeredByUserId);
+  if (cascade) params.set("cascade", "true");
 
   const url = `${API_BASE}/builds/${buildId}/cancel?${params.toString()}`;
   const response = await fetchWithAuth(url, { method: "POST" });
   if (!response.ok) {
-    throw new Error(`Failed to cancel build: ${response.statusText}`);
+    throw new Error(await errorMessage(response, "Failed to cancel build"));
+  }
+  return response.json();
+}
+
+/**
+ * Cancel every RUNNING build matching an explicit id set and/or an
+ * idleness threshold, optionally releasing the claims their tasks hold.
+ *
+ * Pass ``dry_run: true`` first: the response then reports the exact same
+ * selection (builds, cascaded task ids, per-build skip reasons,
+ * truncation) that a real call would act on, and writes nothing.
+ *
+ * On the JWT path this requires the workspace admin role.
+ */
+export async function bulkCancelBuilds(
+  request: BulkCancelBuildsRequest,
+  environmentId: string,
+): Promise<BulkCancelBuildsResponse> {
+  const params = new URLSearchParams();
+  params.set("environment_id", environmentId);
+
+  const url = `${API_BASE}/builds/bulk-cancel?${params.toString()}`;
+  const response = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, "Failed to cancel builds"));
   }
   return response.json();
 }

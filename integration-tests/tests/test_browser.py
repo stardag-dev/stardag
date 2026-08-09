@@ -204,8 +204,10 @@ class TestUISidebarNavigation:
         expect(collapse_btn).to_be_visible()
 
         # Test navigation items exist
-        home_btn = logged_in_page.get_by_text("Home", exact=True)
-        expect(home_btn).to_be_visible()
+        # Scoped to the sidebar button: the breadcrumb also reads "Builds",
+        # so a bare text locator matches two elements and trips strict mode.
+        builds_btn = logged_in_page.locator("button[title='Builds']")
+        expect(builds_btn).to_be_visible()
 
         # Test collapse/expand
         collapse_btn.click()
@@ -481,8 +483,9 @@ class TestUIBuildViewDAG:
         """Test DAG toggle exists on build page and collapse/expand works."""
         self._go_to_home(logged_in_page, docker_services)
 
-        # Navigate to Home (builds list)
-        logged_in_page.get_by_text("Home", exact=True).click()
+        # Navigate to the builds list (sidebar button — see above on why this
+        # is not a text locator).
+        logged_in_page.locator("button[title='Builds']").click()
         logged_in_page.wait_for_load_state("networkidle")
 
         # Check if there are any builds to click on
@@ -494,28 +497,30 @@ class TestUIBuildViewDAG:
             logged_in_page.wait_for_load_state("networkidle")
             logged_in_page.wait_for_timeout(500)
 
-            # Should have DAG View toggle button
-            dag_button = logged_in_page.get_by_text("DAG View", exact=False)
+            # Should have a DAG View disclosure toggle.
+            #
+            # This block asserted on button text ("Click to expand" /
+            # "Click to collapse") that has never existed in this UI — the
+            # toggle expresses its state with a rotated chevron and the
+            # panel's presence. It went unnoticed because the guard above
+            # matched nothing while the builds list was a list of buttons
+            # rather than a table, so the body never ran. It runs now, and
+            # asserts against aria-expanded, which is both the accessible
+            # contract and a stable hook.
+            dag_button = logged_in_page.locator(
+                "button[aria-controls='build-dag-panel']"
+            )
             expect(dag_button).to_be_visible()
+            expect(dag_button).to_have_attribute("aria-expanded", "true")
+            expect(logged_in_page.locator("#build-dag-panel")).to_be_visible()
 
-            # Test collapse/expand
-            dag_button = logged_in_page.locator("button:has-text('DAG View')")
-            if dag_button.is_visible():
-                dag_button.click()
-                logged_in_page.wait_for_timeout(300)
+            dag_button.click()
+            expect(dag_button).to_have_attribute("aria-expanded", "false")
+            expect(logged_in_page.locator("#build-dag-panel")).to_have_count(0)
 
-                collapsed_text = dag_button.inner_text()
-                assert "Click to expand" in collapsed_text, (
-                    f"After collapse, expected 'Click to expand', got: {collapsed_text}"
-                )
-
-                dag_button.click()
-                logged_in_page.wait_for_timeout(300)
-
-                expanded_text = dag_button.inner_text()
-                assert "Click to collapse" in expanded_text, (
-                    f"After expand, expected 'Click to collapse', got: {expanded_text}"
-                )
+            dag_button.click()
+            expect(dag_button).to_have_attribute("aria-expanded", "true")
+            expect(logged_in_page.locator("#build-dag-panel")).to_be_visible()
 
 
 class TestUIResponsiveness:
