@@ -31,7 +31,14 @@ _HEADER_BYTES = SDK_VERSION_HEADER.lower().encode()
 # undiagnosable — a client told "upgrade" could not ask *to what*. The rest
 # are unauthenticated infrastructure endpoints that predate any notion of an
 # SDK and have no business failing on one.
-_EXEMPT_PATHS = frozenset({"/health", "/api/v1/version"})
+# Both spellings: FastAPI's `redirect_slashes` means a client can arrive at
+# `/health/`, and the redirect is issued by the router — *after* this
+# middleware. Matching only the canonical form would gate the trailing-slash
+# variant with a 426 before the redirect could happen, breaking the one
+# guarantee this list exists to make.
+_EXEMPT_PATHS = frozenset(
+    {"/health", "/health/", "/api/v1/version", "/api/v1/version/"}
+)
 _EXEMPT_PREFIXES = ("/.well-known/",)
 
 

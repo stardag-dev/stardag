@@ -174,7 +174,7 @@ def check_minimum_sdk_version(
         message=(
             f"This Stardag server requires stardag SDK {minimum} or newer, "
             f"but this request came from stardag {version}. Upgrade with: "
-            f'pip install --upgrade "stardag>={minimum}"  '
+            f'pip install --upgrade "stardag>={minimum}" '
             f"(the server's current requirement is always readable as "
             f"minimum_sdk_version at GET /api/v1/version)."
         ),
@@ -195,17 +195,33 @@ _MAX_TRACKED_SDK_VERSIONS = 200
 _MALFORMED = "<malformed>"
 
 
+_ABSENT = "<absent>"
+
+
 def record_sdk_version(raw: str | None, version: Version | None) -> None:
-    """Log the first request seen from each distinct SDK version."""
-    if raw is None:
-        return
-    label = str(version) if version is not None else _MALFORMED
+    """Log the first request seen from each distinct SDK version.
+
+    A *missing* header is recorded too, as its own label. It is allowed —
+    that is the whole point of shipping the measurement before the
+    enforcement — but "how many callers are on an SDK old enough not to send
+    the header yet" is precisely the number a floor has to be set against,
+    and returning early here meant it could never be observed.
+    """
+    label = (
+        _ABSENT if raw is None else str(version) if version is not None else _MALFORMED
+    )
     if label in _seen_sdk_versions:
         return
     if len(_seen_sdk_versions) >= _MAX_TRACKED_SDK_VERSIONS:
         return
     _seen_sdk_versions.add(label)
-    if version is None:
+    if raw is None:
+        logger.info(
+            "First request in this process with no %s header (an SDK "
+            "predating the header, or a non-SDK client; request allowed)",
+            SDK_VERSION_HEADER,
+        )
+    elif version is None:
         logger.info(
             "Unparseable %s header: %r (treated as unknown, request allowed)",
             SDK_VERSION_HEADER,
