@@ -366,4 +366,10 @@ async def evict_concurrency_limit_holder(
 
     record_entity_created(auth.workspace_id, "events")
 
-    return TaskEventResponse(task_id=db_task.task_id, status=db_task.latest_status)
+    # This surface has no build scope, so both fields carry the global
+    # status — see TaskEventResponse for why they are usually different.
+    return TaskEventResponse(
+        task_id=db_task.task_id,
+        status=db_task.latest_status,
+        latest_status=db_task.latest_status,
+    )

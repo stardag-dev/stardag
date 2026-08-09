@@ -449,7 +449,11 @@ async def _create_task_event(
 
     status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
 
-    return TaskEventResponse(task_id=db_task.task_id, status=status)
+    return TaskEventResponse(
+        task_id=db_task.task_id,
+        status=status,
+        latest_status=db_task.latest_status,
+    )
 
 
 # --- Build CRUD ---

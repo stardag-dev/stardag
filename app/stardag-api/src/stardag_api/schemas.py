@@ -616,7 +616,18 @@ class TaskEventResponse(BaseModel):
     """Slim response for task lifecycle events (start, complete, fail, etc.)."""
 
     task_id: str
+    # The task's status **within this build**, replayed from this build's
+    # events. Not the same thing as `latest_status` below, and the
+    # difference is load-bearing: cancelling a task that another build
+    # already completed yields `status="cancelled"` (this build did cancel
+    # it) while `latest_status` stays `completed` (COMPLETED is sticky
+    # environment-wide). A caller asking "did my cancel release the claim?"
+    # must read `latest_status`; one asking "what did this build do?" wants
+    # `status`.
     status: TaskStatus
+    # The environment-global denormalised status after this event — the
+    # execution claim's own answer.
+    latest_status: TaskStatus | None = None
 
 
 class TaskListResponse(BaseModel):

@@ -116,6 +116,38 @@ async def test_cancel_without_cascade_leaves_the_claim_held(client: AsyncClient)
 
 
 @pytest.mark.asyncio
+async def test_task_event_response_separates_build_scope_from_the_claim(
+    client: AsyncClient,
+):
+    """`status` is what this build did; `latest_status` is what the claim says.
+
+    They diverge exactly where it matters: cancelling a task that is already
+    COMPLETED records the event (deliberately — that is what makes a cancel
+    racing a completion benign) and this build's replay ends in `cancelled`,
+    but COMPLETED is sticky environment-wide, so the claim was never held and
+    nothing was released. A caller that reads `status` to decide "did my
+    release work?" gets the wrong answer every time.
+    """
+    build_id = await _new_build(client)
+    await _start(client, build_id, "sticky")
+    completed = (
+        await client.post(f"/api/v1/builds/{build_id}/tasks/sticky/complete")
+    ).json()
+    assert completed["status"] == "completed"
+    assert completed["latest_status"] == "completed"
+
+    cancelled = (
+        await client.post(f"/api/v1/builds/{build_id}/tasks/sticky/cancel")
+    ).json()
+    assert cancelled["status"] == "cancelled", "this build did cancel it"
+    assert cancelled["latest_status"] == "completed", "but COMPLETED is sticky"
+
+    # And the global listing agrees with `latest_status`, not with `status`.
+    listed = (await client.get("/api/v1/tasks", params={"task_id": "sticky"})).json()
+    assert listed["tasks"][0]["latest_status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_cancel_cascade_releases_claims_and_limit_slots(client: AsyncClient):
     """cascade=true is the fix: the task leaves RUNNING, so the claim is
     free for the next build and the concurrency-limit slot is free too."""
