@@ -98,9 +98,18 @@ async def create_build_tick_summary(
     # Retention is enforced on insert rather than by a background job:
     # this service has no scheduler, and the property we actually need is
     # "a build's trail is bounded", which insert-time pruning gives
-    # exactly and immediately. The delete is bounded by construction —
-    # steady state removes one row per insert — and rides the same
-    # transaction, so a build never observes an over-long trail.
+    # immediately. The delete is bounded by construction — steady state
+    # removes one row per insert — and rides the same transaction.
+    #
+    # The bound is eventual, not absolute, and deliberately so. Two
+    # concurrent inserts for the same build each compute `retained_ids`
+    # without seeing the other's uncommitted row, so the trail can briefly
+    # hold a few rows more than the cap; the next insert prunes them. The
+    # alternative is locking the build row on every tick report, which puts
+    # a serialisation point on the scheduler's hot path to defend a
+    # retention limit whose violation nobody can observe except by counting
+    # rows. Not worth it — and the window is already narrow, since the
+    # scheduler lease single-flights ticks per build.
     retained_ids = (
         select(BuildTickSummary.id)
         .where(BuildTickSummary.build_id == build.id)
