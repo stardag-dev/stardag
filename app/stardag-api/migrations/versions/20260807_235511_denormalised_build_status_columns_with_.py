@@ -54,33 +54,77 @@ _TERMINAL_BUILD_STATUS = {
 _USER_TRIGGERABLE = ("build_completed", "build_failed", "build_cancelled")
 
 
-def _backfill_build_status(connection: sa.engine.Connection) -> None:
-    """Replay every build-level event into the latest_* columns on its build."""
-    states: dict[str, dict] = {}
+_UPDATE_BATCH = 500
 
+
+def _fresh_state() -> dict:
+    return {
+        "status": "pending",
+        "started_at": None,
+        "completed_at": None,
+        "triggered_by": None,
+        "is_resumed": False,
+    }
+
+
+def _backfill_build_status(connection: sa.engine.Connection) -> None:
+    """Replay every build-level event into the latest_* columns on its build.
+
+    Streamed per build rather than accumulated: this runs at upgrade time on
+    installations whose event tables are the biggest thing they own, and a
+    dict keyed by every build that ever existed is a poor thing to require
+    of the machine running the migration.
+
+    Ordering by ``build_id`` first is what makes that possible, and is safe
+    because the replay only ever depends on the order of events *within* one
+    build — the global interleaving carries no information here. When the
+    build id changes, the previous build's state is final and can be
+    flushed.
+    """
+    update_stmt = sa.text(
+        """
+        UPDATE builds
+        SET latest_status = :status,
+            latest_started_at = :started_at,
+            latest_completed_at = :completed_at,
+            latest_status_triggered_by_user_id = :triggered_by,
+            latest_is_resumed = :is_resumed
+        WHERE id = :build_id
+        """
+    )
+    pending_updates: list[dict] = []
+
+    def flush(force: bool = False) -> None:
+        if pending_updates and (force or len(pending_updates) >= _UPDATE_BATCH):
+            connection.execute(update_stmt, pending_updates)
+            pending_updates.clear()
+
+    # Statement-level, NOT `connection.execution_options(...)`: that mutates
+    # the connection Alembic is running the whole migration on, and a
+    # streaming connection reports rowcount -1 — which Alembic reads as "the
+    # version-table update matched no row" and aborts every upgrade.
     events = connection.execute(
         sa.text(
             """
             SELECT id, build_id, event_type, created_at, event_metadata
             FROM events
             WHERE task_id IS NULL
-            ORDER BY created_at ASC, id ASC
+            ORDER BY build_id ASC, created_at ASC, id ASC
             """
-        )
+        ).execution_options(stream_results=True)
     )
+
+    current_id: str | None = None
+    state = _fresh_state()
 
     for row in events:
         build_id = str(row.build_id)
-        state = states.setdefault(
-            build_id,
-            {
-                "status": "pending",
-                "started_at": None,
-                "completed_at": None,
-                "triggered_by": None,
-                "is_resumed": False,
-            },
-        )
+        if build_id != current_id:
+            if current_id is not None:
+                pending_updates.append({"build_id": current_id, **state})
+                flush()
+            current_id = build_id
+            state = _fresh_state()
 
         et = row.event_type
         meta = row.event_metadata or {}
@@ -114,19 +158,9 @@ def _backfill_build_status(connection: sa.engine.Connection) -> None:
             )
         # Any other build-level event type is status-neutral.
 
-    update_stmt = sa.text(
-        """
-        UPDATE builds
-        SET latest_status = :status,
-            latest_started_at = :started_at,
-            latest_completed_at = :completed_at,
-            latest_status_triggered_by_user_id = :triggered_by,
-            latest_is_resumed = :is_resumed
-        WHERE id = :build_id
-        """
-    )
-    for build_id, state in states.items():
-        connection.execute(update_stmt, {"build_id": build_id, **state})
+    if current_id is not None:
+        pending_updates.append({"build_id": current_id, **state})
+    flush(force=True)
 
 
 def upgrade() -> None:
