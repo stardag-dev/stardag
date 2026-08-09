@@ -345,6 +345,45 @@ async def test_bulk_cancel_limit_truncates_and_reports_it(
     assert body["truncated"] is False
 
 
+@pytest.mark.asyncio
+async def test_truncation_does_not_relabel_a_not_idle_build_as_retryable(
+    client: AsyncClient, async_session
+):
+    """`limit_reached` is the one skip reason worth retrying on, so it must
+    not be handed to a build that no retry will ever select.
+
+    The check order used to report `limit_reached` for any running,
+    non-reactive build the moment truncation happened — including builds
+    skipped for not being idle, which stay unselectable however many times
+    the caller calls back.
+    """
+    idle = [await _new_build(client) for _ in range(2)]
+    for build_id in idle:
+        await _backdate(async_session, build_id, age=timedelta(days=2))
+    # Running and requested, but active seconds ago.
+    busy = await _new_build(client)
+
+    body = (
+        await client.post(
+            BULK_CANCEL,
+            json={
+                "build_ids": idle + [busy],
+                "idle_for_seconds": 3600,
+                "limit": 1,
+            },
+        )
+    ).json()
+
+    assert body["truncated"] is True
+    assert body["build_count"] == 1
+    # One idle build was left over by the cap — that one is retryable.
+    leftover = [b for b in idle if b in body["skipped"]]
+    assert len(leftover) == 1
+    assert body["skipped"][leftover[0]] == "limit_reached"
+    # The busy one is not, and must not be advertised as such.
+    assert body["skipped"][busy] == "not_idle"
+
+
 # ---------------------------------------------------------------------------
 # The reaper: idleness must reflect activity, not Build.last_active_at
 # ---------------------------------------------------------------------------
