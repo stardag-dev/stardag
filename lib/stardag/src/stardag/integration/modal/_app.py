@@ -85,7 +85,6 @@ from stardag.integration.modal._target import (
 from stardag.registry._base import (
     NoOpRegistry,
     accepts_executor_metadata_kwarg,
-    accepts_reactive_app_name_kwarg,
     get_git_commit_hash,
     registry_provider,
 )
@@ -335,19 +334,19 @@ def _run_watchdog_sweep(
     if type(registry) is NoOpRegistry:
         logger.warning("Tick watchdog: no registry configured; nothing to do.")
         return
-    # Old custom RegistryABC implementations predate the kwarg; degrade to
-    # an unscoped listing rather than breaking the sweep entirely.
-    scoped = reactive_app_name is not None and accepts_reactive_app_name_kwarg(
-        registry.build_list_running
+    # Scoping is server-side now that `build_list_running` is expressed in
+    # terms of `build_list`, so every RegistryABC gets it and the signature
+    # shim this used to need went with it. `scoped` still exists because
+    # the truncation remedy below differs by it.
+    scoped = reactive_app_name is not None
+    running_builds = registry.build_list_running(
+        limit=sweep_limit, reactive_app_name=reactive_app_name
     )
-    if scoped:
-        running_builds = registry.build_list_running(
-            limit=sweep_limit, reactive_app_name=reactive_app_name
-        )
-        scope = f"reactive builds owned by {reactive_app_name!r}"
-    else:
-        running_builds = registry.build_list_running(limit=sweep_limit)
-        scope = "running builds"
+    scope = (
+        f"reactive builds owned by {reactive_app_name!r}"
+        if scoped
+        else "running builds"
+    )
     if len(running_builds) >= sweep_limit:
         # The remedy follows `scoped`, not whether a name was *asked* for:
         # a scoping request the registry cannot honour still yields a

@@ -340,6 +340,198 @@ Target roots are managed under `stardag environment target-roots`. Changes are a
 
 See `stardag environment target-roots --help` for full options (e.g. `--env` to target a specific environment).
 
+## Build & Task Commands
+
+`stardag builds` and `stardag tasks` answer "what does the scheduler actually
+think the state is?" — listing builds, showing a build's scheduling frontier
+(including upstreams held by _other_ builds), and cleaning up builds that were
+abandoned by a process that died.
+
+=== "Active venv"
+
+    ```sh
+    stardag builds list [--status running] [--reactive-app NAME] [--older-than 24h]
+    stardag builds show <build-id>
+    stardag builds frontier <build-id>
+    stardag builds ticks <build-id> [--limit N]
+    stardag builds cancel <build-id> [--cascade] [--yes]
+    stardag builds cleanup [--older-than 24h] [--build-id ID ...] [--apply] [--yes]
+
+    stardag tasks list [--status running] [--older-than 1h]
+    stardag tasks cancel <build-id> <task-id> [--yes]
+    stardag tasks retry <build-id> <task-id> [--yes]
+    ```
+
+=== "uv run ..."
+
+    ```sh
+    uv run stardag builds list [--status running] [--older-than 24h]
+    uv run stardag builds show <build-id>
+    uv run stardag builds frontier <build-id>
+    uv run stardag builds ticks <build-id> [--limit N]
+    uv run stardag builds cancel <build-id> [--cascade] [--yes]
+    uv run stardag builds cleanup [--older-than 24h] [--apply] [--yes]
+
+    uv run stardag tasks list [--status running] [--older-than 1h]
+    uv run stardag tasks cancel <build-id> <task-id> [--yes]
+    uv run stardag tasks retry <build-id> <task-id> [--yes]
+    ```
+
+All commands accept `-p/--stardag-profile` and `-e/--stardag-env` to target a
+profile / environment other than the active one.
+
+- `builds list` — builds most recently active first, with each build's _last
+  activity_ and how long it has been idle.
+- `builds show` — one build: status, roots, reactive metadata, liveness.
+- `builds frontier` — what a reactive scheduler tick sees: which tasks it would
+  act on, which executions it would probe, and which upstreams are holding the
+  build back (see [Reading the frontier](#reading-the-frontier)).
+- `builds ticks` — the scheduler's own account of its recent ticks, crashed
+  ones included. Reactive builds are driven by many short-lived ticks, each in
+  its own container; this is where their reasoning is kept.
+- `builds cancel` — cancel one build. `--cascade` also cancels its
+  RUNNING/SUSPENDED tasks, releasing their execution claims.
+- `builds cleanup` — find and cancel abandoned builds (see
+  [Cleaning up abandoned builds](#cleaning-up-abandoned-builds)).
+- `tasks list` — tasks by their environment-global status. `--status running`
+  is the claim-holder question.
+- `tasks cancel` / `tasks retry` — release a claim, or reset a
+  failed/cancelled/skipped/suspended task to `PENDING`.
+
+### Durations
+
+`--older-than` takes one number and one optional unit — `s`, `m`, `h`, `d` or
+`w`; a bare number is seconds. `24h`, `90m`, `3d`, `2w`. Compound forms
+(`1h30m`) and fractions (`1.5h`) are not accepted, and the minimum for a build
+staleness threshold is 60 seconds.
+
+The filter is applied **server-side** — by the same predicate the reaper and
+`builds cleanup` use, so a build that `builds list --older-than 24h` shows is
+a build `builds cleanup --older-than 24h` would act on. Paging and totals stay
+exact, and with the filter set the server orders stalest-first.
+
+On `builds list` the filter **implies** `--status running`, whether or not
+you pass it: idleness only means anything for a build that has not
+finished. A completed build has no activity by definition and always
+will, so including terminal builds would fill a staleness listing with
+history — sorted stalest-first, which is to say the oldest completed
+builds above the running ones you are looking for. Pairing `--older-than`
+with any other status is therefore a contradiction rather than a narrower
+query, and is rejected.
+
+If the registry is older than the CLI it will silently ignore the filter — the
+command detects that (a returned build newer than the cutoff, or one with no
+activity timestamp at all) and prints a warning on stderr saying the results
+are unfiltered. It does **not** quietly filter the page itself: the server
+already paginated and counted without the filter, so a local cut would drop
+rows from a page chosen wrong and under-report exactly the oldest builds.
+
+### JSON output
+
+The read-only commands — `builds list`, `builds show`, `builds frontier`,
+`builds ticks`, `builds cleanup` (whose default dry run writes nothing) and
+`tasks list` — take `--json`. In that mode **stdout carries exactly one JSON
+document and nothing else**; every hint, warning and prompt goes to stderr, so
+piping is safe:
+
+```sh
+stardag builds list --status running --json | jq -r '.builds[] | .id'
+```
+
+The document is the SDK's model of the API payload: the same field names and
+nesting as the REST response, minus any field this SDK version does not model.
+`builds cleanup --json --apply` requires `--yes`, since it cannot prompt
+without contaminating the output.
+
+### Reading the frontier
+
+`builds frontier` is the command for a build that is not progressing. Besides
+the actionable/running partitions, it renders the build's **external
+blockers**: tasks of this build held back by an upstream whose current status
+_another_ build produced.
+
+That case is easy to hit and hard to see any other way. Task rows and their
+dependency edges are per **environment**, not per build, so an upstream that
+some other build left `RUNNING` gates this build's tasks while contributing
+nothing to the counts this build can see. The command names the blocking task
+(namespace and name, not just an id), its status, how long it has been in it,
+and the build that owns it — plus which of the two remedies applies:
+
+- **Not in this build's task set.** This build will never schedule it; it can
+  only wait for the owner. If the owner is gone, release the claim with
+  `stardag tasks cancel <owning-build-id> <task-id>`.
+- **In this build's task set, but another build produced its status.** It
+  resolves when that build finishes it; retrying from here would not release
+  the claim.
+
+One important caveat the output states explicitly: the registry computes the
+blocker list **only for a build with nothing actionable and nothing running**.
+An empty list therefore means "not externally blocked _or_ not stalled" — for
+a build that is merely progressing, `builds frontier` says the list was not
+evaluated rather than claiming there are no blockers.
+
+### Cleaning up abandoned builds
+
+A build's status is derived from its build-level events, so a build whose
+orchestrator died without emitting a terminal event stays `RUNNING` forever —
+interrupted local runs, crashed CI jobs, failed triggers. Each one keeps
+holding whatever execution claims and concurrency-limit slots its tasks had at
+the moment it vanished, and a claim held by a dead build denies that task to
+every future build in the environment.
+
+The end-to-end workflow:
+
+```sh
+# 1. Find them: running builds with no activity for a day.
+stardag builds list --status running --older-than 24h
+
+# 2. Inspect one before acting on the batch.
+stardag builds show <build-id>
+
+# 3. See what it is holding — and, if it is stalled, what is holding it.
+stardag builds frontier <build-id>
+
+# 4. Or ask the question claim-first: who holds a claim, and since when?
+stardag tasks list --status running --older-than 24h
+
+# 5. Dry run (the default): exactly what would be cancelled, and why
+#    anything named was skipped. Writes nothing.
+stardag builds cleanup --older-than 24h
+
+# 6. Apply (prompts for confirmation).
+stardag builds cleanup --older-than 24h --apply
+
+# ...or unattended, e.g. from a timer.
+stardag builds cleanup --older-than 24h --apply --yes
+```
+
+Notes on step 5/6:
+
+- **`--apply` is the only thing that makes `cleanup` act.** `-y/--yes` only
+  skips the confirmation prompt — `cleanup -y` on its own is still a dry run.
+  On a command that reports by default, `-y` alone must not become a cascade
+  of cancellations.
+- **The selection is the server's, both times.** The dry run and the real run
+  send the same filter to the same endpoint, so what you review is what you
+  get.
+- **Idleness is measured on activity**, not on the column the list is ordered
+  by — task events deliberately do not touch that column, so filtering on it
+  would call a build that has been running tasks for three days "idle".
+- **Cascade is on by default** for `cleanup` (and off by default for a single
+  `builds cancel`): releasing leaked claims is the point of a cleanup pass.
+- **Reactive builds are excluded** unless you pass `--include-reactive` or
+  `--reactive-app NAME`. A reactive build is quiet between ticks by design, and
+  already has a watchdog for the case where it wedges.
+- Only `RUNNING` builds are ever eligible, which makes the operation
+  idempotent — safe to re-run, and safe to put on a timer.
+- If the output says the result was truncated, more builds matched than
+  `--limit` allowed; run it again.
+
+`stardag builds cleanup` cannot stop anything that is still executing: like
+every other status write it rewrites the registry's view, and a worker whose
+task is cancelled keeps running until it notices (a completion that lands
+afterwards wins). Clean up builds you believe are dead.
+
 ## Concurrency Limit Commands
 
 Named concurrency limits cap how many tasks tagged with a given key may run

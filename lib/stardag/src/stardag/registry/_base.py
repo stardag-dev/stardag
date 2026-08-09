@@ -79,21 +79,6 @@ def accepts_executor_metadata_kwarg(fn: Any) -> bool:
     return has_var_keyword or "executor_metadata" in params
 
 
-def accepts_reactive_app_name_kwarg(fn: Any) -> bool:
-    """Whether a ``build_list_running[_aio]`` impl accepts ``reactive_app_name``.
-
-    Same signature-inspection rationale as :func:`accepts_executor_kwargs`.
-    The watchdog degrades to an unscoped listing for older implementations
-    rather than raising: a tick no-ops on a non-reactive build, so a wider
-    listing only costs invocations, it does not misbehave.
-    """
-    info = _param_info(fn)
-    if info is None:
-        return False
-    params, has_var_keyword = info
-    return has_var_keyword or "reactive_app_name" in params
-
-
 class FrontierTaskRef(StardagBaseModel):
     """A task in a build's scheduling frontier (see :class:`BuildFrontier`)."""
 
@@ -272,6 +257,169 @@ class RegisteredTaskInfo(StardagBaseModel):
     latest_executor_metadata: dict[str, Any] | None = None
 
 
+class BuildSummary(StardagBaseModel):
+    """One build row from ``GET /builds`` (and the single-build endpoints).
+
+    A read model for operators, not for the build engine: the CLI's
+    ``stardag builds list/show/cancel`` and anything else that needs to
+    *look at* builds rather than drive one. Unknown response fields are
+    ignored (pydantic's default), so a newer server can add fields without
+    breaking an older SDK.
+
+    ``last_active_at`` and ``last_activity_at`` are two different numbers
+    and confusing them is the classic way to cancel live work:
+
+    - ``last_active_at`` is the column the list is ordered by, bumped only
+      by build-level *lifecycle* transitions (resume, complete, fail,
+      cancel, exit-early, roots appended). Task events deliberately do not
+      touch it, so a build that has been running tasks for three days
+      still shows its last lifecycle change here.
+    - ``last_activity_at`` is the activity signal: the newest of the
+      build's entire event stream (task events included), its
+      ``last_active_at``, and any pending scheduler wake-up. This is what
+      staleness must be measured on, and what the server's bulk-cancel
+      idle filter measures.
+
+    Both are None on servers predating the fields.
+    """
+
+    id: UUID
+    name: str
+    # Derived server-side from the build's recorded events: pending /
+    # running / completed / failed / cancelled.
+    status: str | None = None
+    description: str | None = None
+    commit_hash: str | None = None
+    root_task_ids: list[str] = []
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    # True when the most recent build-level event is BUILD_RESUMED.
+    is_resumed: bool = False
+    executor_metadata: dict[str, Any] | None = None
+    # Reactive-scheduling marker/owner; None means the build is not
+    # reactively scheduled (see :class:`BuildInfo`).
+    reactive_app_name: str | None = None
+    reactive_tick_kwargs: dict[str, Any] | None = None
+    last_active_at: datetime | None = None
+    last_activity_at: datetime | None = None
+
+
+class BuildListPage(StardagBaseModel):
+    """One page of ``GET /builds``.
+
+    ``total`` counts everything matching the filter, not this page — the
+    two together are what tells a caller whether it has seen everything.
+    """
+
+    builds: list[BuildSummary] = []
+    total: int = 0
+    page: int = 1
+    page_size: int = 0
+
+
+class BuildCancelResult(BuildSummary):
+    """Response of ``POST /builds/{id}/cancel``.
+
+    A superset of :class:`BuildSummary`, mirroring the server. The
+    cascade fields are empty/zero unless the call passed ``cascade=True``
+    — and on a server predating the cascade they are absent from the
+    response and default here, which reads correctly as "nothing was
+    cascaded".
+    """
+
+    # Tasks moved to CANCELLED alongside the build, releasing their
+    # execution claims and any concurrency-limit slots they held.
+    cascaded_task_ids: list[str] = []
+    cascaded_task_count: int = 0
+
+
+class BulkCancelBuildRef(StardagBaseModel):
+    """One build cancelled — or, in a dry run, *selected* — by bulk cancel."""
+
+    build_id: UUID
+    name: str = ""
+    # The idleness signal the selection was made on (see
+    # :class:`BuildSummary` on why this is not ``last_active_at``).
+    last_activity_at: datetime | None = None
+    reactive_app_name: str | None = None
+    # Tasks cancelled along with the build; empty when cascade is off.
+    cascaded_task_ids: list[str] = []
+
+
+class BulkCancelResult(StardagBaseModel):
+    """Result of ``POST /builds/bulk-cancel``.
+
+    In a dry run this reports exactly what a real run would have done and
+    nothing is written — which is what makes it safe to make ``dry_run``
+    the default of any cleanup UX built on top.
+    """
+
+    dry_run: bool = False
+    builds: list[BulkCancelBuildRef] = []
+    build_count: int = 0
+    task_count: int = 0
+    # Explicitly-requested build ids that were *not* acted on, keyed by id
+    # with a machine-readable reason: "not_found" (unknown, or another
+    # environment — deliberately indistinguishable), "not_running",
+    # "reactive", "not_idle".
+    skipped: dict[str, str] = {}
+    # More builds matched the filter than ``limit`` allowed — call again.
+    truncated: bool = False
+
+
+class TaskSummary(StardagBaseModel):
+    """One task row from ``GET /tasks``.
+
+    The status fields are *environment-global*, not per build: a task row
+    is unique per ``(environment_id, task_id)``, so a task left RUNNING by
+    a build whose orchestrator died denies the execution claim to every
+    future build that needs it until something moves it.
+    ``latest_status_build_id`` is therefore the answer to "who is holding
+    this claim", and ``latest_status_at`` to "since when".
+    """
+
+    id: UUID
+    task_id: str
+    task_namespace: str = ""
+    task_name: str = ""
+    version: str | None = None
+    output_uri: str | None = None
+    created_at: datetime | None = None
+    is_phantom: bool = False
+    latest_status: str | None = None
+    latest_status_at: datetime | None = None
+    latest_status_build_id: UUID | None = None
+    latest_executor: str | None = None
+    latest_executor_ref: str | None = None
+    latest_executor_metadata: dict[str, Any] | None = None
+
+
+class TaskListPage(StardagBaseModel):
+    """One page of ``GET /tasks``."""
+
+    tasks: list[TaskSummary] = []
+    total: int = 0
+    page: int = 1
+    page_size: int = 0
+
+
+class TickSummaryRecord(StardagBaseModel):
+    """A persisted reactive-scheduler tick summary.
+
+    ``summary`` is the dict the SDK reported, verbatim and including
+    ``outcome`` — the server stores it as an open blob, so a client may
+    encounter keys neither it nor the server knows about. Render it
+    generically rather than field by field.
+    """
+
+    id: UUID
+    build_id: UUID
+    outcome: str
+    summary: dict[str, Any] = {}
+    created_at: datetime | None = None
+
+
 class TaskMetadata(StardagBaseModel):
     """Metadata for a registered task in the registry."""
 
@@ -374,15 +522,28 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
-    def build_cancel(self, build_id: UUID) -> None:
-        """Cancel a build.
+    def build_cancel(
+        self, build_id: UUID, *, cascade: bool = False
+    ) -> "BuildCancelResult | None":
+        """Cancel a build, optionally releasing the claims its tasks hold.
 
-        Called when a build is explicitly cancelled by the user.
+        Cancelling a build records a build-level event and nothing else,
+        which is why it has never actually cleaned anything up: task rows
+        are per *environment* with a denormalised global status, so a task
+        the build left RUNNING keeps denying its execution claim — and
+        occupying its concurrency-limit slots — long after the build is
+        gone. ``cascade=True`` cancels those tasks too.
 
-        Args:
-            build_id: The build UUID returned by build_start.
+        Default False: cascading is a behaviour change for existing
+        callers, and the build engine's own fail-fast path already cancels
+        its running tasks itself.
+
+        Returns the cancelled build plus what the cascade released, or
+        None for backends that don't report it (the default). The return
+        value exists for operator tooling; lifecycle callers ignore it.
+        Same optional-return convention as ``task_register_bulk``.
         """
-        pass
+        return None
 
     def build_exit_early(self, build_id: UUID, reason: str | None = None) -> None:
         """Mark a build as exited early.
@@ -440,15 +601,43 @@ class RegistryABC(metaclass=abc.ABCMeta):
             self.task_register(build_id, task)
         return None
 
+    def build_list(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        status: str | None = None,
+        reactive_app_name: str | None = None,
+        idle_for_seconds: int | None = None,
+    ) -> BuildListPage:
+        """List builds in the environment, most recently active first.
+
+        The general listing behind ``build_list_running`` and the CLI's
+        ``stardag builds list``. Filters are applied *server-side*:
+
+            status: derived build status (e.g. ``"running"``).
+            reactive_app_name: only builds driven by this reactive app.
+            idle_for_seconds: only builds with no activity of any kind for
+                at least this long (minimum 60). Measured on
+                ``BuildSummary.last_activity_at`` — see that class for why
+                that is not ``last_active_at``.
+
+        Default: not supported (backends that cannot enumerate builds).
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support build_list")
+
     def build_list_running(
         self, limit: int = 100, reactive_app_name: str | None = None
     ) -> list[UUID]:
         """List ids of builds currently in RUNNING status (most recent first).
 
-        Used by the reactive scheduler watchdog to sweep for builds that
-        may need a tick. ``reactive_app_name`` narrows the listing to builds
-        reactively scheduled by that app — the watchdog's actual question,
-        and what keeps ``limit`` from being consumed by unrelated builds.
+        Used by the reactive scheduler watchdog to sweep for builds that may
+        need a tick. ``reactive_app_name`` narrows the listing to builds
+        reactively scheduled by that app — the watchdog's actual question, and
+        what keeps ``limit`` from being consumed by builds no tick of this app
+        can advance (resident builds, and builds left RUNNING by an
+        orchestrator that died without emitting a terminal event).
+
         Default: empty (no reactive-scheduling support).
         """
         return []
@@ -457,17 +646,131 @@ class RegistryABC(metaclass=abc.ABCMeta):
         self, limit: int = 100, reactive_app_name: str | None = None
     ) -> list[UUID]:
         """Async version of build_list_running."""
-        # Only forward the kwarg when there is something to forward *and*
-        # the implementation takes it. An unscoped sweep must reach a
-        # pre-kwarg implementation unchanged — passing `None` positionally
-        # would raise TypeError on the very call that needs no scoping.
-        # Keyword, not positional: an implementation is free to make it
-        # keyword-only.
-        if reactive_app_name is None or not accepts_reactive_app_name_kwarg(
-            self.build_list_running
-        ):
-            return self.build_list_running(limit)
-        return self.build_list_running(limit, reactive_app_name=reactive_app_name)
+        return self.build_list_running(limit, reactive_app_name)
+
+    def build_bulk_cancel(
+        self,
+        *,
+        build_ids: Sequence[UUID | str] | None = None,
+        idle_for_seconds: int | None = None,
+        reactive_app_name: str | None = None,
+        include_reactive: bool = False,
+        cascade: bool = True,
+        dry_run: bool = False,
+        limit: int = 100,
+        reason: str | None = None,
+    ) -> BulkCancelResult:
+        """Cancel RUNNING builds matching a filter (bulk cleanup / reaper).
+
+        Nothing terminates abandoned builds on its own: build status is
+        derived from build-level events, so a build whose orchestrator
+        died without emitting one stays RUNNING forever, holding whatever
+        execution claims and concurrency-limit slots its tasks had when it
+        vanished. This is the cleanup.
+
+        At least one of ``build_ids`` / ``idle_for_seconds`` is required —
+        an unqualified "cancel everything running" is not a cleanup
+        operation. Only RUNNING builds are ever eligible, which makes the
+        call idempotent. Reactive builds are excluded unless
+        ``include_reactive`` (or ``reactive_app_name``) says otherwise:
+        they are quiet between ticks *by design*, so quiet does not mean
+        abandoned. ``cascade`` defaults True here (unlike the single-build
+        cancel) because releasing leaked claims is the entire point.
+
+        ``dry_run=True`` reports the exact same selection — builds, the
+        tasks a real run would cancel, and the per-build ``skipped``
+        reasons — and writes nothing. Prefer it over reimplementing
+        selection client-side: the server's answer is the one that will
+        actually be acted on.
+
+        Default: not supported.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support build_bulk_cancel"
+        )
+
+    def build_report_tick_summary(
+        self, build_id: UUID, summary: dict[str, Any]
+    ) -> None:
+        """Record one reactive scheduler tick's summary against a build.
+
+        Pure observability, on a hot path: callers report and move on, and
+        must never fail a tick because this failed. ``summary`` is stored
+        verbatim server-side apart from a required ``outcome`` key, so new
+        summary fields need no server release. Default: no-op — a backend
+        without the endpoint simply keeps the trail in its logs.
+        """
+        pass
+
+    async def build_report_tick_summary_aio(
+        self, build_id: UUID, summary: dict[str, Any]
+    ) -> None:
+        """Async version of build_report_tick_summary."""
+        self.build_report_tick_summary(build_id, summary)
+
+    def build_list_tick_summaries(
+        self, build_id: UUID, limit: int = 20
+    ) -> list[TickSummaryRecord]:
+        """List a build's retained tick summaries, newest first.
+
+        The read side of ``build_report_tick_summary``: "why is this build
+        not progressing?" answered from the scheduler's own account of
+        each tick, instead of from logs scattered across short-lived tick
+        containers. Retention is finite server-side. Default: empty.
+        """
+        return []
+
+    def task_list(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        status: Sequence[str] | None = None,
+        status_older_than: datetime | None = None,
+        task_name: str | None = None,
+        task_namespace: str | None = None,
+    ) -> TaskListPage:
+        """List tasks in the environment.
+
+        ``status`` is the *environment-global* status and may name several
+        values (``["running", "suspended"]`` matches either) — which makes
+        this the way to ask "which tasks are holding an execution claim?".
+        ``status_older_than`` is an absolute cutoff (``latest_status_at <
+        status_older_than``), not a duration, so a paged scan cannot drift
+        while it pages; tasks with no recorded timestamp never match.
+
+        With either filter applied, results come back oldest-claim-first
+        — the triage order.
+
+        Default: not supported.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support task_list")
+
+    def task_cancel_by_id(self, build_id: UUID, task_id: str) -> None:
+        """Cancel a task addressed by id rather than by task object.
+
+        Same event as ``task_cancel``; separate because operator tooling
+        (and the server) only ever has the id — rehydrating a task object
+        just to cancel it would fail for exactly the abandoned tasks that
+        most need cancelling. Default: no-op.
+        """
+        pass
+
+    async def task_cancel_by_id_aio(self, build_id: UUID, task_id: str) -> None:
+        """Async version of task_cancel_by_id."""
+        self.task_cancel_by_id(build_id, task_id)
+
+    def task_retry_by_id(self, build_id: UUID, task_id: str) -> None:
+        """Reset a retryable task to pending, addressed by id.
+
+        See ``task_cancel_by_id`` for why the id-addressed variant exists.
+        Default: no-op.
+        """
+        pass
+
+    async def task_retry_by_id_aio(self, build_id: UUID, task_id: str) -> None:
+        """Async version of task_retry_by_id."""
+        self.task_retry_by_id(build_id, task_id)
 
     def build_add_roots(self, build_id: UUID, root_task_ids: list[str]) -> None:
         """Append root task ids to a build (reactive re-trigger with new roots).
@@ -552,6 +855,23 @@ class RegistryABC(metaclass=abc.ABCMeta):
     async def build_get_aio(self, build_id: UUID) -> BuildInfo:
         """Async version of build_get."""
         return self.build_get(build_id)
+
+    def build_get_summary(self, build_id: UUID) -> BuildSummary:
+        """Return the full build record (``GET /builds/{id}``).
+
+        Same endpoint as ``build_get``, deliberately a different read
+        model. ``BuildInfo`` is the contract a *custom* registry backend
+        must satisfy for reactive scheduling — four fields, all of which
+        such a backend necessarily has. ``BuildSummary`` is the operator
+        view of an API-registry build: names, timestamps, liveness. Fusing
+        them would make every reactive-capable backend responsible for
+        fields it has no notion of.
+
+        Default: not supported.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support build_get_summary"
+        )
 
     def build_set_reactive_meta(
         self,
@@ -803,9 +1123,11 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """Async version of build_fail."""
         self.build_fail(build_id, error_message)
 
-    async def build_cancel_aio(self, build_id: UUID) -> None:
+    async def build_cancel_aio(
+        self, build_id: UUID, *, cascade: bool = False
+    ) -> "BuildCancelResult | None":
         """Async version of build_cancel."""
-        self.build_cancel(build_id)
+        return self.build_cancel(build_id, cascade=cascade)
 
     async def build_exit_early_aio(
         self, build_id: UUID, reason: str | None = None
