@@ -84,7 +84,6 @@ from stardag.integration.modal._target import (
 )
 from stardag.registry._base import (
     NoOpRegistry,
-    accepts_executor_metadata_kwarg,
     get_git_commit_hash,
     registry_provider,
 )
@@ -1541,17 +1540,13 @@ class _WorkerLifecycleReporter:
                 ref = modal.current_function_call_id()
             except Exception:
                 pass
-            kwargs: dict[str, typing.Any] = {
-                "executor": MODAL_EXECUTOR_NAME,
-                "executor_ref": ref,
-            }
-            # Dropped (not warned) for registries predating the kwarg —
-            # descriptive only, unlike the executor ref.
-            if self.executor_metadata is not None and accepts_executor_metadata_kwarg(
-                self.registry.task_start
-            ):
-                kwargs["executor_metadata"] = self.executor_metadata
-            self.registry.task_start(self.build_id, self.task, **kwargs)
+            self.registry.task_start(
+                self.build_id,
+                self.task,
+                executor=MODAL_EXECUTOR_NAME,
+                executor_ref=ref,
+                executor_metadata=self.executor_metadata,
+            )
 
         self._guard(_do, "start")
 
@@ -2789,16 +2784,11 @@ class StardagApp:
         explicit_build_id = build_id is not None
         executor_metadata = self._build_executor_metadata(reactive=reactive)
         if build_id is None:
-            if accepts_executor_metadata_kwarg(registry.build_start):
-                build_id = registry.build_start(
-                    root_tasks=task_list,
-                    description=description,
-                    executor_metadata=executor_metadata,
-                )
-            else:
-                build_id = registry.build_start(
-                    root_tasks=task_list, description=description
-                )
+            build_id = registry.build_start(
+                root_tasks=task_list,
+                description=description,
+                executor_metadata=executor_metadata,
+            )
 
         if reactive:
             if self.watchdog_period_minutes is None:
@@ -3009,12 +2999,7 @@ class StardagApp:
                 # register the (possibly new) roots BEFORE discovery, so a
                 # concurrent tick can't complete-and-terminal the build on
                 # the old root set while we're adding to it.
-                if executor_metadata is not None and accepts_executor_metadata_kwarg(
-                    registry.build_resume
-                ):
-                    registry.build_resume(build_id, executor_metadata=executor_metadata)
-                else:
-                    registry.build_resume(build_id)
+                registry.build_resume(build_id, executor_metadata=executor_metadata)
                 build_is_running = True
                 registry.build_add_roots(build_id, root_ids)
             stage = "task discovery and registration"

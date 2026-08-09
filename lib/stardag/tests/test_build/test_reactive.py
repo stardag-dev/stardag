@@ -90,6 +90,8 @@ class FakeReactiveRegistry(NoOpRegistry):
         # Named concurrency limits: key -> cap; holders tracked per task.
         self.limits: dict[str, int] = {}
         self.task_limit_keys: dict[str, set[str]] = {}
+        # Limit keys as sent on each claiming start: task_id -> keys.
+        self.claim_limit_keys: dict[str, list[str]] = {}
         self.status_at: dict[str, datetime] = {}
         # task_id -> task_data body, served by task_get_metadata_aio
         # (rehydration fallback); missing key -> KeyError, like a 404.
@@ -216,6 +218,43 @@ class FakeReactiveRegistry(NoOpRegistry):
             # Instant worker: completes and wakes the scheduler.
             self.statuses[tid] = "completed"
             self.needs_tick = True
+
+    async def task_start_claim_aio(
+        self,
+        build_id,
+        task,
+        executor=None,
+        executor_ref=None,
+        executor_metadata=None,
+        limit_keys=None,
+    ):
+        """Real claim arbitration, mirroring the API's claim-on-start."""
+        from stardag.registry import StartClaimResult
+
+        tid = str(task.id)
+        self.calls.append(("start_claim", tid))
+        self.claim_limit_keys[tid] = list(limit_keys or [])
+        if self.statuses.get(tid) == "running":
+            executor_name, ref = self.refs.get(tid, (None, None))
+            return StartClaimResult(
+                started=False,
+                denied_reason="already_running",
+                executor=executor_name,
+                executor_ref=ref,
+            )
+        if self.statuses.get(tid) == "completed":
+            return StartClaimResult(started=False, denied_reason="already_completed")
+        started = await self.task_start_with_limits_aio(
+            build_id,
+            task,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
+            limit_keys=limit_keys,
+        )
+        if not started:
+            return StartClaimResult(started=False, denied_reason="limit")
+        return StartClaimResult(started=True)
 
     async def task_start_with_limits_aio(
         self,
@@ -1157,9 +1196,12 @@ class TestConcurrencyLimits:
         assert summary.spawned == 3
         assert registry.build_status == "completed"
 
-    async def test_no_selector_no_limit_calls(
+    async def test_no_selector_claims_without_limit_keys(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
+        """Without a selector the claiming start still happens (it is the
+        exactly-once arbitration), but carries no limit keys — so nothing
+        is enforced and no slot is held."""
         (root,) = _chain("nolim-root")
         registry, locks, executor, store = _setup([root])
 
@@ -1172,7 +1214,7 @@ class TestConcurrencyLimits:
             config=FAST_TICK,
         )
 
-        assert not any(m == "start_with_limits" for (m, _) in registry.calls)
+        assert registry.claim_limit_keys[str(root.id)] == []
 
 
 class TestStaleRunningNoRef:
@@ -1510,38 +1552,6 @@ class TestExecutorMetadataRecording:
             self.MetadataTickExecutor.METADATA
         )
 
-    async def test_metadata_dropped_for_pre_metadata_registry(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """A registry whose task_start_aio predates the executor_metadata
-        kwarg still gets the ref-recording start — no TypeError."""
-
-        class PreMetadataRegistry(FakeReactiveRegistry):
-            async def task_start_aio(  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
-                self, build_id, task, executor=None, executor_ref=None
-            ):
-                await super().task_start_aio(
-                    build_id, task, executor=executor, executor_ref=executor_ref
-                )
-
-        (root,) = _chain("meta-legacy-root")
-        registry = PreMetadataRegistry(root_task_ids=[str(root.id)], auto_complete=True)
-        registry.add_task(str(root.id))
-        store = InMemoryTaskStore(uuid4())
-        store.save_tasks([root])
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=self.MetadataTickExecutor(),
-            lock_manager=_lock_manager(),
-            task_store=store,
-            config=FAST_TICK,
-        )
-
-        assert summary.outcome == "terminal"
-        assert registry.refs[str(root.id)] == ("fake", "ref-1")
-
 
 class TestAcquiringStartExecutorMetadata:
     """The limits-acquiring TASK_STARTED (recorded BEFORE the spawn) carries
@@ -1607,57 +1617,13 @@ class TestAcquiringStartExecutorMetadata:
         assert summary.spawned == 1
         assert registry.acquire_metadata[str(root.id)] == self.PRE_SPAWN_METADATA
 
-    async def test_acquiring_start_metadata_dropped_for_legacy_registry(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """A registry whose task_start_with_limits_aio predates the kwarg
-        gets the plain acquiring start — no TypeError."""
-
-        class PreMetadataLimitsRegistry(FakeReactiveRegistry):
-            async def task_start_with_limits_aio(  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
-                self, build_id, task, executor=None, executor_ref=None, limit_keys=None
-            ):
-                return await super().task_start_with_limits_aio(
-                    build_id,
-                    task,
-                    executor=executor,
-                    executor_ref=executor_ref,
-                    limit_keys=limit_keys,
-                )
-
-        (root,) = _chain("acquire-meta-legacy")
-        registry = PreMetadataLimitsRegistry(
-            root_task_ids=[str(root.id)], auto_complete=True
-        )
-        registry.add_task(str(root.id))
-        registry.limits["gpu"] = 1
-        store = InMemoryTaskStore(uuid4())
-        store.save_tasks([root])
-        config = TickConfig(
-            linger_seconds=0.3,
-            poll_interval_seconds=0.01,
-            limit_key_selector=lambda t: ["gpu"],
-        )
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=self.PreSpawnMetadataExecutor(),
-            lock_manager=_lock_manager(),
-            task_store=store,
-            config=config,
-        )
-
-        assert summary.outcome == "terminal"
-        assert summary.spawned == 1
-
 
 class ClaimingReactiveRegistry(FakeReactiveRegistry):
-    """FakeReactiveRegistry with real claim arbitration (API semantics).
+    """FakeReactiveRegistry with a scriptable cross-build claim race.
 
-    ``claim_race_once`` simulates the cross-build race the claim closes:
-    the frontier snapshot says PENDING, but by claim time another build's
-    scheduler has already started (and instantly completed) the task.
+    ``claim_race_once`` simulates the race the claim closes: the frontier
+    snapshot says PENDING, but by claim time another build's scheduler has
+    already started (and instantly completed) the task.
     """
 
     def __init__(self, **kwargs):
@@ -1676,11 +1642,11 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
         from stardag.registry import StartClaimResult
 
         tid = str(task.id)
-        self.calls.append(("start_claim", tid))
         if tid in self.claim_race_once:
             # "Another build" won this task just before us and its instant
             # worker completed it (completion wakes our scheduler).
             self.claim_race_once.discard(tid)
+            self.calls.append(("start_claim", tid))
             self.statuses[tid] = "completed"
             self.needs_tick = True
             return StartClaimResult(
@@ -1689,17 +1655,7 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
                 executor="fake",
                 executor_ref="fc-other-build",
             )
-        if self.statuses.get(tid) == "running":
-            executor_name, ref = self.refs.get(tid, (None, None))
-            return StartClaimResult(
-                started=False,
-                denied_reason="already_running",
-                executor=executor_name,
-                executor_ref=ref,
-            )
-        if self.statuses.get(tid) == "completed":
-            return StartClaimResult(started=False, denied_reason="already_completed")
-        started = await self.task_start_with_limits_aio(
+        return await super().task_start_claim_aio(
             build_id,
             task,
             executor=executor,
@@ -1707,9 +1663,6 @@ class ClaimingReactiveRegistry(FakeReactiveRegistry):
             executor_metadata=executor_metadata,
             limit_keys=limit_keys,
         )
-        if not started:
-            return StartClaimResult(started=False, denied_reason="limit")
-        return StartClaimResult(started=True)
 
 
 class TestTickClaims:
@@ -1783,31 +1736,6 @@ class TestTickClaims:
         assert summary.spawned == 3
         # all acquisitions went through the claiming start
         assert any(m == "start_claim" for (m, _) in registry.calls)
-
-    async def test_claim_off_uses_legacy_limits_path(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        (root,) = _chain("tick-claim-off")
-        registry = ClaimingReactiveRegistry(
-            root_task_ids=[str(root.id)], auto_complete=True
-        )
-        registry.add_task(str(root.id))
-        store = InMemoryTaskStore(uuid4())
-        store.save_tasks([root])
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=FakeTickExecutor(),
-            lock_manager=_lock_manager(),
-            task_store=store,
-            config=TickConfig(
-                linger_seconds=0.3, poll_interval_seconds=0.01, claim=False
-            ),
-        )
-
-        assert summary.terminal_status == "completed"
-        assert not any(m == "start_claim" for (m, _) in registry.calls)
 
 
 class TestExternalBlockers:

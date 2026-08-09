@@ -84,14 +84,12 @@ from stardag.build._base import (
 from stardag.build._task_modules import import_failure_note
 from stardag.build._task_store import BuildTaskStore
 from stardag.exceptions import NotFoundError, is_missing_route_error
-from stardag.registry._api_registry import _is_route_not_found
 from stardag.registry import (
     BuildFrontier,
     FrontierExternalBlocker,
     FrontierTaskRef,
     RegistryABC,
 )
-from stardag.registry._base import accepts_executor_metadata_kwarg
 
 logger = logging.getLogger(__name__)
 
@@ -231,12 +229,6 @@ class TickConfig:
     # atomically at task start, before the spawn: a denied task simply
     # stays in the frontier — a slot-holder's completion wakes the
     # scheduler (cross-build slot releases are covered by the watchdog).
-    # Per-task execution claim on the acquiring start (exactly-once across
-    # builds): a start racing an already-RUNNING task is denied and the
-    # task simply stays in the frontier — the existing RUNNING-probe
-    # partition takes over on later passes. Degrades gracefully against
-    # older servers (the claim parameter is ignored).
-    claim: bool = True
     limit_key_selector: "Callable[[BaseTask], Sequence[str]] | None" = None
     # Staleness escape hatch for RUNNING tasks WITHOUT an executor ref
     # (e.g. a tick that crashed between limit-slot acquisition and spawn):
@@ -406,7 +398,7 @@ async def _report_tick_summary(
         # build is gone) is also not worth escalating from here — the tick
         # already ran — but it is not a reason to disable reporting for
         # every other build in the process.
-        if _is_route_not_found(e):
+        if is_missing_route_error(e):
             _tick_summary_route_missing = True
             logger.debug(
                 "Registry API does not support tick summaries; reporting "
@@ -662,23 +654,6 @@ async def _act_on_frontier(
         return False, 0  # terminal handling deals with it
     acted = False
     denied_this_round = 0
-    # Hoisted signature reflection (mirrors _concurrent.py's once-per-build
-    # check): whether the registry accepts the executor_metadata kwarg on
-    # the two start surfaces used below.
-    start_accepts_metadata = accepts_executor_metadata_kwarg(registry.task_start_aio)
-    limits_start_accepts_metadata = accepts_executor_metadata_kwarg(
-        registry.task_start_with_limits_aio
-    )
-    # Claim only through registries that implement arbitration (see the
-    # resident engine's identical gate) — the ABC default would just add a
-    # duplicate start. Keeps pre-claim custom registries on their old path.
-    claim_active = config.claim and (
-        type(registry).task_start_claim_aio is not RegistryABC.task_start_claim_aio
-    )
-    # The claim method's signature always accepts executor_metadata; only the
-    # legacy limits-start path needs reflection (pre-metadata custom
-    # registries).
-    acquiring_start_accepts_metadata = claim_active or limits_start_accepts_metadata
     for item in frontier.actionable:
         task = await _load_task(
             item.task_id,
@@ -740,76 +715,50 @@ async def _act_on_frontier(
             if config.limit_key_selector is not None
             else []
         )
-        if limit_keys or claim_active:
-            # Atomic acquiring start BEFORE spawning — the execution claim
-            # (exactly-once arbitration) and any concurrency-limit slots in
-            # one transaction, so a denied task never occupies a worker.
-            # The acquiring TASK_STARTED carries no executor ref yet (there
-            # is nothing to reference), but it does carry the executor
-            # metadata when the executor can resolve it pre-spawn —
-            # otherwise a UI read in the acquire→spawn window shows a
-            # RUNNING task with blank executor info. The post-spawn start
-            # below re-records with the ref (duplicate starts are
-            # tolerated, and slots are counted per task, not per start).
-            acquire_metadata: "dict[str, typing.Any] | None" = None
-            if acquiring_start_accepts_metadata:
-                try:
-                    acquire_metadata = await task_executor.get_executor_metadata(task)
-                except Exception:
-                    logger.debug(
-                        f"Executor metadata resolution failed for task "
-                        f"{task.id}; acquiring without it.",
-                        exc_info=True,
-                    )
-            if claim_active:
-                claim_result = await registry.task_start_claim_aio(
-                    build_id,
-                    task,
-                    executor_metadata=acquire_metadata,
-                    limit_keys=limit_keys or None,
+        # Atomic claiming start BEFORE spawning — the execution claim
+        # (exactly-once arbitration) and any concurrency-limit slots in
+        # one transaction, so a denied task never occupies a worker.
+        # The acquiring TASK_STARTED carries no executor ref yet (there
+        # is nothing to reference), but it does carry the executor
+        # metadata when the executor can resolve it pre-spawn —
+        # otherwise a UI read in the acquire→spawn window shows a
+        # RUNNING task with blank executor info. The post-spawn start
+        # below re-records with the ref (duplicate starts are
+        # tolerated, and slots are counted per task, not per start).
+        acquire_metadata: "dict[str, typing.Any] | None" = None
+        try:
+            acquire_metadata = await task_executor.get_executor_metadata(task)
+        except Exception:
+            logger.debug(
+                f"Executor metadata resolution failed for task "
+                f"{task.id}; acquiring without it.",
+                exc_info=True,
+            )
+        claim_result = await registry.task_start_claim_aio(
+            build_id,
+            task,
+            executor_metadata=acquire_metadata,
+            limit_keys=limit_keys or None,
+        )
+        if not claim_result.started:
+            if claim_result.denied_reason == "limit":
+                logger.info(
+                    f"Task {task.id} denied by concurrency limits "
+                    f"{limit_keys}; leaving in frontier."
                 )
-                started = claim_result.started
-                if not started:
-                    if claim_result.denied_reason == "limit":
-                        logger.info(
-                            f"Task {task.id} denied by concurrency limits "
-                            f"{limit_keys}; leaving in frontier."
-                        )
-                        summary.limit_denied += 1
-                    else:
-                        # already_running / already_completed: another
-                        # scheduler won the race (or the frontier snapshot
-                        # is stale) — the next frontier fetch reflects the
-                        # true status and the RUNNING-probe partition takes
-                        # over.
-                        logger.info(
-                            f"Claim for task {task.id} denied "
-                            f"({claim_result.denied_reason}); leaving in "
-                            "frontier."
-                        )
-                        summary.claim_denied += 1
-                    denied_this_round += 1
-                    continue
+                summary.limit_denied += 1
             else:
-                if acquire_metadata is not None:
-                    started = await registry.task_start_with_limits_aio(
-                        build_id,
-                        task,
-                        executor_metadata=acquire_metadata,
-                        limit_keys=limit_keys,
-                    )
-                else:
-                    started = await registry.task_start_with_limits_aio(
-                        build_id, task, limit_keys=limit_keys
-                    )
-                if not started:
-                    logger.info(
-                        f"Task {task.id} denied by concurrency limits "
-                        f"{limit_keys}; leaving in frontier."
-                    )
-                    summary.limit_denied += 1
-                    denied_this_round += 1
-                    continue
+                # already_running / already_completed: another scheduler
+                # won the race (or the frontier snapshot is stale) — the
+                # next frontier fetch reflects the true status and the
+                # RUNNING-probe partition takes over.
+                logger.info(
+                    f"Claim for task {task.id} denied "
+                    f"({claim_result.denied_reason}); leaving in frontier."
+                )
+                summary.claim_denied += 1
+            denied_this_round += 1
+            continue
         try:
             handle = await task_executor.submit_detached(task)
         except Exception as e:
@@ -818,18 +767,13 @@ async def _act_on_frontier(
             summary.failed_recorded += 1
             acted = True
             continue
-        if handle.executor_metadata is not None and start_accepts_metadata:
-            await registry.task_start_aio(
-                build_id,
-                task,
-                executor=handle.executor,
-                executor_ref=handle.ref,
-                executor_metadata=handle.executor_metadata,
-            )
-        else:
-            await registry.task_start_aio(
-                build_id, task, executor=handle.executor, executor_ref=handle.ref
-            )
+        await registry.task_start_aio(
+            build_id,
+            task,
+            executor=handle.executor,
+            executor_ref=handle.ref,
+            executor_metadata=handle.executor_metadata,
+        )
         summary.spawned += 1
         acted = True
     return acted, denied_this_round
@@ -1381,7 +1325,7 @@ async def _skip_blocked(
         skipped = await registry.build_skip_blocked_aio(build_id)
         summary.skipped += len(skipped)
     except NotFoundError as e:
-        if not _is_route_not_found(e):
+        if not is_missing_route_error(e):
             raise
         logger.warning(
             "Registry server does not support skip-blocked; tasks blocked "

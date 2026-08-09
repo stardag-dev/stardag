@@ -201,13 +201,14 @@ class TestClaimWinner:
         assert summary.status == BuildExitStatus.SUCCESS
         assert registry.claim_calls(task) == 0
 
-    async def test_claim_skipped_without_registry_support(
+    async def test_claim_through_registry_less_path(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """Registries without claim arbitration (ABC default) are never
-        claimed through — even with claim=True (warned, not failed)."""
-        task = SyncOnlyTask(name="claim-unsupported")
-        registry = RecordingRegistry()  # no task_start_claim_aio override
+        """The registry-less path stays claimable: NoOpRegistry grants every
+        claim (nothing shared to arbitrate against), so a claim=True build
+        runs exactly as it would without claims."""
+        task = SyncOnlyTask(name="claim-registry-less")
+        registry = RecordingRegistry()  # NoOpRegistry subclass, no arbitration
 
         summary = await build_aio(
             [task],
@@ -217,7 +218,9 @@ class TestClaimWinner:
         )
 
         assert summary.status == BuildExitStatus.SUCCESS
-        assert not registry.has_call("task_start_claim_aio", task.id)
+        assert task.complete()
+        # The engine's own ref-carrying start still lands.
+        assert registry.has_call("task_start_aio", task.id)
 
 
 class TestClaimLoser:

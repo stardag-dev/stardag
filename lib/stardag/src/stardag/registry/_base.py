@@ -1,7 +1,6 @@
 """Base registry classes and utilities."""
 
 import abc
-import inspect
 import os
 import subprocess
 from datetime import datetime
@@ -16,67 +15,6 @@ from stardag.utils.resource_provider import resource_provider
 if TYPE_CHECKING:
     from stardag import BaseTask
     from stardag.artifact import Artifact
-
-
-def _compute_param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
-    """(parameter names, accepts **kwargs) of ``fn``, or None if uninspectable."""
-    try:
-        signature = inspect.signature(fn)
-    except (TypeError, ValueError):
-        return None
-    params = signature.parameters
-    has_var_keyword = any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-    )
-    return frozenset(params), has_var_keyword
-
-
-@lru_cache(maxsize=256)
-def _cached_param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
-    return _compute_param_info(fn)
-
-
-def _param_info(fn: Any) -> tuple[frozenset[str], bool] | None:
-    """Cached signature reflection for the accepts_* helpers.
-
-    Bound methods hash by (instance, function), so repeated lookups on the
-    same registry hit the cache. Unhashable callables fall back to direct
-    computation.
-    """
-    try:
-        return _cached_param_info(fn)
-    except TypeError:
-        return _compute_param_info(fn)
-
-
-def accepts_executor_kwargs(fn: Any) -> bool:
-    """Whether a ``task_start[_aio]`` implementation accepts the
-    ``executor``/``executor_ref`` kwargs.
-
-    Signature inspection (instead of a try/except TypeError fallback, which
-    would also mask unrelated TypeErrors raised *inside* an implementation)
-    to stay compatible with custom :class:`RegistryABC` implementations
-    written against the pre-detached ``(build_id, task)`` signature.
-    """
-    info = _param_info(fn)
-    if info is None:
-        return False
-    params, has_var_keyword = info
-    return has_var_keyword or ("executor" in params and "executor_ref" in params)
-
-
-def accepts_executor_metadata_kwarg(fn: Any) -> bool:
-    """Whether an implementation accepts the ``executor_metadata`` kwarg.
-
-    Same signature-inspection rationale as :func:`accepts_executor_kwargs`:
-    custom implementations written before the kwarg existed must keep
-    working — callers drop the metadata for those instead of raising.
-    """
-    info = _param_info(fn)
-    if info is None:
-        return False
-    params, has_var_keyword = info
-    return has_var_keyword or "executor_metadata" in params
 
 
 class FrontierTaskRef(StardagBaseModel):
@@ -1083,35 +1021,18 @@ class RegistryABC(metaclass=abc.ABCMeta):
         description: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
     ) -> UUID:
-        """Async version of build_start.
-
-        Drops ``executor_metadata`` for sync overrides written against the
-        pre-metadata signature (detected via signature inspection).
-        """
-        if executor_metadata is not None and accepts_executor_metadata_kwarg(
-            self.build_start
-        ):
-            return self.build_start(
-                root_tasks, description, executor_metadata=executor_metadata
-            )
-        return self.build_start(root_tasks, description)
+        """Async version of build_start."""
+        return self.build_start(
+            root_tasks, description, executor_metadata=executor_metadata
+        )
 
     async def build_resume_aio(
         self,
         build_id: UUID,
         executor_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Async version of build_resume.
-
-        Drops ``executor_metadata`` for sync overrides written against the
-        pre-metadata signature (detected via signature inspection).
-        """
-        if executor_metadata is not None and accepts_executor_metadata_kwarg(
-            self.build_resume
-        ):
-            self.build_resume(build_id, executor_metadata=executor_metadata)
-            return
-        self.build_resume(build_id)
+        """Async version of build_resume."""
+        self.build_resume(build_id, executor_metadata=executor_metadata)
 
     async def build_complete_aio(self, build_id: UUID) -> None:
         """Async version of build_complete."""
@@ -1175,15 +1096,19 @@ class RegistryABC(metaclass=abc.ABCMeta):
         **This is the extension seam for custom arbitration backends**: a
         custom ``RegistryABC`` implementation can arbitrate however it
         likes (Redis, DynamoDB, ...), keeping claim, status and completion
-        consistent in one backend. The default implementation performs NO
-        arbitration — it records the start via :meth:`task_start_aio` and
-        reports it as won, preserving pre-claim behavior for backends
-        without support.
+        consistent in one backend. There is deliberately no default
+        implementation: a backend that answers "you won" without
+        arbitrating is indistinguishable from one that arbitrates
+        correctly, and the build engines rely on this method for
+        exactly-once execution. Implement it, or subclass
+        :class:`NoOpRegistry` to opt out explicitly.
         """
-        await self.task_start_aio(
-            build_id, task, executor=executor, executor_ref=executor_ref
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement task_start_claim_aio. "
+            "Implement it to arbitrate per-task execution claims (see "
+            "APIRegistry), or subclass NoOpRegistry to opt out of "
+            "arbitration."
         )
-        return StartClaimResult(started=True)
 
     async def task_start_with_limits_aio(
         self,
@@ -1222,32 +1147,14 @@ class RegistryABC(metaclass=abc.ABCMeta):
         executor_ref: str | None = None,
         executor_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Async version of task_start.
-
-        Tolerates subclasses that override the sync ``task_start`` with the
-        pre-detached ``(build_id, task)`` signature: refs are dropped for
-        those rather than raising (detected via signature inspection, so
-        TypeErrors raised *inside* an implementation propagate normally).
-        ``executor_metadata`` is likewise dropped for overrides that predate
-        the kwarg.
-        """
-        if (
-            executor is None and executor_ref is None and executor_metadata is None
-        ) or not accepts_executor_kwargs(self.task_start):
-            self.task_start(build_id, task)
-            return
-        if executor_metadata is not None and accepts_executor_metadata_kwarg(
-            self.task_start
-        ):
-            self.task_start(
-                build_id,
-                task,
-                executor=executor,
-                executor_ref=executor_ref,
-                executor_metadata=executor_metadata,
-            )
-            return
-        self.task_start(build_id, task, executor=executor, executor_ref=executor_ref)
+        """Async version of task_start."""
+        self.task_start(
+            build_id,
+            task,
+            executor=executor,
+            executor_ref=executor_ref,
+            executor_metadata=executor_metadata,
+        )
 
     async def task_complete_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_complete."""
@@ -1322,6 +1229,26 @@ class NoOpRegistry(RegistryABC):
 
     def task_get_metadata(self, task_id: UUID) -> TaskMetadata:
         raise NotImplementedError("NoOpRegistry does not support task_get_metadata.")
+
+    async def task_start_claim_aio(
+        self,
+        build_id: UUID,
+        task: "BaseTask",
+        executor: str | None = None,
+        executor_ref: str | None = None,
+        executor_metadata: dict[str, Any] | None = None,
+        limit_keys: Sequence[str] | None = None,
+    ) -> StartClaimResult:
+        """Always grant: there is nothing to arbitrate against.
+
+        This is the registry-*less* path — no shared state records that a
+        task is RUNNING, so no other execution can be observed and no
+        cross-build exactly-once guarantee is on offer in the first place.
+        Granting unconditionally is the honest answer here, unlike on
+        :class:`RegistryABC` (where it would silently defeat arbitration a
+        real backend was expected to provide).
+        """
+        return StartClaimResult(started=True)
 
 
 def init_registry() -> RegistryABC:

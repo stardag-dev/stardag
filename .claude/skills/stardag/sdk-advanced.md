@@ -351,8 +351,8 @@ Key `stardag.build` exports for the execution layer: `DetachedHandle`,
 **Exactly-once by default (execution claims)**: task starts atomically
 claim the task (registry-arbitrated); a losing racer re-attaches to the
 winner instead of duplicating work. Control via `build(..., claim=...)`
-(`None`=auto for probeable executions, `True`, `False`) and
-`TickConfig.claim`; custom arbitration backends override
+(`None`=auto for probeable executions, `True`, `False`); reactive
+scheduler ticks always claim. Custom arbitration backends implement
 `RegistryABC.task_start_claim_aio`. `GlobalLockConfig` is deprecated
 (kept for ref-less executions, now with background TTL renewal).
 

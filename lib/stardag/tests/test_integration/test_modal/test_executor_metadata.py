@@ -338,17 +338,6 @@ class MetadataAwareRegistry(NoOpRegistry):
         )
 
 
-class LegacyRegistry(NoOpRegistry):
-    """Registry with the pre-metadata task_start signature."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.starts: list[dict] = []
-
-    def task_start(self, build_id, task, executor=None, executor_ref=None) -> None:  # pyright: ignore[reportIncompatibleMethodOverride]  # pre-metadata signature (deliberate)
-        self.starts.append({"executor": executor, "executor_ref": executor_ref})
-
-
 def _reporter_env(build_id) -> dict[str, str]:
     return {
         STARDAG_BUILD_ID_ENV: str(build_id),
@@ -389,19 +378,6 @@ class TestWorkerReporterMetadata:
                 "executor_ref": "fc-worker-1",
                 "executor_metadata": EXPECTED_WORKER_METADATA,
             }
-        ]
-
-    def test_started_drops_metadata_for_legacy_registry(self, monkeypatch):
-        """No TypeError against a pre-metadata registry — the start (with
-        its ref) is still recorded."""
-        monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-worker-2")
-        registry = LegacyRegistry()
-        reporter = self._create_reporter(registry, _reporter_env(uuid4()))
-
-        reporter.started()
-
-        assert registry.starts == [
-            {"executor": MODAL_EXECUTOR_NAME, "executor_ref": "fc-worker-2"}
         ]
 
     def test_metadata_minimal_without_forwarded_env(self):

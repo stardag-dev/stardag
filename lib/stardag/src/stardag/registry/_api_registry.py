@@ -118,11 +118,6 @@ def _maybe_gzip_json_body(
 _QueryParams = dict[str, str] | Sequence[tuple[str, str]]
 
 
-def _is_route_not_found(err: NotFoundError) -> bool:
-    """Module-local alias for the shared missing-route check."""
-    return is_missing_route_error(err)
-
-
 def _parse_bulk_register_response(payload: object) -> "list[RegisteredTaskInfo] | None":
     """Parse the ``/tasks/bulk?id_only=true`` response into RegisteredTaskInfo.
 
@@ -505,7 +500,7 @@ class APIRegistry(RegistryABC):
                 operation="Resume build",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /builds/%s/resume; "
@@ -629,7 +624,7 @@ class APIRegistry(RegistryABC):
                 operation=f"Bulk-register {len(tasks)} tasks",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /tasks/bulk; "
@@ -756,7 +751,7 @@ class APIRegistry(RegistryABC):
                 operation=f"Add dependencies for task {task.id}",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /dependencies; "
@@ -805,7 +800,7 @@ class APIRegistry(RegistryABC):
                 operation=f"Skip task {task.id}",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /skip; task %s will "
@@ -1076,7 +1071,7 @@ class APIRegistry(RegistryABC):
                 operation="Resume build",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /builds/%s/resume; "
@@ -1580,7 +1575,7 @@ class APIRegistry(RegistryABC):
         the frontier/notify contract) rather than silently degrading. A
         resource-level 404 (build does not exist) is returned as-is.
         """
-        if not _is_route_not_found(err):
+        if not is_missing_route_error(err):
             return err
         return RuntimeError(
             "The registry server does not support reactive scheduling "
@@ -1633,7 +1628,7 @@ class APIRegistry(RegistryABC):
                 operation=f"Bulk-register {len(tasks)} tasks",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /tasks/bulk; "
@@ -1814,7 +1809,7 @@ class APIRegistry(RegistryABC):
                 operation=f"Add dependencies for task {task.id}",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /dependencies; "
@@ -1858,7 +1853,7 @@ class APIRegistry(RegistryABC):
                 operation=f"Skip task {task.id}",
             )
         except NotFoundError as e:
-            if not _is_route_not_found(e):
+            if not is_missing_route_error(e):
                 raise
             logger.warning(
                 "Registry API does not support POST /skip; task %s will "
