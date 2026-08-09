@@ -19,6 +19,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     localStorage.setItem("theme", theme);
     document.documentElement.classList.toggle("dark", theme === "dark");
+    // Tailwind's `dark:` variant only reaches what we style ourselves.
+    // Natively-rendered controls — checkbox and radio glyphs, select
+    // arrows, scrollbars, focus rings — are painted by the browser from
+    // `color-scheme`, which defaults to light no matter what class is on
+    // the root. Without this an unchecked checkbox is a white box on a
+    // dark table.
+    document.documentElement.style.colorScheme = theme;
   }, [theme]);
 
   const toggleTheme = () => setTheme((t) => (t === "light" ? "dark" : "light"));
