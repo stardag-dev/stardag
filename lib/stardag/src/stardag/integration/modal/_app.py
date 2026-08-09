@@ -1580,6 +1580,17 @@ class _WorkerLifecycleReporter:
         except ValueError:
             logger.warning(f"Invalid {STARDAG_CLAIM_TTL_SECONDS_ENV}: {raw_ttl!r}")
             ttl_seconds = None
+        # A syntactically valid but out-of-range value is the same problem
+        # as a malformed one, and worse in effect: the server rejects it
+        # (422) on `task_start`, so the worker loses its whole lifecycle
+        # report over a bound on an expiry. Drop it and let the server pick
+        # its default.
+        if ttl_seconds is not None and ttl_seconds <= 0:
+            logger.warning(
+                f"Ignoring {STARDAG_CLAIM_TTL_SECONDS_ENV}={raw_ttl!r}: a claim "
+                "TTL must be positive. The server's default applies instead."
+            )
+            ttl_seconds = None
         return cls(
             registry,
             build_id,

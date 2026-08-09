@@ -1241,7 +1241,14 @@ async def build_aio(
         if not latest_status_expires_at:
             return False
         try:
-            expires_at = datetime.fromisoformat(latest_status_expires_at)
+            # `fromisoformat` only learned to accept a trailing "Z" in 3.11,
+            # and this project supports 3.10. The registry serialises UTC
+            # timestamps in exactly that form, so on 3.10 every expiry would
+            # fail to parse — and an unparsed expiry reads as *not lapsed*,
+            # leaving the loser waiting out a claim nobody holds.
+            expires_at = datetime.fromisoformat(
+                latest_status_expires_at.replace("Z", "+00:00")
+            )
         except ValueError:
             return False
         if expires_at.tzinfo is None:
