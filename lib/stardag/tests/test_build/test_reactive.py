@@ -135,6 +135,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         # this build's tasks (dependency edges are global too) while
         # contributing to neither ``actionable`` nor ``status_counts``.
         self.not_in_build: set[str] = set()
+        self.blocker_attempts: dict[str, int] = {}
         # task_id -> the build whose event produced the current status. An
         # ABSENT key means "this build's own doing" (the common case), which
         # is what makes a task NOT an external blocker; an explicit None is a
@@ -230,6 +231,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         status_at: "datetime | None" = None,
         expires_at: "datetime | None" = None,
         in_build: bool = False,
+        attempt_count: int = 0,
     ) -> None:
         """Register an upstream whose current status this build did not set.
 
@@ -252,6 +254,7 @@ class FakeReactiveRegistry(NoOpRegistry):
             self.expires_at[task_id] = expires_at
         if not in_build:
             self.not_in_build.add(task_id)
+        self.blocker_attempts[task_id] = attempt_count
         for downstream in blocks:
             self.upstreams.setdefault(downstream, set()).add(task_id)
 
@@ -380,6 +383,15 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.calls.append(("complete", tid))
         self._count_event(tid, is_start=False)
         self.statuses[tid] = "completed"
+
+    async def task_retry_by_id_aio(self, build_id, task_id):
+        """Id-based retry — what a tick uses for a blocker it cannot
+        reconstruct (it has the id off the frontier, not the object)."""
+        self.calls.append(("retry", task_id))
+        self._count_event(task_id, is_start=False)
+        if self.statuses.get(task_id) in _RETRYABLE_STATUSES:
+            self.statuses[task_id] = "pending"
+            self.refs.pop(task_id, None)
 
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
@@ -582,6 +594,13 @@ class FakeReactiveRegistry(NoOpRegistry):
                             ),
                             blocking_status_build_id=owner_id,
                             blocking_in_build=up not in self.not_in_build,
+                            # Mirrors the server: attempts are per build, so
+                            # only a blocker in this build's plan has any.
+                            blocking_attempt_count=(
+                                self.blocker_attempts.get(up, 0)
+                                if up not in self.not_in_build
+                                else None
+                            ),
                         )
                     )
         return BuildFrontier(
@@ -2010,6 +2029,7 @@ class TestExternalBlockers:
         blocker_age_seconds: float | None = 60.0,
         blocker_expires_in_seconds: float | None = None,
         in_build: bool = False,
+        blocker_attempts: int = 0,
         owner_build_id: "UUID | None" = None,
         owner_build_status: "str | None" = "running",
         owner_build_known: bool = True,
@@ -2033,6 +2053,7 @@ class TestExternalBlockers:
                 + timedelta(seconds=blocker_expires_in_seconds)
             ),
             in_build=in_build,
+            attempt_count=blocker_attempts,
             owner_build_id=owner_build_id,
             owner_build_status=owner_build_status,
             owner_build_known=owner_build_known,
@@ -2387,15 +2408,86 @@ class TestExternalBlockers:
         assert summary.external_blockers_waited == 2
         assert registry.build_get_calls == [owner]
 
-    async def test_in_build_blocker_does_not_cause_a_wait(
+    async def test_cancelled_in_build_blocker_is_retried_not_failed(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """A blocker inside this build's own task set is already modelled by
-        actionable/running/status_counts, so it must not buy the build a
-        wait — but it does get named, since the status counts alone never
-        said which task was holding things up."""
+        """Builds collaborate: a task in *this build's own plan* is this
+        build's to run, whatever build last touched it.
+
+        The motivating shape is fail-fast. Build A starts a shared task,
+        hits an unrelated failure, and cascade-cancels the tasks it started
+        — correctly, since it owns those claims. The cancel releases the
+        claim, which is the whole point. But the task is left CANCELLED,
+        which is not schedulable, so build B — which shares the dependency
+        and has failed at nothing — used to die on it too. One build's
+        fail-fast became every overlapping build's failure.
+
+        Nothing owns the task now: no claim, no live execution. It is in B's
+        plan, so B resets it and runs it.
+        """
         _, registry, locks, executor, store = self._blocked_build(
             blocker_status="cancelled", in_build=True
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        # Reset, not failed: the next tick finds it actionable.
+        assert summary.terminal_status is None
+        assert ("retry", self.BLOCKER_ID) in registry.calls
+        assert registry.statuses[self.BLOCKER_ID] == "pending"
+        assert registry.build_error_message is None
+
+    async def test_in_build_retry_respects_the_attempt_budget(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Retrying an in-plan blocker must not become an infinite loop.
+
+        A task that genuinely fails every time would otherwise be reset,
+        rerun and re-failed forever. The budget that already bounds ordinary
+        retries bounds this one too, and the build fails once it is spent —
+        which is the honest outcome, since nothing will move the task.
+        """
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="failed", in_build=True, blocker_attempts=5
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+                max_attempts=2,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert ("retry", self.BLOCKER_ID) not in registry.calls
+        message = registry.build_error_message or ""
+        assert "Blocked within this build by" in message
+
+    async def test_in_build_blocker_that_cannot_be_retried_still_fails(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Not every in-plan blocker is recoverable. One in a status no
+        retry moves is named and the build fails, rather than idling."""
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="unregistered", in_build=True
         )
 
         summary = await run_tick_aio(

@@ -740,6 +740,10 @@ class TickSummary:
     external_blockers: int = 0
     external_blockers_waited: int = 0
     external_blockers_fatal: int = 0
+    # Blockers in this build's own task set that it reset so it could run
+    # them itself (the collaboration path: a shared task another build
+    # cancelled is still this build's to run).
+    in_build_blockers_reset: int = 0
 
 
 # Outcomes worth persisting. ``not_reactive`` is excluded by definition:
@@ -1832,9 +1836,14 @@ class _ExternalBlockers(typing.NamedTuple):
     queued: list[_BlockerVerdict]
     # Out-of-build and nothing is going to run it. Fail.
     fatal: list[_BlockerVerdict]
-    # In this build's own task set: already accounted for by actionable /
-    # running / status_counts, so it must not influence the wait-or-fail
-    # decision. Kept only to enrich the message.
+    # In this build's own task set, in a status a retry moves, with budget
+    # left: this build's to run. Reset and schedule, don't fail — see
+    # ``_classify_external_blockers``.
+    recoverable: list[_BlockerVerdict]
+    # In this build's own task set but not recoverable (a status no retry
+    # moves, or the attempt budget is spent): already accounted for by
+    # actionable / running / status_counts, so it must not influence the
+    # wait-or-fail decision. Kept only to enrich the message.
     in_build: list[_BlockerVerdict]
 
     @property
@@ -1872,6 +1881,7 @@ async def _classify_external_blockers(
     now: datetime,
     *,
     registry: RegistryABC,
+    config: TickConfig,
 ) -> _ExternalBlockers:
     """Split the frontier's external blockers into wait / fail / ignore.
 
@@ -1936,6 +1946,7 @@ async def _classify_external_blockers(
     executing: list[_BlockerVerdict] = []
     queued: list[_BlockerVerdict] = []
     fatal: list[_BlockerVerdict] = []
+    recoverable: list[_BlockerVerdict] = []
     in_build: list[_BlockerVerdict] = []
 
     # Owning-build statuses resolved during THIS classification only. A wide
@@ -1971,7 +1982,27 @@ async def _classify_external_blockers(
 
     for blocker in frontier.blocked_by_external:
         if blocker.blocking_in_build:
-            in_build.append(_BlockerVerdict(blocker, "in this build's own task set"))
+            # A task in this build's own plan is this build's to run,
+            # whatever build last touched it. Builds collaborate: the claim
+            # is the only cross-build coordination primitive, and this
+            # blocker holds none — a retryable status carries no claim.
+            #
+            # The shape that motivates it is fail-fast. Another build starts
+            # a shared task, hits an unrelated failure and cascade-cancels
+            # what it started — correctly, since it owns those claims. That
+            # releases the claim, which is the point, but leaves the task
+            # CANCELLED, which is not schedulable. Without this, one build's
+            # fail-fast became every overlapping build's failure.
+            if blocker.blocking_status in _RETRYABLE_STATUSES and _retry_allowed(
+                blocker.blocking_attempt_count, config.max_attempts
+            ):
+                recoverable.append(
+                    _BlockerVerdict(blocker, "in this build's own task set, resettable")
+                )
+            else:
+                in_build.append(
+                    _BlockerVerdict(blocker, "in this build's own task set")
+                )
             continue
 
         if blocker.blocking_status in _RUNNING_STATUSES:
@@ -2042,7 +2073,11 @@ async def _classify_external_blockers(
             )
 
     return _ExternalBlockers(
-        executing=executing, queued=queued, fatal=fatal, in_build=in_build
+        executing=executing,
+        queued=queued,
+        fatal=fatal,
+        recoverable=recoverable,
+        in_build=in_build,
     )
 
 
@@ -2212,7 +2247,32 @@ async def _handle_terminal(
         # failure.
         now = datetime.now(timezone.utc)
         truncated = frontier.blocked_by_external_truncated
-        blockers = await _classify_external_blockers(frontier, now, registry=registry)
+        blockers = await _classify_external_blockers(
+            frontier, now, registry=registry, config=config
+        )
+
+        # Recoverable in-plan blockers first: this build can reset them and
+        # run them itself, so there is nothing to wait for and nothing to
+        # fail on. Done before the wait/fail decision because it *removes*
+        # the reason for both — the next tick finds them actionable.
+        if blockers.recoverable:
+            reset_ids = [v.blocker.blocking_task_id for v in blockers.recoverable]
+            for task_id in reset_ids:
+                try:
+                    await registry.task_retry_by_id_aio(build_id, task_id)
+                except Exception as e:
+                    # Best-effort: another tick may have reset it already, or
+                    # completed it outright. Either way the next frontier read
+                    # tells the truth, and failing the build over a lost race
+                    # is the outcome this whole path exists to avoid.
+                    logger.warning(f"Could not reset in-build blocker {task_id}: {e}")
+            summary.in_build_blockers_reset += len(reset_ids)
+            logger.info(
+                f"Build {build_id}: reset {len(reset_ids)} blocker(s) in this "
+                f"build's own task set so this build can run them: "
+                f"{', '.join(reset_ids[:_MAX_REPORTED_BLOCKERS])}"
+            )
+            return None
         waiting = blockers.waiting
         summary.external_blockers += len(frontier.blocked_by_external)
         summary.external_blockers_waited += len(waiting)

@@ -126,6 +126,13 @@ class FrontierExternalBlocker(StardagBaseModel):
     # only wait for whoever owns it. True still blocks, but the blocker also
     # shows up in this build's own ``actionable``/``running``.
     blocking_in_build: bool
+    # Attempts this blocker has already spent **in this build's round**,
+    # when the blocker is in this build's plan (None otherwise, and on
+    # servers predating the field). A tick that resets an in-plan blocker
+    # needs this to stay inside the same budget an ordinary retry obeys —
+    # otherwise a task that fails every time is reset, rerun and re-failed
+    # forever.
+    blocking_attempt_count: int | None = None
 
 
 class BuildFrontier(StardagBaseModel):

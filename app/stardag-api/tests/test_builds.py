@@ -2045,6 +2045,8 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
             ],
             "blocking_status_build_id": build_a,
             "blocking_in_build": False,
+            # Out of this build's plan, so it has spent no attempts in it.
+            "blocking_attempt_count": None,
         }
     ]
     assert frontier_b["blocked_by_external"][0]["blocking_status_at"] is not None
@@ -2069,6 +2071,38 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
 
 
 @pytest.mark.asyncio
+async def test_frontier_reports_attempts_for_an_in_plan_blocker(client):
+    """A blocker inside this build's plan carries its attempt count.
+
+    A scheduler may reset such a blocker and run it — the task is in its
+    plan, so it is its to run. It needs the attempts already spent to stay
+    inside the same retry budget an ordinary task obeys; without it, a task
+    that fails every time would be reset, rerun and re-failed forever.
+    """
+    build = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build}/tasks", json=_register_payload("up"))
+    await client.post(
+        f"/api/v1/builds/{build}/tasks",
+        json=_register_payload("down", deps=["up"]),
+    )
+    # This build spends one attempt on the shared task...
+    await client.post(f"/api/v1/builds/{build}/tasks/up/start")
+    await client.post(f"/api/v1/builds/{build}/tasks/up/fail")
+
+    # ...then another build cancels it (the fail-fast cascade shape), so the
+    # status this build is now looking at was set elsewhere.
+    other = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{other}/tasks", json=_register_payload("up"))
+    await client.post(f"/api/v1/builds/{other}/tasks/up/cancel")
+
+    frontier = (await client.get(f"/api/v1/builds/{build}/frontier")).json()
+    blockers = frontier["blocked_by_external"]
+    assert len(blockers) == 1
+    assert blockers[0]["blocking_task_id"] == "up"
+    assert blockers[0]["blocking_in_build"] is True
+    assert blockers[0]["blocking_attempt_count"] == 1
+
+
 async def test_frontier_reports_blocker_owned_by_another_build(client: AsyncClient):
     await _assert_frontier_reports_cross_build_blocker(client)
 

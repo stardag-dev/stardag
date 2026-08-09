@@ -408,6 +408,11 @@ class FrontierExternalBlocker(BaseModel):
     # only wait for whoever owns it. True still blocks, but the blocker
     # shows up in this build's own ``actionable``/``running`` as well.
     blocking_in_build: bool
+    # Attempts spent by the blocker in *this* build's current round, when it
+    # is part of this build's task set (null otherwise — a task outside the
+    # plan has no attempts in it). Lets a scheduler apply its retry budget
+    # to an in-plan blocker without a second round-trip.
+    blocking_attempt_count: int | None = None
 
 
 class BuildFrontierResponse(BaseModel):

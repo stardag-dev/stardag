@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any, Sequence
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -1753,6 +1753,7 @@ async def get_build_frontier(
     # edges (ix_task_dep_downstream), bounded by LIMIT.
     blocked_by_external: list[FrontierExternalBlocker] = []
     blocked_by_external_truncated = False
+    blocker_rows: Sequence[Any] = []
     if not actionable_tasks and not running_tasks:
         blocked = aliased(Task)
         blocker = aliased(Task)
@@ -1768,6 +1769,7 @@ async def get_build_frontier(
                     blocker.latest_status_expires_at,
                     blocker.latest_status_build_id,
                     blocker.id.in_(build_task_ids),
+                    blocker.id,
                 )
                 .select_from(TaskDependency)
                 .join(blocked, TaskDependency.downstream_task_id == blocked.id)
@@ -1791,34 +1793,10 @@ async def get_build_frontier(
         blocked_by_external_truncated = (
             len(blocker_rows) > _MAX_FRONTIER_EXTERNAL_BLOCKERS
         )
-        blocked_by_external = [
-            FrontierExternalBlocker(
-                task_id=blocked_task_id,
-                blocking_task_id=blocking_task_id,
-                blocking_task_namespace=blocking_namespace,
-                blocking_task_name=blocking_name,
-                blocking_status=blocking_status,
-                blocking_status_at=blocking_status_at,
-                # The point of the whole entry: a blocker RUNNING under a
-                # build that died used to be indistinguishable from one
-                # running normally, leaving the consumer to guess from
-                # elapsed time. Past this instant it is provably gone.
-                blocking_status_expires_at=blocking_status_expires_at,
-                blocking_status_build_id=blocking_status_build_id,
-                blocking_in_build=bool(blocking_in_build),
-            )
-            for (
-                blocked_task_id,
-                blocking_task_id,
-                blocking_namespace,
-                blocking_name,
-                blocking_status,
-                blocking_status_at,
-                blocking_status_expires_at,
-                blocking_status_build_id,
-                blocking_in_build,
-            ) in blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
-        ]
+        # Response objects are built lower down, once attempt counts are
+        # known: an in-plan blocker carries its attempts so a scheduler can
+        # apply the same retry budget it applies to anything else.
+        blocker_rows = blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
 
     root_task_ids: list[str] = list(build.root_task_ids or [])
     roots: list[Task] = []
@@ -1853,9 +1831,48 @@ async def get_build_frontier(
     attempt_task_pks = {t.id for t in actionable_tasks}
     attempt_task_pks.update(t.id for t in running_tasks)
     attempt_task_pks.update(t.id for t in roots)
+    # In-plan blockers too — a scheduler may reset one, and it needs the
+    # budget to decide. Out-of-plan blockers are skipped: they have no
+    # attempts in this build by definition.
+    attempt_task_pks.update(row[9] for row in blocker_rows if row[8])
     attempt_counts = await get_attempt_counts_in_build(
         db, build_id, list(attempt_task_pks)
     )
+
+    blocked_by_external = [
+        FrontierExternalBlocker(
+            task_id=blocked_task_id,
+            blocking_task_id=blocking_task_id,
+            blocking_task_namespace=blocking_namespace,
+            blocking_task_name=blocking_name,
+            blocking_status=blocking_status,
+            blocking_status_at=blocking_status_at,
+            # The point of the whole entry: a blocker RUNNING under a build
+            # that died used to be indistinguishable from one running
+            # normally, leaving the consumer to guess from elapsed time.
+            # Past this instant it is provably gone.
+            blocking_status_expires_at=blocking_status_expires_at,
+            blocking_status_build_id=blocking_status_build_id,
+            blocking_in_build=bool(blocking_in_build),
+            # Only meaningful for a blocker in this build's plan; a task
+            # outside it has spent no attempts here.
+            blocking_attempt_count=(
+                attempt_counts.get(blocker_pk, 0) if blocking_in_build else None
+            ),
+        )
+        for (
+            blocked_task_id,
+            blocking_task_id,
+            blocking_namespace,
+            blocking_name,
+            blocking_status,
+            blocking_status_at,
+            blocking_status_expires_at,
+            blocking_status_build_id,
+            blocking_in_build,
+            blocker_pk,
+        ) in blocker_rows
+    ]
 
     def _ref(t: Task) -> FrontierTaskRef:
         return FrontierTaskRef(
