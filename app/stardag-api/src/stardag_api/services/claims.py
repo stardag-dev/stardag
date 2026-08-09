@@ -6,8 +6,8 @@ the same transaction as the event and as the concurrency-limit slot rows.
 That single-row design is deliberate and its advantages are load-bearing
 (one transaction so claim, status, completion and slot occupancy cannot
 drift; no join on a frontier that is re-read every few seconds; zero
-liveness traffic). See ``docs/design/execution-claims-and-liveness.md``
-before changing any of it.
+liveness traffic). See the execution-claims design note before changing
+any of it.
 
 Its one defect is what this module addresses: the claim recorded no
 liveness evidence a **third party** could evaluate. This adds an expiry —
@@ -21,7 +21,17 @@ The two predicates are the same rule expressed twice, once in Python (for
 the FOR-UPDATE-locked row already in hand) and once in SQL (for counting
 rows we do not want to load):
 
-    RUNNING AND (expires_at IS NULL OR expires_at > now())
+    RUNNING AND (expires_at IS NULL OR expires_at > <now>)
+
+where ``<now>`` is **application** time (``utc_now()``), not the database's
+``now()``. Deliberate, and worth knowing before "simplifying" it: the same
+clock has to decide both predicates, and the Python one has no database
+session to ask. The cost is that a skewed app server mis-times expiries by
+its skew — immaterial against TTLs measured in hours.
+
+The design note this module implements lands with the accompanying work
+(``docs/design/execution-claims-and-liveness.md``); it is not on this
+branch.
 """
 
 from __future__ import annotations
@@ -85,6 +95,9 @@ def live_claim_filter(now: datetime | None = None) -> ColumnElement[bool]:
     ``latest_status`` leads the expression so an index on it (or on
     ``(environment_id, latest_status, …)``) still drives the scan; the
     expiry comparison then filters the few rows that survive.
+
+    Compares against application time, not the database's ``now()`` — see
+    the module docstring for why both predicates must share one clock.
     """
     return (Task.latest_status == TaskStatus.RUNNING) & or_(
         Task.latest_status_expires_at.is_(None),
