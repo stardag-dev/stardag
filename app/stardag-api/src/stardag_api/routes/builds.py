@@ -543,11 +543,12 @@ async def list_builds(
         Query(
             ge=60,
             description=(
-                "Only builds with no activity of any kind for at least this "
-                "many seconds, measured on `last_activity_at`. Same "
-                "definition and same floor as POST /builds/bulk-cancel, so "
-                "the two cannot disagree about what is idle. Ordering "
-                "switches to stalest-first."
+                "Only builds that are still RUNNING and have had no "
+                "activity of any kind for at least this many seconds, "
+                "measured on `last_activity_at`. Same definition and same "
+                "floor as POST /builds/bulk-cancel, so the two cannot "
+                "disagree about what is idle. Ordering switches to "
+                "stalest-first."
             ),
         ),
     ] = None,
@@ -568,9 +569,17 @@ async def list_builds(
       are scanned up to a bounded cap and filtered in Python, so ``total``
       means "matches within the scanned window". Intended to be combined
       with ``reactive_app_name``, which keeps the candidate set small.
-    - ``idle_for_seconds``: only builds idle for at least that long. **A real
-      SQL predicate**, so ``total`` is an exact ``COUNT(*)`` and pagination
-      is server-side and unbounded — no scan cap, nothing silently dropped.
+    - ``idle_for_seconds``: only builds that are **still running** and have
+      been idle for at least that long. **A real SQL predicate**, so
+      ``total`` is an exact ``COUNT(*)`` and pagination is server-side and
+      unbounded — no scan cap, nothing silently dropped.
+
+    Idleness implies RUNNING because that is the only state in which it
+    means anything. A finished build has no activity by definition, so
+    without the RUNNING predicate a staleness query returns every build
+    that ever completed, ordered by how long ago — which is a history
+    listing wearing a cleanup query's clothes. The word this filter exists
+    to express is *abandoned*, and only a running build can be abandoned.
 
     Idleness is the same definition the stale-build reaper uses
     (:func:`~stardag_api.services.build_cleanup.idle_filters`), deliberately
@@ -590,13 +599,10 @@ async def list_builds(
     the sort key is a proxy for the full signal.
 
     **Combining ``status`` with ``idle_for_seconds``:** only
-    ``status=running`` is accepted, and it then uses the SQL RUNNING
-    predicate instead of the Python scan, keeping the pair exact and
-    unbounded. That combination — "running, and idle for a day" — is the
-    abandoned-build query, and answering it over the 500 most-recently-active
-    candidates would drop precisely the oldest builds it exists to find. Any
-    other status alongside ``idle_for_seconds`` is rejected with **422**
-    rather than served an approximate ``total`` that looks exact.
+    ``status=running`` is accepted, and it is redundant — the idle filter
+    already implies it. Any other status is a contradiction rather than a
+    narrower query, so it is rejected with **422** instead of being served
+    the empty result the predicates would produce.
     """
     environment_id = auth.environment_id
     if idle_for_seconds is not None and status not in (None, BuildStatus.RUNNING):
@@ -604,12 +610,11 @@ async def list_builds(
             status_code=422,
             detail=(
                 f"status={status.value!r} cannot be combined with "
-                "idle_for_seconds: only 'running' has a SQL predicate, and "
-                "the other statuses are derived by scanning a bounded window "
-                "of candidates, which would make `total` and pagination "
-                "approximate without saying so. Filter by idle_for_seconds "
-                "alone and inspect `status` per build, or drop "
-                "idle_for_seconds."
+                "idle_for_seconds: an idle filter already means 'still "
+                "running, but nothing is happening'. A build that reached "
+                f"{status.value!r} is finished, not idle. Drop "
+                "idle_for_seconds to list builds by status, or drop status "
+                "to find abandoned builds."
             ),
         )
 
@@ -622,8 +627,11 @@ async def list_builds(
     sql_filtered = idle_for_seconds is not None
     if idle_for_seconds is not None:
         filters.extend(idle_filters(utc_now() - timedelta(seconds=idle_for_seconds)))
-        if status == BuildStatus.RUNNING:
-            filters.append(build_is_running())
+        # Unconditionally, not just when status=running was asked for: this
+        # endpoint is the preview for POST /builds/bulk-cancel, which only
+        # ever acts on running builds. A preview that lists rows the action
+        # will not touch is worse than no preview.
+        filters.append(build_is_running())
 
     # Sort by last_active_at so a resumed build (BUILD_RESUMED touches this
     # column) jumps back to the top of the list. ``Build.id`` is a UUID7
