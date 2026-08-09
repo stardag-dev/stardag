@@ -385,12 +385,32 @@ async def _seed_running_build(pg_engine: AsyncEngine, name: str):
         apply_event_to_build(build, event)
         # A second event so the resume endpoint sees "activity" and actually
         # records a BUILD_RESUMED rather than no-opping.
+        #
+        # A *task*-level event, deliberately. A build-level terminal event
+        # here would leave this build's event stream disagreeing with its
+        # own `latest_*` columns — a state the denormalisation makes
+        # impossible in production, and one that would mask exactly the
+        # bugs these tests exist to catch (code consulting the stream where
+        # it should consult the columns).
+        activity_task = Task(
+            id=generate_uuid7(),
+            task_id=f"{name}-activity",
+            environment_id=DEFAULT_ENVIRONMENT_ID,
+            task_namespace="",
+            task_name=f"{name}-activity",
+            task_data={},
+            is_phantom=False,
+            latest_status=TaskStatus.PENDING,
+            latest_waiting_for_lock=False,
+        )
+        setup.add(activity_task)
+        await setup.flush()
         setup.add(
             Event(
                 id=generate_uuid7(),
                 build_id=build.id,
-                task_id=None,
-                event_type=EventType.BUILD_FAILED,
+                task_id=activity_task.id,
+                event_type=EventType.TASK_STARTED,
                 created_at=datetime.now(timezone.utc),
             )
         )

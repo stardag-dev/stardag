@@ -913,7 +913,7 @@ async def test_list_builds_idle_filter_environment_isolation(
 async def test_list_builds_running_and_idle_is_exact_and_unbounded(
     client: AsyncClient, async_session
 ):
-    """ "Running, and idle for a day" — the abandoned-build query — is served
+    """The abandoned-build query — running, and idle for a day — is served
     entirely in SQL: an exact `COUNT(*)` and a server-side page.
 
     This used to be the one status combination with a SQL predicate, bolted
