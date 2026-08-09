@@ -59,8 +59,12 @@ class FrontierTaskRef(StardagBaseModel):
     # previous one by any other event (a failure, a suspension) is a new
     # attempt.
     #
-    # ``0`` means "not attempted in this build" — an ordinary spawn
-    # candidate, never a reason to deny a start.
+    # ``0`` means "not attempted in this **round**" — an ordinary spawn
+    # candidate, never a reason to deny a start. Note *round*, not build:
+    # BUILD_RESUMED resets the count, so a task that ran in an earlier
+    # round of the same build reads ``0`` again after a re-trigger. That is
+    # deliberate — a retry budget is per attempt at making the build
+    # progress, and a resume is a new attempt.
     #
     # ``None`` means the *server does not report attempts at all* (it
     # predates the field, so the key is absent from the payload and this
