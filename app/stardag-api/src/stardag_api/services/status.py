@@ -126,6 +126,11 @@ def last_build_resumed_at(build_id: UUID) -> Select[tuple[datetime]]:
     """
     return select(func.max(Event.created_at)).where(
         Event.build_id == build_id,
+        # Explicit, even though only build-level events carry this type: it
+        # is what makes the index a seek on (build_id, NULL, 'build_resumed')
+        # rather than a scan over every event the build ever recorded, and
+        # the comment above claims exactly that.
+        Event.task_id.is_(None),
         Event.event_type == EventType.BUILD_RESUMED.value,
     )
 

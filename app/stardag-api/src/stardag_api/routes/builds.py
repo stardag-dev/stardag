@@ -1845,7 +1845,8 @@ async def get_build_frontier(
     # aggregate would be N+1 on the hottest read in the system. Bounded to
     # the tasks actually being reported, so the added scan is proportional
     # to the response, not to the build's whole event history. Frontier
-    # query-count delta: +1, unconditionally.
+    # query-count delta: +1, or 0 when the frontier has no tasks to report
+    # (`get_attempt_counts_in_build` returns without touching the DB).
     attempt_task_pks = {t.id for t in actionable_tasks}
     attempt_task_pks.update(t.id for t in running_tasks)
     attempt_task_pks.update(t.id for t in roots)
