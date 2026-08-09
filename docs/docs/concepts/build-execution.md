@@ -120,7 +120,8 @@ tick(build_id):
     act (bounded-concurrent, up to a per-tick spawn cap):
          spawn pending/suspended tasks detached (recording refs)
          probe running refs — leave live ones; self-heal completions
-         (target existence is ground truth); record failures
+         (target existence is ground truth); record failures, and
+         respawn the retryable ones within the attempt budget
     handle terminal states (all roots complete / failure — with blocked
     tasks marked skipped / cancelled; wait rather than fail when the
     only thing missing is a task another build is executing)
@@ -203,6 +204,75 @@ dependencies are still registered before the tasks that depend on them (the
 bulk endpoint resolves `dependency_task_ids` against rows that must already
 exist), and the walk's result is identical to the serial one for any DAG.
 Only the completion checks overlap.
+
+### Task retries: the failures no backend can retry for you
+
+An execution backend's function-level retries (Modal's `retries=`, say)
+cover exceptions raised _inside_ the container. That leaves a class of
+failures they structurally cannot reach: a spawn that failed before any
+container existed, an execution the backend killed (OOM, timeout), a spot
+instance preempted mid-run, a worker that died after writing part of its
+output. Under `FAIL_FAST`, one of those used to end the whole build.
+
+A tick therefore keeps its own budget: `TickConfig.max_attempts` (default
+**2**), a budget **per task per build round** on how many executions the
+scheduler will start. A failure the tick records is reset to pending and
+picked up on the next pass while the budget allows.
+
+The split is deliberate and narrow:
+
+| Failure                                                             | Retried? |
+| ------------------------------------------------------------------- | -------- |
+| Spawn raised — no container ever ran                                | yes      |
+| Backend reports the execution failed (OOM, kill, preemption)        | yes      |
+| Execution claim lapsed with nothing left to probe (worker vanished) | yes      |
+| Task object missing and not rehydratable from the registry          | **no**   |
+| Exception inside your task                                          | n/a      |
+
+The last row is the important one: a task that raises reports its own
+`TASK_FAILED` and leaves the frontier, so a tick never sees it. Genuinely
+deterministic failures are therefore out of reach of this budget by
+construction, not by a judgement call — which is why defaulting it above 1
+cannot turn "fails fast on a bug" into "runs the bug three times". The
+`no` row is the one deterministic failure a tick _does_ see, and it is
+excluded explicitly: the task store and the imported task classes do not
+change between two passes, so a retry re-reads the same absence.
+
+Because a tick is short-lived and remembers nothing, the count comes from
+the registry (`attempt_count` on the frontier, the per-build task listing
+and task events).
+
+#### Rounds: what resets the budget, and what does not
+
+A **round** runs from the build's most recent `BUILD_RESUMED` event, or
+from the build's beginning if it has never been resumed, and the count is
+scoped to it. So the two things that look alike from the UI are not:
+
+- **Re-triggering the build resets it.** `build_trigger(..., build_id=<this
+build>, reactive=True)` records `BUILD_RESUMED` _before_ its discovery
+  resets the failed tasks to pending, so the round boundary lands ahead of
+  them and every task starts the new round at zero. This is the recovery
+  path for a build that ran out of attempts, and both exhaustion messages
+  point at it. Add `tick_kwargs={"max_attempts": N}` to the same re-trigger
+  if the task needs more attempts per round.
+- **A bare retry does not.** Clicking Retry in the UI, running `stardag
+tasks retry`, or POSTing the retry route flips the task back to pending
+  without recording `BUILD_RESUMED`, so the count it is measured against is
+  unchanged. On a task that is already at budget the retry _succeeds_ and
+  the scheduler then refuses to start it — which would look like nothing
+  happening at all, so the tick says so explicitly and fails the task again
+  with the re-trigger spelled out.
+
+**Resuming a suspended task is never budget-gated.** A dynamic-dependency
+yield records a fresh start, so a task that yields repeatedly accumulates
+attempts while being perfectly healthy; gating resumption would cap dynamic
+dependencies rather than retries. It does mean such a task reaches its
+_retry_ budget sooner within a round — raise `max_attempts` for DAGs that
+suspend a lot.
+
+Set `max_attempts=1` for the previous behaviour (record the failure, never
+respawn). Against a registry that does not report `attempt_count` no budget
+can bound a retry loop, so retries are disabled and the tick logs that.
 
 ### Cross-build blocking
 

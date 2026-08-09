@@ -8,6 +8,53 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
+- **Reactive builds now have a task-level retry policy.** A reactive tick
+  recorded a failed execution and never respawned it, on the reasoning that
+  retries are the execution backend's job. They partly are — a backend's
+  function-level retries (Modal's `retries=`) cover exceptions raised
+  _inside_ the container — but they cannot cover a spawn that failed before
+  any container existed, an execution the backend killed (OOM, timeout), a
+  preempted worker, or one that died after writing partial output. Under
+  `FAIL_FAST`, any one of those ended the whole build.
+
+  `TickConfig.max_attempts` (default **2**, also accepted as a Modal
+  `tick_kwarg`) is a budget, per task per build _round_, on how many
+  executions the scheduler starts. A failure the tick records is reset to
+  pending and picked up on the next pass while the budget allows. The
+  budget covers exactly the failures no backend can retry: a failed spawn,
+  an execution the backend reports failed, and a task whose execution claim
+  lapsed with nothing left to probe. It deliberately does **not** cover a
+  task whose object cannot be rehydrated — the same absence on the second
+  reading — and it never sees an exception inside a task at all, since the
+  worker self-reports that and the task leaves the frontier. Set
+  `max_attempts=1` for the previous behaviour.
+
+  A **round** runs from the build's most recent `BUILD_RESUMED` event, which
+  makes the recovery path the one you already reach for: **re-triggering the
+  build** (`build_trigger(..., build_id=<this build>, reactive=True)`)
+  records `BUILD_RESUMED` ahead of its discovery retries, so every task
+  starts the new round at zero — optionally with a raised budget via
+  `tick_kwargs={"max_attempts": N}`. A **bare** retry (the UI's Retry,
+  `stardag tasks retry`, the retry route) does not start a round and does
+  not reset anything.
+
+  Exhaustion is loud in both directions. A tick that declines to respawn
+  names the task, the attempts spent, the budget and the re-trigger. And on
+  a task already at budget, a bare retry succeeds server-side while the
+  scheduler still refuses to start it — previously a silent no-op; now the
+  tick says exactly that, distinguishes it from a re-trigger, fails the task
+  again rather than leaving it pending and inert, and spells out the
+  re-trigger that would work. New `TickSummary` counters `retried`,
+  `retry_exhausted` and `budget_denied` carry the same facts into the
+  persisted per-build summary.
+
+  Resuming a **suspended** task is never budget-gated: a dynamic-dependency
+  yield records a fresh start, so gating resumption would cap dynamic
+  dependencies rather than retries. Server support is required
+  (`attempt_count` on the frontier); against a registry that does not report
+  it, no budget can bound a retry loop, so retries stay off and the tick
+  says why.
+
 - **Reactive ticks fan out concurrently.** Acting on a frontier was a plain
   `for` loop with awaits inside it: per actionable task, a task-store read,
   an execution-claim acquisition, an executor spawn and a start recording

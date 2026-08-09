@@ -39,6 +39,42 @@ class FrontierTaskRef(StardagBaseModel):
     # while ``latest_status == "running"``: every other transition releases
     # the claim, and the server clears this with it.
     latest_status_expires_at: datetime | None = None
+    # How many times execution has been *started* for this task in the
+    # build's current **round** — the budget a reactive tick's
+    # ``TickConfig.max_attempts`` spends (see ``stardag.build._reactive``).
+    #
+    # A round runs from the build's most recent BUILD_RESUMED event, or
+    # from the build's beginning if it has never been resumed. So the count
+    # is scoped tighter than the build: re-triggering an existing build id
+    # emits BUILD_RESUMED and thereby starts a fresh round, which is what
+    # makes "re-trigger it" a real escape from an exhausted budget rather
+    # than a no-op. A *bare* retry (the retry route, the UI's Retry,
+    # ``stardag tasks retry``) emits no such event and does not reset it.
+    #
+    # The server collapses *runs of consecutive* TASK_STARTED events into
+    # one attempt, so the several starts one execution records — the
+    # reactive path's two (the claiming start, then the one carrying the
+    # executor ref) and the resident path's three (claim, engine ref,
+    # worker self-report) — count once each. A start separated from the
+    # previous one by any other event (a failure, a suspension) is a new
+    # attempt.
+    #
+    # ``0`` means "not attempted in this **round**" — an ordinary spawn
+    # candidate, never a reason to deny a start. Note *round*, not build:
+    # BUILD_RESUMED resets the count, so a task that ran in an earlier
+    # round of the same build reads ``0`` again after a re-trigger. That is
+    # deliberate — a retry budget is per attempt at making the build
+    # progress, and a resume is a new attempt.
+    #
+    # ``None`` means the *server does not report attempts at all* (it
+    # predates the field, so the key is absent from the payload and this
+    # default applies). That is not the same statement as ``0`` and must
+    # not be collapsed into it: a budget is only enforceable against a
+    # counter that exists, so a reader with no counter cannot allow a retry
+    # either — it has no way to stop allowing one. Callers therefore read
+    # ``None`` as "no retry policy is possible here" and degrade to exactly
+    # the behaviour they had before attempts were counted.
+    attempt_count: int | None = None
 
 
 class FrontierExternalBlocker(StardagBaseModel):
