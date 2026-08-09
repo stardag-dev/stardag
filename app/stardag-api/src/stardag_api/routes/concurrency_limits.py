@@ -48,7 +48,7 @@ from stardag_api.schemas import (
     TaskEventResponse,
 )
 from stardag_api.services.claims import live_claim_filter
-from stardag_api.services.status import apply_event_to_task
+from stardag_api.services.status import apply_event_to_task, get_attempt_counts_in_build
 
 router = APIRouter(prefix="/concurrency-limits", tags=["concurrency-limits"])
 
@@ -389,10 +389,19 @@ async def evict_concurrency_limit_holder(
 
     record_entity_created(auth.workspace_id, "events")
 
-    # This surface has no build scope, so both fields carry the global
-    # status — see TaskEventResponse for why they are usually different.
+    # Attempts the evicted task made in the build the eviction was recorded
+    # against — one extra query, on an admin recovery path that runs at
+    # human frequency, so that the field is never null anywhere and an SDK
+    # can read it without a "was it computed here?" branch.
+    attempt_counts = await get_attempt_counts_in_build(
+        db, db_task.latest_status_build_id, [db_task.id]
+    )
+
+    # This surface has no build scope, so both status fields carry the
+    # global status — see TaskEventResponse for why they usually differ.
     return TaskEventResponse(
         task_id=db_task.task_id,
         status=db_task.latest_status,
         latest_status=db_task.latest_status,
+        attempt_count=attempt_counts.get(db_task.id, 0),
     )

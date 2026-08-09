@@ -95,6 +95,7 @@ from stardag_api.services.status import (
     apply_event_to_build,
     apply_event_to_task,
     get_all_task_global_statuses,
+    get_attempt_counts_in_build,
     get_task_status_in_build,
 )
 
@@ -516,12 +517,18 @@ async def _create_task_event(
 
     record_entity_created(auth.workspace_id, "events")
 
-    status, _, _, _ = await get_task_status_in_build(db, build_id, db_task.id)
+    # The attempt count comes out of the replay this call already performs,
+    # so every task-event response carries it at no extra query cost — see
+    # TaskEventResponse.attempt_count for why it is worth carrying.
+    status, _, _, _, attempt_count = await get_task_status_in_build(
+        db, build_id, db_task.id
+    )
 
     return TaskEventResponse(
         task_id=db_task.task_id,
         status=status,
         latest_status=db_task.latest_status,
+        attempt_count=attempt_count,
     )
 
 
@@ -1633,6 +1640,15 @@ async def get_build_frontier(
     dependency gating is environment-global, while ``running`` and
     ``status_counts`` cover only tasks this build has events for. See
     :class:`FrontierExternalBlocker`.
+
+    ``attempt_count`` on every task ref is the one field here that is
+    scoped to **this build**, and to its current round, rather than to the
+    environment — deliberately, because "how many times has this build
+    tried since it was last resumed" is the retry-relevant number. A task
+    that failed twice in an earlier build must not arrive here with its
+    budget already spent, and neither must one whose build the user has
+    just re-triggered. It also counts *attempts*, not TASK_STARTED events;
+    see :class:`FrontierTaskRef`.
     """
     _raise_if_limit_exceeded(check_rate_limit(auth.workspace_id, limits_settings))
     build = await _get_build_checked(build_id, db, auth)
@@ -1820,6 +1836,27 @@ async def get_build_frontier(
             .all()
         )
 
+    # Execution attempts per task in this build's current round, for the
+    # scheduler's retry policy (see FrontierTaskRef.attempt_count). Derived
+    # rather than denormalised: attempts are per *build* and per *round*,
+    # and there is no per-(build, task) row to denormalise onto — inventing
+    # one would cost a table, a fold on every start path and a backfill, to
+    # replace this.
+    #
+    # ONE grouped query for every task in the response — the frontier is
+    # re-read on every linger poll (~3 s per active build), so a per-task
+    # aggregate would be N+1 on the hottest read in the system. Bounded to
+    # the tasks actually being reported, so the added scan is proportional
+    # to the response, not to the build's whole event history. Frontier
+    # query-count delta: +1, or 0 when the frontier has no tasks to report
+    # (`get_attempt_counts_in_build` returns without touching the DB).
+    attempt_task_pks = {t.id for t in actionable_tasks}
+    attempt_task_pks.update(t.id for t in running_tasks)
+    attempt_task_pks.update(t.id for t in roots)
+    attempt_counts = await get_attempt_counts_in_build(
+        db, build_id, list(attempt_task_pks)
+    )
+
     def _ref(t: Task) -> FrontierTaskRef:
         return FrontierTaskRef(
             task_id=t.task_id,
@@ -1835,6 +1872,9 @@ async def get_build_frontier(
             # expiry the server itself will hand the task to the next
             # claimant, so a scheduler can stop inferring from elapsed time.
             latest_status_expires_at=t.latest_status_expires_at,
+            # Absent from the map = no attempt recorded in this build. A
+            # root cached from an earlier build is the normal case.
+            attempt_count=attempt_counts.get(t.id, 0),
         )
 
     return BuildFrontierResponse(
@@ -3073,6 +3113,13 @@ async def list_tasks_in_build(
 ):
     """List all tasks in a build with their status.
 
+    Statuses are global (events from all builds); ``attempt_count`` is
+    per-build by construction — it answers "how many times did *this* build
+    try since it was last resumed", which is what a UI or CLI showing a
+    build wants, and what a global count could not express. See
+    ``FrontierTaskRef.attempt_count`` for the counting rule and the round
+    window.
+
     Requires authentication via API key or JWT token with environment_id.
     """
     build = await db.get(Build, build_id)
@@ -3129,6 +3176,10 @@ async def list_tasks_in_build(
         )
         artifact_counts = {row[0]: row[1] for row in artifact_count_result.all()}
 
+    # One grouped query for the whole page, mirroring artifact_counts above
+    # (and never one per task).
+    attempt_counts = await get_attempt_counts_in_build(db, build_id, task_ids)
+
     responses = []
     for task in tasks:
         (
@@ -3165,6 +3216,7 @@ async def list_tasks_in_build(
                 waiting_for_lock=waiting_for_lock,
                 status_build_id=status_build_id,
                 commit_hash=commit_hash,
+                attempt_count=attempt_counts.get(task.id, 0),
             )
         )
 

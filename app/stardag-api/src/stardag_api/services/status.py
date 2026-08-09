@@ -1,9 +1,10 @@
 """Status derivation from events."""
 
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from stardag_api.models import Build, BuildStatus, Event, EventType, Task, TaskStatus
@@ -31,6 +32,228 @@ _RETRYABLE_STATUSES = (
     TaskStatus.SKIPPED,
     TaskStatus.SUSPENDED,
 )
+
+
+# --- Execution attempts -------------------------------------------------
+#
+# "How many times has execution been started for this task in the build's
+# current round?" — the number a scheduler needs to decide whether a
+# failure is worth another go. It is NOT the number of TASK_STARTED
+# events, and the gap is not an edge case: engines routinely emit several
+# starts per attempt.
+#
+#   reactive (_act_on_frontier):  an *acquiring* start (the atomic claim /
+#       limit-slot acquisition, before the spawn, with no executor ref)
+#       and then a second start carrying the ref once the spawn returned.
+#   resident (_concurrent):       the same claim-then-ref pair, and on top
+#       of it the worker's own self-reported start when the executor
+#       reports lifecycle — which lands minutes later under cold start, so
+#       three starts for one execution.
+#   sequential / unclaimed:       exactly one start.
+#
+# Counting events would therefore make the same task look like it had
+# 1, 2 or 3 attempts depending on which engine and which executor ran it,
+# and would exhaust any retry budget on the first try.
+#
+# The rule instead counts *transitions into RUNNING*: a start begins a new
+# attempt unless the previous status-affecting event was itself a start.
+# Consecutive starts are one execution re-recording itself, whatever the
+# engine's reason for re-recording. That is engine-agnostic by
+# construction — it needs no knowledge of who emits how many starts, only
+# that nothing else happened to the task in between.
+#
+# Status-neutral events are excluded from "previous" so one landing inside
+# an attempt's acquire→spawn window cannot split it in two. They can't
+# change status, so they can't end an attempt either.
+_ATTEMPT_ORDERING_EVENT_TYPES = (
+    EventType.TASK_STARTED,
+    EventType.TASK_RESUMED,
+    EventType.TASK_SUSPENDED,
+    EventType.TASK_RETRIED,
+    EventType.TASK_COMPLETED,
+    EventType.TASK_FAILED,
+    EventType.TASK_SKIPPED,
+    EventType.TASK_CANCELLED,
+)
+
+
+def starts_new_attempt(event_type: str | None, prev_event_type: str | None) -> bool:
+    """Whether ``event_type`` begins a new execution attempt.
+
+    ``prev_event_type`` is the preceding *status-affecting* event for the
+    same (build, task) **within the current round** — ``None`` for the
+    first one, which is why the first start after a resume always counts
+    even if the last event before the resume was also a start. The single
+    Python definition of the rule described above;
+    ``get_attempt_counts_in_build`` expresses the identical predicate in
+    SQL, and the two must agree.
+    """
+    return (
+        event_type == EventType.TASK_STARTED
+        and prev_event_type != EventType.TASK_STARTED
+    )
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalise a timestamp to aware UTC so two of them can be compared.
+
+    One event stream can hold both shapes at once: Postgres returns aware
+    values and SQLite returns naive ones, and on either backend an object
+    flushed earlier in *this* session still carries the aware value
+    ``utc_now()`` produced, never having round-tripped through the
+    database. Every one of them is UTC, so the only real work is putting
+    the tzinfo back on the ones that lost it — without which the round
+    comparison below raises on a mixed stream.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def last_build_resumed_at(build_id: UUID) -> Select[tuple[datetime]]:
+    """When this build was last resumed — NULL if it never was.
+
+    (The annotation is SQLAlchemy's column type; ``max`` over no rows
+    still yields NULL, so executing this returns ``datetime | None``.)
+
+    The start of the attempt-counting window (see
+    :func:`get_attempt_counts_in_build`). Factored out because the two
+    consumers need it in different forms — ``.scalar_subquery()`` inside
+    the grouped statement, executed directly beside the per-task replay,
+    which must still see the whole stream — and they must not drift.
+
+    Served by ``ix_events_build_task_type`` as a seek: build-level events
+    carry ``task_id IS NULL``, so ``(build_id, NULL, 'build_resumed')`` is
+    a point lookup rather than a scan of the build's events.
+    """
+    return select(func.max(Event.created_at)).where(
+        Event.build_id == build_id,
+        # Explicit, even though only build-level events carry this type: it
+        # is what makes the index a seek on (build_id, NULL, 'build_resumed')
+        # rather than a scan over every event the build ever recorded, and
+        # the comment above claims exactly that.
+        Event.task_id.is_(None),
+        Event.event_type == EventType.BUILD_RESUMED.value,
+    )
+
+
+async def get_attempt_counts_in_build(
+    db: AsyncSession,
+    build_id: UUID,
+    task_db_ids: Sequence[UUID] | None = None,
+) -> dict[UUID, int]:
+    """Execution attempts per task in a build's **current round**, by task pk.
+
+    A "round" starts at the build's most recent ``BUILD_RESUMED`` event, or
+    at the beginning of the build when it has never been resumed.
+
+    **Why the resume, and not simply the whole build.** A retry budget has
+    to have an escape hatch the user can reach, and re-triggering an
+    existing build id — ``build_trigger(..., build_id=<existing>,
+    reactive=True)`` — is the recommended way to pick a failed reactive
+    build back up. That path does NOT mint a new build: it resumes this
+    one and calls ``task_retry`` on the failed tasks *in it*. Counting
+    over the build's whole history would therefore leave the budget
+    already spent the moment the user asked for another round, so the one
+    action anybody reaches for after a failure would do nothing unless
+    they also raised ``max_attempts``.
+
+    ``BUILD_RESUMED`` is exactly the durable marker of "another round was
+    asked for": it already exists, it is already emitted on that path, and
+    the server skips it for a build with no activity beyond
+    ``BUILD_STARTED`` — so a *first* trigger is not a resume and the
+    window is simply the whole build. No new event type, column or marker.
+    Repeated re-triggers do hand out fresh budgets, but that is a user
+    deciding to try again, not a scheduler looping.
+
+    **Per build, deliberately** — unlike the denormalised ``Task.latest_*``
+    columns beside it, which are environment-global because a completed
+    task is completed for everyone. Attempts are not like that: the
+    retry-relevant question is "how many times has *this* build tried in
+    this round", and a task that burned two attempts in an earlier build
+    must not arrive in a new one with its budget already spent. That is
+    also why this cannot live on the task row at all — there is no
+    per-(build, task) row to denormalise onto, and adding one would buy a
+    fold on every start path plus a backfill to replace a single grouped
+    query over an index that already exists
+    (``ix_events_build_task_type``).
+
+    Note what a resume does NOT reset: ``TASK_RETRIED`` on its own never
+    resets the count. A scheduler retries a failed task *through* that
+    endpoint, so a counter cleared by it would be cleared by every
+    enforcement of the budget it defines. The distinction is the whole
+    point — a bare retry spends budget, a resume grants a new round.
+
+    Tasks with no attempt in this round are simply absent from the result;
+    callers default them to 0.
+
+    ``task_db_ids`` bounds the scan to the tasks the caller will actually
+    report, so the cost tracks the size of the response rather than the
+    size of the build. Omit it for every task in the build.
+
+    One grouped query, never one per task: the frontier that consumes this
+    is re-read on every linger poll of every active build. The round
+    cutoff rides along as a correlated scalar subquery, so windowing costs
+    no extra round trip.
+    """
+    if task_db_ids is not None and not task_db_ids:
+        return {}
+
+    # LAG gives each event its predecessor within the task's own stream, so
+    # the attempt-boundary rule becomes a WHERE clause. Restricting the rows
+    # to the status-affecting types is safe *and* is what makes the rule
+    # right (see _ATTEMPT_ORDERING_EVENT_TYPES); restricting them to
+    # ``task_db_ids`` is safe because the window partitions by task, so a
+    # task's predecessor is never in another task's rows.
+    #
+    # The round cutoff is applied HERE, in the inner query, not to the
+    # outer count — so LAG never sees a pre-resume event and the first
+    # start of a new round has no predecessor and always counts. Filtering
+    # afterwards would instead let the last start of the *previous* round
+    # collapse the first start of this one, and a resumed build would
+    # report zero attempts however many times it tried.
+    #
+    # ``>=``, and the tie it admits is unreachable in practice: it would
+    # take a task event committed in the same microsecond as the resume,
+    # by a different request, to land on the wrong side. Counting such an
+    # event is also the conservative direction — it can only spend budget,
+    # never grant an unbounded loop.
+    resumed_at = last_build_resumed_at(build_id).scalar_subquery()
+    ordered = (
+        select(
+            Event.task_id.label("task_id"),
+            Event.event_type.label("event_type"),
+            func.lag(Event.event_type)
+            .over(
+                partition_by=Event.task_id,
+                order_by=(Event.created_at, Event.id),
+            )
+            .label("prev_event_type"),
+        )
+        .where(
+            Event.build_id == build_id,
+            Event.task_id.is_not(None),
+            Event.event_type.in_([e.value for e in _ATTEMPT_ORDERING_EVENT_TYPES]),
+            # Never resumed → no cutoff → the window is the whole build.
+            or_(resumed_at.is_(None), Event.created_at >= resumed_at),
+        )
+        .where(*([Event.task_id.in_(task_db_ids)] if task_db_ids is not None else []))
+        .subquery()
+    )
+    rows = (
+        await db.execute(
+            select(ordered.c.task_id, func.count())
+            .where(
+                ordered.c.event_type == EventType.TASK_STARTED.value,
+                # Null-safe: the first event in a stream has no predecessor
+                # and must still count as an attempt (renders IS DISTINCT
+                # FROM on Postgres, IS NOT on SQLite).
+                ordered.c.prev_event_type.is_distinct_from(
+                    EventType.TASK_STARTED.value
+                ),
+            )
+            .group_by(ordered.c.task_id)
+        )
+    ).all()
+    return {task_id: count for task_id, count in rows}
 
 
 def apply_event_to_task(task: Task, event: Event) -> None:
@@ -308,17 +531,39 @@ def apply_event_to_build(build: Build, event: Event) -> None:
 
 async def get_task_status_in_build(
     db: AsyncSession, build_id: UUID, task_db_id: UUID
-) -> tuple[TaskStatus, datetime | None, datetime | None, str | None]:
+) -> tuple[TaskStatus, datetime | None, datetime | None, str | None, int]:
     """Get derived task status from events for a specific build.
 
     Returns:
-        Tuple of (status, started_at, completed_at, error_message)
+        Tuple of (status, started_at, completed_at, error_message,
+        attempt_count)
+
+    ``attempt_count`` rides along on the replay this already does, so every
+    task-event response can carry the authoritative post-event count
+    without a second round-trip for a caller deciding whether to retry. It
+    applies the same rule as :func:`get_attempt_counts_in_build`, via the
+    same :func:`starts_new_attempt` predicate and the same round window.
+
+    The window cannot be pushed into the query the way it is for the
+    grouped path: the *status* fold has to see the whole stream (a task
+    completed before a resume is still completed), so only the attempt
+    tally is windowed. That costs one small indexed lookup for the round
+    cutoff.
     """
+    # The build's current round (see get_attempt_counts_in_build). Fetched
+    # rather than filtered on, because the status fold below needs every
+    # event regardless of round.
+    resumed_at = await db.scalar(last_build_resumed_at(build_id))
+    round_start = _as_utc(resumed_at) if resumed_at is not None else None
+
     result = await db.execute(
         select(Event)
         .where(Event.build_id == build_id)
         .where(Event.task_id == task_db_id)
-        .order_by(Event.created_at.desc())
+        # id (UUID7) breaks created_at ties, matching the SQL attempt count.
+        # Without it, two same-timestamp events replay in whatever order the
+        # index returned, which the attempt rule is sensitive to.
+        .order_by(Event.created_at.desc(), Event.id.desc())
     )
     events = result.scalars().all()
 
@@ -326,9 +571,21 @@ async def get_task_status_in_build(
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
+    attempt_count = 0
+    prev_ordering_type: str | None = None
 
     # Process events from oldest to newest to build final state
     for event in reversed(events):
+        # Pre-resume events are skipped for the tally *without* updating
+        # prev_ordering_type, so the first start of a new round still sees
+        # no predecessor and counts — mirroring the SQL path, where the
+        # cutoff is applied before LAG rather than after it.
+        if event.event_type in _ATTEMPT_ORDERING_EVENT_TYPES and (
+            round_start is None or _as_utc(event.created_at) >= round_start
+        ):
+            if starts_new_attempt(event.event_type, prev_ordering_type):
+                attempt_count += 1
+            prev_ordering_type = event.event_type
         if event.event_type == EventType.TASK_PENDING:
             status = TaskStatus.PENDING
         elif event.event_type == EventType.TASK_REFERENCED:
@@ -368,7 +625,7 @@ async def get_task_status_in_build(
             status = TaskStatus.CANCELLED
             completed_at = event.created_at
 
-    return status, started_at, completed_at, error_message
+    return status, started_at, completed_at, error_message, attempt_count
 
 
 async def get_all_task_statuses_in_build(

@@ -16,6 +16,7 @@ from stardag_api.services.lock import (
 from stardag_api.services.slug import generate_build_slug
 from stardag_api.services.status import (
     apply_event_to_build,
+    get_attempt_counts_in_build,
     get_task_status_in_build,
 )
 
@@ -27,6 +28,7 @@ __all__ = [
     "check_task_completed_in_registry",
     "cleanup_expired_locks",
     "generate_build_slug",
+    "get_attempt_counts_in_build",
     "get_lock",
     "get_task_status_in_build",
     "get_environment_lock_count",
