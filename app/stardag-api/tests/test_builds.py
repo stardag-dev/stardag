@@ -2071,6 +2071,62 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.xfail(
+    reason=(
+        "Known deadlock, not yet fixed. A build's plan is not closed over "
+        "dynamic dependency edges recorded by other builds, while gating "
+        "consults all of them — so the build is gated on a task no build "
+        "containing it can schedule. The fix (admit incomplete upstreams "
+        "into the plan at registration) changes what a build's task set IS, "
+        "and with it the graph view's primary/context split, so it is "
+        "deliberately not bundled into a release."
+    ),
+    strict=True,
+)
+async def test_registration_pulls_in_known_upstreams(client):
+    """A build's plan must be closed under the dependency relation.
+
+    Registration walks `task.requires()` — static edges only — while gating
+    consults *every* recorded edge, including dynamic ones a previous build
+    discovered at runtime. A task can therefore be gated by an upstream that
+    is not in its plan, which no build containing it can ever schedule:
+    a permanent deadlock, and the one shape the whole cross-build blocker
+    machinery was built to describe rather than prevent.
+
+    A dynamic edge outlives the build that recorded it, so a later build
+    that statically discovers the same task inherits the dependency and must
+    inherit the upstream with it.
+    """
+    # Build A runs "parent" and discovers "dyn-up" dynamically.
+    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks", json=_register_payload("parent")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks",
+        json=_register_payload("dyn-up"),
+    )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks",
+        json=_register_payload("parent", deps=["dyn-up"]),
+    )
+
+    # Build B registers only "parent" — its static requires() has no dyn-up.
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_b}/tasks", json=_register_payload("parent")
+    )
+
+    frontier = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
+    # dyn-up must be in B's plan — and actionable, since nothing gates it.
+    # Without closure B reports it as an out-of-plan blocker instead, which
+    # no build containing "parent" can ever clear.
+    assert [t["task_id"] for t in frontier["actionable"]] == ["dyn-up"], (
+        f"dyn-up not schedulable by build B: {frontier}"
+    )
+    assert frontier["blocked_by_external"] == []
+
+
 async def test_frontier_reports_attempts_for_an_in_plan_blocker(client):
     """A blocker inside this build's plan carries its attempt count.
 
