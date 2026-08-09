@@ -127,7 +127,7 @@ describe("ClaimTriage", () => {
   });
 
   it("releases each selected claim under its own owning build", async () => {
-    vi.mocked(cancelTask).mockResolvedValue(undefined);
+    vi.mocked(cancelTask).mockResolvedValue("cancelled");
     const user = userEvent.setup();
     renderTriage();
     await screen.findByText("GrindBeans");
@@ -150,11 +150,89 @@ describe("ClaimTriage", () => {
     await waitFor(() => expect(fetchTasks).toHaveBeenCalledTimes(2));
   });
 
+  it("will not offer to release a claim a task is not holding", async () => {
+    // Reachable by unchecking both status boxes, which used to drop the
+    // status filter entirely and list every task in the environment.
+    // Cancelling a completed task is not an error — the server records the
+    // event and COMPLETED stays — so it reported a cheerful "released 1 of
+    // 1 claims" having released nothing.
+    vi.mocked(fetchTasks).mockResolvedValue({
+      tasks: [
+        makeTask({ task_id: "tid-grind", task_name: "GrindBeans" }),
+        makeTask({
+          task_id: "tid-done",
+          task_name: "PourWater",
+          status: "completed",
+          latest_status: "completed",
+        }),
+      ],
+      total: 2,
+      page: 1,
+      page_size: 25,
+    });
+    const user = userEvent.setup();
+    renderTriage();
+    await screen.findByText("PourWater");
+
+    expect(
+      screen.getByRole("checkbox", {
+        name: /PourWater cannot be selected: it is completed and holds no claim/,
+      }),
+    ).toBeDisabled();
+
+    // Select-all takes the claim holder and leaves the finished task.
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select all claims on this page" }),
+    );
+    expect(screen.getByText("1 claim selected")).toBeInTheDocument();
+  });
+
+  it("keeps listing claim holders when every status box is unchecked", async () => {
+    const user = userEvent.setup();
+    renderTriage();
+    await screen.findByText("GrindBeans");
+
+    await user.click(screen.getByRole("checkbox", { name: "Running" }));
+    await user.click(screen.getByRole("checkbox", { name: "Suspended" }));
+
+    await waitFor(() => {
+      const last = vi.mocked(fetchTasks).mock.calls.at(-1)![0]!;
+      // Not `undefined`, which would list every task in the environment.
+      expect(last.status).toEqual(["running", "suspended"]);
+    });
+  });
+
+  it("says so when a task finished before its claim could be released", async () => {
+    // The race that survives the guard above: held when listed, finished
+    // by the time the release lands. The write succeeds; COMPLETED is
+    // sticky, so nothing was actually released.
+    vi.mocked(cancelTask).mockImplementation(async (buildId: string) =>
+      buildId === BUILD_B ? "completed" : "cancelled",
+    );
+    const user = userEvent.setup();
+    renderTriage();
+    await screen.findByText("GrindBeans");
+
+    await user.click(
+      screen.getByRole("checkbox", { name: "Select all claims on this page" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Release claims" }));
+    await user.click(
+      screen.getAllByRole("button", { name: "Release claims" }).slice(-1)[0],
+    );
+
+    const banner = await screen.findByRole("status");
+    expect(banner).toHaveTextContent("Released 1 of 2 claims.");
+    expect(banner).toHaveTextContent("SteamMilk");
+    expect(banner).toHaveTextContent(/already completed — no claim to release/);
+  });
+
   it("reports partial failure per task rather than as one error", async () => {
     // A task can complete between being listed and being acted on, so a
     // mixed result is the normal case, not an exception.
     vi.mocked(cancelTask).mockImplementation(async (buildId: string) => {
       if (buildId === BUILD_B) throw new Error("Task not found");
+      return "cancelled";
     });
     const user = userEvent.setup();
     renderTriage();

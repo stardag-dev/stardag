@@ -437,7 +437,7 @@ export async function cancelTask(
   buildId: string,
   taskId: string,
   environmentId?: string,
-): Promise<void> {
+): Promise<TaskStatus> {
   const params = new URLSearchParams();
   if (environmentId) params.set("environment_id", environmentId);
 
@@ -446,6 +446,13 @@ export async function cancelTask(
   if (!response.ok) {
     throw new Error(await errorMessage(response, "Failed to cancel task"));
   }
+  // The resulting status, which is not always `cancelled`: the server
+  // records the event unconditionally — that is what makes a cancel racing
+  // a completion benign — but COMPLETED is sticky and wins. A caller that
+  // reports "released" without looking is lying in exactly the case the
+  // user most needs told about.
+  const body: unknown = await response.json();
+  return (body as { status: TaskStatus }).status;
 }
 
 /**
