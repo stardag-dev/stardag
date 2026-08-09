@@ -89,16 +89,25 @@ So the gap is narrower and more specific than "no TTL":
 > The claim records no liveness evidence that a **third party** can evaluate.
 
 Everything below exists to infer, from the outside, what a single stored
-expiry would state directly:
+expiry would state directly.
+
+Some of these landed with the reactive-scheduling work this note was
+written alongside, so a reader on `main` will not find all of them yet —
+they are marked. The argument does not depend on which are merged: each is
+an independent attempt to answer "is that claim still alive?" without the
+claim saying so, which is the point.
 
 | Mechanism                                                                   | Where                                    |
 | --------------------------------------------------------------------------- | ---------------------------------------- |
 | `TickConfig.stale_running_no_ref_seconds`                                   | `build/_reactive.py`                     |
 | `ClaimConfig.stale_running_no_ref_seconds` (second copy, different default) | `build/_base.py`, `build/_concurrent.py` |
-| `TickConfig.stale_external_blocker_seconds` + blocker classification        | `build/_reactive.py`                     |
-| `blocked_by_external` + owning-build liveness lookup                        | `routes/builds.py`, `build/_reactive.py` |
-| Stale-build reaper (task-claim half)                                        | `services/build_cleanup.py`              |
-| `GET /tasks?status=running` ("who holds a claim?")                          | `routes/tasks.py`                        |
+| `TickConfig.stale_external_blocker_seconds` + blocker classification (†)    | `build/_reactive.py`                     |
+| `blocked_by_external` + owning-build liveness lookup (†)                    | `routes/builds.py`, `build/_reactive.py` |
+| Stale-build reaper (task-claim half) (†)                                    | `services/build_cleanup.py`              |
+| `GET /tasks?status=running` ("who holds a claim?") (†)                      | `routes/tasks.py`                        |
+
+(†) Introduced by the accompanying reactive-scheduling work rather than
+present on `main` at the time of writing.
 
 `build/_registry_limiter.py` contains a written confession of the same gap:
 a slot leaked by a crashed build "has no automatic healer", while a
@@ -106,7 +115,13 @@ legitimately long-running limited task "can be force-failed by that build's
 `stale_running_no_ref_seconds` heal". Two heuristics for one missing field,
 pulling in opposite directions.
 
-## Sketch of the minimal fix (not implemented)
+## Sketch of the minimal fix
+
+> Written before the fix existed. It has since been implemented much as
+> sketched — one nullable `tasks.latest_status_expires_at`, granted at
+> start, honoured by both the claim check and the concurrency-limit count.
+> Kept in its original form because the reasoning is the point, and a note
+> rewritten to match its outcome stops showing how the decision was made.
 
 Recorded so the next person does not reach for a lock table.
 
