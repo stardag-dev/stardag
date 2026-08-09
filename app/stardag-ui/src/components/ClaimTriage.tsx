@@ -116,7 +116,10 @@ export function ClaimTriage({
       environment_id: environmentId,
       page,
       page_size: PAGE_SIZE,
-      status: statuses.length > 0 ? statuses : undefined,
+      // Unchecking both boxes means "either kind of claim", not "every
+      // task in the environment" — this view only has an opinion about
+      // tasks that hold a claim.
+      status: statuses.length > 0 ? statuses : CLAIM_HOLDING_STATUSES,
       status_older_than:
         ageSeconds > 0
           ? new Date(Date.now() - ageSeconds * 1000).toISOString()
@@ -146,11 +149,23 @@ export function ClaimTriage({
     setPage(1);
   }, [environmentId, statusKey, ageSeconds]);
 
-  // Only a task whose owning build is known can be acted on — the cancel
-  // endpoint is addressed to a build. Rows without one stay visible (they
-  // are still claim holders worth seeing) but are not selectable.
+  // Two conditions, both of which leave the row visible but unselectable:
+  //
+  // - the task must actually hold a claim. Releasing one it does not hold
+  //   changes nothing — the server records the event (deliberately: that
+  //   is what makes a cancel racing a completion safe) but COMPLETED and
+  //   the other terminal statuses do not move. Offering the action anyway
+  //   produced a "released 1 of 1 claims" for a task that was already
+  //   finished, which is worse than offering nothing.
+  // - the owning build must be known, because the cancel endpoint is
+  //   addressed to a build.
   const actionableTasks = useMemo(
-    () => tasks.filter((task) => Boolean(task.latest_status_build_id)),
+    () =>
+      tasks.filter(
+        (task) =>
+          Boolean(task.latest_status_build_id) &&
+          CLAIM_HOLDING_STATUSES.includes(task.latest_status ?? task.status),
+      ),
     [tasks],
   );
   const selectableIds = useMemo(
@@ -190,7 +205,16 @@ export function ClaimTriage({
     );
     const collected: ReleaseOutcome[] = selectedTasks.map((task, i) => {
       const result = results[i];
-      if (result.status === "fulfilled") return { task, error: null };
+      if (result.status === "fulfilled") {
+        // A released claim leaves the task CANCELLED. Anything else means
+        // the event was recorded but did not take: the claim was held when
+        // the page was fetched, and between then and now the task reached
+        // a terminal status of its own — COMPLETED is sticky and wins.
+        // The request succeeded; the release did not.
+        return result.value === "cancelled"
+          ? { task, error: null }
+          : { task, error: `already ${result.value} — no claim to release` };
+      }
       const reason: unknown = result.reason;
       return {
         task,
@@ -349,6 +373,8 @@ export function ClaimTriage({
               {tasks.map((task) => {
                 const holderBuildId = task.latest_status_build_id ?? null;
                 const status = task.latest_status ?? task.status;
+                const holdsClaim = CLAIM_HOLDING_STATUSES.includes(status);
+                const selectable = holdsClaim && Boolean(holderBuildId);
                 const held = task.latest_status_at
                   ? formatDuration(task.latest_status_at, null)
                   : "—";
@@ -366,11 +392,13 @@ export function ClaimTriage({
                         <Checkbox
                           checked={isSelected(task.task_id)}
                           onChange={(checked) => toggle(task.task_id, checked)}
-                          disabled={!holderBuildId}
+                          disabled={!selectable}
                           label={
-                            holderBuildId
+                            selectable
                               ? `Select ${task.task_name}`
-                              : `${task.task_name} cannot be selected: its owning build was not recorded`
+                              : !holdsClaim
+                                ? `${task.task_name} cannot be selected: it is ${status} and holds no claim to release`
+                                : `${task.task_name} cannot be selected: its owning build was not recorded`
                           }
                         />
                       </td>

@@ -378,7 +378,21 @@ export function TaskDetail({
       setCancelError(null);
       try {
         if (action === "release") {
-          await cancelTask(targetBuildId, task.task_id, task.environment_id);
+          const resulting = await cancelTask(
+            targetBuildId,
+            task.task_id,
+            task.environment_id,
+          );
+          // The write always succeeds; the release does not. A task that
+          // completed since this panel loaded keeps COMPLETED, and saying
+          // "released" would send the user away believing the claim is
+          // free when it never was theirs to free.
+          if (resulting !== "cancelled") {
+            setCancelError(
+              `This task is already ${resulting}, so there was no claim to release.`,
+            );
+            return false;
+          }
         } else {
           await retryTask(targetBuildId, task.task_id, task.environment_id);
         }

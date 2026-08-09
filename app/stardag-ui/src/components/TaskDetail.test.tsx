@@ -333,7 +333,7 @@ describe("TaskDetail claim holder", () => {
   });
 
   it("addresses the release to the holding build, not the one on screen", async () => {
-    vi.mocked(cancelTask).mockResolvedValue(undefined);
+    vi.mocked(cancelTask).mockResolvedValue("cancelled");
     const onTaskCancelled = vi.fn();
     const user = userEvent.setup();
     render(
