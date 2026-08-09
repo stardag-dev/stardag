@@ -6,6 +6,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-09
+
 ### Registry API
 
 - **The API now knows which SDK is calling it, and can say so when that
