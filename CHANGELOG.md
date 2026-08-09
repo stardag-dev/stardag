@@ -102,6 +102,46 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   that every replica runs its own timer with no leader election; cancellation
   is idempotent, so concurrent sweeps are wasteful rather than wrong.
 
+### UI
+
+- **A Builds view, replacing "Home".** Builds are listed with status,
+  duration, last activity and the reactive app that owns them, and can be
+  filtered by status, by owning app, and by how long they have been idle.
+  The idle filter means _abandoned_, so it implies Running: a finished
+  build has no activity by definition, and including terminal builds would
+  fill a staleness listing with history sorted oldest-first.
+
+- **Bulk cleanup of abandoned builds**, admin-gated to match the API. Rows
+  are selectable per page, and "Clean up idle builds…" sweeps the whole
+  environment on the server rather than the visible page. Both paths open a
+  confirmation showing a **dry run of the real query** — the same selection
+  `POST /builds/bulk-cancel` will act on, including the per-build reasons
+  anything was skipped — because a preview that disagrees with the action
+  is worse than no preview.
+
+- **A build that is not progressing now says why.** When nothing is
+  actionable and nothing is running, the build view names each blocking
+  upstream, its status, how long it has been held, and which build owns it
+  — including blockers that are not part of the build at all, which are
+  otherwise invisible from it. Each carries the remedy (release the claim,
+  or reset the task to pending) addressed to the owning build. Behind a
+  disclosure: the scheduler's own tick trail, with runs of identical ticks
+  collapsed ("lease held ×20") and counters that stayed at zero dropped, so
+  a stalled build's repetition reads as a diagnosis instead of a log.
+
+- **Claim triage in the task explorer.** Lists the tasks holding an
+  execution claim, longest-held first, with the build that owns each one,
+  and releases them in bulk. Only tasks actually holding a claim are
+  selectable, and every release reads the resulting status back — a task
+  that finished between listing and acting is reported as such rather than
+  counted as released.
+
+- **Fixed:** unchecked checkboxes rendered as white boxes in dark mode
+  (`color-scheme` was never set, so every native control used the light
+  theme); durations past a day read as `371h 41m` instead of `15d 11h 41m`;
+  dates rendered in the browser's locale order (`8/9/2026` or `9/8/2026`
+  depending on the reader) rather than `YYYY-MM-DD`.
+
 ### SDK
 
 - **Reactive builds now discover the DAG inside Modal, not on the machine

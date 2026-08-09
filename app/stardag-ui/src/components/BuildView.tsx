@@ -25,6 +25,7 @@ import type {
   TaskWithContext,
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
+import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildExecutorChips } from "./ExecutorBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
@@ -88,6 +89,10 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // Refresh state
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  // Bumped on every build refresh (manual, auto or post-mutation). The
+  // scheduling panel refetches off this rather than running its own timer,
+  // so the 5s auto-refresh drives one request stream, not two.
+  const [refreshToken, setRefreshToken] = useState(0);
   const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastClickRef = useRef<number>(0);
 
@@ -163,6 +168,7 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // Refresh handler
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
+    setRefreshToken((token) => token + 1);
     await loadBuild();
     setRefreshing(false);
   }, [loadBuild]);
@@ -592,6 +598,20 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                   )}
                 </div>
               </div>
+
+              {/* Scheduler state. Renders itself only when it has something
+                  to say — see `schedulingPanelForm`. Placed above the DAG so
+                  a stalled build's explanation is the first thing read. */}
+              {activeEnvironment?.id && (
+                <BuildSchedulingPanel
+                  buildId={buildId}
+                  environmentId={activeEnvironment.id}
+                  buildStatus={build.status}
+                  refreshToken={refreshToken}
+                  onNavigateToBuild={onNavigateToBuild}
+                  onChanged={handleRefresh}
+                />
+              )}
 
               {/* DAG header - always visible */}
               <div className="flex items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-700">

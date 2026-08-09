@@ -27,6 +27,7 @@ import {
   type AvailableColumn,
   type ColumnConfig,
 } from "./ColumnManagerModal";
+import { ClaimTriage } from "./ClaimTriage";
 import { DagControls, type DagControlsState } from "./DagControls";
 import { DagGraph } from "./DagGraph";
 import {
@@ -129,9 +130,18 @@ function formatFilterForInput(filter: FilterCondition): string {
   return `${filter.key} ${filter.operator} ${quoteValue(filter.value)}`;
 }
 
+// The explorer answers two different questions with two different
+// backends. "search" is the generic `/tasks/search` filtering that has
+// always been here. "claims" is the operational question — which tasks
+// are holding an execution claim — which `/tasks/search` cannot answer:
+// it reports a status but neither when the task entered it nor which
+// build put it there. See `ClaimTriage`.
+type ExplorerMode = "search" | "claims";
+
 export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
   const { activeEnvironment } = useEnvironment();
   const { setItems: setBreadcrumb } = useBreadcrumb();
+  const [mode, setMode] = useState<ExplorerMode>("search");
 
   // Search state
   const [filters, setFilters] = useState<FilterCondition[]>([]);
@@ -156,12 +166,15 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     const items: { label: string; onClick?: () => void }[] = [
       { label: "Task Explorer" },
     ];
+    if (mode === "claims") {
+      items.push({ label: "Claims" });
+    }
     if (selectedTask) {
       items.push({ label: selectedTask.task_id });
     }
     setBreadcrumb(items);
     return () => setBreadcrumb([]);
-  }, [selectedTask, setBreadcrumb]);
+  }, [selectedTask, setBreadcrumb, mode]);
 
   // DAG view state
   const [userPrefersShowDag, setUserPrefersShowDag] = useState(true);
@@ -834,157 +847,203 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
           {/* Left panel - search, filters, DAG, results */}
           <Panel defaultSize={selectedTask ? 70 : 100} minSize={40}>
             <div className="flex h-full flex-col">
-              {/* Search bar */}
-              <TaskExplorerSearch
-                searchText={searchText}
-                onSearchInput={handleSearchInput}
-                onSearchSubmit={handleSearchSubmit}
-                onKeyDown={handleKeyDown}
-                onFocus={() => searchText && handleSearchInput(searchText)}
-                onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
-                filters={filters}
-                onEditFilter={editFilter}
-                onRemoveFilter={removeFilter}
-                onClearAllFilters={() => setFilters([])}
-                onShowColumnManager={() => setShowColumnManager(true)}
-                showAutocomplete={showAutocomplete}
-                autocompleteOptions={autocompleteOptions}
-                autocompleteMode={autocompleteMode}
-                autocompleteKey={autocompleteKey}
-                selectedIndex={selectedIndex}
-                onAutocompleteSelect={handleAutocompleteSelect}
-                onSelectedIndexChange={setSelectedIndex}
-                inputRef={inputRef}
-              />
-
-              {/* DAG header - always visible */}
-              <div className="flex items-center justify-between border-b border-gray-200 px-4 py-1.5 dark:border-gray-700">
-                <button
-                  onClick={() => canShowDag && handleToggleDag()}
-                  disabled={!canShowDag}
-                  className={`flex items-center gap-2 text-sm ${
-                    canShowDag
-                      ? "cursor-pointer text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
-                      : "cursor-not-allowed text-gray-400 dark:text-gray-500"
-                  }`}
-                >
-                  <svg
-                    className={`h-4 w-4 transition-transform ${
-                      showDag ? "rotate-90" : ""
+              {/* Mode tabs */}
+              <div
+                role="tablist"
+                aria-label="Task explorer mode"
+                className="flex items-center gap-1 border-b border-gray-200 bg-white px-4 py-1 dark:border-gray-700 dark:bg-gray-800"
+              >
+                {(
+                  [
+                    ["search", "Search"],
+                    ["claims", "Claims"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    role="tab"
+                    aria-selected={mode === value}
+                    onClick={() => setMode(value)}
+                    className={`rounded-md px-2.5 py-1 text-sm font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                      mode === value
+                        ? "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300"
+                        : "text-gray-600 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-700"
                     }`}
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
+                    title={
+                      value === "claims"
+                        ? "Tasks holding an execution claim, and the builds that own them"
+                        : "Search and filter every task in this environment"
+                    }
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M9 5l7 7-7 7"
-                    />
-                  </svg>
-                  <span className="font-medium">DAG View</span>
-                  {!canShowDag && (
-                    <span className="text-xs text-gray-400 dark:text-gray-500">
-                      {tasks.length === 0 ? "(No tasks)" : "(Limit: 500 tasks)"}
-                    </span>
-                  )}
-                </button>
-                {showDag && canShowDag && (
-                  <div className="flex items-center gap-2">
-                    <DagControls
-                      value={dagControls}
-                      onChange={setDagControls}
-                      primaryCount={tasks.length}
-                      upstreamCount={extendedDagGraph?.total_upstream_count ?? 0}
-                      downstreamCount={extendedDagGraph?.total_downstream_count ?? 0}
-                      groupCount={extendedDagGraph?.groups.length ?? 0}
-                      truncated={extendedDagGraph?.truncated ?? false}
-                    />
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {mode === "claims" ? (
+                <ClaimTriage
+                  environmentId={activeEnvironment.id}
+                  selectedTaskId={selectedTask?.task_id ?? null}
+                  onSelectTask={(task) => setSelectedTask(task as TaskSearchResult)}
+                  onNavigateToBuild={onNavigateToBuild}
+                />
+              ) : (
+                <>
+                  {/* Search bar */}
+                  <TaskExplorerSearch
+                    searchText={searchText}
+                    onSearchInput={handleSearchInput}
+                    onSearchSubmit={handleSearchSubmit}
+                    onKeyDown={handleKeyDown}
+                    onFocus={() => searchText && handleSearchInput(searchText)}
+                    onBlur={() => setTimeout(() => setShowAutocomplete(false), 150)}
+                    filters={filters}
+                    onEditFilter={editFilter}
+                    onRemoveFilter={removeFilter}
+                    onClearAllFilters={() => setFilters([])}
+                    onShowColumnManager={() => setShowColumnManager(true)}
+                    showAutocomplete={showAutocomplete}
+                    autocompleteOptions={autocompleteOptions}
+                    autocompleteMode={autocompleteMode}
+                    autocompleteKey={autocompleteKey}
+                    selectedIndex={selectedIndex}
+                    onAutocompleteSelect={handleAutocompleteSelect}
+                    onSelectedIndexChange={setSelectedIndex}
+                    inputRef={inputRef}
+                  />
+
+                  {/* DAG header - always visible */}
+                  <div className="flex items-center justify-between border-b border-gray-200 px-4 py-1.5 dark:border-gray-700">
                     <button
-                      onClick={() => setDagFullscreen(true)}
-                      className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
-                      title="Fullscreen DAG"
+                      onClick={() => canShowDag && handleToggleDag()}
+                      disabled={!canShowDag}
+                      className={`flex items-center gap-2 text-sm ${
+                        canShowDag
+                          ? "cursor-pointer text-gray-700 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
+                          : "cursor-not-allowed text-gray-400 dark:text-gray-500"
+                      }`}
                     >
                       <svg
-                        className="h-4 w-4"
+                        className={`h-4 w-4 transition-transform ${
+                          showDag ? "rotate-90" : ""
+                        }`}
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
-                        strokeWidth={2}
                       >
                         <path
                           strokeLinecap="round"
                           strokeLinejoin="round"
-                          d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
+                          strokeWidth={2}
+                          d="M9 5l7 7-7 7"
                         />
                       </svg>
+                      <span className="font-medium">DAG View</span>
+                      {!canShowDag && (
+                        <span className="text-xs text-gray-400 dark:text-gray-500">
+                          {tasks.length === 0 ? "(No tasks)" : "(Limit: 500 tasks)"}
+                        </span>
+                      )}
                     </button>
-                  </div>
-                )}
-              </div>
-
-              {/* DAG + Results with resizable split */}
-              <PanelGroup direction="vertical" className="flex-1">
-                {/* Collapsible DAG section */}
-                <Panel
-                  ref={dagPanelRef}
-                  defaultSize={50}
-                  minSize={0}
-                  collapsible
-                  onCollapse={() => setShowDag(false)}
-                  onExpand={() => setShowDag(true)}
-                >
-                  {showDag && canShowDag && !dagFullscreen && (
-                    <div className="h-full bg-gray-50 dark:bg-gray-900">
-                      {dagLoading ? (
-                        <div className="flex h-full items-center justify-center">
-                          <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
-                        </div>
-                      ) : dagGraph ? (
-                        <DagGraph
-                          tasks={tasksWithContext}
-                          graph={dagGraph}
-                          selectedTaskId={selectedTask?.task_id ?? null}
-                          onTaskClick={handleDagTaskClick}
-                          direction={dagDirection}
-                          onDirectionChange={setDagDirection}
-                          positionCache={dagPositionCacheRef}
+                    {showDag && canShowDag && (
+                      <div className="flex items-center gap-2">
+                        <DagControls
+                          value={dagControls}
+                          onChange={setDagControls}
+                          primaryCount={tasks.length}
+                          upstreamCount={extendedDagGraph?.total_upstream_count ?? 0}
+                          downstreamCount={
+                            extendedDagGraph?.total_downstream_count ?? 0
+                          }
+                          groupCount={extendedDagGraph?.groups.length ?? 0}
+                          truncated={extendedDagGraph?.truncated ?? false}
                         />
-                      ) : (
-                        <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
-                          <p>Failed to load DAG</p>
+                        <button
+                          onClick={() => setDagFullscreen(true)}
+                          className="rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200"
+                          title="Fullscreen DAG"
+                        >
+                          <svg
+                            className="h-4 w-4"
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                            strokeWidth={2}
+                          >
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5v-4m0 4h-4m4 0l-5-5"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* DAG + Results with resizable split */}
+                  <PanelGroup direction="vertical" className="flex-1">
+                    {/* Collapsible DAG section */}
+                    <Panel
+                      ref={dagPanelRef}
+                      defaultSize={50}
+                      minSize={0}
+                      collapsible
+                      onCollapse={() => setShowDag(false)}
+                      onExpand={() => setShowDag(true)}
+                    >
+                      {showDag && canShowDag && !dagFullscreen && (
+                        <div className="h-full bg-gray-50 dark:bg-gray-900">
+                          {dagLoading ? (
+                            <div className="flex h-full items-center justify-center">
+                              <div className="h-6 w-6 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+                            </div>
+                          ) : dagGraph ? (
+                            <DagGraph
+                              tasks={tasksWithContext}
+                              graph={dagGraph}
+                              selectedTaskId={selectedTask?.task_id ?? null}
+                              onTaskClick={handleDagTaskClick}
+                              direction={dagDirection}
+                              onDirectionChange={setDagDirection}
+                              positionCache={dagPositionCacheRef}
+                            />
+                          ) : (
+                            <div className="flex h-full items-center justify-center text-gray-500 dark:text-gray-400">
+                              <p>Failed to load DAG</p>
+                            </div>
+                          )}
                         </div>
                       )}
-                    </div>
-                  )}
-                </Panel>
+                    </Panel>
 
-                <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
+                    <PanelResizeHandle className="h-1 cursor-row-resize bg-gray-200 transition-colors hover:bg-blue-400 dark:bg-gray-700 dark:hover:bg-blue-500" />
 
-                {/* Results table */}
-                <Panel defaultSize={50} minSize={20}>
-                  <TaskExplorerTable
-                    tasks={tasks}
-                    loading={loading}
-                    error={error}
-                    visibleColumns={visibleColumns}
-                    selectedTaskId={selectedTask?.task_id ?? null}
-                    sortBy={sortBy}
-                    sortDir={sortDir}
-                    onSort={handleSort}
-                    onCellClick={handleCellClick}
-                    onSelectTask={setSelectedTask}
-                    onNavigateToBuild={onNavigateToBuild}
-                    onResizeStart={handleResizeStart}
-                    page={page}
-                    pageSize={pageSize}
-                    total={total}
-                    totalPages={totalPages}
-                    onPageChange={setPage}
-                  />
-                </Panel>
-              </PanelGroup>
+                    {/* Results table */}
+                    <Panel defaultSize={50} minSize={20}>
+                      <TaskExplorerTable
+                        tasks={tasks}
+                        loading={loading}
+                        error={error}
+                        visibleColumns={visibleColumns}
+                        selectedTaskId={selectedTask?.task_id ?? null}
+                        sortBy={sortBy}
+                        sortDir={sortDir}
+                        onSort={handleSort}
+                        onCellClick={handleCellClick}
+                        onSelectTask={setSelectedTask}
+                        onNavigateToBuild={onNavigateToBuild}
+                        onResizeStart={handleResizeStart}
+                        page={page}
+                        pageSize={pageSize}
+                        total={total}
+                        totalPages={totalPages}
+                        onPageChange={setPage}
+                      />
+                    </Panel>
+                  </PanelGroup>
+                </>
+              )}
             </div>
           </Panel>
 
