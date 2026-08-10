@@ -1768,8 +1768,12 @@ async def get_build_frontier(
                     blocker.latest_status_at,
                     blocker.latest_status_expires_at,
                     blocker.latest_status_build_id,
-                    blocker.id.in_(build_task_ids),
-                    blocker.id,
+                    # Labelled, because these two are the ones read by name
+                    # before the row is destructured below — and a positional
+                    # index into a ten-column select is a silent breakage
+                    # waiting for someone to reorder it.
+                    blocker.id.in_(build_task_ids).label("blocking_in_build"),
+                    blocker.id.label("blocker_pk"),
                 )
                 .select_from(TaskDependency)
                 .join(blocked, TaskDependency.downstream_task_id == blocked.id)
@@ -1834,7 +1838,9 @@ async def get_build_frontier(
     # In-plan blockers too — a scheduler may reset one, and it needs the
     # budget to decide. Out-of-plan blockers are skipped: they have no
     # attempts in this build by definition.
-    attempt_task_pks.update(row[9] for row in blocker_rows if row[8])
+    attempt_task_pks.update(
+        row.blocker_pk for row in blocker_rows if row.blocking_in_build
+    )
     attempt_counts = await get_attempt_counts_in_build(
         db, build_id, list(attempt_task_pks)
     )

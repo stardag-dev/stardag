@@ -2187,6 +2187,16 @@ def _blocker_remedy(verdicts: Sequence[_BlockerVerdict]) -> str:
     One remedy, because there is one: the blocker is in this build's plan
     (closure guarantees it), so re-triggering resets it and runs it here. The
     exception is a RUNNING blocker, which holds a claim no reset can take.
+
+    The cancel that releases such a claim is spelled with the **owning**
+    build's id, which the blocker description above it supplies. Any build in
+    the environment is accepted there — the route does not require the task to
+    be in it — but the id chosen becomes the task's
+    ``latest_status_build_id``, and cancelling under the stuck build makes
+    that build the owner of the CANCELLED status. The frontier then stops
+    reporting the task as an external blocker at all, so the very reset this
+    message is steering towards never happens and the build has to be
+    re-triggered anyway. Under the owner, the next tick resets it and runs it.
     """
     remedy = (
         "Re-trigger this build to reset the blocker and run it here — a "
@@ -2199,8 +2209,11 @@ def _blocker_remedy(verdicts: Sequence[_BlockerVerdict]) -> str:
         remedy += (
             ". A blocker stuck RUNNING holds an execution claim no reset can "
             "take — and while a lapsed claim is re-claimable, no build is "
-            "claiming it: cancel the task (POST /api/v1/builds/{build_id}"
-            "/tasks/{task_id}/cancel) to release the claim first"
+            "claiming it: cancel the task first, addressed to the build that "
+            "owns it (named above), i.e. POST /api/v1/builds/<owning-build-id>"
+            "/tasks/<blocking-task-id>/cancel — addressing it to this build "
+            "instead would make this build the owner of the cancelled status, "
+            "which stops the next tick from picking the task up"
         )
     return remedy + "."
 
@@ -2282,7 +2295,18 @@ async def _handle_terminal(
         # fail on. Done before the wait/fail decision because it *removes*
         # the reason for both — the next tick finds them actionable.
         if blockers.recoverable:
-            reset_ids = [v.blocker.blocking_task_id for v in blockers.recoverable]
+            # Deduplicated, because the frontier reports one entry per
+            # (blocked, blocker) *edge*: a shared upstream appears once for
+            # every task of this build that depends on it, which is the normal
+            # shape for the fan-out this path exists to unblock. Without the
+            # dedupe a diamond retries the same task N times — the second call
+            # hitting a row that is already PENDING, so it fails and logs — and
+            # ``in_build_blockers_reset`` counts edges rather than tasks.
+            # ``dict.fromkeys`` rather than a set: registration order is what
+            # makes the log line's truncated list stable.
+            reset_ids = list(
+                dict.fromkeys(v.blocker.blocking_task_id for v in blockers.recoverable)
+            )
             for task_id in reset_ids:
                 try:
                     await registry.task_retry_by_id_aio(build_id, task_id)

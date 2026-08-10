@@ -2144,8 +2144,15 @@ class TestExternalBlockers:
         assert str(registry.status_build_id[self.BLOCKER_ID]) in message  # its owner
         assert "execution claim lapsed" in message
         # A reset cannot take a claim, lapsed or not, so the remedy is a
-        # cancel — and it is the only extra clause the remedy carries.
-        assert "release the claim" in message
+        # cancel — and it is the only extra clause the remedy carries. It has
+        # to name whose build id goes in the URL: any build in the environment
+        # is accepted there, but addressing it to *this* build makes this build
+        # the owner of the cancelled status, at which point the task stops
+        # being an external blocker and the reset it would have got never
+        # happens.
+        assert "cancel the task first" in message
+        assert "the build that owns it (named above)" in message
+        assert "<owning-build-id>" in message
 
     async def test_running_blocker_without_an_expiry_waits(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -2233,7 +2240,7 @@ class TestExternalBlockers:
         # One remedy, since the blocker is in this build's plan: re-trigger.
         # Only a RUNNING blocker needs the cancel-first hint.
         assert "Re-trigger this build" in message
-        assert "release the claim" not in message
+        assert "cancel the task first" not in message
 
     @pytest.mark.parametrize("owner_build_status", ["running", "pending"])
     async def test_non_running_blocker_of_a_live_build_waits(
@@ -2442,6 +2449,50 @@ class TestExternalBlockers:
         assert ("retry", self.BLOCKER_ID) in registry.calls
         assert registry.statuses[self.BLOCKER_ID] == "pending"
         assert registry.build_error_message is None
+
+    async def test_a_shared_cancelled_blocker_is_reset_once_per_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The frontier reports one entry per (blocked, blocker) *edge*.
+
+        A cancelled upstream shared by several of this build's tasks therefore
+        arrives once per dependent — the normal shape for the fan-out this path
+        exists to unblock, and a diamond is enough to produce it. Resetting per
+        entry would call retry N times on one task: the calls after the first
+        hit a row that is already PENDING, so they fail and log, and
+        ``in_build_blockers_reset`` would count edges rather than tasks.
+        """
+        root, registry, locks, executor, store = self._blocked_build(
+            blocker_status="cancelled", in_build=True
+        )
+        # A second task of this build gated by the *same* blocker.
+        sibling = SyncOnlyTask(name="shared-blocker-sibling")
+        store.save_task(sibling)
+        registry.add_task(str(sibling.id), status="pending")
+        registry.upstreams.setdefault(str(sibling.id), set()).add(self.BLOCKER_ID)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.terminal_status is None
+        # Two edges reported, one task reset.
+        assert summary.external_blockers == 0  # short-circuited by the reset
+        retries = [
+            call for call in registry.calls if call == ("retry", self.BLOCKER_ID)
+        ]
+        assert len(retries) == 1, registry.calls
+        assert summary.in_build_blockers_reset == 1
+        assert registry.statuses[self.BLOCKER_ID] == "pending"
 
     async def test_in_build_retry_respects_the_attempt_budget(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
