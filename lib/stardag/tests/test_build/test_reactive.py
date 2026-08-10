@@ -2143,8 +2143,8 @@ class TestExternalBlockers:
         assert self.BLOCKER_ID in message
         assert str(registry.status_build_id[self.BLOCKER_ID]) in message  # its owner
         assert "execution claim lapsed" in message
-        # Certainty about the cause is not the power to fix it from here.
-        assert "does not unblock this build" in message
+        # A reset cannot take a claim, lapsed or not, so the remedy is a
+        # cancel — and it is the only extra clause the remedy carries.
         assert "release the claim" in message
 
     async def test_running_blocker_without_an_expiry_waits(
@@ -2200,18 +2200,16 @@ class TestExternalBlockers:
         assert summary.outcome == "lingered_out"
         assert registry.build_get_calls == []
 
-    @pytest.mark.parametrize(
-        "blocker_status", ["pending", "suspended", "failed", "cancelled", "skipped"]
-    )
-    async def test_non_running_external_blocker_fails_immediately(
+    @pytest.mark.parametrize("blocker_status", ["pending", "suspended"])
+    async def test_owner_driven_blocker_of_a_terminal_build_fails_immediately(
         self,
         blocker_status: str,
         default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
     ):
-        """Nobody is executing the blocker, the build that owns it has gone
-        terminal, and this build will never schedule it (it is not in this
-        build's task set) — so waiting would be waiting forever. Fail now,
-        naming the task and the build that owns it."""
+        """PENDING and SUSPENDED say "the owning build is going to move this".
+        Once that build has gone terminal, nobody is, and waiting would be
+        waiting forever. Fail now, naming the task, the build that owns it and
+        the one remedy there is."""
         _, registry, locks, executor, store = self._blocked_build(
             blocker_status=blocker_status, owner_build_status="completed"
         )
@@ -2232,9 +2230,9 @@ class TestExternalBlockers:
         assert "pipelines.Ingest" in message
         assert blocker_status.upper() in message
         assert f"under build {registry.status_build_id[self.BLOCKER_ID]}" in message
-        # Actionable: retry now covers suspended too (#208 A2), and only a
-        # RUNNING blocker needs the cancel-first hint.
-        assert "/retry" in message
+        # One remedy, since the blocker is in this build's plan: re-trigger.
+        # Only a RUNNING blocker needs the cancel-first hint.
+        assert "Re-trigger this build" in message
         assert "release the claim" not in message
 
     @pytest.mark.parametrize("owner_build_status", ["running", "pending"])
@@ -2322,12 +2320,9 @@ class TestExternalBlockers:
         assert registry.build_get_calls == []  # nothing to look up
         message = registry.build_error_message or ""
         assert "no build owns its status" in message
-        # Both documented remedies are addressed to a build, so quoting
-        # them here would hand the reader a URL with no id to put in it.
-        # Say what can actually be done instead.
-        assert "/retry" not in message
-        assert "no build id to address a retry or cancel to" in message
-        assert "stardag tasks list" in message
+        # The remedy needs no owning build id to be actionable: the blocker is
+        # in *this* build's plan, so re-triggering *this* build resets it.
+        assert "Re-trigger this build" in message
 
     async def test_failed_owner_lookup_fails_without_propagating(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -2451,7 +2446,7 @@ class TestExternalBlockers:
     async def test_in_build_retry_respects_the_attempt_budget(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """Retrying an in-plan blocker must not become an infinite loop.
+        """Resetting an in-plan blocker must not become an infinite loop.
 
         A task that genuinely fails every time would otherwise be reset,
         rerun and re-failed forever. The budget that already bounds ordinary
@@ -2459,7 +2454,7 @@ class TestExternalBlockers:
         which is the honest outcome, since nothing will move the task.
         """
         _, registry, locks, executor, store = self._blocked_build(
-            blocker_status="failed", in_build=True, blocker_attempts=5
+            blocker_status="cancelled", in_build=True, blocker_attempts=5
         )
 
         summary = await run_tick_aio(
@@ -2479,7 +2474,171 @@ class TestExternalBlockers:
         assert summary.terminal_status == "failed"
         assert ("retry", self.BLOCKER_ID) not in registry.calls
         message = registry.build_error_message or ""
-        assert "Blocked within this build by" in message
+        assert "Blocked by" in message
+        assert "attempt budget in this build is spent" in message
+
+    @pytest.mark.parametrize("blocker_status", ["failed", "skipped"])
+    async def test_a_result_in_this_builds_plan_is_left_to_fail_mode(
+        self,
+        blocker_status: str,
+        default_in_memory_fs_target: typing.Type[InMemoryFileTarget],
+    ):
+        """S1, and the line the collaboration rule stops at: a task in this
+        build's plan is this build's to *run*, but only a CANCELLED status is
+        a revocation of permission to run. FAILED and SKIPPED are results.
+
+        Build A ran the shared task and it failed. Nothing about that failure
+        belongs to B: resetting it would rerun a task that just told the
+        environment it does not work, on nobody's request, and would override
+        the ``fail_mode`` B was triggered with. B fails instead, naming the
+        blocker — and a re-trigger, where the user *does* ask, resets it.
+
+        Budget deliberately intact (attempts 0 of 2): the point is the status,
+        not an exhausted retry allowance.
+        """
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status=blocker_status, in_build=True, blocker_attempts=0
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                # CONTINUE, or FAIL_FAST would fail the build on the status
+                # count before terminal detection ever looks at a blocker.
+                fail_mode=FailMode.CONTINUE,
+                max_attempts=2,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert ("retry", self.BLOCKER_ID) not in registry.calls
+        assert registry.statuses[self.BLOCKER_ID] == blocker_status
+        # A result influences neither half of the wait-or-fail decision: the
+        # build's own terminal logic owns the outcome.
+        assert summary.external_blockers == 1
+        assert summary.external_blockers_waited == 0
+        assert summary.external_blockers_fatal == 0
+        assert summary.in_build_blockers_reset == 0
+        message = registry.build_error_message or ""
+        assert "pipelines.Ingest" in message
+        assert "a result rather than a revocation" in message
+        assert "Re-trigger this build" in message
+
+    def _suspended_shared_task(
+        self, *, owner_build_status: str, child_claim_lapsed: bool
+    ):
+        """S2's shape: a shared task suspended on a dynamic child of its own.
+
+        The child is registered into the *owning* build's plan only, which is
+        what happens when this build registered before the owner's worker
+        yielded. It also keeps the suspended parent out of ``actionable``: a
+        suspended task with every upstream complete is simply schedulable, and
+        that is not the state S2 is about.
+        """
+        _, registry, locks, executor, store = self._blocked_build(
+            blocker_status="suspended",
+            in_build=True,
+            owner_build_id=(owner := uuid4()),
+            owner_build_status=owner_build_status,
+        )
+        registry.add_blocking_task(
+            "dynamic-child",
+            blocks={self.BLOCKER_ID},
+            status="running",
+            owner_build_id=owner,
+            # Same owner, so the same status — the fake keeps one entry per
+            # build and the default would overwrite the parent's.
+            owner_build_status=owner_build_status,
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=-1 if child_claim_lapsed else 60),
+            namespace="pipelines",
+            name="Child",
+        )
+        return registry, locks, executor, store
+
+    async def test_suspended_blocker_in_this_builds_plan_is_waited_on(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """S2: build A is mid-flight through the shared task's dynamic deps.
+
+        A ran the shared task, its worker registered dynamic dependencies,
+        yielded, and returned — leaving the task SUSPENDED with the children
+        in A's plan. The task is in B's plan too, but resetting it would rerun
+        all of its pre-yield work for nothing while A is legitimately making
+        progress, and would race A's own scheduling of the children.
+
+        So B waits. Bounded, not open-ended: SUSPENDED persists only while A
+        progresses the children, and A stalling on one of them stalls on a
+        RUNNING task whose claim expires.
+        """
+        registry, locks, executor, store = self._suspended_shared_task(
+            owner_build_status="running", child_claim_lapsed=False
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.terminal_status is None
+        assert registry.build_status == "running"
+        assert ("retry", self.BLOCKER_ID) not in registry.calls
+        assert registry.statuses[self.BLOCKER_ID] == "suspended"
+        assert summary.in_build_blockers_reset == 0
+        # Both edges are waited on: the suspended parent (its owner is live)
+        # and the running child (its claim is live).
+        assert summary.external_blockers_waited == 2
+        assert summary.external_blockers_fatal == 0
+
+    async def test_suspended_blocker_of_a_dead_owner_fails(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The other end of S2's bound, and why the wait is not a hang.
+
+        The owning build died while its dynamic child was running, so the
+        child's claim lapses and the suspended parent has nobody left to
+        progress it. Both are fatal on their own evidence — the claim for the
+        child, the owner's status for the parent — and the build fails naming
+        them instead of waiting forever. A re-trigger resets the whole chain.
+        """
+        registry, locks, executor, store = self._suspended_shared_task(
+            owner_build_status="failed", child_claim_lapsed=True
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.2,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.CONTINUE,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert ("retry", self.BLOCKER_ID) not in registry.calls
+        assert summary.external_blockers_fatal == 2
+        assert summary.external_blockers_waited == 0
+        message = registry.build_error_message or ""
+        assert "its owning build is failed" in message  # the suspended parent
+        assert "execution claim lapsed" in message  # its dynamic child
 
     async def test_in_build_blocker_that_cannot_be_retried_still_fails(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -2509,7 +2668,7 @@ class TestExternalBlockers:
         assert summary.external_blockers_fatal == 0
         message = registry.build_error_message or ""
         assert "No runnable or running tasks left" in message
-        assert "Blocked within this build by" in message
+        assert "Blocked by" in message
         assert "pipelines.Ingest" in message
 
     async def test_a_fatal_blocker_wins_over_a_waitable_one(
