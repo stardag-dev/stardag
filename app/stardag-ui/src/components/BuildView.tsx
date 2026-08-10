@@ -26,6 +26,7 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
+import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildExecutorChips } from "./ExecutorBadge";
 import { DagControls, type DagControlsState } from "./DagControls";
@@ -598,6 +599,13 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
                   )}
                 </div>
               </div>
+
+              {/* Why it failed — above the scheduling panel, which goes quiet
+                  on a failed build. See BuildFailureReason. */}
+              <BuildFailureReason
+                status={build.status}
+                message={build.latest_error_message}
+              />
 
               {/* Scheduler state. Renders itself only when it has something
                   to say — see `schedulingPanelForm`. Placed above the DAG so
