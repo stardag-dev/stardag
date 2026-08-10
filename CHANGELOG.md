@@ -127,11 +127,14 @@ build_id=<existing>, reactive=True)` is the recommended way to pick a
   keeps its exact semantics.
 
   `blocking_in_build` is reported for diagnostics and is not the field a
-  scheduler should branch on — plan closure (below) makes `false` unreachable
-  for anything registered under the current rule, and what happens next
-  follows from the blocker's status. `blocking_attempt_count` is `null` for a
-  blocker outside the plan, which is also what keeps a scheduler from
-  resetting one: it has no budget to spend there.
+  scheduler should branch on: what happens next follows from the blocker's
+  status. Plan closure (below) makes `true` the normal case, but `false` stays
+  reachable — closure runs once, at registration, so an edge written afterwards
+  is outside the plan, which is what happens whenever a concurrent build's
+  worker yields dynamic dependencies into its own plan.
+  `blocking_attempt_count` is `null` for a blocker outside the plan, which is
+  also what keeps a scheduler from resetting one: it has no budget to spend
+  there.
 
 - **Registration closes a build's plan over every recorded dependency edge**
   ([#208](https://github.com/stardag-dev/stardag/issues/208)). A build's plan
