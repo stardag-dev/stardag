@@ -6,7 +6,7 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## v0.18.0 — Stuck builds explain themselves, and triggering got fast
+## v0.18.0 — Builds collaborate, and triggering got fast
 
 Reactive scheduling worked until something went wrong. Then a build sat at
 RUNNING forever with no way to ask why, and the usual answer — a task in
@@ -32,11 +32,30 @@ orchestrator that died wedged its tasks permanently. Claims now carry an
 expiry, granted at start and derived from the executor's own timeout, and
 both the claim check and the concurrency-limit count honour it.
 
-**A build that cannot progress says so.** The frontier reports the upstreams
-blocking it, their status, how long they have been held and which build owns
-them — including blockers that are not part of the build at all. A reactive
-build now **waits** for a live cross-build blocker instead of failing with
-"No runnable or running tasks left".
+**Builds collaborate instead of owning tasks.** A build is a request for a
+set of root tasks to be materialised, not an owner of the tasks that
+materialise them. The execution claim is the only thing coordinating across
+builds; which build completes a task is otherwise irrelevant.
+
+Two things follow, and both were previously wrong:
+
+_A build's plan holds every dependency that was not complete when it was
+discovered._ Discovery walks `requires()`, but dependency edges also come
+from tasks that yielded them dynamically in some earlier build, and those
+edges outlive it. A build could therefore be gated by an upstream it never
+registered — which nothing could ever run, since the only thing that would
+produce it was the task being gated. Registration now closes the plan over
+every recorded edge, pruning at complete tasks.
+
+_A shared task another build cancelled is still this build's to run._ When a
+fail-fast build cancels the tasks it started, it correctly releases those
+claims — but the tasks were left `CANCELLED`, which is not schedulable, so
+every other build sharing the dependency died with it. One build's fail-fast
+is now just that: one build's. Any build with the task in its plan resets it
+and runs it, bounded by the per-task retry budget.
+
+**A build that still cannot progress says why.** The frontier names the
+tasks holding it up, their status and how long they have been in it.
 
 **Operational surface.** New `stardag builds` and `stardag tasks` CLI groups:
 list builds by status/idleness/app, list the tasks holding claims, and clean
@@ -97,6 +116,14 @@ app = StardagApp(
     ...
 )
 ```
+
+**A build's task set now includes upstreams it did not register.** Because
+the plan is closed over every recorded dependency edge, a task another build
+is running — or one it cancelled — appears in your build's own
+`actionable`/`running` and in its DAG view as a primary node rather than as
+greyed-out context. `upstream_depth` in the graph view therefore reveals
+only _complete_ upstreams; incomplete ones are already in the build. Nothing
+to change on your side, but the counts and the view will look different.
 
 **The watchdog sweep is scoped to the app that owns each build.** It used to
 page every RUNNING build and filter client-side, which meant an environment
