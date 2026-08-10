@@ -111,6 +111,17 @@ build_id=<existing>, reactive=True)` is the recommended way to pick a
   or a migration. Retention is bounded per build (newest 50 by default,
   `STARDAG_API_MAX_TICK_SUMMARIES_PER_BUILD`), pruned on insert.
   Additive: nothing writes to these endpoints yet.
+- **A failed build now reports _why_, on the build itself.**
+  `BuildResponse.latest_error_message` carries the reason recorded on the
+  build's newest `BUILD_FAILED` event, so "why did this fail" no longer costs a
+  `GET /builds/{id}/events` per build — which is why no listing ever showed it.
+  Reported while the build is `failed` and not afterwards: a build resumed after
+  failing is running again, and a current status paired with a previous round's
+  reason misleads worse than no reason. A blank reason is normalised to `null`,
+  so "none recorded" has one representation. Derived from the event rather than
+  denormalised onto the row (unlike `Task.latest_error_message`), batched into
+  one grouped query per page on the listing path.
+
 - **`GET /builds/{id}/frontier` now reports why a build is waiting on work
   it does not own** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
   Dependency gating is environment-global (task rows and edges are shared
@@ -341,6 +352,14 @@ build_id=<existing>, reactive=True)` is the recommended way to pick a
   `POST /builds/bulk-cancel` will act on, including the per-build reasons
   anything was skipped — because a preview that disagrees with the action
   is worse than no preview.
+
+- **A failed build says why it failed.** The scheduling panel explains a build
+  while it is _stalled_, and goes quiet the moment it fails — failing skips the
+  blocked tasks, and terminal tasks leave the frontier's blocker list. The
+  reason the scheduler recorded on its way out (which task, its status and age,
+  the owning build, why nothing will move it, and the remedy) is now shown on
+  the failed build, in the place the panel's explanation occupied. Untruncated,
+  because the remedy is at the end of it.
 
 - **A build that is not progressing now says why.** When nothing is
   actionable and nothing is running, the build view names each blocking
@@ -594,6 +613,12 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   new (optional, default `None`) hook an executor implements to expose its
   wall-clock limit. `StartClaimResult.latest_status_at` is replaced by
   `latest_status_expires_at`.
+
+- **`stardag builds show` prints a failed build's reason.**
+  `BuildSummary.latest_error_message` models the new server field, and the
+  command renders it as **Failure reason** — the most useful row on a failed
+  build, since the reactive scheduler's reasons name the blocking task, the
+  build that owns it and what to run. Absent on servers predating the field.
 
 - **New `stardag builds` and `stardag tasks` CLI groups.** There was no way
   to list builds, inspect a build's scheduling frontier, cancel a build or
