@@ -59,6 +59,11 @@ export interface Build {
   status: BuildStatus;
   started_at: string | null;
   completed_at: string | null;
+  // Why a `failed` build failed, as recorded server-side on its BUILD_FAILED
+  // event. Null for every other status — the reason is reported while the
+  // build is failed and not afterwards. Optional in the type so responses
+  // from a server predating the field deserialize cleanly.
+  latest_error_message?: string | null;
   // User who triggered the status change (for manual overrides)
   status_triggered_by_user: StatusTriggeredByUser | null;
   // True iff the latest build-level event is BUILD_RESUMED — set when
