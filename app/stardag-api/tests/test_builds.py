@@ -1994,18 +1994,18 @@ async def test_frontier_reflects_cross_build_running(client: AsyncClient):
 
 
 async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> None:
-    """A build whose only remaining task is gated by an upstream that another
-    build left RUNNING has nothing actionable and nothing running — the
-    frontier must say so explicitly instead of looking terminal."""
+    """A task another build is running is *in this build's plan*, not outside it.
+
+    Registration closes the plan over every recorded dependency edge, so an
+    upstream that was not complete — running included — belongs to the build
+    that depends on it. The build therefore has a running task and is not
+    stalled, and there is no "blocked by something outside my plan" to
+    report. The claim is what coordinates: this build will be denied the
+    start until the holder finishes or its claim lapses.
+    """
     build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
     await client.post(
-        f"/api/v1/builds/{build_a}/tasks",
-        json={
-            "task_id": "ext-up",
-            "task_namespace": "pipelines.ingest",
-            "task_name": "Upstream",
-            "task_data": {},
-        },
+        f"/api/v1/builds/{build_a}/tasks", json=_register_payload("ext-up")
     )
     await client.post(
         f"/api/v1/builds/{build_a}/tasks",
@@ -2016,59 +2016,128 @@ async def _assert_frontier_reports_cross_build_blocker(client: AsyncClient) -> N
         params={"executor": "modal", "executor_ref": "fc-build-a"},
     )
 
-    # Build B references only the downstream task; the upstream (and the
-    # edge, which is environment-global) belongs to build A entirely.
     build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
     await client.post(
         f"/api/v1/builds/{build_b}/tasks", json=_register_payload("ext-down")
     )
 
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
-    # The shape that used to read as "this build cannot progress".
-    assert frontier_b["actionable"] == []
-    assert frontier_b["running"] == []
-    assert frontier_b["status_counts"] == {"pending": 1}
-
-    assert frontier_b["blocked_by_external_truncated"] is False
-    assert frontier_b["blocked_by_external"] == [
-        {
-            "task_id": "ext-down",
-            "blocking_task_id": "ext-up",
-            "blocking_task_namespace": "pipelines.ingest",
-            "blocking_task_name": "Upstream",
-            "blocking_status": "running",
-            "blocking_status_at": frontier_b["blocked_by_external"][0][
-                "blocking_status_at"
-            ],
-            "blocking_status_expires_at": frontier_b["blocked_by_external"][0][
-                "blocking_status_expires_at"
-            ],
-            "blocking_status_build_id": build_a,
-            "blocking_in_build": False,
-        }
-    ]
-    assert frontier_b["blocked_by_external"][0]["blocking_status_at"] is not None
-    # The blocker holds a live claim, so build B is told when it lapses —
-    # the one liveness question B cannot answer for itself (it cannot probe
-    # build A's executor).
-    assert (
-        frontier_b["blocked_by_external"][0]["blocking_status_expires_at"] is not None
-    )
-
-    # Build A owns the blocker, so from its side nothing is external — and
-    # its own liveness signal (`running`) covers the same task.
-    frontier_a = (await client.get(f"/api/v1/builds/{build_a}/frontier")).json()
-    assert frontier_a["blocked_by_external"] == []
-    assert [t["task_id"] for t in frontier_a["running"]] == ["ext-up"]
-
-    # Once the blocker completes, the downstream is this build's to run.
-    await client.post(f"/api/v1/builds/{build_a}/tasks/ext-up/complete")
-    frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
+    # ext-up is in B's plan and running, so B is not stalled...
+    assert [t["task_id"] for t in frontier_b["running"]] == ["ext-up"]
+    assert frontier_b["status_counts"] == {"pending": 1, "running": 1}
+    # ...and nothing is reported as blocking from outside the plan.
     assert frontier_b["blocked_by_external"] == []
-    assert [t["task_id"] for t in frontier_b["actionable"]] == ["ext-down"]
+    assert frontier_b["blocked_by_external_truncated"] is False
 
 
 @pytest.mark.asyncio
+async def test_plan_closure_stops_at_complete_upstreams(client):
+    """Closure prunes exactly where discovery does.
+
+    A complete upstream gates nothing, and its own upstreams are assumed
+    complete with it — so the walk stops there rather than dragging a
+    build's whole historical ancestry into its plan.
+    """
+    seed = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{seed}/tasks", json=_register_payload("gp"))
+    await client.post(
+        f"/api/v1/builds/{seed}/tasks", json=_register_payload("mid", deps=["gp"])
+    )
+    await client.post(
+        f"/api/v1/builds/{seed}/tasks", json=_register_payload("leaf", deps=["mid"])
+    )
+    # "mid" is complete, so nothing above it should be inherited.
+    await client.post(f"/api/v1/builds/{seed}/tasks/mid/start")
+    await client.post(f"/api/v1/builds/{seed}/tasks/mid/complete")
+
+    other = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{other}/tasks", json=_register_payload("leaf"))
+
+    frontier = (await client.get(f"/api/v1/builds/{other}/frontier")).json()
+    in_plan = set(frontier["status_counts"])
+    # leaf (pending) is the build's; "gp" must NOT have been pulled in.
+    assert frontier["status_counts"].get("completed") is None, (
+        f"a complete upstream was admitted: {frontier}"
+    )
+    assert frontier["status_counts"] == {"pending": 1}, in_plan
+
+
+async def test_registration_pulls_in_known_upstreams(client):
+    """A build's plan must be closed under the dependency relation.
+
+    Registration walks `task.requires()` — static edges only — while gating
+    consults *every* recorded edge, including dynamic ones a previous build
+    discovered at runtime. A task can therefore be gated by an upstream that
+    is not in its plan, which no build containing it can ever schedule:
+    a permanent deadlock, and the one shape the whole cross-build blocker
+    machinery was built to describe rather than prevent.
+
+    A dynamic edge outlives the build that recorded it, so a later build
+    that statically discovers the same task inherits the dependency and must
+    inherit the upstream with it.
+    """
+    # Build A runs "parent" and discovers "dyn-up" dynamically.
+    build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks", json=_register_payload("parent")
+    )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks",
+        json=_register_payload("dyn-up"),
+    )
+    await client.post(
+        f"/api/v1/builds/{build_a}/tasks",
+        json=_register_payload("parent", deps=["dyn-up"]),
+    )
+
+    # Build B registers only "parent" — its static requires() has no dyn-up.
+    build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_b}/tasks", json=_register_payload("parent")
+    )
+
+    frontier = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
+    # dyn-up must be in B's plan — and actionable, since nothing gates it.
+    # Without closure B reports it as an out-of-plan blocker instead, which
+    # no build containing "parent" can ever clear.
+    assert [t["task_id"] for t in frontier["actionable"]] == ["dyn-up"], (
+        f"dyn-up not schedulable by build B: {frontier}"
+    )
+    assert frontier["blocked_by_external"] == []
+
+
+async def test_frontier_reports_attempts_for_an_in_plan_blocker(client):
+    """A blocker inside this build's plan carries its attempt count.
+
+    A scheduler may reset such a blocker and run it — the task is in its
+    plan, so it is its to run. It needs the attempts already spent to stay
+    inside the same retry budget an ordinary task obeys; without it, a task
+    that fails every time would be reset, rerun and re-failed forever.
+    """
+    build = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build}/tasks", json=_register_payload("up"))
+    await client.post(
+        f"/api/v1/builds/{build}/tasks",
+        json=_register_payload("down", deps=["up"]),
+    )
+    # This build spends one attempt on the shared task...
+    await client.post(f"/api/v1/builds/{build}/tasks/up/start")
+    await client.post(f"/api/v1/builds/{build}/tasks/up/fail")
+
+    # ...then another build cancels it (the fail-fast cascade shape), so the
+    # status this build is now looking at was set elsewhere.
+    other = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{other}/tasks", json=_register_payload("up"))
+    await client.post(f"/api/v1/builds/{other}/tasks/up/cancel")
+
+    frontier = (await client.get(f"/api/v1/builds/{build}/frontier")).json()
+    blockers = frontier["blocked_by_external"]
+    assert len(blockers) == 1
+    assert blockers[0]["blocking_task_id"] == "up"
+    assert blockers[0]["blocking_in_build"] is True
+    assert blockers[0]["blocking_attempt_count"] == 1
+
+
 async def test_frontier_reports_blocker_owned_by_another_build(client: AsyncClient):
     await _assert_frontier_reports_cross_build_blocker(client)
 
@@ -2082,49 +2151,36 @@ async def test_frontier_reports_blocker_owned_by_another_build_postgres(pg_clien
 
 
 @pytest.mark.asyncio
-async def test_frontier_external_blocker_reports_in_build_membership(
+async def test_every_reported_blocker_is_now_in_this_builds_plan(
     client: AsyncClient,
 ):
-    """`blocking_in_build` separates the two ways a stalled build is held up.
+    """`blocking_in_build` is False only for builds registered before plan
+    closure existed.
 
-    Chain top -> mid -> down, where `top` runs under another build and `mid`
-    is registered here but was last touched there (registration is
-    status-neutral, so ownership does not move). This build is stalled on
-    both: one blocker it has never heard of, one it can see but cannot
-    advance.
+    Closure admits every incomplete upstream at registration, so a build
+    cannot be gated by something outside its own plan. The field stays on
+    the model — builds registered under the old rule still have open plans,
+    and the scheduler's out-of-plan handling remains their safety net — but
+    for anything registered now it is always True, which is what makes the
+    blocker actionable rather than a dead end.
     """
     build_a = (await client.post("/api/v1/builds", json={})).json()["id"]
-    await client.post(
-        f"/api/v1/builds/{build_a}/tasks", json=_register_payload("chain-top")
-    )
-    await client.post(
-        f"/api/v1/builds/{build_a}/tasks",
-        json=_register_payload("chain-mid", ["chain-top"]),
-    )
-    await client.post(f"/api/v1/builds/{build_a}/tasks/chain-top/start")
+    for tid, deps in (("top", None), ("mid", ["top"]), ("down", ["mid"])):
+        await client.post(
+            f"/api/v1/builds/{build_a}/tasks", json=_register_payload(tid, deps)
+        )
+    await client.post(f"/api/v1/builds/{build_a}/tasks/top/start")
+    await client.post(f"/api/v1/builds/{build_a}/tasks/top/cancel")
 
     build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
-    await client.post(
-        f"/api/v1/builds/{build_b}/tasks", json=_register_payload("chain-mid")
-    )
-    await client.post(
-        f"/api/v1/builds/{build_b}/tasks",
-        json=_register_payload("chain-down", ["chain-mid"]),
-    )
+    await client.post(f"/api/v1/builds/{build_b}/tasks", json=_register_payload("down"))
 
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
-    assert frontier_b["actionable"] == []
-    assert frontier_b["running"] == []
-
-    entries = {e["task_id"]: e for e in frontier_b["blocked_by_external"]}
-    # Never registered here: this build can only wait for whoever owns it.
-    assert entries["chain-mid"]["blocking_task_id"] == "chain-top"
-    assert entries["chain-mid"]["blocking_in_build"] is False
-    assert entries["chain-mid"]["blocking_status"] == "running"
-    assert entries["chain-mid"]["blocking_status_build_id"] == build_a
-    # Registered here, but held back by the above — visible, not advanceable.
-    assert entries["chain-down"]["blocking_task_id"] == "chain-mid"
-    assert entries["chain-down"]["blocking_in_build"] is True
+    blockers = frontier_b["blocked_by_external"]
+    assert blockers, frontier_b
+    assert all(e["blocking_in_build"] for e in blockers), blockers
+    # And the whole incomplete chain came with it.
+    assert frontier_b["status_counts"] == {"pending": 2, "cancelled": 1}
 
 
 @pytest.mark.asyncio
@@ -2156,10 +2212,14 @@ async def test_frontier_omits_external_blockers_while_the_build_progresses(
         f"/api/v1/builds/{build_b}/tasks", json=_register_payload("gate-free")
     )
 
-    # Something to run: not stalled, so no diagnostic even though the
-    # external blocker is present and gating `gate-down`.
+    # Something to run: not stalled, so no diagnostic. `gate-up` is in B's
+    # plan now (closure), and RUNNING tasks stay in `actionable` — that is
+    # the scheduler's probe partition, not a spawn list.
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
-    assert [t["task_id"] for t in frontier_b["actionable"]] == ["gate-free"]
+    assert sorted(t["task_id"] for t in frontier_b["actionable"]) == [
+        "gate-free",
+        "gate-up",
+    ]
     assert frontier_b["blocked_by_external"] == []
 
     # Running counts as progress too. (A RUNNING task stays in `actionable`
@@ -2167,15 +2227,31 @@ async def test_frontier_omits_external_blockers_while_the_build_progresses(
     # that the gate is an OR, not a check on `actionable` alone.)
     await client.post(f"/api/v1/builds/{build_b}/tasks/gate-free/start")
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
-    assert [t["task_id"] for t in frontier_b["running"]] == ["gate-free"]
+    assert sorted(t["task_id"] for t in frontier_b["running"]) == [
+        "gate-free",
+        "gate-up",
+    ]
     assert frontier_b["blocked_by_external"] == []
 
-    # Out of work: now the build looks stuck, and the answer appears.
+    # Out of its own work, but still not stalled: the upstream is running,
+    # in this build's plan, and this build waits on it like any other
+    # running task of its own. There is nothing to diagnose.
     await client.post(f"/api/v1/builds/{build_b}/tasks/gate-free/complete")
+    frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
+    assert [t["task_id"] for t in frontier_b["running"]] == ["gate-up"]
+    assert frontier_b["blocked_by_external"] == []
+
+    # Stalled only when nothing is driving the upstream. Another build
+    # cancels it (the fail-fast shape) — now it is in this build's plan in a
+    # status nothing will move, which is the one case worth reporting, and
+    # it is reported as in-plan so a scheduler can reset and run it.
+    await client.post(f"/api/v1/builds/{build_a}/tasks/gate-up/cancel")
     frontier_b = (await client.get(f"/api/v1/builds/{build_b}/frontier")).json()
     assert frontier_b["actionable"] == []
     assert frontier_b["running"] == []
-    assert [e["task_id"] for e in frontier_b["blocked_by_external"]] == ["gate-down"]
+    blockers = frontier_b["blocked_by_external"]
+    assert [e["blocking_task_id"] for e in blockers] == ["gate-up"]
+    assert blockers[0]["blocking_in_build"] is True
 
 
 @pytest.mark.asyncio
@@ -2197,6 +2273,10 @@ async def test_frontier_external_blockers_are_capped_and_flagged(
             f"/api/v1/builds/{build_a}/tasks", json=_register_payload(tid, ["cap-up"])
         )
     await client.post(f"/api/v1/builds/{build_a}/tasks/cap-up/start")
+    # Cancelled, not left running: a running upstream is in the plan and
+    # keeps the build un-stalled, so the blocker list is never computed.
+    # Only a status nothing is driving produces the diagnostic.
+    await client.post(f"/api/v1/builds/{build_a}/tasks/cap-up/cancel")
 
     build_b = (await client.post("/api/v1/builds", json={})).json()["id"]
     for tid in ("cap-down-1", "cap-down-2"):

@@ -121,11 +121,30 @@ class FrontierExternalBlocker(StardagBaseModel):
     # "never lapses". Always None for a non-RUNNING blocker: it holds no
     # claim, so "will anyone move it?" must be asked of its owning build.
     blocking_status_expires_at: datetime | None = None
-    # Whether the blocker is also part of *this* build's task set. False is
-    # the pathological case: this build will never schedule it, so it can
-    # only wait for whoever owns it. True still blocks, but the blocker also
-    # shows up in this build's own ``actionable``/``running``.
+    # Whether the blocker is also part of *this* build's task set. True is the
+    # normal case: a build's plan holds every dependency that was not complete
+    # at discovery, so the blocker is this build's own task and shows up in its
+    # ``actionable``/``running`` too.
+    #
+    # False is still reachable, and not only for builds registered before
+    # closure existed. Closure runs once, at registration, so a dependency edge
+    # written afterwards is not in the plan — which is what happens whenever a
+    # concurrent build's worker yields dynamic dependencies into its own plan.
+    # Re-triggering re-runs discovery and brings them in.
+    #
+    # Reported for diagnostics, not branched on: the scheduler decides from
+    # the blocker's *status* (see
+    # ``stardag.build._reactive._classify_external_blockers``), and the
+    # attempt count below is what keeps it from resetting a task outside the
+    # plan.
     blocking_in_build: bool
+    # Attempts this blocker has already spent **in this build's round**,
+    # when the blocker is in this build's plan (None otherwise, and on
+    # servers predating the field). A tick that resets an in-plan blocker
+    # needs this to stay inside the same budget an ordinary retry obeys —
+    # otherwise a task that fails every time is reset, rerun and re-failed
+    # forever.
+    blocking_attempt_count: int | None = None
 
 
 class BuildFrontier(StardagBaseModel):

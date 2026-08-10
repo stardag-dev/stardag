@@ -26,6 +26,105 @@ Four facts about stardag force the shape of everything below.
    containers that read the frontier, act, and exit. Nothing on the
    scheduling side stays alive for the duration of a task.
 
+## Builds collaborate; the claim is the only coordination
+
+Everything below rests on one principle, worth stating before the mechanics
+because most of the bugs in this area came from quietly violating it:
+
+> **A build is a request for a set of root tasks to be materialised, not an
+> owner of the tasks that materialise them.** The execution claim is the
+> only cross-build coordination primitive. Which build completes a task is
+> otherwise irrelevant.
+
+That follows from the constraints above rather than being a preference.
+Tasks are content-addressed, so the output is a property of the environment;
+within one deployed app the worker selector and resources are a pure
+function of the task, so _which_ build ran it cannot change the result. What
+must not happen is two builds executing the same task at once — and that is
+exactly, and only, what the claim prevents.
+
+Two consequences are load-bearing, and both were violated by earlier
+versions of this code:
+
+**A build's plan is closed under the dependency relation.** It contains
+every dependency of its roots that was not complete at discovery time,
+pruned at complete tasks — whose own upstreams are assumed complete with
+them. Discovery enforces this for `requires()`; registration extends it to
+every recorded edge, because dynamic dependency edges are written by
+whichever build first ran the task and then outlive it. A build gated by
+something outside its own plan can never clear it: nothing else is going to
+run it, and the only thing that would produce it is the task being gated.
+That was a permanent deadlock.
+
+**A build acts on everything in its plan, whatever build last touched it.**
+A shared task another build cancelled — the fail-fast cascade is the common
+way — holds no claim and has no live execution. Deferring to the build that
+cancelled it turned one build's fail-fast into every overlapping build's
+failure. The scheduler resets such a task and runs it, bounded by the
+per-task retry budget.
+
+What stays build-scoped is **authority to revoke**: cascade-cancel touches
+only tasks whose current status this build produced, so cancelling build B
+cannot release claims held by build C's live workers. Authority to revoke
+and permission to complete are different questions, and only the first
+belongs to a build.
+
+### Revocation is not a result
+
+"Acts on everything in its plan" is not "resets everything in its plan". A
+mid-flight tick of some _other_ build resets exactly one status, and the line
+it draws is between a revocation of permission to run and a statement about
+the task:
+
+| Status      | Another build's tick, mid-flight                | At trigger / resume |
+| ----------- | ----------------------------------------------- | ------------------- |
+| `CANCELLED` | **reset and run** — a revocation, not a verdict | reset               |
+| `FAILED`    | leave — a _result_; `fail_mode` owns it         | reset               |
+| `SKIPPED`   | leave — a consequence of a failure              | reset               |
+| `SUSPENDED` | leave — the owning build is progressing it      | reset               |
+| `RUNNING`   | leave — the claim is coordinating               | **not** reset       |
+| `COMPLETED` | n/a                                             | pruned              |
+
+So `RUNNING` is the only status that blocks a trigger, and a trigger resets
+the whole retryable set — identically for a new build id and for a resume,
+since both go through the reactive bootstrap.
+
+The asymmetry between the two columns is the point: at trigger _you asked_,
+so retrying a previous failure is what you meant. Mid-flight nobody asked,
+and a tick that reset a failure would silently override the `fail_mode` the
+build was triggered with.
+
+### What this makes unnecessary
+
+A body of machinery existed to describe a build blocked by a task outside its
+plan, and to tell its operator that the only remedy lived under another build.
+That advice is gone — the out-of-plan branch, its remediation copy and the
+two-remedy split in the CLI and the UI — because the remedy it named was never
+the right one. `blocking_in_build` survives on the wire as a diagnostic;
+nothing branches on it. What keeps a tick from resetting a task outside its
+plan is the attempt budget: the server reports no attempt count for one, and a
+missing count refuses the retry.
+
+**What closure does _not_ buy, and it is easy to overstate.** Closure runs
+once, at registration. A dependency edge written _afterwards_ is not in the
+plan, and there is a routine way for that to happen: a concurrent build's
+worker yields dynamic dependencies, which are registered into _its_ plan, while
+this build closed its plan a minute earlier and never saw the edges. So a build
+registered under the current rule can still be gated by a task outside its
+plan. Verified live, not hypothetical: two builds sharing a task that suspends
+on dynamic children leave the second build reporting those children as
+out-of-plan blockers.
+
+Which is exactly why the wait-or-fail verdicts and the owning-build liveness
+lookup stay, and why they were nearly deleted with the rest. They are what
+makes that state benign rather than a deadlock: the children are RUNNING under
+live claims, so the build **waits**, and when they finish it proceeds. If their
+owner dies, their claims lapse, the shared parent goes `SKIPPED`, and the build
+fails naming it with a remedy addressed to itself. The same machinery covers a
+`SUSPENDED` shared task being progressed by the build that suspended it, where
+the owner's status is the only liveness evidence that exists at all, because a
+task holding no claim carries no expiry to read.
+
 ## The design: the claim is a status, not a lease
 
 `Task.latest_status == RUNNING` _is_ the execution claim. It is arbitrated in

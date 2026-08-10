@@ -513,24 +513,27 @@ def _render_external_blockers(frontier: BuildFrontier) -> None:
             "truncated list still proves the build is waiting, not stuck."
         )
 
-    # The two cases need different remedies, so say which applies.
-    out_of_build = [b for b in frontier.blocked_by_external if not b.blocking_in_build]
-    in_build = [b for b in frontier.blocked_by_external if b.blocking_in_build]
-    if out_of_build:
-        console.print(
-            f"\n[bold]{len(out_of_build)} blocker(s) are not in this build's task "
-            "set[/bold] — this build will never schedule them and can only wait "
-            "for the build that owns them. Check that owner with "
-            "'stardag builds show <owning-build-id>'; if it is gone, release the "
-            "claim with 'stardag tasks cancel <owning-build-id> <task-id>'."
-        )
-    if in_build:
-        console.print(
-            f"\n[bold]{len(in_build)} blocker(s) are in this build's task set[/bold] "
-            "but another build produced their current status. They will resolve "
-            "when that build finishes them; a retry from here would not release "
-            "the claim."
-        )
+    # What happens next is a function of the blocker's status, not of which
+    # build produced it — so say it once, by status.
+    console.print(
+        "\n[bold]What happens next depends on the status[/bold] — "
+        "[bold]running[/bold] means another build holds the execution claim; "
+        "it resolves when that build finishes or the claim expires. "
+        "[bold]cancelled[/bold] is a revocation, not a result: this build's "
+        "next tick resets it and runs it itself. [bold]suspended[/bold] "
+        "resolves as the owning build works through the dynamic dependencies "
+        "it yielded. [bold]failed[/bold] and [bold]skipped[/bold] are results "
+        "— a tick leaves them to this build's fail_mode, so re-trigger the "
+        "build to reset them and run them here."
+    )
+    console.print(
+        "\n[dim]A blocker stuck [bold]running[/bold] after its claim has "
+        "expired is the one case needing a hand: release the claim with "
+        "'stardag tasks cancel <owned-by-build> <blocking-task-id>', using the "
+        "build in the 'Owned by build' column — not this build, since the id "
+        "you pass becomes the task's new status owner and this build's next "
+        "tick would then stop seeing the task as recoverable.[/dim]"
+    )
 
 
 @app.command("ticks")

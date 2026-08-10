@@ -455,14 +455,39 @@ dependency edges are per **environment**, not per build, so an upstream that
 some other build left `RUNNING` gates this build's tasks while contributing
 nothing to the counts this build can see. The command names the blocking task
 (namespace and name, not just an id), its status, how long it has been in it,
-and the build that owns it — plus which of the two remedies applies:
+and the build that owns it.
 
-- **Not in this build's task set.** This build will never schedule it; it can
-  only wait for the owner. If the owner is gone, release the claim with
-  `stardag tasks cancel <owning-build-id> <task-id>`.
-- **In this build's task set, but another build produced its status.** It
-  resolves when that build finishes it; retrying from here would not release
-  the claim.
+A build's plan includes every dependency that was not complete when it was
+discovered, so the blocker is usually this build's own task — the **In this
+build** column says which. Either way, what happens next is a function of the
+blocker's **status** rather than of which build produced it:
+
+- `running` — another build holds the execution claim. It resolves when that
+  build finishes the task or the claim expires.
+- `cancelled` — a revocation of permission to run, not a verdict on the task.
+  This build's next tick resets it and runs it itself, bounded by the per-task
+  attempt budget: a shared task another build's fail-fast cancelled is still
+  this build's to run.
+- `suspended` — the owning build is working through the dynamic dependencies
+  the task yielded. It resolves as that build progresses them.
+- `failed`, `skipped` — results. A tick leaves them to this build's
+  `fail_mode` rather than overriding the policy you chose, so **re-trigger the
+  build** to reset them and run them here.
+
+One case needs a hand: a blocker still `running` after its execution claim has
+expired. No build is claiming it, and a `running` task is not schedulable, so
+release the claim first — either from the blocking build's scheduling panel in
+the UI ("Release claim" on the blocker) or with:
+
+```bash
+stardag tasks cancel <owned-by-build> <blocking-task-id>
+```
+
+Use the build from the **Owned by build** column, not the stalled build. The id
+you pass becomes the task's new status owner, so cancelling it under the
+stalled build makes that build own the `cancelled` status — at which point the
+task drops out of its external-blocker list and its next tick no longer treats
+it as something to reset. The UI action fills the owning build in for you.
 
 One important caveat the output states explicitly: the registry computes the
 blocker list **only for a build with nothing actionable and nothing running**.

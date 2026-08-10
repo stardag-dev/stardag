@@ -135,8 +135,12 @@ async def test_build_graph_upstream_depth_one(client: AsyncClient):
             assert node["is_primary"] is True
             assert node["traversal_depth"] == 0
         elif node["task_name"] == "UpstreamTask":
-            assert node["is_primary"] is False
-            assert node["traversal_depth"] == 1
+            # Primary now: an upstream that was not complete at discovery
+            # time is part of the build — this build cannot finish without
+            # it and is entitled to run it. Only *complete* upstreams stay
+            # context. See _close_plan_over_dependencies.
+            assert node["is_primary"] is True
+            assert node["traversal_depth"] == 0
 
 
 @pytest.mark.asyncio
@@ -149,6 +153,13 @@ async def test_build_graph_depth_limiting(client: AsyncClient):
     await register_task(client, build_id, "t-b", "TaskB", dependency_task_ids=["t-a"])
     await register_task(client, build_id, "t-c", "TaskC", dependency_task_ids=["t-b"])
     await register_task(client, build_id, "t-d", "TaskD", dependency_task_ids=["t-c"])
+    # Complete the chain. Depth limiting governs *context* nodes, and an
+    # incomplete upstream is no longer context — it belongs to the build
+    # that depends on it. Only completed upstreams (whose own upstreams are
+    # assumed complete with them) sit outside the plan.
+    for tid in ("t-a", "t-b", "t-c"):
+        await client.post(f"/api/v1/builds/{build_id}/tasks/{tid}/start")
+        await client.post(f"/api/v1/builds/{build_id}/tasks/{tid}/complete")
 
     # Build 2: only has TaskD
     build2_id = await create_build(client)
@@ -199,7 +210,11 @@ async def test_build_graph_grouping(client: AsyncClient):
     group = data["groups"][0]
     assert group["task_name"] == "LoadData"
     assert group["count"] == 5
-    assert group["depth"] == 1
+    # Depth 0, not 1: these upstreams are incomplete, so they are part of
+    # this build's own plan rather than context one level up. Grouping is
+    # what is under test here, and it applies at whatever depth the nodes
+    # land — see _close_plan_over_dependencies.
+    assert group["depth"] == 0
     assert group["status"] == "pending"  # no events = pending
     assert len(group["sample_task_ids"]) == 5  # up to 5 samples
 

@@ -109,17 +109,26 @@ function BlockerCard({
     ? `${blocker.blocking_task_namespace}/${blocker.blocking_task_name}`
     : blocker.blocking_task_name;
 
-  // The remedy differs by ownership, so the copy has to as well.
+  // What happens next is a function of the blocker's status, not of who owns
+  // it or whether it is in this build's plan. Plan membership is still worth
+  // reporting — the chip below does that — but it does not change the copy:
+  // a RUNNING blocker resolves when its claim does either way.
   let explanation: string;
-  if (!blocker.blocking_in_build) {
-    explanation =
-      "This build has never registered the blocking task, so it will never schedule it — it can only wait for whoever owns it.";
-  } else if (ownedByThisBuild) {
+  if (ownedByThisBuild) {
     explanation =
       "The blocking task is in this build's own task set and this build put it into that status, but it is not actionable, so nothing here will move it on.";
+  } else if (blocker.blocking_status === "cancelled") {
+    explanation =
+      "Another build cancelled the blocking task. That revoked permission to run it, not the task itself, and it is in this build's plan — so this build's next tick resets it and runs it, bounded by the per-task attempt budget.";
+  } else if (blocker.blocking_status === "running") {
+    explanation =
+      "Another build holds the execution claim on the blocking task. It resolves when that build finishes the task or the claim expires — until then, running it here would be a duplicate execution.";
+  } else if (blocker.blocking_status === "suspended") {
+    explanation =
+      "The blocking task yielded dynamic dependencies and is waiting for them. The build that owns it is working through them; this build resolves as that one progresses.";
   } else {
     explanation =
-      "The blocking task is in this build's own task set — it is in the table below — but another build set its current status, so this build will not advance it.";
+      "The blocking task's status is a result, not a revocation, so a tick leaves it to this build's fail_mode rather than overriding the policy the build was triggered with. Re-trigger this build to reset it and run it here.";
   }
 
   return (

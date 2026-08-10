@@ -398,10 +398,17 @@ class DiscoveryResult:
 # expresses. RUNNING is deliberately absent: it holds a live execution
 # claim, and releasing that claim is cancellation, not retry.
 #
-# Only the re-trigger path passes retry_failed=True. Workers registering
-# dynamically yielded deps call discover_and_register_aio with the default
-# (False), so a worker can never reset its own parent's SUSPENDED status
-# out from under itself.
+# Every trigger passes retry_failed=True — a new build id and a resume
+# alike, because both go through ``run_reactive_bootstrap`` now that
+# discovery runs inside Modal. Workers registering dynamically yielded deps
+# call discover_and_register_aio with the default (False), so a worker can
+# never reset its own parent's SUSPENDED status out from under itself.
+#
+# So RUNNING is the only status that blocks a trigger, while a *mid-flight*
+# tick resets only CANCELLED (see ``_classify_external_blockers``). The
+# asymmetry is intended: at trigger *you asked*, so retrying a previous
+# failure is what you meant. Mid-flight nobody asked, and ``fail_mode`` owns
+# what happens to a failure.
 _RETRYABLE_STATUSES = ("failed", "cancelled", "skipped", "suspended")
 
 
@@ -732,14 +739,20 @@ class TickSummary:
     # three times).
     #
     # ``external_blockers`` is every entry the frontier reported while the
-    # build looked stalled, including in-build ones; ``waited`` and
-    # ``fatal`` split only the out-of-build entries, so the three do not
-    # add up. A tick with waited > 0 and fatal == 0 is the healthy
-    # "waiting on another build" state; fatal > 0 always accompanies a
-    # failed build.
+    # build looked stalled; ``waited`` and ``fatal`` cover only the entries
+    # that drove the wait-or-fail decision, so the three do not add up —
+    # a blocker whose status is a result influences neither (see
+    # ``_ExternalBlockers.inert``). A tick with waited > 0 and fatal == 0 is
+    # the healthy "waiting on another build" state; fatal > 0 always
+    # accompanies a failed build.
     external_blockers: int = 0
     external_blockers_waited: int = 0
     external_blockers_fatal: int = 0
+    # Blockers this build reset so it could run them itself (the
+    # collaboration path: a shared task another build cancelled is still this
+    # build's to run). Only ever a task in this build's plan — the attempt
+    # budget the reset is bounded by does not exist for anything else.
+    in_build_blockers_reset: int = 0
 
 
 # Outcomes worth persisting. ``not_reactive`` is excluded by definition:
@@ -1823,19 +1836,24 @@ class _BlockerVerdict(typing.NamedTuple):
 class _ExternalBlockers(typing.NamedTuple):
     """Partition of a frontier's ``blocked_by_external`` (see below)."""
 
-    # Out-of-build, RUNNING, claim not lapsed: someone else is executing
-    # it, and their completion frees this build. Wait.
+    # RUNNING with a claim that has not lapsed: someone is executing it, and
+    # their completion frees this build. Wait.
     executing: list[_BlockerVerdict]
-    # Out-of-build, not running (so holding no claim, so carrying no
-    # expiry), but owned by a build that is still live — that build is
-    # going to schedule it. Wait.
+    # Not running (so holding no claim, so carrying no expiry) and in a
+    # status its owning build is still driving — that build is going to move
+    # it. Wait.
     queued: list[_BlockerVerdict]
-    # Out-of-build and nothing is going to run it. Fail.
+    # Nothing is going to move it and this build cannot reset it. Fail.
     fatal: list[_BlockerVerdict]
-    # In this build's own task set: already accounted for by actionable /
-    # running / status_counts, so it must not influence the wait-or-fail
-    # decision. Kept only to enrich the message.
-    in_build: list[_BlockerVerdict]
+    # CANCELLED with attempt budget left: a revocation, not a verdict, so
+    # this build's to run. Reset and schedule, don't fail — see
+    # ``_classify_external_blockers``.
+    recoverable: list[_BlockerVerdict]
+    # A *result* (FAILED/SKIPPED), or a CANCELLED whose budget is spent: the
+    # outcome belongs to ``fail_mode``, which already sees it in
+    # ``status_counts``, so it must not influence the wait-or-fail decision.
+    # Kept only to enrich the message.
+    inert: list[_BlockerVerdict]
 
     @property
     def waiting(self) -> list[_BlockerVerdict]:
@@ -1867,27 +1885,60 @@ def _blocker_status_age_seconds(
     return (now - status_at).total_seconds()
 
 
+# Blocker statuses whose fate belongs to the build that owns them. Neither
+# holds an execution claim, so the server clears the expiry with the claim
+# and the owner's status is the only liveness evidence that exists: PENDING
+# means that build has not scheduled it yet, SUSPENDED means that build is
+# working through its dynamic dependencies. Both are transient while the
+# owner lives — and both are a permanent wedge once it dies.
+_OWNER_DRIVEN_STATUSES = ("pending", "suspended")
+
+
 async def _classify_external_blockers(
     frontier: BuildFrontier,
     now: datetime,
     *,
     registry: RegistryABC,
+    config: TickConfig,
 ) -> _ExternalBlockers:
-    """Split the frontier's external blockers into wait / fail / ignore.
+    """Split the frontier's external blockers into reset / wait / fail / ignore.
 
     The frontier reports these only when the build has nothing actionable
     and nothing running — precisely the state the stuck-build check reads as
-    "this build is dead". The split decides whether it actually is, on two
-    questions: is the blocker in this build's own task set, and is anyone
-    going to move it?
+    "this build is dead". Each entry is an upstream of one of this build's
+    tasks whose current status *another* build produced. The split decides,
+    per blocker, whether anyone — this build included — is going to move it.
 
-    ``blocking_in_build`` → **ignored**: already visible in ``actionable`` /
-    ``running`` / ``status_counts``, so letting it drive this decision would
-    double-count it (a blocker genuinely stuck *in* this build still fails
-    the build, exactly as before).
+    **Plan membership is not one of the questions.** What decides is the
+    blocker's *status*, because the status is what says whether it is a
+    revocation, a result, or work in flight. A build's plan is closed under the
+    dependency relation, so a gating upstream is *usually* this build's own
+    task — but closure runs once, at registration, and an edge written after
+    that is not in the plan. A concurrent build's worker yielding dynamic
+    dependencies does exactly that, routinely. Such a blocker is still decided
+    here, on the same evidence as any other, and the attempt budget is what
+    stops the CANCELLED branch acting on one (see below). See
+    ``docs/design/execution-claims-and-liveness.md``.
 
-    Out-of-build, the second question is answered from different evidence in
-    the two halves of the table.
+    **CANCELLED — reset it and run it.** A cancel releases the execution
+    claim (that is the whole point of the fail-fast cascade) and leaves the
+    task in a status nothing schedules. It revokes *permission to run*; it is
+    not a verdict on the task, and permission is not build-scoped — a task in
+    this build's plan is this build's to run, whatever build last touched it.
+    Without this, one build's fail-fast became every overlapping build's
+    failure. Bounded by the same per-task attempt budget an ordinary retry
+    obeys, so a task that fails on every attempt cannot loop here. A blocker
+    outside the plan excludes itself without a plan check: the server reports
+    no attempt count for one, and a missing count refuses the retry (see
+    :func:`_retry_allowed`).
+
+    **FAILED / SKIPPED — leave them.** A failure is a *result*, and results
+    belong to ``fail_mode``: FAIL_FAST has already failed the build on the
+    same count, and CONTINUE means "finish what you can, then fail". A tick
+    that reset them would override the policy the user chose, and would do it
+    on nobody's request. They go to ``inert`` — named in the failure message,
+    influencing nothing. A re-trigger, where the user *did* ask, resets the
+    whole retryable set (see ``_RETRYABLE_STATUSES``).
 
     **RUNNING — read the claim's expiry.** A RUNNING task holds an execution
     claim, and the claim's expiry is the one piece of liveness evidence a
@@ -1906,14 +1957,16 @@ async def _classify_external_blockers(
       self-closing (new starts all carry an expiry) and the escape hatch is
       a task cancel, which the log line names.
 
-    **Everything else — ask the owning build.** A PENDING/SUSPENDED/terminal
-    task holds no claim, so the server clears the expiry with it and there
-    is nothing to read. The wedge is real (a task abandoned SUSPENDED blocks
-    every downstream build), so this half still decides, the only way it can:
+    **PENDING / SUSPENDED — ask the owning build** (``_OWNER_DRIVEN_STATUSES``).
+    Neither holds a claim, so the server clears the expiry with it and there
+    is nothing to read. The wedge is real — a task abandoned SUSPENDED blocks
+    every downstream build — so this half still decides, the only way it can:
 
-    - owning build still live → **wait**; it is going to schedule it.
-      Without this a PENDING dynamic dependency of a healthy concurrent
-      build would fail this build.
+    - owning build still live → **wait**; it is going to move it. Without
+      this a SUSPENDED shared task would fail every *other* build that
+      depends on it while the owner is legitimately mid-flight through its
+      dynamic dependencies, and a PENDING dynamic dependency of a healthy
+      concurrent build would do the same.
     - owning build terminal → **fail**; nothing will move it.
     - ``blocking_status_build_id is None`` → **fail** without a lookup: no
       status-moving event was ever recorded against it, so there is nobody
@@ -1923,20 +1976,25 @@ async def _classify_external_blockers(
       of life, and a silent indefinite hang is the failure mode #208 exists
       to kill.
 
-    So the owning-build lookup survives, for non-RUNNING blockers **only** —
+    So the owning-build lookup earns its place, for these statuses **only** —
     not out of caution but because it is the only evidence that exists for a
-    status carrying no claim. What a live owner does not buy is a deadline:
-    a build gone silent without transitioning is reaped server-side, not
+    status carrying no claim. What a live owner does not buy is a deadline: a
+    build gone silent without transitioning is reaped server-side, not
     guessed at here from a task's age.
 
-    None of this changes the outcome for a dead blocker outside this build's
-    task set: this build can never run it, so the build still fails. What
-    the expiry buys is certainty about *why*, and a message that says so.
+    **Why waiting on a SUSPENDED blocker is bounded**, and not the open-ended
+    hang it looks like: SUSPENDED persists only while the owner progresses the
+    dynamic dependencies it yielded, or while the owner is itself stuck on a
+    RUNNING task — and a RUNNING task carries a claim with an expiry. Once
+    that lapses the owner recovers or fails it, ``skip_blocked`` moves the
+    suspended parent to SKIPPED, the owner goes terminal, and this build stops
+    waiting. The wait ends on the same bound everything else here uses.
     """
     executing: list[_BlockerVerdict] = []
     queued: list[_BlockerVerdict] = []
     fatal: list[_BlockerVerdict] = []
-    in_build: list[_BlockerVerdict] = []
+    recoverable: list[_BlockerVerdict] = []
+    inert: list[_BlockerVerdict] = []
 
     # Owning-build statuses resolved during THIS classification only. A wide
     # DAG stalled behind one build yields one blocker entry per blocked edge,
@@ -1970,8 +2028,24 @@ async def _classify_external_blockers(
         return owner_statuses[owner_id]
 
     for blocker in frontier.blocked_by_external:
-        if blocker.blocking_in_build:
-            in_build.append(_BlockerVerdict(blocker, "in this build's own task set"))
+        if blocker.blocking_status == "cancelled":
+            # A revocation, not a verdict: the cancel released the claim, and
+            # a task in this build's plan is this build's to run whatever
+            # build last touched it. Budget-bounded, and the budget also
+            # excludes an out-of-plan blocker, which has no attempt count.
+            if _retry_allowed(blocker.blocking_attempt_count, config.max_attempts):
+                recoverable.append(
+                    _BlockerVerdict(blocker, "cancelled, so this build's to reset")
+                )
+            else:
+                inert.append(
+                    _BlockerVerdict(
+                        blocker,
+                        "cancelled, but not resettable from here (its attempt "
+                        "budget in this build is spent, or this build has no "
+                        "attempts on it to count)",
+                    )
+                )
             continue
 
         if blocker.blocking_status in _RUNNING_STATUSES:
@@ -1985,8 +2059,8 @@ async def _classify_external_blockers(
                     _BlockerVerdict(
                         blocker,
                         f"its execution claim lapsed at {expires_at}, so the "
-                        "claim is abandoned and re-claimable — but not by "
-                        "this build",
+                        "claim is abandoned and re-claimable — but a RUNNING "
+                        "task is not schedulable until someone releases it",
                     )
                 )
             elif expires_at is None:
@@ -2008,9 +2082,25 @@ async def _classify_external_blockers(
                 )
             continue
 
-        # Not running: no claim is held, so there is no expiry to read. It
-        # moves only if the build owning its status is still going to
-        # schedule it.
+        if blocker.blocking_status not in _OWNER_DRIVEN_STATUSES:
+            # A result — FAILED or SKIPPED — or a status no build drives at
+            # all (an UNREGISTERED phantom, or one a future server adds).
+            # Nothing is going to move it, but the decision is not this
+            # path's to take: it is in this build's plan, so it is in
+            # ``status_counts``, and ``fail_mode`` owns what happens to a
+            # failure. Recorded for the message only.
+            inert.append(
+                _BlockerVerdict(
+                    blocker,
+                    "a result rather than a revocation, so this build's "
+                    "fail_mode owns the outcome",
+                )
+            )
+            continue
+
+        # PENDING or SUSPENDED: no claim is held, so there is no expiry to
+        # read. It moves only if the build owning its status is still going to
+        # move it.
         owner_id = blocker.blocking_status_build_id
         if owner_id is None:
             fatal.append(
@@ -2042,7 +2132,11 @@ async def _classify_external_blockers(
             )
 
     return _ExternalBlockers(
-        executing=executing, queued=queued, fatal=fatal, in_build=in_build
+        executing=executing,
+        queued=queued,
+        fatal=fatal,
+        recoverable=recoverable,
+        inert=inert,
     )
 
 
@@ -2092,56 +2186,57 @@ def _describe_blockers(
     return described
 
 
-def _blocker_remediation(verdicts: Sequence[_BlockerVerdict]) -> str:
+def _blocker_remedy(verdicts: Sequence[_BlockerVerdict]) -> str:
     """How to get out of it — the part the error used to lack.
 
-    Both documented endpoints are addressed to a *build*, so a blocker
-    whose owning build was never recorded has no build id to substitute
-    into them. Telling that reader to "retry it under the build that owns
-    it" is not a remedy, it is the shape of one — and this function exists
-    precisely for the reader who is stuck.
-    """
-    unowned = [
-        verdict
-        for verdict in verdicts
-        if verdict.blocker.blocking_status_build_id is None
-    ]
-    owned = [
-        verdict
-        for verdict in verdicts
-        if verdict.blocker.blocking_status_build_id is not None
-    ]
+    One remedy, because one covers it: re-triggering this build re-runs
+    discovery, which closes the plan again over whatever edges exist *now* and
+    resets the retryable set — so it reaches a blocker that was outside the
+    plan as well as one inside it. The exception is a RUNNING blocker, which
+    holds a claim no reset can take.
 
-    parts: list[str] = []
-    if owned:
-        remedy = (
-            "Retry the blocking task under the build that owns it "
-            "(POST /api/v1/builds/{build_id}/tasks/{task_id}/retry) to reset "
-            "it to pending — this now works from suspended as well as from "
-            "failed/cancelled/skipped — then re-trigger this build"
+    Spelled in the **surfaces a user actually has** — the UI and the CLI — not
+    as the REST routes underneath them. This text lands in a build's
+    ``error_message``, read by someone whose build just died; a bare
+    ``POST /api/v1/...`` leaves them to find a base URL, mint a token and
+    assemble a body before they can act on it.
+
+    The UI is named first because it cannot get the build id wrong: the
+    scheduling panel addresses a claim action to the blocker's
+    ``blocking_status_build_id``. That matters more than it looks. Any build in
+    the environment is accepted by the route — it does not require the task to
+    be in it — but the id given becomes the task's ``latest_status_build_id``,
+    so cancelling under the *stuck* build makes that build the owner of the
+    CANCELLED status. The frontier then stops reporting the task as an external
+    blocker at all, so the very reset this message is steering towards never
+    happens and the build has to be re-triggered anyway. Under the owner, the
+    next tick resets it and runs it — which is why the CLI form spells the
+    argument ``<owning-build-id>`` and says which build that is.
+    """
+    remedy = (
+        "Re-trigger this build to reset the blocker and run it here — a "
+        "trigger resets failed/cancelled/skipped/suspended tasks in the plan, "
+        "which a mid-flight tick deliberately does not. Trigger it with this "
+        "same build id: build_trigger(..., build_id=<this build>, "
+        "reactive=True). A task-level Retry (in the UI, or 'stardag tasks "
+        "retry') is not the same thing and will not do it"
+    )
+    if any(
+        verdict.blocker.blocking_status in _RUNNING_STATUSES for verdict in verdicts
+    ):
+        remedy += (
+            ". A blocker stuck RUNNING holds an execution claim no reset can "
+            "take — and while a lapsed claim is re-claimable, no build is "
+            "claiming it, so release it first: in the UI, open the blocking "
+            "build's scheduling panel and use the blocker's 'Release claim' "
+            "action, which addresses it to the owning build for you; from the "
+            "CLI, 'stardag tasks cancel <owning-build-id> "
+            "<blocking-task-id>'. It has to be the build that owns the blocker "
+            "(named above), not this one — cancelling it under this build "
+            "would make this build the owner of the cancelled status, which "
+            "stops the next tick from picking the task up"
         )
-        if any(
-            verdict.blocker.blocking_status in _RUNNING_STATUSES for verdict in owned
-        ):
-            remedy += (
-                ". A blocker stuck RUNNING holds an execution claim no retry "
-                "can take — and while a lapsed claim is re-claimable, no "
-                "build is claiming it: cancel it (POST /api/v1/builds/"
-                "{build_id}/tasks/{task_id}/cancel) to release the claim "
-                "first"
-            )
-        parts.append(remedy + ".")
-    if unowned:
-        parts.append(
-            "No build is recorded as having set the status of "
-            f"{'some of these blockers' if owned else 'this blocker'}, so "
-            "there is no build id to address a retry or cancel to. Find the "
-            "task in the registry UI (or `stardag tasks list`), which names "
-            "the build that owns each claim; if nothing owns it, the status "
-            "predates claim recording and the task has to be re-run under a "
-            "new build."
-        )
-    return " ".join(parts)
+    return remedy + "."
 
 
 async def _handle_terminal(
@@ -2212,7 +2307,43 @@ async def _handle_terminal(
         # failure.
         now = datetime.now(timezone.utc)
         truncated = frontier.blocked_by_external_truncated
-        blockers = await _classify_external_blockers(frontier, now, registry=registry)
+        blockers = await _classify_external_blockers(
+            frontier, now, registry=registry, config=config
+        )
+
+        # Recoverable (cancelled) blockers first: this build can reset them
+        # and run them itself, so there is nothing to wait for and nothing to
+        # fail on. Done before the wait/fail decision because it *removes*
+        # the reason for both — the next tick finds them actionable.
+        if blockers.recoverable:
+            # Deduplicated, because the frontier reports one entry per
+            # (blocked, blocker) *edge*: a shared upstream appears once for
+            # every task of this build that depends on it, which is the normal
+            # shape for the fan-out this path exists to unblock. Without the
+            # dedupe a diamond retries the same task N times — the second call
+            # hitting a row that is already PENDING, so it fails and logs — and
+            # ``in_build_blockers_reset`` counts edges rather than tasks.
+            # ``dict.fromkeys`` rather than a set: registration order is what
+            # makes the log line's truncated list stable.
+            reset_ids = list(
+                dict.fromkeys(v.blocker.blocking_task_id for v in blockers.recoverable)
+            )
+            for task_id in reset_ids:
+                try:
+                    await registry.task_retry_by_id_aio(build_id, task_id)
+                except Exception as e:
+                    # Best-effort: another tick may have reset it already, or
+                    # completed it outright. Either way the next frontier read
+                    # tells the truth, and failing the build over a lost race
+                    # is the outcome this whole path exists to avoid.
+                    logger.warning(f"Could not reset in-build blocker {task_id}: {e}")
+            summary.in_build_blockers_reset += len(reset_ids)
+            logger.info(
+                f"Build {build_id}: reset {len(reset_ids)} cancelled blocker(s) "
+                f"in this build's own plan so this build can run them: "
+                f"{', '.join(reset_ids[:_MAX_REPORTED_BLOCKERS])}"
+            )
+            return None
         waiting = blockers.waiting
         summary.external_blockers += len(frontier.blocked_by_external)
         summary.external_blockers_waited += len(waiting)
@@ -2272,34 +2403,33 @@ async def _handle_terminal(
         if blockers.fatal:
             # Precise, actionable failure: which task, its name, its status,
             # how long it has been in it, which build owns it, why that owner
-            # is not going to move it — plus how to release it. The status
+            # is not going to move it — plus how to get it moving. The status
             # counts alone (the whole of the old message) point nowhere near
-            # the cause when the cause is not in this build's task set at all.
+            # the cause when the cause is an upstream in a status no tick of
+            # this build will touch.
             reason = (
                 f"Build cannot progress: it has nothing runnable or running "
                 f"of its own, and {len(blockers.fatal)} of its task(s) are "
-                "blocked by an upstream owned by another build that will not "
-                f"move it (status counts: {counts}). Knowing the blocker is "
-                "dead does not unblock this build — the blocker is not in "
-                "this build's task set, so this build can never run it; it "
-                "has to be released under the build that owns it. Blocked "
-                f"by: {_describe_blockers(blockers.fatal, now, truncated)}"
-                f". {_blocker_remediation(blockers.fatal)}"
+                "blocked by an upstream that nothing is going to move "
+                f"(status counts: {counts}). Blocked by: "
+                f"{_describe_blockers(blockers.fatal, now, truncated)}"
+                f". {_blocker_remedy(blockers.fatal)}"
             )
         else:
-            # No out-of-build blocker: genuinely stuck (failed deps in
-            # CONTINUE mode, a lost task pickle, or a blocker inside this
-            # build that will never run). Fail rather than idle forever —
-            # naming any in-build blockers, which are otherwise invisible in
-            # the status counts.
+            # Nothing to wait for and nothing fatal: genuinely stuck (failed
+            # deps in CONTINUE mode, a lost task pickle, a blocker whose
+            # status is a result this tick will not override). Fail rather
+            # than idle forever — naming the inert blockers, whose role in it
+            # the status counts do not reveal.
             reason = (
                 "No runnable or running tasks left but roots are not "
                 f"complete (status counts: {counts})"
             )
-            if blockers.in_build:
-                reason += ". Blocked within this build by: " + _describe_blockers(
-                    blockers.in_build, now, truncated
+            if blockers.inert:
+                reason += ". Blocked by: " + _describe_blockers(
+                    blockers.inert, now, truncated
                 )
+                reason += f". {_blocker_remedy(blockers.inert)}"
         logger.error(f"Failing build {build_id}: {reason}")
         await registry.build_fail_aio(build_id, reason)
         return "failed"

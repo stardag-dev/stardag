@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any, Sequence
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -1753,6 +1753,7 @@ async def get_build_frontier(
     # edges (ix_task_dep_downstream), bounded by LIMIT.
     blocked_by_external: list[FrontierExternalBlocker] = []
     blocked_by_external_truncated = False
+    blocker_rows: Sequence[Any] = []
     if not actionable_tasks and not running_tasks:
         blocked = aliased(Task)
         blocker = aliased(Task)
@@ -1767,7 +1768,12 @@ async def get_build_frontier(
                     blocker.latest_status_at,
                     blocker.latest_status_expires_at,
                     blocker.latest_status_build_id,
-                    blocker.id.in_(build_task_ids),
+                    # Labelled, because these two are the ones read by name
+                    # before the row is destructured below — and a positional
+                    # index into a ten-column select is a silent breakage
+                    # waiting for someone to reorder it.
+                    blocker.id.in_(build_task_ids).label("blocking_in_build"),
+                    blocker.id.label("blocker_pk"),
                 )
                 .select_from(TaskDependency)
                 .join(blocked, TaskDependency.downstream_task_id == blocked.id)
@@ -1791,34 +1797,10 @@ async def get_build_frontier(
         blocked_by_external_truncated = (
             len(blocker_rows) > _MAX_FRONTIER_EXTERNAL_BLOCKERS
         )
-        blocked_by_external = [
-            FrontierExternalBlocker(
-                task_id=blocked_task_id,
-                blocking_task_id=blocking_task_id,
-                blocking_task_namespace=blocking_namespace,
-                blocking_task_name=blocking_name,
-                blocking_status=blocking_status,
-                blocking_status_at=blocking_status_at,
-                # The point of the whole entry: a blocker RUNNING under a
-                # build that died used to be indistinguishable from one
-                # running normally, leaving the consumer to guess from
-                # elapsed time. Past this instant it is provably gone.
-                blocking_status_expires_at=blocking_status_expires_at,
-                blocking_status_build_id=blocking_status_build_id,
-                blocking_in_build=bool(blocking_in_build),
-            )
-            for (
-                blocked_task_id,
-                blocking_task_id,
-                blocking_namespace,
-                blocking_name,
-                blocking_status,
-                blocking_status_at,
-                blocking_status_expires_at,
-                blocking_status_build_id,
-                blocking_in_build,
-            ) in blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
-        ]
+        # Response objects are built lower down, once attempt counts are
+        # known: an in-plan blocker carries its attempts so a scheduler can
+        # apply the same retry budget it applies to anything else.
+        blocker_rows = blocker_rows[:_MAX_FRONTIER_EXTERNAL_BLOCKERS]
 
     root_task_ids: list[str] = list(build.root_task_ids or [])
     roots: list[Task] = []
@@ -1853,9 +1835,50 @@ async def get_build_frontier(
     attempt_task_pks = {t.id for t in actionable_tasks}
     attempt_task_pks.update(t.id for t in running_tasks)
     attempt_task_pks.update(t.id for t in roots)
+    # In-plan blockers too — a scheduler may reset one, and it needs the
+    # budget to decide. Out-of-plan blockers are skipped: they have no
+    # attempts in this build by definition.
+    attempt_task_pks.update(
+        row.blocker_pk for row in blocker_rows if row.blocking_in_build
+    )
     attempt_counts = await get_attempt_counts_in_build(
         db, build_id, list(attempt_task_pks)
     )
+
+    blocked_by_external = [
+        FrontierExternalBlocker(
+            task_id=blocked_task_id,
+            blocking_task_id=blocking_task_id,
+            blocking_task_namespace=blocking_namespace,
+            blocking_task_name=blocking_name,
+            blocking_status=blocking_status,
+            blocking_status_at=blocking_status_at,
+            # The point of the whole entry: a blocker RUNNING under a build
+            # that died used to be indistinguishable from one running
+            # normally, leaving the consumer to guess from elapsed time.
+            # Past this instant it is provably gone.
+            blocking_status_expires_at=blocking_status_expires_at,
+            blocking_status_build_id=blocking_status_build_id,
+            blocking_in_build=bool(blocking_in_build),
+            # Only meaningful for a blocker in this build's plan; a task
+            # outside it has spent no attempts here.
+            blocking_attempt_count=(
+                attempt_counts.get(blocker_pk, 0) if blocking_in_build else None
+            ),
+        )
+        for (
+            blocked_task_id,
+            blocking_task_id,
+            blocking_namespace,
+            blocking_name,
+            blocking_status,
+            blocking_status_at,
+            blocking_status_expires_at,
+            blocking_status_build_id,
+            blocking_in_build,
+            blocker_pk,
+        ) in blocker_rows
+    ]
 
     def _ref(t: Task) -> FrontierTaskRef:
         return FrontierTaskRef(
@@ -1894,6 +1917,104 @@ async def get_build_frontier(
 
 
 # --- Tasks within Builds ---
+
+
+async def _close_plan_over_dependencies(
+    db: AsyncSession,
+    *,
+    build_id: UUID,
+    task_pks: Sequence[UUID],
+) -> int:
+    """Admit incomplete upstreams of ``task_pks`` into this build's plan.
+
+    **A build's plan is every dependency of its roots that was not complete
+    at discovery time**, pruned at complete tasks — whose own upstreams are
+    assumed complete with them. That is not a new rule: it is exactly what
+    discovery does when it walks ``task.requires()``.
+
+    The gap is that discovery walks *static* edges while gating consults
+    every recorded edge, dynamic ones included. A dynamic edge is written by
+    whichever build first ran the task and then outlives it, environment
+    -global and permanent. A later build that statically discovers the same
+    task therefore inherits the dependency without inheriting the task, and
+    is gated on an upstream it never registered — which no build containing
+    it can schedule, because the only thing that would produce it is the
+    very task being gated. A permanent deadlock.
+
+    Admitting an upstream is a status-neutral TASK_REFERENCED: nothing about
+    the upstream's own state changes, it simply becomes part of this build's
+    plan, which is what makes it schedulable here.
+
+    Over-approximating is safe, under-approximating is not. If this run
+    would in fact yield different dynamic dependencies, the build completes
+    an upstream it did not need — wasted work, correct outcome — whereas
+    missing one deadlocks. So no attempt is made to decide whether a
+    recorded edge is still current.
+
+    **RUNNING upstreams are admitted like any other.** Excluding them was
+    tempting — another build is executing it, so nothing is deadlocked
+    *right now* — but closure runs once, at registration, while RUNNING is
+    transient. The moment the task stops running the exclusion becomes a
+    permanent hole, and the likeliest way for it to stop running is an
+    operator releasing a stale claim: the documented remedy would strand
+    every build that inherited the dependency while it was running.
+
+    A task this build did not start therefore appears in its own
+    ``running``, and its liveness heuristics may act on it. That is correct:
+    the destructive action is gated on the claim's expiry, and past that
+    expiry the server no longer honours the claim and will hand the task to
+    the next claimant whoever asks. Which build started it was never what
+    made recovery safe — the claim is.
+    """
+    if not task_pks:
+        return 0
+
+    admitted = 0
+    frontier_pks = list(task_pks)
+    seen: set[UUID] = set(task_pks)
+    while frontier_pks:
+        in_plan = (
+            select(Event.task_id)
+            .where(Event.build_id == build_id, Event.task_id.is_not(None))
+            .distinct()
+            .scalar_subquery()
+        )
+        rows = (
+            (
+                await db.execute(
+                    select(Task)
+                    .join(TaskDependency, TaskDependency.upstream_task_id == Task.id)
+                    .where(
+                        TaskDependency.downstream_task_id.in_(frontier_pks),
+                        Task.latest_status != TaskStatus.COMPLETED,
+                        Task.id.not_in(in_plan),
+                    )
+                    .distinct()
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        frontier_pks = []
+        for upstream in rows:
+            if upstream.id in seen:
+                continue
+            seen.add(upstream.id)
+            db.add(
+                Event(
+                    build_id=build_id,
+                    task_id=upstream.id,
+                    event_type=EventType.TASK_REFERENCED,
+                )
+            )
+            admitted += 1
+            frontier_pks.append(upstream.id)
+        if frontier_pks:
+            # Flush so the next level's `in_plan` subquery sees these.
+            await db.flush()
+
+    return admitted
 
 
 async def _reconcile_dependency_edges(
@@ -2156,6 +2277,8 @@ async def register_task(
     db.add(event)
     await db.flush()
     apply_event_to_task(db_task, event)
+
+    await _close_plan_over_dependencies(db, build_id=build_id, task_pks=[db_task.id])
 
     await db.commit()
     await db.refresh(db_task)
@@ -2513,6 +2636,12 @@ async def register_tasks_bulk(
         # round-trip needed.
         for t, ev in zip(tasks_in, events):
             apply_event_to_task(db_task_by_task_id[t.task_id], ev)
+
+    await _close_plan_over_dependencies(
+        db,
+        build_id=build_id,
+        task_pks=[t.id for t in db_task_by_task_id.values()],
+    )
 
     # One final flush + commit at the end. Earlier flushes (just the
     # task INSERT batch) populated the rows we need to FK against.
