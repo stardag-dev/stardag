@@ -318,6 +318,11 @@ def _render_build(build: BuildSummary) -> None:
     # Only for a failed build, and it is the most useful row on one: the
     # scheduler's reason names the blocking task, its owner and the remedy.
     # Wrapped rather than truncated — a truncated remedy is not a remedy.
+    #
+    # Truthiness rather than `is not None`, and the two agree: the server
+    # excludes blank reasons from the field, so None is the only way "no reason
+    # recorded" is expressed. A blank row headed "Failure reason" would be
+    # noise, so if that ever changes server-side this is the behaviour to keep.
     if build.latest_error_message:
         table.add_row("Failure reason", build.latest_error_message)
     table.add_row("Description", build.description or "-")
