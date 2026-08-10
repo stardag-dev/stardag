@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Annotated, Any, Sequence
+from typing import Annotated, Any, Mapping, Sequence
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -258,7 +258,11 @@ def _latest_build_error_query(build_ids: list[UUID]):
             func.row_number()
             .over(
                 partition_by=Event.build_id,
-                order_by=Event.created_at.desc(),
+                # `id` breaks the tie: two BUILD_FAILED events can share a
+                # timestamp (same transaction, or coarse clock resolution), and
+                # "latest" has to be a single well-defined row rather than
+                # whichever the planner happens to emit first.
+                order_by=(Event.created_at.desc(), Event.id.desc()),
             )
             .label("rn"),
         )
@@ -267,6 +271,12 @@ def _latest_build_error_query(build_ids: list[UUID]):
             Event.task_id.is_(None),
             Event.event_type.in_(_BUILD_ERROR_EVENT_TYPES),
             Event.error_message.is_not(None),
+            # A blank reason is not a reason. Excluded here rather than
+            # filtered by each consumer, so "no reason recorded" has exactly
+            # one representation (None) everywhere downstream — otherwise a
+            # CLI or UI that renders on truthiness and one that renders on
+            # `is not None` disagree about the same build.
+            Event.error_message != "",
         )
         .subquery()
     )
@@ -287,7 +297,7 @@ async def _build_to_response(
     db: AsyncSession,
     build: Build,
     last_event_at: datetime | None = None,
-    latest_error_message: str | None = None,
+    latest_error_messages: Mapping[UUID, str | None] | None = None,
 ) -> BuildResponse:
     """Assemble a BuildResponse from a build row.
 
@@ -300,9 +310,18 @@ async def _build_to_response(
     caller already fetched it in bulk. Passing None for a build that has
     events simply costs one extra index lookup, never a wrong answer.
 
-    ``latest_error_message`` works the same way, with the lookup additionally
-    gated on the build actually being FAILED — so the ten single-build callers
-    need no changes and pay nothing, and only the listing path has to batch.
+    ``latest_error_messages`` is a *mapping* rather than a value for one
+    build, because the two states a value cannot distinguish are exactly the
+    ones that matter: "the caller has not looked this up" and "the caller
+    looked and there is none". With a scalar, a FAILED build whose reason is
+    absent — which happens, `POST /fail` takes no message — looked identical to
+    an unfetched one and re-queried per build, reintroducing the N+1 the batch
+    exists to avoid. A supplied mapping means "already resolved, do not ask
+    again", even for ids it does not contain.
+
+    Absent the mapping, the lookup happens here, gated on the build actually
+    being FAILED — so the ten single-build callers need no changes and pay
+    nothing for a build that cannot have a reason.
 
     The gate is also what the field *means*: the reason is reported while the
     build is failed, and not afterwards. A build cancelled after failing reads
@@ -314,10 +333,15 @@ async def _build_to_response(
     )
     if last_event_at is None:
         last_event_at = await _last_event_at(db, build.id)
-    if latest_error_message is None and build.latest_status == BuildStatus.FAILED:
-        latest_error_message = (await _latest_build_error_map(db, [build.id])).get(
-            build.id
+    resolved_errors: Mapping[UUID, str | None] = (
+        latest_error_messages
+        if latest_error_messages is not None
+        else (
+            await _latest_build_error_map(db, [build.id])
+            if build.latest_status == BuildStatus.FAILED
+            else {}
         )
+    )
     return BuildResponse(
         id=build.id,
         environment_id=build.environment_id,
@@ -337,7 +361,7 @@ async def _build_to_response(
         is_resumed=build.latest_is_resumed,
         last_active_at=build.last_active_at,
         last_activity_at=last_activity_at(build, last_event_at),
-        latest_error_message=latest_error_message,
+        latest_error_message=resolved_errors.get(build.id),
     )
 
 
@@ -797,14 +821,14 @@ async def list_builds(
     # One grouped query for the page's activity timestamps rather than one
     # per build.
     last_events = await _last_event_at_map(db, [b.id for b in page_builds])
-    # Only the failed ones can have a reason, so only they are asked about.
+    # Only the failed ones can have a reason, so only they are asked about —
+    # and the map is passed whole, so a failed build the query returned nothing
+    # for is not mistaken for one nobody has asked about yet.
     last_errors = await _latest_build_error_map(
         db, [b.id for b in page_builds if b.latest_status == BuildStatus.FAILED]
     )
     build_responses = [
-        await _build_to_response(
-            db, build, last_events.get(build.id), last_errors.get(build.id)
-        )
+        await _build_to_response(db, build, last_events.get(build.id), last_errors)
         for build in page_builds
     ]
 

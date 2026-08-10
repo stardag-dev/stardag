@@ -142,6 +142,45 @@ async def test_failed_build_reports_its_reason(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_failed_build_without_a_reason_reports_none(client: AsyncClient):
+    """`POST /fail` takes no message, so "failed, reason unknown" is reachable.
+
+    It must read as None rather than as an empty string, because the CLI and the
+    UI both decide whether to render a "why this failed" block on presence — and
+    a block headed that with nothing in it is worse than no block.
+    """
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build_id}/fail")
+
+    detail = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert detail["status"] == "failed"
+    assert detail["latest_error_message"] is None
+
+    # Same on the listing. This is also the case that made a scalar
+    # "already fetched?" signal unworkable: indistinguishable from unfetched,
+    # it re-queried per build and reintroduced the N+1 the batch removes.
+    listed = (await client.get("/api/v1/builds")).json()["builds"]
+    entry = next(b for b in listed if b["id"] == build_id)
+    assert entry["latest_error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_blank_failure_reason_reads_as_none(client: AsyncClient):
+    """An empty message is "no reason", not a reason that is empty.
+
+    Normalised server-side so every consumer has one representation to check;
+    otherwise a client rendering on truthiness and one rendering on
+    `is not None` disagree about the same build.
+    """
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(f"/api/v1/builds/{build_id}/fail", params={"error_message": ""})
+
+    detail = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert detail["status"] == "failed"
+    assert detail["latest_error_message"] is None
+
+
+@pytest.mark.asyncio
 async def test_resumed_build_stops_reporting_its_old_failure(client: AsyncClient):
     """The reason is reported *while* failed, and not afterwards.
 
