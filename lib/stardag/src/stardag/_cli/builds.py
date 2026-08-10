@@ -526,6 +526,14 @@ def _render_external_blockers(frontier: BuildFrontier) -> None:
         "— a tick leaves them to this build's fail_mode, so re-trigger the "
         "build to reset them and run them here."
     )
+    console.print(
+        "\n[dim]A blocker stuck [bold]running[/bold] after its claim has "
+        "expired is the one case needing a hand: release the claim with "
+        "'stardag tasks cancel <owned-by-build> <blocking-task-id>', using the "
+        "build in the 'Owned by build' column — not this build, since the id "
+        "you pass becomes the task's new status owner and this build's next "
+        "tick would then stop seeing the task as recoverable.[/dim]"
+    )
 
 
 @app.command("ticks")

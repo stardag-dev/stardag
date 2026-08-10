@@ -2144,15 +2144,18 @@ class TestExternalBlockers:
         assert str(registry.status_build_id[self.BLOCKER_ID]) in message  # its owner
         assert "execution claim lapsed" in message
         # A reset cannot take a claim, lapsed or not, so the remedy is a
-        # cancel — and it is the only extra clause the remedy carries. It has
-        # to name whose build id goes in the URL: any build in the environment
-        # is accepted there, but addressing it to *this* build makes this build
-        # the owner of the cancelled status, at which point the task stops
-        # being an external blocker and the reset it would have got never
-        # happens.
-        assert "cancel the task first" in message
-        assert "the build that owns it (named above)" in message
-        assert "<owning-build-id>" in message
+        # release — and it is the only extra clause the remedy carries.
+        assert "release it first" in message
+        # Named in surfaces the reader has, not as a REST route they would have
+        # to find a base URL and a token for.
+        assert "'Release claim' action" in message
+        assert "stardag tasks cancel <owning-build-id> <blocking-task-id>" in message
+        assert "/api/v1" not in message
+        # And it has to say *whose* build id: any build in the environment is
+        # accepted, but addressing it to *this* build makes this build the owner
+        # of the cancelled status, at which point the task stops being an
+        # external blocker and the reset it would have got never happens.
+        assert "the build that owns the blocker (named above), not this one" in message
 
     async def test_running_blocker_without_an_expiry_waits(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
@@ -2240,7 +2243,7 @@ class TestExternalBlockers:
         # One remedy, since the blocker is in this build's plan: re-trigger.
         # Only a RUNNING blocker needs the cancel-first hint.
         assert "Re-trigger this build" in message
-        assert "cancel the task first" not in message
+        assert "release it first" not in message
 
     @pytest.mark.parametrize("owner_build_status", ["running", "pending"])
     async def test_non_running_blocker_of_a_live_build_waits(

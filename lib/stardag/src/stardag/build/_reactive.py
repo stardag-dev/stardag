@@ -2188,20 +2188,31 @@ def _blocker_remedy(verdicts: Sequence[_BlockerVerdict]) -> str:
     (closure guarantees it), so re-triggering resets it and runs it here. The
     exception is a RUNNING blocker, which holds a claim no reset can take.
 
-    The cancel that releases such a claim is spelled with the **owning**
-    build's id, which the blocker description above it supplies. Any build in
-    the environment is accepted there — the route does not require the task to
-    be in it — but the id chosen becomes the task's
-    ``latest_status_build_id``, and cancelling under the stuck build makes
-    that build the owner of the CANCELLED status. The frontier then stops
-    reporting the task as an external blocker at all, so the very reset this
-    message is steering towards never happens and the build has to be
-    re-triggered anyway. Under the owner, the next tick resets it and runs it.
+    Spelled in the **surfaces a user actually has** — the UI and the CLI — not
+    as the REST routes underneath them. This text lands in a build's
+    ``error_message``, read by someone whose build just died; a bare
+    ``POST /api/v1/...`` leaves them to find a base URL, mint a token and
+    assemble a body before they can act on it.
+
+    The UI is named first because it cannot get the build id wrong: the
+    scheduling panel addresses a claim action to the blocker's
+    ``blocking_status_build_id``. That matters more than it looks. Any build in
+    the environment is accepted by the route — it does not require the task to
+    be in it — but the id given becomes the task's ``latest_status_build_id``,
+    so cancelling under the *stuck* build makes that build the owner of the
+    CANCELLED status. The frontier then stops reporting the task as an external
+    blocker at all, so the very reset this message is steering towards never
+    happens and the build has to be re-triggered anyway. Under the owner, the
+    next tick resets it and runs it — which is why the CLI form spells the
+    argument ``<owning-build-id>`` and says which build that is.
     """
     remedy = (
         "Re-trigger this build to reset the blocker and run it here — a "
         "trigger resets failed/cancelled/skipped/suspended tasks in the plan, "
-        "which a mid-flight tick deliberately does not"
+        "which a mid-flight tick deliberately does not. Trigger it with this "
+        "same build id: build_trigger(..., build_id=<this build>, "
+        "reactive=True). A task-level Retry (in the UI, or 'stardag tasks "
+        "retry') is not the same thing and will not do it"
     )
     if any(
         verdict.blocker.blocking_status in _RUNNING_STATUSES for verdict in verdicts
@@ -2209,11 +2220,14 @@ def _blocker_remedy(verdicts: Sequence[_BlockerVerdict]) -> str:
         remedy += (
             ". A blocker stuck RUNNING holds an execution claim no reset can "
             "take — and while a lapsed claim is re-claimable, no build is "
-            "claiming it: cancel the task first, addressed to the build that "
-            "owns it (named above), i.e. POST /api/v1/builds/<owning-build-id>"
-            "/tasks/<blocking-task-id>/cancel — addressing it to this build "
-            "instead would make this build the owner of the cancelled status, "
-            "which stops the next tick from picking the task up"
+            "claiming it, so release it first: in the UI, open the blocking "
+            "build's scheduling panel and use the blocker's 'Release claim' "
+            "action, which addresses it to the owning build for you; from the "
+            "CLI, 'stardag tasks cancel <owning-build-id> "
+            "<blocking-task-id>'. It has to be the build that owns the blocker "
+            "(named above), not this one — cancelling it under this build "
+            "would make this build the owner of the cancelled status, which "
+            "stops the next tick from picking the task up"
         )
     return remedy + "."
 

@@ -473,6 +473,21 @@ a function of its **status** rather than of which build produced it:
   `fail_mode` rather than overriding the policy you chose, so **re-trigger the
   build** to reset them and run them here.
 
+One case needs a hand: a blocker still `running` after its execution claim has
+expired. No build is claiming it, and a `running` task is not schedulable, so
+release the claim first — either from the blocking build's scheduling panel in
+the UI ("Release claim" on the blocker) or with:
+
+```bash
+stardag tasks cancel <owned-by-build> <blocking-task-id>
+```
+
+Use the build from the **Owned by build** column, not the stalled build. The id
+you pass becomes the task's new status owner, so cancelling it under the
+stalled build makes that build own the `cancelled` status — at which point the
+task drops out of its external-blocker list and its next tick no longer treats
+it as something to reset. The UI action fills the owning build in for you.
+
 One important caveat the output states explicitly: the registry computes the
 blocker list **only for a build with nothing actionable and nothing running**.
 An empty list therefore means "not externally blocked _or_ not stalled" — for
