@@ -1909,11 +1909,16 @@ async def _classify_external_blockers(
     tasks whose current status *another* build produced. The split decides,
     per blocker, whether anyone — this build included — is going to move it.
 
-    **Plan membership is not one of the questions.** A build's plan is closed
-    under the dependency relation, so a gating upstream is this build's own
-    task; see ``docs/design/execution-claims-and-liveness.md``. What decides
-    is the blocker's *status*, because the status is what says whether it is
-    a revocation, a result, or work in flight.
+    **Plan membership is not one of the questions.** What decides is the
+    blocker's *status*, because the status is what says whether it is a
+    revocation, a result, or work in flight. A build's plan is closed under the
+    dependency relation, so a gating upstream is *usually* this build's own
+    task — but closure runs once, at registration, and an edge written after
+    that is not in the plan. A concurrent build's worker yielding dynamic
+    dependencies does exactly that, routinely. Such a blocker is still decided
+    here, on the same evidence as any other, and the attempt budget is what
+    stops the CANCELLED branch acting on one (see below). See
+    ``docs/design/execution-claims-and-liveness.md``.
 
     **CANCELLED — reset it and run it.** A cancel releases the execution
     claim (that is the whole point of the fail-fast cascade) and leaves the
@@ -2184,9 +2189,11 @@ def _describe_blockers(
 def _blocker_remedy(verdicts: Sequence[_BlockerVerdict]) -> str:
     """How to get out of it — the part the error used to lack.
 
-    One remedy, because there is one: the blocker is in this build's plan
-    (closure guarantees it), so re-triggering resets it and runs it here. The
-    exception is a RUNNING blocker, which holds a claim no reset can take.
+    One remedy, because one covers it: re-triggering this build re-runs
+    discovery, which closes the plan again over whatever edges exist *now* and
+    resets the retryable set — so it reaches a blocker that was outside the
+    plan as well as one inside it. The exception is a RUNNING blocker, which
+    holds a claim no reset can take.
 
     Spelled in the **surfaces a user actually has** — the UI and the CLI — not
     as the REST routes underneath them. This text lands in a build's

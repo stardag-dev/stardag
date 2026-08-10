@@ -280,10 +280,10 @@ describe("BuildSchedulingPanel", () => {
     expect(screen.queryByText("skipped")).toBeNull();
   });
 
-  // The blocking task is in this build's plan — closure guarantees it — so
-  // the copy explains what happens next from the blocker's *status*, not from
-  // which build owns it. The plan-membership chip stays as a diagnostic for
-  // builds registered before closure existed.
+  // The copy explains what happens next from the blocker's *status*, not from
+  // which build owns it or whether it is in this build's plan — the chip
+  // reports that separately, and it stays reachable (closure runs once, so a
+  // dynamic edge written later is outside the plan).
   it.each([
     ["running", /holds the execution claim/i],
     ["cancelled", /resets it and runs it/i],

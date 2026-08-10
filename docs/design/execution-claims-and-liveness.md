@@ -97,22 +97,33 @@ build was triggered with.
 ### What this makes unnecessary
 
 A body of machinery existed to describe a build blocked by a task outside its
-plan, and to tell its operator that the only remedy lived under another
-build. With the plan closed that state is unreachable for anything registered
-under the current rule — a gating upstream is in the plan, so the build is
-running it, about to run it, or resetting it — so the out-of-plan branch, its
-remediation copy and the two-remedy split in the CLI and the UI are **gone**.
-`blocking_in_build` survives on the wire as a diagnostic for builds
-registered before closure existed; nothing branches on it. What keeps a tick
-from resetting a task outside its plan is the attempt budget: the server
-reports no attempt count for one, and a missing count refuses the retry.
+plan, and to tell its operator that the only remedy lived under another build.
+That advice is gone — the out-of-plan branch, its remediation copy and the
+two-remedy split in the CLI and the UI — because the remedy it named was never
+the right one. `blocking_in_build` survives on the wire as a diagnostic;
+nothing branches on it. What keeps a tick from resetting a task outside its
+plan is the attempt budget: the server reports no attempt count for one, and a
+missing count refuses the retry.
 
-What is _not_ unnecessary, and was nearly deleted with the rest: the
-wait-or-fail verdicts and the owning-build liveness lookup. A closed plan
-still contains tasks this build must not touch — a `SUSPENDED` shared task
-being progressed by the build that suspended it is the case that matters —
-and for those the owner's status is the only liveness evidence that exists,
-because a task holding no claim carries no expiry to read.
+**What closure does _not_ buy, and it is easy to overstate.** Closure runs
+once, at registration. A dependency edge written _afterwards_ is not in the
+plan, and there is a routine way for that to happen: a concurrent build's
+worker yields dynamic dependencies, which are registered into _its_ plan, while
+this build closed its plan a minute earlier and never saw the edges. So a build
+registered under the current rule can still be gated by a task outside its
+plan. Verified live, not hypothetical: two builds sharing a task that suspends
+on dynamic children leave the second build reporting those children as
+out-of-plan blockers.
+
+Which is exactly why the wait-or-fail verdicts and the owning-build liveness
+lookup stay, and why they were nearly deleted with the rest. They are what
+makes that state benign rather than a deadlock: the children are RUNNING under
+live claims, so the build **waits**, and when they finish it proceeds. If their
+owner dies, their claims lapse, the shared parent goes `SKIPPED`, and the build
+fails naming it with a remedy addressed to itself. The same machinery covers a
+`SUSPENDED` shared task being progressed by the build that suspended it, where
+the owner's status is the only liveness evidence that exists at all, because a
+task holding no claim carries no expiry to read.
 
 ## The design: the claim is a status, not a lease
 

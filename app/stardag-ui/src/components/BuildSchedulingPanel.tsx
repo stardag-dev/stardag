@@ -109,8 +109,10 @@ function BlockerCard({
     ? `${blocker.blocking_task_namespace}/${blocker.blocking_task_name}`
     : blocker.blocking_task_name;
 
-  // The blocking task is in this build's plan (closure guarantees it), so
-  // what happens next is a function of its status, not of who owns it.
+  // What happens next is a function of the blocker's status, not of who owns
+  // it or whether it is in this build's plan. Plan membership is still worth
+  // reporting — the chip below does that — but it does not change the copy:
+  // a RUNNING blocker resolves when its claim does either way.
   let explanation: string;
   if (ownedByThisBuild) {
     explanation =

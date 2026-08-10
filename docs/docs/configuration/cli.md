@@ -458,8 +458,9 @@ nothing to the counts this build can see. The command names the blocking task
 and the build that owns it.
 
 A build's plan includes every dependency that was not complete when it was
-discovered, so the blocker is this build's own task, and what happens next is
-a function of its **status** rather than of which build produced it:
+discovered, so the blocker is usually this build's own task — the **In this
+build** column says which. Either way, what happens next is a function of the
+blocker's **status** rather than of which build produced it:
 
 - `running` — another build holds the execution claim. It resolves when that
   build finishes the task or the claim expires.
