@@ -32,6 +32,13 @@ describe("BuildFailureReason", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("says nothing for a whitespace-only reason", () => {
+    // The server excludes blank reasons, so this guards the slip rather than
+    // today's behaviour: a heading with nothing under it is worse than silence.
+    render(<BuildFailureReason status="failed" message={"  \n "} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("says nothing when no reason was recorded", () => {
     // A server predating `latest_error_message` omits the field. An empty
     // banner headed "Why this build failed" would be worse than no banner.

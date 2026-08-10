@@ -21,9 +21,14 @@ interface BuildFailureReasonProps {
  * halves matter: a build resumed after failing is running again and must not
  * show the previous round's reason, and a server predating
  * `latest_error_message` omits the field rather than sending an empty one.
+ *
+ * The presence check trims. The server excludes blank reasons, so this is not
+ * load-bearing against the current API — but the failure mode if it ever slips
+ * (a heading reading "Why this build failed" above nothing) is worse than the
+ * cost of one `trim()`, and this component is the last place that can tell.
  */
 export function BuildFailureReason({ status, message }: BuildFailureReasonProps) {
-  if (status !== "failed" || !message) return null;
+  if (status !== "failed" || !message?.trim()) return null;
 
   return (
     <div
