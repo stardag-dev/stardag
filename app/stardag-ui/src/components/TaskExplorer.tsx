@@ -172,14 +172,23 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     if (!selectedTask) return;
     // Merged rather than replaced: `fetchTask` returns a `Task`, while the
     // selection is a `TaskSearchResult` carrying search-only extras (artifact
-    // columns) that a plain assignment would drop. Guarded on the id so a slow
-    // response cannot land on a different row the user has since selected, and
-    // swallowed on failure — the list refetch is what guarantees the view
-    // converges, and one failed row re-read must not clear a live selection.
-    void fetchTask(selectedTask.task_id, selectedTask.environment_id)
+    // columns) that a plain assignment would drop. Failure is swallowed — the
+    // list refetch is what guarantees the view converges, and one failed row
+    // re-read must not clear a live selection.
+    //
+    // Guarded on (environment, task), not the task alone. `task_id` is a
+    // content hash and rows are unique per `(environment_id, task_id)`, so the
+    // *same* id legitimately exists in two environments: switch environment
+    // while this is in flight, select the same task there, and an id-only
+    // guard would merge the previous environment's row into it.
+    const requestedTaskId = selectedTask.task_id;
+    const requestedEnvironmentId = selectedTask.environment_id;
+    void fetchTask(requestedTaskId, requestedEnvironmentId)
       .then((fresh) =>
         setSelectedTask((latest) =>
-          latest && latest.task_id === fresh.task_id
+          latest &&
+          latest.task_id === requestedTaskId &&
+          latest.environment_id === requestedEnvironmentId
             ? ({ ...latest, ...fresh } as TaskSearchResult)
             : latest,
         ),
