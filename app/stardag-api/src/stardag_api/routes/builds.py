@@ -232,10 +232,62 @@ async def _last_event_at_map(
     return {build_id: ts for build_id, ts in rows}
 
 
+# Build-level event types that carry a failure reason worth reporting on the
+# build itself. BUILD_FAILED is the one that matters; listing it rather than
+# "any event with an error_message" keeps a task-level error from being
+# promoted to the build, which would attribute one task's failure to the whole
+# build.
+_BUILD_ERROR_EVENT_TYPES = (EventType.BUILD_FAILED,)
+
+
+def _latest_build_error_query(build_ids: list[UUID]):
+    """Newest error-carrying build-level event per build, as a subquery-free join.
+
+    Deliberately *not* a denormalised ``Build.latest_error_message`` column,
+    even though ``Task`` has one and the status columns next to it were
+    denormalised precisely to stop replaying events. Two reasons: a column
+    needs a migration and a backfill, and this read is not on a hot path —
+    ``GET /builds`` is a human-facing listing, not the frontier a scheduler
+    polls every few seconds. If it ever shows up in a profile, the column is
+    the answer and this helper is where to delete.
+    """
+    ranked = (
+        select(
+            Event.build_id.label("build_id"),
+            Event.error_message.label("error_message"),
+            func.row_number()
+            .over(
+                partition_by=Event.build_id,
+                order_by=Event.created_at.desc(),
+            )
+            .label("rn"),
+        )
+        .where(
+            Event.build_id.in_(build_ids),
+            Event.task_id.is_(None),
+            Event.event_type.in_(_BUILD_ERROR_EVENT_TYPES),
+            Event.error_message.is_not(None),
+        )
+        .subquery()
+    )
+    return select(ranked.c.build_id, ranked.c.error_message).where(ranked.c.rn == 1)
+
+
+async def _latest_build_error_map(
+    db: AsyncSession, build_ids: list[UUID]
+) -> dict[UUID, str]:
+    """One grouped query for a whole page's failure reasons."""
+    if not build_ids:
+        return {}
+    rows = (await db.execute(_latest_build_error_query(build_ids))).all()
+    return {build_id: message for build_id, message in rows}
+
+
 async def _build_to_response(
     db: AsyncSession,
     build: Build,
     last_event_at: datetime | None = None,
+    latest_error_message: str | None = None,
 ) -> BuildResponse:
     """Assemble a BuildResponse from a build row.
 
@@ -247,12 +299,25 @@ async def _build_to_response(
     ``last_event_at`` short-circuits the per-build activity lookup when the
     caller already fetched it in bulk. Passing None for a build that has
     events simply costs one extra index lookup, never a wrong answer.
+
+    ``latest_error_message`` works the same way, with the lookup additionally
+    gated on the build actually being FAILED — so the ten single-build callers
+    need no changes and pay nothing, and only the listing path has to batch.
+
+    The gate is also what the field *means*: the reason is reported while the
+    build is failed, and not afterwards. A build cancelled after failing reads
+    as cancelled, and pairing a current status with a previous status's reason
+    would be worse than reporting none.
     """
     triggered_by_user = await _get_triggered_by_user(
         db, build.latest_status_triggered_by_user_id
     )
     if last_event_at is None:
         last_event_at = await _last_event_at(db, build.id)
+    if latest_error_message is None and build.latest_status == BuildStatus.FAILED:
+        latest_error_message = (await _latest_build_error_map(db, [build.id])).get(
+            build.id
+        )
     return BuildResponse(
         id=build.id,
         environment_id=build.environment_id,
@@ -272,6 +337,7 @@ async def _build_to_response(
         is_resumed=build.latest_is_resumed,
         last_active_at=build.last_active_at,
         last_activity_at=last_activity_at(build, last_event_at),
+        latest_error_message=latest_error_message,
     )
 
 
@@ -731,8 +797,14 @@ async def list_builds(
     # One grouped query for the page's activity timestamps rather than one
     # per build.
     last_events = await _last_event_at_map(db, [b.id for b in page_builds])
+    # Only the failed ones can have a reason, so only they are asked about.
+    last_errors = await _latest_build_error_map(
+        db, [b.id for b in page_builds if b.latest_status == BuildStatus.FAILED]
+    )
     build_responses = [
-        await _build_to_response(db, build, last_events.get(build.id))
+        await _build_to_response(
+            db, build, last_events.get(build.id), last_errors.get(build.id)
+        )
         for build in page_builds
     ]
 

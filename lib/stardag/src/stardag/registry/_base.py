@@ -299,6 +299,10 @@ class BuildSummary(StardagBaseModel):
     # Derived server-side from the build's recorded events: pending /
     # running / completed / failed / cancelled.
     status: str | None = None
+    # Why a FAILED build failed, as recorded server-side. None for any other
+    # status, and on servers predating the field — so a consumer must not read
+    # None as "failed for no reason".
+    latest_error_message: str | None = None
     description: str | None = None
     commit_hash: str | None = None
     root_task_ids: list[str] = []

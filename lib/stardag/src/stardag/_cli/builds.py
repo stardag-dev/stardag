@@ -315,6 +315,11 @@ def _render_build(build: BuildSummary) -> None:
     table.add_row("Status", build.status or "-")
     if build.is_resumed:
         table.add_row("Resumed", "yes")
+    # Only for a failed build, and it is the most useful row on one: the
+    # scheduler's reason names the blocking task, its owner and the remedy.
+    # Wrapped rather than truncated — a truncated remedy is not a remedy.
+    if build.latest_error_message:
+        table.add_row("Failure reason", build.latest_error_message)
     table.add_row("Description", build.description or "-")
     table.add_row("Commit", build.commit_hash or "-")
     table.add_row("Created", _stamp(build.created_at))

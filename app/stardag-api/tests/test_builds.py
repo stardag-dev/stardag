@@ -111,6 +111,81 @@ async def test_fail_build(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_failed_build_reports_its_reason(client: AsyncClient):
+    """A failed build carries why it failed, on the build itself.
+
+    The reason was only ever on the BUILD_FAILED event, so every consumer
+    wanting "why did this fail" needed a second request per build — which is
+    why no listing showed it and the UI showed it nowhere at all.
+    """
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+
+    # Not failed yet: no reason to report, and none invented.
+    assert (await client.get(f"/api/v1/builds/{build_id}")).json()[
+        "latest_error_message"
+    ] is None
+
+    await client.post(
+        f"/api/v1/builds/{build_id}/fail",
+        params={"error_message": "blocked by pipelines.Ingest"},
+    )
+
+    detail = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert detail["status"] == "failed"
+    assert detail["latest_error_message"] == "blocked by pipelines.Ingest"
+
+    # And on the listing, which is the path that could not afford a per-build
+    # lookup and therefore never had it.
+    listed = (await client.get("/api/v1/builds")).json()["builds"]
+    entry = next(b for b in listed if b["id"] == build_id)
+    assert entry["latest_error_message"] == "blocked by pipelines.Ingest"
+
+
+@pytest.mark.asyncio
+async def test_resumed_build_stops_reporting_its_old_failure(client: AsyncClient):
+    """The reason is reported *while* failed, and not afterwards.
+
+    A resumed build is running again; pairing that with the previous
+    round's failure reason would be worse than reporting nothing.
+    """
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    await client.post(
+        f"/api/v1/builds/{build_id}/fail", params={"error_message": "transient"}
+    )
+    assert (await client.get(f"/api/v1/builds/{build_id}")).json()[
+        "latest_error_message"
+    ] == "transient"
+
+    await client.post(f"/api/v1/builds/{build_id}/resume")
+    resumed = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert resumed["status"] == "running"
+    assert resumed["latest_error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_task_failure_is_not_promoted_to_the_build(client: AsyncClient):
+    """A task's error is the task's. The build reports only its own.
+
+    Reading "newest event carrying an error_message" would have attributed one
+    task's failure to a build that has not failed.
+    """
+    build_id = (await client.post("/api/v1/builds", json={})).json()["id"]
+    task_id = "a" * 64
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks",
+        json={"task_id": task_id, "task_name": "T", "task_namespace": ""},
+    )
+    await client.post(
+        f"/api/v1/builds/{build_id}/tasks/{task_id}/fail",
+        params={"error_message": "the task blew up"},
+    )
+
+    detail = (await client.get(f"/api/v1/builds/{build_id}")).json()
+    assert detail["status"] == "running"
+    assert detail["latest_error_message"] is None
+
+
+@pytest.mark.asyncio
 async def test_resume_build_after_failure(client: AsyncClient):
     """Resuming a failed build flips its status back to running.
 
