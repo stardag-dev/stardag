@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 from uuid import uuid4
 
+import pytest
 from typer.testing import CliRunner
 
 from stardag._cli.builds import app
@@ -285,29 +286,25 @@ class TestFrontier:
         assert "5h" in result.output  # how long it has been held up
         assert OTHER_BUILD_ID in result.output
 
-    def test_out_of_build_blocker_gets_its_own_remedy(self):
+    @pytest.mark.parametrize("in_build", [True, False])
+    def test_guidance_is_by_status_not_by_plan_membership(self, in_build: bool):
+        """Plan closure makes the blocker this build's own task, so what
+        happens next follows from its status. The two-remedy split — one
+        addressed to this build, one to the build that owns the task — is
+        gone, and the same guidance is printed either way."""
         registry = _mock_registry(
             build_get_frontier=_frontier(
-                blocked_by_external=[_blocker(blocking_in_build=False)]
+                blocked_by_external=[_blocker(blocking_in_build=in_build)]
             )
         )
         with _patch_resolve(registry):
             result = runner.invoke(app, ["frontier", BUILD_ID])
         assert result.exit_code == 0, result.output
-        assert "not in this build's task set" in result.output
-        assert "stardag tasks cancel" in result.output
-
-    def test_in_build_blocker_gets_a_different_remedy(self):
-        registry = _mock_registry(
-            build_get_frontier=_frontier(
-                blocked_by_external=[_blocker(blocking_in_build=True)]
-            )
-        )
-        with _patch_resolve(registry):
-            result = runner.invoke(app, ["frontier", BUILD_ID])
-        assert result.exit_code == 0, result.output
-        assert "in this build's task set" in result.output
-        assert "a retry from here would not release" in result.output
+        output = " ".join(result.output.split())  # rich wraps the paragraph
+        assert "What happens next depends on the status" in output
+        assert "another build holds the execution claim" in output
+        assert "re-trigger the build" in output
+        assert "not in this build's task set" not in output
 
     def test_truncation_is_surfaced(self):
         registry = _mock_registry(

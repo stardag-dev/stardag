@@ -128,6 +128,12 @@ class FrontierExternalBlocker(StardagBaseModel):
     # shows up in its ``actionable``/``running`` too. False survives for
     # builds registered before closure existed — this build cannot schedule
     # it, and re-triggering is what brings it into the plan.
+    #
+    # Reported for diagnostics, not branched on: the scheduler decides from
+    # the blocker's *status* (see
+    # ``stardag.build._reactive._classify_external_blockers``), and the
+    # attempt count below is what keeps it from resetting a task outside the
+    # plan.
     blocking_in_build: bool
     # Attempts this blocker has already spent **in this build's round**,
     # when the blocker is in this build's plan (None otherwise, and on

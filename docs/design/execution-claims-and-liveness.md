@@ -69,18 +69,50 @@ cannot release claims held by build C's live workers. Authority to revoke
 and permission to complete are different questions, and only the first
 belongs to a build.
 
+### Revocation is not a result
+
+"Acts on everything in its plan" is not "resets everything in its plan". A
+mid-flight tick of some _other_ build resets exactly one status, and the line
+it draws is between a revocation of permission to run and a statement about
+the task:
+
+| Status      | Another build's tick, mid-flight                | At trigger / resume |
+| ----------- | ----------------------------------------------- | ------------------- |
+| `CANCELLED` | **reset and run** — a revocation, not a verdict | reset               |
+| `FAILED`    | leave — a _result_; `fail_mode` owns it         | reset               |
+| `SKIPPED`   | leave — a consequence of a failure              | reset               |
+| `SUSPENDED` | leave — the owning build is progressing it      | reset               |
+| `RUNNING`   | leave — the claim is coordinating               | **not** reset       |
+| `COMPLETED` | n/a                                             | pruned              |
+
+So `RUNNING` is the only status that blocks a trigger, and a trigger resets
+the whole retryable set — identically for a new build id and for a resume,
+since both go through the reactive bootstrap.
+
+The asymmetry between the two columns is the point: at trigger _you asked_,
+so retrying a previous failure is what you meant. Mid-flight nobody asked,
+and a tick that reset a failure would silently override the `fail_mode` the
+build was triggered with.
+
 ### What this makes unnecessary
 
-A body of machinery exists to describe a build blocked by a task outside its
-plan: blocker classification, owning-build liveness lookups, wait-or-fail
-verdicts, and remediation copy naming another build. With the plan closed,
-that state is unreachable for anything registered under the current rule —
-a gating upstream is in the plan, so the build is either running it, about
-to run it, or resetting it.
+A body of machinery existed to describe a build blocked by a task outside its
+plan, and to tell its operator that the only remedy lived under another
+build. With the plan closed that state is unreachable for anything registered
+under the current rule — a gating upstream is in the plan, so the build is
+running it, about to run it, or resetting it — so the out-of-plan branch, its
+remediation copy and the two-remedy split in the CLI and the UI are **gone**.
+`blocking_in_build` survives on the wire as a diagnostic for builds
+registered before closure existed; nothing branches on it. What keeps a tick
+from resetting a task outside its plan is the attempt budget: the server
+reports no attempt count for one, and a missing count refuses the retry.
 
-The machinery is retained, not deleted, for one honest reason: builds
-registered _before_ closure existed still have open plans, and the handling
-remains their only safety net. New code should not add to it.
+What is _not_ unnecessary, and was nearly deleted with the rest: the
+wait-or-fail verdicts and the owning-build liveness lookup. A closed plan
+still contains tasks this build must not touch — a `SUSPENDED` shared task
+being progressed by the build that suspended it is the case that matters —
+and for those the owner's status is the only liveness evidence that exists,
+because a task holding no claim carries no expiry to read.
 
 ## The design: the claim is a status, not a lease
 

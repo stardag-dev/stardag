@@ -109,17 +109,24 @@ function BlockerCard({
     ? `${blocker.blocking_task_namespace}/${blocker.blocking_task_name}`
     : blocker.blocking_task_name;
 
-  // The remedy differs by ownership, so the copy has to as well.
+  // The blocking task is in this build's plan (closure guarantees it), so
+  // what happens next is a function of its status, not of who owns it.
   let explanation: string;
-  if (!blocker.blocking_in_build) {
-    explanation =
-      "This build never registered the blocking task, so it cannot schedule it. Builds registered since plan closure landed always include their incomplete upstreams, so re-triggering this build brings the task into its plan and lets it run.";
-  } else if (ownedByThisBuild) {
+  if (ownedByThisBuild) {
     explanation =
       "The blocking task is in this build's own task set and this build put it into that status, but it is not actionable, so nothing here will move it on.";
+  } else if (blocker.blocking_status === "cancelled") {
+    explanation =
+      "Another build cancelled the blocking task. That revoked permission to run it, not the task itself, and it is in this build's plan — so this build's next tick resets it and runs it, bounded by the per-task attempt budget.";
+  } else if (blocker.blocking_status === "running") {
+    explanation =
+      "Another build holds the execution claim on the blocking task. It resolves when that build finishes the task or the claim expires — until then, running it here would be a duplicate execution.";
+  } else if (blocker.blocking_status === "suspended") {
+    explanation =
+      "The blocking task yielded dynamic dependencies and is waiting for them. The build that owns it is working through them; this build resolves as that one progresses.";
   } else {
     explanation =
-      "The blocking task is in this build's own task set — it is in the table below — but another build set its current status, so this build will not advance it.";
+      "The blocking task's status is a result, not a revocation, so a tick leaves it to this build's fail_mode rather than overriding the policy the build was triggered with. Re-trigger this build to reset it and run it here.";
   }
 
   return (

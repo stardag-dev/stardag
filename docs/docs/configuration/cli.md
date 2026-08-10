@@ -455,18 +455,23 @@ dependency edges are per **environment**, not per build, so an upstream that
 some other build left `RUNNING` gates this build's tasks while contributing
 nothing to the counts this build can see. The command names the blocking task
 (namespace and name, not just an id), its status, how long it has been in it,
-and the build that owns it — plus which of the two remedies applies:
+and the build that owns it.
 
-- **In this build's task set, but another build produced its status.** The
-  normal case, and the only one a build registered today can reach: a build's
-  plan includes every dependency that was not complete when it was
-  discovered. If the task is running, it resolves when the holder finishes or
-  its claim expires. If it is cancelled, failed or skipped, this build resets
-  it and runs it itself — a shared task another build cancelled is still this
-  build's to run.
-- **Not in this build's task set.** Only reachable for builds registered
-  before plan closure existed. This build cannot schedule it; re-trigger the
-  build to bring the task into its plan.
+A build's plan includes every dependency that was not complete when it was
+discovered, so the blocker is this build's own task, and what happens next is
+a function of its **status** rather than of which build produced it:
+
+- `running` — another build holds the execution claim. It resolves when that
+  build finishes the task or the claim expires.
+- `cancelled` — a revocation of permission to run, not a verdict on the task.
+  This build's next tick resets it and runs it itself, bounded by the per-task
+  attempt budget: a shared task another build's fail-fast cancelled is still
+  this build's to run.
+- `suspended` — the owning build is working through the dynamic dependencies
+  the task yielded. It resolves as that build progresses them.
+- `failed`, `skipped` — results. A tick leaves them to this build's
+  `fail_mode` rather than overriding the policy you chose, so **re-trigger the
+  build** to reset them and run them here.
 
 One important caveat the output states explicitly: the registry computes the
 blocker list **only for a build with nothing actionable and nothing running**.

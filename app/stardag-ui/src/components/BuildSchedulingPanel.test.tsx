@@ -280,40 +280,48 @@ describe("BuildSchedulingPanel", () => {
     expect(screen.queryByText("skipped")).toBeNull();
   });
 
-  it("distinguishes a blocker outside this build from one inside it", async () => {
+  // The blocking task is in this build's plan — closure guarantees it — so
+  // the copy explains what happens next from the blocker's *status*, not from
+  // which build owns it. The plan-membership chip stays as a diagnostic for
+  // builds registered before closure existed.
+  it.each([
+    ["running", /holds the execution claim/i],
+    ["cancelled", /resets it and runs it/i],
+    ["suspended", /yielded dynamic dependencies/i],
+    ["failed", /result, not a revocation/i],
+    ["skipped", /result, not a revocation/i],
+  ] as const)("explains a %s blocker by what happens next", async (status, copy) => {
     vi.mocked(fetchBuildFrontier).mockResolvedValue(
       makeFrontier({
-        blocked_by_external: [makeBlocker({ blocking_in_build: false })],
+        blocked_by_external: [
+          makeBlocker({ blocking_status: status, blocking_in_build: true }),
+        ],
       }),
     );
     const user = userEvent.setup();
-    const { unmount } = renderPanel();
-    // Visible without expanding anything: a blocker that is not part of
-    // this build at all is the case with no local remedy.
-    expect(await screen.findByText("outside this build")).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Explain why GrindBeans is blocking" }),
-    );
-    expect(
-      await screen.findByText(/never registered the blocking task/i),
-    ).toBeInTheDocument();
-    // The remedy is named, not a dead end: re-triggering closes the plan.
-    expect(screen.getByText(/re-triggering this build/i)).toBeInTheDocument();
-    unmount();
-
-    vi.mocked(fetchBuildFrontier).mockResolvedValue(
-      makeFrontier({ blocked_by_external: [makeBlocker({ blocking_in_build: true })] }),
-    );
     renderPanel();
+
     expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
     expect(screen.queryByText("outside this build")).toBeNull();
     await user.click(
       screen.getByRole("button", { name: "Explain why GrindBeans is blocking" }),
     );
-    expect(
-      await screen.findByText(/in this build's own task set/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(copy)).toBeInTheDocument();
+    // Deleted with the out-of-plan handling: a build cannot be gated by an
+    // upstream it never registered any more.
     expect(screen.queryByText(/never registered the blocking task/i)).toBeNull();
+  });
+
+  it("still flags a blocker outside this build's plan", async () => {
+    vi.mocked(fetchBuildFrontier).mockResolvedValue(
+      makeFrontier({
+        blocked_by_external: [makeBlocker({ blocking_in_build: false })],
+      }),
+    );
+    renderPanel();
+    // Only reachable for a build registered before plan closure; reported
+    // because it changes what a reader should expect, not what a tick does.
+    expect(await screen.findByText("outside this build")).toBeInTheDocument();
   });
 
   it("says so when the blocker list was truncated", async () => {
