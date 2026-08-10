@@ -2088,7 +2088,7 @@ async def _classify_external_blockers(
                 _BlockerVerdict(
                     blocker,
                     "a result rather than a revocation, so this build's "
-                    "fail_mode owns the outcome — re-trigger to reset it",
+                    "fail_mode owns the outcome",
                 )
             )
             continue
@@ -2384,7 +2384,7 @@ async def _handle_terminal(
                 reason += ". Blocked by: " + _describe_blockers(
                     blockers.inert, now, truncated
                 )
-                reason += f" {_blocker_remedy(blockers.inert)}"
+                reason += f". {_blocker_remedy(blockers.inert)}"
         logger.error(f"Failing build {build_id}: {reason}")
         await registry.build_fail_aio(build_id, reason)
         return "failed"
