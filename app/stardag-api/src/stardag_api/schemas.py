@@ -121,6 +121,16 @@ class BuildResponse(BaseModel):
     completed_at: datetime | None = None
     # User who triggered the status change (for manual overrides)
     status_triggered_by_user: StatusTriggeredByUser | None = None
+    # Why a FAILED build failed: the reason recorded on its newest
+    # BUILD_FAILED event. None for every other status — the reason is
+    # reported while the build is failed and not afterwards, because a
+    # current status paired with a previous status's reason misleads (a
+    # build cancelled after failing reads as cancelled).
+    #
+    # Not denormalised onto the row like Task.latest_error_message: that
+    # needs a migration, and this is a human-facing read rather than the
+    # frontier a scheduler polls. See _build_to_response.
+    latest_error_message: str | None = None
     # True if the most-recent build-level event is BUILD_RESUMED — i.e.
     # the build was picked up via sd.build(resume_build_id=...) after
     # finishing/failing. UI surfaces this as "running (resumed)".
