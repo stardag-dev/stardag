@@ -399,7 +399,18 @@ export function ConcurrencyLimits() {
       {/* Holder task detail panel */}
       {selectedTask && (
         <div className="w-96 flex-shrink-0 border-l border-gray-200 dark:border-gray-700">
-          <TaskDetail task={selectedTask} onClose={() => setSelectedTask(null)} />
+          <TaskDetail
+            task={selectedTask}
+            onClose={() => setSelectedTask(null)}
+            // Releasing a holder's claim frees the slot it occupies, so both
+            // the holder list and the limit's own counts are stale the moment
+            // the panel's write lands.
+            onTaskCancelled={() => {
+              if (expandedKey) void loadHolders(expandedKey);
+              void loadLimits();
+              setSelectedTask(null);
+            }}
+          />
         </div>
       )}
     </div>
