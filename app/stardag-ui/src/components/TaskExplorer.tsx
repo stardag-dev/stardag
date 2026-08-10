@@ -160,6 +160,41 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
 
   // Selected task for detail view
   const [selectedTask, setSelectedTask] = useState<TaskSearchResult | null>(null);
+  // Bumped whenever a write from the detail panel changed a task. Both list
+  // modes take it as a refetch trigger, and the selected task is re-read with
+  // it: `TaskDetail` renders "Holding an execution claim" off the object this
+  // component handed it, so without the re-read a released claim keeps being
+  // reported as held — an instruction to act, still on screen after acting.
+  const [taskChangeNonce, setTaskChangeNonce] = useState(0);
+
+  const handleTaskChanged = useCallback(() => {
+    setTaskChangeNonce((n) => n + 1);
+    if (!selectedTask) return;
+    // Merged rather than replaced: `fetchTask` returns a `Task`, while the
+    // selection is a `TaskSearchResult` carrying search-only extras (artifact
+    // columns) that a plain assignment would drop. Failure is swallowed — the
+    // list refetch is what guarantees the view converges, and one failed row
+    // re-read must not clear a live selection.
+    //
+    // Guarded on (environment, task), not the task alone. `task_id` is a
+    // content hash and rows are unique per `(environment_id, task_id)`, so the
+    // *same* id legitimately exists in two environments: switch environment
+    // while this is in flight, select the same task there, and an id-only
+    // guard would merge the previous environment's row into it.
+    const requestedTaskId = selectedTask.task_id;
+    const requestedEnvironmentId = selectedTask.environment_id;
+    void fetchTask(requestedTaskId, requestedEnvironmentId)
+      .then((fresh) =>
+        setSelectedTask((latest) =>
+          latest &&
+          latest.task_id === requestedTaskId &&
+          latest.environment_id === requestedEnvironmentId
+            ? ({ ...latest, ...fresh } as TaskSearchResult)
+            : latest,
+        ),
+      )
+      .catch(() => undefined);
+  }, [selectedTask]);
 
   // Update breadcrumb navigation
   useEffect(() => {
@@ -452,6 +487,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
     sortBy,
     sortDir,
     visibleArtifactNames,
+    taskChangeNonce,
   ]);
 
   useEffect(() => {
@@ -886,6 +922,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                   selectedTaskId={selectedTask?.task_id ?? null}
                   onSelectTask={(task) => setSelectedTask(task as TaskSearchResult)}
                   onNavigateToBuild={onNavigateToBuild}
+                  reloadToken={taskChangeNonce}
                 />
               ) : (
                 <>
@@ -1056,6 +1093,7 @@ export function TaskExplorer({ onNavigateToBuild }: TaskExplorerProps) {
                   <TaskDetail
                     task={selectedTask as Task}
                     onClose={() => setSelectedTask(null)}
+                    onTaskCancelled={handleTaskChanged}
                   />
                 </div>
               </Panel>

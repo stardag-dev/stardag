@@ -318,6 +318,7 @@ describe("TaskDetail claim holder", () => {
         task={makeTask()}
         buildId={VIEWED_BUILD}
         onClose={() => {}}
+        onTaskCancelled={() => {}}
         onStatusBuildClick={onStatusBuildClick}
       />,
     );
@@ -364,12 +365,14 @@ describe("TaskDetail claim holder", () => {
 
   it("offers a reset as well for a suspended task, and retries under the holder", async () => {
     vi.mocked(retryTask).mockResolvedValue(undefined);
+    const onTaskCancelled = vi.fn();
     const user = userEvent.setup();
     render(
       <TaskDetail
         task={makeTask({ status: "suspended", latest_status: "suspended" })}
         buildId={VIEWED_BUILD}
         onClose={() => {}}
+        onTaskCancelled={onTaskCancelled}
       />,
     );
 
@@ -380,11 +383,23 @@ describe("TaskDetail claim holder", () => {
     await waitFor(() =>
       expect(retryTask).toHaveBeenCalledWith(HOLDER_BUILD, "tid-grind-beans", "env-1"),
     );
+    // The reset path has to ask for a re-read too. This panel renders the
+    // status — and the claim notice with it — from its `task` prop, so a parent
+    // that is not told keeps showing "holding an execution claim" for a task
+    // that was just reset to pending.
+    expect(onTaskCancelled).toHaveBeenCalled();
   });
 
   it("hides the remedies from non-admin members but keeps the diagnosis", async () => {
     mockWorkspaceRole = "member";
-    render(<TaskDetail task={makeTask()} buildId={VIEWED_BUILD} onClose={() => {}} />);
+    render(
+      <TaskDetail
+        task={makeTask()}
+        buildId={VIEWED_BUILD}
+        onClose={() => {}}
+        onTaskCancelled={() => {}}
+      />,
+    );
 
     expect(
       await screen.findByText("Execution claim held by another build"),
@@ -403,6 +418,7 @@ describe("TaskDetail claim holder", () => {
         task={makeTask({ status: "completed", latest_status: "completed" })}
         buildId={VIEWED_BUILD}
         onClose={() => {}}
+        onTaskCancelled={() => {}}
       />,
     );
     expect(await screen.findByText("GrindBeans")).toBeInTheDocument();
@@ -411,7 +427,9 @@ describe("TaskDetail claim holder", () => {
 
   it("reports the holder without cross-build wording when no build is in view", async () => {
     // The task explorer renders this panel with no build context.
-    render(<TaskDetail task={makeTask()} onClose={() => {}} />);
+    render(
+      <TaskDetail task={makeTask()} onClose={() => {}} onTaskCancelled={() => {}} />,
+    );
     expect(await screen.findByText("Holding an execution claim")).toBeInTheDocument();
     expect(screen.queryByText(/not the build you are viewing/)).not.toBeInTheDocument();
   });

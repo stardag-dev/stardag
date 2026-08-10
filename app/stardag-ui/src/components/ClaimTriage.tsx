@@ -62,6 +62,14 @@ interface ClaimTriageProps {
   selectedTaskId: string | null;
   onSelectTask: (task: Task) => void;
   onNavigateToBuild?: (buildId: string) => void;
+  /**
+   * Bumped by the parent when something outside this list changed a task —
+   * a claim action taken in the detail panel, say. This list reloads itself
+   * after its own bulk release, but it cannot see writes it did not make,
+   * and a released claim still listed as held is an invitation to release
+   * it again.
+   */
+  reloadToken?: number;
 }
 
 /**
@@ -81,6 +89,7 @@ export function ClaimTriage({
   selectedTaskId,
   onSelectTask,
   onNavigateToBuild,
+  reloadToken = 0,
 }: ClaimTriageProps) {
   const { activeWorkspaceRole } = useEnvironment();
   const isAdmin = activeWorkspaceRole === "owner" || activeWorkspaceRole === "admin";
@@ -142,7 +151,7 @@ export function ClaimTriage({
     // `statuses` is covered by the derived `statusKey`; listing the array
     // itself would refetch on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [environmentId, page, statusKey, ageSeconds, reloadNonce]);
+  }, [environmentId, page, statusKey, ageSeconds, reloadNonce, reloadToken]);
 
   // Reset to page 1 when the filters change under the user.
   useEffect(() => {

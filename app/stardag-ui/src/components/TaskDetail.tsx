@@ -300,7 +300,19 @@ interface TaskDetailProps {
   task: Task;
   buildId?: string;
   onClose: () => void;
-  onTaskCancelled?: () => void;
+  /**
+   * Called after this panel's own write changed the task — a claim action or
+   * the cancel button.
+   *
+   * **Required on purpose.** This panel renders the task's status, and the
+   * "holding an execution claim" notice with it, from the `task` prop — a
+   * snapshot its parent handed it. It has no way to re-read that itself, so a
+   * parent that omits the callback leaves the panel asserting a claim is held
+   * seconds after the user released it: an instruction to act, still on screen
+   * after acting. That is exactly what happened while this was optional, so it
+   * is now a type error to forget rather than a defect to notice.
+   */
+  onTaskCancelled: () => void;
   onStatusBuildClick?: (buildId: string) => void;
 }
 
@@ -422,7 +434,7 @@ export function TaskDetail({
     if (!confirmed) return;
 
     if (await runTaskAction("release", buildId)) {
-      onTaskCancelled?.();
+      onTaskCancelled();
     }
   };
 
@@ -435,7 +447,7 @@ export function TaskDetail({
           : `Reset to pending under build ${holderBuildId.slice(0, 8)}.`,
       );
       setClaimAction(null);
-      onTaskCancelled?.();
+      onTaskCancelled();
     }
   }, [claimAction, holderBuildId, runTaskAction, onTaskCancelled]);
 
