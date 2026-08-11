@@ -67,6 +67,8 @@ image = (
 
 app = sd_modal.StardagApp(
     "stardag_examples-walkthrough",
+    # Optional: lets reactive ticks rebuild tasks without the pickle store.
+    task_modules=["stardag_examples.modal.walkthrough.tasks"],
     # Registry credentials are injected into every function automatically
     # from the `stardag-api-key` Modal secret (created via
     # `stardag modal stardag-api-key create`) — StardagApp's default
