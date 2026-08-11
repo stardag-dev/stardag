@@ -79,9 +79,8 @@ of a confusing 404 or 422.
 **Upgrade your registry first.** This SDK uses endpoints and fields added in
 the same release (claim expiry, the frontier's blocker reporting, tick
 summaries, bulk cancel, attempt counts). Against an older registry those
-calls fail. The registry ships three migrations, one of which backfills
-build status and one of which backfills claim expiry — see
-[CHANGELOG.md](CHANGELOG.md).
+calls fail. The registry ships four migrations, two of which backfill data —
+build status, and claim expiry — see [CHANGELOG.md](CHANGELOG.md).
 
 One thing to check before upgrading a registry with long-running work: the
 claim-expiry backfill stamps existing RUNNING tasks with
