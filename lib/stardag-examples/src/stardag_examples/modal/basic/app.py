@@ -49,6 +49,11 @@ image = (
 # stardag_api_key_secret=... to override, or None to disable.
 app = sd_modal.StardagApp(
     "stardag_examples-basic",
+    # Declared so a reactive scheduler tick can rebuild these tasks from
+    # registry data rather than from the build task store's pickles, which
+    # need target-root write access at trigger time and are invalidated by a
+    # redeploy. Inference alone only warns; declaring is what enables it.
+    task_modules=["stardag_examples.modal.basic.task"],
     builder_settings=sd_modal.FunctionSettings(image=image),
     worker_settings={
         "default": sd_modal.FunctionSettings(image=image),
