@@ -491,6 +491,39 @@ export function BuildSchedulingPanel({
     />
   );
 
+  if (form === "satisfied") {
+    // Every root is complete, so there is nothing to diagnose and nothing to
+    // intervene in — however the build's own status reads. Green rather than
+    // amber, and deliberately short: the interesting question ("why does the
+    // status still say failed?") is answered by the failure reason above this
+    // panel, not by repeating it here.
+    const completedElsewhere = buildStatus !== "completed";
+    return (
+      <div className="border-b border-green-200 bg-green-50 px-4 py-1.5 dark:border-green-900/60 dark:bg-green-950/30">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span aria-hidden="true" className="text-green-700 dark:text-green-400">
+            ✓
+          </span>
+          <h3 className="text-xs font-semibold text-green-900 dark:text-green-200">
+            Everything this build asked for is complete
+          </h3>
+          <span className="text-xs text-green-900/80 dark:text-green-100/80">
+            {buildStatus === "running"
+              ? "— its roots finished, so a scheduler tick will complete it"
+              : `— its roots finished after the build was recorded as ${buildStatus}, ` +
+                "so nothing is outstanding. Re-trigger it to reconcile the record."}
+          </span>
+        </div>
+        {completedElsewhere && (
+          <p className="mt-1 text-xs text-green-900/70 dark:text-green-100/70">
+            Tasks are shared across builds, so another build may have finished them.
+            Which build ran a task does not change its result.
+          </p>
+        )}
+      </div>
+    );
+  }
+
   if (form === "collapsed") {
     // A progressing reactive build: one line, never an empty box. It must
     // not imply anything about blockers — the server does not look for

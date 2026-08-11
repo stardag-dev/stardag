@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { BuildFailureReason } from "./BuildFailureReason";
 
@@ -46,5 +47,34 @@ describe("BuildFailureReason", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     render(<BuildFailureReason status="failed" />);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("collapses to a dated record once the roots have completed anyway", async () => {
+    // The reason is history at this point, not a call to action — the build's
+    // work got done elsewhere. It must stay reachable, though: it is the only
+    // account of why this build stopped, and the message embeds the status
+    // counts *as they were*, which is exactly what makes an unlabelled one
+    // misleading.
+    const user = userEvent.setup();
+    render(
+      <BuildFailureReason
+        status="failed"
+        message={REASON}
+        failedAt="2026-08-06T20:24:37Z"
+        superseded
+      />,
+    );
+
+    // Not shouting: no alert role, and the reason is not on screen yet.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Re-trigger this build to reset the blocker/)).toBeNull();
+
+    // But it is one click away, and dated so it reads as a past event.
+    const toggle = screen.getByRole("button", { name: /Why it was recorded as failed/ });
+    expect(toggle).toHaveTextContent(/2026/);
+    await user.click(toggle);
+    expect(
+      await screen.findByText(/Re-trigger this build to reset the blocker/),
+    ).toBeInTheDocument();
   });
 });
