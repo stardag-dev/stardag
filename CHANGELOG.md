@@ -6,6 +6,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-08-11
+
 ### Registry API
 
 - **The API now knows which SDK is calling it, and can say so when that
@@ -109,6 +111,17 @@ build_id=<existing>, reactive=True)` is the recommended way to pick a
   or a migration. Retention is bounded per build (newest 50 by default,
   `STARDAG_API_MAX_TICK_SUMMARIES_PER_BUILD`), pruned on insert.
   Additive: nothing writes to these endpoints yet.
+- **A failed build now reports _why_, on the build itself.**
+  `BuildResponse.latest_error_message` carries the reason recorded on the
+  build's newest `BUILD_FAILED` event, so "why did this fail" no longer costs a
+  `GET /builds/{id}/events` per build — which is why no listing ever showed it.
+  Reported while the build is `failed` and not afterwards: a build resumed after
+  failing is running again, and a current status paired with a previous round's
+  reason misleads worse than no reason. A blank reason is normalised to `null`,
+  so "none recorded" has one representation. Derived from the event rather than
+  denormalised onto the row (unlike `Task.latest_error_message`), batched into
+  one grouped query per page on the listing path.
+
 - **`GET /builds/{id}/frontier` now reports why a build is waiting on work
   it does not own** ([#208](https://github.com/stardag-dev/stardag/issues/208)).
   Dependency gating is environment-global (task rows and edges are shared
@@ -117,10 +130,57 @@ build_id=<existing>, reactive=True)` is the recommended way to pick a
   could gate a build's tasks while contributing nothing it could see — a
   scheduler then read "nothing actionable, nothing running" as "cannot
   progress" and failed the build. The new `blocked_by_external` list pairs
-  each such blocked task with its blocker (identity, status, the owning
-  build id and status timestamp, and whether the blocker is in this build's
-  task set), capped with an explicit `blocked_by_external_truncated` flag.
-  Purely additive: every existing field keeps its exact semantics.
+  each such blocked task with its blocker (identity, status, status
+  timestamp, the owning build id, the claim's expiry where the blocker holds
+  one, the attempts the blocker has spent in this build's round, and whether
+  the blocker is in this build's task set), capped with an explicit
+  `blocked_by_external_truncated` flag. Purely additive: every existing field
+  keeps its exact semantics.
+
+  `blocking_in_build` is reported for diagnostics and is not the field a
+  scheduler should branch on: what happens next follows from the blocker's
+  status. Plan closure (below) makes `true` the normal case, but `false` stays
+  reachable — closure runs once, at registration, so an edge written afterwards
+  is outside the plan, which is what happens whenever a concurrent build's
+  worker yields dynamic dependencies into its own plan.
+  `blocking_attempt_count` is `null` for a blocker outside the plan, which is
+  also what keeps a scheduler from resetting one: it has no budget to spend
+  there.
+
+- **Registration closes a build's plan over every recorded dependency edge**
+  ([#208](https://github.com/stardag-dev/stardag/issues/208)). A build's plan
+  is every dependency of its roots that was not complete at discovery time,
+  pruned at complete tasks. Discovery enforces that by walking
+  `requires()` — **static** edges. But gating consults every recorded edge,
+  and _dynamic_ edges are written by whichever build first ran the task and
+  then outlive it: environment-global and permanent. So a later build that
+  statically discovers the same task inherited the dependency without
+  inheriting the task, and was gated on an upstream **no build containing it
+  could schedule** — the only thing that would produce it being the very task
+  being gated. Permanent deadlock.
+
+  Both registration endpoints now admit incomplete upstreams into the plan,
+  transitively, stopping at complete tasks. Admission is a status-neutral
+  `TASK_REFERENCED`: the upstream's own state is untouched, it simply becomes
+  part of this build's plan, which is what makes it schedulable here.
+  Over-approximating is safe and under-approximating is not — a stale edge
+  costs one unnecessary upstream, a missing one deadlocks — so no attempt is
+  made to judge whether a recorded edge is current.
+
+  RUNNING upstreams are admitted too. Closure runs **once**, at registration,
+  while RUNNING is transient: excluding them would leave a permanent hole in
+  the plan the moment the task stopped running, and the likeliest way for it
+  to stop is an operator releasing a stale claim — the documented remedy
+  stranding every build that inherited the dependency. Safety comes from the
+  claim, not from which build started the task.
+
+  **Visible consequence, and it is the intended one:** an incomplete upstream
+  now belongs to the build that depends on it, so `GET /builds/{id}/graph`
+  reports it as a **primary** node rather than as greyed-out context, and
+  `upstream_depth` reveals only _complete_ upstreams. It also joins the
+  build's own `actionable`/`running` and its status counts. Nothing to change
+  on your side, but the counts and the graph will look different.
+
 - **Frontier task refs now actually carry `latest_status_at`.** The field
   was declared and documented as the input to scheduler staleness bounds
   but never populated, so it always serialised as `null` and those guards
@@ -293,12 +353,23 @@ build_id=<existing>, reactive=True)` is the recommended way to pick a
   anything was skipped — because a preview that disagrees with the action
   is worse than no preview.
 
+- **A failed build says why it failed.** The scheduling panel explains a build
+  while it is _stalled_, and goes quiet the moment it fails — failing skips the
+  blocked tasks, and terminal tasks leave the frontier's blocker list. The
+  reason the scheduler recorded on its way out (which task, its status and age,
+  the owning build, why nothing will move it, and the remedy) is now shown on
+  the failed build, in the place the panel's explanation occupied. Untruncated,
+  because the remedy is at the end of it.
+
 - **A build that is not progressing now says why.** When nothing is
   actionable and nothing is running, the build view names each blocking
-  upstream, its status, how long it has been held, and which build owns it
-  — including blockers that are not part of the build at all, which are
-  otherwise invisible from it. Each carries the remedy (release the claim,
-  or reset the task to pending) addressed to the owning build. Behind a
+  upstream, its status, how long it has been held, and which build owns it.
+  Each carries what happens next, which follows from the blocker's
+  **status**: `running` resolves when the claim finishes or expires;
+  `cancelled` is a revocation, so this build's next tick resets it and runs
+  it; `suspended` resolves as the owning build works through the dynamic
+  dependencies it yielded; `failed` and `skipped` are results left to this
+  build's `fail_mode`, so re-triggering is the way to reset them. Behind a
   disclosure: the scheduler's own tick trail, with runs of identical ticks
   collapsed ("lease held ×20") and counters that stayed at zero dropped, so
   a stalled build's repetition reads as a diagnosis instead of a log.
@@ -506,14 +577,14 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   is waited on; one whose claim has **lapsed** fails the build, with the
   message saying the claim is provably abandoned rather than presumed so.
 
-  What this does **not** change: proving a blocker dead still does not let
-  your build run it — a blocker outside your build's task set has to be
-  released under the build that owns it, so the build still fails, just with
-  certainty about why. And the collapse applies to RUNNING blockers only: a
-  SUSPENDED or PENDING blocker holds no claim and therefore carries no
-  expiry, so "will anyone move it?" is still asked of its owning build (an
-  abandoned-SUSPENDED upstream remains a real wedge, recovered by retrying
-  it under its owner).
+  What this does **not** change: proving a blocker dead does not make it
+  schedulable. A RUNNING task is not runnable whoever holds the lapsed claim,
+  so the build still fails — just with certainty about why, and pointing at
+  the cancel that releases it. And the collapse applies to RUNNING blockers
+  only: a SUSPENDED or PENDING blocker holds no claim and therefore carries
+  no expiry, so "will anyone move it?" is still asked of its owning build (an
+  abandoned-SUSPENDED upstream remains a real wedge, recovered by
+  re-triggering the build that is waiting on it).
 
 - **Every start records a claim TTL derived from the executor's own
   timeout.** For Modal that is the worker function's `timeout` from its
@@ -525,9 +596,8 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   Setting an explicit `timeout` on long-running Modal workers is therefore
   worth doing.
 
-- **Removed: `TickConfig.stale_external_blocker_seconds`,
-  `TickConfig.stale_running_no_ref_seconds` and
-  `ClaimConfig.stale_running_no_ref_seconds`.** All three configured a local
+- **Removed: `TickConfig.stale_running_no_ref_seconds` and
+  `ClaimConfig.stale_running_no_ref_seconds`.** Both configured a local
   guess at how long "too long" is, which the claim's own expiry now answers.
   A task RUNNING without an executor ref (a scheduler that died between the
   claiming start and the spawn) is failed when its claim lapses instead of
@@ -543,6 +613,12 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   new (optional, default `None`) hook an executor implements to expose its
   wall-clock limit. `StartClaimResult.latest_status_at` is replaced by
   `latest_status_expires_at`.
+
+- **`stardag builds show` prints a failed build's reason.**
+  `BuildSummary.latest_error_message` models the new server field, and the
+  command renders it as **Failure reason** — the most useful row on a failed
+  build, since the reactive scheduler's reasons name the blocking task, the
+  build that owns it and what to run. Absent on servers predating the field.
 
 - **New `stardag builds` and `stardag tasks` CLI groups.** There was no way
   to list builds, inspect a build's scheduling frontier, cancel a build or
@@ -567,10 +643,12 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   partitions it renders the build's **external blockers** — tasks of this
   build held back by an upstream whose current status _another_ build
   produced — naming the blocking task's namespace/name (not just an id), its
-  status, how long it has been in it, the owning build, and which of the two
-  remedies applies (a blocker outside this build's task set can only be
-  waited on or released; one inside it resolves when its owner finishes it).
-  It also states honestly that the registry computes that list only for a
+  status, how long it has been in it, the owning build, and what happens next,
+  which follows from the status rather than from which build produced it
+  (`running` waits on the claim, `cancelled` is reset by the next tick,
+  `suspended` waits on the owning build, `failed`/`skipped` need a
+  re-trigger). It also states honestly that the registry computes that list
+  only for a
   build with nothing actionable and nothing running, so an empty list never
   reads as "no blockers" for a build that is merely progressing.
 
@@ -690,9 +768,10 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   sees, which are scoped to this build. That shape read as "nothing
   runnable, nothing running, so this build is dead", and the build was
   failed within seconds of triggering with an error naming only status
-  counts. Common whenever DAGs overlap, and especially when the blocker is
-  a dynamic dependency registered under an earlier build, so it is not in
-  the new build's task set at all.
+  counts. Common whenever DAGs overlap, and worst when the blocker was a
+  dynamic dependency registered under an earlier build — which plan closure
+  (see the Registry API section) now pulls into the new build's plan instead
+  of leaving it gating a build that could never schedule it.
 
   A tick now reads the frontier's blocking upstreams and asks, for each,
   whether anyone is going to move it. A blocker **another build is
@@ -704,24 +783,38 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   status, or that status could not be resolved — fails the build
   immediately, naming the task, its namespace/name, its status, how long it
   has been in it, the build that owns it, why that owner will not move it,
-  and how to release it. A blocker inside this build's own task set is
-  unchanged: it is already visible in the counts, and still fails the build
-  when it can never run.
+  and the one remedy there is: **re-trigger this build**, which resets the
+  blocker (it is in this build's plan) and runs it here.
 
-  Both waits are bounded by the new
-  `TickConfig.stale_external_blocker_seconds` (default 6 hours), measured on
-  how long the blocker has sat in its status rather than on the tick, which
-  is too short-lived to bound anything: past the bound the blocker is
-  presumed abandoned and the build fails with the full explanation instead
-  of hanging silently. `None` waits indefinitely. `TickSummary` gains
-  `external_blockers`, `external_blockers_waited` and
-  `external_blockers_fatal`, and `BuildInfo` gains `status` (the build's
-  derived status, `None` when a server or custom registry does not report
-  it). Owner liveness is resolved only when a build actually looks stalled,
-  and once per owning build per pass, so a healthy build issues no extra
-  requests however often it polls. Requires a stardag-api version matching
-  this SDK; against an older server the blocker list is always empty and
-  terminal detection behaves exactly as before.
+  **Which of those questions gets asked is decided by the blocker's status,
+  not by which build owns it.** A build's plan is closed under the dependency
+  relation, so a gating upstream is this build's own task; deferring to
+  whichever build last touched it is what turned one build's fail-fast into
+  every overlapping build's failure. A `CANCELLED` blocker is a revocation of
+  permission to run, not a verdict on the task, and permission is not
+  build-scoped — the tick **resets it and runs it**, bounded by
+  `max_attempts`. `FAILED` and `SKIPPED` are _results_: `fail_mode` owns them
+  (FAIL_FAST has already failed the build on the same count; CONTINUE means
+  "finish what you can, then fail"), so a tick names them in the failure and
+  changes nothing. A `SUSPENDED` blocker is waited on while its owning build
+  lives, because resetting it would redo all of the task's pre-yield work
+  while that build is legitimately progressing the children it yielded. At
+  **trigger** time the whole retryable set is reset, `RUNNING` excepted — the
+  asymmetry is deliberate: at trigger you asked, mid-flight nobody did.
+
+  Waits are bounded by evidence rather than by a timer. For a RUNNING blocker
+  it is the claim's expiry; for a SUSPENDED or PENDING one — which holds no
+  claim, so has no expiry to read — it is the owning build going terminal,
+  and a build gone silent without transitioning is reaped server-side.
+  `TickSummary` gains `external_blockers`, `external_blockers_waited`,
+  `external_blockers_fatal` and `in_build_blockers_reset`, and `BuildInfo`
+  gains `status` (the build's derived status, `None` when a server or custom
+  registry does not report it). Owner liveness is resolved only when a build
+  actually looks stalled, only for the blockers whose status needs it, and
+  once per owning build per pass, so a healthy build issues no extra requests
+  however often it polls. Requires a stardag-api version matching this SDK;
+  against an older server the blocker list is always empty and terminal
+  detection behaves exactly as before.
 
 - **Fixed: re-triggering a reactive build now recovers tasks left
   `SUSPENDED`.** A task that suspended for dynamic dependencies and was
@@ -736,15 +829,16 @@ liveness)` plus a staleness bound on how long the blocker had sat in its
   remains deliberately non-retryable: it holds a live execution claim, and
   releasing that claim is cancellation, not retry.
 
-- **`TickConfig.stale_running_no_ref_seconds` takes effect for the first
-  time**, now that the frontier actually populates
-  `FrontierTaskRef.latest_status_at`. The field was declared and documented
-  as the input to that bound but never sent by the server — it silently
-  serialised as `null` on every ref, leaving the guard dead. Against a
-  matching server, a task stuck RUNNING without an executor ref for longer
-  than the bound (default 30 minutes) is now failed as intended. Raise the
-  bound if you run long ref-less tasks — e.g. a resident build sharing
-  tasks with a concurrently ticking reactive one.
+- **Fixed: a task stuck RUNNING with no executor ref is now actually
+  recovered.** A scheduler that died between the claiming start and the spawn
+  leaves a task RUNNING that no worker will ever report on.
+  `stale_running_no_ref_seconds` was supposed to bound that, but it was
+  measured against `FrontierTaskRef.latest_status_at`, which the server
+  declared and never populated — so it serialised as `null` on every ref and
+  the guard was dead code for its whole life. The frontier now populates the
+  field, and the bound it feeds has been replaced outright by the claim's
+  expiry (see the removal above), which is evidence rather than a guess and
+  needs no tuning for long ref-less tasks.
 
 ### Fixed
 

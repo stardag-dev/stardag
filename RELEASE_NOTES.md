@@ -6,6 +6,148 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.18.0 — Builds collaborate, and triggering got fast
+
+Reactive scheduling worked until something went wrong. Then a build sat at
+RUNNING forever with no way to ask why, and the usual answer — a task in
+_another_ build holding an execution claim nobody would ever release — was
+invisible from anywhere in the product.
+
+This release closes that loop, and makes triggering roughly ten times
+faster on the way.
+
+**Triggering discovers the DAG inside Modal.** A reactive trigger now
+spawns a `bootstrap` function that walks the DAG, registers it, persists the
+task objects and only then arms the build and spawns the first tick.
+Discovery means one target existence check per task; from your laptop
+against a `modalvol://` root each is a rate-limited Volume API call, while
+inside Modal the volume is a mounted filesystem. A 127-task trigger went
+from 64s — most of it rate-limit backoff — to 6.6s. It also means a
+reactive trigger needs **registry credentials only**, with no target-root
+access at all.
+
+**Execution claims expire.** `Task.latest_status == RUNNING` _is_ the claim,
+and it recorded no liveness evidence a third party could evaluate — so an
+orchestrator that died wedged its tasks permanently. Claims now carry an
+expiry, granted at start and derived from the executor's own timeout, and
+both the claim check and the concurrency-limit count honour it.
+
+**Builds collaborate instead of owning tasks.** A build is a request for a
+set of root tasks to be materialised, not an owner of the tasks that
+materialise them. The execution claim is the only thing coordinating across
+builds; which build completes a task is otherwise irrelevant.
+
+Two things follow, and both were previously wrong:
+
+_A build's plan holds every dependency that was not complete when it was
+discovered._ Discovery walks `requires()`, but dependency edges also come
+from tasks that yielded them dynamically in some earlier build, and those
+edges outlive it. A build could therefore be gated by an upstream it never
+registered — which nothing could ever run, since the only thing that would
+produce it was the task being gated. Registration now closes the plan over
+every recorded edge, pruning at complete tasks.
+
+_A shared task another build cancelled is still this build's to run._ When a
+fail-fast build cancels the tasks it started, it correctly releases those
+claims — but the tasks were left `CANCELLED`, which is not schedulable, so
+every other build sharing the dependency died with it. One build's fail-fast
+is now just that: one build's. Any build with the task in its plan resets it
+and runs it, bounded by the per-task retry budget.
+
+**A build that still cannot progress says why.** The frontier names the
+tasks holding it up, their status and how long they have been in it.
+
+**Operational surface.** New `stardag builds` and `stardag tasks` CLI groups:
+list builds by status/idleness/app, list the tasks holding claims, and clean
+up abandoned builds in bulk with a dry run that is the same query the reaper
+acts on. Scheduler ticks record what they decided, per build.
+
+**Reactive scheduling is more concurrent.** Ticks fan out with bounded
+concurrency instead of spawning serially, discovery runs concurrently, and
+the per-pass spawn cap is derived from the tick container's own timeout.
+Tasks get a retry policy for failures the backend cannot retry itself.
+
+**The SDK identifies itself.** Every request carries
+`X-Stardag-SDK-Version`, and a registry that requires a newer SDK answers
+`426` with a message naming both versions and the upgrade command, instead
+of a confusing 404 or 422.
+
+---
+
+### Upgrade order
+
+**Upgrade your registry first.** This SDK uses endpoints and fields added in
+the same release (claim expiry, the frontier's blocker reporting, tick
+summaries, bulk cancel, attempt counts). Against an older registry those
+calls fail. The registry ships three migrations, one of which backfills
+build status and one of which backfills claim expiry — see
+[CHANGELOG.md](CHANGELOG.md).
+
+One thing to check before upgrading a registry with long-running work: the
+claim-expiry backfill stamps existing RUNNING tasks with
+`latest_status_at + <default TTL>` (7 days). A task that has been RUNNING
+longer than that gets an expiry already in the past, so the next tick treats
+its claim as lapsed and may recover it. That is the intended healing for a
+genuinely wedged task; run this first if you want to know what it will touch:
+
+```sql
+SELECT count(*) FROM tasks
+WHERE latest_status = 'running'
+  AND latest_status_at < now() - interval '7 days';
+```
+
+### Migration guide
+
+**Reactive triggers now need registry credentials in your Modal
+environment**, because discovery runs there rather than on the triggering
+machine. `StardagApp` injects them from the `stardag-api-key` secret by
+default. To keep discovery local — for a target root only your machine can
+reach, say — pass `reactive_discovery="local"`.
+
+**Declaring `task_modules` is now what enables pickle-free ticks.**
+Inference still happens, but it is observation-only: an SDK upgrade never
+starts eliding pickles on its own. Nothing breaks if you do not declare —
+ticks keep reading the build task store exactly as before. To opt in:
+
+```python
+app = StardagApp(
+    "my-app",
+    task_modules=["my_pkg.tasks.*", "my_pkg.pipelines.*"],
+    ...
+)
+```
+
+**A build's task set now includes upstreams it did not register.** Because
+the plan is closed over every recorded dependency edge, a task another build
+is running — or one it cancelled — appears in your build's own
+`actionable`/`running` and in its DAG view as a primary node rather than as
+greyed-out context. `upstream_depth` in the graph view therefore reveals
+only _complete_ upstreams; incomplete ones are already in the build. Nothing
+to change on your side, but the counts and the view will look different.
+
+**The watchdog sweep is scoped to the app that owns each build.** It used to
+page every RUNNING build and filter client-side, which meant an environment
+with more stale builds than the sweep's page budget could starve the
+watchdog of the builds it exists to find. The cost is that an app deployed
+**without** `watchdog_period_minutes` no longer gets incidental coverage
+from another app's watchdog. Set it on every app you want swept.
+
+**`stardag builds list --older-than` implies `--status running`.** Idleness
+only means anything for a build that has not finished; a completed build has
+no activity by definition and always will, so including terminal builds
+filled a staleness listing with history sorted oldest-first. Pairing
+`--older-than` with any other status is rejected.
+
+**Custom `RegistryABC` implementations may need updating.** The
+compatibility shims for registry backends that predate recent keyword
+arguments have been removed, and `build_list_running` is now expressed in
+terms of `build_list` with server-side filtering. If you have your own
+`RegistryABC` subclass, check `build_list_running`'s signature. If you use
+the shipped `APIRegistry` — which is almost certainly the case — nothing
+changes.
+
+---
+
 ## v0.17.0 — stardag ships its type information (PEP 561)
 
 The published distribution now includes a
