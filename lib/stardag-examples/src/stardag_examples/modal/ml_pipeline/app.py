@@ -24,10 +24,7 @@ image = (
 
 app = sd_modal.StardagApp(
     "stardag_examples-ml_pipeline",
-    # Declared so a reactive scheduler tick can rebuild these tasks from
-    # registry data rather than from the build task store's pickles, which
-    # need target-root write access at trigger time and are invalidated by a
-    # redeploy. Inference alone only warns; declaring is what enables it.
+    # Optional: lets reactive ticks rebuild tasks without the pickle store.
     task_modules=["stardag_examples.ml_pipeline.*"],
     builder_settings=sd_modal.FunctionSettings(
         image=image,
