@@ -1,0 +1,48 @@
+# Dependabot configuration.
+#
+# Scanning was enabled without an update config, so alerts accumulated with
+# no PRs to clear them. This keeps every manifest updated on a weekly cadence,
+# grouped into one PR per ecosystem per week to avoid a flood of single-dep PRs.
+#
+# Ecosystems:
+#   - pip: all Python projects (uv.lock is detected by the pip ecosystem)
+#   - npm: the UI and the AWS CDK tooling
+#   - github-actions: workflow action pins
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directories:
+      - "/app/stardag-api"
+      - "/lib/stardag"
+      - "/lib/stardag-examples"
+      - "/lib/stardag-examples/standalone/stardag-modal"
+      - "/docs"
+      - "/integration-tests"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      python:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directories:
+      - "/app/stardag-ui"
+      - "/infra/aws-cdk"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      javascript:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
