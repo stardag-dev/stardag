@@ -840,6 +840,154 @@ re-trigger, and fails the task again rather than leaving it pending and
 inert. See
 [Task retries](../concepts/build-execution.md#task-retries-the-failures-no-backend-can-retry-for-you).
 
+### Preemption and timeouts
+
+Two things routinely kill a Modal container without the task being wrong:
+Modal **reclaims** the instance, or the execution hits the function
+**timeout**. Stardag treats both as _interruptions_ — the attempt ended,
+the task did not fail — but they recover by different routes, and the
+difference decides what you should write in your task.
+
+The contract below was measured against a live workspace with **modal
+client 1.5.0 on 2026-08-12**, and is pinned by the regression tests in
+`test_live_semantics.py`. Modal documents some of it and not the rest, so
+treat the version as part of the statement.
+
+#### What arrives in your task, and when
+
+| event                          | your code receives                  | when                                        |
+| ------------------------------ | ----------------------------------- | ------------------------------------------- |
+| Modal reclaims the container   | `KeyboardInterrupt`                 | when the platform decides                   |
+| The function `timeout` elapses | `modal.exception.InputCancellation` | at the declared timeout, to the millisecond |
+| Someone cancels the call       | `modal.exception.InputCancellation` | when the cancel is issued                   |
+
+Both are **`BaseException`, not `Exception`** — so a bare `except
+Exception:` in your task will not catch them, which is deliberate on
+Modal's part and load-bearing here.
+
+After the first signal you have roughly **a minute** before the container
+is killed (Modal escalates SIGUSR1 → SIGINT after ~30s → SIGKILL after
+another ~30s). That is enough to write a checkpoint. It also means a
+worker's `timeout` does not bound how long its container lives: budget
+`timeout + ~60s`.
+
+!!! warning "One keyword decides whether your build survives"
+
+    An exception derived from `Exception` leaving the container is a **task
+    failure**: Modal will not restart it, stardag records `TASK_FAILED`, and
+    under `FAIL_FAST` the build dies. A `BaseException` leaving the
+    container reads as a **crashed container**, which Modal restarts on the
+    same input — in a few seconds, without consuming `retries`.
+
+    ```python
+    except KeyboardInterrupt:
+        save_checkpoint(path)
+        raise RuntimeError("checkpointed")   # ✗ permanently failed build
+    ```
+
+    ```python
+    except KeyboardInterrupt:
+        save_checkpoint(path)
+        raise                                # ✓ restarted, and it succeeds
+    ```
+
+    This is exactly what you must write to checkpoint, which is why it is
+    worth stating so bluntly.
+
+#### The recipe
+
+```{.python notest}
+class TrainModel(sd.Task[Model]):
+    def run(self):
+        try:
+            train(resume_from=self.checkpoint_path())
+        except KeyboardInterrupt:          # the platform is taking the container
+            save_checkpoint(self.checkpoint_path())
+            raise sd.TaskInterrupted("checkpointed; reschedule me") from None
+```
+
+`sd.TaskInterrupted` (and its subclasses `TaskPreempted` and
+`TaskTimedOut`) says what happened, and stardag's `Runner` translates it
+back into a `BaseException` on the way out so the restart still happens.
+A plain `raise` does the same thing today — the exception type earns its
+place by being self-documenting and by surviving the later refactor that
+wraps the body in `except Exception`, not by unlocking behaviour.
+
+#### Expected timeouts
+
+A timeout has two opposite meanings and only you know which applies:
+
+- **The task hung.** Running it again burns the wall-clock to arrive at the
+  same place.
+- **The task is meant to outlive the timeout** — a training run that
+  checkpoints and is _supposed_ to be killed and resumed until it
+  converges.
+
+Declare it on the app, and reactive scheduler ticks apply it:
+
+```{.python notest}
+from stardag.build import InterruptionPolicy
+
+def interruption_policy(task):
+    if isinstance(task, TrainModel):
+        return InterruptionPolicy.RESTART   # resume it; it checkpoints
+    return InterruptionPolicy.FAIL          # a timeout here means it hung
+
+stardag_app = StardagApp(
+    "my-app",
+    interruption_policy_selector=interruption_policy,
+    ...
+)
+```
+
+`FAIL` is the default for every task, and it is what stardag did before
+interruptions were reported at all: a retryable failure under
+`max_attempts`. Adopting this feature therefore changes nobody's retry
+budget by default — what changes is that the worker reports the timeout in
+its grace window instead of a scheduler discovering it later, which is what
+makes recovery work **on an app with no watchdog configured**.
+
+`RESTART` tasks are bounded separately, by `TickConfig.max_interruptions`
+(default 20), because interruptions deliberately do _not_ spend
+`max_attempts` — a task designed to be killed and resumed would otherwise
+exhaust a budget meant for genuine failures and fail the build for the one
+reason it was built to survive.
+
+#### The knobs, and how they multiply
+
+| knob                                | covers                                                           |
+| ----------------------------------- | ---------------------------------------------------------------- |
+| `FunctionSettings(timeout=)`        | how long one execution attempt may run                           |
+| `FunctionSettings(retries=)`        | exceptions raised inside the container, and timeouts             |
+| `FunctionSettings(nonpreemptible=)` | opts out of reclamation entirely (3× CPU/memory price; no GPU)   |
+| `TickConfig.max_attempts`           | failures a tick records itself — spawn failures, dead executions |
+| `TickConfig.max_interruptions`      | platform interruptions of a `RESTART` task                       |
+
+They **multiply**, which is easy to miss: a worker with `retries=3` running
+a task allowed 20 interruptions can consume up to 80 container attempts.
+Each Modal retry also gets a fresh `timeout` window.
+
+Two things `retries=` does _not_ do, both verified rather than assumed: it
+is not what recovers a **preempted or crashed** container (Modal restarts
+those on the same input regardless of the setting), and it cannot rescue a
+**timed-out** call once the timeout has fired — at that point the call
+resolves `FunctionTimeoutError` whatever your code does next, including
+catching the signal and returning normally. That is why a timeout is
+reported to the registry: the event is the only path back into the
+frontier.
+
+If a task genuinely cannot be interrupted, `nonpreemptible=True` is the
+honest answer — at 3× the CPU and memory price, and not available for GPU
+functions.
+
+!!! note "Registry version"
+
+    Interruption reporting needs a Registry API that serves
+    `POST /builds/{id}/tasks/{task_id}/interrupt`. Against an older server
+    the SDK logs a warning and records nothing, which is exactly its
+    behaviour before this existed — a version skew degrades to the old
+    recovery path, never to a failed build.
+
 **Claim expiry and your worker `timeout`.** Every start a tick records
 carries a claim TTL derived from the `timeout` of the worker function the
 task routes to (`FunctionSettings(timeout=...)`), plus a grace margin — so

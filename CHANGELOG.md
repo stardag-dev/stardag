@@ -28,6 +28,77 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   [GHSA-47m3-4ppr-cfh4](https://github.com/stardag-dev/stardag/security/advisories/GHSA-47m3-4ppr-cfh4)
   (CVSS 7.7 High; read-only, authenticated).
 
+- **`TASK_INTERRUPTED` / `TaskStatus.INTERRUPTED`**, and
+  `POST /builds/{id}/tasks/{task_id}/interrupt`. Modelled on `SUSPENDED`:
+  non-terminal, non-running, holds no execution claim, listed as
+  actionable by the frontier, and reset by a re-trigger. **No migration** —
+  both columns are already `String(32)`.
+
+  Deliberately a status rather than a `retryable` flag on `/fail`: a
+  worker-recorded _failure_ sits in the next frontier snapshot and, under
+  `FAIL_FAST`, kills the build before anything can retry it. A tick avoids
+  that only because it records and retries inside one pass.
+
+- `FrontierTaskRef.interrupt_count`, counted over the same build round as
+  `attempt_count`. An interruption between two starts does not open a new
+  attempt.
+
+- Old SDKs are unaffected (nothing emits the new event). A **new SDK
+  against an older server** logs a warning and records nothing, which is
+  its pre-existing behaviour — a version skew degrades to the old recovery
+  path, never to a failed build.
+
+### UI
+
+- `INTERRUPTED` renders as its own status (orange, beside skipped's amber
+  rather than failed's red), is filterable, and offers Retry but not
+  Release — an interrupted task holds no claim to release.
+
+### SDK
+
+- **A platform interruption is no longer a failure** (closes
+  [#245](https://github.com/stardag-dev/stardag/issues/245)). Preemption
+  and function timeouts are the two ways a container routinely dies
+  without the task being broken, and neither had any representation in the
+  SDK. A task that caught the interrupt to checkpoint — which is exactly
+  what you must do — and re-raised anything derived from `Exception`
+  recorded a permanent `TASK_FAILED` and, under `FAIL_FAST`, killed the
+  build. The same task with a bare `raise` is restarted and succeeds. One
+  keyword, no warning.
+
+  New: `sd.TaskInterrupted`, and its subclasses `sd.TaskPreempted` and
+  `sd.TaskTimedOut`. Raise one from a task that checkpointed and wants to
+  run again; the Modal runner translates it back into a `BaseException` on
+  the way out, so the execution backend restarts the input rather than
+  recording a failure.
+
+  The Modal runner now catches `BaseException` and classifies what ended
+  the attempt. A **timeout** is reported to the registry inside the grace
+  window the platform allows, which releases the execution claim and its
+  concurrency-limit slots immediately and wakes the scheduler directly —
+  so recovery no longer depends on the (opt-in) watchdog. A **preemption**
+  is deliberately not reported: Modal restarts the input itself, on the
+  same call id and without spending an attempt, which is faster than any
+  reschedule. A **cancellation** is not reported either — whoever
+  cancelled the task already recorded that.
+
+- **`TickConfig.interruption_policy_selector`** decides what an
+  interruption of a given task means: `InterruptionPolicy.RESTART` to
+  respawn it (for a task that checkpoints and expects to be killed and
+  resumed until it converges) or `FAIL` to record a retryable failure.
+  **`FAIL` is the default and reproduces the previous behaviour exactly**
+  — only the latency changes. `RESTART` tasks are bounded by the new
+  `TickConfig.max_interruptions` (default 20); interruptions deliberately
+  do not spend `max_attempts`, or a task designed to be resumed would
+  exhaust a budget meant for genuine failures.
+
+- **`FunctionSettings` gains `nonpreemptible` and `startup_timeout`**, the
+  two Modal knobs this topic needs that were not previously expressible
+  through `StardagApp`. `nonpreemptible=True` is the direct answer to
+  "this task must not be preempted" (3× CPU/memory price, not supported
+  for GPU functions).
+
+
 ## [0.18.0] — 2026-08-11
 
 ### Registry API

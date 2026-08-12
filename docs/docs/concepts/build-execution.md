@@ -262,15 +262,22 @@ picked up on the next pass while the budget allows.
 
 The split is deliberate and narrow:
 
-| Failure                                                             | Retried? |
-| ------------------------------------------------------------------- | -------- |
-| Spawn raised — no container ever ran                                | yes      |
-| Backend reports the execution failed (OOM, kill, preemption)        | yes      |
-| Execution claim lapsed with nothing left to probe (worker vanished) | yes      |
-| Task object missing and not rehydratable from the registry          | **no**   |
-| Exception inside your task                                          | n/a      |
+| Failure                                                             | Retried?  |
+| ------------------------------------------------------------------- | --------- |
+| Spawn raised — no container ever ran                                | yes       |
+| Backend reports the execution failed (OOM, kill)                    | yes       |
+| Execution claim lapsed with nothing left to probe (worker vanished) | yes       |
+| Task object missing and not rehydratable from the registry          | **no**    |
+| Exception inside your task                                          | n/a       |
+| Container reclaimed, or the function timeout hit                    | see below |
 
-The last row is the important one: a task that raises reports its own
+The `see below` row is not a failure at all: the platform ended the
+attempt and the task did nothing wrong. Those are recorded as
+[interruptions](#interrupted-the-platform-took-the-execution) and
+budgeted separately, so that a task designed to be killed and resumed
+does not spend a budget meant for genuine failures.
+
+The `n/a` row is the important one: a task that raises reports its own
 `TASK_FAILED` and leaves the frontier, so a tick never sees it. Genuinely
 deterministic failures are therefore out of reach of this budget by
 construction, not by a judgement call — which is why defaulting it above 1
@@ -314,6 +321,56 @@ suspend a lot.
 Set `max_attempts=1` for the previous behaviour (record the failure, never
 respawn). Against a registry that does not report `attempt_count` no budget
 can bound a retry loop, so retries are disabled and the tick logs that.
+
+### INTERRUPTED: the platform took the execution
+
+Some executions end without the task being wrong: the backend reclaims the
+container, or the execution hits the function timeout. Recording those as
+failures is wrong twice over — under `FAIL_FAST` it kills a build for
+something the task did not do, and it spends a retry budget meant for
+genuine failures on a task whose whole design may be to be killed and
+resumed.
+
+So they get their own status. `INTERRUPTED` is shaped exactly like
+`SUSPENDED`: non-terminal, non-running, holds no execution claim, listed
+as actionable by the frontier, and reset by a re-trigger. The difference
+between them is only the reason the attempt ended.
+
+**The worker reports it, in the grace window before it dies.** That is the
+point. A preempted or timed-out worker that reports nothing leaves its
+claim held and its concurrency-limit slots occupied until something
+notices the execution is gone — and the only thing that can notice is a
+scheduler tick, woken by a watchdog that is off by default. Reporting the
+interruption releases the claim immediately and wakes the scheduler
+directly, so recovery no longer depends on an opt-in safety net.
+
+**What happens next is per task**, because a timeout means two opposite
+things and only the author knows which:
+
+- `InterruptionPolicy.FAIL` (**the default**) records a retryable failure
+  under `max_attempts` — the behaviour that predates this status. A
+  timeout here is read as "the task hung".
+- `InterruptionPolicy.RESTART` puts the task straight back on the
+  frontier, bounded by `TickConfig.max_interruptions` (default 20). For a
+  task that checkpoints and expects to be resumed until it converges.
+
+Declared via `TickConfig.interruption_policy_selector` — deployed-app
+configuration, alongside `limit_key_selector`.
+
+**Interruptions do not spend `max_attempts`.** Same argument as resuming a
+suspended task: a budget meant to stop a broken task from being retried
+forever should not be consumed by the platform's scheduling decisions. The
+separate `max_interruptions` bound exists so that "does not spend the
+retry budget" does not become "unbounded".
+
+**A backend running its own retries is not raced.** Some backends restart
+a timed-out input themselves, under the same execution ref. Before
+respawning an interrupted task whose ref still probes as live, a tick
+leaves it alone — otherwise the task would run twice.
+
+For the Modal specifics — which exception arrives when, how much grace
+there is, and the one-keyword footgun in writing the `except` block — see
+[Preemption and timeouts](../how-to/integrate-modal.md#preemption-and-timeouts).
 
 ### Cross-build blocking
 

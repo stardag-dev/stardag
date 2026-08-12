@@ -57,6 +57,7 @@ from stardag.build._base import (
 from stardag.build._registry_limiter import RegistryConcurrencyLimiter
 from stardag.build._reactive import (
     DiscoveryResult,
+    InterruptionPolicy,
     TickConfig,
     TickSummary,
     discover_and_register_aio,
@@ -144,6 +145,7 @@ __all__ = [
     "ClaimConfig",
     "DetachedExecutionStatus",
     "DiscoveryResult",
+    "InterruptionPolicy",
     "TickConfig",
     "TickSummary",
     "discover_and_register_aio",

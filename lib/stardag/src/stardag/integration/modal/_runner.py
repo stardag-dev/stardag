@@ -14,6 +14,8 @@ import asyncio
 import inspect
 import logging
 import os
+import threading
+import time
 import typing
 from uuid import UUID
 
@@ -38,14 +40,120 @@ from stardag.integration.modal._metadata import (
     STARDAG_MODAL_ENVIRONMENT_ENV,
     STARDAG_MODAL_FUNCTION_ID_ENV,
     STARDAG_MODAL_FUNCTION_NAME_ENV,
+    STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
     STARDAG_REACTIVE_ENV,
 )
 from stardag.integration.modal._protocols import RunFunction
+from stardag.exceptions import TaskInterrupted, TaskTimedOut
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
 
+# Modal's own "this input was cancelled" BaseException. Looked up rather
+# than imported so a client that predates or renames it degrades to "we
+# cannot recognise a cancellation" instead of failing every worker import.
+_InputCancellation: type[BaseException] | None = getattr(
+    modal.exception, "InputCancellation", None
+)
+
 logger = logging.getLogger(__name__)
+
+# How long the worker will wait for its interruption report to land before
+# giving up and letting the container die. Small relative to the ~60s
+# window Modal leaves between the timeout signal and SIGKILL: the report is
+# one HTTP call, and the rest of the window belongs to the task's own
+# checkpointing.
+_INTERRUPT_REPORT_TIMEOUT_SECONDS = 10.0
+
+# Slack when deciding whether an InputCancellation arrived *at* the
+# function's declared timeout (a timeout) or before it (a cancellation).
+#
+# Modal delivers the timeout signal at the declared timeout to the
+# millisecond, so this is not compensating for jitter in the signal — it
+# covers the gap between the clock the *task* started on (this module,
+# just before ``run()``) and the clock Modal is measuring, which starts
+# earlier and includes container startup. That gap makes measured elapsed
+# time run SHORT of Modal's, so the tolerance is one-sided: only "arrived a
+# little before the timeout" needs forgiving.
+_TIMEOUT_DETECTION_SLACK_SECONDS = 5.0
+
+# What a caught BaseException meant, and therefore what the worker does.
+_PREEMPTION = "preemption"
+_TIMEOUT = "timeout"
+_CANCELLATION = "cancellation"
+
+
+def _declared_function_timeout(env_overrides: dict[str, str] | None) -> float | None:
+    """The worker function's ``timeout``, as forwarded by the orchestrator.
+
+    Unparseable or non-positive values are dropped rather than raised on:
+    this feeds a heuristic whose failure mode is "behave as before", and no
+    task should die over a malformed diagnostic.
+    """
+    raw = (env_overrides or {}).get(
+        STARDAG_MODAL_FUNCTION_TIMEOUT_ENV
+    ) or os.environ.get(STARDAG_MODAL_FUNCTION_TIMEOUT_ENV)
+    if not raw:
+        return None
+    try:
+        timeout = float(raw)
+    except ValueError:
+        logger.warning(f"Invalid {STARDAG_MODAL_FUNCTION_TIMEOUT_ENV}: {raw!r}")
+        return None
+    return timeout if timeout > 0 else None
+
+
+def _classify_interruption(
+    exception: BaseException,
+    *,
+    elapsed_seconds: float,
+    function_timeout_seconds: float | None,
+) -> str | None:
+    """What ended this execution, or ``None`` if the task simply raised.
+
+    The rules, and the live-measured behaviour each one encodes (modal
+    1.5.0, 2026-08-12):
+
+    - **The task said so.** ``TaskTimedOut`` and ``TaskPreempted`` are
+      explicit. A bare ``TaskInterrupted`` resolves to preemption, which is
+      the conservative reading: preemption's handling is "report nothing,
+      re-raise", i.e. exactly what happens today, so a task that guesses
+      wrong degrades rather than changes behaviour.
+    - **A ``KeyboardInterrupt`` is the preemption signal.** Modal sends an
+      interrupt when it reclaims a container, and an escaping
+      ``BaseException`` reads to Modal as a crashed container — which it
+      restarts on the same input, ungated by ``retries``, in a few seconds.
+      That is strictly better than a scheduler respawn (the claim is kept,
+      no attempt is spent, no round-trip), so the right thing here is to
+      get out of the way.
+    - **An ``InputCancellation`` is ambiguous and has to be timed.** It is
+      what a function timeout looks like *and* what
+      ``FunctionCall.cancel()`` looks like — same type, same
+      ``"Input was cancelled by user"`` message. Since stardag cancels its
+      own workers (FAIL_FAST, UI cancel), reading every one as an
+      interruption would resurrect tasks the build just cancelled. Only one
+      of them arrives at the declared timeout, so that is the test.
+
+    With no declared timeout to compare against, an ``InputCancellation``
+    is read as a cancellation — the conservative direction again, since
+    cancellation is also handled by doing nothing.
+    """
+    if isinstance(exception, TaskTimedOut):
+        return _TIMEOUT
+    if isinstance(exception, TaskInterrupted):
+        # Covers TaskPreempted and the bare base class.
+        return _PREEMPTION
+    if isinstance(exception, (KeyboardInterrupt, SystemExit)):
+        return _PREEMPTION
+    if _InputCancellation is not None and isinstance(exception, _InputCancellation):
+        if function_timeout_seconds is None:
+            return _CANCELLATION
+        reached_timeout = (
+            elapsed_seconds
+            >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
+        )
+        return _TIMEOUT if reached_timeout else _CANCELLATION
+    return None
 
 
 class _WorkerLifecycleReporter:
@@ -205,7 +313,7 @@ class _WorkerLifecycleReporter:
         )
         self._wake_scheduler()
 
-    def failed(self, exception: Exception) -> None:
+    def failed(self, exception: BaseException) -> None:
         self._guard(
             lambda: self.registry.task_fail(
                 self.build_id, self.task, error_message=str(exception)
@@ -213,6 +321,43 @@ class _WorkerLifecycleReporter:
             "fail",
         )
         self._wake_scheduler()
+
+    def interrupted(self, reason: str) -> None:
+        """Report that the platform ended this execution — not a failure.
+
+        Deliberately never ``task_fail``: a worker-recorded failure lands in
+        the next frontier snapshot and, under FAIL_FAST, kills the build
+        before any scheduler can retry it. A tick gets away with
+        record-then-retry only because both halves happen inside one pass.
+
+        **Bounded, because this runs in a dying container.** Modal gives
+        roughly 60s between the timeout signal and the hard kill, shared
+        with whatever the task did to checkpoint. A registry that hangs
+        must not spend the rest of it — the whole value here is promptness,
+        and the fallback (report nothing, let a later tick discover the
+        dead execution) is exactly the behaviour that predates this method.
+        """
+        done = threading.Event()
+
+        def _report() -> None:
+            self._guard(
+                lambda: self.registry.task_interrupt(
+                    self.build_id, self.task, reason=reason
+                ),
+                "interrupt",
+            )
+            self._guard(self._wake_scheduler, "interrupt-wake")
+            done.set()
+
+        thread = threading.Thread(target=_report, daemon=True)
+        thread.start()
+        if not done.wait(_INTERRUPT_REPORT_TIMEOUT_SECONDS):
+            logger.error(
+                f"Reporting the interruption of task {self.task.id} did not "
+                f"finish within {_INTERRUPT_REPORT_TIMEOUT_SECONDS}s; giving "
+                "up on it so the container can exit. The execution claim "
+                "stays held until a scheduler observes the execution is gone."
+            )
 
     def _register_dynamic_deps(self, task_struct: TaskStruct) -> None:
         result = asyncio.run(
@@ -323,8 +468,15 @@ class Runner(RunFunction):
         """Optional setup logic before the task runs."""
         _setup_logging()
 
-    def teardown(self, task: BaseTask, exception: Exception | None) -> None:
-        """Optional teardown logic after the task runs."""
+    def teardown(self, task: BaseTask, exception: BaseException | None) -> None:
+        """Optional teardown logic after the task runs.
+
+        ``exception`` widened from ``Exception`` when the runner started
+        catching ``BaseException``: a task killed by a platform interrupt
+        is exactly the case where teardown matters most, and it used to
+        bypass this hook entirely. Overrides typed against the narrower
+        signature keep working — the value is only ever passed in.
+        """
         if exception:
             logger.error(f"Task {repr(task)} raised an exception: {repr(exception)}")
 
@@ -346,7 +498,7 @@ class Runner(RunFunction):
         """
         # getattr: tolerate subclasses overriding __init__ without super()
         result: None | TaskStruct = None
-        exception: Exception | None = None
+        exception: BaseException | None = None
         try:
             self.setup(task)
             # All lifecycle reporting happens inside the env-overrides
@@ -370,23 +522,131 @@ class Runner(RunFunction):
                         )
                 if reporter is not None:
                     reporter.started()
+                function_timeout = _declared_function_timeout(env_overrides)
+                started_at = time.monotonic()
                 try:
                     result = self.run(task)
-                except Exception as e:
-                    if reporter is not None:
-                        reporter.failed(e)
+                except BaseException as e:
+                    kind = self._report_end_of_attempt(
+                        task,
+                        e,
+                        reporter=reporter,
+                        elapsed_seconds=time.monotonic() - started_at,
+                        function_timeout_seconds=function_timeout,
+                    )
+                    if kind == _PREEMPTION and isinstance(e, Exception):
+                        # The task raised ``sd.TaskInterrupted`` — an
+                        # ordinary Exception, deliberately, so it does not
+                        # slip past the user's own error handling. But an
+                        # ordinary exception leaving the container is a
+                        # *task failure* to the execution backend, which
+                        # will not restart the input for it. A BaseException
+                        # escaping reads as a crashed container, which it
+                        # will. Translating here is what makes
+                        # "raise sd.TaskInterrupted" mean what it says.
+                        raise KeyboardInterrupt(
+                            f"Task reported an interruption: {e}"
+                        ) from e
                     raise
                 if reporter is not None:
                     if result is None:
                         reporter.completed()
                     else:
                         reporter.suspended(result)
-        except Exception as e:
+        except BaseException as e:
             exception = e
             raise
         finally:
             self.teardown(task, exception)
         return result
+
+    def _report_end_of_attempt(
+        self,
+        task: BaseTask,
+        exception: BaseException,
+        *,
+        reporter: "_WorkerLifecycleReporter | None",
+        elapsed_seconds: float,
+        function_timeout_seconds: float | None,
+    ) -> str | None:
+        """Record what ended this attempt — or deliberately record nothing.
+
+        Returns the classification, which the caller needs in order to
+        choose how the exception leaves the container (see ``__call__``).
+
+        Three of the four outcomes below report nothing at all, and that is
+        the substance of the change rather than an omission:
+
+        - **Preemption.** The exception is on its way out of the container,
+          and an escaping ``BaseException`` reads to Modal as a crash — so
+          Modal restarts the input itself, on the same call id, in a few
+          seconds. Recording a terminal event here would replace that with
+          a slower scheduler respawn *and* release a claim the restart is
+          about to need. The previous code reached the same outcome by
+          accident, because ``except Exception`` did not catch the
+          interrupt; the difference now is that a task which caught the
+          signal to checkpoint and raised ``sd.TaskInterrupted`` gets it
+          too, instead of a permanent failure.
+        - **Cancellation.** Somebody cancelled this call — usually stardag
+          itself, on FAIL_FAST or a UI cancel, and whoever did it has
+          already recorded the outcome. Reporting an interruption here
+          would resurrect a task the build just cancelled.
+        - **A raised ``BaseException`` that is none of the above** (an
+          unclassifiable ``GeneratorExit``, say). Left alone: the previous
+          behaviour for anything outside ``except Exception``.
+
+        Only a **timeout** is reported, because it is the only one where
+        nothing else will recover the task: after the timeout fires, the
+        call is dead whatever the container does next (verified live —
+        returning cleanly, re-raising an interrupt and raising an ordinary
+        exception all resolve to ``FunctionTimeoutError``), so a registry
+        event is the only path back into the frontier.
+        """
+        kind = _classify_interruption(
+            exception,
+            elapsed_seconds=elapsed_seconds,
+            function_timeout_seconds=function_timeout_seconds,
+        )
+        if reporter is None:
+            return kind
+        if kind is None:
+            if isinstance(exception, Exception):
+                reporter.failed(exception)
+            else:
+                logger.warning(
+                    f"Task {task.id} ended with {type(exception).__name__}, "
+                    "which is neither an ordinary failure nor a recognised "
+                    "platform interruption; reporting nothing and letting "
+                    "it propagate."
+                )
+            return kind
+        if kind == _TIMEOUT:
+            logger.warning(
+                f"Task {task.id} hit its worker function's timeout of "
+                f"{function_timeout_seconds}s after {elapsed_seconds:.1f}s. "
+                "Reporting an interruption — the task is not at fault, and "
+                "the scheduler decides whether to resume it or fail it "
+                "(TickConfig.interruption_policy_selector)."
+            )
+            reporter.interrupted(
+                f"Execution hit the worker function's {function_timeout_seconds}s "
+                "timeout"
+            )
+            return kind
+        if kind == _CANCELLATION:
+            logger.info(
+                f"Execution of task {task.id} was cancelled. Recording "
+                "nothing: whoever cancelled it owns that record."
+            )
+            return kind
+        logger.warning(
+            f"Execution of task {task.id} was interrupted by the platform "
+            f"after {elapsed_seconds:.1f}s. Recording nothing and letting "
+            "the interrupt propagate, so the execution backend restarts "
+            "this input itself — faster than a reschedule, and it keeps "
+            "the execution claim."
+        )
+        return kind
 
     def run(self, task: BaseTask) -> None | TaskStruct:
         """Default run logic — handles sync, async, and dynamic deps tasks.
