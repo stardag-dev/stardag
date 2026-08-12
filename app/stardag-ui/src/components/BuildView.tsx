@@ -26,6 +26,7 @@ import type {
 } from "../types/task";
 import { isExtendedResponse } from "../types/task";
 import { BuildSchedulingPanel } from "./BuildSchedulingPanel";
+import { rootsSatisfiedFrom } from "../utils/claims";
 import { BuildFailureReason } from "./BuildFailureReason";
 import { BuildStatusBadge } from "./BuildStatusBadge";
 import { BuildExecutorChips } from "./ExecutorBadge";
@@ -351,6 +352,17 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
   // placeholder names alongside real tasks.
   const realTasks = useMemo(() => allTasks.filter((t) => !t.is_phantom), [allTasks]);
 
+  // Whether every root has since completed — see `rootsSatisfiedFrom`. Computed
+  // from the task list this view already fetched rather than from the frontier,
+  // which only the scheduling panel holds; both call the same rule so the two
+  // cannot disagree about the same build.
+  const rootsSuperseded = useMemo(() => {
+    const statusById = new Map(
+      allTasks.map((t) => [t.task_id, t.latest_status ?? t.status]),
+    );
+    return rootsSatisfiedFrom(build?.root_task_ids ?? [], (id) => statusById.get(id));
+  }, [allTasks, build?.root_task_ids]);
+
   // Client-side filtering
   const filteredTasks = realTasks.filter((task) => {
     if (
@@ -605,6 +617,8 @@ export function BuildView({ buildId, onBack, onNavigateToBuild }: BuildViewProps
               <BuildFailureReason
                 status={build.status}
                 message={build.latest_error_message}
+                failedAt={build.completed_at}
+                superseded={rootsSuperseded}
               />
 
               {/* Scheduler state. Renders itself only when it has something
