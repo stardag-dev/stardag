@@ -262,6 +262,34 @@ class TestRunnerInterruptionReporting:
 
         assert registry.methods() == ["task_start", "task_interrupt"]
 
+    def test_the_reason_never_names_a_timeout_it_does_not_know(
+        self, registry, default_in_memory_fs_target
+    ):
+        """A task can raise ``TaskTimedOut`` on its own authority, and the
+        orchestrator may not have forwarded a declared timeout — an older
+        one, or a worker function that declares none. The reason lands in
+        a user-visible error message, so it must not read "the worker
+        function's Nones timeout"."""
+        runner = _runner_raising(sd.TaskTimedOut("out of time"))
+
+        with pytest.raises(BaseException):
+            runner(make_range(limit=2), env_overrides=_env(uuid4()))
+
+        assert registry.methods() == ["task_start", "task_interrupt"]
+        reason = registry.calls[1][1]["reason"]
+        assert "None" not in reason
+        assert "timeout" in reason
+
+    def test_the_reason_names_the_timeout_when_it_does_know(
+        self, registry, default_in_memory_fs_target
+    ):
+        runner = _runner_raising(InputCancellation("Input was cancelled by user"))
+
+        with pytest.raises(InputCancellation):
+            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=0.0001))
+
+        assert "0.0001s" in registry.calls[1][1]["reason"]
+
     def test_no_reporter_still_translates_the_escape(
         self, registry, default_in_memory_fs_target
     ):

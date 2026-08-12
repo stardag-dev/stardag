@@ -621,16 +621,27 @@ class Runner(RunFunction):
                 )
             return kind
         if kind == _TIMEOUT:
+            # The declared timeout is usually known — it is what the
+            # classification compared against. Not always, though: a task
+            # that raises ``TaskTimedOut`` itself is believed regardless,
+            # and an orchestrator that forwarded no timeout leaves nothing
+            # to name. Saying "the worker function's Nones timeout" in an
+            # error a user reads is worse than not naming a number.
+            of_timeout = (
+                f" of {function_timeout_seconds}s"
+                if function_timeout_seconds is not None
+                else ""
+            )
             logger.warning(
-                f"Task {task.id} hit its worker function's timeout of "
-                f"{function_timeout_seconds}s after {elapsed_seconds:.1f}s. "
-                "Reporting an interruption — the task is not at fault, and "
-                "the scheduler decides whether to resume it or fail it "
+                f"Task {task.id} hit its worker function's timeout"
+                f"{of_timeout} after {elapsed_seconds:.1f}s. Reporting an "
+                "interruption — the task is not at fault, and the scheduler "
+                "decides whether to resume it or fail it "
                 "(TickConfig.interruption_policy_selector)."
             )
             reporter.interrupted(
-                f"Execution hit the worker function's {function_timeout_seconds}s "
-                "timeout"
+                f"Execution hit the worker function's timeout{of_timeout} "
+                f"after {elapsed_seconds:.1f}s"
             )
             return kind
         if kind == _CANCELLATION:
