@@ -1,6 +1,7 @@
 """Task search routes - advanced filtering and autocomplete."""
 
 import re
+import string
 import time
 from collections import Counter
 from typing import Annotated, Any, NoReturn
@@ -68,8 +69,36 @@ OPERATORS = {
 # for a quote, a backslash, or whitespace in a key, so rejecting is both safe
 # and lossless — and it keeps the invariant to a single character class,
 # rather than an escaping routine that has to stay correct forever.
-_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]+")
-_ARRAY_SEGMENT_RE = re.compile(r"([A-Za-z0-9_-]+)\[([0-9]+)\]")
+#
+# The check is a charset test rather than a regex on purpose: it is obviously
+# linear in the length of the input, with no backtracking behaviour to reason
+# about, and it is the single place that decides what may be interpolated.
+_PATH_SEGMENT_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+_ASCII_DIGITS = frozenset(string.digits)
+
+
+def _is_valid_segment(segment: str) -> bool:
+    """True if ``segment`` is a bare, identifier-safe JSON path step."""
+    return bool(segment) and all(c in _PATH_SEGMENT_CHARS for c in segment)
+
+
+def _split_array_segment(segment: str) -> tuple[str, str] | None:
+    """Split an ``items[3]`` style step into ``("items", "3")``.
+
+    Returns None if ``segment`` is not exactly that shape. The index is
+    checked against ASCII digits specifically, not ``str.isdigit()`` — the
+    latter accepts superscripts and other Unicode digit forms, which would
+    then be interpolated verbatim into the SQL text.
+    """
+    if not segment.endswith("]"):
+        return None
+    field, sep, index = segment[:-1].partition("[")
+    if not sep or not index or not all(c in _ASCII_DIGITS for c in index):
+        return None
+    if not _is_valid_segment(field):
+        return None
+    return field, index
+
 
 # Bounds on the raw query-string inputs. The filter/sort grammar is parsed
 # with regexes whose worst case is polynomial in the input length, so the
@@ -98,9 +127,9 @@ def _render_jsonb_path(base: str, path_parts: list[str], key: str) -> str:
     """Render a JSONB accessor chain over ``base``, validating every segment.
 
     ``base`` is a trusted, code-supplied expression (e.g. ``tasks.task_data``).
-    Every element of ``path_parts`` is caller-controlled and is validated
-    against ``_PATH_SEGMENT_RE`` / ``_ARRAY_SEGMENT_RE`` before it reaches the
-    SQL text. Raises HTTPException(400) on anything that does not match.
+    Every element of ``path_parts`` is caller-controlled and must pass
+    ``_is_valid_segment`` or ``_split_array_segment`` before it reaches the SQL
+    text. Raises HTTPException(400) on anything that does not.
 
     The last segment uses ``->>`` (text extraction); earlier ones use ``->``
     (JSON extraction), which is what makes the result comparable to a bound
@@ -109,11 +138,11 @@ def _render_jsonb_path(base: str, path_parts: list[str], key: str) -> str:
     rendered = base
     for i, part in enumerate(path_parts):
         is_last = i == len(path_parts) - 1
-        array_match = _ARRAY_SEGMENT_RE.fullmatch(part)
-        if array_match:
-            field, index = array_match.groups()
+        array_segment = _split_array_segment(part)
+        if array_segment is not None:
+            field, index = array_segment
             rendered = f"({rendered}->'{field}')->{index}"
-        elif _PATH_SEGMENT_RE.fullmatch(part):
+        elif _is_valid_segment(part):
             rendered = f"{rendered}->>'{part}'" if is_last else f"{rendered}->'{part}'"
         else:
             _reject_path_segment(key, part)
@@ -123,7 +152,7 @@ def _render_jsonb_path(base: str, path_parts: list[str], key: str) -> str:
 def _validate_artifact_name(artifact_name: str, key: str) -> None:
     """Artifact names are bound as parameters everywhere except the sort
     subquery, where the name must be validated before interpolation."""
-    if not _PATH_SEGMENT_RE.fullmatch(artifact_name):
+    if not _is_valid_segment(artifact_name):
         _reject_path_segment(key, artifact_name)
 
 
@@ -1102,9 +1131,9 @@ def _get_nested_value(data: dict, path: list[str]) -> str | None:
     current = data
     for part in path:
         # Handle array access
-        array_match = _ARRAY_SEGMENT_RE.fullmatch(part)
-        if array_match:
-            field, index = array_match.groups()
+        array_segment = _split_array_segment(part)
+        if array_segment is not None:
+            field, index = array_segment
             if isinstance(current, dict) and field in current:
                 current = current[field]
                 if isinstance(current, list) and int(index) < len(current):

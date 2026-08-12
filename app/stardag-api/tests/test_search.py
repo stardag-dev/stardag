@@ -9,6 +9,9 @@ from fastapi import HTTPException
 
 from stardag_api.routes.search import (
     _extract_keys,
+    _is_valid_segment,
+    _render_jsonb_path,
+    _split_array_segment,
     _validate_filter_value,
     build_jsonb_condition,
     parse_filter_string,
@@ -555,3 +558,68 @@ async def test_search_sort_by_artifact_still_works(pg_client: AsyncClient) -> No
         "/api/v1/tasks/search", params={"sort": "artifact.report.score:asc"}
     )
     assert resp.status_code == 200, resp.text
+
+
+class TestRenderedPathNeverContainsMetacharacters:
+    """The property the SQL-injection fix actually rests on: whatever the
+    caller sends, the rendered accessor chain either contains no SQL
+    metacharacter, or no chain is produced at all (400).
+
+    This is asserted directly rather than inferred from the endpoint's status
+    code, so it stays true if the calling code is ever restructured.
+    """
+
+    ADVERSARIAL = [
+        "x'",
+        'x"',
+        "x\\",
+        "x`",
+        "x;",
+        "x--",
+        "x/*",
+        "x*/",
+        "x'||'",
+        "x[0]'",
+        "x[0']",
+        "x[0]junk",
+        "x[]",
+        "x[-1]",
+        "x[\u00b2]",  # Unicode superscript two - str.isdigit() accepts it
+        "x[\u0661]",  # Arabic-Indic digit one - likewise
+        "",
+        " ",
+        "x y",
+        "x\ty",
+        "x\ny",
+        "x.y",
+        "%",
+        ":param",
+        "\u0000",
+    ]
+
+    @pytest.mark.parametrize("segment", ADVERSARIAL)
+    def test_no_metacharacter_survives(self, segment: str) -> None:
+        try:
+            rendered = _render_jsonb_path("tasks.task_data", [segment], "param.k")
+        except HTTPException as exc:
+            assert exc.status_code == 400
+            return
+        # A chain was produced, so the segment must have been identifier-safe.
+        # That is the whole invariant: the accessor is a single-quoted literal,
+        # and only a quote (or a backslash, which some engines honour inside
+        # literals) could escape it. Sequences like `--` or `;` are inert
+        # *inside* a quoted literal, so a segment of "x--" renders the harmless
+        # ->>'x--' and is legitimately allowed.
+        assert _is_valid_segment(segment) or _split_array_segment(segment)
+        for forbidden in ("'", '"', "\\", "`"):
+            assert forbidden not in segment, (segment, rendered)
+        # Quotes in the output are only the delimiters this code emits itself.
+        body = rendered[len("tasks.task_data") :]
+        assert body.count("'") % 2 == 0, (segment, rendered)
+
+    def test_unicode_digit_index_is_rejected_not_interpolated(self) -> None:
+        """``str.isdigit()`` would accept these; the ASCII-only check must not."""
+        for segment in ("x[\u00b2]", "x[\u0661]"):
+            with pytest.raises(HTTPException) as exc_info:
+                _render_jsonb_path("tasks.task_data", [segment], "param.k")
+            assert exc_info.value.status_code == 400
