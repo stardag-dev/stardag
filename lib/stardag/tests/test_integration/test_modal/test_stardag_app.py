@@ -23,7 +23,8 @@ from stardag.integration.modal import (
     Runner,
     StardagApp,
 )
-from stardag.integration.modal._app import _default_build, _default_run
+from stardag.integration.modal._builder import _default_build
+from stardag.integration.modal._runner import _default_run
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
 
@@ -494,7 +495,7 @@ class TestBuilderBuildKwargs:
 
     def test_default_build_forwards_build_kwargs(self, monkeypatch):
         from stardag.build import FailMode
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _builder as builder_module
 
         captured: dict = {}
 
@@ -503,9 +504,9 @@ class TestBuilderBuildKwargs:
             captured["kwargs"] = kwargs
             return None
 
-        monkeypatch.setattr(modal_app_module, "build", fake_build)
+        monkeypatch.setattr(builder_module, "build", fake_build)
 
-        builder = modal_app_module.Builder()
+        builder = builder_module.Builder()
         executor = MagicMock()
         root = MagicMock()
         builder.build(
@@ -523,7 +524,7 @@ class TestBuilderBuildKwargs:
 
     def test_default_build_no_build_kwargs(self, monkeypatch):
         """Backwards-compat: omitting build_kwargs still works."""
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _builder as builder_module
 
         captured: dict = {}
 
@@ -531,9 +532,9 @@ class TestBuilderBuildKwargs:
             captured["kwargs"] = kwargs
             return None
 
-        monkeypatch.setattr(modal_app_module, "build", fake_build)
+        monkeypatch.setattr(builder_module, "build", fake_build)
 
-        builder = modal_app_module.Builder()
+        builder = builder_module.Builder()
         builder.build(MagicMock(), MagicMock())
         # Only task_executor — no leaked kwargs from a None build_kwargs.
         assert set(captured["kwargs"].keys()) == {"task_executor"}
@@ -1450,13 +1451,13 @@ class TestFinalizeBakesTaskModules:
             return TickSummary(outcome="noop")
 
         with (
-            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
-            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
             patch(
-                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
             ),
             patch(
-                "stardag.integration.modal._app.import_task_modules"
+                "stardag.integration.modal._tick.import_task_modules"
             ) as import_modules,
         ):
             rp.get.return_value = registry
@@ -1464,7 +1465,10 @@ class TestFinalizeBakesTaskModules:
 
         # Exactly the list frozen at deploy time — not re-derived in the
         # container, where the filesystem walk would cost cold-start time.
-        import_modules.assert_called_once_with(result.task_modules)
+        # (The deployment record holds it as a tuple; import_task_modules
+        # keys its cache on ``tuple(modules)`` either way.)
+        import_modules.assert_called_once()
+        assert list(import_modules.call_args.args[0]) == result.task_modules
 
     def test_opted_out_tick_imports_nothing(self, default_in_memory_fs_target):
         from stardag.build import TickSummary
@@ -1481,13 +1485,13 @@ class TestFinalizeBakesTaskModules:
             return TickSummary(outcome="noop")
 
         with (
-            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
-            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
             patch(
-                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
             ),
             patch(
-                "stardag.integration.modal._app.import_task_modules"
+                "stardag.integration.modal._tick.import_task_modules"
             ) as import_modules,
         ):
             rp.get.return_value = registry
@@ -1803,7 +1807,7 @@ class TestDynamicDepPickleElision:
     its first dynamic dependency."""
 
     def _reporter(self, build_id):
-        from stardag.integration.modal._app import _WorkerLifecycleReporter
+        from stardag.integration.modal._runner import _WorkerLifecycleReporter
         from stardag.utils.testing.helper_tasks import SyncOnlyTask
 
         registry = MagicMock(spec=RegistryABC)
@@ -1999,7 +2003,7 @@ class TestApiKeySecretPropagation:
         # containers, so finalize resolves the workspace locally (mocked to
         # "test-workspace" by the hermetic fixture) and bakes it into the
         # function env so container-side executor metadata has it.
-        from stardag.integration.modal._app import STARDAG_MODAL_WORKSPACE_ENV
+        from stardag.integration.modal._metadata import STARDAG_MODAL_WORKSPACE_ENV
 
         captured: list[dict] = []
         real_from_dict = modal.Secret.from_dict
@@ -2097,6 +2101,90 @@ class TestFinalizeRegistersTick:
         assert registered["bootstrap"]["timeout"] == 900
 
 
+class TestDeployedFunctionsAreSerializable:
+    """Every function finalize() registers is registered ``serialized=True``,
+    i.e. Modal cloudpickles the closure at deploy time and reconstructs it in
+    the container. Whatever those closures capture must therefore survive
+    ``modal._serialization``: a capture that doesn't is a deploy-time failure
+    with nothing in the unit tier to catch it.
+    """
+
+    def _finalize_capturing_functions(self, **app_kwargs):
+        app = StardagApp(
+            "test-serializable",
+            builder_settings=FunctionSettings(image=_make_image(), timeout=1800),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+            **app_kwargs,
+        )
+        captured: dict = {}
+
+        def capture_function(**kwargs):
+            def decorator(fn):
+                captured[kwargs["name"]] = fn
+                return fn
+
+            return decorator
+
+        app.modal_app.function = capture_function  # type: ignore[assignment]
+        with patch("stardag.integration.modal._app.get_target_roots_volumes") as mv:
+            mv.return_value = MagicMock(by_volume_name={}, by_root_key={})
+            app.finalize()
+        return captured
+
+    def test_every_registered_function_round_trips(self):
+        # Modal's own serializer (its vendored cloudpickle), not the
+        # standalone package — that is what a deploy actually runs.
+        from modal._serialization import serialize
+
+        captured = self._finalize_capturing_functions(
+            watchdog_period_minutes=5,
+            task_modules=["stardag.utils.*"],
+            limit_key_selector=lambda task: ["some-limit"],
+        )
+
+        assert set(captured) == {
+            "build",
+            "worker_default",
+            "tick",
+            "bootstrap",
+            "tick_watchdog",
+        }
+        for name, fn in captured.items():
+            assert serialize(fn), f"{name} serialized to nothing"
+
+    def test_round_tripped_tick_still_reads_its_deploy_time_config(self):
+        """The tick's deploy-time captures (app name, selectors, worker
+        timeouts, baked module list) have to arrive intact on the other side
+        of serialization — the container never sees the StardagApp."""
+        from uuid import uuid4
+
+        from modal._serialization import deserialize, serialize
+        from stardag.registry import BuildInfo
+
+        captured = self._finalize_capturing_functions(watchdog_period_minutes=5)
+        tick = deserialize(serialize(captured["tick"]), None)
+
+        build_id = uuid4()
+        registry = MagicMock(spec=RegistryABC)
+        registry.build_get.return_value = BuildInfo(
+            id=build_id, reactive_app_name="another-app", reactive_tick_kwargs=None
+        )
+        with (
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("modal.Function.from_name", side_effect=Exception("no such app")),
+        ):
+            rp.get.return_value = registry
+            result = tick(str(build_id))
+
+        # It compared the build's owner against the app name it was
+        # deployed with, which means that capture survived the round trip.
+        assert result == {
+            "outcome": "foreign_app",
+            "owner_app": "another-app",
+            "forwarded": False,
+        }
+
+
 class TestTickAppOwnership:
     """Only the app recorded as the build's reactive_app_name (in the
     registry) may drive its ticks — read via the lighter build_get."""
@@ -2155,8 +2243,8 @@ class TestTickAppOwnership:
 
         # Patch the tick loop to assert it is never entered on a foreign app.
         with (
-            patch("stardag.integration.modal._app.registry_provider") as rp,
-            patch("stardag.integration.modal._app.run_tick_aio") as tick_aio,
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
         ):
             rp.get.return_value = registry
             result = tick(str(build_id))
@@ -2184,8 +2272,8 @@ class TestTickAppOwnership:
         registry = self._registry_with_reactive_app(build_id, "app-gone")
 
         with (
-            patch("stardag.integration.modal._app.registry_provider") as rp,
-            patch("stardag.integration.modal._app.run_tick_aio") as tick_aio,
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
             patch(
                 "modal.Function.from_name",
                 side_effect=Exception("app not found"),
@@ -2211,8 +2299,8 @@ class TestTickAppOwnership:
         registry = self._registry_with_reactive_app(build_id, None)
 
         with (
-            patch("stardag.integration.modal._app.registry_provider") as rp,
-            patch("stardag.integration.modal._app.run_tick_aio") as tick_aio,
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio") as tick_aio,
         ):
             rp.get.return_value = registry
             result = tick(str(build_id))
@@ -2240,10 +2328,10 @@ class TestTickAppOwnership:
         # construction requires configured credentials (present on dev
         # machines, absent in CI — the guard itself must not need them).
         with (
-            patch("stardag.integration.modal._app.run_tick_aio", stub_tick_aio),
-            patch("stardag.integration.modal._app.registry_provider") as rp,
+            patch("stardag.integration.modal._tick.run_tick_aio", stub_tick_aio),
+            patch("stardag.integration.modal._tick.registry_provider") as rp,
             patch(
-                "stardag.integration.modal._app.RegistryGlobalConcurrencyLockManager"
+                "stardag.integration.modal._tick.RegistryGlobalConcurrencyLockManager"
             ),
         ):
             rp.get.return_value = own_registry
@@ -2340,7 +2428,7 @@ class TestReactiveRetrigger:
 
 class TestWatchdogSweep:
     def test_sweep_ticks_each_running_build_without_linger(self):
-        from stardag.integration.modal._app import _run_watchdog_sweep
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
         build_ids = [uuid4(), uuid4()]
         registry = MagicMock(spec=RegistryABC)
@@ -2362,7 +2450,7 @@ class TestWatchdogSweep:
         so each build gets a share of its wall clock — otherwise the first
         wide build would size its fan-out as though it owned the whole
         timeout and the rest of the sweep would never run."""
-        from stardag.integration.modal._app import _run_watchdog_sweep
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
         build_ids = [uuid4(), uuid4(), uuid4(), uuid4()]
         registry = MagicMock(spec=RegistryABC)
@@ -2381,7 +2469,7 @@ class TestWatchdogSweep:
     def test_sweep_omits_the_budget_when_the_timeout_is_unknown(self):
         """No declared tick timeout — nothing to split, and the spawn cap
         falls to its next rung rather than being handed a made-up number."""
-        from stardag.integration.modal._app import _run_watchdog_sweep
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
         registry = MagicMock(spec=RegistryABC)
         registry.build_list_running.return_value = [uuid4()]
@@ -2394,7 +2482,7 @@ class TestWatchdogSweep:
         assert ticked == [{"linger_seconds": 0}]
 
     def test_sweep_survives_individual_tick_failures(self):
-        from stardag.integration.modal._app import _run_watchdog_sweep
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
         build_ids = [uuid4(), uuid4()]
         registry = MagicMock(spec=RegistryABC)
@@ -2411,7 +2499,7 @@ class TestWatchdogSweep:
         assert ticked == [str(build_ids[1])]  # second build still swept
 
     def test_sweep_noop_without_registry(self):
-        from stardag.integration.modal._app import _run_watchdog_sweep
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
         _run_watchdog_sweep(NoOpRegistry(), lambda *a, **k: 1 / 0)  # no raise
 
@@ -2419,7 +2507,7 @@ class TestWatchdogSweep:
         """The listing — not the tick — is where irrelevant builds must be
         dropped: a tick on a non-reactive build is a whole (wasted) function
         invocation, and unrelated builds otherwise consume the sweep limit."""
-        from stardag.integration.modal._app import _run_watchdog_sweep
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
         registry = MagicMock(spec=RegistryABC)
         registry.build_list_running.return_value = []
@@ -2433,7 +2521,7 @@ class TestWatchdogSweep:
     def test_truncation_warning_names_the_scope_and_the_remedy(self, caplog):
         import logging
 
-        from stardag.integration.modal._app import _run_watchdog_sweep
+        from stardag.integration.modal._tick import _run_watchdog_sweep
 
         registry = MagicMock(spec=RegistryABC)
         registry.build_list_running.return_value = [uuid4(), uuid4()]
@@ -2497,7 +2585,7 @@ class TestTickFunctionTimeout:
         return typing.cast("FunctionSettings", kwargs)
 
     def test_reads_tick_settings_when_given(self):
-        from stardag.integration.modal._app import _tick_function_timeout_seconds
+        from stardag.integration.modal._tick import _tick_function_timeout_seconds
 
         assert (
             _tick_function_timeout_seconds(
@@ -2511,7 +2599,7 @@ class TestTickFunctionTimeout:
         timeout must follow the same fallback — otherwise every app that
         does not configure the tick separately (the common case) would
         report "unknown"."""
-        from stardag.integration.modal._app import _tick_function_timeout_seconds
+        from stardag.integration.modal._tick import _tick_function_timeout_seconds
 
         builder = self._settings(timeout=3600)
         assert _tick_function_timeout_seconds(None, builder) == 3600.0
@@ -2521,12 +2609,12 @@ class TestTickFunctionTimeout:
         """`timeout=0` was reported as "not declared", which sends the spawn
         cap to a different fallback rung than the one the function was
         registered with."""
-        from stardag.integration.modal._app import _tick_function_timeout_seconds
+        from stardag.integration.modal._tick import _tick_function_timeout_seconds
 
         assert _tick_function_timeout_seconds(self._settings(timeout=0), None) == 0.0
 
     def test_none_when_neither_declares_one(self):
-        from stardag.integration.modal._app import _tick_function_timeout_seconds
+        from stardag.integration.modal._tick import _tick_function_timeout_seconds
 
         assert _tick_function_timeout_seconds(None, None) is None
         assert (
@@ -2540,7 +2628,7 @@ class TestBuildTickConfig:
     ticks, explicit kwargs win, app-level limit key selector injected."""
 
     def test_stored_kwargs_applied(self):
-        from stardag.integration.modal._app import _build_tick_config
+        from stardag.integration.modal._tick import _build_tick_config
 
         config = _build_tick_config(
             {"linger_seconds": 42, "fail_mode": "continue"},
@@ -2552,7 +2640,7 @@ class TestBuildTickConfig:
         assert config.limit_key_selector is None
 
     def test_explicit_kwargs_win_and_selector_injected(self):
-        from stardag.integration.modal._app import _build_tick_config
+        from stardag.integration.modal._tick import _build_tick_config
 
         selector = lambda t: ["gpu"]  # noqa: E731
         config = _build_tick_config(
@@ -2565,7 +2653,7 @@ class TestBuildTickConfig:
 
     def test_defaults_without_stored_kwargs(self):
         from stardag.build import TickConfig
-        from stardag.integration.modal._app import _build_tick_config
+        from stardag.integration.modal._tick import _build_tick_config
 
         config = _build_tick_config(None, None, None)
         assert config.linger_seconds == TickConfig().linger_seconds
@@ -2575,7 +2663,7 @@ class TestBuildTickConfig:
         """The deployed tick's own Modal ``timeout`` — how long this
         container may live — is what the per-pass spawn cap is derived
         from, so it has to reach the TickConfig."""
-        from stardag.integration.modal._app import _build_tick_config
+        from stardag.integration.modal._tick import _build_tick_config
 
         config = _build_tick_config(None, None, None, tick_timeout_seconds=300.0)
 
@@ -2584,7 +2672,7 @@ class TestBuildTickConfig:
     def test_caller_supplied_budget_wins_over_the_function_timeout(self):
         """A default, not an override: the watchdog sweep runs several
         ticks in one container and passes on its own share of the budget."""
-        from stardag.integration.modal._app import _build_tick_config
+        from stardag.integration.modal._tick import _build_tick_config
 
         config = _build_tick_config(
             None,
@@ -2599,6 +2687,6 @@ class TestBuildTickConfig:
         """It is a deploy-time fact about the container, not per-build
         config: persisting it in a build's stored tick_kwargs would go
         stale on the next redeploy."""
-        from stardag.integration.modal._app import _TICK_KWARGS_ALLOWED
+        from stardag.integration.modal._tick import _TICK_KWARGS_ALLOWED
 
         assert "tick_timeout_seconds" not in _TICK_KWARGS_ALLOWED

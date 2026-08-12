@@ -38,10 +38,8 @@ try:
     live_modal_guard(VOLUME_NAME)
 
     from stardag.build import BuildExitStatus, build
-    from stardag.integration.modal._app import (
-        MODAL_EXECUTOR_NAME,
-        ModalTaskExecutor,
-    )
+    from stardag.integration.modal._executor import ModalTaskExecutor
+    from stardag.integration.modal._metadata import MODAL_EXECUTOR_NAME
     from stardag.registry import NoOpRegistry, RegisteredTaskInfo
     from stardag.testing.modal._tasks import SleepAndSaveCallId
 
@@ -90,7 +88,7 @@ import json
 import sys
 
 from stardag.build import build_aio
-from stardag.integration.modal._app import ModalTaskExecutor
+from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.registry import NoOpRegistry
 from stardag.testing.modal._tasks import SleepAndSaveCallId
 

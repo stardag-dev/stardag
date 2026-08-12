@@ -31,10 +31,8 @@ try:
     live_modal_guard(VOLUME_NAME)
 
     from stardag.build import BuildExitStatus, ClaimConfig, build_aio
-    from stardag.integration.modal._app import (
-        MODAL_EXECUTOR_NAME,
-        ModalTaskExecutor,
-    )
+    from stardag.integration.modal._executor import ModalTaskExecutor
+    from stardag.integration.modal._metadata import MODAL_EXECUTOR_NAME
     from stardag.registry import NoOpRegistry, StartClaimResult
     from stardag.testing.modal._tasks import SleepAndSaveCallId
 

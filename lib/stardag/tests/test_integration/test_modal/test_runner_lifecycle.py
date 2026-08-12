@@ -18,12 +18,11 @@ try:
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
-from stardag.integration.modal._app import (
+from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
-    Runner,
-    _WorkerLifecycleReporter,
 )
+from stardag.integration.modal._runner import Runner, _WorkerLifecycleReporter
 from stardag.registry import NoOpRegistry, registry_provider
 from stardag.testing.modal._tasks import SyncDynamicRangeSumTask, make_range
 
@@ -226,13 +225,15 @@ class TestReporterCreationGuard:
     ):
         """The best-effort contract covers creation itself: a broken registry
         config in the worker env must not fail a task before it runs."""
-        from stardag.integration.modal import _app as app_module
+        from stardag.integration.modal import _runner as runner_module
 
         def broken_create(task, env_overrides):
             raise RuntimeError("malformed registry config")
 
         monkeypatch.setattr(
-            app_module._WorkerLifecycleReporter, "create", staticmethod(broken_create)
+            runner_module._WorkerLifecycleReporter,
+            "create",
+            staticmethod(broken_create),
         )
         task = make_range(limit=3)
 
@@ -247,7 +248,7 @@ class TestReactiveWorkerBehavior:
     and registers dynamically yielded deps itself (no resident orchestrator)."""
 
     def _reactive_env(self, build_id: UUID, app_name: str = "wake-app") -> dict:
-        from stardag.integration.modal._app import (
+        from stardag.integration.modal._metadata import (
             STARDAG_MODAL_APP_NAME_ENV,
             STARDAG_REACTIVE_ENV,
         )

@@ -18,7 +18,7 @@ try:
 except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
-from stardag.integration.modal._app import Runner
+from stardag.integration.modal._runner import Runner
 from stardag.testing.modal._tasks import (
     AsyncDoubleTask,
     AsyncDynamicRangeSumTask,
