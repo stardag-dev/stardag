@@ -46,6 +46,17 @@ export interface StardagConfig {
 
   // Optional features
   sesEnabled: boolean;
+
+  // Whether the Cognito user pool allows self-service sign-up. Off by
+  // default: a self-hosted instance is typically reachable from the public
+  // internet, and open sign-up there means anyone can obtain an account.
+  // Opt in (COGNITO_ALLOW_SELF_SIGNUP=true) for a deployment that
+  // deliberately offers open registration (e.g. a hosted trial).
+  //
+  // NOTE: this governs Cognito *native* self-registration only. It does not
+  // by itself stop account creation via a federated IdP (e.g. Google) — see
+  // infra/aws-cdk/README.md ("Restricting who can sign up").
+  allowSelfSignUp: boolean;
 }
 
 export function loadConfig(): StardagConfig {
@@ -74,6 +85,7 @@ export function loadConfig(): StardagConfig {
 
     // Optional features (opt-in)
     sesEnabled: optionalBoolEnv("SES_ENABLED", false),
+    allowSelfSignUp: optionalBoolEnv("COGNITO_ALLOW_SELF_SIGNUP", false),
   };
 }
 

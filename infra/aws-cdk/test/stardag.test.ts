@@ -21,6 +21,7 @@ const mockConfig = {
   googleClientId: "test-client-id.apps.googleusercontent.com",
   googleClientSecret: "test-client-secret",
   sesEnabled: false, // Opt-in feature, disabled by default
+  allowSelfSignUp: false, // Secure default: no open self-registration
 };
 
 describe("StardagStack", () => {
@@ -76,6 +77,14 @@ describe("StardagStack", () => {
         UserPoolName: "stardag-users",
         UsernameAttributes: ["email"],
         AutoVerifiedAttributes: ["email"],
+      });
+    });
+
+    test("disables native self-signup by default (allowSelfSignUp=false)", () => {
+      // selfSignUpEnabled:false synthesizes AllowAdminCreateUserOnly:true.
+      // mockConfig has allowSelfSignUp:false, the secure default.
+      template.hasResourceProperties("AWS::Cognito::UserPool", {
+        AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
       });
     });
 

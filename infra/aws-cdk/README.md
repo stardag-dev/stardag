@@ -336,11 +336,47 @@ SES_ENABLED=true  # Enable AWS SES for transactional emails
 
 ### Optional Features
 
-| Feature     | Env Var       | Default | Description                                      |
-| ----------- | ------------- | ------- | ------------------------------------------------ |
-| SES (Email) | `SES_ENABLED` | `false` | AWS SES for transactional emails (invites, etc.) |
+| Feature             | Env Var                     | Default | Description                                       |
+| ------------------- | --------------------------- | ------- | ------------------------------------------------- |
+| SES (Email)         | `SES_ENABLED`               | `false` | AWS SES for transactional emails (invites, etc.)  |
+| Self-service signup | `COGNITO_ALLOW_SELF_SIGNUP` | `false` | Allow anyone to register in the Cognito user pool |
 
 **SES (Email):** When enabled, creates an SES email identity for your domain with automatic DKIM DNS records. Requires the domain to be configured in Route 53. After deployment, you'll need to request SES production access in the AWS Console (sandbox mode only allows sending to verified emails).
+
+### Restricting who can sign up
+
+This deployment is reachable from the public internet, so **who can obtain an
+account is a security decision**. The Registry API auto-provisions an internal
+user and a personal workspace on first login for any principal Cognito
+authenticates, so account creation in the pool is effectively account creation
+in Stardag.
+
+**Default is closed.** `COGNITO_ALLOW_SELF_SIGNUP` defaults to `false`, which
+sets the user pool's `selfSignUpEnabled: false` — the public `SignUp` API is
+disabled and native (email/password) users can only be created by an admin
+(`aws cognito-idp admin-create-user`, or the Cognito console). Set
+`COGNITO_ALLOW_SELF_SIGNUP=true` only for a deployment that deliberately offers
+open registration (e.g. a hosted trial).
+
+> **Important — federated (Google) sign-up is a separate door.** Disabling
+> self-signup blocks the _native_ `SignUp` API only. When a Google (or other
+> federated) IdP is configured, Cognito **still auto-provisions a pool user on
+> first federated login**, regardless of `selfSignUpEnabled`. So with the
+> default Google IdP, `COGNITO_ALLOW_SELF_SIGNUP=false` alone does **not** stop
+> anyone with a Google account from signing in and getting an account.
+>
+> To actually restrict federated sign-up, do one (or both) of:
+>
+> - **Add a pre-sign-up Lambda trigger** on the user pool that rejects sign-ups
+>   whose email is outside an allowlist/domain. The trigger fires for federated
+>   sign-ups too (`triggerSource == "PreSignUp_ExternalProvider"`); `throw` to
+>   deny. This is the robust, IdP-independent control.
+> - **Restrict at the IdP** — e.g. set the Google OAuth consent screen to
+>   _Internal_ for a Workspace org, or limit it to explicit test users, so only
+>   your org's Google accounts can complete the flow.
+>
+> If neither is in place, treat the deployment as open-registration regardless
+> of the `COGNITO_ALLOW_SELF_SIGNUP` value.
 
 ## CDK Commands
 

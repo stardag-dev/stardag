@@ -61,6 +61,7 @@ export class StardagStack extends cdk.Stack {
       googleClientId: config.googleClientId,
       googleClientSecret: config.googleClientSecret,
       domainPrefix: "stardag", // Must be globally unique
+      allowSelfSignUp: config.allowSelfSignUp,
     });
 
     // =============================================================
