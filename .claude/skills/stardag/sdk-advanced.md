@@ -401,7 +401,7 @@ class TrainModel(sd.Task[Model]):
     def run(self):
         try:
             train(resume_from=self.checkpoint_path())
-        except KeyboardInterrupt:      # the platform is taking the container
+        except BaseException:          # preemption OR the function timeout
             save_checkpoint(self.checkpoint_path())
             raise sd.TaskInterrupted("checkpointed; reschedule me") from None
 ```
@@ -412,10 +412,12 @@ anything derived from `Exception` and the task is recorded as a permanent
 failure — under `FAIL_FAST`, a dead build. `raise sd.TaskInterrupted(...)`
 (or a bare `raise`) keeps it restartable.
 
-On the scheduler side, `TickConfig.interruption_policy_selector` decides
-whether an interruption resumes the task (`InterruptionPolicy.RESTART`,
-bounded by `max_interruptions`) or records a retryable failure (`FAIL`, the
-default). See the Modal how-to for what arrives when.
+On the scheduler side an interruption **resumes** the task by default
+(`InterruptionPolicy.RESTART`, bounded by `TickConfig.max_interruptions`,
+and it does not spend `max_attempts`). Use
+`TickConfig.interruption_policy_selector` to return `FAIL` for a task where
+hitting the timeout means it hung. See the Modal how-to for what arrives
+when.
 
 ## TaskRef (Immutable Reference)
 

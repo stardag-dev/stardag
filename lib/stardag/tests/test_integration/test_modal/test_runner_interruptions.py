@@ -118,12 +118,62 @@ class TestClassifyInterruption:
             (RuntimeError("ordinary bug"), None),
         ],
     )
-    def test_unambiguous_exceptions(self, exception, expected):
+    def test_exception_types_well_before_the_timeout(self, exception, expected):
+        """What each type means when the timeout is nowhere near.
+
+        Only ``TaskTimedOut`` reads as a timeout here, because it is the one
+        the task asserted rather than the clock. The rest are timing-
+        dependent — see the two tests below for what they become once the
+        timeout has fired.
+        """
         assert (
             _classify_interruption(
                 exception, elapsed_seconds=1.0, function_timeout_seconds=600.0
             )
             == expected
+        )
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            sd.TaskInterrupted("checkpointed"),
+            sd.TaskPreempted("reclaimed"),
+            KeyboardInterrupt(),
+        ],
+    )
+    def test_a_declared_interruption_at_the_timeout_must_be_reported(self, exception):
+        """The stranding case, and the reason timing decides rather than
+        type. Once the timeout has fired the backend will NOT restart the
+        input — so leaving this to "the platform will handle it" leaves the
+        task RUNNING until its claim expires. Reachable straight from the
+        documented recipe, which is what makes it worth a test per shape."""
+        assert (
+            _classify_interruption(
+                exception, elapsed_seconds=300.0, function_timeout_seconds=300.0
+            )
+            == _TIMEOUT
+        )
+
+    @pytest.mark.parametrize(
+        "exception",
+        [
+            sd.TaskInterrupted("checkpointed"),
+            sd.TaskPreempted("reclaimed"),
+            KeyboardInterrupt(),
+        ],
+    )
+    def test_the_same_interruption_well_before_the_timeout_is_preemption(
+        self, exception
+    ):
+        """The control. Before the timeout, an escaping BaseException gets
+        the input restarted by the backend on the same call id — faster than
+        a reschedule and it keeps the claim, so reporting would be strictly
+        worse."""
+        assert (
+            _classify_interruption(
+                exception, elapsed_seconds=5.0, function_timeout_seconds=300.0
+            )
+            == _PREEMPTION
         )
 
     def test_input_cancellation_at_the_timeout_is_a_timeout(self):

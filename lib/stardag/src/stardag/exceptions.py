@@ -26,7 +26,7 @@ class TaskInterrupted(StardagError):
             def run(self):
                 try:
                     train(resume_from=self.checkpoint_path())
-                except KeyboardInterrupt:      # the preemption signal
+                except BaseException:      # preemption OR the timeout
                     save_checkpoint(self.checkpoint_path())
                     raise sd.TaskInterrupted("checkpointed") from None
 

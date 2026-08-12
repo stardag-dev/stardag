@@ -51,9 +51,9 @@ LimitKeySelector = typing.Callable[[BaseTask], typing.Sequence[str]]
 InterruptionPolicySelector = typing.Callable[[BaseTask], InterruptionPolicy]
 """Maps a task to what a platform interruption of it should mean.
 
-``RESTART`` for a task that checkpoints and expects to be resumed;
-``FAIL`` (the default for every task when no selector is configured) for
-one where a timeout means it hung. See :class:`InterruptionPolicy`.
+``RESTART`` (the default for every task when no selector is configured)
+resumes a task the platform interrupted; ``FAIL`` is the opt-in for one
+where hitting the timeout means it hung. See :class:`InterruptionPolicy`.
 """
 
 

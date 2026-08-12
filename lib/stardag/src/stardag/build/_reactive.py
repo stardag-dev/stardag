@@ -167,20 +167,31 @@ class InterruptionPolicy(str, Enum):
       killed and resumed until it converges. Here the timeout is not a
       failure at all.
 
-    Only the person who wrote the task knows which it is, so it is
-    declared rather than inferred — see
+    Only the person who wrote the task knows which it is, so the second
+    case is declared rather than inferred — see
     ``TickConfig.interruption_policy_selector``.
     """
 
-    #: Respawn the task, bounded by ``TickConfig.max_interruptions``.
-    #: For the checkpoint-and-resume workload above.
+    #: Resume the task, bounded by ``TickConfig.max_interruptions``.
+    #:
+    #: **The default**, and it means what the status says: an interruption
+    #: is the platform taking the container away, so the thing to do about
+    #: it is run the task again. A default of FAIL would say the opposite —
+    #: that stardag records "not the task's fault" and then fails the task
+    #: for it — and would quietly overrule a task that caught the
+    #: interrupt, checkpointed, and raised ``TaskInterrupted`` to ask for
+    #: exactly this.
     RESTART = "restart"
 
-    #: Record a retryable failure, bounded by the ordinary
-    #: ``TickConfig.max_attempts``. The default, because it is exactly what
-    #: happened before interruptions were reported at all: the execution
-    #: died, a tick eventually noticed and retried it once. Choosing it
-    #: changes only *when* that is discovered, not what follows.
+    #: Record a retryable failure instead, bounded by the ordinary
+    #: ``TickConfig.max_attempts``.
+    #:
+    #: The opt-in for a task where hitting the function timeout means it
+    #: **hung**: resuming that burns the wall-clock to arrive at the same
+    #: place, so failing it after a couple of attempts is cheaper and more
+    #: honest. Select it per task; it is also what every interruption
+    #: degrades to when the registry cannot report interruption counts,
+    #: since an unbounded resume loop is the one outcome worse than either.
     FAIL = "fail"
 
 
@@ -695,14 +706,14 @@ class TickConfig:
     # a hung task is a clear signal and a bounded bill.
     max_interruptions: int = 20
     # Maps a task to what should happen when the platform interrupts it.
-    # ``None`` (the default) means ``InterruptionPolicy.FAIL`` for every
-    # task, which reproduces the behaviour that predates interruption
-    # reporting exactly: the execution is treated as a retryable failure
-    # under ``max_attempts``. Only the *latency* changed — the worker now
-    # says so in its grace window instead of a later tick inferring it.
+    # ``None`` (the default) means ``InterruptionPolicy.RESTART`` for
+    # every task: an interruption is the platform taking the container
+    # away, so the default response is to run the task again, bounded by
+    # ``max_interruptions``.
     #
-    # Return ``InterruptionPolicy.RESTART`` for tasks that checkpoint and
-    # expect to be resumed.
+    # Return ``InterruptionPolicy.FAIL`` for tasks where hitting the
+    # function timeout means the task hung — resuming those burns the
+    # wall-clock to arrive at the same place.
     #
     # Deployed-app configuration, like ``limit_key_selector`` beside it,
     # and for the same reason NOT in the Modal ``_TICK_KWARGS_ALLOWED``
@@ -829,8 +840,9 @@ class TickSummary:
     # the direct answer to "why did my long-running task's build die?".
     interruptions_exhausted: int = 0
     # Interrupted tasks this tick converted straight to a retryable failure
-    # because the policy said FAIL (the default) — i.e. a timeout that is
-    # being read as "this hung", not as "resume it".
+    # because the policy said FAIL — i.e. a timeout that is being read as
+    # "this hung", not as "resume it". Also covers the degradation when the
+    # registry cannot report interruption counts.
     interruptions_failed: int = 0
     # Interrupted tasks left alone because their executor ref still probes
     # as live: the execution backend is retrying the input itself, so
@@ -1809,9 +1821,10 @@ async def _act_on_frontier(
                 acted = True
                 return
 
-        # FAIL — the default, and the no-counter fallback above. Exactly
-        # what happened before interruptions were reported: a retryable
-        # failure under the attempt budget. Recorded HERE, inside a tick
+        # FAIL — selected for this task, or the no-counter fallback
+        # above. A retryable failure under the attempt budget, which is
+        # what happened to every interruption before this existed.
+        # Recorded HERE, inside a tick
         # pass, rather than by the worker: a worker-recorded failure would
         # sit in the next frontier snapshot and fail the build under
         # FAIL_FAST before anything could retry it, which is the whole
@@ -2045,17 +2058,22 @@ async def _resolve_running(
 def _interruption_policy(task: BaseTask, config: "TickConfig") -> "InterruptionPolicy":
     """What this task's interruptions mean — see :class:`InterruptionPolicy`.
 
-    A selector failure resolves to ``FAIL`` rather than raising: this runs
-    while deciding what to do about a task the platform already took away,
-    and a broken selector must not additionally kill the tick. ``FAIL`` is
-    also the safe direction — it is bounded by ``max_attempts``, so a
-    mis-resolved task fails a build at worst, where a mis-resolved
-    ``RESTART`` could respawn one up to the (much larger) interruption
-    budget.
+    With no selector configured every task gets ``RESTART`` — see
+    :class:`InterruptionPolicy` for why that, and not ``FAIL``, is the
+    default.
+
+    A selector *failure* resolves to ``FAIL``, which is deliberately not
+    the default: this runs while deciding what to do about a task the
+    platform already took away, and a broken selector must not
+    additionally kill the tick — but nor should a broken selector be
+    rewarded with the larger budget. ``FAIL`` is bounded by
+    ``max_attempts``, so a mis-resolved task costs a couple of attempts at
+    worst, where a mis-resolved ``RESTART`` could spend the whole
+    interruption budget.
     """
     selector = config.interruption_policy_selector
     if selector is None:
-        return InterruptionPolicy.FAIL
+        return InterruptionPolicy.RESTART
     try:
         return selector(task)
     except Exception:

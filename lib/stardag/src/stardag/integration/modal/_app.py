@@ -332,13 +332,16 @@ class StardagApp:
                 (deployed-app configuration applied by every tick). Default:
                 no limits.
             interruption_policy_selector: Maps a task to what a platform
-                interruption of it means — ``InterruptionPolicy.RESTART``
-                for a task that checkpoints and expects to be killed and
-                resumed until it converges, ``FAIL`` for one where hitting
-                the function timeout means it hung. Deployed-app
+                interruption of it means. Default (no selector):
+                ``InterruptionPolicy.RESTART`` for every task — an
+                interruption is the platform taking the container away, so
+                the task is run again, bounded by
+                ``TickConfig.max_interruptions``. Return
+                ``InterruptionPolicy.FAIL`` for a task where hitting the
+                function timeout means it hung, and should be failed under
+                the ordinary attempt budget instead. Deployed-app
                 configuration applied by every tick, like the selector
-                above. Default: ``FAIL`` for every task, which is the
-                behaviour that predates interruption reporting.
+                above.
             task_modules: Modules whose import registers the task classes
                 this app may schedule. **Only reactive scheduling needs
                 this**: a scheduler tick reconstructs tasks from registry

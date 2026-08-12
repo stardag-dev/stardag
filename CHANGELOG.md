@@ -82,15 +82,20 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   reschedule. A **cancellation** is not reported either — whoever
   cancelled the task already recorded that.
 
-- **`TickConfig.interruption_policy_selector`** decides what an
-  interruption of a given task means: `InterruptionPolicy.RESTART` to
-  respawn it (for a task that checkpoints and expects to be killed and
-  resumed until it converges) or `FAIL` to record a retryable failure.
-  **`FAIL` is the default and reproduces the previous behaviour exactly**
-  — only the latency changes. `RESTART` tasks are bounded by the new
-  `TickConfig.max_interruptions` (default 20); interruptions deliberately
-  do not spend `max_attempts`, or a task designed to be resumed would
-  exhaust a budget meant for genuine failures.
+- **An interrupted task is resumed by default** —
+  `InterruptionPolicy.RESTART`, bounded by the new
+  `TickConfig.max_interruptions` (default 20). Interruptions deliberately
+  do not spend `max_attempts`, or a task designed to be killed and resumed
+  would exhaust a budget meant for genuine failures and fail the build for
+  the one reason it was built to survive.
+
+  **This is a behaviour change**, and it is the point: an execution the
+  platform took away used to become a retryable failure under
+  `max_attempts` (default 2), so a checkpointing task died on its third
+  interruption. Use `TickConfig.interruption_policy_selector` to return
+  `InterruptionPolicy.FAIL` for a task where hitting the function timeout
+  means it **hung** — resuming that burns the wall-clock to arrive at the
+  same place. `FAIL` reproduces the previous behaviour exactly.
 
 - **`FunctionSettings` gains `nonpreemptible` and `startup_timeout`**, the
   two Modal knobs this topic needs that were not previously expressible

@@ -865,6 +865,14 @@ Both are **`BaseException`, not `Exception`** — so a bare `except
 Exception:` in your task will not catch them, which is deliberate on
 Modal's part and load-bearing here.
 
+!!! warning "`except KeyboardInterrupt:` does not catch a timeout"
+
+    `InputCancellation` derives straight from `BaseException`; it is **not**
+    a `KeyboardInterrupt`. A handler written for preemption therefore does
+    nothing at all on a timeout. To cover both, catch `BaseException` — or
+    `modal.exception.InputCancellation` specifically if you want to handle
+    the two differently.
+
 After the first signal you have roughly **a minute** before the container
 is killed (Modal escalates SIGUSR1 → SIGINT after ~30s → SIGKILL after
 another ~30s). That is enough to write a checkpoint. It also means a
@@ -880,15 +888,15 @@ worker's `timeout` does not bound how long its container lives: budget
     same input — in a few seconds, without consuming `retries`.
 
     ```python
-    except KeyboardInterrupt:
+    except BaseException:
         save_checkpoint(path)
         raise RuntimeError("checkpointed")   # ✗ permanently failed build
     ```
 
     ```python
-    except KeyboardInterrupt:
+    except BaseException:
         save_checkpoint(path)
-        raise                                # ✓ restarted, and it succeeds
+        raise                                # ✓ the task stays recoverable
     ```
 
     This is exactly what you must write to checkpoint, which is why it is
@@ -901,14 +909,17 @@ class TrainModel(sd.Task[Model]):
     def run(self):
         try:
             train(resume_from=self.checkpoint_path())
-        except KeyboardInterrupt:          # the platform is taking the container
+        except BaseException:              # preemption OR the function timeout
             save_checkpoint(self.checkpoint_path())
             raise sd.TaskInterrupted("checkpointed; reschedule me") from None
 ```
 
 `sd.TaskInterrupted` (and its subclasses `TaskPreempted` and
-`TaskTimedOut`) says what happened, and stardag's `Runner` translates it
-back into a `BaseException` on the way out so the restart still happens.
+`TaskTimedOut`) says what happened, and stardag's `Runner` then routes it by
+**which recovery is still available**, not by which exception you chose:
+before the timeout it re-raises so Modal restarts the input; once the
+timeout has fired — when no restart is coming — it records the interruption
+so a scheduler tick can resume the task instead.
 A plain `raise` does the same thing today — the exception type earns its
 place by being self-documenting and by surviving the later refactor that
 wraps the body in `except Exception`, not by unlocking behaviour.
@@ -923,15 +934,24 @@ A timeout has two opposite meanings and only you know which applies:
   checkpoints and is _supposed_ to be killed and resumed until it
   converges.
 
-Declare it on the app, and reactive scheduler ticks apply it:
+**You do not have to configure anything for the second case.** The default
+for every task is `InterruptionPolicy.RESTART`: an interruption means the
+platform took the container, so the task is run again — bounded by
+`TickConfig.max_interruptions` (default 20). Interruptions deliberately do
+_not_ spend `max_attempts`, or a task designed to be killed and resumed
+would exhaust a budget meant for genuine failures and fail the build for
+the one reason it was built to survive.
+
+Opt a task **out** when hitting the timeout means it hung, so that resuming
+it would just burn the wall-clock again:
 
 ```{.python notest}
 from stardag.build import InterruptionPolicy
 
 def interruption_policy(task):
-    if isinstance(task, TrainModel):
-        return InterruptionPolicy.RESTART   # resume it; it checkpoints
-    return InterruptionPolicy.FAIL          # a timeout here means it hung
+    if isinstance(task, ShouldNeverTakeAnHour):
+        return InterruptionPolicy.FAIL      # a timeout here means it hung
+    return InterruptionPolicy.RESTART       # the default
 
 stardag_app = StardagApp(
     "my-app",
@@ -940,18 +960,8 @@ stardag_app = StardagApp(
 )
 ```
 
-`FAIL` is the default for every task, and it is what stardag did before
-interruptions were reported at all: a retryable failure under
-`max_attempts`. Adopting this feature therefore changes nobody's retry
-budget by default — what changes is that the worker reports the timeout in
-its grace window instead of a scheduler discovering it later, which is what
-makes recovery work **on an app with no watchdog configured**.
-
-`RESTART` tasks are bounded separately, by `TickConfig.max_interruptions`
-(default 20), because interruptions deliberately do _not_ spend
-`max_attempts` — a task designed to be killed and resumed would otherwise
-exhaust a budget meant for genuine failures and fail the build for the one
-reason it was built to survive.
+`FAIL` records a retryable failure under `max_attempts` instead — which is
+what stardag did with _every_ interruption before this existed.
 
 #### The knobs, and how they multiply
 

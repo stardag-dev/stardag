@@ -111,48 +111,58 @@ def _classify_interruption(
 ) -> str | None:
     """What ended this execution, or ``None`` if the task simply raised.
 
-    The rules, and the live-measured behaviour each one encodes (modal
-    1.5.0, 2026-08-12):
+    **The question is not "what kind of exception is this" but "is anything
+    else going to recover this execution".** Two independent facts decide
+    it, and conflating them strands tasks:
 
-    - **The task said so.** ``TaskTimedOut`` and ``TaskPreempted`` are
-      explicit. A bare ``TaskInterrupted`` resolves to preemption, which is
-      the conservative reading: preemption's handling is "report nothing,
-      re-raise", i.e. exactly what happens today, so a task that guesses
-      wrong degrades rather than changes behaviour.
-    - **A ``KeyboardInterrupt`` is the preemption signal.** Modal sends an
-      interrupt when it reclaims a container, and an escaping
-      ``BaseException`` reads to Modal as a crashed container — which it
-      restarts on the same input, ungated by ``retries``, in a few seconds.
-      That is strictly better than a scheduler respawn (the claim is kept,
-      no attempt is spent, no round-trip), so the right thing here is to
-      get out of the way.
-    - **An ``InputCancellation`` is ambiguous and has to be timed.** It is
-      what a function timeout looks like *and* what
-      ``FunctionCall.cancel()`` looks like — same type, same
-      ``"Input was cancelled by user"`` message. Since stardag cancels its
-      own workers (FAIL_FAST, UI cancel), reading every one as an
-      interruption would resurrect tasks the build just cancelled. Only one
-      of them arrives at the declared timeout, so that is the test.
+    - **Has the function timeout fired?** If it has, the call is dead and
+      the backend will NOT restart the input, whatever the container does
+      next (verified live: returning cleanly, re-raising an interrupt and
+      raising an ordinary exception all resolve to ``FunctionTimeoutError``
+      with no restart). Only a registry event can bring the task back.
+    - **Did the task declare an interruption?** ``TaskInterrupted`` and its
+      subclasses mean "I persisted my progress, run me again".
 
-    With no declared timeout to compare against, an ``InputCancellation``
-    is read as a cancellation — the conservative direction again, since
-    cancellation is also handled by doing nothing.
+    So a *declared* interruption is not automatically preemption-shaped.
+    Raised before the timeout it is: the exception escapes, the backend
+    reads a crashed container and restarts the input on the same call id in
+    a few seconds — better than a scheduler respawn on every axis (the
+    claim is kept, no attempt is spent, no round-trip). Raised **at** the
+    timeout, the same exception needs reporting, because nothing else is
+    coming. Routing it by subclass instead of by timing is how a task that
+    followed the documented recipe ends up sitting RUNNING until its claim
+    expires.
+
+    The remaining subtlety is that **an ``InputCancellation`` is ambiguous
+    and can only be timed.** It is what a function timeout looks like *and*
+    what ``FunctionCall.cancel()`` looks like — same type, same
+    ``"Input was cancelled by user"`` message. Since stardag cancels its own
+    workers (FAIL_FAST, UI cancel), reading every one as an interruption
+    would resurrect tasks the build just cancelled. Only one of them arrives
+    at the declared timeout.
+
+    With no declared timeout to compare against, nothing can be shown to
+    have timed out: a declared interruption is preemption-shaped and an
+    ``InputCancellation`` is a cancellation. Both are the conservative
+    direction, being the behaviour that predates interruption reporting.
     """
+    timed_out = function_timeout_seconds is not None and (
+        elapsed_seconds >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
+    )
     if isinstance(exception, TaskTimedOut):
+        # The task says it ran out of time and it is believed, even against
+        # a clock that disagrees — it knows something the clock does not.
         return _TIMEOUT
     if isinstance(exception, TaskInterrupted):
-        # Covers TaskPreempted and the bare base class.
-        return _PREEMPTION
+        # Covers TaskPreempted and the bare base class. Timing decides who
+        # recovers it; see the docstring.
+        return _TIMEOUT if timed_out else _PREEMPTION
     if isinstance(exception, (KeyboardInterrupt, SystemExit)):
-        return _PREEMPTION
+        # The preemption signal — but if the timeout has fired, a preemption
+        # signal arriving now is still an execution nobody will restart.
+        return _TIMEOUT if timed_out else _PREEMPTION
     if _InputCancellation is not None and isinstance(exception, _InputCancellation):
-        if function_timeout_seconds is None:
-            return _CANCELLATION
-        reached_timeout = (
-            elapsed_seconds
-            >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
-        )
-        return _TIMEOUT if reached_timeout else _CANCELLATION
+        return _TIMEOUT if timed_out else _CANCELLATION
     return None
 
 

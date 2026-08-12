@@ -4284,12 +4284,12 @@ class TestInterruptedTasks:
     the checkpoint-and-resume workload, bounded by its own budget.
     """
 
-    async def test_default_policy_records_a_retryable_failure(
+    async def test_default_policy_resumes_the_task(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """No selector configured -> FAIL -> the pre-existing behaviour: the
-        failure is recorded and the task retried inside the same pass, so
-        terminal detection never sees a build-killing failure."""
+        """No selector configured -> RESTART. The status says the platform
+        took the container; the default response is to run the task again,
+        with no failure recorded anywhere in its history."""
         (root,) = _chain("interrupted-default")
         registry, locks, executor, store = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
@@ -4303,18 +4303,49 @@ class TestInterruptedTasks:
             config=FAST_TICK,
         )
 
+        assert summary.interruptions_restarted == 1
+        assert summary.interruptions_failed == 0
+        assert summary.failed_recorded == 0
+        assert ("fail", str(root.id)) not in registry.calls
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+
+    async def test_fail_policy_records_a_retryable_failure(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The opt-in for "a timeout here means it hung": the failure is
+        recorded and the task retried inside the same pass, so terminal
+        detection never sees a build-killing failure. This is what every
+        interruption did before the status existed."""
+        (root,) = _chain("interrupted-fail-policy")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry.statuses[str(root.id)] = "interrupted"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+                interruption_policy_selector=lambda task: InterruptionPolicy.FAIL,
+            ),
+        )
+
         assert summary.interruptions_failed == 1
         assert summary.retried == 1
         assert summary.interruptions_restarted == 0
-        # Retried, spawned, and the build finished — not failed.
         assert executor.spawned == [root.id]
         assert summary.terminal_status == "completed"
 
     async def test_restart_policy_respawns_without_recording_a_failure(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """The checkpointing task's path: straight back to the frontier, no
-        failure in its history at all."""
+        """Same outcome as the default, reached by asking for it explicitly
+        — kept separate so a future change to the default cannot silently
+        take the explicit path with it."""
         (root,) = _chain("interrupted-restart")
         registry, locks, executor, store = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"

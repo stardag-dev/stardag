@@ -147,7 +147,7 @@ class TrainModel(sd.Task[Model]):
     def run(self):
         try:
             train(resume_from=self.checkpoint_path())
-        except KeyboardInterrupt:      # the platform is taking the container
+        except BaseException:          # preemption OR the function timeout
             save_checkpoint(self.checkpoint_path())
             raise sd.TaskInterrupted("checkpointed; reschedule me") from None
 ```
