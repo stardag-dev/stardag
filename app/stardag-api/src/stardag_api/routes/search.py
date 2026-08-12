@@ -1,9 +1,10 @@
 """Task search routes - advanced filtering and autocomplete."""
 
 import re
+import string
 import time
 from collections import Counter
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -58,6 +59,101 @@ OPERATORS = {
     "<=": "<=",
     "~": "ILIKE",  # substring/contains
 }
+
+
+# A JSON path step and an artifact name are *identifiers* as far as the
+# query is concerned: they are interpolated into the SQL text, because
+# Postgres has no bind-parameter form for a `->'step'` accessor. So they are
+# constrained to an identifier-safe character class and anything else is
+# rejected outright rather than escaped. The filter DSL has no legitimate use
+# for a quote, a backslash, or whitespace in a key, so rejecting is both safe
+# and lossless — and it keeps the invariant to a single character class,
+# rather than an escaping routine that has to stay correct forever.
+#
+# The check is a charset test rather than a regex on purpose: it is obviously
+# linear in the length of the input, with no backtracking behaviour to reason
+# about, and it is the single place that decides what may be interpolated.
+_PATH_SEGMENT_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+_ASCII_DIGITS = frozenset(string.digits)
+
+
+def _is_valid_segment(segment: str) -> bool:
+    """True if ``segment`` is a bare, identifier-safe JSON path step."""
+    return bool(segment) and all(c in _PATH_SEGMENT_CHARS for c in segment)
+
+
+def _split_array_segment(segment: str) -> tuple[str, str] | None:
+    """Split an ``items[3]`` style step into ``("items", "3")``.
+
+    Returns None if ``segment`` is not exactly that shape. The index is
+    checked against ASCII digits specifically, not ``str.isdigit()`` — the
+    latter accepts superscripts and other Unicode digit forms, which would
+    then be interpolated verbatim into the SQL text.
+    """
+    if not segment.endswith("]"):
+        return None
+    field, sep, index = segment[:-1].partition("[")
+    if not sep or not index or not all(c in _ASCII_DIGITS for c in index):
+        return None
+    if not _is_valid_segment(field):
+        return None
+    return field, index
+
+
+# Bounds on the raw query-string inputs. The filter/sort grammar is parsed
+# with regexes whose worst case is polynomial in the input length, so the
+# cheapest correct defence is to refuse to parse an input long enough for
+# that to matter. These are far above any real filter string.
+MAX_FILTER_LENGTH = 2000
+MAX_QUERY_LENGTH = 500
+MAX_SORT_LENGTH = 200
+
+
+def _reject_path_segment(key: str, segment: str) -> NoReturn:
+    """Always raises. Typed ``NoReturn`` so the type checker enforces that
+    ``_render_jsonb_path``'s else-branch cannot fall through and return an
+    unvalidated path if this ever becomes conditional."""
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Invalid filter key {key!r}: path segment {segment!r} must contain "
+            "only letters, digits, underscore and hyphen, optionally followed "
+            "by an array index such as 'items[0]'"
+        ),
+    )
+
+
+def _render_jsonb_path(base: str, path_parts: list[str], key: str) -> str:
+    """Render a JSONB accessor chain over ``base``, validating every segment.
+
+    ``base`` is a trusted, code-supplied expression (e.g. ``tasks.task_data``).
+    Every element of ``path_parts`` is caller-controlled and must pass
+    ``_is_valid_segment`` or ``_split_array_segment`` before it reaches the SQL
+    text. Raises HTTPException(400) on anything that does not.
+
+    The last segment uses ``->>`` (text extraction); earlier ones use ``->``
+    (JSON extraction), which is what makes the result comparable to a bound
+    text parameter.
+    """
+    rendered = base
+    for i, part in enumerate(path_parts):
+        is_last = i == len(path_parts) - 1
+        array_segment = _split_array_segment(part)
+        if array_segment is not None:
+            field, index = array_segment
+            rendered = f"({rendered}->'{field}')->{index}"
+        elif _is_valid_segment(part):
+            rendered = f"{rendered}->>'{part}'" if is_last else f"{rendered}->'{part}'"
+        else:
+            _reject_path_segment(key, part)
+    return rendered
+
+
+def _validate_artifact_name(artifact_name: str, key: str) -> None:
+    """Artifact names are bound as parameters everywhere except the sort
+    subquery, where the name must be validated before interpolation."""
+    if not _is_valid_segment(artifact_name):
+        _reject_path_segment(key, artifact_name)
 
 
 def _validate_filter_value(key: str, op: str, value: str) -> None:
@@ -197,20 +293,8 @@ def build_jsonb_condition(
         json_path = key[6:]  # Remove 'param.' prefix
         path_parts = json_path.split(".")
 
-        # Build JSONB path access
-        jsonb_path = f"{task_alias}.task_data"
-        for i, part in enumerate(path_parts):
-            # Check for array access like items[0]
-            array_match = re.match(r"(\w+)\[(\d+)\]", part)
-            if array_match:
-                field, index = array_match.groups()
-                jsonb_path = f"({jsonb_path}->'{field}')->{index}"
-            else:
-                if i == len(path_parts) - 1:
-                    # Last part - use ->> for text extraction
-                    jsonb_path = f"{jsonb_path}->>'{part}'"
-                else:
-                    jsonb_path = f"{jsonb_path}->'{part}'"
+        # Build JSONB path access (every segment validated - see helper)
+        jsonb_path = _render_jsonb_path(f"{task_alias}.task_data", path_parts, key)
 
         safe_key = (
             key.replace(".", "_").replace("[", "_").replace("]", "_").replace("-", "_")
@@ -245,18 +329,12 @@ def build_jsonb_condition(
         json_path = parts[1]
         path_parts = json_path.split(".")
 
+        # The artifact name is bound as a parameter below, but validate it
+        # here too so a malformed key fails the same way in every branch.
+        _validate_artifact_name(artifact_name, key)
+
         # Build JSONB path access for artifact body_json
-        jsonb_path = "artifact_filter.body_json"
-        for i, part in enumerate(path_parts):
-            array_match = re.match(r"(\w+)\[(\d+)\]", part)
-            if array_match:
-                field, index = array_match.groups()
-                jsonb_path = f"({jsonb_path}->'{field}')->{index}"
-            else:
-                if i == len(path_parts) - 1:
-                    jsonb_path = f"{jsonb_path}->>'{part}'"
-                else:
-                    jsonb_path = f"{jsonb_path}->'{part}'"
+        jsonb_path = _render_jsonb_path("artifact_filter.body_json", path_parts, key)
 
         safe_key = (
             key.replace(".", "_").replace("[", "_").replace("]", "_").replace("-", "_")
@@ -345,9 +423,9 @@ async def search_tasks(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 50,
-    filter: str | None = None,
-    q: str | None = None,  # Text search
-    sort: str = "created_at:desc",
+    filter: Annotated[str | None, Query(max_length=MAX_FILTER_LENGTH)] = None,
+    q: Annotated[str | None, Query(max_length=MAX_QUERY_LENGTH)] = None,
+    sort: Annotated[str, Query(max_length=MAX_SORT_LENGTH)] = "created_at:desc",
     include_artifacts: str | None = None,  # Comma-separated artifact names to include
 ):
     """Search tasks with advanced filtering.
@@ -468,34 +546,33 @@ async def search_tasks(
     elif sort_field.startswith("param.") or sort_field.startswith("artifact."):
         order_dir = "ASC" if sort_dir == "asc" else "DESC"
 
+        # The sort field is caller-controlled and lands in SQL text, exactly
+        # like a filter key. Same validation, same 400 on anything else.
+        sort_bindparams: dict[str, str] = {}
         if sort_field.startswith("param."):
             # Sort by JSONB field in task_data
             json_key = sort_field[6:]  # Remove "param." prefix
-            path_parts = json_key.split(".")
-            jsonb_path = "tasks.task_data"
-            for i, part in enumerate(path_parts):
-                if i == len(path_parts) - 1:
-                    jsonb_path = f"{jsonb_path}->>'{part}'"
-                else:
-                    jsonb_path = f"{jsonb_path}->'{part}'"
+            jsonb_path = _render_jsonb_path(
+                "tasks.task_data", json_key.split("."), sort_field
+            )
         else:
             # Sort by JSONB field in artifact body_json
             # Format: artifact.{name}.{json_path}
             rest = sort_field[9:]  # Remove "artifact." prefix
             parts = rest.split(".", 1)
             artifact_name = parts[0]
+            _validate_artifact_name(artifact_name, sort_field)
             json_path_parts = parts[1].split(".") if len(parts) > 1 else []
-            # Build subquery to extract value from artifact
-            inner_path = "artifact_sort.body_json"
-            for i, part in enumerate(json_path_parts):
-                if i == len(json_path_parts) - 1:
-                    inner_path = f"{inner_path}->>'{part}'"
-                else:
-                    inner_path = f"{inner_path}->'{part}'"
+            # Build subquery to extract value from artifact. The artifact name
+            # is bound, not interpolated - it is a value, not an identifier.
+            inner_path = _render_jsonb_path(
+                "artifact_sort.body_json", json_path_parts, sort_field
+            )
+            sort_bindparams["sort_artifact_name"] = artifact_name
             jsonb_path = (
                 f"(SELECT {inner_path} FROM task_artifacts artifact_sort "
                 f"WHERE artifact_sort.task_pk = tasks.id "
-                f"AND artifact_sort.name = '{artifact_name}' LIMIT 1)"
+                f"AND artifact_sort.name = :sort_artifact_name LIMIT 1)"
             )
 
         # Numeric-safe sort: cast to float where possible, fall back to text
@@ -505,8 +582,10 @@ async def search_tasks(
         )
         text_expr = f"({jsonb_path})"
         query = query.order_by(
-            text(f"{numeric_expr} {order_dir} NULLS LAST"),
-            text(f"{text_expr} {order_dir} NULLS LAST"),
+            text(f"{numeric_expr} {order_dir} NULLS LAST").bindparams(
+                **sort_bindparams
+            ),
+            text(f"{text_expr} {order_dir} NULLS LAST").bindparams(**sort_bindparams),
         )
     else:
         # Unknown sort field - default to created_at
@@ -724,8 +803,8 @@ async def get_key_suggestions(
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
     prefix: str = "",
     limit: int = 20,
-    filter: str | None = None,
-    q: str | None = None,
+    filter: Annotated[str | None, Query(max_length=MAX_FILTER_LENGTH)] = None,
+    q: Annotated[str | None, Query(max_length=MAX_QUERY_LENGTH)] = None,
 ):
     """Get key suggestions for autocomplete.
 
@@ -1052,9 +1131,9 @@ def _get_nested_value(data: dict, path: list[str]) -> str | None:
     current = data
     for part in path:
         # Handle array access
-        array_match = re.match(r"(\w+)\[(\d+)\]", part)
-        if array_match:
-            field, index = array_match.groups()
+        array_segment = _split_array_segment(part)
+        if array_segment is not None:
+            field, index = array_segment
             if isinstance(current, dict) and field in current:
                 current = current[field]
                 if isinstance(current, list) and int(index) < len(current):
@@ -1077,8 +1156,8 @@ def _get_nested_value(data: dict, path: list[str]) -> str | None:
 async def get_available_columns(
     db: Annotated[AsyncSession, Depends(get_db)],
     auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
-    filter: str | None = None,
-    q: str | None = None,
+    filter: Annotated[str | None, Query(max_length=MAX_FILTER_LENGTH)] = None,
+    q: Annotated[str | None, Query(max_length=MAX_QUERY_LENGTH)] = None,
 ):
     """Get all available columns for the results table.
 

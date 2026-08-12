@@ -9,6 +9,9 @@ from fastapi import HTTPException
 
 from stardag_api.routes.search import (
     _extract_keys,
+    _is_valid_segment,
+    _render_jsonb_path,
+    _split_array_segment,
     _validate_filter_value,
     build_jsonb_condition,
     parse_filter_string,
@@ -420,3 +423,203 @@ async def test_search_filter_build_id_ilike_accepts_non_uuid_substring(
     # Returns 200 with empty results (no UUID happens to contain that text).
     assert resp.status_code == 200, resp.text
     assert resp.json()["tasks"] == []
+
+
+# ---------------------------------------------------------------------------
+# Filter-key / sort-field injection defence.
+#
+# JSONB path segments and the sort subquery's artifact name land in the SQL
+# *text* (Postgres has no bind-parameter form for a `->'step'` accessor), so
+# they are validated against an identifier character class. These tests pin
+# that a quote in a key can never reach the emitted SQL.
+# ---------------------------------------------------------------------------
+
+
+INJECTION_SEGMENTS = [
+    "x'",
+    "x' OR '1'='1",
+    "x'--",
+    "x'; DROP TABLE tasks; --",
+    "x'||(SELECT 1)||'",
+    'x"',
+    "x\\",
+    "x y",
+    "x;y",
+    "x/*c*/",
+]
+
+
+class TestFilterKeyInjection:
+    @pytest.mark.parametrize("segment", INJECTION_SEGMENTS)
+    def test_param_key_with_sql_metacharacters_raises_400(self, segment: str) -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            build_jsonb_condition(f"param.{segment}", "=", "v")
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.parametrize("segment", INJECTION_SEGMENTS)
+    def test_artifact_key_with_sql_metacharacters_raises_400(
+        self, segment: str
+    ) -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            build_jsonb_condition(f"artifact.report.{segment}", "=", "v")
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.parametrize("segment", INJECTION_SEGMENTS)
+    def test_artifact_name_with_sql_metacharacters_raises_400(
+        self, segment: str
+    ) -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            build_jsonb_condition(f"artifact.{segment}.field", "=", "v")
+        assert exc_info.value.status_code == 400
+
+    def test_legitimate_param_key_still_builds(self) -> None:
+        condition, _, _ = build_jsonb_condition("param.learning_rate", "=", "0.1")
+        assert condition is not None
+        assert "task_data->>'learning_rate'" in condition
+
+    def test_legitimate_nested_and_array_key_still_builds(self) -> None:
+        condition, _, _ = build_jsonb_condition("param.cfg.items[2].name", "=", "x")
+        assert condition is not None
+        assert "->'cfg'" in condition
+        assert "->'items')->2" in condition
+        assert "->>'name'" in condition
+
+    def test_artifact_name_is_bound_not_interpolated(self) -> None:
+        condition, _, artifact_name = build_jsonb_condition(
+            "artifact.report.score", "=", "1"
+        )
+        assert condition is not None
+        assert artifact_name == "report"
+        # The name is a *value* — it must travel as a bound parameter.
+        assert "artifact_filter.name = :filter_artifact_name" in condition
+        assert "'report'" not in condition
+
+    def test_hyphen_and_underscore_are_accepted(self) -> None:
+        condition, _, _ = build_jsonb_condition("param.my-key_2", "=", "v")
+        assert condition is not None
+        assert "->>'my-key_2'" in condition
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_filter",
+    [
+        "param.x':=:1",
+        "param.x' OR '1'='1:=:1",
+        "artifact.a'.b:=:1",
+        "artifact.a.b':=:1",
+    ],
+)
+async def test_search_filter_key_injection_returns_400(
+    client: AsyncClient, bad_filter: str
+) -> None:
+    resp = await client.get(
+        "/api/v1/tasks/search", params={"filter": bad_filter, "page_size": 50}
+    )
+    assert resp.status_code == 400, resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_sort",
+    [
+        "param.x':asc",
+        "artifact.a' UNION SELECT 1 --.b:asc",
+        "artifact.a.b':desc",
+    ],
+)
+async def test_search_sort_injection_returns_400(
+    client: AsyncClient, bad_sort: str
+) -> None:
+    resp = await client.get(
+        "/api/v1/tasks/search", params={"sort": bad_sort, "page_size": 50}
+    )
+    assert resp.status_code == 400, resp.text
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_overlong_filter(client: AsyncClient) -> None:
+    """Bounded input is the ReDoS defence for the filter grammar."""
+    resp = await client.get(
+        "/api/v1/tasks/search", params={"filter": "a" * 5000, "page_size": 50}
+    )
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_search_sort_by_artifact_still_works(pg_client: AsyncClient) -> None:
+    """Regression: the sort subquery still functions after the artifact name
+    moved from an interpolated literal to a bound parameter.
+
+    Postgres-only: the numeric-detection branch uses the ``~`` regex operator.
+    """
+    await _create_task(pg_client, "art-sort-1", {"v": 1})
+    resp = await pg_client.get(
+        "/api/v1/tasks/search", params={"sort": "artifact.report.score:asc"}
+    )
+    assert resp.status_code == 200, resp.text
+
+
+class TestRenderedPathNeverContainsMetacharacters:
+    """The property the SQL-injection fix actually rests on: whatever the
+    caller sends, the rendered accessor chain either contains no SQL
+    metacharacter, or no chain is produced at all (400).
+
+    This is asserted directly rather than inferred from the endpoint's status
+    code, so it stays true if the calling code is ever restructured.
+    """
+
+    ADVERSARIAL = [
+        "x'",
+        'x"',
+        "x\\",
+        "x`",
+        "x;",
+        "x--",
+        "x/*",
+        "x*/",
+        "x'||'",
+        "x[0]'",
+        "x[0']",
+        "x[0]junk",
+        "x[]",
+        "x[-1]",
+        "x[\u00b2]",  # Unicode superscript two - str.isdigit() accepts it
+        "x[\u0661]",  # Arabic-Indic digit one - likewise
+        "",
+        " ",
+        "x y",
+        "x\ty",
+        "x\ny",
+        "x.y",
+        "%",
+        ":param",
+        "\u0000",
+    ]
+
+    @pytest.mark.parametrize("segment", ADVERSARIAL)
+    def test_no_metacharacter_survives(self, segment: str) -> None:
+        try:
+            rendered = _render_jsonb_path("tasks.task_data", [segment], "param.k")
+        except HTTPException as exc:
+            assert exc.status_code == 400
+            return
+        # A chain was produced, so the segment must have been identifier-safe.
+        # That is the whole invariant: the accessor is a single-quoted literal,
+        # and only a quote (or a backslash, which some engines honour inside
+        # literals) could escape it. Sequences like `--` or `;` are inert
+        # *inside* a quoted literal, so a segment of "x--" renders the harmless
+        # ->>'x--' and is legitimately allowed.
+        assert _is_valid_segment(segment) or _split_array_segment(segment)
+        for forbidden in ("'", '"', "\\", "`"):
+            assert forbidden not in segment, (segment, rendered)
+        # Quotes in the output are only the delimiters this code emits itself.
+        body = rendered[len("tasks.task_data") :]
+        assert body.count("'") % 2 == 0, (segment, rendered)
+
+    def test_unicode_digit_index_is_rejected_not_interpolated(self) -> None:
+        """``str.isdigit()`` would accept these; the ASCII-only check must not."""
+        for segment in ("x[\u00b2]", "x[\u0661]"):
+            with pytest.raises(HTTPException) as exc_info:
+                _render_jsonb_path("tasks.task_data", [segment], "param.k")
+            assert exc_info.value.status_code == 400
