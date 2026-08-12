@@ -33,8 +33,9 @@ try:
         StardagApp,
         get_default_volume_mount_path,
     )
-    from stardag.integration.modal._app import ModalTaskExecutor
     from stardag.integration.modal._config import with_stardag_on_image
+    from stardag.integration.modal._executor import ModalTaskExecutor
+    from stardag.integration.modal._settings import _prepare_function_settings
     from stardag.testing.modal import live_modal_guard
     from stardag.testing.modal._tasks import (
         AsyncDoubleTask,
@@ -244,7 +245,7 @@ class TestUserVolumesOverride:
         )
 
         # Verify _prepare_function_settings merges correctly
-        settings = StardagApp._prepare_function_settings(
+        settings = _prepare_function_settings(
             FunctionSettings(
                 image=TEST_IMAGE,
                 volumes={EXPECTED_MOUNT_PATH: user_volume},
@@ -270,7 +271,7 @@ class TestUserVolumesOverride:
         assert EXPECTED_MOUNT_PATH in result.volume_mounts
 
         # Verify _prepare_function_settings includes auto volumes
-        settings = StardagApp._prepare_function_settings(
+        settings = _prepare_function_settings(
             FunctionSettings(image=TEST_IMAGE),
             extra_secrets=[],
             auto_volumes=result.auto_volumes,

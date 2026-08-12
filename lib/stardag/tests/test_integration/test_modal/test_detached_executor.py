@@ -17,7 +17,8 @@ except ImportError:
 
 from stardag import BaseTask
 from stardag.build import TaskExecutionError
-from stardag.integration.modal._app import MODAL_EXECUTOR_NAME, ModalTaskExecutor
+from stardag.integration.modal._executor import ModalTaskExecutor
+from stardag.integration.modal._metadata import MODAL_EXECUTOR_NAME
 
 
 class FakeFunctionCall:
@@ -256,7 +257,7 @@ class TestBuildIdInjection:
 
     async def test_injected_inside_build_context(self):
         from stardag.build._base import current_build_id_var
-        from stardag.integration.modal._app import STARDAG_BUILD_ID_ENV
+        from stardag.integration.modal._metadata import STARDAG_BUILD_ID_ENV
 
         build_id = __import__("uuid").uuid4()
         function_call = FakeFunctionCall()
@@ -273,7 +274,7 @@ class TestBuildIdInjection:
         assert env_overrides[STARDAG_BUILD_ID_ENV] == str(build_id)
 
     async def test_not_injected_outside_build_context(self):
-        from stardag.integration.modal._app import STARDAG_BUILD_ID_ENV
+        from stardag.integration.modal._metadata import STARDAG_BUILD_ID_ENV
 
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
@@ -285,7 +286,7 @@ class TestBuildIdInjection:
 
     async def test_not_injected_when_worker_reporting_disabled(self):
         from stardag.build._base import current_build_id_var
-        from stardag.integration.modal._app import STARDAG_BUILD_ID_ENV
+        from stardag.integration.modal._metadata import STARDAG_BUILD_ID_ENV
 
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = ModalTaskExecutor(

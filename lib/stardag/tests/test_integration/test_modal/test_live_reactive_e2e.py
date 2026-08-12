@@ -54,10 +54,8 @@ try:
         LockAcquisitionResult,
         LockAcquisitionStatus,
     )
-    from stardag.integration.modal._app import (
-        MODAL_EXECUTOR_NAME,
-        ModalTaskExecutor,
-    )
+    from stardag.integration.modal._executor import ModalTaskExecutor
+    from stardag.integration.modal._metadata import MODAL_EXECUTOR_NAME
     from stardag.registry import BuildFrontier, FrontierTaskRef, NoOpRegistry
     from stardag.testing.modal._tasks import SleepAndSaveCallId
 

@@ -59,7 +59,7 @@ def hermetic_modal_executor_metadata(monkeypatch):
     Tests exercising the resolution logic itself override these
     monkeypatches explicitly.
     """
-    from stardag.integration.modal import _app as modal_app_module
+    from stardag.integration.modal import _app, _executor, _metadata
 
     async def _fake_workspace_aio():
         return "test-workspace"
@@ -73,23 +73,28 @@ def hermetic_modal_executor_metadata(monkeypatch):
     # The real (pre-patch) functions, for tests exercising the resolution
     # logic itself.
     originals = {
-        "get_modal_workspace_aio": modal_app_module._get_modal_workspace_aio,
-        "get_modal_app_id_aio": modal_app_module._get_modal_app_id_aio,
-        "get_modal_function_id_aio": modal_app_module._get_modal_function_id_aio,
+        "get_modal_workspace_aio": _metadata._get_modal_workspace_aio,
+        "get_modal_app_id_aio": _metadata._get_modal_app_id_aio,
+        "get_modal_function_id_aio": _metadata._get_modal_function_id_aio,
     }
 
-    monkeypatch.setattr(
-        modal_app_module, "_get_modal_workspace_aio", _fake_workspace_aio
-    )
-    monkeypatch.setattr(
-        modal_app_module, "_get_modal_workspace", lambda: "test-workspace"
-    )
-    monkeypatch.setattr(modal_app_module, "_get_modal_environment", lambda: "test-env")
+    def patch_everywhere(name, value):
+        """Patch ``name`` in ``_metadata`` and in every module that calls it.
+
+        The helpers are defined in ``_metadata`` but imported *by name* into
+        their callers, so patching only the definition site would leave
+        those call sites resolving the real function.
+        """
+        for module in (_metadata, _executor, _app):
+            if hasattr(module, name):
+                monkeypatch.setattr(module, name, value)
+
+    patch_everywhere("_get_modal_workspace_aio", _fake_workspace_aio)
+    patch_everywhere("_get_modal_workspace", lambda: "test-workspace")
+    patch_everywhere("_get_modal_environment", lambda: "test-env")
     # Pin the app-id / function-id resolution too, so the unit tier never
     # attempts a real ``modal.App.lookup`` / handle hydration over the
     # network. Tests exercising these helpers override them explicitly.
-    monkeypatch.setattr(modal_app_module, "_get_modal_app_id_aio", _fake_app_id_aio)
-    monkeypatch.setattr(
-        modal_app_module, "_get_modal_function_id_aio", _fake_function_id_aio
-    )
+    patch_everywhere("_get_modal_app_id_aio", _fake_app_id_aio)
+    patch_everywhere("_get_modal_function_id_aio", _fake_function_id_aio)
     return originals

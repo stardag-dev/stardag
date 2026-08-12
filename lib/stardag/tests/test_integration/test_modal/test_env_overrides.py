@@ -24,12 +24,10 @@ except ImportError:
     pytest.skip("Skipping modal tests (import not available)", allow_module_level=True)
 
 import stardag as sd
-from stardag.integration.modal._app import (
-    ModalTaskExecutor,
-    Runner,
-    _callable_accepts_env_overrides,
-    _normalize_worker_selection,
-)
+from stardag.integration.modal._executor import ModalTaskExecutor
+from stardag.integration.modal._protocols import _callable_accepts_env_overrides
+from stardag.integration.modal._runner import Runner
+from stardag.integration.modal._selector import _normalize_worker_selection
 from stardag.testing.modal._tasks import make_range
 
 _UNSET = "<unset>"

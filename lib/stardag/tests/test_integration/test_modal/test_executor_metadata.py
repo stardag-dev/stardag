@@ -21,7 +21,8 @@ except ImportError:
 
 from stardag import BaseTask
 from stardag.build._base import current_build_id_var
-from stardag.integration.modal._app import (
+from stardag.integration.modal._executor import ModalTaskExecutor
+from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
     STARDAG_BUILD_ID_ENV,
     STARDAG_CLAIM_TTL_SECONDS_ENV,
@@ -31,9 +32,8 @@ from stardag.integration.modal._app import (
     STARDAG_MODAL_FUNCTION_ID_ENV,
     STARDAG_MODAL_FUNCTION_NAME_ENV,
     STARDAG_MODAL_WORKSPACE_ENV,
-    ModalTaskExecutor,
-    _WorkerLifecycleReporter,
 )
+from stardag.integration.modal._runner import _WorkerLifecycleReporter
 from stardag.registry import NoOpRegistry
 
 EXPECTED_BASE_METADATA = {
@@ -116,7 +116,7 @@ class TestDetachedHandleMetadata:
         function id) fail here; the spawn still succeeds and the handle
         carries only the identity fields the executor always knows.
         """
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _executor as executor_module
 
         async def _boom():
             raise ConnectionError("no network")
@@ -129,15 +129,15 @@ class TestDetachedHandleMetadata:
         async def _no_function_id(function):
             return None
 
-        monkeypatch.setattr(modal_app_module, "_get_modal_workspace_aio", _boom)
+        monkeypatch.setattr(executor_module, "_get_modal_workspace_aio", _boom)
         monkeypatch.setattr(
-            modal_app_module,
+            executor_module,
             "_get_modal_environment",
             lambda: (_ for _ in ()).throw(ConnectionError("also broken")),
         )
-        monkeypatch.setattr(modal_app_module, "_get_modal_app_id_aio", _no_app_id)
+        monkeypatch.setattr(executor_module, "_get_modal_app_id_aio", _no_app_id)
         monkeypatch.setattr(
-            modal_app_module, "_get_modal_function_id_aio", _no_function_id
+            executor_module, "_get_modal_function_id_aio", _no_function_id
         )
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
@@ -157,7 +157,7 @@ class TestDetachedHandleMetadata:
         """A raising token lookup is cached as None: no raise reaches the
         caller and the lookup (and its timeout) is not re-paid on every
         task start."""
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _metadata as metadata_module
 
         real_get = hermetic_modal_executor_metadata["get_modal_workspace_aio"]
         calls = {"n": 0}
@@ -167,12 +167,12 @@ class TestDetachedHandleMetadata:
             raise TimeoutError("modal api unreachable")
 
         monkeypatch.setattr(
-            modal_app_module, "_lookup_modal_workspace_aio", _raising_lookup
+            metadata_module, "_lookup_modal_workspace_aio", _raising_lookup
         )
         monkeypatch.setattr(
-            modal_app_module,
+            metadata_module,
             "_modal_workspace_cache",
-            modal_app_module._MODAL_WORKSPACE_UNRESOLVED,
+            metadata_module._MODAL_WORKSPACE_UNRESOLVED,
         )
 
         assert await real_get() is None
@@ -185,7 +185,7 @@ class TestDetachedHandleMetadata:
         """Inside a Modal container there is no token, so the workspace is
         baked into STARDAG_MODAL_WORKSPACE at deploy; the resolver must read
         that env var instead of attempting (and failing) a token lookup."""
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _metadata as metadata_module
 
         real_get = hermetic_modal_executor_metadata["get_modal_workspace_aio"]
 
@@ -193,15 +193,15 @@ class TestDetachedHandleMetadata:
             raise AssertionError("token lookup must not run when env is set")
 
         monkeypatch.setattr(
-            modal_app_module, "_lookup_modal_workspace_aio", _must_not_be_called
+            metadata_module, "_lookup_modal_workspace_aio", _must_not_be_called
         )
         monkeypatch.setattr(
-            modal_app_module,
+            metadata_module,
             "_modal_workspace_cache",
-            modal_app_module._MODAL_WORKSPACE_UNRESOLVED,
+            metadata_module._MODAL_WORKSPACE_UNRESOLVED,
         )
         monkeypatch.setenv(
-            modal_app_module.STARDAG_MODAL_WORKSPACE_ENV, "baked-workspace"
+            metadata_module.STARDAG_MODAL_WORKSPACE_ENV, "baked-workspace"
         )
 
         assert await real_get() == "baked-workspace"
@@ -214,10 +214,10 @@ class TestDetachedHandleMetadata:
         and UI deep links break."""
         import types
 
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _metadata as metadata_module
 
         monkeypatch.setattr(
-            modal_app_module.modal.config,
+            metadata_module.modal.config,
             "config",
             types.SimpleNamespace(
                 get=lambda k: {
@@ -233,26 +233,26 @@ class TestDetachedHandleMetadata:
             return types.SimpleNamespace(workspace_name="", username="andhus")
 
         monkeypatch.setattr(
-            modal_app_module.modal.config,
+            metadata_module.modal.config,
             "_lookup_workspace",
             _fake_lookup,
             raising=False,
         )
-        assert await modal_app_module._lookup_modal_workspace_aio() == "andhus"
+        assert await metadata_module._lookup_modal_workspace_aio() == "andhus"
 
         async def _fake_lookup_named(server_url, token_id, token_secret):
             return types.SimpleNamespace(workspace_name="my-org", username="u")
 
         monkeypatch.setattr(
-            modal_app_module.modal.config,
+            metadata_module.modal.config,
             "_lookup_workspace",
             _fake_lookup_named,
             raising=False,
         )
-        assert await modal_app_module._lookup_modal_workspace_aio() == "my-org"
+        assert await metadata_module._lookup_modal_workspace_aio() == "my-org"
 
     async def test_base_metadata_resolved_once(self, monkeypatch):
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _executor as executor_module
 
         calls = {"n": 0}
 
@@ -260,7 +260,7 @@ class TestDetachedHandleMetadata:
             calls["n"] += 1
             return "counted-ws"
 
-        monkeypatch.setattr(modal_app_module, "_get_modal_workspace_aio", _counting)
+        monkeypatch.setattr(executor_module, "_get_modal_workspace_aio", _counting)
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
@@ -504,7 +504,7 @@ class TestWorkspaceLookupColdBurst:
         one network lookup, everyone gets the cached result."""
         import asyncio
 
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _metadata as metadata_module
 
         real_get = hermetic_modal_executor_metadata["get_modal_workspace_aio"]
         calls = {"n": 0}
@@ -515,12 +515,12 @@ class TestWorkspaceLookupColdBurst:
             return "burst-ws"
 
         monkeypatch.setattr(
-            modal_app_module, "_lookup_modal_workspace_aio", _slow_lookup
+            metadata_module, "_lookup_modal_workspace_aio", _slow_lookup
         )
         monkeypatch.setattr(
-            modal_app_module,
+            metadata_module,
             "_modal_workspace_cache",
-            modal_app_module._MODAL_WORKSPACE_UNRESOLVED,
+            metadata_module._MODAL_WORKSPACE_UNRESOLVED,
         )
 
         results = await asyncio.gather(*[real_get() for _ in range(10)])
@@ -604,10 +604,10 @@ class TestAppAndFunctionIdResolution:
         timeout — it must not stall the caller; the id is omitted."""
         import asyncio
 
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _metadata as metadata_module
 
         real = hermetic_modal_executor_metadata["get_modal_app_id_aio"]
-        monkeypatch.setattr(modal_app_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(metadata_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
 
         async def _hang(name, environment_name=None):
             await asyncio.sleep(10)
@@ -626,10 +626,10 @@ class TestAppAndFunctionIdResolution:
         timeout; the id is omitted rather than stalling the start."""
         import asyncio
 
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _metadata as metadata_module
 
         real = hermetic_modal_executor_metadata["get_modal_function_id_aio"]
-        monkeypatch.setattr(modal_app_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(metadata_module, "_MODAL_ID_LOOKUP_TIMEOUT_SECONDS", 0.01)
 
         class _Fn:
             def __init__(self):
@@ -649,7 +649,7 @@ class TestFunctionIdCaching:
     eliminated, now also for function ids)."""
 
     async def test_resolved_function_id_cached_per_worker(self, monkeypatch):
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _executor as executor_module
 
         calls = {"n": 0}
 
@@ -657,7 +657,7 @@ class TestFunctionIdCaching:
             calls["n"] += 1
             return "fu-counted"
 
-        monkeypatch.setattr(modal_app_module, "_get_modal_function_id_aio", _counting)
+        monkeypatch.setattr(executor_module, "_get_modal_function_id_aio", _counting)
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
@@ -669,7 +669,7 @@ class TestFunctionIdCaching:
     async def test_failed_function_id_cached_per_worker(self, monkeypatch):
         """A resolved-but-``None`` (failed hydration) is a resolution: it is
         cached and not retried on the next start, and the key stays omitted."""
-        from stardag.integration.modal import _app as modal_app_module
+        from stardag.integration.modal import _executor as executor_module
 
         calls = {"n": 0}
 
@@ -677,7 +677,7 @@ class TestFunctionIdCaching:
             calls["n"] += 1
             return None
 
-        monkeypatch.setattr(modal_app_module, "_get_modal_function_id_aio", _failing)
+        monkeypatch.setattr(executor_module, "_get_modal_function_id_aio", _failing)
         worker = FakeWorkerFunction(FakeFunctionCall())
         executor = _make_executor(worker)
 
