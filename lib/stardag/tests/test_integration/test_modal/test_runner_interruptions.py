@@ -189,9 +189,7 @@ class TestRunnerInterruptionReporting:
         assert registry.methods() == ["task_start", "task_interrupt"]
         assert "timeout" in registry.calls[1][1]["reason"]
 
-    def test_cancellation_reports_nothing(
-        self, registry, default_in_memory_fs_target
-    ):
+    def test_cancellation_reports_nothing(self, registry, default_in_memory_fs_target):
         runner = _runner_raising(InputCancellation("Input was cancelled by user"))
 
         with pytest.raises(InputCancellation):
