@@ -98,6 +98,7 @@ export class FoundationStack extends cdk.Stack {
       googleClientId: config.googleClientId,
       googleClientSecret: config.googleClientSecret,
       domainPrefix: "stardag",
+      allowSelfSignUp: config.allowSelfSignUp,
     });
 
     this.cognitoIssuerUrl = cognito.issuerUrl;

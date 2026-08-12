@@ -19,6 +19,23 @@ export interface StardagCognitoProps {
    * @default "stardag"
    */
   domainPrefix?: string;
+
+  /**
+   * Whether users may self-register in the Cognito user pool.
+   *
+   * Off by default: a self-hosted instance is typically reachable from the
+   * public internet, and open sign-up there lets anyone obtain an account.
+   *
+   * NOTE: this maps to Cognito's `selfSignUpEnabled`, which governs *native*
+   * (email/password) self-registration only. It does NOT prevent account
+   * creation via a federated identity provider such as Google — Cognito
+   * auto-provisions a pool user on first federated login regardless. To
+   * restrict federated sign-up, add a pre-sign-up Lambda trigger (email
+   * allowlist) or restrict the upstream IdP. See the README.
+   *
+   * @default false
+   */
+  allowSelfSignUp?: boolean;
 }
 
 export class StardagCognito extends Construct {
@@ -35,6 +52,7 @@ export class StardagCognito extends Construct {
       googleClientId,
       googleClientSecret,
       domainPrefix = "stardag",
+      allowSelfSignUp = false,
     } = props;
 
     // =============================================================
@@ -43,8 +61,10 @@ export class StardagCognito extends Construct {
     this.userPool = new cognito.UserPool(this, "UserPool", {
       userPoolName: "stardag-users",
 
-      // Self sign-up enabled (users can register)
-      selfSignUpEnabled: true,
+      // Native self-registration. Off by default (see props docs); a hosted
+      // deployment that wants open registration opts in via config. Does not
+      // affect federated (e.g. Google) sign-up — see the README.
+      selfSignUpEnabled: allowSelfSignUp,
 
       // Sign-in options
       signInAliases: {
