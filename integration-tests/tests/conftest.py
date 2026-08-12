@@ -4,6 +4,7 @@ This file re-exports all fixtures from the stardag_integration_tests package
 so they are available to all tests in this directory.
 """
 
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -64,8 +65,15 @@ def auth_storage_state(
     """
     global _AUTH_STORAGE_STATE_FILE
 
-    # Create a temporary file for storage state
-    storage_file = Path(tempfile.mktemp(suffix=".json"))
+    # Create a temporary file for storage state. mkstemp rather than mktemp:
+    # this file holds session cookies, and mktemp only *predicts* a free name,
+    # leaving a window in which another process can create that path first
+    # (as a symlink, say) between the check and Playwright's write. mkstemp
+    # creates it atomically with 0600 and hands back the descriptor, which we
+    # close immediately since Playwright writes the path by name.
+    handle, storage_path = tempfile.mkstemp(suffix=".json")
+    os.close(handle)
+    storage_file = Path(storage_path)
     _AUTH_STORAGE_STATE_FILE = storage_file
 
     # Create a fresh context for login
