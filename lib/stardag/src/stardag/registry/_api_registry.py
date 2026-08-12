@@ -748,6 +748,41 @@ class APIRegistry(RegistryABC):
             operation=f"Fail task {task.id}",
         )
 
+    def task_interrupt(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Record that the platform interrupted this task's execution.
+
+        **A server without the route is not an error, and must not fall
+        back to ``task_fail``.** Recording nothing is exactly how this SDK
+        behaved before interruptions existed: the task stays RUNNING and a
+        later scheduler pass discovers the dead execution and retries it.
+        Recording a *failure* instead would turn a version skew into
+        permanently failed builds — the precise footgun this whole feature
+        exists to remove. So the degradation is silence, loudly logged.
+        """
+        params = self._get_event_params()
+        if reason:
+            params["reason"] = reason
+        try:
+            self._request(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/interrupt",
+                params=params,
+                operation=f"Interrupt task {task.id}",
+            )
+        except NotFoundError as e:
+            if not is_missing_route_error(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /interrupt; the "
+                "interruption of task %s will not be recorded, and its "
+                "execution claim stays held until a scheduler observes the "
+                "execution is gone. Upgrade the Registry API for immediate "
+                "rescheduling of interrupted tasks.",
+                task.id,
+            )
+
     def task_suspend(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as suspended (waiting for dynamic dependencies)."""
         self._request(
@@ -1815,6 +1850,35 @@ class APIRegistry(RegistryABC):
             params=params,
             operation=f"Fail task {task.id}",
         )
+
+    async def task_interrupt_aio(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Async version - record a platform interruption.
+
+        Same old-server behaviour as the sync version: silence, never a
+        fallback to ``task_fail``.
+        """
+        params = self._get_event_params()
+        if reason:
+            params["reason"] = reason
+        try:
+            await self._arequest(
+                "POST",
+                f"{self.api_url}/api/v1/builds/{build_id}/tasks/{task.id}/interrupt",
+                params=params,
+                operation=f"Interrupt task {task.id}",
+            )
+        except NotFoundError as e:
+            if not is_missing_route_error(e):
+                raise
+            logger.warning(
+                "Registry API does not support POST /interrupt; the "
+                "interruption of task %s will not be recorded. Upgrade the "
+                "Registry API for immediate rescheduling of interrupted "
+                "tasks.",
+                task.id,
+            )
 
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version - mark a task as suspended."""

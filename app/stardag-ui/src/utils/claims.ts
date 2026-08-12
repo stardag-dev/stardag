@@ -34,6 +34,10 @@ export function availableClaimActions(status: TaskStatus): ClaimAction[] {
     case "failed":
     case "cancelled":
     case "skipped":
+    // Retryable, and deliberately NOT releasable: an interrupted task
+    // holds no claim to release — the platform ended its execution and
+    // the server cleared the claim with it.
+    case "interrupted":
       return ["retry"];
     default:
       return [];

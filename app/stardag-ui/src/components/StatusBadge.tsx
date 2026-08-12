@@ -21,6 +21,11 @@ const statusStyles: Record<TaskStatus, string> = {
   pending: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300",
   running: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300",
   suspended: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300",
+  // Orange: adjacent to skipped's amber and pending's yellow — an
+  // interruption is in that family (nothing is wrong, nothing is done)
+  // rather than in failed's red.
+  interrupted:
+    "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300",
   completed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
   failed: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
   skipped: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300",
@@ -35,6 +40,8 @@ const statusStylesMuted: Record<TaskStatus, string> = {
   running: "bg-blue-100/50 text-blue-800/60 dark:bg-blue-900/20 dark:text-blue-400/50",
   suspended:
     "bg-purple-100/50 text-purple-800/60 dark:bg-purple-900/20 dark:text-purple-400/50",
+  interrupted:
+    "bg-orange-100/50 text-orange-800/60 dark:bg-orange-900/20 dark:text-orange-400/50",
   completed:
     "bg-green-100/50 text-green-800/60 dark:bg-green-900/20 dark:text-green-400/50",
   failed: "bg-red-100/50 text-red-800/60 dark:bg-red-900/20 dark:text-red-400/50",

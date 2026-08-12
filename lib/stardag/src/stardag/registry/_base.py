@@ -75,6 +75,22 @@ class FrontierTaskRef(StardagBaseModel):
     # ``None`` as "no retry policy is possible here" and degrade to exactly
     # the behaviour they had before attempts were counted.
     attempt_count: int | None = None
+    # How many times an execution of this task was **interrupted** by the
+    # platform in the same round — a function timeout, or a reclaimed
+    # container. Budgeted separately from ``attempt_count``, against
+    # ``TickConfig.max_interruptions``, and deliberately so: a task built to
+    # be killed and resumed until it converges would otherwise burn a budget
+    # meant for genuine failures and fail the build for the one reason it
+    # was designed to survive.
+    #
+    # ``None`` carries the same "this server does not report it" meaning as
+    # above, but a different consequence. An unreportable *attempt* count
+    # refuses the retry, because retrying is the thing that could loop
+    # unbounded. An unreportable *interruption* count has no such danger to
+    # guard against on its own — but it also cannot bound a respawn loop, so
+    # it degrades to treating the interruption as an ordinary retryable
+    # failure under the attempt budget, which is bounded.
+    interrupt_count: int | None = None
 
 
 class FrontierExternalBlocker(StardagBaseModel):
@@ -979,6 +995,25 @@ class RegistryABC(metaclass=abc.ABCMeta):
         """
         pass
 
+    def task_interrupt(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Record that a task's execution was interrupted by the platform.
+
+        Not a failure: the execution ended for a reason unrelated to the
+        task's correctness (the backend hit its function timeout, or
+        reclaimed the container), so the task is the scheduler's to start
+        again. Called by the worker itself, in the grace window the
+        platform gives it before the kill, which is what releases the
+        execution claim and any concurrency-limit slots straight away.
+
+        Args:
+            build_id: The build UUID returned by build_start.
+            task: The task whose execution was interrupted.
+            reason: Optional description of what interrupted it.
+        """
+        pass
+
     def task_suspend(self, build_id: UUID, task: "BaseTask") -> None:
         """Mark a task as suspended waiting for dynamic dependencies.
 
@@ -1263,6 +1298,12 @@ class RegistryABC(metaclass=abc.ABCMeta):
     ) -> None:
         """Async version of task_fail."""
         self.task_fail(build_id, task, error_message)
+
+    async def task_interrupt_aio(
+        self, build_id: UUID, task: "BaseTask", reason: str | None = None
+    ) -> None:
+        """Async version of task_interrupt."""
+        self.task_interrupt(build_id, task, reason)
 
     async def task_suspend_aio(self, build_id: UUID, task: "BaseTask") -> None:
         """Async version of task_suspend."""

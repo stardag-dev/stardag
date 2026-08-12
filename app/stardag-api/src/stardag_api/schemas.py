@@ -367,6 +367,20 @@ class FrontierTaskRef(BaseModel):
     # to 0 — don't: treat absence as "unknown, don't enforce". Every
     # response of this API that declares the field always populates it.
     attempt_count: int = 0
+    # Interruptions for this task in the same round window — executions the
+    # platform took away (function timeout, container reclaimed) rather
+    # than executions that went wrong.
+    #
+    # A separate budget from ``attempt_count``, and separate on purpose: a
+    # task built to be killed and resumed until it converges would
+    # otherwise spend a budget meant for genuine failures and fail the
+    # build for the one reason it was designed to survive. So an
+    # interruption does not open a new attempt (see
+    # ``services.status.starts_new_attempt``), and is bounded here instead,
+    # against ``TickConfig.max_interruptions``.
+    #
+    # Same "absence means unknown" caution as above.
+    interrupt_count: int = 0
 
 
 class FrontierExternalBlocker(BaseModel):

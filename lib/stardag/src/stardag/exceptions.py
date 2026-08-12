@@ -11,6 +11,58 @@ class StardagError(Exception):
     pass
 
 
+class TaskInterrupted(StardagError):
+    """This attempt ended for a reason unrelated to the task's correctness.
+
+    Raise this from a task that caught a platform interruption — a
+    preemption signal, or the execution backend's function timeout — and
+    persisted whatever progress it had. It says "run me again", and the
+    execution layer arranges for that to happen.
+
+    The canonical shape, for a task that is expected to be killed and
+    resumed until it converges::
+
+        class TrainModel(sd.Task[Model]):
+            def run(self):
+                try:
+                    train(resume_from=self.checkpoint_path())
+                except KeyboardInterrupt:      # the preemption signal
+                    save_checkpoint(self.checkpoint_path())
+                    raise sd.TaskInterrupted("checkpointed") from None
+
+    **Why this exists at all**, given that a bare ``raise`` in that
+    ``except`` block would also work: the failure mode it replaces is
+    silent and expensive. An interrupt reaches user code as a
+    ``BaseException``, so it escapes ``except Exception`` — which is what
+    lets the execution layer see the container as crashed and re-run the
+    input. Catch the interrupt to checkpoint, re-raise anything derived
+    from ``Exception``, and that same task becomes a permanent failure
+    instead, taking a ``FAIL_FAST`` build with it. One keyword apart, no
+    warning. Naming the intent makes the correct behaviour survive the
+    later refactor that wraps the body in a broad ``except``.
+
+    Deliberately an ``Exception`` and not a ``BaseException``: it is raised
+    from inside the user's own error handling, where a ``BaseException``
+    subclass would be one more thing that slips past their control flow for
+    no benefit. The runner catches ``BaseException`` regardless.
+    """
+
+
+class TaskPreempted(TaskInterrupted):
+    """The execution backend reclaimed the container running this task."""
+
+
+class TaskTimedOut(TaskInterrupted):
+    """The execution backend's function timeout ended this attempt.
+
+    Distinct from :class:`TaskPreempted` because the two want different
+    defaults: a container reclaimed mid-run says nothing about the task,
+    while a task that hits its timeout may equally be hung. Which reading
+    applies is a property of the task, configured on the scheduler — see
+    ``TickConfig.interruption_policy_selector``.
+    """
+
+
 class APIError(StardagError):
     """Error communicating with the Stardag API.
 
