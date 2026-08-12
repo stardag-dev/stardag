@@ -432,10 +432,16 @@ def _drive_sync_generator(
     """Drive a sync generator result for idempotent re-execution.
 
     Advances the generator past yield batches whose deps are all complete.
-    Stops at the first yield with any incomplete dep and returns that yield's
-    full ``TaskStruct`` (which may also include already-complete deps — the
-    caller is expected to filter for incomplete ones when scheduling). If
-    the generator completes, returns ``None``.
+    Stops at the first yield with any incomplete dep and returns **all** of
+    that yield's deps — including the already-complete ones, which the
+    caller is expected to filter out when scheduling. If the generator
+    completes, returns ``None``.
+
+    The returned ``TaskStruct`` is the yielded one **flattened** to a tuple
+    of tasks, not its original shape: a task that yields a nested structure
+    (a list of lists, a dict of tasks) gets a flat tuple of the same tasks
+    back. Nothing downstream needs the nesting — the build engine flattens
+    to schedule — and the flat form is what survives the Modal boundary.
 
     If ``result`` is ``None`` (no dynamic deps) returns ``None``. If
     ``result`` is already a ``TaskStruct`` (unusual but possible when a
@@ -464,8 +470,8 @@ async def _drive_async_generator(task: BaseTask) -> None | TaskStruct:
 
     Same contract as ``_drive_sync_generator``: advances past fully-complete
     yield batches and returns the first batch that contains any incomplete
-    dep as a ``TaskStruct`` (may include already-complete deps). Returns
-    ``None`` when the generator finishes.
+    dep, flattened to a tuple of tasks and including the already-complete
+    ones. Returns ``None`` when the generator finishes.
     """
     agen = typing.cast(
         typing.AsyncGenerator[TaskStruct, None],

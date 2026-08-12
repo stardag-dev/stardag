@@ -789,7 +789,7 @@ class StardagApp:
                     # pre-flight compare the DAG against what the ticks
                     # will actually import rather than against the
                     # caller's local app definition.
-                    task_modules=task_module_patterns,
+                    task_module_patterns=task_module_patterns,
                     elide_pickles=elide_pickles,
                     require_pickle_free=require_pickle_free,
                 )
@@ -1166,7 +1166,7 @@ class StardagApp:
                         registry=registry,
                         app_name=self.name,
                         tick_kwargs=tick_kwargs,
-                        task_modules=self.task_modules,
+                        task_module_patterns=self.task_modules,
                         elide_pickles=(
                             self._task_modules_declared or self.require_pickle_free
                         ),

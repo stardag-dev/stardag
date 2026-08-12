@@ -35,9 +35,15 @@ logger = logging.getLogger(__name__)
 
 
 def _preflight_task_modules(
-    tasks: typing.Iterable[BaseTask], task_modules: typing.Sequence[str]
+    tasks: typing.Iterable[BaseTask], task_module_patterns: typing.Sequence[str]
 ) -> None:
-    """Warn about discovered task classes ``task_modules`` doesn't cover.
+    """Warn about discovered task classes the declared patterns don't cover.
+
+    Takes the app's declared ``task_modules`` **patterns**, not the module
+    list they expand to: coverage is a question about patterns, and
+    :func:`uncovered_task_classes` matches classes against them. (The
+    expansion is a separate deploy-time artifact — it is what a tick
+    imports; see :class:`stardag.integration.modal._tick._TickDeployment`.)
 
     **The authoritative coverage check.** It runs wherever discovery runs
     — normally the bootstrap container — on the set discovery just walked:
@@ -54,26 +60,26 @@ def _preflight_task_modules(
     working setups the moment they upgrade, which is precisely what "this
     feature is additive" forbids.
 
-    In the default (bootstrap) placement ``task_modules`` is the list
-    **baked into the deployment at ``finalize()``** — not the caller's
-    local app definition. That closes the stale-deploy blind spot this
-    check used to carry: it compares the DAG against the module list the
-    ticks will actually import, so "you changed ``task_modules`` but
-    didn't redeploy" is visible rather than silently agreeable.
+    In the default (bootstrap) placement these are the patterns **baked
+    into the deployment at ``finalize()``** — not the caller's local app
+    definition. That closes the stale-deploy blind spot this check used to
+    carry: it compares the DAG against the patterns the deployed ticks
+    were built from, so "you changed ``task_modules`` but didn't redeploy"
+    is visible rather than silently agreeable.
 
     Skipped entirely when the app opted out of ``task_modules`` — an app
     that never declared any would otherwise warn about every class in
     every DAG, on every trigger.
     """
-    if not task_modules:
+    if not task_module_patterns:
         return
-    uncovered = uncovered_task_classes(tasks, task_modules)
+    uncovered = uncovered_task_classes(tasks, task_module_patterns)
     if not uncovered:
         return
     logger.warning(
         format_uncovered_message(
             uncovered,
-            task_modules,
+            task_module_patterns,
             remedy=(
                 "Until then these tasks stay dependent on their "
                 "build-task-store pickles, which need target-root "
@@ -84,9 +90,12 @@ def _preflight_task_modules(
 
 
 def _advise_uncovered_root_task_modules(
-    root_tasks: typing.Sequence[BaseTask], task_modules: typing.Sequence[str]
+    root_tasks: typing.Sequence[BaseTask], task_module_patterns: typing.Sequence[str]
 ) -> None:
     """Advisory, roots-only coverage note emitted at the trigger.
+
+    Takes the declared ``task_modules`` **patterns**, like
+    :func:`_preflight_task_modules`.
 
     Purely additive early feedback, and deliberately **not** a check in
     its own right: :func:`_preflight_task_modules` is the authoritative
@@ -103,15 +112,15 @@ def _advise_uncovered_root_task_modules(
     the moment they trigger, beats saying it a container start later in a
     log they have to go and find.
     """
-    if not task_modules or not root_tasks:
+    if not task_module_patterns or not root_tasks:
         return
-    uncovered = uncovered_task_classes(root_tasks, task_modules)
+    uncovered = uncovered_task_classes(root_tasks, task_module_patterns)
     if not uncovered:
         return
     logger.warning(
         format_uncovered_message(
             uncovered,
-            task_modules,
+            task_module_patterns,
             remedy=(
                 "This is an early, ROOT-TASKS-ONLY note from the trigger; "
                 "the full check runs over the whole discovered DAG where "
@@ -125,11 +134,15 @@ def _persist_discovered_tasks(
     build_id: UUID,
     tasks: typing.Iterable[BaseTask],
     *,
-    task_modules: typing.Sequence[str],
+    task_module_patterns: typing.Sequence[str],
     elide_pickles: bool,
     require_pickle_free: bool,
 ) -> None:
     """Write the build task store, skipping pickles that aren't needed.
+
+    Takes the declared ``task_modules`` **patterns** —
+    :func:`plan_pickle_elision` matches task classes against them, exactly
+    as the coverage check does.
 
     Unless the app *opted in* (``elide_pickles``), this is byte-for-byte
     the old behaviour: pickle everything. With opt-in, each task gets a
@@ -146,16 +159,16 @@ def _persist_discovered_tasks(
 
     ``elide_pickles`` is the app's opt-in — ``task_modules`` passed
     explicitly (or ``require_pickle_free``), NOT merely inferred —
-    resolved at ``finalize()`` and baked in alongside the module list.
+    resolved at ``finalize()`` and baked in alongside the patterns.
     Inference must stay observation-only: it happens for every app,
     including apps written before the feature existed, and an SDK upgrade
     must never start dropping pickles on its own.
     """
     store = BuildTaskStore(build_id)
-    if not task_modules or not elide_pickles:
+    if not task_module_patterns or not elide_pickles:
         store.save_tasks(tasks)
         return
-    plan: PickleElisionPlan = plan_pickle_elision(tasks, task_modules)
+    plan: PickleElisionPlan = plan_pickle_elision(tasks, task_module_patterns)
     if require_pickle_free:
         error = plan.require_pickle_free_error()
         if error is not None:
@@ -220,7 +233,7 @@ def run_reactive_bootstrap(
     registry: typing.Any,
     app_name: str,
     tick_kwargs: dict[str, typing.Any] | None,
-    task_modules: typing.Sequence[str],
+    task_module_patterns: typing.Sequence[str],
     elide_pickles: bool,
     require_pickle_free: bool,
 ) -> ReactiveBootstrapResult:
@@ -265,12 +278,12 @@ def run_reactive_bootstrap(
         )
     )
     # --- task-module coverage pre-flight (see _preflight_task_modules) ---
-    _preflight_task_modules(discovery.incomplete.values(), task_modules)
+    _preflight_task_modules(discovery.incomplete.values(), task_module_patterns)
     # --- task persistence, with conditional pickle elision ---
     _persist_discovered_tasks(
         build_id,
         discovery.incomplete.values(),
-        task_modules=task_modules,
+        task_module_patterns=task_module_patterns,
         elide_pickles=elide_pickles,
         require_pickle_free=require_pickle_free,
     )
