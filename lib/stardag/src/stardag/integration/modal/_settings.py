@@ -46,10 +46,10 @@ class FunctionSettings(typing.TypedDict, total=False):
             *inside* the container and function timeouts; it is not what
             recovers a preempted or crashed container (Modal restarts
             those on the same input regardless). See
-            :class:`~stardag.exceptions.TaskInterrupted` and
+            :class:`~stardag.exceptions.ResumableInterruption` and
             ``TickConfig.max_attempts`` for the other two layers, and note
             they multiply: ``retries=3`` under a task allowed 20
-            interruptions is up to 80 container attempts.
+            resumptions is up to 80 container attempts.
         nonpreemptible: Run on an instance that will not be reclaimed. The
             direct answer to "this task must not be preempted", for work
             that genuinely cannot checkpoint. Modal client >= 1.2.3;

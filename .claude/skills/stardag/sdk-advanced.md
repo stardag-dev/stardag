@@ -377,11 +377,8 @@ from stardag.exceptions import (
     AuthenticationError,   # Auth failures (missing/invalid credentials)
     AuthorizationError,    # Permission denied (403)
     TokenExpiredError,     # Auth token expiration
-    # Raised BY a task, not caught: this attempt ended for a reason
-    # unrelated to the task's correctness — run it again.
-    TaskInterrupted,
-    TaskPreempted,         # the backend reclaimed the container
-    TaskTimedOut,          # the backend's function timeout ended the attempt
+    # Raised BY a task, not caught: "I checkpointed, run me again".
+    ResumableInterruption,
 )
 
 from stardag.build import (
@@ -394,30 +391,40 @@ from stardag.build import (
 
 ### Surviving preemption and timeouts
 
-A task that can be killed and resumed should checkpoint and say so:
+A task that can be killed and resumed checkpoints and says so:
 
 ```python
-class TrainModel(sd.Task[Model]):
+import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+
+class TrainModel(sd.Task[None]):
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
     def run(self):
+        checkpoint = self.target() / "checkpoint.json"
         try:
-            train(resume_from=self.checkpoint_path())
-        except BaseException:          # preemption OR the function timeout
-            save_checkpoint(self.checkpoint_path())
-            raise sd.TaskInterrupted("checkpointed; reschedule me") from None
+            train(resume_from=checkpoint)
+        except MODAL_INTERRUPTIONS:        # preemption OR the function timeout
+            save_checkpoint(checkpoint)
+            raise sd.ResumableInterruption("checkpointed") from None
+        self.target().mark_done()
 ```
 
-**The trap:** a platform interrupt arrives as a `BaseException`, so it
-escapes `except Exception`. Catch it to checkpoint and then re-raise
-anything derived from `Exception` and the task is recorded as a permanent
-failure — under `FAIL_FAST`, a dead build. `raise sd.TaskInterrupted(...)`
-(or a bare `raise`) keeps it restartable.
+**Rules:**
 
-On the scheduler side an interruption **resumes** the task by default
-(`InterruptionPolicy.RESTART`, bounded by `TickConfig.max_interruptions`,
-and it does not spend `max_attempts`). Use
-`TickConfig.interruption_policy_selector` to return `FAIL` for a task where
-hitting the timeout means it hung. See the Modal how-to for what arrives
-when.
+- Catch `MODAL_INTERRUPTIONS`, never `BaseException` — a blanket catch
+  sweeps up ordinary bugs and would resume a `NameError` until the budget
+  runs out. `except KeyboardInterrupt:` is also wrong: it misses timeouts.
+- An interruption you do **not** catch is a failure, retried under
+  `TickConfig.max_attempts`. That is the correct answer for a hung task or
+  a too-small `timeout`, and it is why no configuration decides whether a
+  timeout was "expected".
+- Resumption is bounded by `TickConfig.max_interruptions` (default 20).
+- Only reactive builds resume. `sd.build`/`build_aio` fail the task.
+- The checkpoint goes inside the task's directory target; `mark_done()` is
+  what marks the task complete.
 
 ## TaskRef (Immutable Reference)
 

@@ -61,7 +61,6 @@ from stardag.integration.modal._settings import (
 )
 from stardag.integration.modal._target import get_default_volume_mount_path
 from stardag.integration.modal._tick import (
-    InterruptionPolicySelector,
     LimitKeySelector,
     _run_tick,
     _run_watchdog_sweep,
@@ -240,7 +239,6 @@ class StardagApp:
         reactive_discovery: ReactiveDiscovery = "modal",
         watchdog_period_minutes: int | None = None,
         limit_key_selector: LimitKeySelector | None = None,
-        interruption_policy_selector: InterruptionPolicySelector | None = None,
         task_modules: typing.Sequence[str] | None = None,
         require_pickle_free: bool = False,
         modal_workspace: str | None = None,
@@ -331,17 +329,6 @@ class StardagApp:
                 concurrency-limit keys it runs under in reactive scheduling
                 (deployed-app configuration applied by every tick). Default:
                 no limits.
-            interruption_policy_selector: Maps a task to what a platform
-                interruption of it means. Default (no selector):
-                ``InterruptionPolicy.RESTART`` for every task — an
-                interruption is the platform taking the container away, so
-                the task is run again, bounded by
-                ``TickConfig.max_interruptions``. Return
-                ``InterruptionPolicy.FAIL`` for a task where hitting the
-                function timeout means it hung, and should be failed under
-                the ordinary attempt budget instead. Deployed-app
-                configuration applied by every tick, like the selector
-                above.
             task_modules: Modules whose import registers the task classes
                 this app may schedule. **Only reactive scheduling needs
                 this**: a scheduler tick reconstructs tasks from registry
@@ -458,11 +445,6 @@ class StardagApp:
         # consistently (callables can't be persisted in the JSON build
         # meta like the scalar tick_kwargs).
         self.limit_key_selector = limit_key_selector
-        # Same deployed-app-configuration argument as the selector
-        # above: read by a tick when it picks an interrupted task off
-        # the frontier, and a callable, so it cannot ride in the
-        # per-build JSON tick config.
-        self.interruption_policy_selector = interruption_policy_selector
         # Task-module declaration for reactive scheduling: the patterns
         # whose expansion is imported by every scheduler tick so it can
         # rebuild task objects from registry data (see
@@ -755,7 +737,6 @@ class StardagApp:
             app_name=app_name,
             worker_selector=self.worker_selector,
             limit_key_selector=self.limit_key_selector,
-            interruption_policy_selector=self.interruption_policy_selector,
             modal_workspace=self.modal_workspace,
             worker_timeouts=self._worker_timeouts(),
             tick_timeout_seconds=_tick_function_timeout_seconds(

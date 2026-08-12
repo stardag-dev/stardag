@@ -879,89 +879,89 @@ another ~30s). That is enough to write a checkpoint. It also means a
 worker's `timeout` does not bound how long its container lives: budget
 `timeout + ~60s`.
 
-!!! warning "One keyword decides whether your build survives"
+!!! danger "Catch the interruption types, never `BaseException`"
 
-    An exception derived from `Exception` leaving the container is a **task
-    failure**: Modal will not restart it, stardag records `TASK_FAILED`, and
-    under `FAIL_FAST` the build dies. A `BaseException` leaving the
-    container reads as a **crashed container**, which Modal restarts on the
-    same input — in a few seconds, without consuming `retries`.
+    `except BaseException:` looks like the way to cover both signals. It is
+    not: a `NameError` is a `BaseException` too, so a blanket catch sweeps
+    up ordinary bugs, and re-raising `ResumableInterruption` for one turns a
+    deterministic failure into a task that resumes until its budget runs
+    out. Catch `MODAL_INTERRUPTIONS` — exactly `KeyboardInterrupt` and
+    `modal.exception.InputCancellation`, and nothing else.
 
-    ```python
-    except BaseException:
-        save_checkpoint(path)
-        raise RuntimeError("checkpointed")   # ✗ permanently failed build
-    ```
-
-    ```python
-    except BaseException:
-        save_checkpoint(path)
-        raise                                # ✓ the task stays recoverable
-    ```
-
-    This is exactly what you must write to checkpoint, which is why it is
-    worth stating so bluntly.
+    `except KeyboardInterrupt:` is equally wrong in the other direction: it
+    misses the timeout entirely, so a training task silently never
+    checkpoints.
 
 #### The recipe
 
+Everything you need is one `try/except` and one exception:
+
 ```{.python notest}
-class TrainModel(sd.Task[Model]):
+import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+
+class TrainModel(sd.Task[None]):
+    seed: int = 0
+
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
     def run(self):
+        checkpoint = self.target() / "checkpoint.json"
+
+        state = {"step": 0}
+        if checkpoint.exists():
+            with checkpoint.open("r") as f:
+                state = json.load(f)
+
         try:
-            train(resume_from=self.checkpoint_path())
-        except BaseException:              # preemption OR the function timeout
-            save_checkpoint(self.checkpoint_path())
-            raise sd.TaskInterrupted("checkpointed; reschedule me") from None
+            while state["step"] < TOTAL_STEPS:
+                train_one_step(state)
+                state["step"] += 1
+        except MODAL_INTERRUPTIONS:            # preemption OR the timeout
+            with checkpoint.open("w") as f:
+                json.dump(state, f)
+            raise sd.ResumableInterruption("checkpointed") from None
+
+        with (self.target() / "model.pkl").open("wb") as f:
+            f.write(serialize(model))
+        self.target().mark_done()              # only now is the task complete
 ```
 
-`sd.TaskInterrupted` (and its subclasses `TaskPreempted` and
-`TaskTimedOut`) says what happened, and stardag's `Runner` then routes it by
-**which recovery is still available**, not by which exception you chose:
-before the timeout it re-raises so Modal restarts the input; once the
-timeout has fired — when no restart is coming — it records the interruption
-so a scheduler tick can resume the task instead.
-A plain `raise` does the same thing today — the exception type earns its
-place by being self-documenting and by surviving the later refactor that
-wraps the body in `except Exception`, not by unlocking behaviour.
+Three things carry it:
 
-#### Expected timeouts
+- **`MODAL_INTERRUPTIONS`** is the exact pair the platform raises. Importing
+  it keeps `modal.exception` out of your task and makes being specific the
+  easy thing to write.
+- **`sd.ResumableInterruption` is the whole request.** Raising it is how a
+  task says "I saved my progress, run me again", and it is the only way a
+  task gets resumed.
+- **The checkpoint lives inside the task's own directory target**, and
+  `mark_done()` is what makes the task complete. Writing a checkpoint does
+  not — `DirectoryTarget.exists()` is backed by a `._DONE` flag file — so
+  progress and completion cannot be confused.
 
-A timeout has two opposite meanings and only you know which applies:
+#### What happens if you _don't_ catch it
 
-- **The task hung.** Running it again burns the wall-clock to arrive at the
-  same place.
-- **The task is meant to outlive the timeout** — a training run that
-  checkpoints and is _supposed_ to be killed and resumed until it
-  converges.
+Nothing to configure, and this is the part worth understanding: **an
+interruption you do not catch is a failure.** The execution dies, a
+scheduler tick notices, and the task is retried under the ordinary
+`TickConfig.max_attempts` (default 2) like any other failure.
 
-**You do not have to configure anything for the second case.** The default
-for every task is `InterruptionPolicy.RESTART`: an interruption means the
-platform took the container, so the task is run again — bounded by
-`TickConfig.max_interruptions` (default 20). Interruptions deliberately do
-_not_ spend `max_attempts`, or a task designed to be killed and resumed
-would exhaust a budget meant for genuine failures and fail the build for
-the one reason it was built to survive.
+That is deliberate. Letting an interruption propagate means the task had no
+plan for one, which leaves exactly two possibilities — it hung, or the
+worker's `timeout` is too small for the work — and neither is improved by
+running it twenty more times.
 
-Opt a task **out** when hitting the timeout means it hung, so that resuming
-it would just burn the wall-clock again:
+So there is no "is this timeout expected?" setting anywhere. The task
+answers that by raising `ResumableInterruption` or not, and a task that is
+not built to resume simply never raises it.
 
-```{.python notest}
-from stardag.build import InterruptionPolicy
-
-def interruption_policy(task):
-    if isinstance(task, ShouldNeverTakeAnHour):
-        return InterruptionPolicy.FAIL      # a timeout here means it hung
-    return InterruptionPolicy.RESTART       # the default
-
-stardag_app = StardagApp(
-    "my-app",
-    interruption_policy_selector=interruption_policy,
-    ...
-)
-```
-
-`FAIL` records a retryable failure under `max_attempts` instead — which is
-what stardag did with _every_ interruption before this existed.
+A task that _does_ ask is bounded by `TickConfig.max_interruptions`
+(default 20), a budget separate from `max_attempts` — a trainer designed to
+be killed and resumed would otherwise exhaust a budget meant for genuine
+failures and fail the build for the one reason it was built to survive.
 
 #### The knobs, and how they multiply
 
@@ -971,7 +971,7 @@ what stardag did with _every_ interruption before this existed.
 | `FunctionSettings(retries=)`        | exceptions raised inside the container, and timeouts             |
 | `FunctionSettings(nonpreemptible=)` | opts out of reclamation entirely (3× CPU/memory price; no GPU)   |
 | `TickConfig.max_attempts`           | failures a tick records itself — spawn failures, dead executions |
-| `TickConfig.max_interruptions`      | platform interruptions of a `RESTART` task                       |
+| `TickConfig.max_interruptions`      | how many times a task may ask to be resumed                      |
 
 They **multiply**, which is easy to miss: a worker with `retries=3` running
 a task allowed 20 interruptions can consume up to 80 container attempts.

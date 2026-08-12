@@ -354,7 +354,7 @@ def test_escaping_base_exception_restarts_the_input(deployed_probe_app):
 
     This is why preemption needs no registry event: the backend recovers it
     faster than a scheduler could, keeping the claim and spending no
-    attempt. It is also why the runner translates ``sd.TaskInterrupted``
+    attempt. It is also why the runner translates ``sd.ResumableInterruption``
     (an ordinary Exception) into a ``BaseException`` on the way out — an
     ordinary exception is a task failure, and gets no restart.
     """

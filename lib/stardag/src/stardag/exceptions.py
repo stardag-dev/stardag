@@ -11,55 +11,41 @@ class StardagError(Exception):
     pass
 
 
-class TaskInterrupted(StardagError):
-    """This attempt ended for a reason unrelated to the task's correctness.
+class ResumableInterruption(StardagError):
+    """Raise this to say: I saved my progress, run me again.
 
-    Raise this from a task that caught a platform interruption — a
-    preemption signal, or the execution backend's function timeout — and
-    persisted whatever progress it had. It says "run me again", and the
-    execution layer arranges for that to happen.
+    The **only** way a task asks to be resumed. Raise it after catching a
+    platform interruption — the execution backend reclaiming your container,
+    or hitting its function timeout — and persisting whatever progress you
+    had::
 
-    The canonical shape, for a task that is expected to be killed and
-    resumed until it converges::
-
-        class TrainModel(sd.Task[Model]):
+        class TrainModel(sd.Task[None]):
             def run(self):
                 try:
-                    train(resume_from=self.checkpoint_path())
-                except BaseException:      # preemption OR the timeout
-                    save_checkpoint(self.checkpoint_path())
-                    raise sd.TaskInterrupted("checkpointed") from None
+                    train(resume_from=self.target() / "checkpoint.json")
+                except MODAL_INTERRUPTIONS:
+                    save_checkpoint(self.target() / "checkpoint.json")
+                    raise sd.ResumableInterruption("checkpointed") from None
 
-    **Why this exists at all**, given that a bare ``raise`` in that
-    ``except`` block would also work: the failure mode it replaces is
-    silent and expensive. An interrupt reaches user code as a
-    ``BaseException``, so it escapes ``except Exception`` — which is what
-    lets the execution layer see the container as crashed and re-run the
-    input. Catch the interrupt to checkpoint, re-raise anything derived
-    from ``Exception``, and that same task becomes a permanent failure
-    instead, taking a ``FAIL_FAST`` build with it. One keyword apart, no
-    warning. Naming the intent makes the correct behaviour survive the
-    later refactor that wraps the body in a broad ``except``.
+    **An interruption you do NOT catch is a failure**, deliberately. Letting
+    one propagate means the task had no plan for it: either it hung, or the
+    worker's timeout is too small for the work. Both want the same answer —
+    fail, with the scheduler's ordinary attempt budget — and neither is
+    improved by running it again twenty times. So there is no configuration
+    deciding "is this timeout expected?": the task answers that by whether
+    it raises this, and a task not built to resume simply never does.
 
-    Deliberately an ``Exception`` and not a ``BaseException``: it is raised
-    from inside the user's own error handling, where a ``BaseException``
-    subclass would be one more thing that slips past their control flow for
-    no benefit. The runner catches ``BaseException`` regardless.
-    """
+    Catch the interruption types **specifically** (see
+    ``stardag.integration.modal.MODAL_INTERRUPTIONS``), never
+    ``BaseException``. A blanket catch would sweep up ordinary bugs — a
+    ``NameError`` is a ``BaseException`` too — and turn a deterministic
+    failure into a task that resumes until its budget runs out.
 
-
-class TaskPreempted(TaskInterrupted):
-    """The execution backend reclaimed the container running this task."""
-
-
-class TaskTimedOut(TaskInterrupted):
-    """The execution backend's function timeout ended this attempt.
-
-    Distinct from :class:`TaskPreempted` because the two want different
-    defaults: a container reclaimed mid-run says nothing about the task,
-    while a task that hits its timeout may equally be hung. Which reading
-    applies is a property of the task, configured on the scheduler — see
-    ``TickConfig.interruption_policy_selector``.
+    Deliberately an ``Exception``, not a ``BaseException``: you raise it
+    from inside your own error handling, where a ``BaseException`` subclass
+    would be one more thing slipping past your control flow. The Modal
+    runner catches it and re-raises an interrupt in its place, so the
+    backend still sees a container to restart.
     """
 
 

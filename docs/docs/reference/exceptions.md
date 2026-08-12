@@ -11,9 +11,7 @@ StardagError
 │   ├── AuthorizationError
 │   ├── SDKVersionUnsupportedError
 │   └── TokenExpiredError
-├── TaskInterrupted
-│   ├── TaskPreempted
-│   └── TaskTimedOut
+├── ResumableInterruption
 └── ...
 ```
 
@@ -126,67 +124,60 @@ except TokenExpiredError:
     os.system("stardag auth refresh")
 ```
 
-## Interruption Exceptions
-
-These are the one group you **raise** rather than catch: they tell the
-execution layer that an attempt ended for a reason unrelated to the task's
-correctness, so it should be run again.
-
-### TaskInterrupted
+## ResumableInterruption
 
 ```python
-from stardag import TaskInterrupted
+from stardag import ResumableInterruption
 ```
 
-Raise this from a task that caught a platform interruption — the execution
-backend reclaiming its container, or hitting the function timeout — and
-persisted whatever progress it had.
+The one exception you **raise** rather than catch. It says: _I saved my
+progress, run me again._
 
 ```python
-class TrainModel(sd.Task[Model]):
+import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+
+class TrainModel(sd.Task[None]):
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
     def run(self):
+        checkpoint = self.target() / "checkpoint.json"
         try:
-            train(resume_from=self.checkpoint_path())
-        except BaseException:          # preemption OR the function timeout
-            save_checkpoint(self.checkpoint_path())
-            raise sd.TaskInterrupted("checkpointed; reschedule me") from None
+            train(resume_from=checkpoint)
+        except MODAL_INTERRUPTIONS:        # preemption OR the function timeout
+            save_checkpoint(checkpoint)
+            raise sd.ResumableInterruption("checkpointed") from None
+        self.target().mark_done()
 ```
 
-**Why it exists, given that a bare `raise` also works.** The failure it
-replaces is silent and expensive. A platform interrupt reaches your code as
-a `BaseException`, so it escapes `except Exception` — which is what lets the
-backend see the container as crashed and re-run the input. Catch the
-interrupt to checkpoint, re-raise anything derived from `Exception`, and the
-same task becomes a **permanent failure** instead, taking a `FAIL_FAST`
-build with it. One keyword apart, with no warning either way. Naming the
-intent is what makes the correct behaviour survive the later refactor that
-wraps the body in a broad `except`.
+**An interruption you do not catch is a failure**, deliberately. Letting
+one propagate means the task had no plan for it — it hung, or the worker's
+timeout is too small — and both want the same answer: fail, under the
+scheduler's ordinary attempt budget. So there is no setting anywhere
+deciding whether a timeout was "expected"; the task answers by raising
+this, or by not raising it.
 
-It is deliberately an `Exception`, not a `BaseException`: you raise it from
-inside your own error handling, where a `BaseException` subclass would be
-one more thing slipping past your control flow for no benefit. The runner
-catches `BaseException` regardless and translates.
+!!! danger "Catch the interruption types, never `BaseException`"
 
-### TaskPreempted
+    A `NameError` is a `BaseException` too. A blanket catch sweeps up
+    ordinary bugs, and re-raising `ResumableInterruption` for one turns a
+    deterministic failure into a task that resumes until its budget runs
+    out. Use `MODAL_INTERRUPTIONS` (exactly `KeyboardInterrupt` and
+    `modal.exception.InputCancellation`).
 
-```python
-from stardag import TaskPreempted
-```
+    `except KeyboardInterrupt:` is wrong the other way: `InputCancellation`
+    is not a `KeyboardInterrupt`, so it misses timeouts entirely.
 
-The backend reclaimed the container running this task.
+`ResumableInterruption` is an ordinary `Exception`, not a `BaseException`:
+you raise it from inside your own error handling, where a `BaseException`
+subclass would be one more thing slipping past your control flow. The Modal
+runner catches it and re-raises an interrupt in its place, so the backend
+still sees a container to restart.
 
-### TaskTimedOut
-
-```python
-from stardag import TaskTimedOut
-```
-
-The backend's function timeout ended this attempt. Distinct from
-`TaskPreempted` because the two want different defaults: a container
-reclaimed mid-run says nothing about the task, while a task that hits its
-timeout may equally be hung. Which reading applies is a property of the
-task, configured on the scheduler via
-`TickConfig.interruption_policy_selector` — see
+Resumption is bounded by `TickConfig.max_interruptions` (default 20), a
+budget separate from `max_attempts` — see
 [Preemption and timeouts](../how-to/integrate-modal.md#preemption-and-timeouts).
 
 ## Common Error Scenarios

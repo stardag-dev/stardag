@@ -344,24 +344,21 @@ scheduler tick, woken by a watchdog that is off by default. Reporting the
 interruption releases the claim immediately and wakes the scheduler
 directly, so recovery no longer depends on an opt-in safety net.
 
-**What happens next is per task**, because a timeout means two opposite
-things and only the author knows which:
+**Only a task that asks gets resumed.** The status is written for one
+reason: the task caught the interruption, persisted its progress, and
+raised `ResumableInterruption`. An interruption it did not catch never
+becomes INTERRUPTED at all — the execution simply dies and a later
+scheduler pass records an ordinary retryable failure, which is the right
+answer for both things an uncaught interruption can mean (the task hung, or
+its timeout is too small).
 
-- `InterruptionPolicy.FAIL` (**the default**) records a retryable failure
-  under `max_attempts` — the behaviour that predates this status. A
-  timeout here is read as "the task hung".
-- `InterruptionPolicy.RESTART` puts the task straight back on the
-  frontier, bounded by `TickConfig.max_interruptions` (default 20). For a
-  task that checkpoints and expects to be resumed until it converges.
+That is why there is no policy or per-task configuration here. The
+distinction between "expected timeout" and "something went wrong" is made
+by the task, in the only place that knows it.
 
-Declared via `TickConfig.interruption_policy_selector` — deployed-app
-configuration, alongside `limit_key_selector`.
-
-**Interruptions do not spend `max_attempts`.** Same argument as resuming a
-suspended task: a budget meant to stop a broken task from being retried
-forever should not be consumed by the platform's scheduling decisions. The
-separate `max_interruptions` bound exists so that "does not spend the
-retry budget" does not become "unbounded".
+Resumption is bounded by `TickConfig.max_interruptions` (default 20),
+separate from `max_attempts` — a task designed to be killed and resumed
+would otherwise exhaust a budget meant for genuine failures.
 
 **A backend running its own retries is not raced.** Some backends restart
 a timed-out input themselves, under the same execution ref. Before

@@ -26,7 +26,6 @@ from stardag import BaseTask
 from stardag.build import (
     BuildTaskStore,
     FailMode,
-    InterruptionPolicy,
     TickConfig,
     run_tick_aio,
 )
@@ -47,14 +46,6 @@ logger = logging.getLogger(__name__)
 
 LimitKeySelector = typing.Callable[[BaseTask], typing.Sequence[str]]
 """Maps a task to the named registry concurrency-limit keys it runs under."""
-
-InterruptionPolicySelector = typing.Callable[[BaseTask], InterruptionPolicy]
-"""Maps a task to what a platform interruption of it should mean.
-
-``RESTART`` (the default for every task when no selector is configured)
-resumes a task the platform interrupted; ``FAIL`` is the opt-in for one
-where hitting the timeout means it hung. See :class:`InterruptionPolicy`.
-"""
 
 
 # --- Per-build tick configuration ---
@@ -119,7 +110,6 @@ def _build_tick_config(
     tick_kwargs: dict[str, typing.Any] | None,
     limit_key_selector: LimitKeySelector | None,
     tick_timeout_seconds: float | None = None,
-    interruption_policy_selector: "InterruptionPolicySelector | None" = None,
 ) -> TickConfig:
     """Assemble a TickConfig for one tick invocation.
 
@@ -147,7 +137,6 @@ def _build_tick_config(
     config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
     return TickConfig(
         limit_key_selector=limit_key_selector,
-        interruption_policy_selector=interruption_policy_selector,
         **config_kwargs,
     )
 
@@ -200,9 +189,6 @@ class _TickDeployment:
         limit_key_selector: Named registry concurrency-limit keys per task.
             Deployed-app configuration because a callable cannot be
             persisted in the build's JSON tick config.
-        interruption_policy_selector: What a platform interruption of a
-            given task should mean (resume it, or fail it). Same
-            deployed-app-configuration argument as the selector above.
         modal_workspace: Explicit Modal workspace for executor metadata, or
             None to resolve it best-effort.
         worker_timeouts: Per-worker Modal ``timeout`` (seconds), which is
@@ -222,7 +208,6 @@ class _TickDeployment:
     app_name: str
     worker_selector: WorkerSelector
     limit_key_selector: LimitKeySelector | None
-    interruption_policy_selector: InterruptionPolicySelector | None
     modal_workspace: str | None
     worker_timeouts: dict[str, int]
     tick_timeout_seconds: float | None
@@ -326,7 +311,6 @@ def _run_tick(
         build_info.reactive_tick_kwargs,
         tick_kwargs,
         deployment.limit_key_selector,
-        interruption_policy_selector=deployment.interruption_policy_selector,
         tick_timeout_seconds=deployment.tick_timeout_seconds,
     )
 

@@ -45,7 +45,7 @@ from stardag.integration.modal._metadata import (
     STARDAG_REACTIVE_ENV,
 )
 from stardag.integration.modal._protocols import RunFunction
-from stardag.exceptions import TaskInterrupted, TaskTimedOut
+from stardag.exceptions import ResumableInterruption
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
 
@@ -55,6 +55,41 @@ from stardag.utils.env import temp_env_vars
 _InputCancellation: type[BaseException] | None = getattr(
     modal.exception, "InputCancellation", None
 )
+
+MODAL_INTERRUPTIONS: tuple[type[BaseException], ...] = tuple(
+    e for e in (KeyboardInterrupt, _InputCancellation) if e is not None
+)
+"""The exceptions Modal ends an execution with when the platform, not the
+task, decided — catch these to checkpoint.
+
+``KeyboardInterrupt`` is the preemption signal (Modal reclaiming the
+container); ``modal.exception.InputCancellation`` is what a function
+**timeout** raises — and also what an explicit ``FunctionCall.cancel()``
+raises, which is why stardag tells them apart by elapsed time rather than
+by type.
+
+Provided as a tuple so a task can catch both without importing from
+``modal.exception`` itself, and **so it is easy to be specific**::
+
+    from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+    try:
+        train(...)
+    except MODAL_INTERRUPTIONS:
+        save_checkpoint(...)
+        raise sd.ResumableInterruption("checkpointed") from None
+
+Never substitute ``except BaseException``. Both members are
+``BaseException`` subclasses precisely so an ordinary ``except Exception``
+cannot swallow them — but a blanket catch sweeps up real bugs too (a
+``NameError`` is a ``BaseException``), and re-raising
+``ResumableInterruption`` for one of those turns a deterministic failure
+into a task that resumes until its budget runs out.
+
+Note this is Modal-specific by design and lives here rather than in the
+core: it is the set *this backend* uses, and another backend would signal
+differently.
+"""
 
 logger = logging.getLogger(__name__)
 
@@ -109,60 +144,50 @@ def _classify_interruption(
     elapsed_seconds: float,
     function_timeout_seconds: float | None,
 ) -> str | None:
-    """What ended this execution, or ``None`` if the task simply raised.
+    """What ended this execution, and therefore who recovers it.
 
-    **The question is not "what kind of exception is this" but "is anything
-    else going to recover this execution".** Two independent facts decide
-    it, and conflating them strands tasks:
+    **The task decides whether it is resumable; the clock decides who
+    resumes it.** Two questions, in that order:
 
-    - **Has the function timeout fired?** If it has, the call is dead and
-      the backend will NOT restart the input, whatever the container does
-      next (verified live: returning cleanly, re-raising an interrupt and
-      raising an ordinary exception all resolve to ``FunctionTimeoutError``
-      with no restart). Only a registry event can bring the task back.
-    - **Did the task declare an interruption?** ``TaskInterrupted`` and its
-      subclasses mean "I persisted my progress, run me again".
+    1. *Did the task ask to be resumed?* Only ``ResumableInterruption``
+       says yes. An interruption the task let propagate is not a request —
+       it means the task had no plan for being interrupted, so either it
+       hung or the worker's timeout is too small for the work. Both want
+       the same answer, and it is not "run it twenty more times": it is a
+       failure under the ordinary attempt budget. There is deliberately no
+       configuration overriding this, because the task already answered by
+       raising or not raising.
+    2. *Is anything already going to restart it?* Before the function
+       timeout fires, an escaping ``BaseException`` reads to Modal as a
+       crashed container and the input is restarted on the same call id in
+       a few seconds — better than a scheduler respawn on every axis (the
+       claim is kept, no attempt is spent, no round-trip). Once the timeout
+       has fired nothing is coming (verified live: returning cleanly,
+       re-raising an interrupt and raising an ordinary exception all
+       resolve to ``FunctionTimeoutError`` with no restart), so the
+       registry event is the only way back.
 
-    So a *declared* interruption is not automatically preemption-shaped.
-    Raised before the timeout it is: the exception escapes, the backend
-    reads a crashed container and restarts the input on the same call id in
-    a few seconds — better than a scheduler respawn on every axis (the
-    claim is kept, no attempt is spent, no round-trip). Raised **at** the
-    timeout, the same exception needs reporting, because nothing else is
-    coming. Routing it by subclass instead of by timing is how a task that
-    followed the documented recipe ends up sitting RUNNING until its claim
-    expires.
+    Hence the return values:
 
-    The remaining subtlety is that **an ``InputCancellation`` is ambiguous
-    and can only be timed.** It is what a function timeout looks like *and*
-    what ``FunctionCall.cancel()`` looks like — same type, same
-    ``"Input was cancelled by user"`` message. Since stardag cancels its own
-    workers (FAIL_FAST, UI cancel), reading every one as an interruption
-    would resurrect tasks the build just cancelled. Only one of them arrives
-    at the declared timeout.
-
-    With no declared timeout to compare against, nothing can be shown to
-    have timed out: a declared interruption is preemption-shaped and an
-    ``InputCancellation`` is a cancellation. Both are the conservative
-    direction, being the behaviour that predates interruption reporting.
+    - ``_TIMEOUT`` — the task asked to be resumed and no restart is coming.
+      The one case that reports ``TASK_INTERRUPTED``.
+    - ``_PREEMPTION`` — the task asked to be resumed and the backend will
+      restart it. Report nothing, get out of the way.
+    - ``_CANCELLATION`` — a raw platform interruption. Report nothing: on a
+      preemption the backend restarts it, and on a timeout the execution
+      dies and a later scheduler pass records the failure, which is exactly
+      what should happen to a task that did not plan for this.
+    - ``None`` — an ordinary exception. A failure, reported as one.
     """
     timed_out = function_timeout_seconds is not None and (
         elapsed_seconds >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
     )
-    if isinstance(exception, TaskTimedOut):
-        # The task says it ran out of time and it is believed, even against
-        # a clock that disagrees — it knows something the clock does not.
-        return _TIMEOUT
-    if isinstance(exception, TaskInterrupted):
-        # Covers TaskPreempted and the bare base class. Timing decides who
-        # recovers it; see the docstring.
+    if isinstance(exception, ResumableInterruption):
         return _TIMEOUT if timed_out else _PREEMPTION
     if isinstance(exception, (KeyboardInterrupt, SystemExit)):
-        # The preemption signal — but if the timeout has fired, a preemption
-        # signal arriving now is still an execution nobody will restart.
-        return _TIMEOUT if timed_out else _PREEMPTION
+        return _CANCELLATION
     if _InputCancellation is not None and isinstance(exception, _InputCancellation):
-        return _TIMEOUT if timed_out else _CANCELLATION
+        return _CANCELLATION
     return None
 
 
@@ -545,7 +570,7 @@ class Runner(RunFunction):
                         function_timeout_seconds=function_timeout,
                     )
                     if kind == _PREEMPTION and isinstance(e, Exception):
-                        # The task raised ``sd.TaskInterrupted`` — an
+                        # The task raised ``sd.ResumableInterruption`` — an
                         # ordinary Exception, deliberately, so it does not
                         # slip past the user's own error handling. But an
                         # ordinary exception leaving the container is a
@@ -553,10 +578,8 @@ class Runner(RunFunction):
                         # will not restart the input for it. A BaseException
                         # escaping reads as a crashed container, which it
                         # will. Translating here is what makes
-                        # "raise sd.TaskInterrupted" mean what it says.
-                        raise KeyboardInterrupt(
-                            f"Task reported an interruption: {e}"
-                        ) from e
+                        # "raise sd.ResumableInterruption" mean what it says.
+                        raise KeyboardInterrupt(f"Task asked to be resumed: {e}") from e
                     raise
                 if reporter is not None:
                     if result is None:
@@ -584,33 +607,28 @@ class Runner(RunFunction):
         Returns the classification, which the caller needs in order to
         choose how the exception leaves the container (see ``__call__``).
 
-        Three of the four outcomes below report nothing at all, and that is
-        the substance of the change rather than an omission:
+        **Only one outcome writes anything**, and the three that do not are
+        the substance of the design rather than an omission:
 
-        - **Preemption.** The exception is on its way out of the container,
-          and an escaping ``BaseException`` reads to Modal as a crash — so
-          Modal restarts the input itself, on the same call id, in a few
-          seconds. Recording a terminal event here would replace that with
-          a slower scheduler respawn *and* release a claim the restart is
-          about to need. The previous code reached the same outcome by
-          accident, because ``except Exception`` did not catch the
-          interrupt; the difference now is that a task which caught the
-          signal to checkpoint and raised ``sd.TaskInterrupted`` gets it
-          too, instead of a permanent failure.
-        - **Cancellation.** Somebody cancelled this call — usually stardag
-          itself, on FAIL_FAST or a UI cancel, and whoever did it has
-          already recorded the outcome. Reporting an interruption here
-          would resurrect a task the build just cancelled.
-        - **A raised ``BaseException`` that is none of the above** (an
-          unclassifiable ``GeneratorExit``, say). Left alone: the previous
-          behaviour for anything outside ``except Exception``.
+        - **The task asked to be resumed and the backend will restart it**
+          (an interruption before the timeout). The exception is on its way
+          out; an escaping ``BaseException`` reads as a crashed container,
+          which Modal restarts on the same call id in a few seconds. A
+          terminal event here would replace that with a slower scheduler
+          respawn *and* release a claim the restart is about to need.
+        - **A raw platform interruption** the task did not catch. It had no
+          plan for being interrupted, so the right end state is a failure
+          under the ordinary attempt budget — which is exactly what happens
+          if the worker says nothing and the execution dies.
+        - **A deliberate cancel.** Whoever cancelled it — usually stardag
+          itself on FAIL_FAST or a UI cancel — has already recorded the
+          outcome. Reporting here would resurrect a task the build just
+          cancelled.
 
-        Only a **timeout** is reported, because it is the only one where
-        nothing else will recover the task: after the timeout fires, the
-        call is dead whatever the container does next (verified live —
-        returning cleanly, re-raising an interrupt and raising an ordinary
-        exception all resolve to ``FunctionTimeoutError``), so a registry
-        event is the only path back into the frontier.
+        Only **"the task asked to be resumed and no restart is coming"**
+        reports, because that is the only case where nothing else can
+        recover the task: after a timeout fires the call is dead whatever
+        the container does next.
         """
         kind = _classify_interruption(
             exception,
@@ -631,41 +649,45 @@ class Runner(RunFunction):
                 )
             return kind
         if kind == _TIMEOUT:
-            # The declared timeout is usually known — it is what the
-            # classification compared against. Not always, though: a task
-            # that raises ``TaskTimedOut`` itself is believed regardless,
-            # and an orchestrator that forwarded no timeout leaves nothing
-            # to name. Saying "the worker function's Nones timeout" in an
-            # error a user reads is worse than not naming a number.
             of_timeout = (
                 f" of {function_timeout_seconds}s"
                 if function_timeout_seconds is not None
                 else ""
             )
             logger.warning(
-                f"Task {task.id} hit its worker function's timeout"
-                f"{of_timeout} after {elapsed_seconds:.1f}s. Reporting an "
-                "interruption — the task is not at fault, and the scheduler "
-                "decides whether to resume it or fail it "
-                "(TickConfig.interruption_policy_selector)."
+                f"Task {task.id} checkpointed and asked to be resumed after "
+                f"hitting its worker function's timeout{of_timeout} "
+                f"({elapsed_seconds:.1f}s elapsed). Reporting an "
+                "interruption: the backend will not restart a timed-out "
+                "input, so a scheduler tick has to."
             )
             reporter.interrupted(
-                f"Execution hit the worker function's timeout{of_timeout} "
-                f"after {elapsed_seconds:.1f}s"
+                f"Task checkpointed and asked to be resumed after the "
+                f"worker function's timeout{of_timeout} "
+                f"({elapsed_seconds:.1f}s elapsed)"
             )
             return kind
         if kind == _CANCELLATION:
+            # A raw platform interruption the task did not catch, or a
+            # deliberate cancel. Recording nothing is right for both: a
+            # cancel is already owned by whoever issued it, and an uncaught
+            # interruption means the task had no plan for one — so it should
+            # end up a failure under the ordinary attempt budget, which is
+            # what happens when the execution dies unreported.
             logger.info(
-                f"Execution of task {task.id} was cancelled. Recording "
-                "nothing: whoever cancelled it owns that record."
+                f"Execution of task {task.id} was interrupted or cancelled "
+                f"after {elapsed_seconds:.1f}s without the task asking to be "
+                "resumed. Recording nothing; if this task is meant to "
+                "survive interruptions, catch MODAL_INTERRUPTIONS and raise "
+                "stardag.ResumableInterruption."
             )
             return kind
         logger.warning(
-            f"Execution of task {task.id} was interrupted by the platform "
-            f"after {elapsed_seconds:.1f}s. Recording nothing and letting "
-            "the interrupt propagate, so the execution backend restarts "
-            "this input itself — faster than a reschedule, and it keeps "
-            "the execution claim."
+            f"Task {task.id} checkpointed and asked to be resumed "
+            f"{elapsed_seconds:.1f}s in, before its timeout. Recording "
+            "nothing and letting the interrupt propagate, so the execution "
+            "backend restarts this input itself — faster than a reschedule, "
+            "and it keeps the execution claim."
         )
         return kind
 

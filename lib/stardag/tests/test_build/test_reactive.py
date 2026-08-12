@@ -42,7 +42,6 @@ from stardag.build._base import (
 from stardag.build import _reactive as reactive_module
 from stardag.build._reactive import (
     _RETRYABLE_STATUSES,
-    InterruptionPolicy,
     TickSummary,
     _skip_blocked,
 )
@@ -4277,19 +4276,18 @@ class TestInterruptedTasks:
     FAIL_FAST build; it is not running, so it holds no claim; and it is
     still the scheduler's to act on, which is what these tests pin.
 
-    The policy split is the interesting part. ``FAIL`` (the default)
-    reproduces exactly what happened before interruptions were reported at
-    all — a retryable failure under ``max_attempts`` — so adopting the
-    feature changes nobody's retry budget. ``RESTART`` is the opt-in for
-    the checkpoint-and-resume workload, bounded by its own budget.
+    There is no policy to configure: the status is written only for a
+    task that raised ``ResumableInterruption``, so reaching this code means
+    the task asked. An interruption a task did not catch never gets here —
+    the worker reports nothing, the execution dies, and a later pass
+    records an ordinary retryable failure.
     """
 
-    async def test_default_policy_resumes_the_task(
+    async def test_an_interrupted_task_is_resumed(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """No selector configured -> RESTART. The status says the platform
-        took the container; the default response is to run the task again,
-        with no failure recorded anywhere in its history."""
+        """No configuration involved: the status exists only because a
+        worker asked to be resumed, so the tick resumes it."""
         (root,) = _chain("interrupted-default")
         registry, locks, executor, store = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
@@ -4310,42 +4308,11 @@ class TestInterruptedTasks:
         assert executor.spawned == [root.id]
         assert summary.terminal_status == "completed"
 
-    async def test_fail_policy_records_a_retryable_failure(
+    async def test_a_resumption_request_respawns_without_a_failure(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """The opt-in for "a timeout here means it hung": the failure is
-        recorded and the task retried inside the same pass, so terminal
-        detection never sees a build-killing failure. This is what every
-        interruption did before the status existed."""
-        (root,) = _chain("interrupted-fail-policy")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
-        registry.statuses[str(root.id)] = "interrupted"
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            lock_manager=locks,
-            task_store=store,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-                interruption_policy_selector=lambda task: InterruptionPolicy.FAIL,
-            ),
-        )
-
-        assert summary.interruptions_failed == 1
-        assert summary.retried == 1
-        assert summary.interruptions_restarted == 0
-        assert executor.spawned == [root.id]
-        assert summary.terminal_status == "completed"
-
-    async def test_restart_policy_respawns_without_recording_a_failure(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """Same outcome as the default, reached by asking for it explicitly
-        — kept separate so a future change to the default cannot silently
-        take the explicit path with it."""
+        """An INTERRUPTED task is one that asked to be resumed, so it goes
+        straight back to the frontier with no failure in its history."""
         (root,) = _chain("interrupted-restart")
         registry, locks, executor, store = _setup([root], auto_complete=True)
         registry.statuses[str(root.id)] = "interrupted"
@@ -4359,7 +4326,6 @@ class TestInterruptedTasks:
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 
@@ -4370,7 +4336,7 @@ class TestInterruptedTasks:
         assert executor.spawned == [root.id]
         assert summary.terminal_status == "completed"
 
-    async def test_restart_is_bounded_by_its_own_budget(
+    async def test_resumption_is_bounded_by_its_own_budget(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
         """Exempt from the attempt budget does not mean unbounded: a task
@@ -4389,7 +4355,6 @@ class TestInterruptedTasks:
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
                 max_interruptions=3,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 
@@ -4422,7 +4387,6 @@ class TestInterruptedTasks:
                 poll_interval_seconds=0.01,
                 max_attempts=2,
                 max_interruptions=10,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 
@@ -4461,7 +4425,6 @@ class TestInterruptedTasks:
             config=TickConfig(
                 linger_seconds=0.05,
                 poll_interval_seconds=0.01,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 
@@ -4499,7 +4462,6 @@ class TestInterruptedTasks:
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 
@@ -4534,7 +4496,6 @@ class TestInterruptedTasks:
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 
@@ -4544,8 +4505,8 @@ class TestInterruptedTasks:
     async def test_no_interrupt_counter_falls_back_to_the_attempt_budget(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """A server predating ``interrupt_count`` cannot bound a respawn
-        loop, so RESTART degrades to the bounded thing rather than to an
+        """A server predating ``interrupt_count`` cannot bound a resume
+        loop, so resumption degrades to the bounded thing rather than to an
         unbounded one."""
         (root,) = _chain("interrupted-no-counter")
         registry, locks, executor, store = _setup([root], auto_complete=True)
@@ -4561,41 +4522,10 @@ class TestInterruptedTasks:
             config=TickConfig(
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 
         assert summary.interruptions_restarted == 0
-        assert summary.interruptions_failed == 1
-
-    async def test_a_broken_selector_does_not_crash_the_tick(
-        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
-    ):
-        """It runs while deciding what to do about a task the platform
-        already took away; a bad selector must not additionally kill the
-        pass. FAIL is the safe resolution — bounded by max_attempts."""
-
-        def boom(task):
-            raise RuntimeError("selector is broken")
-
-        (root,) = _chain("interrupted-bad-selector")
-        registry, locks, executor, store = _setup([root], auto_complete=True)
-        registry.statuses[str(root.id)] = "interrupted"
-
-        summary = await run_tick_aio(
-            uuid4(),
-            registry=registry,
-            task_executor=executor,
-            lock_manager=locks,
-            task_store=store,
-            config=TickConfig(
-                linger_seconds=0.3,
-                poll_interval_seconds=0.01,
-                interruption_policy_selector=boom,
-            ),
-        )
-
-        assert summary.outcome != "error"
         assert summary.interruptions_failed == 1
 
     async def test_an_interruption_does_not_fail_a_fail_fast_build(
@@ -4619,7 +4549,6 @@ class TestInterruptedTasks:
                 linger_seconds=0.3,
                 poll_interval_seconds=0.01,
                 fail_mode=FailMode.FAIL_FAST,
-                interruption_policy_selector=lambda task: InterruptionPolicy.RESTART,
             ),
         )
 

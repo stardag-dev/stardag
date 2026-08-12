@@ -56,46 +56,51 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### SDK
 
-- **A platform interruption is no longer a failure** (closes
-  [#245](https://github.com/stardag-dev/stardag/issues/245)). Preemption
-  and function timeouts are the two ways a container routinely dies
-  without the task being broken, and neither had any representation in the
-  SDK. A task that caught the interrupt to checkpoint — which is exactly
-  what you must do — and re-raised anything derived from `Exception`
-  recorded a permanent `TASK_FAILED` and, under `FAIL_FAST`, killed the
-  build. The same task with a bare `raise` is restarted and succeeds. One
-  keyword, no warning.
+- **A task can survive preemption and function timeouts** (closes
+  [#245](https://github.com/stardag-dev/stardag/issues/245)). The two ways
+  a container routinely dies without the task being broken had no
+  representation in the SDK, and a task that caught the interrupt to
+  checkpoint — which is what you must do — and re-raised anything derived
+  from `Exception` recorded a permanent `TASK_FAILED`, killing a
+  `FAIL_FAST` build.
 
-  New: `sd.TaskInterrupted`, and its subclasses `sd.TaskPreempted` and
-  `sd.TaskTimedOut`. Raise one from a task that checkpointed and wants to
-  run again; the Modal runner translates it back into a `BaseException` on
-  the way out, so the execution backend restarts the input rather than
-  recording a failure.
+  New: **`sd.ResumableInterruption`**, and
+  **`stardag.integration.modal.MODAL_INTERRUPTIONS`** — the exact pair the
+  platform raises (`KeyboardInterrupt` for preemption,
+  `modal.exception.InputCancellation` for a timeout, which is _not_ a
+  `KeyboardInterrupt`).
 
-  The Modal runner now catches `BaseException` and classifies what ended
-  the attempt. A **timeout** is reported to the registry inside the grace
-  window the platform allows, which releases the execution claim and its
-  concurrency-limit slots immediately and wakes the scheduler directly —
-  so recovery no longer depends on the (opt-in) watchdog. A **preemption**
-  is deliberately not reported: Modal restarts the input itself, on the
-  same call id and without spending an attempt, which is faster than any
-  reschedule. A **cancellation** is not reported either — whoever
-  cancelled the task already recorded that.
+  ```python
+  try:
+      train(resume_from=checkpoint)
+  except MODAL_INTERRUPTIONS:
+      save_checkpoint(checkpoint)
+      raise sd.ResumableInterruption("checkpointed") from None
+  ```
 
-- **An interrupted task is resumed by default** —
-  `InterruptionPolicy.RESTART`, bounded by the new
-  `TickConfig.max_interruptions` (default 20). Interruptions deliberately
-  do not spend `max_attempts`, or a task designed to be killed and resumed
-  would exhaust a budget meant for genuine failures and fail the build for
-  the one reason it was built to survive.
+  **The task decides, not configuration.** Raising `ResumableInterruption`
+  is the only way a task gets resumed, bounded by the new
+  `TickConfig.max_interruptions` (default 20) — a budget separate from
+  `max_attempts`, or a trainer designed to be killed and resumed would
+  exhaust one meant for genuine failures. An interruption a task does
+  **not** catch stays a failure under `max_attempts`: it means the task had
+  no plan for one, so either it hung or the worker's `timeout` is too
+  small, and neither is improved by resuming it.
 
-  **This is a behaviour change**, and it is the point: an execution the
-  platform took away used to become a retryable failure under
-  `max_attempts` (default 2), so a checkpointing task died on its third
-  interruption. Use `TickConfig.interruption_policy_selector` to return
-  `InterruptionPolicy.FAIL` for a task where hitting the function timeout
-  means it **hung** — resuming that burns the wall-clock to arrive at the
-  same place. `FAIL` reproduces the previous behaviour exactly.
+  Catch `MODAL_INTERRUPTIONS`, never `BaseException` — a `NameError` is a
+  `BaseException` too, and resuming one would run a deterministic failure
+  until the budget is gone.
+
+  The Modal runner reports the interruption inside the grace window the
+  platform allows, which releases the execution claim and its
+  concurrency-limit slots immediately and wakes the scheduler directly — so
+  recovery does not depend on the (opt-in) watchdog. It reports only when
+  nothing else will recover the execution: before the function timeout
+  fires an escaping `BaseException` gets the input restarted by Modal on
+  the same call id, which is faster and keeps the claim.
+
+  **Reactive builds only.** `sd.build`/`build_aio` have no resumption path;
+  a timed-out execution fails the task there as it always did.
 
 - **`FunctionSettings` gains `nonpreemptible` and `startup_timeout`**, the
   two Modal knobs this topic needs that were not previously expressible

@@ -108,7 +108,6 @@ import logging
 import typing
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
 from functools import partial
 from typing import Callable, Coroutine, Sequence
 from uuid import UUID
@@ -151,48 +150,6 @@ _TERMINAL_BUILD_STATUSES = ("completed", "failed", "cancelled")
 # reporting it. It arrives in the frontier's actionable set like a pending
 # task, and ``_act_on_interrupted`` decides what happens to it.
 _INTERRUPTED_STATUS = "interrupted"
-
-
-class InterruptionPolicy(str, Enum):
-    """What a scheduler does with a task the platform interrupted.
-
-    A timeout has two legitimate and opposite meanings, and nothing in a
-    task's execution tells them apart:
-
-    - the task hung, or is pathologically slow, and the timeout is the
-      symptom of a bug. Running it again burns the wall-clock to arrive at
-      the same place.
-    - the task is known to need more wall-clock than the platform's
-      maximum function timeout, checkpoints, and is *supposed* to be
-      killed and resumed until it converges. Here the timeout is not a
-      failure at all.
-
-    Only the person who wrote the task knows which it is, so the second
-    case is declared rather than inferred — see
-    ``TickConfig.interruption_policy_selector``.
-    """
-
-    #: Resume the task, bounded by ``TickConfig.max_interruptions``.
-    #:
-    #: **The default**, and it means what the status says: an interruption
-    #: is the platform taking the container away, so the thing to do about
-    #: it is run the task again. A default of FAIL would say the opposite —
-    #: that stardag records "not the task's fault" and then fails the task
-    #: for it — and would quietly overrule a task that caught the
-    #: interrupt, checkpointed, and raised ``TaskInterrupted`` to ask for
-    #: exactly this.
-    RESTART = "restart"
-
-    #: Record a retryable failure instead, bounded by the ordinary
-    #: ``TickConfig.max_attempts``.
-    #:
-    #: The opt-in for a task where hitting the function timeout means it
-    #: **hung**: resuming that burns the wall-clock to arrive at the same
-    #: place, so failing it after a couple of attempts is cheaper and more
-    #: honest. Select it per task; it is also what every interruption
-    #: degrades to when the registry cannot report interruption counts,
-    #: since an unbounded resume loop is the one outcome worse than either.
-    FAIL = "fail"
 
 
 # Slack added to an executor's own timeout when deriving a claim TTL. It
@@ -681,10 +638,10 @@ class TickConfig:
     # outright — but a suspend-heavy task does reach its retry budget
     # sooner than a plain one, so raise this if you retry those.
     max_attempts: int = 2
-    # Budget, per task per build round, on how many platform INTERRUPTIONS
-    # a task may absorb before the scheduler stops respawning it — the
-    # companion to ``max_attempts``, and only consulted under
-    # ``InterruptionPolicy.RESTART``.
+    # Budget, per task per build round, on how many times a task may ask
+    # to be resumed before the scheduler stops obliging — the companion to
+    # ``max_attempts``, and reached only by a task that raised
+    # ``ResumableInterruption``.
     #
     # **Why a second budget rather than one.** An interruption is the
     # platform taking the container away: a function timeout, or a
@@ -705,23 +662,6 @@ class TickConfig:
     # long training run is a plausible afternoon, 20 identical timeouts of
     # a hung task is a clear signal and a bounded bill.
     max_interruptions: int = 20
-    # Maps a task to what should happen when the platform interrupts it.
-    # ``None`` (the default) means ``InterruptionPolicy.RESTART`` for
-    # every task: an interruption is the platform taking the container
-    # away, so the default response is to run the task again, bounded by
-    # ``max_interruptions``.
-    #
-    # Return ``InterruptionPolicy.FAIL`` for tasks where hitting the
-    # function timeout means the task hung — resuming those burns the
-    # wall-clock to arrive at the same place.
-    #
-    # Deployed-app configuration, like ``limit_key_selector`` beside it,
-    # and for the same reason NOT in the Modal ``_TICK_KWARGS_ALLOWED``
-    # allowlist: it is a callable, so it cannot ride in a build's persisted
-    # JSON tick config.
-    interruption_policy_selector: "Callable[[BaseTask], InterruptionPolicy] | None" = (
-        None
-    )
     # How many of a pass's per-task actions may be in flight at once. Each
     # actionable task costs a task-store read, an acquiring start, an
     # executor spawn and a ref-recording start; doing that serially makes a
@@ -829,8 +769,7 @@ class TickSummary:
     # gate.
     budget_denied: int = 0
     # --- interruptions (TickConfig.max_interruptions) ---
-    # Interrupted tasks this tick respawned under
-    # ``InterruptionPolicy.RESTART``. A steadily climbing count on a
+    # Interrupted tasks this tick resumed. A steadily climbing count on a
     # long-running task is the healthy checkpoint-and-resume signal, not a
     # problem.
     interruptions_restarted: int = 0
@@ -839,10 +778,9 @@ class TickSummary:
     # Under FAIL_FAST each of these fails the build, so a non-zero value is
     # the direct answer to "why did my long-running task's build die?".
     interruptions_exhausted: int = 0
-    # Interrupted tasks this tick converted straight to a retryable failure
-    # because the policy said FAIL — i.e. a timeout that is being read as
-    # "this hung", not as "resume it". Also covers the degradation when the
-    # registry cannot report interruption counts.
+    # Interrupted tasks this tick converted to a retryable failure because
+    # the registry cannot report interruption counts, so no budget could
+    # bound resuming them. The only route to this counter.
     interruptions_failed: int = 0
     # Interrupted tasks left alone because their executor ref still probes
     # as live: the execution backend is retrying the input itself, so
@@ -1761,84 +1699,78 @@ async def _act_on_frontier(
                 )
                 return
 
-        policy = _interruption_policy(task, config)
-        if policy is InterruptionPolicy.RESTART:
-            spent = item.interrupt_count
-            if spent is not None and spent < config.max_interruptions:
-                spawn_candidates.append(task)
-                summary.interruptions_restarted += 1
-                logger.info(
-                    f"Task {task.id} of build {build_id} was interrupted by "
-                    f"the platform and will be started again "
-                    f"({spent} of {config.max_interruptions} allowed "
-                    "interruption(s) absorbed this build round)."
-                )
-                return
-            if spent is None:
-                # No counter, so no bound — fall through to the failure
-                # path, which IS bounded (by max_attempts). See
-                # ``FrontierTaskRef.interrupt_count``.
-                logger.warning(
-                    f"Task {task.id} of build {build_id} was interrupted and "
-                    "is configured to restart, but this registry does not "
-                    "report per-round interruption counts, so "
-                    "TickConfig.max_interruptions cannot be enforced and "
-                    "restarting would be unbounded. Treating it as a "
-                    "retryable failure instead. Upgrade stardag-api to "
-                    "enable interruption restarts."
-                )
-            else:
-                summary.interruptions_exhausted += 1
-                logger.error(
-                    f"Task {task.id} of build {build_id} has been "
-                    f"interrupted {spent} time(s) this build round, which is "
-                    f"its whole budget (TickConfig.max_interruptions="
-                    f"{config.max_interruptions}). Failing it rather than "
-                    "starting it again. If this task legitimately needs more "
-                    "resumes — a long training run that checkpoints, say — "
-                    "re-trigger this build with "
-                    'tick_kwargs={"max_interruptions": N}, which also starts '
-                    "a new round and resets the count."
-                )
-                await _record_task_failure(
-                    task,
-                    (
-                        f"Interruption budget spent ({spent} of "
-                        f"{config.max_interruptions} allowed interruption(s) "
-                        "in this build round). Re-trigger this build "
-                        f"(build_id={build_id}) to start a new round, "
-                        'optionally with tick_kwargs={"max_interruptions": N}.'
-                    ),
-                    build_id=build_id,
-                    registry=registry,
-                    config=config,
-                    summary=summary,
-                    # Already over its budget; the retry branch would only
-                    # re-derive that against a different budget and log it
-                    # twice.
-                    retryable=False,
-                )
-                acted = True
-                return
+        # Every INTERRUPTED task is here because a worker asked to be
+        # resumed — that status is only ever written for a task that raised
+        # ``ResumableInterruption``. An interruption the task did NOT catch
+        # never reaches this branch: the worker reports nothing, the
+        # execution dies, and a later pass records it as an ordinary
+        # retryable failure. So there is no policy to consult here, and no
+        # per-task configuration deciding whether a timeout was "expected" —
+        # the task said so by raising, or it did not.
+        spent = item.interrupt_count
+        if spent is None:
+            # No counter, so nothing can bound a resume loop. Degrade to the
+            # thing that IS bounded (``max_attempts``) rather than to an
+            # unbounded one. See ``FrontierTaskRef.interrupt_count``.
+            logger.warning(
+                f"Task {task.id} of build {build_id} asked to be resumed, "
+                "but this registry does not report per-round interruption "
+                "counts, so TickConfig.max_interruptions cannot be enforced "
+                "and resuming would be unbounded. Recording a retryable "
+                "failure instead. Upgrade stardag-api to enable resumption."
+            )
+            summary.interruptions_failed += 1
+            await _record_task_failure(
+                task,
+                "Execution interrupted; this registry cannot bound resumption",
+                build_id=build_id,
+                registry=registry,
+                config=config,
+                summary=summary,
+                retryable=True,
+                attempts_spent=item.attempt_count,
+            )
+            acted = True
+            return
 
-        # FAIL — selected for this task, or the no-counter fallback
-        # above. A retryable failure under the attempt budget, which is
-        # what happened to every interruption before this existed.
-        # Recorded HERE, inside a tick
-        # pass, rather than by the worker: a worker-recorded failure would
-        # sit in the next frontier snapshot and fail the build under
-        # FAIL_FAST before anything could retry it, which is the whole
-        # reason an interruption is a status of its own.
-        summary.interruptions_failed += 1
+        if spent < config.max_interruptions:
+            spawn_candidates.append(task)
+            summary.interruptions_restarted += 1
+            logger.info(
+                f"Task {task.id} of build {build_id} checkpointed and asked "
+                f"to be resumed; starting it again ({spent} of "
+                f"{config.max_interruptions} allowed interruption(s) "
+                "absorbed this build round)."
+            )
+            return
+
+        summary.interruptions_exhausted += 1
+        logger.error(
+            f"Task {task.id} of build {build_id} has been interrupted "
+            f"{spent} time(s) this build round, which is its whole budget "
+            f"(TickConfig.max_interruptions={config.max_interruptions}). "
+            "Failing it rather than resuming it again. If this task "
+            "legitimately needs more resumes — a long training run that "
+            "checkpoints, say — re-trigger this build with "
+            'tick_kwargs={"max_interruptions": N}, which also starts a new '
+            "round and resets the count."
+        )
         await _record_task_failure(
             task,
-            "Execution interrupted by the platform (reported by the worker)",
+            (
+                f"Interruption budget spent ({spent} of "
+                f"{config.max_interruptions} allowed interruption(s) in this "
+                f"build round). Re-trigger this build (build_id={build_id}) "
+                "to start a new round, optionally with "
+                'tick_kwargs={"max_interruptions": N}.'
+            ),
             build_id=build_id,
             registry=registry,
             config=config,
             summary=summary,
-            retryable=True,
-            attempts_spent=item.attempt_count,
+            # Already over its budget; the retry branch would only re-derive
+            # that against a different budget and log it twice.
+            retryable=False,
         )
         acted = True
 
@@ -2053,35 +1985,6 @@ async def _resolve_running(
         "leaving it (watchdog will re-check)."
     )
     return "leave"
-
-
-def _interruption_policy(task: BaseTask, config: "TickConfig") -> "InterruptionPolicy":
-    """What this task's interruptions mean — see :class:`InterruptionPolicy`.
-
-    With no selector configured every task gets ``RESTART`` — see
-    :class:`InterruptionPolicy` for why that, and not ``FAIL``, is the
-    default.
-
-    A selector *failure* resolves to ``FAIL``, which is deliberately not
-    the default: this runs while deciding what to do about a task the
-    platform already took away, and a broken selector must not
-    additionally kill the tick — but nor should a broken selector be
-    rewarded with the larger budget. ``FAIL`` is bounded by
-    ``max_attempts``, so a mis-resolved task costs a couple of attempts at
-    worst, where a mis-resolved ``RESTART`` could spend the whole
-    interruption budget.
-    """
-    selector = config.interruption_policy_selector
-    if selector is None:
-        return InterruptionPolicy.RESTART
-    try:
-        return selector(task)
-    except Exception:
-        logger.exception(
-            f"interruption_policy_selector failed for task {task.id}; "
-            "treating the interruption as a retryable failure."
-        )
-        return InterruptionPolicy.FAIL
 
 
 async def _probe_detached(

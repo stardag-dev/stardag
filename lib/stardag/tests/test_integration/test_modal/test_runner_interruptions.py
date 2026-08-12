@@ -1,21 +1,25 @@
 """What the worker does when the platform ends its execution.
 
-The classification matrix, which is the whole of the worker's side of
-stardag#245. Two rows are the ones a future refactor is most likely to
-break, and both are load-bearing:
+The whole of the worker's side of stardag#245, and it turns on one rule:
 
-- **A cancellation must report nothing.** Modal delivers a function
-  timeout and a ``FunctionCall.cancel()`` identically — same signal, same
-  ``InputCancellation``, same message — and stardag cancels its own
-  workers on FAIL_FAST and on a UI cancel. A worker that read every
-  cancellation as an interruption would resurrect tasks the build just
-  cancelled. The only discriminator is elapsed-vs-declared-timeout.
-- **``TaskInterrupted`` must escape as a ``BaseException``.** An ordinary
-  exception leaving the container is a task failure to Modal, which will
-  not restart the input; a ``BaseException`` reads as a crashed container,
-  which it will. That translation is what makes the documented recipe
-  ("catch the interrupt, checkpoint, raise ``sd.TaskInterrupted``") do
-  what it says instead of permanently failing the build.
+    **The task decides whether it is resumable; the clock decides who
+    resumes it.**
+
+Only ``ResumableInterruption`` asks to be resumed. An interruption the task
+lets propagate is not a request — it means the task had no plan for one, so
+either it hung or its worker's ``timeout`` is too small, and both should
+end as an ordinary failure. That is why there is no per-task configuration
+deciding whether a timeout was "expected": the task answered by raising, or
+by not raising.
+
+Given a request, *timing* says who honours it. Before the timeout an
+escaping ``BaseException`` gets the input restarted by the backend on the
+same call id; after it, nothing is coming and only a registry event can
+bring the task back.
+
+The tests below walk that as a grid — exception type × elapsed-vs-timeout —
+because the two axes are independent and the interesting failures live in
+the corners, not on the axes.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ except ImportError:
 from modal.exception import InputCancellation
 
 import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
 from stardag.integration.modal._metadata import (
     STARDAG_BUILD_ID_ENV,
     STARDAG_MODAL_FUNCTION_TIMEOUT_ENV,
@@ -103,195 +108,155 @@ def _runner_raising(exception: BaseException) -> Runner:
     return Raising()
 
 
-# --- the classifier, in isolation ---------------------------------------
+# --- the exception set users are told to catch --------------------------
+
+
+class TestModalInterruptions:
+    def test_covers_both_signals_and_nothing_else(self):
+        """The tuple is the public "catch these" answer, so its membership
+        is API. Preemption arrives as KeyboardInterrupt and a timeout as
+        InputCancellation; nothing else is a platform interruption."""
+        assert set(MODAL_INTERRUPTIONS) == {KeyboardInterrupt, InputCancellation}
+
+    def test_input_cancellation_is_not_a_keyboard_interrupt(self):
+        """Why the tuple exists at all. ``except KeyboardInterrupt:`` — the
+        obvious thing to write — silently does nothing on a timeout."""
+        assert not issubclass(InputCancellation, KeyboardInterrupt)
+
+    def test_members_escape_except_exception(self):
+        """Both are BaseException-only, which is what stops an ordinary
+        ``except Exception`` in a task body from swallowing them."""
+        assert all(not issubclass(e, Exception) for e in MODAL_INTERRUPTIONS)
+
+    def test_an_ordinary_bug_is_not_in_the_set(self):
+        """The reason to catch this tuple rather than ``BaseException``: a
+        NameError is a BaseException too, and converting one into "resume
+        me" would run a deterministic failure until the budget is gone."""
+        assert not isinstance(NameError("typo"), MODAL_INTERRUPTIONS)
+
+
+# --- the classifier: exception type × timing ----------------------------
 
 
 class TestClassifyInterruption:
     @pytest.mark.parametrize(
-        ("exception", "expected"),
+        ("exception", "before_timeout", "at_timeout"),
         [
-            (KeyboardInterrupt(), _PREEMPTION),
-            (SystemExit(), _PREEMPTION),
-            (sd.TaskInterrupted("checkpointed"), _PREEMPTION),
-            (sd.TaskPreempted("reclaimed"), _PREEMPTION),
-            (sd.TaskTimedOut("ran long"), _TIMEOUT),
-            (RuntimeError("ordinary bug"), None),
+            # Asked to be resumed → honoured either way; only *who* differs.
+            (sd.ResumableInterruption("checkpointed"), _PREEMPTION, _TIMEOUT),
+            # Did NOT ask → never reported, whatever the timing. The dead
+            # execution becomes an ordinary failure on a later tick pass.
+            (KeyboardInterrupt(), _CANCELLATION, _CANCELLATION),
+            (
+                InputCancellation("Input was cancelled by user"),
+                _CANCELLATION,
+                _CANCELLATION,
+            ),
+            (SystemExit(), _CANCELLATION, _CANCELLATION),
+            # Not an interruption at all.
+            (RuntimeError("ordinary bug"), None, None),
+            (NameError("typo"), None, None),
         ],
     )
-    def test_exception_types_well_before_the_timeout(self, exception, expected):
-        """What each type means when the timeout is nowhere near.
-
-        Only ``TaskTimedOut`` reads as a timeout here, because it is the one
-        the task asserted rather than the clock. The rest are timing-
-        dependent — see the two tests below for what they become once the
-        timeout has fired.
-        """
-        assert (
-            _classify_interruption(
-                exception, elapsed_seconds=1.0, function_timeout_seconds=600.0
-            )
-            == expected
-        )
-
-    @pytest.mark.parametrize(
-        "exception",
-        [
-            sd.TaskInterrupted("checkpointed"),
-            sd.TaskPreempted("reclaimed"),
-            KeyboardInterrupt(),
-        ],
-    )
-    def test_a_declared_interruption_at_the_timeout_must_be_reported(self, exception):
-        """The stranding case, and the reason timing decides rather than
-        type. Once the timeout has fired the backend will NOT restart the
-        input — so leaving this to "the platform will handle it" leaves the
-        task RUNNING until its claim expires. Reachable straight from the
-        documented recipe, which is what makes it worth a test per shape."""
-        assert (
-            _classify_interruption(
-                exception, elapsed_seconds=300.0, function_timeout_seconds=300.0
-            )
-            == _TIMEOUT
-        )
-
-    @pytest.mark.parametrize(
-        "exception",
-        [
-            sd.TaskInterrupted("checkpointed"),
-            sd.TaskPreempted("reclaimed"),
-            KeyboardInterrupt(),
-        ],
-    )
-    def test_the_same_interruption_well_before_the_timeout_is_preemption(
-        self, exception
-    ):
-        """The control. Before the timeout, an escaping BaseException gets
-        the input restarted by the backend on the same call id — faster than
-        a reschedule and it keeps the claim, so reporting would be strictly
-        worse."""
+    def test_the_grid(self, exception, before_timeout, at_timeout):
         assert (
             _classify_interruption(
                 exception, elapsed_seconds=5.0, function_timeout_seconds=300.0
             )
-            == _PREEMPTION
+            == before_timeout
         )
-
-    def test_input_cancellation_at_the_timeout_is_a_timeout(self):
         assert (
             _classify_interruption(
-                InputCancellation("Input was cancelled by user"),
-                elapsed_seconds=600.0,
-                function_timeout_seconds=600.0,
+                exception, elapsed_seconds=300.0, function_timeout_seconds=300.0
             )
-            == _TIMEOUT
-        )
-
-    def test_input_cancellation_well_before_it_is_a_cancellation(self):
-        """The FAIL_FAST / UI-cancel case. Reporting an interruption here
-        would put a task the build just cancelled back in the frontier."""
-        assert (
-            _classify_interruption(
-                InputCancellation("Input was cancelled by user"),
-                elapsed_seconds=8.0,
-                function_timeout_seconds=600.0,
-            )
-            == _CANCELLATION
+            == at_timeout
         )
 
     def test_slack_is_one_sided(self):
-        """Measured elapsed time starts later than Modal's clock (which
-        includes container startup), so it runs short — a signal a few
-        seconds 'early' is still the timeout."""
+        """Measured elapsed time starts after container startup, so it runs
+        short of Modal's clock — a request arriving a few seconds 'early' is
+        still past the timeout."""
         assert (
             _classify_interruption(
-                InputCancellation("Input was cancelled by user"),
-                elapsed_seconds=597.0,
-                function_timeout_seconds=600.0,
+                sd.ResumableInterruption("checkpointed"),
+                elapsed_seconds=297.0,
+                function_timeout_seconds=300.0,
             )
             == _TIMEOUT
         )
 
-    def test_without_a_declared_timeout_it_is_a_cancellation(self):
-        """No value to compare against → the conservative reading, which
-        is also the behaviour that predates interruption reporting."""
+    def test_without_a_declared_timeout_nothing_can_be_shown_to_have_timed_out(
+        self,
+    ):
+        """No value to compare against, so the backend is assumed able to
+        restart it — the conservative direction, being what happened before
+        interruptions were reported at all."""
         assert (
             _classify_interruption(
-                InputCancellation("Input was cancelled by user"),
+                sd.ResumableInterruption("checkpointed"),
                 elapsed_seconds=99999.0,
                 function_timeout_seconds=None,
             )
-            == _CANCELLATION
+            == _PREEMPTION
         )
 
 
 # --- what the runner reports, end to end --------------------------------
 
 
-class TestRunnerInterruptionReporting:
-    def test_timeout_reports_an_interruption_not_a_failure(
+class TestRunnerReporting:
+    def test_a_resumption_request_at_the_timeout_is_reported(
         self, registry, default_in_memory_fs_target
     ):
-        runner = _runner_raising(InputCancellation("Input was cancelled by user"))
+        """The one case that writes anything: the task asked, and nothing
+        else will restart a timed-out call."""
+        runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
 
-        with pytest.raises(InputCancellation):
+        with pytest.raises(BaseException):
             runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=0.0001))
 
         assert registry.methods() == ["task_start", "task_interrupt"]
-        assert "timeout" in registry.calls[1][1]["reason"]
+        assert "resumed" in registry.calls[1][1]["reason"]
 
-    def test_cancellation_reports_nothing(self, registry, default_in_memory_fs_target):
-        runner = _runner_raising(InputCancellation("Input was cancelled by user"))
-
-        with pytest.raises(InputCancellation):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=600.0))
-
-        assert registry.methods() == ["task_start"]
-
-    def test_preemption_reports_nothing_and_propagates(
+    def test_a_resumption_request_before_the_timeout_reports_nothing(
         self, registry, default_in_memory_fs_target
     ):
-        """Modal restarts a crashed container's input itself, on the same
-        call id and without spending an attempt. Recording a terminal event
-        would replace that with a slower reschedule and release a claim the
-        restart still needs."""
-        runner = _runner_raising(KeyboardInterrupt())
-
-        with pytest.raises(KeyboardInterrupt):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=600.0))
-
-        assert registry.methods() == ["task_start"]
-
-    def test_task_interrupted_escapes_as_a_base_exception(
-        self, registry, default_in_memory_fs_target
-    ):
-        """The documented recipe. ``sd.TaskInterrupted`` is an ordinary
-        Exception by design — so it does not slip past the user's own error
-        handling — but an ordinary exception leaving the container is a
-        task failure Modal will not restart. The runner translates."""
-        runner = _runner_raising(sd.TaskInterrupted("checkpointed; reschedule me"))
+        """The backend restarts the input on the same call id, faster than a
+        reschedule and keeping the claim — so reporting would be worse."""
+        runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
 
         with pytest.raises(KeyboardInterrupt) as caught:
             runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=600.0))
 
-        assert isinstance(caught.value.__cause__, sd.TaskInterrupted)
+        # Translated on the way out: an ordinary Exception leaving the
+        # container is a task failure Modal will not restart.
+        assert isinstance(caught.value.__cause__, sd.ResumableInterruption)
         assert registry.methods() == ["task_start"]
 
-    def test_the_footgun_is_closed(self, registry, default_in_memory_fs_target):
-        """The regression this whole change exists to prevent: a task that
-        catches the interrupt to checkpoint and reports an interruption
-        must not end up FAILED."""
-        runner = _runner_raising(sd.TaskInterrupted("checkpointed"))
+    @pytest.mark.parametrize(
+        "exception",
+        [KeyboardInterrupt(), InputCancellation("Input was cancelled by user")],
+    )
+    @pytest.mark.parametrize("timeout", [0.0001, 600.0])
+    def test_an_uncaught_interruption_never_reports(
+        self, registry, default_in_memory_fs_target, exception, timeout
+    ):
+        """A task that did not ask to be resumed does not get resumed —
+        whether the timeout had fired or not. It ends as a failure via the
+        dead execution, which is the right answer for "it hung" and for
+        "your timeout is too small" alike."""
+        runner = _runner_raising(exception)
 
         with pytest.raises(BaseException):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=600.0))
+            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=timeout))
 
-        assert "task_fail" not in registry.methods()
+        assert registry.methods() == ["task_start"]
 
     def test_an_ordinary_exception_still_fails(
         self, registry, default_in_memory_fs_target
     ):
-        """The control. Widening the wrapper to BaseException must not have
-        made real bugs stop being failures."""
+        """The control: catching BaseException in the runner must not have
+        stopped real bugs being failures."""
         runner = _runner_raising(RuntimeError("genuine bug"))
 
         with pytest.raises(RuntimeError):
@@ -300,53 +265,30 @@ class TestRunnerInterruptionReporting:
         assert registry.methods() == ["task_start", "task_fail"]
         assert "genuine bug" in registry.calls[1][1]["error_message"]
 
-    def test_task_timed_out_reports_regardless_of_elapsed_time(
-        self, registry, default_in_memory_fs_target
-    ):
-        """An explicit exception outranks the timing heuristic — the task
-        knows something the clock does not."""
-        runner = _runner_raising(sd.TaskTimedOut("I know I am out of time"))
-
-        with pytest.raises(BaseException):
-            runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=600.0))
-
-        assert registry.methods() == ["task_start", "task_interrupt"]
-
     def test_the_reason_never_names_a_timeout_it_does_not_know(
         self, registry, default_in_memory_fs_target
     ):
-        """A task can raise ``TaskTimedOut`` on its own authority, and the
-        orchestrator may not have forwarded a declared timeout — an older
-        one, or a worker function that declares none. The reason lands in
-        a user-visible error message, so it must not read "the worker
-        function's Nones timeout"."""
-        runner = _runner_raising(sd.TaskTimedOut("out of time"))
-
+        """A task may raise the request with no declared timeout forwarded.
+        The reason lands in a user-visible message, so it must not read
+        "the worker function's Nones timeout"."""
+        runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
+        # No timeout forwarded → classified as preemption, so nothing is
+        # reported at all; the guard is exercised through the branch that
+        # does report, below.
         with pytest.raises(BaseException):
-            runner(make_range(limit=2), env_overrides=_env(uuid4()))
-
-        assert registry.methods() == ["task_start", "task_interrupt"]
-        reason = registry.calls[1][1]["reason"]
-        assert "None" not in reason
-        assert "timeout" in reason
-
-    def test_the_reason_names_the_timeout_when_it_does_know(
-        self, registry, default_in_memory_fs_target
-    ):
-        runner = _runner_raising(InputCancellation("Input was cancelled by user"))
-
-        with pytest.raises(InputCancellation):
             runner(make_range(limit=2), env_overrides=_env(uuid4(), timeout=0.0001))
 
-        assert "0.0001s" in registry.calls[1][1]["reason"]
+        reason = registry.calls[1][1]["reason"]
+        assert "None" not in reason
+        assert "0.0001s" in reason
 
     def test_no_reporter_still_translates_the_escape(
         self, registry, default_in_memory_fs_target
     ):
-        """Without a build id there is nothing to report to — but the
-        escape translation is what earns the backend restart, so it must
-        not be conditional on reporting being configured."""
-        runner = _runner_raising(sd.TaskInterrupted("checkpointed"))
+        """Without a build id there is nothing to report to — but the escape
+        translation is what earns the backend restart, so it must not be
+        conditional on reporting being configured."""
+        runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
 
         with pytest.raises(KeyboardInterrupt):
             runner(make_range(limit=2))
