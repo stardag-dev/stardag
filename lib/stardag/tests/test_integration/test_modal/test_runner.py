@@ -163,3 +163,27 @@ class TestRunnerAsyncDynamicDeps:
         assert second is None
         assert task.complete()
         assert task.target().load() == 10  # sum(range(5))
+
+    def test_stop_async_iteration_from_the_loop_body_propagates(
+        self, runner: Runner, default_in_memory_fs_target, monkeypatch
+    ):
+        """A ``StopAsyncIteration`` escaping the driver's loop body must not
+        be mistaken for "the generator finished".
+
+        ``async for`` consumes a generator's own exhaustion, so the only way
+        this exception reaches the driver is from the body — e.g. a
+        ``complete()`` override raising it. Swallowing it would return
+        ``None``, which the caller reads as a completed task and reports as
+        such to the registry, losing the error entirely.
+        """
+        task = AsyncDynamicRangeSumTask(limit=5)
+
+        def _boom(self):
+            raise StopAsyncIteration("from complete()")
+
+        # Patch the *dependency* class, whose complete() the driver calls on
+        # each yielded batch, not the task under test.
+        monkeypatch.setattr(type(make_range(limit=5)), "complete", _boom)
+
+        with pytest.raises(StopAsyncIteration):
+            runner(task)
