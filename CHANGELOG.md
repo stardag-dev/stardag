@@ -6,6 +6,22 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+### Registry API
+
+- **Security (server image `0.1.2`): fixed a SQL injection in the task search
+  endpoint.** `GET /api/v1/tasks/search` builds JSONB accessor chains as SQL
+  text (Postgres has no bind-parameter form for a `->'key'` step). The path
+  segments of a `filter` key, and the artifact name in a `sort` field, were
+  interpolated without validation, so a crafted key or sort value could inject
+  SQL. The endpoint requires authentication, and the injection lands inside the
+  environment-scoped `WHERE`; a malformed value was read-only (no statement
+  stacking on the parameterised path) but could read across environments. All
+  released server images before `0.1.2` are affected. Fixed by validating every
+  path segment against an identifier character class and binding the sort
+  artifact name as a parameter; filter/sort inputs are now length-bounded.
+  Self-hosters should upgrade to server image `0.1.2`. See advisory
+  `GHSA-…` <!-- filled in on publish -->.
+
 ## [0.18.0] — 2026-08-11
 
 ### Registry API
