@@ -26,7 +26,7 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   filter/sort inputs are now length-bounded. Self-hosters should upgrade to
   server image `0.1.2`. See advisory
   [GHSA-47m3-4ppr-cfh4](https://github.com/stardag-dev/stardag/security/advisories/GHSA-47m3-4ppr-cfh4)
-  (CVSS 6.5).
+  (CVSS 7.7 High; read-only, authenticated).
 
 ## [0.18.0] — 2026-08-11
 
