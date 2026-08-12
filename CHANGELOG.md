@@ -15,11 +15,16 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   interpolated without validation, so a crafted key or sort value could inject
   SQL. The endpoint requires authentication, and the injection lands inside the
   environment-scoped `WHERE`; a malformed value was read-only (no statement
-  stacking on the parameterised path) but could read across environments. All
-  released server images before `0.1.2` are affected. Fixed by validating every
-  path segment against an identifier character class and binding the sort
-  artifact name as a parameter; filter/sort inputs are now length-bounded.
-  Self-hosters should upgrade to server image `0.1.2`. See advisory
+  stacking on the parameterised path) but could read across environments. The
+  exposure is limited to **registry metadata** — task identities, parameters,
+  build history, registry-stored artifacts, and user/credential records (keys
+  and any local passwords are bcrypt hashes). Task `target()` output is not
+  stored by the service — it lives in the user's own filesystem/S3/Modal
+  storage — and is not exposed by this issue. All released server images before
+  `0.1.2` are affected. Fixed by validating every path segment against an
+  identifier character class and binding the sort artifact name as a parameter;
+  filter/sort inputs are now length-bounded. Self-hosters should upgrade to
+  server image `0.1.2`. See advisory
   [GHSA-47m3-4ppr-cfh4](https://github.com/stardag-dev/stardag/security/advisories/GHSA-47m3-4ppr-cfh4)
   (CVSS 6.5).
 
