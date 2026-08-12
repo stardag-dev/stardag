@@ -5,7 +5,10 @@ description = "Stardag API service for task tracking and monitoring"
 authors = [{ name = "Anders Huss", email = "andhus@kth.se" }]
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.115.0",
+    # fastapi>=0.141 pulls the starlette 1.x line; paired with the starlette
+    # floor below it clears the StaticFiles UNC-path SSRF and the
+    # form()-limits DoS advisories.
+    "fastapi>=0.141.0",
     "uvicorn[standard]>=0.32.0",
     "gunicorn>=23.0.0",
     "sqlalchemy[asyncio]>=2.0.0",
@@ -23,6 +26,18 @@ dependencies = [
     # comparison, and relying on someone else's transitive dep for that is
     # how it disappears in a future gunicorn release.
     "packaging>=23.0",
+    # --- Security floors on transitive dependencies ---
+    # The production image builds from this file (uv pip install .), not from
+    # uv.lock, so a vulnerable transitive version is only excluded from a
+    # fresh build if the floor lives here. Each of these is pulled in by a
+    # parent above; the floor is the first patched version.
+    "starlette>=1.3.1",  # via fastapi — StaticFiles UNC SSRF, form() DoS
+    "urllib3>=2.7.0",  # via boto3 — decompression-bomb / cross-origin headers
+    "cryptography>=50.0.0",  # via python-jose[cryptography] — several CVEs
+    "mako>=1.3.12",  # via alembic — TemplateLookup path traversal
+    # via python-jose -> rsa — decoder DoS. Remove together with python-jose
+    # if/when it is replaced (see the security-scanning follow-ups).
+    "pyasn1>=0.6.4",
 ]
 
 [dependency-groups]
