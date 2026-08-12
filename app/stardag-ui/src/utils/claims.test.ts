@@ -105,6 +105,14 @@ describe("schedulingPanelForm", () => {
     ).toBe("stalled");
   });
 
+  it("leaves a cancelled build alone", () => {
+    // Stopped on purpose. Announcing that its roots finished anyway is noise,
+    // and the form tells the reader to re-trigger to reconcile the record —
+    // which contradicts the intent of cancelling. Before the satisfied form
+    // existed a cancelled build got the quiet strip; it still does.
+    expect(schedulingPanelForm(supersededProd, "cancelled")).toBe("collapsed");
+  });
+
   it("leaves a completed build alone", () => {
     // Already done; the panel has nothing to add, and a green "work is done"
     // banner on a completed build is noise.

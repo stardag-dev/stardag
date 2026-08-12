@@ -58,8 +58,9 @@ export type SchedulingPanelForm = "hidden" | "collapsed" | "stalled" | "satisfie
  *
  * **Three clauses, and each excludes a real state:**
  *
- * - `roots.length > 0` — a build with no roots has nothing to satisfy, and
- *   `every()` over an empty list is vacuously true. This is not a corner case:
+ * - a non-empty root list — enforced in `rootsSatisfiedFrom` below, since that
+ *   is where `every()` is called and where the vacuous-truth trap lives. A build
+ *   with no roots has nothing to satisfy. This is not a corner case:
  *   `POST /builds` defaults `root_task_ids` to `[]`, so *every* build passes
  *   through rootless between being minted and having its roots registered,
  *   which is exactly what `build_trigger` does. Without this clause a build
@@ -147,7 +148,17 @@ export function schedulingPanelForm(
   // to diagnose. Checked ahead of `stalledShape` on purpose — a satisfied build
   // has no actionable and no running tasks by definition, so it always *looks*
   // stalled.
-  if (rootsSatisfied(frontier) && buildStatus !== "completed") {
+  //
+  // `completed` and `cancelled` are excluded, and for the same reason the
+  // stalled rule below excludes them: neither is a build anyone needs told
+  // anything. `completed` already says it. `cancelled` was stopped on purpose —
+  // announcing that its roots finished anyway is noise, and the form's advice to
+  // re-trigger and reconcile the record actively contradicts the user's
+  // intent. Both simply fall through to the quiet strip, which is what they got
+  // before this form existed.
+  const deliberatelyTerminal =
+    buildStatus === "completed" || buildStatus === "cancelled";
+  if (!deliberatelyTerminal && rootsSatisfied(frontier)) {
     return "satisfied";
   }
 
