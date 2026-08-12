@@ -70,7 +70,9 @@ describe("BuildFailureReason", () => {
     expect(screen.queryByText(/Re-trigger this build to reset the blocker/)).toBeNull();
 
     // But it is one click away, and dated so it reads as a past event.
-    const toggle = screen.getByRole("button", { name: /Why it was recorded as failed/ });
+    const toggle = screen.getByRole("button", {
+      name: /Why it was recorded as failed/,
+    });
     expect(toggle).toHaveTextContent(/2026/);
     await user.click(toggle);
     expect(
