@@ -134,6 +134,8 @@ from stardag.testing import test_harness  # Isolated test environment
 
 # Exceptions
 sd.StardagError, sd.APIError, sd.AuthenticationError, sd.AuthorizationError
+# ...and the ones you RAISE: a platform interruption is not a failure
+sd.TaskInterrupted, sd.TaskPreempted, sd.TaskTimedOut
 from stardag.build import BuildFailed          # Raised by BuildSummary.raise_on_failure()
 from stardag.build import TaskExecutionError   # Wraps task executor exceptions
 ```

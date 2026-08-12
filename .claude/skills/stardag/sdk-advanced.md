@@ -377,6 +377,11 @@ from stardag.exceptions import (
     AuthenticationError,   # Auth failures (missing/invalid credentials)
     AuthorizationError,    # Permission denied (403)
     TokenExpiredError,     # Auth token expiration
+    # Raised BY a task, not caught: this attempt ended for a reason
+    # unrelated to the task's correctness — run it again.
+    TaskInterrupted,
+    TaskPreempted,         # the backend reclaimed the container
+    TaskTimedOut,          # the backend's function timeout ended the attempt
 )
 
 from stardag.build import (
@@ -386,6 +391,31 @@ from stardag.build import (
 ```
 
 `TaskExecutionError` preserves tracebacks across thread/process/remote executor boundaries. `BuildFailed` has a `.summary` attribute with the full `BuildSummary`.
+
+### Surviving preemption and timeouts
+
+A task that can be killed and resumed should checkpoint and say so:
+
+```python
+class TrainModel(sd.Task[Model]):
+    def run(self):
+        try:
+            train(resume_from=self.checkpoint_path())
+        except KeyboardInterrupt:      # the platform is taking the container
+            save_checkpoint(self.checkpoint_path())
+            raise sd.TaskInterrupted("checkpointed; reschedule me") from None
+```
+
+**The trap:** a platform interrupt arrives as a `BaseException`, so it
+escapes `except Exception`. Catch it to checkpoint and then re-raise
+anything derived from `Exception` and the task is recorded as a permanent
+failure — under `FAIL_FAST`, a dead build. `raise sd.TaskInterrupted(...)`
+(or a bare `raise`) keeps it restartable.
+
+On the scheduler side, `TickConfig.interruption_policy_selector` decides
+whether an interruption resumes the task (`InterruptionPolicy.RESTART`,
+bounded by `max_interruptions`) or records a retryable failure (`FAIL`, the
+default). See the Modal how-to for what arrives when.
 
 ## TaskRef (Immutable Reference)
 

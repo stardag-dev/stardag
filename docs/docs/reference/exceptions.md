@@ -11,6 +11,9 @@ StardagError
 │   ├── AuthorizationError
 │   ├── SDKVersionUnsupportedError
 │   └── TokenExpiredError
+├── TaskInterrupted
+│   ├── TaskPreempted
+│   └── TaskTimedOut
 └── ...
 ```
 
@@ -122,6 +125,69 @@ except TokenExpiredError:
     # Refresh token and retry
     os.system("stardag auth refresh")
 ```
+
+## Interruption Exceptions
+
+These are the one group you **raise** rather than catch: they tell the
+execution layer that an attempt ended for a reason unrelated to the task's
+correctness, so it should be run again.
+
+### TaskInterrupted
+
+```python
+from stardag import TaskInterrupted
+```
+
+Raise this from a task that caught a platform interruption — the execution
+backend reclaiming its container, or hitting the function timeout — and
+persisted whatever progress it had.
+
+```python
+class TrainModel(sd.Task[Model]):
+    def run(self):
+        try:
+            train(resume_from=self.checkpoint_path())
+        except KeyboardInterrupt:      # the platform is taking the container
+            save_checkpoint(self.checkpoint_path())
+            raise sd.TaskInterrupted("checkpointed; reschedule me") from None
+```
+
+**Why it exists, given that a bare `raise` also works.** The failure it
+replaces is silent and expensive. A platform interrupt reaches your code as
+a `BaseException`, so it escapes `except Exception` — which is what lets the
+backend see the container as crashed and re-run the input. Catch the
+interrupt to checkpoint, re-raise anything derived from `Exception`, and the
+same task becomes a **permanent failure** instead, taking a `FAIL_FAST`
+build with it. One keyword apart, with no warning either way. Naming the
+intent is what makes the correct behaviour survive the later refactor that
+wraps the body in a broad `except`.
+
+It is deliberately an `Exception`, not a `BaseException`: you raise it from
+inside your own error handling, where a `BaseException` subclass would be
+one more thing slipping past your control flow for no benefit. The runner
+catches `BaseException` regardless and translates.
+
+### TaskPreempted
+
+```python
+from stardag import TaskPreempted
+```
+
+The backend reclaimed the container running this task.
+
+### TaskTimedOut
+
+```python
+from stardag import TaskTimedOut
+```
+
+The backend's function timeout ended this attempt. Distinct from
+`TaskPreempted` because the two want different defaults: a container
+reclaimed mid-run says nothing about the task, while a task that hits its
+timeout may equally be hung. Which reading applies is a property of the
+task, configured on the scheduler via
+`TickConfig.interruption_policy_selector` — see
+[Preemption and timeouts](../how-to/integrate-modal.md#preemption-and-timeouts).
 
 ## Common Error Scenarios
 
