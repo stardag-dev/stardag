@@ -216,7 +216,7 @@ async def cascade_cancel_build_tasks(
 ) -> list[Task]:
     """Emit TASK_CANCELLED for the claims ``build_id`` holds. No commit.
 
-    "Claims this build holds" means tasks that are RUNNING or SUSPENDED
+    "Claims this build holds" means tasks that are RUNNING, SUSPENDED or INTERRUPTED
     **and whose current status was produced by this build**
     (``latest_status_build_id``). The ownership scope is what makes cascading
     safe: a task this build merely referenced, while another build is

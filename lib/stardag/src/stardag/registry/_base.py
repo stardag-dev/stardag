@@ -166,7 +166,7 @@ class FrontierExternalBlocker(StardagBaseModel):
 class BuildFrontier(StardagBaseModel):
     """Scheduling state of a build, consumed by reactive scheduler ticks.
 
-    ``actionable``: tasks with global status pending/suspended/running whose
+    ``actionable``: tasks with global status pending/suspended/interrupted/running whose
     upstream dependencies (static + dynamic) are all completed. The
     scheduler partitions them: pending/suspended → spawn; running → probe
     the detached execution ref. ``status_counts`` covers all tasks in the

@@ -4610,6 +4610,115 @@ class TestInterruptedTasks:
         assert summary.terminal_status == "completed"
         assert registry.build_status == "completed"
 
+    async def test_fail_fast_cancels_an_interrupted_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An interrupted task may still have a live execution — that is
+        the premise of the backend-retry guard — so a dying build must
+        cancel it, and must not leave it INTERRUPTED.
+
+        Left behind it is a permanent wedge for every other build gated on
+        it: ``_OWNER_DRIVEN_STATUSES`` reads interrupted as "the owner will
+        move it", so a neighbour waits and then fails, where a CANCELLED
+        task is reset and run.
+        """
+        # Siblings, not a chain: a failed *upstream* would gate the
+        # interrupted task out of `actionable` and the test would pass for
+        # the wrong reason.
+        broken = SyncOnlyTask(name="ff-cancel-broken", deps=())
+        resuming = SyncOnlyTask(name="ff-cancel-resuming", deps=())
+        root = SyncOnlyTask(name="ff-cancel-root", deps=(broken, resuming))
+        registry, locks, executor, store = _setup(
+            [broken, resuming, root],
+            auto_complete=False,
+            executor=FakeTickExecutor(
+                statuses={"fc-live": DetachedExecutionStatus.RUNNING}
+            ),
+        )
+        registry.statuses[str(broken.id)] = "failed"
+        registry.add_task(
+            str(resuming.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-live",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.05,
+                poll_interval_seconds=0.02,
+                fail_mode=FailMode.FAIL_FAST,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert "fc-live" in executor.cancelled_refs
+        assert registry.statuses[str(resuming.id)] == "cancelled"
+
+    async def test_fail_fast_does_not_cancel_what_this_pass_just_resumed(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Terminal handling runs on the snapshot taken BEFORE the pass
+        acted, so an interrupted task the pass resumed still reads
+        ``interrupted`` there, under its old ref.
+
+        Acting on that stale copy is worse than doing nothing: cancelling
+        the dead ref is a no-op, while the TASK_CANCELLED it records
+        releases the claim on the execution that just started — and a
+        cancelled task with no claim is exactly what a neighbouring build
+        treats as recoverable, so it resets it and spawns a second
+        execution while the first is still writing the target. Hence the
+        re-read in ``_cancel_running``.
+        """
+        broken = SyncOnlyTask(name="ff-fresh-broken", deps=())
+        resuming = SyncOnlyTask(name="ff-fresh-resuming", deps=())
+        root = SyncOnlyTask(name="ff-fresh-root", deps=(broken, resuming))
+        registry, locks, executor, store = _setup(
+            [broken, resuming, root],
+            auto_complete=False,
+            # The interrupted task's OLD ref is dead, so the pass resumes it.
+            executor=FakeTickExecutor(
+                statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+            ),
+        )
+        registry.statuses[str(broken.id)] = "failed"
+        registry.add_task(
+            str(resuming.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-dead",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.05,
+                poll_interval_seconds=0.02,
+                fail_mode=FailMode.FAIL_FAST,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        # It was resumed, so it is RUNNING under a NEW ref by the time the
+        # build dies — and it is that ref which must be cancelled, never
+        # the stale one the pre-action snapshot carried.
+        assert executor.spawned == [resuming.id]
+        assert "fc-dead" not in executor.cancelled_refs, (
+            "cancelled the stale ref: the live execution is orphaned and "
+            "its claim released"
+        )
+        assert executor.cancelled_refs == ["ref-1"]
+        assert registry.statuses[str(resuming.id)] == "cancelled"
+
     async def test_interrupted_is_reset_by_a_re_trigger(self):
         """``_RETRYABLE_STATUSES`` covers it, so discovery's
         ``retry_failed`` picks up a task abandoned mid-interruption. Leave

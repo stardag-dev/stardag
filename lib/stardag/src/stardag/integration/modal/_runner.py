@@ -673,23 +673,32 @@ class Runner(RunFunction):
                 )
             return kind
         if kind == _TIMEOUT:
-            of_timeout = (
-                f" of {function_timeout_seconds}s"
-                if function_timeout_seconds is not None
-                else ""
-            )
+            # Two very different situations reach here, and the message
+            # must not claim the stronger one. With a declared timeout we
+            # know the execution really did run out of time. Without one
+            # (the worker declares no ``timeout``, so nothing was
+            # forwarded) we are reporting *because* we cannot tell — see
+            # ``_classify_interruption`` — and naming a timeout that was
+            # never observed would be the "Nones timeout" problem in a new
+            # costume: an assertion the worker is in no position to make.
+            if function_timeout_seconds is not None:
+                detail = (
+                    f"after hitting its worker function's "
+                    f"{function_timeout_seconds}s timeout "
+                    f"({elapsed_seconds:.1f}s elapsed)"
+                )
+            else:
+                detail = (
+                    f"{elapsed_seconds:.1f}s in; the worker function "
+                    "declares no timeout, so whether one fired is unknown "
+                    "and the interruption is reported to be safe"
+                )
             logger.warning(
-                f"Task {task.id} checkpointed and asked to be resumed after "
-                f"hitting its worker function's timeout{of_timeout} "
-                f"({elapsed_seconds:.1f}s elapsed). Reporting an "
-                "interruption: the backend will not restart a timed-out "
-                "input, so a scheduler tick has to."
+                f"Task {task.id} checkpointed and asked to be resumed "
+                f"{detail}. Reporting an interruption: nothing else will "
+                "restart a timed-out input, so a scheduler tick has to."
             )
-            reporter.interrupted(
-                f"Task checkpointed and asked to be resumed after the "
-                f"worker function's timeout{of_timeout} "
-                f"({elapsed_seconds:.1f}s elapsed)"
-            )
+            reporter.interrupted(f"Task checkpointed and asked to be resumed {detail}")
             return kind
         if kind == _CANCELLATION:
             # A raw platform interruption the task did not catch, or a

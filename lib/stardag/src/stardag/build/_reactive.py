@@ -1053,22 +1053,37 @@ async def _run_tick_body_aio(
 
                 # Linger: poll the wake-up flag until deadline.
                 #
-                # ``awaiting_backend`` breaks out of the wait as well, and
-                # it is the one thing here that is NOT waiting for an
-                # event. An interrupted task whose execution still probes
-                # as live is left alone to avoid a duplicate — but nothing
-                # will ever notify us that it stopped being live: the
-                # worker that would have reported is dead, and an
-                # interrupted task emits nothing further. Waiting on
-                # ``needs_tick`` for that would stall the build until the
-                # watchdog, which is off by default. So a pass that left
-                # one behind re-acts on the next poll and re-probes.
+                # Two ways out. ``needs_tick`` is the ordinary one: some
+                # worker reported something.
+                #
+                # The other is an interrupted task whose execution still
+                # probes as live. That one is NOT waiting for an event —
+                # nothing will ever emit one, because the worker that would
+                # have reported is dead and an interrupted task produces
+                # nothing further. Waiting on the flag for it stalls the
+                # build until the watchdog, which is off by default.
+                #
+                # So those refs are re-probed directly, and only they: this
+                # deliberately does not re-enter the pass. Re-acting on
+                # every poll would re-attempt the claim of every
+                # limit-denied task at the poll interval, which is exactly
+                # the hot loop the ``acted`` branch above declines to
+                # create. The pass resumes only once a ref stops being
+                # live, which is the single fact being waited on.
+                #
+                # Residual, and honest: a ref that stays live past
+                # ``linger_seconds`` still lingers out with nothing
+                # scheduled to follow up. For a genuine backend retry that
+                # is fine — the restarted worker's own events re-tick the
+                # build. It is the unwinding race this closes.
                 while True:
                     if loop.time() >= deadline:
                         return
                     await asyncio.sleep(config.poll_interval_seconds)
-                    if awaiting_backend:
-                        break  # re-probe; see above
+                    if awaiting_backend and await _any_ref_settled(
+                        awaiting_backend, task_executor
+                    ):
+                        break  # a ref resolved — re-act and pick it up
                     flag = await registry.build_get_frontier_aio(build_id)
                     if flag.needs_tick:
                         break  # outer loop clears the flag and re-acts
@@ -1410,7 +1425,7 @@ async def _act_on_frontier(
     task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
-) -> tuple[bool, int, int]:
+) -> tuple[bool, int, "list[tuple[FrontierTaskRef, BaseTask]]"]:
     """Spawn/probe/heal the actionable tasks, with bounded concurrency.
 
     Returns ``(acted, denied_this_round, awaiting_backend)``: whether
@@ -1496,14 +1511,15 @@ async def _act_on_frontier(
     grows an ``await`` in the middle stops being atomic.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
-        return False, 0, 0  # terminal handling deals with it
+        return False, 0, []  # terminal handling deals with it
     acted = False
     denied_this_round = 0
     # Interrupted tasks left alone because their execution still probes as
-    # live. Returned so the caller can keep re-probing: unlike everything
-    # else a pass can be waiting for, NOTHING will emit an event when this
-    # resolves — the worker that would have is already dead.
-    awaiting_backend = 0
+    # live, as ``(ref, task)``. Returned so the caller can keep re-probing
+    # *just these*: unlike everything else a pass can be waiting for,
+    # NOTHING will emit an event when this resolves — the worker that would
+    # have is already dead.
+    awaiting_backend: list[tuple[FrontierTaskRef, BaseTask]] = []
     # Task ids appended to ``spawn_candidates`` because they asked to be
     # resumed, so the spawn phase can count only the ones it actually
     # spawned (see ``summary.interruptions_restarted``).
@@ -1712,8 +1728,7 @@ async def _act_on_frontier(
         if item.latest_executor_ref and item.latest_executor:
             status = await _probe_detached(item, task, task_executor)
             if status == DetachedExecutionStatus.RUNNING:
-                nonlocal awaiting_backend
-                awaiting_backend += 1
+                awaiting_backend.append((item, task))
                 summary.interruptions_backend_retrying += 1
                 logger.info(
                     f"Task {task.id} of build {build_id} was interrupted but "
@@ -2020,6 +2035,23 @@ async def _resolve_running(
         "leaving it (watchdog will re-check)."
     )
     return "leave"
+
+
+async def _any_ref_settled(
+    awaiting: "list[tuple[FrontierTaskRef, BaseTask]]",
+    task_executor: TaskExecutorABC,
+) -> bool:
+    """Whether any awaited execution has stopped probing as live.
+
+    The linger loop's cheap poll: one non-blocking probe per interrupted
+    task the pass left behind, and nothing else. Returning True sends the
+    tick back through a full pass, which will re-probe and act.
+    """
+    for item, task in awaiting:
+        status = await _probe_detached(item, task, task_executor)
+        if status != DetachedExecutionStatus.RUNNING:
+            return True
+    return False
 
 
 async def _probe_detached(
@@ -2740,11 +2772,37 @@ async def _cancel_running(
     then fails, where a CANCELLED task would have been reset and run. The
     argument is the one ``CASCADE_CANCEL_STATUSES`` already makes for
     SUSPENDED, word for word.
+
+    Known gap: an interrupted task whose upstream is incomplete again (a
+    dynamic dependency registered after it ran) is in neither ``running``
+    nor ``actionable``, so nothing here reaches it. Narrow, and the
+    server-side cascade — which queries the task table rather than the
+    frontier — closes it whenever the build is cancelled through the API.
     """
     cancellable = _RUNNING_STATUSES + (_INTERRUPTED_STATUS,)
-    running_items = frontier.running or []
+    # Re-read, because the snapshot the caller holds is the PRE-action one.
+    # ``_act_on_frontier`` has already run by the time terminal handling
+    # decides to cancel, so that snapshot can be wrong in both directions:
+    # a task it resumed or spawned this pass is live under a ref the
+    # snapshot has never seen, and a task the snapshot lists as INTERRUPTED
+    # may now be RUNNING under a *different* ref.
+    #
+    # Acting on the stale copy is not merely incomplete, it is harmful:
+    # cancelling the old ref is a no-op while the TASK_CANCELLED it records
+    # releases the claim on the execution that just started — handing the
+    # task to any other build while a container is still writing its
+    # target. One extra read on a path that runs once, at build death.
+    try:
+        frontier = await registry.build_get_frontier_aio(build_id)
+    except Exception as e:
+        logger.warning(
+            f"Could not re-read the frontier of build {build_id} before "
+            f"cancelling ({e}); falling back to the pre-action snapshot, "
+            "which may miss executions started in this pass."
+        )
+    running_items = list(frontier.running or [])
     seen = {item.task_id for item in running_items}
-    running_items = running_items + [
+    running_items += [
         item
         for item in frontier.actionable
         if item.latest_status in cancellable and item.task_id not in seen
