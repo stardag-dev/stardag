@@ -98,7 +98,6 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   "this task must not be preempted" (3× CPU/memory price, not supported
   for GPU functions).
 
-
 ## [0.18.0] — 2026-08-11
 
 ### Registry API
