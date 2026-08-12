@@ -86,10 +86,13 @@ one at the declared timeout to the millisecond (20.000s / 20.001s /
 elapsed execution time against this value decides it — see
 ``_runner._classify_interruption``.
 
-Absent (an older orchestrator, or a worker function that declares no
-timeout) every ``InputCancellation`` reads as a cancellation, which is the
-behaviour that predates interruption reporting: report nothing, and let a
-later scheduler pass discover the dead execution.
+Absent — an older orchestrator, or a worker function that declares no
+``timeout`` of its own — the two cases split. An ``InputCancellation``
+nobody asked to be resumed from still reads as a cancellation and is not
+reported. But a task that DID ask (``ResumableInterruption``) is reported
+anyway, because the backend applies its own default timeout regardless:
+"unknown" does not mean "no timeout fired", and guessing wrong in that
+direction strands the task. See ``_runner._classify_interruption``.
 """
 
 STARDAG_MODAL_WORKSPACE_ENV = "STARDAG_MODAL_WORKSPACE"

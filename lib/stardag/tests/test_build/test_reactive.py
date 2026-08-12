@@ -4394,14 +4394,72 @@ class TestInterruptedTasks:
         assert summary.budget_denied == 0
         assert executor.spawned == [root.id]
 
-    async def test_a_live_ref_means_the_backend_is_retrying(
+    async def test_a_live_ref_is_re_probed_until_it_is_not(
         self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
     ):
-        """An interrupted task whose execution still probes as RUNNING is
-        being restarted by the backend itself, under the same ref. Spawning
-        would run it twice — the guard that makes ``retries>0`` on a worker
-        safe to combine with interruption reporting."""
+        """An interrupted task whose execution still probes as live is left
+        alone — the backend may be retrying the input under the same ref,
+        and spawning would run it twice.
+
+        **But "left alone" must not mean "abandoned".** Nothing will ever
+        emit an event when that ref stops being live: the worker that would
+        have reported is dead, and an interrupted task produces nothing
+        further. A tick that lingered on the wake-up flag here would stall
+        the build until the watchdog — which is off by default. So the pass
+        re-probes instead, and picks the task up as soon as the ref
+        resolves.
+
+        The executor below answers RUNNING once and FAILED after, which is
+        exactly the shape of the race this guards: the interruption is
+        reported inside the grace window and wakes a tick immediately, so
+        the probe can easily land before the call has finished unwinding.
+        """
         (root,) = _chain("interrupted-backend-retry")
+
+        class SettlingExecutor(FakeTickExecutor):
+            probes = 0
+
+            async def detached_status(self, task, executor, ref):
+                SettlingExecutor.probes += 1
+                if SettlingExecutor.probes == 1:
+                    return DetachedExecutionStatus.RUNNING
+                return DetachedExecutionStatus.FAILED
+
+        registry, locks, executor, store = _setup(
+            [root], auto_complete=True, executor=SettlingExecutor()
+        )
+        registry.add_task(
+            str(root.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-live",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        # It waited on the first probe...
+        assert summary.interruptions_backend_retrying >= 1
+        assert SettlingExecutor.probes >= 2, "the tick stopped re-probing"
+        # ...and resumed the task once the ref resolved, rather than
+        # lingering out with the build stalled.
+        assert summary.interruptions_restarted == 1
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+
+    async def test_a_live_ref_is_not_spawned_in_the_same_pass(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The other half: while the ref stays live, nothing is spawned.
+        A permanently-live ref lingers out rather than duplicating the
+        execution."""
+        (root,) = _chain("interrupted-still-live")
         registry, locks, executor, store = _setup(
             [root],
             auto_complete=False,
@@ -4422,13 +4480,10 @@ class TestInterruptedTasks:
             task_executor=executor,
             lock_manager=locks,
             task_store=store,
-            config=TickConfig(
-                linger_seconds=0.05,
-                poll_interval_seconds=0.01,
-            ),
+            config=TickConfig(linger_seconds=0.1, poll_interval_seconds=0.02),
         )
 
-        assert summary.interruptions_backend_retrying == 1
+        assert summary.interruptions_backend_retrying >= 1
         assert summary.interruptions_restarted == 0
         assert executor.spawned == []
         assert registry.statuses[str(root.id)] == "interrupted"

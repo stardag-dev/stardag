@@ -1007,7 +1007,7 @@ async def _run_tick_body_aio(
                     summary.outcome = "not_reactive"
                     return
 
-                acted, denied_this_round = await _act_on_frontier(
+                acted, denied_this_round, awaiting_backend = await _act_on_frontier(
                     frontier,
                     build_id=build_id,
                     registry=registry,
@@ -1052,10 +1052,23 @@ async def _run_tick_body_aio(
                     continue
 
                 # Linger: poll the wake-up flag until deadline.
+                #
+                # ``awaiting_backend`` breaks out of the wait as well, and
+                # it is the one thing here that is NOT waiting for an
+                # event. An interrupted task whose execution still probes
+                # as live is left alone to avoid a duplicate — but nothing
+                # will ever notify us that it stopped being live: the
+                # worker that would have reported is dead, and an
+                # interrupted task emits nothing further. Waiting on
+                # ``needs_tick`` for that would stall the build until the
+                # watchdog, which is off by default. So a pass that left
+                # one behind re-acts on the next poll and re-probes.
                 while True:
                     if loop.time() >= deadline:
                         return
                     await asyncio.sleep(config.poll_interval_seconds)
+                    if awaiting_backend:
+                        break  # re-probe; see above
                     flag = await registry.build_get_frontier_aio(build_id)
                     if flag.needs_tick:
                         break  # outer loop clears the flag and re-acts
@@ -1397,10 +1410,11 @@ async def _act_on_frontier(
     task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
-) -> tuple[bool, int]:
+) -> tuple[bool, int, int]:
     """Spawn/probe/heal the actionable tasks, with bounded concurrency.
 
-    Returns ``(acted, denied_this_round)``: whether anything acted, and how
+    Returns ``(acted, denied_this_round, awaiting_backend)``: whether
+    anything acted, how
     many tasks were denied by concurrency limits in THIS pass (used by
     terminal detection — a cumulative count would keep suppressing the
     stuck-build check long after the denied tasks have run).
@@ -1482,9 +1496,18 @@ async def _act_on_frontier(
     grows an ``await`` in the middle stops being atomic.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
-        return False, 0  # terminal handling deals with it
+        return False, 0, 0  # terminal handling deals with it
     acted = False
     denied_this_round = 0
+    # Interrupted tasks left alone because their execution still probes as
+    # live. Returned so the caller can keep re-probing: unlike everything
+    # else a pass can be waiting for, NOTHING will emit an event when this
+    # resolves — the worker that would have is already dead.
+    awaiting_backend = 0
+    # Task ids appended to ``spawn_candidates`` because they asked to be
+    # resumed, so the spawn phase can count only the ones it actually
+    # spawned (see ``summary.interruptions_restarted``).
+    resumption_requests: set[UUID] = set()
     semaphore = asyncio.Semaphore(max(1, config.max_concurrent_actions))
 
     # --- phase 1: resolve task objects --------------------------------
@@ -1689,13 +1712,16 @@ async def _act_on_frontier(
         if item.latest_executor_ref and item.latest_executor:
             status = await _probe_detached(item, task, task_executor)
             if status == DetachedExecutionStatus.RUNNING:
+                nonlocal awaiting_backend
+                awaiting_backend += 1
                 summary.interruptions_backend_retrying += 1
                 logger.info(
                     f"Task {task.id} of build {build_id} was interrupted but "
-                    f"its execution {item.latest_executor_ref} is still "
-                    "live — the execution backend is retrying the input "
-                    "itself. Leaving it alone rather than spawning a "
-                    "duplicate."
+                    f"its execution {item.latest_executor_ref} still probes "
+                    "as live — either the backend is retrying the input "
+                    "itself, or the call has not finished unwinding yet. "
+                    "Leaving it alone this pass and re-probing shortly, "
+                    "rather than spawning a duplicate."
                 )
                 return
 
@@ -1734,8 +1760,12 @@ async def _act_on_frontier(
             return
 
         if spent < config.max_interruptions:
+            # Counted at spawn time, not here: this phase runs before the
+            # per-pass spawn cap, and interrupted tasks are appended after
+            # the pending ones, so they are the first to be truncated.
+            # Incrementing here would report resumes that did not happen.
+            resumption_requests.add(task.id)
             spawn_candidates.append(task)
-            summary.interruptions_restarted += 1
             logger.info(
                 f"Task {task.id} of build {build_id} checkpointed and asked "
                 f"to be resumed; starting it again ({spent} of "
@@ -1893,10 +1923,15 @@ async def _act_on_frontier(
             claim_ttl_seconds=ttl_seconds,
         )
         summary.spawned += 1
+        if task.id in resumption_requests:
+            # Counted here rather than where the request was read, so a
+            # pass truncated by the spawn cap does not report resumes it
+            # never made.
+            summary.interruptions_restarted += 1
         acted = True
 
     await _run_bounded([partial(spawn, task) for task in spawn_candidates], semaphore)
-    return acted, denied_this_round
+    return acted, denied_this_round, awaiting_backend
 
 
 def _claim_has_lapsed(expires_at: datetime | None, now: datetime) -> bool:
@@ -2694,13 +2729,29 @@ async def _cancel_running(
     RUNNING — keeping its pending descendants out of the skip-blocked
     closure (cancelled is a seed status) and holding any concurrency-limit
     slots forever.
+
+    **INTERRUPTED tasks are included, and for both of those reasons.** Such
+    a task may still have a live execution — that is the whole premise of
+    the backend-retry guard in ``_act_on_frontier`` — so a build that dies
+    without cancelling it leaves a container running that nobody is waiting
+    for. And left INTERRUPTED under a terminal build it is a permanent
+    wedge for every *other* build gated on it: ``_OWNER_DRIVEN_STATUSES``
+    reads interrupted as "the owner will move it", so a neighbour waits and
+    then fails, where a CANCELLED task would have been reset and run. The
+    argument is the one ``CASCADE_CANCEL_STATUSES`` already makes for
+    SUSPENDED, word for word.
     """
-    running_items = frontier.running or [
-        item for item in frontier.actionable if item.latest_status in _RUNNING_STATUSES
+    cancellable = _RUNNING_STATUSES + (_INTERRUPTED_STATUS,)
+    running_items = frontier.running or []
+    seen = {item.task_id for item in running_items}
+    running_items = running_items + [
+        item
+        for item in frontier.actionable
+        if item.latest_status in cancellable and item.task_id not in seen
     ]
     for item in running_items:
         if (
-            item.latest_status in _RUNNING_STATUSES
+            item.latest_status in cancellable
             and item.latest_executor is not None
             and item.latest_executor_ref is not None
         ):

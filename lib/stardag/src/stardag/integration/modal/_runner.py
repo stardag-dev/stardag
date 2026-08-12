@@ -178,8 +178,19 @@ def _classify_interruption(
       dies and a later scheduler pass records the failure, which is exactly
       what should happen to a task that did not plan for this.
     - ``None`` — an ordinary exception. A failure, reported as one.
+
+    **With no declared timeout, a resumption request is reported anyway.**
+    The orchestrator forwards the worker function's ``timeout`` only when
+    the app declares one — but the backend applies its own default
+    regardless (Modal's is 300s), so "no declared timeout" does not mean
+    "no timeout fired". Guessing *preemption* there is the dangerous guess:
+    if no restart is coming the task sits RUNNING until its claim lapses,
+    which is the exact stall this path exists to remove. Guessing *timeout*
+    is recoverable either way — if the backend does restart the input, the
+    scheduler's probe finds the ref still live and leaves it alone. So the
+    unknown case reports.
     """
-    timed_out = function_timeout_seconds is not None and (
+    timed_out = function_timeout_seconds is None or (
         elapsed_seconds >= function_timeout_seconds - _TIMEOUT_DETECTION_SLACK_SECONDS
     )
     if isinstance(exception, ResumableInterruption):
@@ -534,6 +545,15 @@ class Runner(RunFunction):
         # getattr: tolerate subclasses overriding __init__ without super()
         result: None | TaskStruct = None
         exception: BaseException | None = None
+        # Started here, not just before ``run()``: this is compared against
+        # the *function's* timeout, and the backend's clock started earlier
+        # still (container startup and input deserialisation are inside its
+        # window and outside ours). Everything between here and ``run()``
+        # — a user ``setup()`` that loads a model, the start report's HTTP
+        # call — would otherwise be time the comparison does not see, and
+        # understating elapsed time makes a real timeout read as a
+        # preemption.
+        started_at = time.monotonic()
         try:
             self.setup(task)
             # All lifecycle reporting happens inside the env-overrides
@@ -558,7 +578,6 @@ class Runner(RunFunction):
                 if reporter is not None:
                     reporter.started()
                 function_timeout = _declared_function_timeout(env_overrides)
-                started_at = time.monotonic()
                 try:
                     result = self.run(task)
                 except BaseException as e:
@@ -569,6 +588,11 @@ class Runner(RunFunction):
                         elapsed_seconds=time.monotonic() - started_at,
                         function_timeout_seconds=function_timeout,
                     )
+                    # _PREEMPTION is returned only for
+                    # ResumableInterruption, always an ordinary Exception —
+                    # the isinstance is a guard so a future classification
+                    # change cannot silently start substituting a
+                    # KeyboardInterrupt for some other BaseException.
                     if kind == _PREEMPTION and isinstance(e, Exception):
                         # The task raised ``sd.ResumableInterruption`` — an
                         # ordinary Exception, deliberately, so it does not

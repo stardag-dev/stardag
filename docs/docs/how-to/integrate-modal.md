@@ -869,9 +869,8 @@ Modal's part and load-bearing here.
 
     `InputCancellation` derives straight from `BaseException`; it is **not**
     a `KeyboardInterrupt`. A handler written for preemption therefore does
-    nothing at all on a timeout. To cover both, catch `BaseException` — or
-    `modal.exception.InputCancellation` specifically if you want to handle
-    the two differently.
+    nothing at all on a timeout. Catch `MODAL_INTERRUPTIONS`, which is
+    exactly the two of them — see the recipe below.
 
 After the first signal you have roughly **a minute** before the container
 is killed (Modal escalates SIGUSR1 → SIGINT after ~30s → SIGKILL after
@@ -962,6 +961,17 @@ A task that _does_ ask is bounded by `TickConfig.max_interruptions`
 (default 20), a budget separate from `max_attempts` — a trainer designed to
 be killed and resumed would otherwise exhaust a budget meant for genuine
 failures and fail the build for the one reason it was built to survive.
+
+!!! note "One path that budget does not cover"
+
+    A resumption request raised **before** the function timeout is handled
+    by Modal restarting the input, not by the scheduler — no event, no
+    attempt, no `interrupt_count`, and that restart is ungated by
+    `retries`. It is what makes preemption recovery fast, and preemption is
+    rare. But a task that raises `ResumableInterruption` on a condition
+    that is *always* true would loop at full container cost with
+    `max_interruptions` never consulted. Raise it only for interruptions
+    you did not choose.
 
 #### The knobs, and how they multiply
 

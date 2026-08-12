@@ -508,8 +508,12 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         # the same question a reader asks of a failure — but deliberately
         # NOT written to latest_completed_at: an interruption is not an
         # ending, it is a pause before the next attempt.
-        if event.error_message is not None:
-            task.latest_error_message = event.error_message
+        #
+        # Assigned unconditionally, exactly like TASK_FAILED: a conditional
+        # write would leave a *previous* failure's text on a task that has
+        # since been retried and then interrupted, so the UI would explain
+        # this interruption with an unrelated stack trace.
+        task.latest_error_message = event.error_message
         # The executor ref is left alone on purpose. An interruption does
         # not always mean the execution is gone: a backend configured with
         # its own retries may be restarting the very same call, and a
@@ -729,10 +733,11 @@ async def get_task_status_in_build(
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
             # Not an ending, so completed_at is deliberately untouched —
-            # mirrors apply_event_to_task.
+            # mirrors apply_event_to_task, including the unconditional
+            # error_message write (a stale one would explain this
+            # interruption with an earlier failure's text).
             status = TaskStatus.INTERRUPTED
-            if event.error_message is not None:
-                error_message = event.error_message
+            error_message = event.error_message
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at
@@ -806,10 +811,11 @@ async def get_all_task_statuses_in_build(
             error_message = event.error_message
         elif event.event_type == EventType.TASK_INTERRUPTED:
             # Not an ending, so completed_at is deliberately untouched —
-            # mirrors apply_event_to_task.
+            # mirrors apply_event_to_task, including the unconditional
+            # error_message write (a stale one would explain this
+            # interruption with an earlier failure's text).
             status = TaskStatus.INTERRUPTED
-            if event.error_message is not None:
-                error_message = event.error_message
+            error_message = event.error_message
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at

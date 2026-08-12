@@ -49,7 +49,16 @@ logger = logging.getLogger(__name__)
 # latest_status_build_id alone, so ownership scoping cannot tell the two
 # apart). Cancelling a build must not fail somebody else's. Use
 # POST /builds/{id}/skip-blocked, or the per-task cancel, for pending work.
-CASCADE_CANCEL_STATUSES = (TaskStatus.RUNNING, TaskStatus.SUSPENDED)
+# INTERRUPTED joins these on the same argument the SUSPENDED comment makes:
+# it holds no slot, but it is equally unschedulable by anyone else and
+# equally permanent once its build is gone. Leaving it behind also strands
+# neighbours — a build gated on an interrupted task reads it as "the owner
+# will move it" and waits, where a cancelled one is reset and run.
+CASCADE_CANCEL_STATUSES = (
+    TaskStatus.RUNNING,
+    TaskStatus.SUSPENDED,
+    TaskStatus.INTERRUPTED,
+)
 
 
 def last_event_at_subquery() -> ColumnElement[datetime]:

@@ -185,19 +185,35 @@ class TestClassifyInterruption:
             == _TIMEOUT
         )
 
-    def test_without_a_declared_timeout_nothing_can_be_shown_to_have_timed_out(
-        self,
-    ):
-        """No value to compare against, so the backend is assumed able to
-        restart it — the conservative direction, being what happened before
-        interruptions were reported at all."""
+    def test_without_a_declared_timeout_a_request_is_still_reported(self):
+        """The orchestrator forwards the worker's ``timeout`` only when the
+        app declares one, but the backend applies its own default anyway —
+        so "unknown" does not mean "no timeout fired".
+
+        Reporting is the recoverable guess: if a restart IS coming the
+        scheduler's probe finds the ref live and leaves it alone, whereas
+        guessing preemption when no restart is coming strands the task
+        until its claim lapses. That asymmetry is the whole reason this
+        defaults the way it does."""
         assert (
             _classify_interruption(
                 sd.ResumableInterruption("checkpointed"),
-                elapsed_seconds=99999.0,
+                elapsed_seconds=1.0,
                 function_timeout_seconds=None,
             )
-            == _PREEMPTION
+            == _TIMEOUT
+        )
+
+    def test_without_a_declared_timeout_an_uncaught_one_is_still_silent(self):
+        """The control. Nobody asked to be resumed, so there is nothing to
+        report in either direction."""
+        assert (
+            _classify_interruption(
+                InputCancellation("Input was cancelled by user"),
+                elapsed_seconds=1.0,
+                function_timeout_seconds=None,
+            )
+            == _CANCELLATION
         )
 
 
@@ -287,10 +303,16 @@ class TestRunnerReporting:
     ):
         """Without a build id there is nothing to report to — but the escape
         translation is what earns the backend restart, so it must not be
-        conditional on reporting being configured."""
+        conditional on reporting being configured.
+
+        A long declared timeout keeps this on the preemption branch; the
+        translation is what is under test, not the classification."""
         runner = _runner_raising(sd.ResumableInterruption("checkpointed"))
 
         with pytest.raises(KeyboardInterrupt):
-            runner(make_range(limit=2))
+            runner(
+                make_range(limit=2),
+                env_overrides={STARDAG_MODAL_FUNCTION_TIMEOUT_ENV: "600"},
+            )
 
         assert registry.calls == []

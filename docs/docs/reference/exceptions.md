@@ -172,9 +172,13 @@ this, or by not raising it.
 
 `ResumableInterruption` is an ordinary `Exception`, not a `BaseException`:
 you raise it from inside your own error handling, where a `BaseException`
-subclass would be one more thing slipping past your control flow. The Modal
-runner catches it and re-raises an interrupt in its place, so the backend
-still sees a container to restart.
+subclass would be one more thing slipping past your control flow.
+
+What happens next depends on whether a restart is still possible. Raised
+before the function timeout, the Modal runner re-raises an interrupt in its
+place so the backend sees a crashed container and restarts the input on the
+same call id. Raised at or after the timeout — when no restart is coming —
+it records the interruption for a scheduler tick to act on.
 
 Resumption is bounded by `TickConfig.max_interruptions` (default 20), a
 budget separate from `max_attempts` — see
