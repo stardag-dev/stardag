@@ -477,14 +477,20 @@ async def _drive_async_generator(task: BaseTask) -> None | TaskStruct:
         typing.AsyncGenerator[TaskStruct, None],
         task.run_aio(),  # type: ignore[assignment]
     )
-    try:
-        async for yielded in agen:
-            deps = flatten_task_struct(yielded)
-            incomplete = [dep for dep in deps if not dep.complete()]
-            if incomplete:
-                return tuple(deps)
-    except StopAsyncIteration:
-        pass
+    # No `except StopAsyncIteration` here, unlike the sync driver's
+    # `except StopIteration`: `async for` consumes the generator's
+    # exhaustion itself and never propagates it, so such a handler could
+    # not do the job it appears to do. The only way to reach it would be a
+    # StopAsyncIteration raised by the loop *body* — `complete()`, say —
+    # and swallowing that would return None, which the caller reads as
+    # "task completed" and reports as such. An error must propagate
+    # instead. (A generator that raises it internally already surfaces as
+    # RuntimeError, so that path never reached the handler either.)
+    async for yielded in agen:
+        deps = flatten_task_struct(yielded)
+        incomplete = [dep for dep in deps if not dep.complete()]
+        if incomplete:
+            return tuple(deps)
     return None
 
 
