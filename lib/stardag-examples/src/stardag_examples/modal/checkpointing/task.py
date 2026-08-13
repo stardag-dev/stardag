@@ -30,13 +30,6 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
     def target(self) -> sd.DirectoryTarget:
         """A directory, so progress and the result can live side by side.
 
-        ``TargetTask`` rather than ``Task`` because this task owns its
-        target rather than letting a serializer pick one: ``Task.target()``
-        is typed to return the serializer's ``LoadableSaveableFileSystemTarget``,
-        so overriding it with a bare ``DirectoryTarget`` does not typecheck.
-        ``TargetTask[DirectoryTarget]`` is the base for exactly this — a
-        typed target you define, with ``complete()`` derived from it.
-
         ``DirectoryTarget.exists()`` is backed by a ``._DONE`` flag file
         written by ``mark_done()``, so writing a checkpoint inside it does
         **not** make the task look complete. That is the whole reason to
@@ -46,10 +39,6 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
         return sd.get_directory_target(sd.get_default_relpath(self))
 
     def run(self) -> None:
-        # Bind the directory once. ``target()`` builds a fresh
-        # ``DirectoryTarget`` per call, and each one tracks the sub-targets
-        # *it* handed out, so ``mark_done()`` on a second instance would
-        # write an empty ``._SUB_KEYS`` manifest next to real files.
         directory = self.target()
         checkpoint = directory / "checkpoint.json"
 
