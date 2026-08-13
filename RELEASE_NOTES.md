@@ -6,6 +6,105 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.19.0 — A task can survive being interrupted
+
+Modal takes containers away. It reclaims preemptible instances, and it kills
+a function that hits its timeout. Neither means the task was wrong — but
+until now the SDK had no way to say so, and the way you would naturally
+write the handler made things worse.
+
+To checkpoint, you catch the interruption. Do that and re-raise anything
+derived from `Exception` — a `RuntimeError`, say — and stardag recorded a
+permanent failure and, under `FAIL_FAST`, killed the build. The same task
+with a bare `raise` was restarted and succeeded. One keyword apart, and
+nothing warned you.
+
+**The rule is now: the task decides whether it is resumable.**
+
+```python
+import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+
+class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
+    def run(self):
+        checkpoint = self.target() / "checkpoint.json"
+        try:
+            train(resume_from=checkpoint)
+        except MODAL_INTERRUPTIONS:        # preemption OR the function timeout
+            save_checkpoint(checkpoint)
+            raise sd.ResumableInterruption("checkpointed") from None
+        self.target().mark_done()
+```
+
+`sd.ResumableInterruption` is the only way a task gets resumed. An
+interruption you let propagate stays a failure, retried under the ordinary
+`TickConfig.max_attempts` — which is the right answer for both things an
+uncaught interruption can mean: the task hung, or its worker's `timeout` is
+too small. So there is **no configuration** deciding whether a timeout was
+"expected". The task answers that by raising, or by not raising.
+
+Resumption is bounded by the new `TickConfig.max_interruptions` (default
+20), a budget separate from `max_attempts`. It has to be separate: a trainer
+designed to be killed and resumed would otherwise exhaust a budget meant for
+genuine failures and fail the build for the one reason it was built to
+survive.
+
+**Catch `MODAL_INTERRUPTIONS`, never `BaseException`.** It is exactly
+`KeyboardInterrupt` (preemption) and `modal.exception.InputCancellation`
+(the timeout). A blanket catch sweeps up ordinary bugs — a `NameError` is a
+`BaseException` too — and answering one with "resume me" runs a
+deterministic failure until the budget is gone. `except KeyboardInterrupt:`
+is wrong in the other direction: `InputCancellation` is not a subclass of
+it, so that handler does nothing at all on a timeout.
+
+**The checkpoint must not be the task's result.** `DirectoryTarget`
+completion is a `._DONE` flag written by `mark_done()`, so a checkpoint
+written inside the directory sits beside the result without being mistaken
+for one.
+
+Note the base class: `sd.TargetTask[sd.DirectoryTarget]`, not `sd.Task`.
+`Task` picks your target from its serializer and types `target()`
+accordingly, so returning a bare `DirectoryTarget` from it does not
+typecheck; `TargetTask` is the base for a task that owns its target.
+
+### What you will see
+
+The task cycles RUNNING → INTERRUPTED → RUNNING and finishes COMPLETED.
+`INTERRUPTED` is a new task status — non-terminal, holds no execution claim,
+and rendered in the UI as its own thing rather than as a failure. It does
+not spend an attempt: a task resumed three times still reports
+`attempt_count == 1`.
+
+### Scope
+
+**Reactive builds only.** `sd.build` / `build_aio` have no resumption path —
+a timed-out execution fails the task there, as it always did, because only a
+scheduler tick can respawn one.
+
+**Requires a Registry API serving `POST /builds/{id}/tasks/{id}/interrupt`.**
+Against an older server the SDK logs a warning and records nothing, which is
+exactly its behaviour before this existed — a version skew degrades to the
+old recovery path, never to a failed build. Deploy the server before
+upgrading the SDK, as usual.
+
+### Also
+
+`FunctionSettings` gains **`nonpreemptible`** (the direct answer to "this
+task must not be preempted" — 3x CPU/memory price, no GPU support) and
+**`startup_timeout`**.
+
+An interruption is now reported by the worker inside the grace window the
+platform allows, rather than being inferred later by a scheduler probing a
+corpse. That releases the execution claim and its concurrency-limit slots
+immediately and wakes the scheduler directly — so recovery no longer depends
+on having configured the watchdog.
+
+---
+
 ## v0.18.0 — Builds collaborate, and triggering got fast
 
 Reactive scheduling worked until something went wrong. Then a build sat at

@@ -6,6 +6,8 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-08-13
+
 ### Registry API
 
 - **Security (server image `0.1.2`): fixed a SQL injection in the task search
@@ -50,11 +52,25 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### UI
 
+- **A build whose work is done no longer says it needs intervention.** A
+  build that failed waiting on a shared task, which another build later
+  completed, kept showing "Nothing runnable, and no wake-up pending — needs
+  intervention" alongside a status count taken when it failed. The panel now
+  recognises that every root is complete.
+
 - `INTERRUPTED` renders as its own status (orange, beside skipped's amber
   rather than failed's red), is filterable, and offers Retry but not
   Release — an interrupted task holds no claim to release.
 
 ### SDK
+
+- **A `StopAsyncIteration` raised by an async task's loop body is no longer
+  swallowed.** `_drive_async_generator` wrapped its `async for` in
+  `except StopAsyncIteration: pass`, mirroring the sync driver — but `async
+for` consumes the generator's own exhaustion, so the handler could only
+  ever catch one raised by the _loop body_ (a `complete()` check, say).
+  Swallowing that returned `None`, which the caller reads as "task
+  completed" and reports as such. It now propagates.
 
 - **A task can survive preemption and function timeouts** (closes
   [#245](https://github.com/stardag-dev/stardag/issues/245)). The two ways
@@ -107,6 +123,23 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   through `StardagApp`. `nonpreemptible=True` is the direct answer to
   "this task must not be preempted" (3× CPU/memory price, not supported
   for GPU functions).
+
+### Deployment
+
+- **Cognito self-signup now defaults to off** (AWS CDK templates). The user
+  pool was created with `selfSignUpEnabled: true`, so a deployment reachable
+  from the public internet let anyone register — and the Registry API
+  auto-provisions an internal user and personal workspace on first login.
+  It is now a config flag, `COGNITO_ALLOW_SELF_SIGNUP`, defaulting to
+  `false`. **Self-hosters who rely on open registration must set it
+  explicitly.** Note this governs _native_ registration only: with a
+  federated IdP, Cognito still auto-provisions on first login regardless —
+  the README covers the pre-sign-up-Lambda and IdP-side options.
+
+- **Dependency security floors raised** across the API's transitive
+  dependencies, the UI's dev/build tooling, and `aws-cdk-lib`
+  (2.215 → 2.264, picking up a critical handlebars advisory and CDK
+  tooling CVEs). Dev lockfiles relocked and Dependabot configured.
 
 ## [0.18.0] — 2026-08-11
 
