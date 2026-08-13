@@ -907,7 +907,8 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
         return sd.get_directory_target(sd.get_default_relpath(self))
 
     def run(self):
-        checkpoint = self.target() / "checkpoint.json"
+        directory = self.target()              # bind once, see below
+        checkpoint = directory / "checkpoint.json"
 
         state = {"step": 0}
         if checkpoint.exists():
@@ -923,9 +924,9 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
                 json.dump(state, f)
             raise sd.ResumableInterruption("checkpointed") from None
 
-        with (self.target() / "model.pkl").open("wb") as f:
+        with (directory / "model.pkl").open("wb") as f:
             f.write(serialize(model))
-        self.target().mark_done()              # only now is the task complete
+        directory.mark_done()                  # only now is the task complete
 ```
 
 Three things carry it:
@@ -945,6 +946,13 @@ Three things carry it:
   `LoadableSaveableFileSystemTarget`, so returning a bare `DirectoryTarget`
   from it does not typecheck. `sd.TargetTask[sd.DirectoryTarget]` is the
   base for a task that owns its target, with `complete()` derived from it.
+- **Bind the directory once.** `target()` builds a _new_ `DirectoryTarget`
+  every call, and each instance remembers only the sub-targets it handed
+  out via `/`. Call it once for the checkpoint and again for
+  `mark_done()`, and the instance that marks done has never seen your
+  files, so it writes an empty `._SUB_KEYS` manifest beside them.
+  Completion still works — that is the separate `._DONE` flag — but the
+  directory's own listing of its contents comes out blank.
 
 #### What happens if you _don't_ catch it
 
