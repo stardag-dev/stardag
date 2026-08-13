@@ -26,7 +26,7 @@ import stardag as sd
 from stardag.integration.modal import MODAL_INTERRUPTIONS
 
 
-class TrainModel(sd.Task[None]):
+class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
     def target(self) -> sd.DirectoryTarget:
         return sd.get_directory_target(sd.get_default_relpath(self))
 
@@ -65,6 +65,11 @@ it, so that handler does nothing at all on a timeout.
 completion is a `._DONE` flag written by `mark_done()`, so a checkpoint
 written inside the directory sits beside the result without being mistaken
 for one.
+
+Note the base class: `sd.TargetTask[sd.DirectoryTarget]`, not `sd.Task`.
+`Task` picks your target from its serializer and types `target()`
+accordingly, so returning a bare `DirectoryTarget` from it does not
+typecheck; `TargetTask` is the base for a task that owns its target.
 
 ### What you will see
 
