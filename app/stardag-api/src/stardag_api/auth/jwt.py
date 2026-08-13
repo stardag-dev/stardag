@@ -168,8 +168,21 @@ class JWTValidator:
 
             # Convert the JWK to a public key object PyJWT can verify with.
             # from_jwk's return type is the RSA public|private union; a signing
-            # JWK (kty=RSA, n/e, no d) yields a public key.
-            public_key = cast(RSAPublicKey, RSAAlgorithm.from_jwk(json.dumps(key)))
+            # JWK (kty=RSA, n/e, no d) yields a public key. A malformed JWK
+            # raises InvalidKeyError/ValueError (neither is a
+            # jwt.InvalidTokenError), so map them here — otherwise a bad key in
+            # the JWKS would surface as a 500 instead of an auth failure.
+            try:
+                public_key = cast(RSAPublicKey, RSAAlgorithm.from_jwk(json.dumps(key)))
+            except (
+                jwt.exceptions.InvalidKeyError,
+                ValueError,
+                TypeError,
+                KeyError,
+            ) as e:
+                raise AuthenticationError(
+                    f"Malformed signing key in JWKS for kid {kid!r}: {e}"
+                ) from e
 
             # Decode and validate the token. PyJWT verifies the signature and
             # expiry; algorithms=["RS256"] is what prevents an "alg":"none" or
@@ -198,7 +211,15 @@ class JWTValidator:
                     f"got {payload.get('iss')!r}"
                 )
 
-            # Manually verify audience
+            # Manually verify audience. Note the deliberate `if token_aud:`:
+            # a token with no `aud` is NOT rejected here. Cognito *access*
+            # tokens legitimately omit `aud` (they scope via `client_id` /
+            # `scope`), so requiring `aud` would break SDK auth against a
+            # Cognito-backed deployment. Such tokens are still gated by
+            # signature + issuer above. Tightening this (e.g. checking
+            # `client_id` against an allowlist when `aud` is absent) is a
+            # possible future hardening, but must not simply reject aud-less
+            # tokens. See the security-scanning follow-ups.
             token_aud = payload.get("aud")
             if token_aud:
                 # aud can be a string or list

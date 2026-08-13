@@ -954,3 +954,52 @@ async def test_validate_rejects_unknown_kid():
         m.return_value = jwks
         with pytest.raises(AuthenticationError, match="[Kk]ey"):
             await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_malformed_jwk_raises_auth_error_not_500():
+    """A malformed JWK in the JWKS must map to AuthenticationError, not leak a
+    raw ValueError/InvalidKeyError (which would surface as a 500)."""
+    _, jwks = _rsa_keypair_and_jwk(kid="test-kid")
+    # Corrupt the key material: non-base64 modulus.
+    jwks["keys"][0]["n"] = "!!!not-base64!!!"
+    private_pem, _ = _rsa_keypair_and_jwk()
+    token = _sign(private_pem, _base_claims(), kid="test-kid")
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError):
+            await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_non_rsa_jwk_raises_auth_error_not_500():
+    """A non-RSA key co-published in the JWKS and selected by a hostile `kid`
+    must map to AuthenticationError (401), not a raw InvalidKeyError (500).
+    IdPs commonly publish EC keys alongside RSA ones."""
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    ec_key = ec.generate_private_key(ec.SECP256R1())
+    nums = ec_key.public_key().public_numbers()
+
+    def _b64url(n: int) -> str:
+        b = n.to_bytes(32, "big")
+        return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+    ec_jwk = {
+        "kid": "test-kid",
+        "kty": "EC",
+        "crv": "P-256",
+        "x": _b64url(nums.x),
+        "y": _b64url(nums.y),
+    }
+    jwks = {"keys": [ec_jwk]}
+    private_pem, _ = _rsa_keypair_and_jwk()
+    token = _sign(private_pem, _base_claims(), kid="test-kid")
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError):
+            await validator.validate_token(token)
