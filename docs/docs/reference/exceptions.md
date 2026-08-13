@@ -138,7 +138,7 @@ import stardag as sd
 from stardag.integration.modal import MODAL_INTERRUPTIONS
 
 
-class TrainModel(sd.Task[None]):
+class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
     def target(self) -> sd.DirectoryTarget:
         return sd.get_directory_target(sd.get_default_relpath(self))
 

@@ -19,7 +19,10 @@ class ResumableInterruption(StardagError):
     or hitting its function timeout — and persisting whatever progress you
     had::
 
-        class TrainModel(sd.Task[None]):
+        class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
+            def target(self) -> sd.DirectoryTarget:
+                return sd.get_directory_target(sd.get_default_relpath(self))
+
             def run(self):
                 try:
                     train(resume_from=self.target() / "checkpoint.json")

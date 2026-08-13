@@ -900,7 +900,7 @@ import stardag as sd
 from stardag.integration.modal import MODAL_INTERRUPTIONS
 
 
-class TrainModel(sd.Task[None]):
+class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
     seed: int = 0
 
     def target(self) -> sd.DirectoryTarget:
@@ -940,6 +940,11 @@ Three things carry it:
   `mark_done()` is what makes the task complete. Writing a checkpoint does
   not — `DirectoryTarget.exists()` is backed by a `._DONE` flag file — so
   progress and completion cannot be confused.
+- **`TargetTask`, not `Task`.** `sd.Task` picks your target from its
+  serializer and types `target()` as the serializer's
+  `LoadableSaveableFileSystemTarget`, so returning a bare `DirectoryTarget`
+  from it does not typecheck. `sd.TargetTask[sd.DirectoryTarget]` is the
+  base for a task that owns its target, with `complete()` derived from it.
 
 #### What happens if you _don't_ catch it
 
