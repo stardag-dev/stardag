@@ -143,13 +143,14 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
         return sd.get_directory_target(sd.get_default_relpath(self))
 
     def run(self):
-        checkpoint = self.target() / "checkpoint.json"
+        directory = self.target()
+        checkpoint = directory / "checkpoint.json"
         try:
             train(resume_from=checkpoint)
         except MODAL_INTERRUPTIONS:        # preemption OR the function timeout
             save_checkpoint(checkpoint)
             raise sd.ResumableInterruption("checkpointed") from None
-        self.target().mark_done()
+        directory.mark_done()
 ```
 
 **An interruption you do not catch is a failure**, deliberately. Letting

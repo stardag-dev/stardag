@@ -24,11 +24,14 @@ class ResumableInterruption(StardagError):
                 return sd.get_directory_target(sd.get_default_relpath(self))
 
             def run(self):
+                directory = self.target()
+                checkpoint = directory / "checkpoint.json"
                 try:
-                    train(resume_from=self.target() / "checkpoint.json")
+                    train(resume_from=checkpoint)
                 except MODAL_INTERRUPTIONS:
-                    save_checkpoint(self.target() / "checkpoint.json")
+                    save_checkpoint(checkpoint)
                     raise sd.ResumableInterruption("checkpointed") from None
+                directory.mark_done()
 
     **An interruption you do NOT catch is a failure**, deliberately. Letting
     one propagate means the task had no plan for it: either it hung, or the
