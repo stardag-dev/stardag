@@ -104,12 +104,22 @@ _INTERRUPT_REPORT_TIMEOUT_SECONDS = 10.0
 # function's declared timeout (a timeout) or before it (a cancellation).
 #
 # Modal delivers the timeout signal at the declared timeout to the
-# millisecond, so this is not compensating for jitter in the signal — it
-# covers the gap between the clock the *task* started on (this module,
-# just before ``run()``) and the clock Modal is measuring, which starts
-# earlier and includes container startup. That gap makes measured elapsed
-# time run SHORT of Modal's, so the tolerance is one-sided: only "arrived a
-# little before the timeout" needs forgiving.
+# millisecond, so this is not compensating for jitter in the signal. It
+# covers the two clocks disagreeing, and they disagree in BOTH directions:
+#
+#   - ours starts later than Modal's (container startup and input
+#     deserialisation are inside its window, outside ours), which
+#     understates elapsed;
+#   - but it is read after the task's own ``except`` block has run, and
+#     that block exists to write a checkpoint, which overstates it.
+#
+# The second dominates in practice. Measured live against a 15s worker:
+# 17.1s, 17.2s, 17.7s — a checkpoint write to a mounted volume, on top of
+# a timeout that had already fired.
+#
+# Which is why the tolerance only has to forgive the *understating*
+# direction: overstating already reads as timed out, and reporting is the
+# recoverable answer anyway (see ``_classify_interruption``).
 _TIMEOUT_DETECTION_SLACK_SECONDS = 5.0
 
 # What a caught BaseException meant, and therefore what the worker does.

@@ -47,13 +47,16 @@ _RETRYABLE_STATUSES = (
 # starts per attempt.
 #
 #   reactive (_act_on_frontier):  an *acquiring* start (the atomic claim /
-#       limit-slot acquisition, before the spawn, with no executor ref)
-#       and then a second start carrying the ref once the spawn returned.
-#   resident (_concurrent):       the same claim-then-ref pair, and on top
-#       of it the worker's own self-reported start when the executor
-#       reports lifecycle — which lands minutes later under cold start, so
-#       three starts for one execution.
+#       limit-slot acquisition, before the spawn, with no executor ref),
+#       a second start carrying the ref once the spawn returned, and the
+#       worker's own self-reported start with its own call id — which
+#       lands seconds later under cold start. Three for one execution.
+#   resident (_concurrent):       the same three, for the same reasons.
 #   sequential / unclaimed:       exactly one start.
+#
+# (Observed live, one execution: 3-field start at t+0, 5-field at t+2.4s,
+# 5-field at t+7.7s. This comment previously credited reactive with two
+# and resident with three; the worker self-report happens in both.)
 #
 # Counting events would therefore make the same task look like it had
 # 1, 2 or 3 attempts depending on which engine and which executor ran it,
