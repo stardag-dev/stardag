@@ -141,6 +141,14 @@ for` consumes the generator's own exhaustion, so the handler could only
   (2.215 → 2.264, picking up a critical handlebars advisory and CDK
   tooling CVEs). Dev lockfiles relocked and Dependabot configured.
 
+- **`aws-cdk` CLI 2.1030.0 → 2.1136.0**, to match the library above. 2.264
+  emits cloud assembly schema 54.0.0 and the old CLI reads at most 48.x.x,
+  so `cdk synth` refused the manifest and every deployment from
+  `infra/aws-cdk` failed at step one. It fails closed — nothing is
+  deployed, no stack is left half-updated — but **self-hosters deploying
+  the CDK templates need this bump**, not just the library one. Bootstrap
+  stack version 6 is still all the templates require; no re-bootstrap.
+
 ## [0.18.0] — 2026-08-11
 
 ### Registry API
