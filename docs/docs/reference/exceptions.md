@@ -11,6 +11,7 @@ StardagError
 │   ├── AuthorizationError
 │   ├── SDKVersionUnsupportedError
 │   └── TokenExpiredError
+├── ResumableInterruption
 └── ...
 ```
 
@@ -122,6 +123,66 @@ except TokenExpiredError:
     # Refresh token and retry
     os.system("stardag auth refresh")
 ```
+
+## ResumableInterruption
+
+```python
+from stardag import ResumableInterruption
+```
+
+The one exception you **raise** rather than catch. It says: _I saved my
+progress, run me again._
+
+```python
+import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+
+class TrainModel(sd.Task[None]):
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
+    def run(self):
+        checkpoint = self.target() / "checkpoint.json"
+        try:
+            train(resume_from=checkpoint)
+        except MODAL_INTERRUPTIONS:        # preemption OR the function timeout
+            save_checkpoint(checkpoint)
+            raise sd.ResumableInterruption("checkpointed") from None
+        self.target().mark_done()
+```
+
+**An interruption you do not catch is a failure**, deliberately. Letting
+one propagate means the task had no plan for it — it hung, or the worker's
+timeout is too small — and both want the same answer: fail, under the
+scheduler's ordinary attempt budget. So there is no setting anywhere
+deciding whether a timeout was "expected"; the task answers by raising
+this, or by not raising it.
+
+!!! danger "Catch the interruption types, never `BaseException`"
+
+    A `NameError` is a `BaseException` too. A blanket catch sweeps up
+    ordinary bugs, and re-raising `ResumableInterruption` for one turns a
+    deterministic failure into a task that resumes until its budget runs
+    out. Use `MODAL_INTERRUPTIONS` (exactly `KeyboardInterrupt` and
+    `modal.exception.InputCancellation`).
+
+    `except KeyboardInterrupt:` is wrong the other way: `InputCancellation`
+    is not a `KeyboardInterrupt`, so it misses timeouts entirely.
+
+`ResumableInterruption` is an ordinary `Exception`, not a `BaseException`:
+you raise it from inside your own error handling, where a `BaseException`
+subclass would be one more thing slipping past your control flow.
+
+What happens next depends on whether a restart is still possible. Raised
+before the function timeout, the Modal runner re-raises an interrupt in its
+place so the backend sees a crashed container and restarts the input on the
+same call id. Raised at or after the timeout — when no restart is coming —
+it records the interruption for a scheduler tick to act on.
+
+Resumption is bounded by `TickConfig.max_interruptions` (default 20), a
+budget separate from `max_attempts` — see
+[Preemption and timeouts](../how-to/integrate-modal.md#preemption-and-timeouts).
 
 ## Common Error Scenarios
 

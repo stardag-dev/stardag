@@ -96,6 +96,8 @@ function getStatusColor(status: TaskStatus): string {
       return "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-400";
     case "suspended":
       return "bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-400";
+    case "interrupted":
+      return "bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-400";
     case "skipped":
       return "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400";
     case "cancelled":

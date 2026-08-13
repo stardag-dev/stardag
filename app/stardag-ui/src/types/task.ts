@@ -3,6 +3,10 @@ export type TaskStatus =
   | "pending"
   | "running"
   | "suspended"
+  // Execution taken away by the platform (function timeout, reclaimed
+  // container). Not a failure and not terminal — the scheduler will
+  // start it again.
+  | "interrupted"
   | "completed"
   | "failed"
   | "skipped"
@@ -405,6 +409,7 @@ export type EventType =
   | "task_referenced"
   | "task_started"
   | "task_suspended"
+  | "task_interrupted"
   | "task_resumed"
   | "task_waiting_for_lock"
   | "task_completed"

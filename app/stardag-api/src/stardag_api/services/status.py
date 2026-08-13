@@ -26,11 +26,15 @@ from stardag_api.services.claims import claim_expires_at
 # and releasing that is cancellation, not retry. Flipping it to PENDING
 # would let a scheduler spawn a second execution of a task that is still
 # running. COMPLETED is excluded by stickiness.
+# INTERRUPTED is in the set for exactly the reason SUSPENDED is: the
+# execution is over (the platform ended it), nothing is running, and the
+# task is otherwise a dead end. Resetting it cannot orphan an execution.
 _RETRYABLE_STATUSES = (
     TaskStatus.FAILED,
     TaskStatus.CANCELLED,
     TaskStatus.SKIPPED,
     TaskStatus.SUSPENDED,
+    TaskStatus.INTERRUPTED,
 )
 
 
@@ -43,13 +47,16 @@ _RETRYABLE_STATUSES = (
 # starts per attempt.
 #
 #   reactive (_act_on_frontier):  an *acquiring* start (the atomic claim /
-#       limit-slot acquisition, before the spawn, with no executor ref)
-#       and then a second start carrying the ref once the spawn returned.
-#   resident (_concurrent):       the same claim-then-ref pair, and on top
-#       of it the worker's own self-reported start when the executor
-#       reports lifecycle — which lands minutes later under cold start, so
-#       three starts for one execution.
+#       limit-slot acquisition, before the spawn, with no executor ref),
+#       a second start carrying the ref once the spawn returned, and the
+#       worker's own self-reported start with its own call id — which
+#       lands seconds later under cold start. Three for one execution.
+#   resident (_concurrent):       the same three, for the same reasons.
 #   sequential / unclaimed:       exactly one start.
+#
+# (Observed live, one execution: 3-field start at t+0, 5-field at t+2.4s,
+# 5-field at t+7.7s. This comment previously credited reactive with two
+# and resident with three; the worker self-report happens in both.)
 #
 # Counting events would therefore make the same task look like it had
 # 1, 2 or 3 attempts depending on which engine and which executor ran it,
@@ -72,8 +79,36 @@ _ATTEMPT_ORDERING_EVENT_TYPES = (
     EventType.TASK_RETRIED,
     EventType.TASK_COMPLETED,
     EventType.TASK_FAILED,
+    EventType.TASK_INTERRUPTED,
     EventType.TASK_SKIPPED,
     EventType.TASK_CANCELLED,
+)
+
+# Predecessors that do NOT open a new attempt.
+#
+# TASK_STARTED is the engine-agnostic dedupe described above: consecutive
+# starts are one execution re-recording itself.
+#
+# TASK_INTERRUPTED is here for a different reason, and it is a policy
+# choice rather than a de-duplication: an interruption is the platform
+# taking the container away, so the run that follows it is a continuation
+# of work the task itself did nothing wrong in. A task designed to be
+# killed and resumed until it converges — the checkpointing trainer this
+# status exists for — would otherwise exhaust a budget meant for genuine
+# failures and fail the build for the one reason it was built to survive.
+# Interruptions are bounded separately, by their own count (see
+# ``get_interrupt_counts_in_build``) against
+# ``TickConfig.max_interruptions``, so "not counted here" does not mean
+# "unbounded".
+#
+# Worth knowing when changing this: two consecutive TASK_STARTEDs are also
+# what makes the execution backend's *own* restart of an input free — a
+# preempted container that comes back records a second start and spends no
+# attempt. Inserting any new event type between those two starts silently
+# starts charging for it.
+_ATTEMPT_CONTINUING_EVENT_TYPES = (
+    EventType.TASK_STARTED,
+    EventType.TASK_INTERRUPTED,
 )
 
 
@@ -90,7 +125,7 @@ def starts_new_attempt(event_type: str | None, prev_event_type: str | None) -> b
     """
     return (
         event_type == EventType.TASK_STARTED
-        and prev_event_type != EventType.TASK_STARTED
+        and prev_event_type not in _ATTEMPT_CONTINUING_EVENT_TYPES
     )
 
 
@@ -243,14 +278,67 @@ async def get_attempt_counts_in_build(
             select(ordered.c.task_id, func.count())
             .where(
                 ordered.c.event_type == EventType.TASK_STARTED.value,
+                # The SQL twin of ``starts_new_attempt`` — the two must
+                # agree, and a change to one is a change to both.
+                #
                 # Null-safe: the first event in a stream has no predecessor
-                # and must still count as an attempt (renders IS DISTINCT
-                # FROM on Postgres, IS NOT on SQLite).
-                ordered.c.prev_event_type.is_distinct_from(
-                    EventType.TASK_STARTED.value
-                ),
+                # and must still count as an attempt. ``NOT IN`` would
+                # answer NULL there and drop the row, so the predicate is
+                # spelled as an AND of IS DISTINCT FROMs (which renders IS
+                # DISTINCT FROM on Postgres and IS NOT on SQLite).
+                *[
+                    ordered.c.prev_event_type.is_distinct_from(e.value)
+                    for e in _ATTEMPT_CONTINUING_EVENT_TYPES
+                ],
             )
             .group_by(ordered.c.task_id)
+        )
+    ).all()
+    return {task_id: count for task_id, count in rows}
+
+
+async def get_interrupt_counts_in_build(
+    db: AsyncSession,
+    build_id: UUID,
+    task_db_ids: Sequence[UUID] | None = None,
+) -> dict[UUID, int]:
+    """Interruptions per task in a build's **current round**, by task pk.
+
+    The companion budget to :func:`get_attempt_counts_in_build`, and
+    deliberately a much simpler rule: a plain count of TASK_INTERRUPTED
+    events, with no de-duplication.
+
+    **Why no dedupe here, when attempts need one.** The attempt rule exists
+    because several engines emit two or three TASK_STARTEDs per execution
+    (acquire, ref-record, worker self-report) — counting events would make
+    the same task look different depending on who ran it. Nothing emits
+    more than one interruption per execution: it is reported once, by the
+    dying worker, in its grace window. One event, one interruption.
+
+    Same round window as attempts, for the same reason: re-triggering a
+    build is how a user says "try again", and a budget the user cannot
+    reset is a budget that eventually wedges the build.
+
+    Tasks with no interruption in this round are absent; callers default
+    them to 0.
+    """
+    if task_db_ids is not None and not task_db_ids:
+        return {}
+
+    resumed_at = last_build_resumed_at(build_id).scalar_subquery()
+    rows = (
+        await db.execute(
+            select(Event.task_id, func.count())
+            .where(
+                Event.build_id == build_id,
+                Event.task_id.is_not(None),
+                Event.event_type == EventType.TASK_INTERRUPTED.value,
+                or_(resumed_at.is_(None), Event.created_at >= resumed_at),
+            )
+            .where(
+                *([Event.task_id.in_(task_db_ids)] if task_db_ids is not None else [])
+            )
+            .group_by(Event.task_id)
         )
     ).all()
     return {task_id: count for task_id, count in rows}
@@ -409,6 +497,34 @@ def apply_event_to_task(task: Task, event: Event) -> None:
         # A suspension is an execution that yielded and returned: nothing is
         # running, so the claim is over and its expiry is meaningless.
         task.latest_status_expires_at = None
+    elif et == EventType.TASK_INTERRUPTED:
+        task.latest_status = TaskStatus.INTERRUPTED
+        task.latest_status_at = event.created_at
+        task.latest_status_event_id = event.id
+        task.latest_status_build_id = event.build_id
+        # The platform ended this execution, so the claim is over — same as
+        # a suspension, and the reason the interruption is worth reporting
+        # at all: it frees the claim and any concurrency-limit slots now,
+        # instead of leaving them held until something notices the corpse.
+        task.latest_status_expires_at = None
+        # Recorded like a failure's, because "why was it interrupted?" is
+        # the same question a reader asks of a failure — but deliberately
+        # NOT written to latest_completed_at: an interruption is not an
+        # ending, it is a pause before the next attempt.
+        #
+        # Assigned unconditionally, exactly like TASK_FAILED: a conditional
+        # write would leave a *previous* failure's text on a task that has
+        # since been retried and then interrupted, so the UI would explain
+        # this interruption with an unrelated stack trace.
+        task.latest_error_message = event.error_message
+        # The executor ref is left alone on purpose. An interruption does
+        # not always mean the execution is gone: a backend configured with
+        # its own retries may be restarting the very same call, and a
+        # scheduler needs the ref to probe for exactly that before it
+        # spawns a duplicate. A TASK_STARTED will replace it; a
+        # TASK_RETRIED clears it.
+        if event_commit is not None:
+            task.latest_commit_hash = event_commit
     elif et == EventType.TASK_WAITING_FOR_LOCK:
         if task.latest_status == TaskStatus.PENDING:
             task.latest_waiting_for_lock = True
@@ -618,6 +734,13 @@ async def get_task_status_in_build(
             status = TaskStatus.FAILED
             completed_at = event.created_at
             error_message = event.error_message
+        elif event.event_type == EventType.TASK_INTERRUPTED:
+            # Not an ending, so completed_at is deliberately untouched —
+            # mirrors apply_event_to_task, including the unconditional
+            # error_message write (a stale one would explain this
+            # interruption with an earlier failure's text).
+            status = TaskStatus.INTERRUPTED
+            error_message = event.error_message
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED
             completed_at = event.created_at
@@ -688,6 +811,13 @@ async def get_all_task_statuses_in_build(
         elif event.event_type == EventType.TASK_FAILED:
             status = TaskStatus.FAILED
             completed_at = event.created_at
+            error_message = event.error_message
+        elif event.event_type == EventType.TASK_INTERRUPTED:
+            # Not an ending, so completed_at is deliberately untouched —
+            # mirrors apply_event_to_task, including the unconditional
+            # error_message write (a stale one would explain this
+            # interruption with an earlier failure's text).
+            status = TaskStatus.INTERRUPTED
             error_message = event.error_message
         elif event.event_type == EventType.TASK_SKIPPED:
             status = TaskStatus.SKIPPED

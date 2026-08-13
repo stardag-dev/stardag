@@ -38,6 +38,7 @@ const COMPACT_BLOCKERS = 2;
 const STATUS_ORDER: TaskStatus[] = [
   "running",
   "suspended",
+  "interrupted",
   "pending",
   "failed",
   "cancelled",
@@ -126,6 +127,9 @@ function BlockerCard({
   } else if (blocker.blocking_status === "suspended") {
     explanation =
       "The blocking task yielded dynamic dependencies and is waiting for them. The build that owns it is working through them; this build resolves as that one progresses.";
+  } else if (blocker.blocking_status === "interrupted") {
+    explanation =
+      "The platform took the blocking task's execution away and the task asked to be resumed. The build that owns it will start it again; this build resolves when that run completes.";
   } else {
     explanation =
       "The blocking task's status is a result, not a revocation, so a tick leaves it to this build's fail_mode rather than overriding the policy the build was triggered with. Re-trigger this build to reset it and run it here.";

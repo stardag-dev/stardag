@@ -971,6 +971,7 @@ async def get_value_suggestions(
             ValueSuggestion(value="pending"),
             ValueSuggestion(value="running"),
             ValueSuggestion(value="suspended"),
+            ValueSuggestion(value="interrupted"),
             ValueSuggestion(value="completed"),
             ValueSuggestion(value="failed"),
             ValueSuggestion(value="skipped"),

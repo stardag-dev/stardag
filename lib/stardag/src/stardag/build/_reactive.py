@@ -143,6 +143,15 @@ SCHEDULER_LOCK_PREFIX = "__scheduler__:"
 _RUNNING_STATUSES = ("running",)
 _TERMINAL_BUILD_STATUSES = ("completed", "failed", "cancelled")
 
+# The platform ended an execution for a reason unrelated to the task (a
+# function timeout, a reclaimed container) and the worker said so before
+# it died. Deliberately NOT in ``_RUNNING_STATUSES``: an interrupted task
+# holds no claim and occupies no concurrency slot, which is the point of
+# reporting it. It arrives in the frontier's actionable set like a pending
+# task, and ``_act_on_interrupted`` decides what happens to it.
+_INTERRUPTED_STATUS = "interrupted"
+
+
 # Slack added to an executor's own timeout when deriving a claim TTL. It
 # covers the ways the claim's clock and the execution's clock differ: the
 # claim is recorded at *acquire* time, BEFORE the spawn, so it absorbs
@@ -395,8 +404,10 @@ class DiscoveryResult:
 # execution: suspension means the execution registered its dynamic
 # dependencies, yielded and *returned*. Resetting it therefore cannot orphan
 # a running worker; re-running from scratch is exactly what the retry
-# expresses. RUNNING is deliberately absent: it holds a live execution
-# claim, and releasing that claim is cancellation, not retry.
+# expresses. INTERRUPTED is here on the same argument: the platform ended
+# the execution, so there is nothing live to orphan. RUNNING is deliberately
+# absent: it holds a live execution claim, and releasing that claim is
+# cancellation, not retry.
 #
 # Every trigger passes retry_failed=True — a new build id and a resume
 # alike, because both go through ``run_reactive_bootstrap`` now that
@@ -409,7 +420,7 @@ class DiscoveryResult:
 # asymmetry is intended: at trigger *you asked*, so retrying a previous
 # failure is what you meant. Mid-flight nobody asked, and ``fail_mode`` owns
 # what happens to a failure.
-_RETRYABLE_STATUSES = ("failed", "cancelled", "skipped", "suspended")
+_RETRYABLE_STATUSES = ("failed", "cancelled", "skipped", "suspended", "interrupted")
 
 
 async def discover_and_register_aio(
@@ -627,6 +638,30 @@ class TickConfig:
     # outright — but a suspend-heavy task does reach its retry budget
     # sooner than a plain one, so raise this if you retry those.
     max_attempts: int = 2
+    # Budget, per task per build round, on how many times a task may ask
+    # to be resumed before the scheduler stops obliging — the companion to
+    # ``max_attempts``, and reached only by a task that raised
+    # ``ResumableInterruption``.
+    #
+    # **Why a second budget rather than one.** An interruption is the
+    # platform taking the container away: a function timeout, or a
+    # reclaimed instance. The task did nothing wrong, and for the workload
+    # this whole path exists for — a trainer that checkpoints and is
+    # *supposed* to be killed and resumed until it converges — being
+    # interrupted is not an error condition, it is the operating mode.
+    # Charging those to ``max_attempts`` would exhaust a budget meant for
+    # genuine failures and fail the build for the one reason it was
+    # designed to survive. The precedent is resuming a SUSPENDED task,
+    # which is never budget-gated for the same reason (see
+    # ``_act_on_frontier``).
+    #
+    # **Why bounded at all, then.** "Not charged to the retry budget"
+    # cannot mean "free": a task that times out every time would otherwise
+    # loop forever, paying for a full container each round. So the bound
+    # exists, and is set generously rather than tightly — 20 resumes of a
+    # long training run is a plausible afternoon, 20 identical timeouts of
+    # a hung task is a clear signal and a bounded bill.
+    max_interruptions: int = 20
     # How many of a pass's per-task actions may be in flight at once. Each
     # actionable task costs a task-store read, an acquiring start, an
     # executor spawn and a ref-recording start; doing that serially makes a
@@ -733,6 +768,25 @@ class TickSummary:
     # retry that cannot do anything". See ``_act_on_frontier``'s budget
     # gate.
     budget_denied: int = 0
+    # --- interruptions (TickConfig.max_interruptions) ---
+    # Interrupted tasks this tick resumed. A steadily climbing count on a
+    # long-running task is the healthy checkpoint-and-resume signal, not a
+    # problem.
+    interruptions_restarted: int = 0
+    # Interrupted tasks this tick refused to respawn because the
+    # interruption budget for the round was spent, and failed instead.
+    # Under FAIL_FAST each of these fails the build, so a non-zero value is
+    # the direct answer to "why did my long-running task's build die?".
+    interruptions_exhausted: int = 0
+    # Interrupted tasks this tick converted to a retryable failure because
+    # the registry cannot report interruption counts, so no budget could
+    # bound resuming them. The only route to this counter.
+    interruptions_failed: int = 0
+    # Interrupted tasks left alone because their executor ref still probes
+    # as live: the execution backend is retrying the input itself, so
+    # spawning here would duplicate the execution. Not an error — it is the
+    # guard working.
+    interruptions_backend_retrying: int = 0
     # Cross-build blocking, summed over the terminal evaluations of this
     # tick (like limit_denied, these are counts of observations, not of
     # distinct tasks — one blocker seen on three linger passes counts
@@ -953,7 +1007,7 @@ async def _run_tick_body_aio(
                     summary.outcome = "not_reactive"
                     return
 
-                acted, denied_this_round = await _act_on_frontier(
+                acted, denied_this_round, awaiting_backend = await _act_on_frontier(
                     frontier,
                     build_id=build_id,
                     registry=registry,
@@ -998,10 +1052,38 @@ async def _run_tick_body_aio(
                     continue
 
                 # Linger: poll the wake-up flag until deadline.
+                #
+                # Two ways out. ``needs_tick`` is the ordinary one: some
+                # worker reported something.
+                #
+                # The other is an interrupted task whose execution still
+                # probes as live. That one is NOT waiting for an event —
+                # nothing will ever emit one, because the worker that would
+                # have reported is dead and an interrupted task produces
+                # nothing further. Waiting on the flag for it stalls the
+                # build until the watchdog, which is off by default.
+                #
+                # So those refs are re-probed directly, and only they: this
+                # deliberately does not re-enter the pass. Re-acting on
+                # every poll would re-attempt the claim of every
+                # limit-denied task at the poll interval, which is exactly
+                # the hot loop the ``acted`` branch above declines to
+                # create. The pass resumes only once a ref stops being
+                # live, which is the single fact being waited on.
+                #
+                # Residual, and honest: a ref that stays live past
+                # ``linger_seconds`` still lingers out with nothing
+                # scheduled to follow up. For a genuine backend retry that
+                # is fine — the restarted worker's own events re-tick the
+                # build. It is the unwinding race this closes.
                 while True:
                     if loop.time() >= deadline:
                         return
                     await asyncio.sleep(config.poll_interval_seconds)
+                    if awaiting_backend and await _any_ref_settled(
+                        awaiting_backend, task_executor
+                    ):
+                        break  # a ref resolved — re-act and pick it up
                     flag = await registry.build_get_frontier_aio(build_id)
                     if flag.needs_tick:
                         break  # outer loop clears the flag and re-acts
@@ -1343,10 +1425,11 @@ async def _act_on_frontier(
     task_store: BuildTaskStore,
     config: TickConfig,
     summary: TickSummary,
-) -> tuple[bool, int]:
+) -> tuple[bool, int, "list[tuple[FrontierTaskRef, BaseTask]]"]:
     """Spawn/probe/heal the actionable tasks, with bounded concurrency.
 
-    Returns ``(acted, denied_this_round)``: whether anything acted, and how
+    Returns ``(acted, denied_this_round, awaiting_backend)``: whether
+    anything acted, how
     many tasks were denied by concurrency limits in THIS pass (used by
     terminal detection — a cumulative count would keep suppressing the
     stuck-build check long after the denied tasks have run).
@@ -1428,9 +1511,19 @@ async def _act_on_frontier(
     grows an ``await`` in the middle stops being atomic.
     """
     if frontier.build_status in _TERMINAL_BUILD_STATUSES:
-        return False, 0  # terminal handling deals with it
+        return False, 0, []  # terminal handling deals with it
     acted = False
     denied_this_round = 0
+    # Interrupted tasks left alone because their execution still probes as
+    # live, as ``(ref, task)``. Returned so the caller can keep re-probing
+    # *just these*: unlike everything else a pass can be waiting for,
+    # NOTHING will emit an event when this resolves — the worker that would
+    # have is already dead.
+    awaiting_backend: list[tuple[FrontierTaskRef, BaseTask]] = []
+    # Task ids appended to ``spawn_candidates`` because they asked to be
+    # resumed, so the spawn phase can count only the ones it actually
+    # spawned (see ``summary.interruptions_restarted``).
+    resumption_requests: set[UUID] = set()
     semaphore = asyncio.Semaphore(max(1, config.max_concurrent_actions))
 
     # --- phase 1: resolve task objects --------------------------------
@@ -1495,11 +1588,19 @@ async def _act_on_frontier(
     running_items: list[tuple[FrontierTaskRef, BaseTask]] = []
     spawn_candidates: list[BaseTask] = []
     budget_denied: list[tuple[FrontierTaskRef, BaseTask]] = []
+    interrupted_items: list[tuple[FrontierTaskRef, BaseTask]] = []
     for item, task in zip(frontier.actionable, resolved):
         if task is None:
             continue
         if item.latest_status in _RUNNING_STATUSES:
             running_items.append((item, task))
+        elif item.latest_status == _INTERRUPTED_STATUS:
+            # Its own phase, not a spawn candidate: what happens to an
+            # interrupted task depends on a policy, on a separate budget,
+            # and — when the execution backend runs its own retries — on
+            # whether the backend is already restarting the very same
+            # input. See ``_act_on_interrupted``.
+            interrupted_items.append((item, task))
         elif item.latest_status == "pending" and _start_denied_by_budget(
             item.attempt_count, config.max_attempts
         ):
@@ -1609,6 +1710,117 @@ async def _act_on_frontier(
 
     await _run_bounded(
         [partial(deny_budget, item, task) for item, task in budget_denied],
+        semaphore,
+    )
+
+    # --- phase 2c: decide what an interruption meant ------------------
+    async def act_on_interrupted(item: FrontierTaskRef, task: BaseTask) -> None:
+        nonlocal acted
+        # The backend may be retrying the input itself. Modal, for one,
+        # restarts a timed-out input when the worker function declares
+        # ``retries``, and it does so under the SAME executor ref — so the
+        # ref probing as live is proof that a restart is in flight and that
+        # spawning here would run the task twice. Probed rather than
+        # assumed, because the tick cannot see the worker's retry config.
+        #
+        # Cost is one non-blocking probe per interrupted task, on a path
+        # that only runs when something was actually interrupted.
+        if item.latest_executor_ref and item.latest_executor:
+            status = await _probe_detached(item, task, task_executor)
+            if status == DetachedExecutionStatus.RUNNING:
+                awaiting_backend.append((item, task))
+                summary.interruptions_backend_retrying += 1
+                logger.info(
+                    f"Task {task.id} of build {build_id} was interrupted but "
+                    f"its execution {item.latest_executor_ref} still probes "
+                    "as live — either the backend is retrying the input "
+                    "itself, or the call has not finished unwinding yet. "
+                    "Leaving it alone this pass and re-probing shortly, "
+                    "rather than spawning a duplicate."
+                )
+                return
+
+        # Every INTERRUPTED task is here because a worker asked to be
+        # resumed — that status is only ever written for a task that raised
+        # ``ResumableInterruption``. An interruption the task did NOT catch
+        # never reaches this branch: the worker reports nothing, the
+        # execution dies, and a later pass records it as an ordinary
+        # retryable failure. So there is no policy to consult here, and no
+        # per-task configuration deciding whether a timeout was "expected" —
+        # the task said so by raising, or it did not.
+        spent = item.interrupt_count
+        if spent is None:
+            # No counter, so nothing can bound a resume loop. Degrade to the
+            # thing that IS bounded (``max_attempts``) rather than to an
+            # unbounded one. See ``FrontierTaskRef.interrupt_count``.
+            logger.warning(
+                f"Task {task.id} of build {build_id} asked to be resumed, "
+                "but this registry does not report per-round interruption "
+                "counts, so TickConfig.max_interruptions cannot be enforced "
+                "and resuming would be unbounded. Recording a retryable "
+                "failure instead. Upgrade stardag-api to enable resumption."
+            )
+            summary.interruptions_failed += 1
+            await _record_task_failure(
+                task,
+                "Execution interrupted; this registry cannot bound resumption",
+                build_id=build_id,
+                registry=registry,
+                config=config,
+                summary=summary,
+                retryable=True,
+                attempts_spent=item.attempt_count,
+            )
+            acted = True
+            return
+
+        if spent < config.max_interruptions:
+            # Counted at spawn time, not here: this phase runs before the
+            # per-pass spawn cap, and interrupted tasks are appended after
+            # the pending ones, so they are the first to be truncated.
+            # Incrementing here would report resumes that did not happen.
+            resumption_requests.add(task.id)
+            spawn_candidates.append(task)
+            logger.info(
+                f"Task {task.id} of build {build_id} checkpointed and asked "
+                f"to be resumed; starting it again ({spent} of "
+                f"{config.max_interruptions} allowed interruption(s) "
+                "absorbed this build round)."
+            )
+            return
+
+        summary.interruptions_exhausted += 1
+        logger.error(
+            f"Task {task.id} of build {build_id} has been interrupted "
+            f"{spent} time(s) this build round, which is its whole budget "
+            f"(TickConfig.max_interruptions={config.max_interruptions}). "
+            "Failing it rather than resuming it again. If this task "
+            "legitimately needs more resumes — a long training run that "
+            "checkpoints, say — re-trigger this build with "
+            'tick_kwargs={"max_interruptions": N}, which also starts a new '
+            "round and resets the count."
+        )
+        await _record_task_failure(
+            task,
+            (
+                f"Interruption budget spent ({spent} of "
+                f"{config.max_interruptions} allowed interruption(s) in this "
+                f"build round). Re-trigger this build (build_id={build_id}) "
+                "to start a new round, optionally with "
+                'tick_kwargs={"max_interruptions": N}.'
+            ),
+            build_id=build_id,
+            registry=registry,
+            config=config,
+            summary=summary,
+            # Already over its budget; the retry branch would only re-derive
+            # that against a different budget and log it twice.
+            retryable=False,
+        )
+        acted = True
+
+    await _run_bounded(
+        [partial(act_on_interrupted, item, task) for item, task in interrupted_items],
         semaphore,
     )
 
@@ -1726,10 +1938,15 @@ async def _act_on_frontier(
             claim_ttl_seconds=ttl_seconds,
         )
         summary.spawned += 1
+        if task.id in resumption_requests:
+            # Counted here rather than where the request was read, so a
+            # pass truncated by the spawn cap does not report resumes it
+            # never made.
+            summary.interruptions_restarted += 1
         acted = True
 
     await _run_bounded([partial(spawn, task) for task in spawn_candidates], semaphore)
-    return acted, denied_this_round
+    return acted, denied_this_round, awaiting_backend
 
 
 def _claim_has_lapsed(expires_at: datetime | None, now: datetime) -> bool:
@@ -1820,6 +2037,61 @@ async def _resolve_running(
     return "leave"
 
 
+async def _any_ref_settled(
+    awaiting: "list[tuple[FrontierTaskRef, BaseTask]]",
+    task_executor: TaskExecutorABC,
+) -> bool:
+    """Whether any awaited execution has stopped probing as live.
+
+    The linger loop's cheap poll: one non-blocking probe per interrupted
+    task the pass left behind, and nothing else. Returning True sends the
+    tick back through a full pass, which will re-probe and act.
+    """
+    for item, task in awaiting:
+        status = await _probe_detached(item, task, task_executor)
+        if status != DetachedExecutionStatus.RUNNING:
+            return True
+    return False
+
+
+async def _probe_detached(
+    item: "FrontierTaskRef",
+    task: BaseTask,
+    task_executor: TaskExecutorABC,
+) -> DetachedExecutionStatus:
+    """Ask the executor about ``item``'s recorded execution, never raising.
+
+    Thin because the interesting judgement is at the call site: only
+    :data:`DetachedExecutionStatus.RUNNING` is treated as "hands off". In
+    particular ``UNKNOWN`` is NOT — and that is a deliberate departure from
+    :func:`_resolve_running`, where UNKNOWN means "leave it".
+
+    The difference is what "leave it" costs. A RUNNING task that is left
+    keeps a live claim and gets re-probed by the next tick, so waiting is
+    free and duplicate-safe. An *interrupted* task holds no claim and is
+    nobody else's to run, so leaving it on UNKNOWN risks stalling the build
+    outright — and UNKNOWN is not rare here: an executor that does not
+    recognise the recorded ref's backend (a resident build reading a ref a
+    Modal tick wrote, say) answers UNKNOWN for every task, forever.
+
+    So this guard covers exactly the case it was built for — a backend
+    retrying the same input under the same ref, which probes as RUNNING —
+    and does not pretend to cover an unreachable backend.
+    """
+    executor_name, ref = item.latest_executor, item.latest_executor_ref
+    if executor_name is None or ref is None:
+        return DetachedExecutionStatus.UNKNOWN
+    try:
+        return await task_executor.detached_status(task, executor_name, ref)
+    except Exception:
+        logger.warning(
+            f"Probing detached execution {ref!r} for task {task.id} raised; "
+            "treating its status as unknown.",
+            exc_info=True,
+        )
+        return DetachedExecutionStatus.UNKNOWN
+
+
 class _BlockerVerdict(typing.NamedTuple):
     """A blocker paired with the reason it landed in its bucket.
 
@@ -1885,13 +2157,19 @@ def _blocker_status_age_seconds(
     return (now - status_at).total_seconds()
 
 
-# Blocker statuses whose fate belongs to the build that owns them. Neither
-# holds an execution claim, so the server clears the expiry with the claim
-# and the owner's status is the only liveness evidence that exists: PENDING
-# means that build has not scheduled it yet, SUSPENDED means that build is
-# working through its dynamic dependencies. Both are transient while the
-# owner lives — and both are a permanent wedge once it dies.
-_OWNER_DRIVEN_STATUSES = ("pending", "suspended")
+# Blocker statuses whose fate belongs to the build that owns them. None of
+# them holds an execution claim, so the server clears the expiry with the
+# claim and the owner's status is the only liveness evidence that exists:
+# PENDING means that build has not scheduled it yet, SUSPENDED means that
+# build is working through its dynamic dependencies, INTERRUPTED means the
+# platform took its execution away and that build is due to start it again.
+# All three are transient while the owner lives — and all three are a
+# permanent wedge once it dies.
+#
+# INTERRUPTED belongs with these and NOT with the inert results: it is not
+# a verdict on the task, so failing this build over it would be failing
+# over a neighbour's timeout.
+_OWNER_DRIVEN_STATUSES = ("pending", "suspended", "interrupted")
 
 
 async def _classify_external_blockers(
@@ -2483,13 +2761,55 @@ async def _cancel_running(
     RUNNING — keeping its pending descendants out of the skip-blocked
     closure (cancelled is a seed status) and holding any concurrency-limit
     slots forever.
+
+    **INTERRUPTED tasks are included, and for both of those reasons.** Such
+    a task may still have a live execution — that is the whole premise of
+    the backend-retry guard in ``_act_on_frontier`` — so a build that dies
+    without cancelling it leaves a container running that nobody is waiting
+    for. And left INTERRUPTED under a terminal build it is a permanent
+    wedge for every *other* build gated on it: ``_OWNER_DRIVEN_STATUSES``
+    reads interrupted as "the owner will move it", so a neighbour waits and
+    then fails, where a CANCELLED task would have been reset and run. The
+    argument is the one ``CASCADE_CANCEL_STATUSES`` already makes for
+    SUSPENDED, word for word.
+
+    Known gap: an interrupted task whose upstream is incomplete again (a
+    dynamic dependency registered after it ran) is in neither ``running``
+    nor ``actionable``, so nothing here reaches it. Narrow, and the
+    server-side cascade — which queries the task table rather than the
+    frontier — closes it whenever the build is cancelled through the API.
     """
-    running_items = frontier.running or [
-        item for item in frontier.actionable if item.latest_status in _RUNNING_STATUSES
+    cancellable = _RUNNING_STATUSES + (_INTERRUPTED_STATUS,)
+    # Re-read, because the snapshot the caller holds is the PRE-action one.
+    # ``_act_on_frontier`` has already run by the time terminal handling
+    # decides to cancel, so that snapshot can be wrong in both directions:
+    # a task it resumed or spawned this pass is live under a ref the
+    # snapshot has never seen, and a task the snapshot lists as INTERRUPTED
+    # may now be RUNNING under a *different* ref.
+    #
+    # Acting on the stale copy is not merely incomplete, it is harmful:
+    # cancelling the old ref is a no-op while the TASK_CANCELLED it records
+    # releases the claim on the execution that just started — handing the
+    # task to any other build while a container is still writing its
+    # target. One extra read on a path that runs once, at build death.
+    try:
+        frontier = await registry.build_get_frontier_aio(build_id)
+    except Exception as e:
+        logger.warning(
+            f"Could not re-read the frontier of build {build_id} before "
+            f"cancelling ({e}); falling back to the pre-action snapshot, "
+            "which may miss executions started in this pass."
+        )
+    running_items = list(frontier.running or [])
+    seen = {item.task_id for item in running_items}
+    running_items += [
+        item
+        for item in frontier.actionable
+        if item.latest_status in cancellable and item.task_id not in seen
     ]
     for item in running_items:
         if (
-            item.latest_status in _RUNNING_STATUSES
+            item.latest_status in cancellable
             and item.latest_executor is not None
             and item.latest_executor_ref is not None
         ):

@@ -25,7 +25,16 @@ class FunctionSettings(typing.TypedDict, total=False):
         gpu: GPU configuration (e.g., "A10G", "T4", or list for fallback).
         cpu: CPU cores (float or (min, max) tuple).
         memory: Memory in MB (int or (min, max) tuple).
-        timeout: Function timeout in seconds.
+        timeout: Function *execution* timeout in seconds. Note it does not
+            bound how long the container lives: Modal signals the timeout
+            and then allows roughly a further minute before the hard kill,
+            so a task that catches the signal to checkpoint outlives its
+            declared timeout by design. Also per *attempt* — with
+            ``retries`` set, each retry gets a fresh window.
+        startup_timeout: Seconds allowed for container startup (loading
+            weights, importing a large dependency tree), separate from
+            ``timeout``. Modal client >= 1.1.4; before that, and when
+            unset, ``timeout`` covers both.
         volumes: Dict of mount path to Volume or CloudBucketMount.
         secrets: List of Modal secrets to inject.
         concurrency_limit: Max number of concurrent containers.
@@ -33,7 +42,19 @@ class FunctionSettings(typing.TypedDict, total=False):
         container_idle_timeout: Seconds before idle container shuts down.
         keep_warm: Number of containers to keep warm.
         ephemeral_disk: Ephemeral disk size in MB.
-        retries: Number of retries on failure.
+        retries: Number of retries on failure. Covers exceptions raised
+            *inside* the container and function timeouts; it is not what
+            recovers a preempted or crashed container (Modal restarts
+            those on the same input regardless). See
+            :class:`~stardag.exceptions.ResumableInterruption` and
+            ``TickConfig.max_attempts`` for the other two layers, and note
+            they multiply: ``retries=3`` under a task allowed 20
+            resumptions is up to 80 container attempts.
+        nonpreemptible: Run on an instance that will not be reclaimed. The
+            direct answer to "this task must not be preempted", for work
+            that genuinely cannot checkpoint. Modal client >= 1.2.3;
+            carries a 3x price multiplier on CPU and memory, and is not
+            supported for GPU functions.
     """
 
     image: typing.Required[modal.Image]
@@ -41,6 +62,7 @@ class FunctionSettings(typing.TypedDict, total=False):
     cpu: float | tuple[float, float]
     memory: int | tuple[int, int]
     timeout: int
+    startup_timeout: int
     volumes: dict[
         typing.Union[str, pathlib.PurePosixPath],
         typing.Union[modal.Volume, modal.CloudBucketMount],
@@ -52,6 +74,7 @@ class FunctionSettings(typing.TypedDict, total=False):
     keep_warm: int
     ephemeral_disk: int
     retries: int
+    nonpreemptible: bool
 
 
 def _dedupe_secrets(secrets: list[modal.Secret]) -> list[modal.Secret]:

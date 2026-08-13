@@ -69,7 +69,7 @@ from stardag.integration.modal._config import get_package_deps, with_stardag_on_
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._profile import get_profile_env_vars, get_profile_secret
 from stardag.integration.modal._protocols import BuildFunction, RunFunction
-from stardag.integration.modal._runner import Runner
+from stardag.integration.modal._runner import MODAL_INTERRUPTIONS, Runner
 from stardag.integration.modal._selector import (
     WorkerSelection,
     WorkerSelector,
@@ -96,6 +96,7 @@ __all__ = [
     "ModalTaskExecutor",
     "PrefectBuilder",
     "Runner",
+    "MODAL_INTERRUPTIONS",
     "FinalizeResult",
     "FunctionSettings",
     "MODAL_VOLUME_URI_PREFIX",

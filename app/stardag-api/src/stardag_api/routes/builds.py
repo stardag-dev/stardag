@@ -96,6 +96,7 @@ from stardag_api.services.status import (
     apply_event_to_task,
     get_all_task_global_statuses,
     get_attempt_counts_in_build,
+    get_interrupt_counts_in_build,
     get_task_status_in_build,
 )
 
@@ -135,6 +136,11 @@ _FRONTIER_NON_TERMINAL_STATUSES = (
     TaskStatus.PENDING,
     TaskStatus.SUSPENDED,
     TaskStatus.RUNNING,
+    # An interrupted task is the scheduler's to start again — the platform
+    # ended the execution, the task did nothing wrong, and nothing else
+    # will pick it up. Listed here for the same reason SUSPENDED is: leave
+    # it out and the build looks finished while a task still needs running.
+    TaskStatus.INTERRUPTED,
 )
 
 # Cap on BuildFrontierResponse.blocked_by_external. A wide DAG stalled
@@ -1649,6 +1655,10 @@ async def skip_blocked_tasks(
         TaskStatus.SKIPPED,
         TaskStatus.PENDING,
         TaskStatus.SUSPENDED,
+        # Grouped with pending/suspended, not with running: an interrupted
+        # task has no live execution that might still complete, so a failed
+        # upstream blocks it exactly as it blocks a pending one.
+        TaskStatus.INTERRUPTED,
     ]
     seeds = (
         select(Task.id)
@@ -1675,7 +1685,13 @@ async def skip_blocked_tasks(
                 .where(
                     Task.id.in_(select(closure.c.id)),
                     Task.id.in_(build_task_pks),
-                    Task.latest_status.in_([TaskStatus.PENDING, TaskStatus.SUSPENDED]),
+                    Task.latest_status.in_(
+                        [
+                            TaskStatus.PENDING,
+                            TaskStatus.SUSPENDED,
+                            TaskStatus.INTERRUPTED,
+                        ]
+                    ),
                 )
                 # Deterministic lock order (matching bulk-register's
                 # task_id ordering) so concurrent skip-blocked calls or
@@ -1940,6 +1956,15 @@ async def get_build_frontier(
     attempt_counts = await get_attempt_counts_in_build(
         db, build_id, list(attempt_task_pks)
     )
+    # A second grouped query over the same bounded id set, for the same
+    # reason and at the same cost shape as the first. Kept separate rather
+    # than folded in: the attempt query windows over LAG'd event pairs and
+    # this one is a plain count, so sharing a statement would mean an outer
+    # join between two different aggregations to save one index scan on a
+    # query the frontier already pays four of.
+    interrupt_counts = await get_interrupt_counts_in_build(
+        db, build_id, list(attempt_task_pks)
+    )
 
     blocked_by_external = [
         FrontierExternalBlocker(
@@ -1994,6 +2019,7 @@ async def get_build_frontier(
             # Absent from the map = no attempt recorded in this build. A
             # root cached from an earlier build is the normal case.
             attempt_count=attempt_counts.get(t.id, 0),
+            interrupt_count=interrupt_counts.get(t.id, 0),
         )
 
     return BuildFrontierResponse(
@@ -3013,6 +3039,46 @@ async def fail_task(
         db,
         auth,
         error_message,
+        commit_hash=commit_hash,
+    )
+
+
+@router.post("/{build_id}/tasks/{task_id}/interrupt", response_model=TaskEventResponse)
+async def interrupt_task(
+    build_id: UUID,
+    task_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    auth: Annotated[SdkAuth, Depends(require_sdk_auth)],
+    reason: str | None = None,
+    commit_hash: str | None = None,
+):
+    """Record that a task's execution was interrupted by the platform.
+
+    An interruption is **not** a failure: the execution ended for a reason
+    unrelated to the task's correctness — the backend hit its function
+    timeout, or reclaimed the container — and the task is the scheduler's
+    to start again. Reported by the worker itself, inside the grace window
+    the platform gives it before the kill, which is what makes the claim
+    and any concurrency-limit slots free up immediately instead of when
+    something later notices the execution is gone.
+
+    Why this is a separate route from ``/fail`` rather than a flag on it:
+    a worker-recorded *failure* would be read by the next scheduler pass as
+    a build-killing failure before anything could retry it (a tick avoids
+    that only by recording and retrying inside one pass). A status that is
+    not a failure cannot lose that race.
+
+    ``reason`` is recorded like ``/fail``'s ``error_message`` — the same
+    question gets asked of both — but does not set ``latest_completed_at``:
+    an interruption is a pause, not an ending.
+    """
+    return await _create_task_event(
+        build_id,
+        task_id,
+        EventType.TASK_INTERRUPTED,
+        db,
+        auth,
+        reason,
         commit_hash=commit_hash,
     )
 

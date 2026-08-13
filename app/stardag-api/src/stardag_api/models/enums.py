@@ -27,6 +27,18 @@ class TaskStatus(str, enum.Enum):
     PENDING = "pending"
     RUNNING = "running"
     SUSPENDED = "suspended"  # Waiting for dynamic dependencies
+    # The execution was taken away for a reason unrelated to the task's
+    # correctness — the platform hit its function timeout, or reclaimed the
+    # container. Not a failure and not terminal: the attempt ended, nothing
+    # is running, and the task is the scheduler's to start again.
+    #
+    # Shaped after SUSPENDED, which is the same kind of thing for a
+    # different reason: non-terminal, non-running, holds no execution
+    # claim, listed as actionable by the frontier, reset by a re-trigger.
+    # The distinction from FAILED is the whole point — "infrastructure took
+    # it" and "the task is broken" want opposite responses, and a build
+    # under FAIL_FAST must not die for the first.
+    INTERRUPTED = "interrupted"
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -73,5 +85,8 @@ class EventType(str, enum.Enum):
     )
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
+    # Execution taken away by the platform, not by the task being wrong
+    # (function timeout, container reclaimed) — see TaskStatus.INTERRUPTED.
+    TASK_INTERRUPTED = "task_interrupted"
     TASK_SKIPPED = "task_skipped"
     TASK_CANCELLED = "task_cancelled"  # Explicitly cancelled by user

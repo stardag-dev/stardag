@@ -11,6 +11,49 @@ class StardagError(Exception):
     pass
 
 
+class ResumableInterruption(StardagError):
+    """Raise this to say: I saved my progress, run me again.
+
+    The **only** way a task asks to be resumed. Raise it after catching a
+    platform interruption — the execution backend reclaiming your container,
+    or hitting its function timeout — and persisting whatever progress you
+    had::
+
+        class TrainModel(sd.Task[None]):
+            def run(self):
+                try:
+                    train(resume_from=self.target() / "checkpoint.json")
+                except MODAL_INTERRUPTIONS:
+                    save_checkpoint(self.target() / "checkpoint.json")
+                    raise sd.ResumableInterruption("checkpointed") from None
+
+    **An interruption you do NOT catch is a failure**, deliberately. Letting
+    one propagate means the task had no plan for it: either it hung, or the
+    worker's timeout is too small for the work. Both want the same answer —
+    fail, with the scheduler's ordinary attempt budget — and neither is
+    improved by running it again twenty times. So there is no configuration
+    deciding "is this timeout expected?": the task answers that by whether
+    it raises this, and a task not built to resume simply never does.
+
+    Catch the interruption types **specifically** (see
+    ``stardag.integration.modal.MODAL_INTERRUPTIONS``), never
+    ``BaseException``. A blanket catch would sweep up ordinary bugs — a
+    ``NameError`` is a ``BaseException`` too — and turn a deterministic
+    failure into a task that resumes until its budget runs out.
+
+    Deliberately an ``Exception``, not a ``BaseException``: you raise it
+    from inside your own error handling, where a ``BaseException`` subclass
+    would be one more thing slipping past your control flow.
+
+    What the Modal runner does with it depends on whether a restart is
+    still possible. Raised before the function timeout, it re-raises an
+    interrupt in its place so the backend sees a crashed container and
+    restarts the input. Raised at or after the timeout — when no restart is
+    coming — it records the interruption for a scheduler to act on and lets
+    your exception propagate unchanged.
+    """
+
+
 class APIError(StardagError):
     """Error communicating with the Stardag API.
 

@@ -134,6 +134,9 @@ from stardag.testing import test_harness  # Isolated test environment
 
 # Exceptions
 sd.StardagError, sd.APIError, sd.AuthenticationError, sd.AuthorizationError
+# ...and the one you RAISE, to ask to be resumed after checkpointing
+sd.ResumableInterruption
+from stardag.integration.modal import MODAL_INTERRUPTIONS  # what to catch
 from stardag.build import BuildFailed          # Raised by BuildSummary.raise_on_failure()
 from stardag.build import TaskExecutionError   # Wraps task executor exceptions
 ```

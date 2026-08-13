@@ -68,6 +68,11 @@ _TICK_KWARGS_ALLOWED = (
     # unblocked by re-triggering *with a raised* max_attempts — which only
     # works if a re-trigger can say it.
     "max_attempts",
+    # ...and the same argument for the interruption budget beside it: a
+    # long training run that gets killed and resumed more often than
+    # expected is recovered by re-triggering with a raised value, which
+    # only works if a re-trigger can say it.
+    "max_interruptions",
 )
 
 
@@ -130,7 +135,10 @@ def _build_tick_config(
     if "fail_mode" in config_kwargs:
         config_kwargs["fail_mode"] = FailMode(config_kwargs["fail_mode"])
     config_kwargs.setdefault("tick_timeout_seconds", tick_timeout_seconds)
-    return TickConfig(limit_key_selector=limit_key_selector, **config_kwargs)
+    return TickConfig(
+        limit_key_selector=limit_key_selector,
+        **config_kwargs,
+    )
 
 
 def _validate_tick_kwargs(

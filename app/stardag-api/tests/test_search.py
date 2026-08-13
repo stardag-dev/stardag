@@ -7,6 +7,7 @@ from httpx import AsyncClient
 
 from fastapi import HTTPException
 
+from stardag_api.models.enums import TaskStatus
 from stardag_api.routes.search import (
     _extract_keys,
     _is_valid_segment,
@@ -125,8 +126,15 @@ async def test_status_values_includes_all_filterable_statuses(client: AsyncClien
 
     Previously only {pending, running, completed, failed} were exposed,
     so suspended / skipped / cancelled were undiscoverable in the
-    search-bar autocomplete. Pin the full set so future additions to
-    TaskStatus on the API side don't silently drift.
+    search-bar autocomplete.
+
+    **Derived from ``TaskStatus``, not a literal list.** A hand-written set
+    here pins only what someone remembered to type: when INTERRUPTED was
+    added to the enum, both the route and this test kept their old seven
+    values and agreed with each other, so the drift the docstring promises
+    to catch went unnoticed until a reviewer read the route. Comparing
+    against the enum is what makes the promise real — a new status now
+    fails here until it is either exposed or explicitly excluded below.
     """
     resp = await client.get(
         "/api/v1/tasks/search/values",
@@ -134,15 +142,10 @@ async def test_status_values_includes_all_filterable_statuses(client: AsyncClien
     )
     assert resp.status_code == 200
     values = {v["value"] for v in resp.json()["values"]}
-    assert values == {
-        "pending",
-        "running",
-        "suspended",
-        "completed",
-        "failed",
-        "skipped",
-        "cancelled",
-    }
+    # UNREGISTERED is an internal phantom-row marker, not something users
+    # filter on — the one deliberate omission, mirrored in the route.
+    expected = {s.value for s in TaskStatus} - {TaskStatus.UNREGISTERED.value}
+    assert values == expected
 
 
 @pytest.mark.asyncio

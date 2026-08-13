@@ -31,6 +31,7 @@ export function TaskFilters({
         <option value="pending">Pending</option>
         <option value="running">Running</option>
         <option value="suspended">Suspended</option>
+        <option value="interrupted">Interrupted</option>
         <option value="completed">Completed</option>
         <option value="failed">Failed</option>
         <option value="skipped">Skipped</option>

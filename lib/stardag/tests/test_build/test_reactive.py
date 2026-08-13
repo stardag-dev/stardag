@@ -40,7 +40,11 @@ from stardag.build._base import (
     LockAcquisitionStatus,
 )
 from stardag.build import _reactive as reactive_module
-from stardag.build._reactive import _RETRYABLE_STATUSES, TickSummary, _skip_blocked
+from stardag.build._reactive import (
+    _RETRYABLE_STATUSES,
+    TickSummary,
+    _skip_blocked,
+)
 from stardag.exceptions import NotFoundError
 from stardag.registry import (
     BuildFrontier,
@@ -108,12 +112,14 @@ class FakeReactiveRegistry(NoOpRegistry):
         self.sent_claim_ttls: dict[str, list[int | None]] = {}
         # --- attempt counting per build ROUND (TickConfig.max_attempts) ---
         # Rather than keeping a number, keep the lifecycle events and derive
-        # the count the way the server does (see ``attempt_count``): True is
-        # a start, False is anything else. Two rules apply on top —
-        # CONSECUTIVE starts collapse into one attempt (a spawn's claim +
-        # ref starts count once), and only events after the build's most
+        # the count the way the server does (see ``attempt_count``). Each
+        # entry is "start", "interrupt" or "other" — three values rather
+        # than two because a start is collapsed by BOTH of the first two,
+        # for different reasons: consecutive starts are one execution
+        # re-recording itself, while a start after an interrupt continues
+        # work the platform took away. Only events after the build's most
         # recent BUILD_RESUMED are counted at all.
-        self.task_events: dict[str, list[bool]] = {}
+        self.task_events: dict[str, list[str]] = {}
         # Where each task's current round begins in its event list — moved
         # to the end of the list by ``build_resume_aio``. Absent = the build
         # has never been resumed, so the round is the whole list.
@@ -126,6 +132,13 @@ class FakeReactiveRegistry(NoOpRegistry):
         # error_message of every recorded failure, per task — the text an
         # operator actually reads in the UI.
         self.fail_reasons: dict[str, list[str | None]] = {}
+        # ...and the same for interruptions.
+        self.interrupt_reasons: dict[str, list[str | None]] = {}
+        # Set False to emulate a server predating interrupt_count (the
+        # field is absent, so the model default None applies). Distinct
+        # from serves_attempt_counts: the two shipped separately, and the
+        # degradations differ.
+        self.serves_interrupt_counts = True
         # task_id -> task_data body, served by task_get_metadata_aio
         # (rehydration fallback); missing key -> KeyError, like a 404.
         self.metadata_bodies: dict[str, dict] = {}
@@ -175,6 +188,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         status_at: "datetime | None" = None,
         expires_at: "datetime | None" = None,
         attempt_count: int | None = None,
+        interrupt_count: int = 0,
     ) -> None:
         self.statuses[task_id] = status
         self.upstreams.setdefault(task_id, set()).update(upstreams or set())
@@ -190,16 +204,28 @@ class FakeReactiveRegistry(NoOpRegistry):
             # fabricated straight into RUNNING or PENDING). Each attempt is
             # a start followed by something else; a RUNNING task's last
             # attempt is still open, so it ends on its start.
-            events: list[bool] = []
+            events: list[str] = []
             for _ in range(attempt_count):
-                events.extend([True, False])
+                events.extend(["start", "other"])
             if status == "running" and events:
                 events.pop()
             self.task_events[task_id] = events
+        if interrupt_count:
+            # Interruptions are appended as start/interrupt pairs, which is
+            # the shape the real stream has and — because a start after an
+            # interrupt opens no new attempt — leaves ``attempt_count``
+            # alone. That property is exactly what these tests are for, so
+            # the fake has to reproduce it rather than assert it.
+            for _ in range(interrupt_count):
+                self.task_events.setdefault(task_id, []).extend(["start", "interrupt"])
 
-    def _count_event(self, task_id: str, *, is_start: bool) -> None:
-        """Record one lifecycle event (True = a start)."""
-        self.task_events.setdefault(task_id, []).append(is_start)
+    def _count_event(self, task_id: str, *, kind: str) -> None:
+        """Record one lifecycle event: "start", "interrupt" or "other"."""
+        self.task_events.setdefault(task_id, []).append(kind)
+
+    def _round_events(self, task_id: str) -> list[str]:
+        events = self.task_events.get(task_id, [])
+        return events[self.round_start.get(task_id, 0) :]
 
     def attempt_count(self, task_id: str) -> int:
         """Starts in the current round, collapsing consecutive ones.
@@ -207,15 +233,26 @@ class FakeReactiveRegistry(NoOpRegistry):
         The server's rule, applied to the recorded history rather than
         maintained as a counter — so a round boundary needs no bookkeeping
         beyond noting where it fell.
+
+        An "interrupt" predecessor collapses a start too, exactly like
+        another start: the platform took the container away, so the run
+        that follows continues work rather than beginning a new attempt.
         """
-        events = self.task_events.get(task_id, [])
         count = 0
-        previous_was_start = False
-        for is_start in events[self.round_start.get(task_id, 0) :]:
-            if is_start and not previous_was_start:
+        previous = None
+        for kind in self._round_events(task_id):
+            if kind == "start" and previous not in ("start", "interrupt"):
                 count += 1
-            previous_was_start = is_start
+            previous = kind
         return count
+
+    def interrupt_count(self, task_id: str) -> int:
+        """Interruptions in the current round — a plain count, no collapsing.
+
+        Nothing emits more than one per execution (the dying worker reports
+        it once), so unlike attempts there is nothing to de-duplicate.
+        """
+        return sum(1 for kind in self._round_events(task_id) if kind == "interrupt")
 
     def add_blocking_task(
         self,
@@ -292,7 +329,7 @@ class FakeReactiveRegistry(NoOpRegistry):
     ):
         tid = str(task.id)
         self.calls.append(("start", tid))
-        self._count_event(tid, is_start=True)
+        self._count_event(tid, kind="start")
         self.sent_claim_ttls.setdefault(tid, []).append(claim_ttl_seconds)
         self.statuses[tid] = "running"
         self.refs[tid] = (executor, executor_ref)
@@ -381,14 +418,14 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_complete_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("complete", tid))
-        self._count_event(tid, is_start=False)
+        self._count_event(tid, kind="other")
         self.statuses[tid] = "completed"
 
     async def task_retry_by_id_aio(self, build_id, task_id):
         """Id-based retry — what a tick uses for a blocker it cannot
         reconstruct (it has the id off the frontier, not the object)."""
         self.calls.append(("retry", task_id))
-        self._count_event(task_id, is_start=False)
+        self._count_event(task_id, kind="other")
         if self.statuses.get(task_id) in _RETRYABLE_STATUSES:
             self.statuses[task_id] = "pending"
             self.refs.pop(task_id, None)
@@ -396,7 +433,7 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_retry_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("retry", tid))
-        self._count_event(tid, is_start=False)
+        self._count_event(tid, kind="other")
         # Same retryable set the server applies (suspended included: a
         # suspended task has no live execution to orphan).
         if self.statuses.get(tid) in _RETRYABLE_STATUSES:
@@ -410,15 +447,30 @@ class FakeReactiveRegistry(NoOpRegistry):
     async def task_cancel_aio(self, build_id, task):
         tid = str(task.id)
         self.calls.append(("cancel", tid))
-        self._count_event(tid, is_start=False)
+        self._count_event(tid, kind="other")
         self.statuses[tid] = "cancelled"
 
     async def task_fail_aio(self, build_id, task, error_message=None):
         tid = str(task.id)
         self.calls.append(("fail", tid))
-        self._count_event(tid, is_start=False)
+        self._count_event(tid, kind="other")
         self.fail_reasons.setdefault(tid, []).append(error_message)
         self.statuses[tid] = "failed"
+
+    async def task_interrupt_aio(self, build_id, task, reason=None):
+        """What a worker reports when the platform took its container.
+
+        Mirrors the server: the claim goes (so no expiry survives) but the
+        executor ref stays, because a backend running its own retries may
+        be restarting that very call and a scheduler needs the ref to
+        probe for it.
+        """
+        tid = str(task.id)
+        self.calls.append(("interrupt", tid))
+        self._count_event(tid, kind="interrupt")
+        self.interrupt_reasons.setdefault(tid, []).append(reason)
+        self.statuses[tid] = "interrupted"
+        self.expires_at.pop(tid, None)
 
     async def build_complete_aio(self, build_id):
         self.calls.append(("build_complete", None))
@@ -471,7 +523,7 @@ class FakeReactiveRegistry(NoOpRegistry):
                     changed = True
         skipped = []
         for tid in blocked:
-            if self.statuses.get(tid) in ("pending", "suspended"):
+            if self.statuses.get(tid) in ("pending", "suspended", "interrupted"):
                 self.statuses[tid] = "skipped"
                 skipped.append(tid)
         return skipped
@@ -535,6 +587,9 @@ class FakeReactiveRegistry(NoOpRegistry):
                 attempt_count=(
                     self.attempt_count(tid) if self.serves_attempt_counts else None
                 ),
+                interrupt_count=(
+                    self.interrupt_count(tid) if self.serves_interrupt_counts else None
+                ),
             )
 
         # Build-scoped, like the API: actionable/running/status_counts see
@@ -547,7 +602,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         actionable = [
             ref(tid)
             for tid, status in in_build.items()
-            if status in ("pending", "suspended", "running")
+            if status in ("pending", "suspended", "running", "interrupted")
             and all(
                 self.statuses.get(up) == "completed"
                 for up in self.upstreams.get(tid, set())
@@ -563,7 +618,7 @@ class FakeReactiveRegistry(NoOpRegistry):
         blocked_by_external: list[FrontierExternalBlocker] = []
         if self.serves_blocked_by_external and not actionable and not running:
             for tid, status in in_build.items():
-                if status not in ("pending", "suspended", "running"):
+                if status not in ("pending", "suspended", "running", "interrupted"):
                     continue
                 for up in sorted(self.upstreams.get(tid, set())):
                     if up not in self.statuses:
@@ -4210,3 +4265,462 @@ class TestBlockerAgeFormatting:
         )
 
         assert _DEFAULT_MAX_CONCURRENT_DISCOVER < _DEFAULT_MAX_CONCURRENCY
+
+
+class TestInterruptedTasks:
+    """What a tick does with a task the platform interrupted.
+
+    An interruption is the execution backend taking a container away — a
+    function timeout, a reclaimed instance — reported by the dying worker
+    in its grace window. It is not a failure, so it must not fail a
+    FAIL_FAST build; it is not running, so it holds no claim; and it is
+    still the scheduler's to act on, which is what these tests pin.
+
+    There is no policy to configure: the status is written only for a
+    task that raised ``ResumableInterruption``, so reaching this code means
+    the task asked. An interruption a task did not catch never gets here —
+    the worker reports nothing, the execution dies, and a later pass
+    records an ordinary retryable failure.
+    """
+
+    async def test_an_interrupted_task_is_resumed(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """No configuration involved: the status exists only because a
+        worker asked to be resumed, so the tick resumes it."""
+        (root,) = _chain("interrupted-default")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry.statuses[str(root.id)] = "interrupted"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        assert summary.interruptions_restarted == 1
+        assert summary.interruptions_failed == 0
+        assert summary.failed_recorded == 0
+        assert ("fail", str(root.id)) not in registry.calls
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+
+    async def test_a_resumption_request_respawns_without_a_failure(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An INTERRUPTED task is one that asked to be resumed, so it goes
+        straight back to the frontier with no failure in its history."""
+        (root,) = _chain("interrupted-restart")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry.statuses[str(root.id)] = "interrupted"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+            ),
+        )
+
+        assert summary.interruptions_restarted == 1
+        assert summary.interruptions_failed == 0
+        assert summary.failed_recorded == 0
+        assert ("fail", str(root.id)) not in registry.calls
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+
+    async def test_resumption_is_bounded_by_its_own_budget(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Exempt from the attempt budget does not mean unbounded: a task
+        that times out forever must stop, with a message naming the knob."""
+        (root,) = _chain("interrupted-exhausted")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry.add_task(str(root.id), status="interrupted", interrupt_count=3)
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+                max_interruptions=3,
+            ),
+        )
+
+        assert summary.interruptions_exhausted == 1
+        assert summary.interruptions_restarted == 0
+        assert executor.spawned == []
+        reason = registry.fail_reasons[str(root.id)][-1] or ""
+        assert "Interruption budget spent (3 of 3" in reason
+        assert "max_interruptions" in reason
+
+    async def test_interruptions_do_not_spend_the_attempt_budget(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The property the whole separate budget exists for. Two
+        interruptions with ``max_attempts=2`` — a task charged for them
+        would already be refused a start."""
+        (root,) = _chain("interrupted-not-an-attempt")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry.add_task(str(root.id), status="interrupted", interrupt_count=2)
+        assert registry.attempt_count(str(root.id)) == 1
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+                max_attempts=2,
+                max_interruptions=10,
+            ),
+        )
+
+        assert summary.interruptions_restarted == 1
+        assert summary.budget_denied == 0
+        assert executor.spawned == [root.id]
+
+    async def test_a_live_ref_is_re_probed_until_it_is_not(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An interrupted task whose execution still probes as live is left
+        alone — the backend may be retrying the input under the same ref,
+        and spawning would run it twice.
+
+        **But "left alone" must not mean "abandoned".** Nothing will ever
+        emit an event when that ref stops being live: the worker that would
+        have reported is dead, and an interrupted task produces nothing
+        further. A tick that lingered on the wake-up flag here would stall
+        the build until the watchdog — which is off by default. So the pass
+        re-probes instead, and picks the task up as soon as the ref
+        resolves.
+
+        The executor below answers RUNNING once and FAILED after, which is
+        exactly the shape of the race this guards: the interruption is
+        reported inside the grace window and wakes a tick immediately, so
+        the probe can easily land before the call has finished unwinding.
+        """
+        (root,) = _chain("interrupted-backend-retry")
+
+        class SettlingExecutor(FakeTickExecutor):
+            probes = 0
+
+            async def detached_status(self, task, executor, ref):
+                SettlingExecutor.probes += 1
+                if SettlingExecutor.probes == 1:
+                    return DetachedExecutionStatus.RUNNING
+                return DetachedExecutionStatus.FAILED
+
+        registry, locks, executor, store = _setup(
+            [root], auto_complete=True, executor=SettlingExecutor()
+        )
+        registry.add_task(
+            str(root.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-live",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=FAST_TICK,
+        )
+
+        # It waited on the first probe...
+        assert summary.interruptions_backend_retrying >= 1
+        assert SettlingExecutor.probes >= 2, "the tick stopped re-probing"
+        # ...and resumed the task once the ref resolved, rather than
+        # lingering out with the build stalled.
+        assert summary.interruptions_restarted == 1
+        assert executor.spawned == [root.id]
+        assert summary.terminal_status == "completed"
+
+    async def test_a_live_ref_is_not_spawned_in_the_same_pass(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The other half: while the ref stays live, nothing is spawned.
+        A permanently-live ref lingers out rather than duplicating the
+        execution."""
+        (root,) = _chain("interrupted-still-live")
+        registry, locks, executor, store = _setup(
+            [root],
+            auto_complete=False,
+            executor=FakeTickExecutor(
+                statuses={"fc-live": DetachedExecutionStatus.RUNNING}
+            ),
+        )
+        registry.add_task(
+            str(root.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-live",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(linger_seconds=0.1, poll_interval_seconds=0.02),
+        )
+
+        assert summary.interruptions_backend_retrying >= 1
+        assert summary.interruptions_restarted == 0
+        assert executor.spawned == []
+        assert registry.statuses[str(root.id)] == "interrupted"
+
+    async def test_a_dead_ref_does_not_block_the_restart(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The control for the guard above: a ref that probes FAILED is a
+        finished execution, so the task is the scheduler's to start."""
+        (root,) = _chain("interrupted-dead-ref")
+        registry, locks, executor, store = _setup(
+            [root],
+            auto_complete=True,
+            executor=FakeTickExecutor(
+                statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+            ),
+        )
+        registry.add_task(
+            str(root.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-dead",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+            ),
+        )
+
+        assert summary.interruptions_backend_retrying == 0
+        assert summary.interruptions_restarted == 1
+        assert executor.spawned == [root.id]
+
+    async def test_unknown_probe_does_not_stall_the_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """UNKNOWN is deliberately NOT treated as "hands off", unlike the
+        RUNNING-task path. An interrupted task holds no claim and is
+        nobody else's to run, and an executor that does not recognise the
+        recorded ref's backend answers UNKNOWN forever — so waiting on it
+        would wedge the build rather than protect it."""
+        (root,) = _chain("interrupted-unknown-ref")
+        # FakeTickExecutor answers UNKNOWN for any ref it was not told about.
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry.add_task(
+            str(root.id),
+            status="interrupted",
+            executor="some-other-backend",
+            executor_ref="ref-we-cannot-probe",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+            ),
+        )
+
+        assert summary.interruptions_backend_retrying == 0
+        assert executor.spawned == [root.id]
+
+    async def test_no_interrupt_counter_falls_back_to_the_attempt_budget(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """A server predating ``interrupt_count`` cannot bound a resume
+        loop, so resumption degrades to the bounded thing rather than to an
+        unbounded one."""
+        (root,) = _chain("interrupted-no-counter")
+        registry, locks, executor, store = _setup([root], auto_complete=True)
+        registry.statuses[str(root.id)] = "interrupted"
+        registry.serves_interrupt_counts = False
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+            ),
+        )
+
+        assert summary.interruptions_restarted == 0
+        assert summary.interruptions_failed == 1
+
+    async def test_an_interruption_does_not_fail_a_fail_fast_build(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """The headline property, stated directly. Under FAIL_FAST a single
+        FAILED task kills the build on the next pass — which is exactly
+        what must not happen when the platform, not the task, ended the
+        run. The dep is interrupted and the build still completes."""
+        dep, root = _chain("ff-dep", "ff-root")
+        registry, locks, executor, store = _setup([dep, root], auto_complete=True)
+        registry.statuses[str(dep.id)] = "interrupted"
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.3,
+                poll_interval_seconds=0.01,
+                fail_mode=FailMode.FAIL_FAST,
+            ),
+        )
+
+        assert summary.terminal_status == "completed"
+        assert registry.build_status == "completed"
+
+    async def test_fail_fast_cancels_an_interrupted_task(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """An interrupted task may still have a live execution — that is
+        the premise of the backend-retry guard — so a dying build must
+        cancel it, and must not leave it INTERRUPTED.
+
+        Left behind it is a permanent wedge for every other build gated on
+        it: ``_OWNER_DRIVEN_STATUSES`` reads interrupted as "the owner will
+        move it", so a neighbour waits and then fails, where a CANCELLED
+        task is reset and run.
+        """
+        # Siblings, not a chain: a failed *upstream* would gate the
+        # interrupted task out of `actionable` and the test would pass for
+        # the wrong reason.
+        broken = SyncOnlyTask(name="ff-cancel-broken", deps=())
+        resuming = SyncOnlyTask(name="ff-cancel-resuming", deps=())
+        root = SyncOnlyTask(name="ff-cancel-root", deps=(broken, resuming))
+        registry, locks, executor, store = _setup(
+            [broken, resuming, root],
+            auto_complete=False,
+            executor=FakeTickExecutor(
+                statuses={"fc-live": DetachedExecutionStatus.RUNNING}
+            ),
+        )
+        registry.statuses[str(broken.id)] = "failed"
+        registry.add_task(
+            str(resuming.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-live",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.05,
+                poll_interval_seconds=0.02,
+                fail_mode=FailMode.FAIL_FAST,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        assert "fc-live" in executor.cancelled_refs
+        assert registry.statuses[str(resuming.id)] == "cancelled"
+
+    async def test_fail_fast_does_not_cancel_what_this_pass_just_resumed(
+        self, default_in_memory_fs_target: typing.Type[InMemoryFileTarget]
+    ):
+        """Terminal handling runs on the snapshot taken BEFORE the pass
+        acted, so an interrupted task the pass resumed still reads
+        ``interrupted`` there, under its old ref.
+
+        Acting on that stale copy is worse than doing nothing: cancelling
+        the dead ref is a no-op, while the TASK_CANCELLED it records
+        releases the claim on the execution that just started — and a
+        cancelled task with no claim is exactly what a neighbouring build
+        treats as recoverable, so it resets it and spawns a second
+        execution while the first is still writing the target. Hence the
+        re-read in ``_cancel_running``.
+        """
+        broken = SyncOnlyTask(name="ff-fresh-broken", deps=())
+        resuming = SyncOnlyTask(name="ff-fresh-resuming", deps=())
+        root = SyncOnlyTask(name="ff-fresh-root", deps=(broken, resuming))
+        registry, locks, executor, store = _setup(
+            [broken, resuming, root],
+            auto_complete=False,
+            # The interrupted task's OLD ref is dead, so the pass resumes it.
+            executor=FakeTickExecutor(
+                statuses={"fc-dead": DetachedExecutionStatus.FAILED}
+            ),
+        )
+        registry.statuses[str(broken.id)] = "failed"
+        registry.add_task(
+            str(resuming.id),
+            status="interrupted",
+            executor="fake",
+            executor_ref="fc-dead",
+        )
+
+        summary = await run_tick_aio(
+            uuid4(),
+            registry=registry,
+            task_executor=executor,
+            lock_manager=locks,
+            task_store=store,
+            config=TickConfig(
+                linger_seconds=0.05,
+                poll_interval_seconds=0.02,
+                fail_mode=FailMode.FAIL_FAST,
+            ),
+        )
+
+        assert summary.terminal_status == "failed"
+        # It was resumed, so it is RUNNING under a NEW ref by the time the
+        # build dies — and it is that ref which must be cancelled, never
+        # the stale one the pre-action snapshot carried.
+        assert executor.spawned == [resuming.id]
+        assert "fc-dead" not in executor.cancelled_refs, (
+            "cancelled the stale ref: the live execution is orphaned and "
+            "its claim released"
+        )
+        assert executor.cancelled_refs == ["ref-1"]
+        assert registry.statuses[str(resuming.id)] == "cancelled"
+
+    async def test_interrupted_is_reset_by_a_re_trigger(self):
+        """``_RETRYABLE_STATUSES`` covers it, so discovery's
+        ``retry_failed`` picks up a task abandoned mid-interruption. Leave
+        it out and that task is unschedulable forever."""
+        assert "interrupted" in _RETRYABLE_STATUSES

@@ -65,6 +65,36 @@ the expiry is re-based off the real start rather than off the pre-spawn
 claim, which absorbed however long the call sat queued.
 """
 
+STARDAG_MODAL_FUNCTION_TIMEOUT_ENV = "STARDAG_MODAL_FUNCTION_TIMEOUT"
+"""Env var carrying the worker function's declared ``timeout``, in seconds.
+
+The one fact a worker needs to tell a **timeout** apart from a
+**cancellation**, and it cannot get it any other way.
+
+Both arrive identically: Modal signals SIGUSR1 and the container sees
+``modal.exception.InputCancellation("Input was cancelled by user")`` —
+same type, same message, whether the function ran out of time or somebody
+called ``FunctionCall.cancel()``. Verified live (modal 1.5.0). The two want
+opposite handling: a timeout is an interruption the scheduler should act
+on, while a cancellation is one *stardag itself* usually issued (FAIL_FAST,
+or the UI's cancel), and reporting an interruption there would resurrect a
+task the build just cancelled.
+
+What separates them is *when* the signal lands. Modal delivers the timeout
+one at the declared timeout to the millisecond (20.000s / 20.001s /
+19.997s, measured across five probes of a 20s function), so comparing
+elapsed execution time against this value decides it — see
+``_runner._classify_interruption``.
+
+Absent — an older orchestrator, or a worker function that declares no
+``timeout`` of its own — the two cases split. An ``InputCancellation``
+nobody asked to be resumed from still reads as a cancellation and is not
+reported. But a task that DID ask (``ResumableInterruption``) is reported
+anyway, because the backend applies its own default timeout regardless:
+"unknown" does not mean "no timeout fired", and guessing wrong in that
+direction strands the task. See ``_runner._classify_interruption``.
+"""
+
 STARDAG_MODAL_WORKSPACE_ENV = "STARDAG_MODAL_WORKSPACE"
 """Env var carrying the resolved Modal workspace name to workers.
 

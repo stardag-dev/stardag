@@ -28,6 +28,86 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   [GHSA-47m3-4ppr-cfh4](https://github.com/stardag-dev/stardag/security/advisories/GHSA-47m3-4ppr-cfh4)
   (CVSS 7.7 High; read-only, authenticated).
 
+- **`TASK_INTERRUPTED` / `TaskStatus.INTERRUPTED`**, and
+  `POST /builds/{id}/tasks/{task_id}/interrupt`. Modelled on `SUSPENDED`:
+  non-terminal, non-running, holds no execution claim, listed as
+  actionable by the frontier, and reset by a re-trigger. **No migration** —
+  both columns are already `String(32)`.
+
+  Deliberately a status rather than a `retryable` flag on `/fail`: a
+  worker-recorded _failure_ sits in the next frontier snapshot and, under
+  `FAIL_FAST`, kills the build before anything can retry it. A tick avoids
+  that only because it records and retries inside one pass.
+
+- `FrontierTaskRef.interrupt_count`, counted over the same build round as
+  `attempt_count`. An interruption between two starts does not open a new
+  attempt.
+
+- Old SDKs are unaffected (nothing emits the new event). A **new SDK
+  against an older server** logs a warning and records nothing, which is
+  its pre-existing behaviour — a version skew degrades to the old recovery
+  path, never to a failed build.
+
+### UI
+
+- `INTERRUPTED` renders as its own status (orange, beside skipped's amber
+  rather than failed's red), is filterable, and offers Retry but not
+  Release — an interrupted task holds no claim to release.
+
+### SDK
+
+- **A task can survive preemption and function timeouts** (closes
+  [#245](https://github.com/stardag-dev/stardag/issues/245)). The two ways
+  a container routinely dies without the task being broken had no
+  representation in the SDK, and a task that caught the interrupt to
+  checkpoint — which is what you must do — and re-raised anything derived
+  from `Exception` recorded a permanent `TASK_FAILED`, killing a
+  `FAIL_FAST` build.
+
+  New: **`sd.ResumableInterruption`**, and
+  **`stardag.integration.modal.MODAL_INTERRUPTIONS`** — the exact pair the
+  platform raises (`KeyboardInterrupt` for preemption,
+  `modal.exception.InputCancellation` for a timeout, which is _not_ a
+  `KeyboardInterrupt`).
+
+  ```python
+  try:
+      train(resume_from=checkpoint)
+  except MODAL_INTERRUPTIONS:
+      save_checkpoint(checkpoint)
+      raise sd.ResumableInterruption("checkpointed") from None
+  ```
+
+  **The task decides, not configuration.** Raising `ResumableInterruption`
+  is the only way a task gets resumed, bounded by the new
+  `TickConfig.max_interruptions` (default 20) — a budget separate from
+  `max_attempts`, or a trainer designed to be killed and resumed would
+  exhaust one meant for genuine failures. An interruption a task does
+  **not** catch stays a failure under `max_attempts`: it means the task had
+  no plan for one, so either it hung or the worker's `timeout` is too
+  small, and neither is improved by resuming it.
+
+  Catch `MODAL_INTERRUPTIONS`, never `BaseException` — a `NameError` is a
+  `BaseException` too, and resuming one would run a deterministic failure
+  until the budget is gone.
+
+  The Modal runner reports the interruption inside the grace window the
+  platform allows, which releases the execution claim and its
+  concurrency-limit slots immediately and wakes the scheduler directly — so
+  recovery does not depend on the (opt-in) watchdog. It reports only when
+  nothing else will recover the execution: before the function timeout
+  fires an escaping `BaseException` gets the input restarted by Modal on
+  the same call id, which is faster and keeps the claim.
+
+  **Reactive builds only.** `sd.build`/`build_aio` have no resumption path;
+  a timed-out execution fails the task there as it always did.
+
+- **`FunctionSettings` gains `nonpreemptible` and `startup_timeout`**, the
+  two Modal knobs this topic needs that were not previously expressible
+  through `StardagApp`. `nonpreemptible=True` is the direct answer to
+  "this task must not be preempted" (3× CPU/memory price, not supported
+  for GPU functions).
+
 ## [0.18.0] — 2026-08-11
 
 ### Registry API

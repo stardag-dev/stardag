@@ -377,6 +377,8 @@ from stardag.exceptions import (
     AuthenticationError,   # Auth failures (missing/invalid credentials)
     AuthorizationError,    # Permission denied (403)
     TokenExpiredError,     # Auth token expiration
+    # Raised BY a task, not caught: "I checkpointed, run me again".
+    ResumableInterruption,
 )
 
 from stardag.build import (
@@ -386,6 +388,43 @@ from stardag.build import (
 ```
 
 `TaskExecutionError` preserves tracebacks across thread/process/remote executor boundaries. `BuildFailed` has a `.summary` attribute with the full `BuildSummary`.
+
+### Surviving preemption and timeouts
+
+A task that can be killed and resumed checkpoints and says so:
+
+```python
+import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+
+class TrainModel(sd.Task[None]):
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
+    def run(self):
+        checkpoint = self.target() / "checkpoint.json"
+        try:
+            train(resume_from=checkpoint)
+        except MODAL_INTERRUPTIONS:        # preemption OR the function timeout
+            save_checkpoint(checkpoint)
+            raise sd.ResumableInterruption("checkpointed") from None
+        self.target().mark_done()
+```
+
+**Rules:**
+
+- Catch `MODAL_INTERRUPTIONS`, never `BaseException` — a blanket catch
+  sweeps up ordinary bugs and would resume a `NameError` until the budget
+  runs out. `except KeyboardInterrupt:` is also wrong: it misses timeouts.
+- An interruption you do **not** catch is a failure, retried under
+  `TickConfig.max_attempts`. That is the correct answer for a hung task or
+  a too-small `timeout`, and it is why no configuration decides whether a
+  timeout was "expected".
+- Resumption is bounded by `TickConfig.max_interruptions` (default 20).
+- Only reactive builds resume. `sd.build`/`build_aio` fail the task.
+- The checkpoint goes inside the task's directory target; `mark_done()` is
+  what marks the task complete.
 
 ## TaskRef (Immutable Reference)
 

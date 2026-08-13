@@ -60,6 +60,7 @@ from stardag.exceptions import (
     AuthorizationError,
     SDKVersionUnsupportedError,
     StardagError,
+    ResumableInterruption,
     TokenExpiredError,
 )
 from stardag.polymorphic import (
@@ -110,6 +111,7 @@ __all__ = [
     "namespace",
     "Polymorphic",
     "registry_provider",
+    "ResumableInterruption",
     "SDKVersionUnsupportedError",
     "StardagError",
     "StardagBaseModel",

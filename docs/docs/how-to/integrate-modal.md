@@ -840,6 +840,174 @@ re-trigger, and fails the task again rather than leaving it pending and
 inert. See
 [Task retries](../concepts/build-execution.md#task-retries-the-failures-no-backend-can-retry-for-you).
 
+### Preemption and timeouts
+
+Two things routinely kill a Modal container without the task being wrong:
+Modal **reclaims** the instance, or the execution hits the function
+**timeout**. Stardag treats both as _interruptions_ — the attempt ended,
+the task did not fail — but they recover by different routes, and the
+difference decides what you should write in your task.
+
+The contract below was measured against a live workspace with **modal
+client 1.5.0 on 2026-08-12**, and is pinned by the regression tests in
+`test_live_semantics.py`. Modal documents some of it and not the rest, so
+treat the version as part of the statement.
+
+#### What arrives in your task, and when
+
+| event                          | your code receives                  | when                                        |
+| ------------------------------ | ----------------------------------- | ------------------------------------------- |
+| Modal reclaims the container   | `KeyboardInterrupt`                 | when the platform decides                   |
+| The function `timeout` elapses | `modal.exception.InputCancellation` | at the declared timeout, to the millisecond |
+| Someone cancels the call       | `modal.exception.InputCancellation` | when the cancel is issued                   |
+
+Both are **`BaseException`, not `Exception`** — so a bare `except
+Exception:` in your task will not catch them, which is deliberate on
+Modal's part and load-bearing here.
+
+!!! warning "`except KeyboardInterrupt:` does not catch a timeout"
+
+    `InputCancellation` derives straight from `BaseException`; it is **not**
+    a `KeyboardInterrupt`. A handler written for preemption therefore does
+    nothing at all on a timeout. Catch `MODAL_INTERRUPTIONS`, which is
+    exactly the two of them — see the recipe below.
+
+After the first signal you have roughly **a minute** before the container
+is killed (Modal escalates SIGUSR1 → SIGINT after ~30s → SIGKILL after
+another ~30s). That is enough to write a checkpoint. It also means a
+worker's `timeout` does not bound how long its container lives: budget
+`timeout + ~60s`.
+
+!!! danger "Catch the interruption types, never `BaseException`"
+
+    `except BaseException:` looks like the way to cover both signals. It is
+    not: a `NameError` is a `BaseException` too, so a blanket catch sweeps
+    up ordinary bugs, and re-raising `ResumableInterruption` for one turns a
+    deterministic failure into a task that resumes until its budget runs
+    out. Catch `MODAL_INTERRUPTIONS` — exactly `KeyboardInterrupt` and
+    `modal.exception.InputCancellation`, and nothing else.
+
+    `except KeyboardInterrupt:` is equally wrong in the other direction: it
+    misses the timeout entirely, so a training task silently never
+    checkpoints.
+
+#### The recipe
+
+Everything you need is one `try/except` and one exception:
+
+```{.python notest}
+import stardag as sd
+from stardag.integration.modal import MODAL_INTERRUPTIONS
+
+
+class TrainModel(sd.Task[None]):
+    seed: int = 0
+
+    def target(self) -> sd.DirectoryTarget:
+        return sd.get_directory_target(sd.get_default_relpath(self))
+
+    def run(self):
+        checkpoint = self.target() / "checkpoint.json"
+
+        state = {"step": 0}
+        if checkpoint.exists():
+            with checkpoint.open("r") as f:
+                state = json.load(f)
+
+        try:
+            while state["step"] < TOTAL_STEPS:
+                train_one_step(state)
+                state["step"] += 1
+        except MODAL_INTERRUPTIONS:            # preemption OR the timeout
+            with checkpoint.open("w") as f:
+                json.dump(state, f)
+            raise sd.ResumableInterruption("checkpointed") from None
+
+        with (self.target() / "model.pkl").open("wb") as f:
+            f.write(serialize(model))
+        self.target().mark_done()              # only now is the task complete
+```
+
+Three things carry it:
+
+- **`MODAL_INTERRUPTIONS`** is the exact pair the platform raises. Importing
+  it keeps `modal.exception` out of your task and makes being specific the
+  easy thing to write.
+- **`sd.ResumableInterruption` is the whole request.** Raising it is how a
+  task says "I saved my progress, run me again", and it is the only way a
+  task gets resumed.
+- **The checkpoint lives inside the task's own directory target**, and
+  `mark_done()` is what makes the task complete. Writing a checkpoint does
+  not — `DirectoryTarget.exists()` is backed by a `._DONE` flag file — so
+  progress and completion cannot be confused.
+
+#### What happens if you _don't_ catch it
+
+Nothing to configure, and this is the part worth understanding: **an
+interruption you do not catch is a failure.** The execution dies, a
+scheduler tick notices, and the task is retried under the ordinary
+`TickConfig.max_attempts` (default 2) like any other failure.
+
+That is deliberate. Letting an interruption propagate means the task had no
+plan for one, which leaves exactly two possibilities — it hung, or the
+worker's `timeout` is too small for the work — and neither is improved by
+running it twenty more times.
+
+So there is no "is this timeout expected?" setting anywhere. The task
+answers that by raising `ResumableInterruption` or not, and a task that is
+not built to resume simply never raises it.
+
+A task that _does_ ask is bounded by `TickConfig.max_interruptions`
+(default 20), a budget separate from `max_attempts` — a trainer designed to
+be killed and resumed would otherwise exhaust a budget meant for genuine
+failures and fail the build for the one reason it was built to survive.
+
+!!! note "One path that budget does not cover"
+
+    A resumption request raised **before** the function timeout is handled
+    by Modal restarting the input, not by the scheduler — no event, no
+    attempt, no `interrupt_count`, and that restart is ungated by
+    `retries`. It is what makes preemption recovery fast, and preemption is
+    rare. But a task that raises `ResumableInterruption` on a condition
+    that is *always* true would loop at full container cost with
+    `max_interruptions` never consulted. Raise it only for interruptions
+    you did not choose.
+
+#### The knobs, and how they multiply
+
+| knob                                | covers                                                           |
+| ----------------------------------- | ---------------------------------------------------------------- |
+| `FunctionSettings(timeout=)`        | how long one execution attempt may run                           |
+| `FunctionSettings(retries=)`        | exceptions raised inside the container, and timeouts             |
+| `FunctionSettings(nonpreemptible=)` | opts out of reclamation entirely (3× CPU/memory price; no GPU)   |
+| `TickConfig.max_attempts`           | failures a tick records itself — spawn failures, dead executions |
+| `TickConfig.max_interruptions`      | how many times a task may ask to be resumed                      |
+
+They **multiply**, which is easy to miss: a worker with `retries=3` running
+a task allowed 20 interruptions can consume up to 80 container attempts.
+Each Modal retry also gets a fresh `timeout` window.
+
+Two things `retries=` does _not_ do, both verified rather than assumed: it
+is not what recovers a **preempted or crashed** container (Modal restarts
+those on the same input regardless of the setting), and it cannot rescue a
+**timed-out** call once the timeout has fired — at that point the call
+resolves `FunctionTimeoutError` whatever your code does next, including
+catching the signal and returning normally. That is why a timeout is
+reported to the registry: the event is the only path back into the
+frontier.
+
+If a task genuinely cannot be interrupted, `nonpreemptible=True` is the
+honest answer — at 3× the CPU and memory price, and not available for GPU
+functions.
+
+!!! note "Registry version"
+
+    Interruption reporting needs a Registry API that serves
+    `POST /builds/{id}/tasks/{task_id}/interrupt`. Against an older server
+    the SDK logs a warning and records nothing, which is exactly its
+    behaviour before this existed — a version skew degrades to the old
+    recovery path, never to a failed build.
+
 **Claim expiry and your worker `timeout`.** Every start a tick records
 carries a claim TTL derived from the `timeout` of the worker function the
 task routes to (`FunctionSettings(timeout=...)`), plus a grace margin — so

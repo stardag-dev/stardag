@@ -430,6 +430,163 @@ class TestTaskSkip404Swallow:
             )
 
 
+class TestTaskInterrupt404Swallow:
+    """``task_interrupt`` against a server with no ``/interrupt`` route.
+
+    The degradation here matters more than most, and it is the reason the
+    fallback is *silence* rather than ``task_fail``. Recording nothing is
+    precisely how the SDK behaved before interruptions existed: the task
+    stays RUNNING, its execution dies, and a later scheduler pass records a
+    retryable failure. Recording a **failure** instead would turn a version
+    skew into permanently failed builds — the exact outcome this whole
+    feature removes.
+
+    Genuine app-level 404s must still propagate, or a typo'd build id would
+    look like an old server.
+    """
+
+    def _registry(self, response_factory):
+        import httpx
+
+        from stardag.registry._api_registry import APIRegistry
+
+        registry = APIRegistry(api_url="http://test.invalid", api_key="test-key")
+        registry._client = httpx.Client(
+            transport=httpx.MockTransport(response_factory),
+            auth=registry._auth,
+        )
+        return registry
+
+    @staticmethod
+    def _inject_async_mock(registry, response_factory):
+        import asyncio
+
+        import httpx
+
+        registry._async_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(response_factory),
+            auth=registry._auth,
+        )
+        registry._async_client_loop = asyncio.get_running_loop()
+
+    def _fake_task(self):
+        from uuid import uuid4
+
+        class _Fake:
+            id = uuid4()
+
+            def get_namespace(self):
+                return "test"
+
+            def get_name(self):
+                return "FakeTask"
+
+        return _Fake()
+
+    BUILD_ID = "00000000-0000-0000-0000-000000000001"
+
+    def test_sync_route_missing_404_is_swallowed(self, caplog):
+        import logging
+        from uuid import UUID
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        registry = self._registry(handler)
+
+        with caplog.at_level(logging.WARNING):
+            registry.task_interrupt(
+                build_id=UUID(self.BUILD_ID),
+                task=self._fake_task(),  # type: ignore[arg-type]
+                reason="timed out",
+            )
+
+        assert any(
+            "does not support POST /interrupt" in rec.message for rec in caplog.records
+        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
+
+    def test_sync_app_level_404_propagates(self):
+        from uuid import UUID
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Build not found"})
+
+        registry = self._registry(handler)
+
+        with pytest.raises(NotFoundError):
+            registry.task_interrupt(
+                build_id=UUID(self.BUILD_ID),
+                task=self._fake_task(),  # type: ignore[arg-type]
+            )
+
+    @pytest.mark.asyncio
+    async def test_aio_route_missing_404_is_swallowed(self, caplog):
+        import logging
+        from uuid import UUID
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Not Found"})
+
+        registry = self._registry(handler)
+        self._inject_async_mock(registry, handler)
+
+        with caplog.at_level(logging.WARNING):
+            await registry.task_interrupt_aio(
+                build_id=UUID(self.BUILD_ID),
+                task=self._fake_task(),  # type: ignore[arg-type]
+            )
+
+        assert any(
+            "does not support POST /interrupt" in rec.message for rec in caplog.records
+        ), f"Expected route-missing warning; got: {[r.message for r in caplog.records]}"
+
+    @pytest.mark.asyncio
+    async def test_aio_app_level_404_propagates(self):
+        from uuid import UUID
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"detail": "Build not found"})
+
+        registry = self._registry(handler)
+        self._inject_async_mock(registry, handler)
+
+        with pytest.raises(NotFoundError):
+            await registry.task_interrupt_aio(
+                build_id=UUID(self.BUILD_ID),
+                task=self._fake_task(),  # type: ignore[arg-type]
+            )
+
+    def test_the_reason_rides_as_a_query_param(self):
+        """Not a body: the route has none, matching ``/fail``."""
+        from uuid import UUID
+
+        import httpx
+
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            return httpx.Response(200, json={"task_id": "t", "status": "interrupted"})
+
+        registry = self._registry(handler)
+        registry.task_interrupt(
+            build_id=UUID(self.BUILD_ID),
+            task=self._fake_task(),  # type: ignore[arg-type]
+            reason="hit the 300s timeout",
+        )
+
+        assert "/interrupt?" in seen["url"]
+        assert "reason=hit+the+300s+timeout" in seen["url"]
+
+
 class TestBuildResume404Swallow:
     """``build_resume`` / ``build_resume_aio`` follow the same backward-
     compat 404 pattern as ``task_skip``: an old API that does not yet
