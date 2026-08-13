@@ -9,6 +9,9 @@ Includes examples for:
   triggering and reactive scheduling), detached execution, dynamic deps, and
   registry-backed named concurrency limits — see
   [walkthrough/README.md](walkthrough/README.md)
+- **checkpointing/** - Surviving preemption and function timeouts: a task
+  that checkpoints, raises `sd.ResumableInterruption`, and is resumed by the
+  scheduler until it converges
 - **ml_pipeline/** - ML pipeline on Modal
 - **prefect/** - Modal + Prefect for observability
 
