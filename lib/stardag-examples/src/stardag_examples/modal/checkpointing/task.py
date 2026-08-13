@@ -17,7 +17,7 @@ SECONDS_PER_STEP = 2.0
 
 
 class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
-    """"Trains" for ``TOTAL_STEPS``, surviving any number of interruptions.
+    """Pretends to train for ``TOTAL_STEPS``, surviving any interruptions.
 
     Deliberately slower than the worker's ``timeout`` (see ``app.py``), so
     a real run *will* be interrupted and resumed several times. That is the
@@ -46,7 +46,12 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
         return sd.get_directory_target(sd.get_default_relpath(self))
 
     def run(self) -> None:
-        checkpoint = self.target() / "checkpoint.json"
+        # Bind the directory once. ``target()`` builds a fresh
+        # ``DirectoryTarget`` per call, and each one tracks the sub-targets
+        # *it* handed out, so ``mark_done()`` on a second instance would
+        # write an empty ``._SUB_KEYS`` manifest next to real files.
+        directory = self.target()
+        checkpoint = directory / "checkpoint.json"
 
         state = {"step": 0, "loss": 10.0}
         if checkpoint.exists():
@@ -78,7 +83,7 @@ class TrainModel(sd.TargetTask[sd.DirectoryTarget]):
                 f"checkpointed at step {state['step']}"
             ) from None
 
-        with (self.target() / "result.json").open("w") as handle:
+        with (directory / "result.json").open("w") as handle:
             json.dump({"steps": state["step"], "loss": state["loss"]}, handle)
         # Only now is the task complete.
-        self.target().mark_done()
+        directory.mark_done()
