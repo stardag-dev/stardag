@@ -15,8 +15,7 @@ from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from jose import JWTError, jwt
-from jose.exceptions import ExpiredSignatureError, JWTClaimsError
+import jwt
 
 from stardag_api.config import jwt_settings
 
@@ -164,7 +163,7 @@ class InternalTokenManager:
             )
             self._key_id = hashlib.sha256(public_key_bytes).hexdigest()[:16]
 
-        # Cache PEM representations for jose library
+        # Cache PEM representations for PyJWT (encode/decode take PEM directly)
         self._private_key_pem = self._private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
@@ -270,11 +269,11 @@ class InternalTokenManager:
             )
             return SessionTokenPayload.from_dict(payload)
 
-        except ExpiredSignatureError as e:
+        except jwt.ExpiredSignatureError as e:
             raise TokenExpiredError("Token has expired") from e
-        except JWTClaimsError as e:
-            raise TokenInvalidError(f"Invalid token claims: {e}") from e
-        except JWTError as e:
+        except jwt.InvalidTokenError as e:
+            # Base class for every other PyJWT failure (bad signature, wrong
+            # issuer/audience, missing claim, malformed token).
             raise TokenInvalidError(f"Invalid token: {e}") from e
 
     def validate_token(self, token: str) -> InternalTokenPayload:
@@ -305,11 +304,11 @@ class InternalTokenManager:
             )
             return InternalTokenPayload.from_dict(payload)
 
-        except ExpiredSignatureError as e:
+        except jwt.ExpiredSignatureError as e:
             raise TokenExpiredError("Token has expired") from e
-        except JWTClaimsError as e:
-            raise TokenInvalidError(f"Invalid token claims: {e}") from e
-        except JWTError as e:
+        except jwt.InvalidTokenError as e:
+            # Base class for every other PyJWT failure (bad signature, wrong
+            # issuer/audience, missing claim, malformed token).
             raise TokenInvalidError(f"Invalid token: {e}") from e
 
     def get_jwks(self) -> dict[str, Any]:
