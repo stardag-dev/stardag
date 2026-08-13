@@ -1,13 +1,15 @@
 """JWT validation using JWKS from OIDC provider."""
 
+import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import httpx
-from jose import JWTError, jwt
-from jose.exceptions import ExpiredSignatureError, JWTClaimsError
+import jwt
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from jwt.algorithms import RSAAlgorithm
 
 from stardag_api.config import oidc_settings
 
@@ -164,26 +166,60 @@ class JWTValidator:
             if key is None:
                 raise AuthenticationError(f"Unable to find key with ID: {kid}")
 
-            # Decode and validate the token
-            # Note: python-jose will validate exp, iat, and signature
-            # We handle audience verification manually to support multiple audiences
+            # Convert the JWK to a public key object PyJWT can verify with.
+            # from_jwk's return type is the RSA public|private union; a signing
+            # JWK (kty=RSA, n/e, no d) yields a public key. A malformed JWK
+            # raises InvalidKeyError/ValueError (neither is a
+            # jwt.InvalidTokenError), so map them here — otherwise a bad key in
+            # the JWKS would surface as a 500 instead of an auth failure.
+            try:
+                public_key = cast(RSAPublicKey, RSAAlgorithm.from_jwk(json.dumps(key)))
+            except (
+                jwt.exceptions.InvalidKeyError,
+                ValueError,
+                TypeError,
+                KeyError,
+            ) as e:
+                raise AuthenticationError(
+                    f"Malformed signing key in JWKS for kid {kid!r}: {e}"
+                ) from e
+
+            # Decode and validate the token. PyJWT verifies the signature and
+            # expiry; algorithms=["RS256"] is what prevents an "alg":"none" or
+            # HS256 key-confusion attack. Issuer and audience are verified
+            # manually below: we allow multiple of each, which PyJWT's single
+            # `issuer`/`audience` parameters don't express directly. PyJWT does
+            # not validate at_hash at all, so no option is needed to skip it
+            # (jose required one — some ID tokens carry at_hash without the
+            # matching access token).
             payload = jwt.decode(
                 token,
-                key,
+                public_key,
                 algorithms=["RS256"],
-                issuer=self.allowed_issuers,
                 options={
-                    "verify_aud": False,  # We verify manually below
-                    "verify_iss": True,
+                    "verify_signature": True,
                     "verify_exp": True,
-                    # Skip at_hash validation - ID tokens contain at_hash but we
-                    # may receive ID tokens without the corresponding access token
-                    # (e.g., for bootstrap endpoints that need user claims)
-                    "verify_at_hash": False,
+                    "verify_aud": False,  # verified manually below
+                    "verify_iss": False,  # verified manually below
                 },
             )
 
-            # Manually verify audience
+            # Manually verify issuer against the allowed set
+            if payload.get("iss") not in self.allowed_issuers:
+                raise AuthenticationError(
+                    f"Invalid issuer. Expected one of {self.allowed_issuers}, "
+                    f"got {payload.get('iss')!r}"
+                )
+
+            # Manually verify audience. Note the deliberate `if token_aud:`:
+            # a token with no `aud` is NOT rejected here. Cognito *access*
+            # tokens legitimately omit `aud` (they scope via `client_id` /
+            # `scope`), so requiring `aud` would break SDK auth against a
+            # Cognito-backed deployment. Such tokens are still gated by
+            # signature + issuer above. Tightening this (e.g. checking
+            # `client_id` against an allowlist when `aud` is absent) is a
+            # possible future hardening, but must not simply reject aud-less
+            # tokens. See the security-scanning follow-ups.
             token_aud = payload.get("aud")
             if token_aud:
                 # aud can be a string or list
@@ -198,11 +234,11 @@ class JWTValidator:
 
             return TokenPayload.from_dict(payload)
 
-        except ExpiredSignatureError as e:
+        except jwt.ExpiredSignatureError as e:
             raise AuthenticationError("Token has expired") from e
-        except JWTClaimsError as e:
-            raise AuthenticationError(f"Invalid token claims: {e}") from e
-        except JWTError as e:
+        except jwt.InvalidTokenError as e:
+            # Base class for every other PyJWT failure (bad signature, wrong
+            # algorithm, missing/invalid claim, malformed token).
             raise AuthenticationError(f"Invalid token: {e}") from e
         except httpx.HTTPError as e:
             logger.error("Failed to fetch JWKS: %s", e)

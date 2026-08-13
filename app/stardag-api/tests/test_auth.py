@@ -789,3 +789,217 @@ async def test_auth_config_local_mode(
     assert data["oidc_client_id"] is None
     assert data["oidc_ui_client_id"] is None
     assert data["local_registration_enabled"] is False
+
+
+# --- End-to-end external OIDC validation (real RSA signature via JWKS) ---
+#
+# The caching tests above use a stub JWKS and never verify a real signature.
+# These exercise the path the python-jose -> PyJWT swap actually changed:
+# JWK -> key via RSAAlgorithm.from_jwk, RS256 signature verification, and the
+# manual issuer/audience checks.
+
+
+def _rsa_keypair_and_jwk(kid: str = "test-kid"):
+    """Return (private_key_pem, jwks_dict) for a fresh RSA keypair."""
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+    numbers = private_key.public_key().public_numbers()
+
+    def _b64url(n: int) -> str:
+        length = (n.bit_length() + 7) // 8
+        return base64.urlsafe_b64encode(n.to_bytes(length, "big")).rstrip(b"=").decode()
+
+    jwks = {
+        "keys": [
+            {
+                "kid": kid,
+                "kty": "RSA",
+                "alg": "RS256",
+                "use": "sig",
+                "n": _b64url(numbers.n),
+                "e": _b64url(numbers.e),
+            }
+        ]
+    }
+    return private_pem, jwks
+
+
+def _sign(private_pem: str, claims: dict, kid: str = "test-kid") -> str:
+    import jwt as pyjwt
+
+    return pyjwt.encode(claims, private_pem, algorithm="RS256", headers={"kid": kid})
+
+
+def _validator(jwks_url: str = "https://idp.example.com/jwks") -> JWTValidator:
+    return JWTValidator(
+        jwks_url=jwks_url,
+        allowed_issuers=["https://idp.example.com", "https://alt.example.com"],
+        audiences=["stardag-ui", "stardag-sdk"],
+        cache_ttl=300,
+    )
+
+
+def _base_claims() -> dict:
+    now = int(time.time())
+    return {
+        "sub": "user-123",
+        "email": "user@example.com",
+        "iss": "https://idp.example.com",
+        "aud": "stardag-ui",
+        "iat": now,
+        "exp": now + 300,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_real_rsa_signed_token_succeeds():
+    private_pem, jwks = _rsa_keypair_and_jwk()
+    token = _sign(private_pem, _base_claims())
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        payload = await validator.validate_token(token)
+    assert isinstance(payload, TokenPayload)
+    assert payload.sub == "user-123"
+    assert payload.email == "user@example.com"
+
+
+@pytest.mark.asyncio
+async def test_validate_accepts_alternate_allowed_issuer():
+    private_pem, jwks = _rsa_keypair_and_jwk()
+    claims = _base_claims() | {"iss": "https://alt.example.com"}
+    token = _sign(private_pem, claims)
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        payload = await validator.validate_token(token)
+    assert payload.iss == "https://alt.example.com"
+
+
+@pytest.mark.asyncio
+async def test_validate_accepts_audience_array():
+    private_pem, jwks = _rsa_keypair_and_jwk()
+    claims = _base_claims() | {"aud": ["some-other", "stardag-sdk"]}
+    token = _sign(private_pem, claims)
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        payload = await validator.validate_token(token)
+    assert payload.sub == "user-123"
+
+
+@pytest.mark.asyncio
+async def test_validate_rejects_wrong_issuer():
+    private_pem, jwks = _rsa_keypair_and_jwk()
+    token = _sign(private_pem, _base_claims() | {"iss": "https://evil.example.com"})
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError, match="[Ii]ssuer"):
+            await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_rejects_wrong_audience():
+    private_pem, jwks = _rsa_keypair_and_jwk()
+    token = _sign(private_pem, _base_claims() | {"aud": "not-ours"})
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError, match="[Aa]udience"):
+            await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_rejects_expired_token():
+    private_pem, jwks = _rsa_keypair_and_jwk()
+    now = int(time.time())
+    token = _sign(private_pem, _base_claims() | {"iat": now - 600, "exp": now - 300})
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError, match="expired"):
+            await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_rejects_signature_from_different_key():
+    # Token signed by key A, JWKS advertises key B (same kid) -> bad signature.
+    private_a, _ = _rsa_keypair_and_jwk()
+    _, jwks_b = _rsa_keypair_and_jwk()
+    token = _sign(private_a, _base_claims())
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks_b
+        with pytest.raises(AuthenticationError):
+            await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_rejects_unknown_kid():
+    private_pem, jwks = _rsa_keypair_and_jwk(kid="real-kid")
+    token = _sign(private_pem, _base_claims(), kid="unknown-kid")
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError, match="[Kk]ey"):
+            await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_malformed_jwk_raises_auth_error_not_500():
+    """A malformed JWK in the JWKS must map to AuthenticationError, not leak a
+    raw ValueError/InvalidKeyError (which would surface as a 500)."""
+    _, jwks = _rsa_keypair_and_jwk(kid="test-kid")
+    # Corrupt the key material: non-base64 modulus.
+    jwks["keys"][0]["n"] = "!!!not-base64!!!"
+    private_pem, _ = _rsa_keypair_and_jwk()
+    token = _sign(private_pem, _base_claims(), kid="test-kid")
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError):
+            await validator.validate_token(token)
+
+
+@pytest.mark.asyncio
+async def test_validate_non_rsa_jwk_raises_auth_error_not_500():
+    """A non-RSA key co-published in the JWKS and selected by a hostile `kid`
+    must map to AuthenticationError (401), not a raw InvalidKeyError (500).
+    IdPs commonly publish EC keys alongside RSA ones."""
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    ec_key = ec.generate_private_key(ec.SECP256R1())
+    nums = ec_key.public_key().public_numbers()
+
+    def _b64url(n: int) -> str:
+        b = n.to_bytes(32, "big")
+        return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+    ec_jwk = {
+        "kid": "test-kid",
+        "kty": "EC",
+        "crv": "P-256",
+        "x": _b64url(nums.x),
+        "y": _b64url(nums.y),
+    }
+    jwks = {"keys": [ec_jwk]}
+    private_pem, _ = _rsa_keypair_and_jwk()
+    token = _sign(private_pem, _base_claims(), kid="test-kid")
+    validator = _validator()
+    with patch.object(validator, "_fetch_jwks", new_callable=AsyncMock) as m:
+        m.return_value = jwks
+        with pytest.raises(AuthenticationError):
+            await validator.validate_token(token)
