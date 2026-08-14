@@ -10,39 +10,42 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Fixed
 
-- **`0.19.0` could fail at import for anyone who had `modal` installed but
-  was not using it.** `stardag.integration.modal._runner` read
-  `modal.exception.InputCancellation` with only a bare `import modal` in
-  scope, at module level. `exception` is not in modal's `__all__`, and
-  modal's package `__getattr__` raises for anything it does not export, so
-  that attribute exists only when something else in the process has already
-  imported the submodule — an accident of the import graph. Where nothing
-  had, importing the integration raised
+- **A failing optional integration no longer takes down the target factory.**
+  `get_default_prefix_to_target_prototype()` imports `stardag.integration.*`
+  to register the `s3://` and `modalvol://` prefixes, and its guards caught
+  only `ImportError` — the "not installed" case. Anything else raised while
+  importing an integration therefore propagated and killed target resolution
+  for **every** prefix, including purely local ones. A process that merely had
+  `modal` or `boto3` installed, typically as a transitive dependency, and
+  never used either backend, could fail on the ordinary
+  `get_file_target` / `get_directory_target` path.
+
+  The guards now also catch and log an unexpected failure: the affected prefix
+  drops out of the mapping (using it gives the ordinary unsupported-prefix
+  error), and a warning names the real cause. A genuinely absent optional
+  dependency stays silent, as before.
+
+### Changed
+
+- **The Modal integration no longer reaches for `modal.exception` through a
+  bare `import modal`.** `_runner.py` resolved
+  `modal.exception.InputCancellation` at module level, and `_app.py` used
+  `except modal.exception.NotFoundError`. Both relied on the submodule being
+  bound as an attribute of the `modal` package — which it is on every
+  currently supported modal release, but only as a side effect of modal's own
+  `__init__` importing it. `exception` is not in modal's `__all__`, and
+  modal's package `__getattr__` rejects anything it does not export, so the
+  form is a private implementation detail away from
 
   ```
   AttributeError: module 'modal' has no attribute 'exception'
   ```
 
-  This was not confined to Modal users.
-  `get_default_prefix_to_target_prototype()` imports the Modal integration to
-  register the `modalvol://` prefix, so the failure landed on the ordinary
-  target-factory path — `get_file_target` / `get_directory_target` — in any
-  process where `modal` was merely present, typically as a transitive
-  dependency. Services that never touched Modal crashed at import.
-
-  Fixed by importing the name out of the submodule
-  (`from modal.exception import InputCancellation`), which does not depend on
-  the parent-package attribute. `_app.py` had the same latent pattern in an
-  `except` clause and is fixed the same way. Affects `0.19.0` only.
-
-- **A broken optional integration no longer takes down the target factory.**
-  The guards in `get_default_prefix_to_target_prototype()` caught only
-  `ImportError` — the "not installed" case — so anything else raised while
-  importing an integration propagated and killed target resolution for every
-  prefix, including purely local ones. They now also catch and log an
-  unexpected failure: the affected prefix drops out of the mapping (using it
-  gives the ordinary unsupported-prefix error) and a warning names the real
-  cause. A genuinely absent dependency stays silent, as before.
+  Both sites now import the name out of the submodule directly, which never
+  consults the parent-package attribute. No behaviour change on any modal
+  version stardag supports (`>=1.0.0`) — this removes a latent dependency on
+  modal's import graph, it does not fix an observed failure on those
+  versions.
 
 ## [0.19.0] — 2026-08-13
 

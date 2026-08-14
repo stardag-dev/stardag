@@ -6,31 +6,33 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## v0.19.1 — Import fix for `0.19.0`
+## v0.19.1 — A broken optional integration no longer takes the process down
 
-**Upgrade if you are on `0.19.0`.** No API changes, nothing to migrate.
+No API changes, nothing to migrate.
 
-`0.19.0` could raise at import time:
+`get_file_target` and `get_directory_target` go through the target factory,
+which imports the optional `stardag.integration.*` backends to find out which
+URI prefixes it can serve. Those imports were guarded against the backend not
+being _installed_ — and against nothing else. So if an integration was
+installed but failed to import for any other reason, the exception propagated
+out of the factory and took **every** prefix with it, including plain local
+paths. A process that had `modal` or `boto3` present as a transitive
+dependency, and used neither, could fail on the ordinary target path because
+of a backend it never asked for.
 
-```
-AttributeError: module 'modal' has no attribute 'exception'
-```
+Now the integration's own prefix simply drops out of the mapping and a warning
+names the cause. Asking for that prefix afterwards gives the ordinary
+"unsupported prefix" error rather than an import traceback, and everything
+else keeps working. A genuinely absent optional dependency stays silent, as
+before — so the warning means something when you see it.
 
-You did not have to be using Modal to hit it. The Modal integration read
-`modal.exception` off a bare `import modal`, and the target factory imports
-that integration to register the `modalvol://` prefix — so the crash landed
-on `get_file_target` / `get_directory_target`, the ordinary path every task
-with a target goes through. Any environment with the `modal` package merely
-present, often as a transitive dependency, could be affected. Whether it
-actually raised came down to import order: `modal.exception` is bound on the
-`modal` package only if something else imported the submodule first, so the
-same code worked in one environment and failed in the next.
-
-Also in this release: an optional integration that fails to import for an
-unexpected reason no longer takes the target factory with it. Only that
-integration's prefix drops out, with a logged warning naming the cause — the
-guard previously handled "not installed" and nothing else, which is what
-turned the bug above into a hard crash instead of a degraded `modalvol://`.
+Also in this release, and the reason the above got looked at: the Modal
+integration used to reach `modal.exception` through a bare `import modal`,
+which works only because modal's own `__init__` happens to import that
+submodule. It is not part of modal's public surface, and modal's package
+`__getattr__` rejects anything outside `__all__`. Both call sites now import
+the name from the submodule directly. This is hardening, not a fix for an
+observed failure: the old form works on every modal release stardag supports.
 
 ## v0.19.0 — A task can survive being interrupted
 

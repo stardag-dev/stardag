@@ -65,9 +65,8 @@ _UNBOUND_EXCEPTION_SUBMODULE = textwrap.dedent(
 
     # `exception` is not in modal's __all__, and modal's package-level
     # __getattr__ raises AttributeError for anything it does not export.
-    # So `modal.exception` is bound only when something else in the process
-    # already imported the submodule — an accident of the import graph, not
-    # a guarantee. Recreate the case where nothing did.
+    # The attribute is bound only because modal's own __init__ imports the
+    # submodule — an implementation detail, not a guarantee. Take it away.
     try:
         del modal.exception
     except AttributeError:
@@ -91,23 +90,26 @@ _UNBOUND_EXCEPTION_SUBMODULE = textwrap.dedent(
 def test_import_survives_unbound_modal_exception_submodule():
     """Importing the integration must not depend on `modal.exception` being bound.
 
-    Regression test. `_runner.py` read `modal.exception.InputCancellation`
-    with only a bare `import modal` in scope, at module level. That works
-    exactly when some other import in the process has already pulled in the
-    `modal.exception` submodule, which binds it as an attribute on the
-    parent package — and blows up with
+    `_runner.py` used to read `modal.exception.InputCancellation` with only
+    a bare `import modal` in scope. That resolves on every modal release we
+    support — but only as a side effect of modal's own `__init__` importing
+    the submodule early, which binds it as an attribute on the package.
+    `exception` is not in modal's `__all__`, and modal's package
+    `__getattr__` raises
 
         AttributeError: module 'modal' has no attribute 'exception'
 
-    when nothing has. Because `get_default_prefix_to_target_prototype()`
-    imports the Modal integration for the `modalvol://` prefix, the failure
-    landed on *any* stardag user with `modal` merely present in the
-    environment, on the ordinary target-factory path, whether or not they
-    used Modal for anything.
+    for anything it does not export. So the old form was one refactor of
+    modal's import graph away from breaking, on a code path that matters:
+    `get_default_prefix_to_target_prototype()` imports this package to
+    register the `modalvol://` prefix, so any failure here reaches users who
+    merely have `modal` installed and never touch Modal.
 
-    The ordinary tests in this file cannot catch it: the pytest process has
-    other modal-importing modules loaded, so the attribute is always bound
-    by the time they run. Hence the subprocess and the explicit unbind.
+    This test pins the property rather than the accident. It unbinds the
+    attribute to assert the import does not consult it — the unbind is
+    deliberately artificial, because no supported modal version leaves it
+    unbound on its own. A subprocess is required: by the time this module is
+    collected, pytest has modal loaded and the attribute bound.
     """
     result = subprocess.run(
         [sys.executable, "-c", _UNBOUND_EXCEPTION_SUBMODULE],

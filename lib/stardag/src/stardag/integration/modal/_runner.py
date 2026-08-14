@@ -54,12 +54,13 @@ from stardag.utils.env import temp_env_vars
 # cancellation" instead of failing every worker import.
 #
 # Import the name out of the submodule rather than reaching for
-# ``modal.exception`` off a bare ``import modal``: ``exception`` is not in
-# modal's ``__all__``, and modal's package ``__getattr__`` raises
-# ``AttributeError`` for anything it does not export. The attribute exists
-# only when something else in the process happened to import the submodule
-# first, so the bare-``modal`` form works or not depending on import order
-# elsewhere in the environment.
+# ``modal.exception`` off a bare ``import modal``. The attribute form works
+# on every modal release we support, but only as a side effect: ``exception``
+# is not in modal's ``__all__``, and modal's package ``__getattr__`` raises
+# for anything it does not export — it resolves purely because modal's own
+# ``__init__`` imports the submodule early, which binds it on the package.
+# Depending on that is depending on a private detail of modal's import
+# graph. The from-import never consults the parent attribute at all.
 try:
     from modal.exception import InputCancellation as _InputCancellationImpl
 

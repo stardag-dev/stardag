@@ -46,12 +46,16 @@ def test_local_prefix_is_always_present():
 def test_broken_modal_integration_does_not_break_the_factory(caplog):
     """A broken Modal integration costs the `modalvol://` prefix, nothing else.
 
-    Regression test for the incident where `stardag.integration.modal`
-    raised `AttributeError` at import (reading the `modal.exception`
-    submodule off a bare `import modal`). The guard here caught only
-    `ImportError`, so the `AttributeError` propagated and killed the target
-    factory — taking down services that had `modal` installed as a
-    transitive dependency and never used a `modalvol://` root.
+    The guard here used to catch only `ImportError` — "the optional
+    dependency is not installed". Any *other* exception escaping the
+    integration's import propagated out of the factory and killed target
+    resolution for every prefix, so a fault confined to one backend took
+    down processes that had `modal` installed as a transitive dependency and
+    never used a `modalvol://` root.
+
+    `AttributeError` is used here because that is the shape reported from a
+    deployment, but the contract under test is the general one: whatever the
+    integration raises, it costs that integration's prefix and no more.
     """
     boom = AttributeError("module 'modal' has no attribute 'exception'")
 
