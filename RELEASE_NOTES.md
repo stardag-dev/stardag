@@ -51,6 +51,31 @@ prefix drops out of the mapping, asking for it afterwards gives the ordinary
 optional dependency stays silent, as before, so the warning means something
 when you see it.
 
+### Recognising this in your own code
+
+The generalisable part has nothing to do with modal. When a local package
+shadows an installed distribution, `import x` **succeeds** — it just returns
+the wrong module. So there is no `ImportError` anywhere, nothing fails at
+import time, and the first symptom is an `AttributeError` at whatever line
+first touches the real package's API. That line is usually deep inside a
+library, so the traceback blames the dependency, and CPython's message for a
+missing module attribute is often identical to what the real package's own
+`__getattr__` would have produced.
+
+If you are staring at an `AttributeError` on a dependency that makes no
+sense, check what you actually imported:
+
+```python
+import x
+print(x.__file__, getattr(x, "__version__", None))
+```
+
+A path outside `site-packages` is the answer. The usual cause is running an
+entrypoint as a script path (`python pkg/service/main.py`), which puts that
+script's own directory on `sys.path[0]` — so any sibling module or package
+of your entrypoint can shadow any installed distribution. `python -m
+pkg.service.main` does not do this.
+
 Worth saying plainly: the old attribute form worked on every modal release
 stardag supports. No modal version is implicated — it was the name collision
 that exposed the assumption.
