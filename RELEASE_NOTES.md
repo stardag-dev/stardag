@@ -6,33 +6,54 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
-## v0.19.1 — A broken optional integration no longer takes the process down
+## v0.19.1 — A user package named `modal` no longer breaks target resolution
 
 No API changes, nothing to migrate.
 
-`get_file_target` and `get_directory_target` go through the target factory,
-which imports the optional `stardag.integration.*` backends to find out which
-URI prefixes it can serve. Those imports were guarded against the backend not
-being _installed_ — and against nothing else. So if an integration was
-installed but failed to import for any other reason, the exception propagated
-out of the factory and took **every** prefix with it, including plain local
-paths. A process that had `modal` or `boto3` present as a transitive
-dependency, and used neither, could fail on the ordinary target path because
-of a backend it never asked for.
+**If you have a package or module of your own named `modal` (or `boto3`),
+upgrade.** On `0.19.0` that could make `get_file_target` and
+`get_directory_target` fail at import — in a service that never used Modal or
+S3 — with
 
-Now the integration's own prefix simply drops out of the mapping and a warning
-names the cause. Asking for that prefix afterwards gives the ordinary
-"unsupported prefix" error rather than an import traceback, and everything
-else keeps working. A genuinely absent optional dependency stays silent, as
-before — so the warning means something when you see it.
+```
+AttributeError: module 'modal' has no attribute 'exception'
+```
 
-Also in this release, and the reason the above got looked at: the Modal
-integration used to reach `modal.exception` through a bare `import modal`,
-which works only because modal's own `__init__` happens to import that
-submodule. It is not part of modal's public surface, and modal's package
-`__getattr__` rejects anything outside `__all__`. Both call sites now import
-the name from the submodule directly. This is hardening, not a fix for an
-observed failure: the old form works on every modal release stardag supports.
+Here is the whole shape of it, because the interesting part is how ordinary
+each half is.
+
+A deployment launched its entrypoint as a script path — `python
+pkg/service/main.py` rather than `python -m pkg.service.main`. CPython puts
+that script's own directory on `sys.path[0]`, and that directory happened to
+contain a first-party `modal/` subpackage. From then on every `import modal`
+anywhere in the process resolved to it, stardag's included. Note this does
+not raise: the import _succeeds_ and hands back the wrong module, so nothing
+notices until something touches an attribute.
+
+What made it stardag's problem is the target factory. It imports the optional
+`stardag.integration.*` backends to find out which URI prefixes it can serve,
+and guarded those imports against the backend not being _installed_ —
+`ImportError` — and nothing else. A shadowed `modal` is not an `ImportError`.
+So the `AttributeError` came up through the factory and took **every** prefix
+with it, plain local paths included. The service could not build a target at
+all, because of a backend it never asked for. It had simply never imported
+`stardag.integration.modal` before; `0.19.0` reaches it to register
+`modalvol://`, which is why a long-latent name collision surfaced as a
+version bump.
+
+Both halves are fixed. The Modal integration no longer reaches
+`modal.exception` through the parent package, so a shadowed or partial modal
+now fails as a plain `ImportError` — accurate, and catchable by everything
+that already guards these imports. And the factory's guards catch and log an
+unexpected failure rather than only a missing dependency: that integration's
+prefix drops out of the mapping, asking for it afterwards gives the ordinary
+"unsupported prefix" error, and a warning names the cause. A genuinely absent
+optional dependency stays silent, as before, so the warning means something
+when you see it.
+
+Worth saying plainly: the old attribute form worked on every modal release
+stardag supports. No modal version is implicated — it was the name collision
+that exposed the assumption.
 
 ## v0.19.0 — A task can survive being interrupted
 

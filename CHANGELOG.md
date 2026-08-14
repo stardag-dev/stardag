@@ -10,42 +10,46 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Fixed
 
-- **A failing optional integration no longer takes down the target factory.**
-  `get_default_prefix_to_target_prototype()` imports `stardag.integration.*`
-  to register the `s3://` and `modalvol://` prefixes, and its guards caught
-  only `ImportError` — the "not installed" case. Anything else raised while
-  importing an integration therefore propagated and killed target resolution
-  for **every** prefix, including purely local ones. A process that merely had
-  `modal` or `boto3` installed, typically as a transitive dependency, and
-  never used either backend, could fail on the ordinary
-  `get_file_target` / `get_directory_target` path.
-
-  The guards now also catch and log an unexpected failure: the affected prefix
-  drops out of the mapping (using it gives the ordinary unsupported-prefix
-  error), and a warning names the real cause. A genuinely absent optional
-  dependency stays silent, as before.
-
-### Changed
-
-- **The Modal integration no longer reaches for `modal.exception` through a
-  bare `import modal`.** `_runner.py` resolved
-  `modal.exception.InputCancellation` at module level, and `_app.py` used
-  `except modal.exception.NotFoundError`. Both relied on the submodule being
-  bound as an attribute of the `modal` package — which it is on every
-  currently supported modal release, but only as a side effect of modal's own
-  `__init__` importing it. `exception` is not in modal's `__all__`, and
-  modal's package `__getattr__` rejects anything it does not export, so the
-  form is a private implementation detail away from
+- **A user package named `modal` no longer breaks target resolution.**
+  Reported from a deployment running `0.19.0`, where `get_directory_target()`
+  failed at import with
 
   ```
   AttributeError: module 'modal' has no attribute 'exception'
   ```
 
-  Both sites now import the name out of the submodule directly, which never
-  consults the parent-package attribute. No behaviour change on any modal
-  version stardag supports (`>=1.0.0`) — this removes a latent dependency on
-  modal's import graph, it does not fix an observed failure on those
-  versions.
+  in a service that did not use Modal at all. Two independent defects had to
+  line up.
+
+  First, the trigger. The service's entrypoint was launched as a script path
+  (`python pkg/service/main.py`, not `python -m`), which puts the script's own
+  directory on `sys.path[0]`. That directory contained a first-party
+  `modal/` subpackage, so **every** `import modal` in the process — stardag's
+  included — resolved to it instead of the installed distribution. `import
+modal` therefore _succeeded_ and returned the wrong module; the failure
+  surfaced only on first attribute access. Nothing on that service's code
+  path had ever imported `stardag.integration.modal` before, which is why the
+  shadowing had been latent and `0.19.0` appeared to cause it.
+
+  Second, why it escalated. `get_default_prefix_to_target_prototype()` imports
+  the optional `stardag.integration.*` backends to register the `s3://` and
+  `modalvol://` prefixes, and guarded those imports against `ImportError` —
+  the "not installed" case — and nothing else. A shadowed `modal` does not
+  raise `ImportError`, so the `AttributeError` propagated out of the factory
+  and killed target resolution for **every** prefix, local paths included.
+
+  Both are fixed. `_runner.py` and `_app.py` no longer resolve
+  `modal.exception` off the parent package — `exception` is not in modal's
+  `__all__`, and the attribute is bound only as a side effect of modal's own
+  `__init__` — so a shadowed or partial `modal` now fails as a plain
+  `ImportError`, which is both accurate and catchable. And the factory's
+  guards now also catch and log an unexpected failure: the affected prefix
+  drops out of the mapping, using it gives the ordinary unsupported-prefix
+  error, and a warning names the cause. A genuinely absent optional dependency
+  stays silent, as before.
+
+  Note the attribute form worked on every modal release stardag supports
+  (`>=1.0.0`); it was the shadowing, not a modal version, that exposed it.
 
 ## [0.19.0] — 2026-08-13
 

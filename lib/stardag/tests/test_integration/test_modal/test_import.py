@@ -4,9 +4,9 @@ Regression test for https://github.com/stardag-dev/stardag/issues/113
 where `from modal.gpu import GPU_T` broke on modal >= 1.4 because the
 `modal.gpu` module was removed.
 
-Also covers the sibling failure mode: reaching a *submodule* off a bare
-``import modal``. See
-:func:`test_import_survives_unbound_modal_exception_submodule`.
+Also covers the sibling failure mode: a *consumer* package named ``modal``
+shadowing the distribution on ``sys.path``. See
+:func:`test_a_shadowed_modal_package_does_not_break_the_target_factory`.
 """
 
 import subprocess
@@ -55,68 +55,84 @@ def test_function_settings_gpu_accepts_list():
     assert settings.get("gpu") == ["A10G", "T4"]
 
 
-# Runs in a subprocess because the setup is a mutation of the interpreter's
-# `modal` package object that must precede the very first import of
-# `stardag.integration.modal` — by the time this test module is collected,
-# the pytest process has long since imported both.
-_UNBOUND_EXCEPTION_SUBMODULE = textwrap.dedent(
+# A first-party package named `modal` on `sys.path` ahead of site-packages
+# shadows the distribution for the whole process. This is not exotic: running
+# an entrypoint as a script path (`python pkg/service/main.py` rather than
+# `python -m ...`) puts that script's own directory on `sys.path[0]`, so any
+# `modal/` subpackage sitting next to it wins. `import modal` then succeeds
+# and returns the wrong thing — which is why an `except ImportError` guard
+# around the integration never fired.
+_SHADOWED_MODAL = textwrap.dedent(
     """
+    import sys
+
+    sys.path.insert(0, sys.argv[1])
+
     import modal
 
-    # `exception` is not in modal's __all__, and modal's package-level
-    # __getattr__ raises AttributeError for anything it does not export.
-    # The attribute is bound only because modal's own __init__ imports the
-    # submodule — an implementation detail, not a guarantee. Take it away.
+    assert "site-packages" not in (modal.__file__ or ""), modal.__file__
+    assert not hasattr(modal, "exception")
+
+    # 1. The integration must fail *loudly and correctly*: a shadowed modal
+    #    genuinely means "the Modal integration is unavailable here", which
+    #    is ImportError. Reaching `modal.exception` off the parent package
+    #    instead produced `AttributeError: module 'modal' has no attribute
+    #    'exception'` — a message identical to CPython's own, blamed on
+    #    modal, and invisible to every `except ImportError` in the stack.
     try:
-        del modal.exception
-    except AttributeError:
+        import stardag.integration.modal  # noqa: F401
+    except ImportError:
         pass
-    assert not hasattr(modal, "exception"), "test setup failed to unbind it"
+    except AttributeError as e:
+        raise AssertionError(f"shadowed modal must raise ImportError, got {e!r}")
+    else:
+        raise AssertionError("expected the integration import to fail")
 
-    import stardag.integration.modal  # noqa: F401
-    from stardag.integration.modal import MODAL_INTERRUPTIONS
+    # 2. And the rest of stardag must not care. This is the actual incident:
+    #    a service that never used Modal could not resolve a local or S3
+    #    target, because the target factory imports the Modal integration to
+    #    register `modalvol://`.
+    from stardag.target._factory import get_default_prefix_to_target_prototype
 
-    # Importing must not merely survive: the interruption tuple has to stay
-    # populated. Silently degrading to KeyboardInterrupt-only would mean
-    # function timeouts stop being recognised as resumable.
-    assert KeyboardInterrupt in MODAL_INTERRUPTIONS, MODAL_INTERRUPTIONS
-    assert len(MODAL_INTERRUPTIONS) == 2, MODAL_INTERRUPTIONS
+    prefixes = get_default_prefix_to_target_prototype()
+    assert "/" in prefixes, prefixes
+    assert "modalvol://" not in prefixes, prefixes
 
     print("ok")
     """
 )
 
 
-def test_import_survives_unbound_modal_exception_submodule():
-    """Importing the integration must not depend on `modal.exception` being bound.
+def test_a_shadowed_modal_package_does_not_break_the_target_factory(tmp_path):
+    """A consumer package named `modal` must cost the Modal integration, not stardag.
 
-    `_runner.py` used to read `modal.exception.InputCancellation` with only
-    a bare `import modal` in scope. That resolves on every modal release we
-    support — but only as a side effect of modal's own `__init__` importing
-    the submodule early, which binds it as an attribute on the package.
-    `exception` is not in modal's `__all__`, and modal's package
-    `__getattr__` raises
+    Regression test for a reported incident, reproduced here exactly: the
+    affected service ran its entrypoint as a script path, which put the
+    entrypoint's directory on `sys.path[0]`, and that directory contained a
+    first-party `modal/` subpackage. Every `import modal` in that process —
+    stardag's included — resolved to the empty local package.
 
-        AttributeError: module 'modal' has no attribute 'exception'
+    Two things then went wrong, and this test covers both. The integration
+    read `modal.exception` off the parent package, so the failure presented
+    as `AttributeError` rather than `ImportError`; and the target factory
+    guarded its integration imports against `ImportError` only. The
+    `AttributeError` went straight through and took down target resolution
+    for every prefix, so a service that had never used Modal for anything
+    could not build a local target.
 
-    for anything it does not export. So the old form was one refactor of
-    modal's import graph away from breaking, on a code path that matters:
-    `get_default_prefix_to_target_prototype()` imports this package to
-    register the `modalvol://` prefix, so any failure here reaches users who
-    merely have `modal` installed and never touch Modal.
-
-    This test pins the property rather than the accident. It unbinds the
-    attribute to assert the import does not consult it — the unbind is
-    deliberately artificial, because no supported modal version leaves it
-    unbound on its own. A subprocess is required: by the time this module is
-    collected, pytest has modal loaded and the attribute bound.
+    Runs in a subprocess: the shadowing has to be in place before the first
+    `import modal` in the process, and pytest imported the real one long ago.
     """
+    shadow = tmp_path / "modal"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("")
+
     result = subprocess.run(
-        [sys.executable, "-c", _UNBOUND_EXCEPTION_SUBMODULE],
+        [sys.executable, "-c", _SHADOWED_MODAL, str(tmp_path)],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, (
-        f"import failed with modal.exception unbound:\n{result.stderr}"
+        f"shadowed-modal handling regressed:\n{result.stdout}\n{result.stderr}"
     )
     assert "ok" in result.stdout
