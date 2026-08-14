@@ -265,11 +265,13 @@ class StardagApp:
                 ``Builder`` for customization, or implement the protocol
                 directly.
 
-                Because this callable is pickled by reference, the module
-                defining it is imported inside the ``build`` container, so
-                its module-level code runs there. That is a property of
-                the ``build`` container only — for setup that must run in
-                *every* container the app deploys, pass
+                Unpickling the serialized ``build`` wrapper in a container
+                reaches this callable's defining module — the function
+                itself for a plain function, its class for a callable
+                instance such as a ``Builder`` subclass — so that module is
+                imported there and its module-level code runs. That is a
+                property of the ``build`` container only; for setup that
+                must run in *every* container the app deploys, pass
                 ``container_setup``.
             run_function: Callable registered as the Modal worker functions.
                 Must match the ``RunFunction`` protocol:
@@ -277,11 +279,12 @@ class StardagApp:
                 Defaults to ``Runner()`` which provides overridable
                 ``setup()``/``teardown()`` hooks.
 
-                As with ``build_function``, the module defining this
-                callable is imported inside every ``worker_*`` container —
-                use that (or ``Runner.setup()``) for worker-specific setup
-                such as GPU init or library preloading, and
-                ``container_setup`` for setup every container needs.
+                As with ``build_function``, unpickling the serialized
+                worker wrapper imports this callable's defining module (or
+                its class's) inside every ``worker_*`` container — use that,
+                or ``Runner.setup()``, for worker-specific setup such as
+                GPU init or library preloading, and ``container_setup``
+                for setup every container needs.
             container_setup: Called once per container, at the top of
                 **every** function this app registers — ``build``, each
                 ``worker_*``, and the reactive ``tick``, ``bootstrap`` and
@@ -494,8 +497,8 @@ class StardagApp:
         self._run_function = run_function
         # The app's container-level setup, closed over by every registered
         # wrapper in finalize(). Deployed-app configuration exactly like
-        # worker_selector: captured here, pickled by reference into the
-        # serialized functions, run once per container.
+        # worker_selector: captured here, carried into the serialized
+        # functions, run once per container.
         if container_setup is not None and not callable(container_setup):
             raise TypeError(
                 f"container_setup must be callable, got "

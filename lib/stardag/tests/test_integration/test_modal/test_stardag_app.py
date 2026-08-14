@@ -2824,6 +2824,29 @@ class TestContainerSetup:
 
         assert order == ["container_setup", "stardag_logging"]
 
+    def test_two_apps_in_one_process_each_run_their_own_hook(self):
+        """The guard is per hook, not one global flag.
+
+        A deployed container only ever unpickles one app's closure, so in
+        production there is one hook — but a process holding two apps
+        would otherwise have the first app's hook silence the second's,
+        which is a wrong answer rather than a missed optimisation.
+        """
+        first, second = [], []
+        app_a = self._app(lambda: first.append("a"))
+        app_b = self._app(lambda: second.append("b"))
+        registered_a = _finalize_capturing_functions(app_a)
+        registered_b = _finalize_capturing_functions(app_b)
+
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            registered_a["worker_default"]("task")
+            registered_b["worker_default"]("task")
+            registered_a["worker_default"]("task")
+            registered_b["worker_default"]("task")
+
+        assert first == ["a"]
+        assert second == ["b"]
+
     def test_defaults_to_none_and_is_a_no_op(self):
         """Additive: an app that passes nothing behaves exactly as before."""
         app = StardagApp(

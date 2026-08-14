@@ -40,9 +40,11 @@ class BuildFunction(typing.Protocol):
 
     Any module-level code in the module where a custom build function is
     defined will execute inside the ``build`` container before the function
-    is called, because the callable is pickled by reference. That covers
-    the ``build`` container only; for setup every container of the app
-    needs — workers and the reactive functions included — pass
+    is called: unpickling the serialized wrapper there reaches the
+    callable's defining module — the function itself for a plain function,
+    its class for a callable instance — and imports it. That covers the
+    ``build`` container only; for setup every container of the app needs —
+    workers and the reactive functions included — pass
     ``StardagApp(container_setup=...)``.
     """
 
@@ -73,8 +75,8 @@ class RunFunction(typing.Protocol):
 
     Any module-level code in the module where a custom run function is
     defined will execute inside every ``worker_*`` container before the
-    function is called, because the callable is pickled by reference — use
-    it for worker-specific setup. For setup every container of the app
+    function is called, by the same mechanism as ``BuildFunction`` above —
+    use it for worker-specific setup. For setup every container of the app
     needs, pass ``StardagApp(container_setup=...)``.
 
     Args (of ``__call__``):

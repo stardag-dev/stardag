@@ -1176,7 +1176,8 @@ and then never again for the rest of that container's inputs.
 
 - **Define it in an importable module.** Like `worker_selector` and your
   build/run functions, the hook is captured by the serialized Modal
-  functions and pickled _by reference_, so its defining module must be
+  functions and pickled _by reference_ (via its class, if you pass a
+  callable instance rather than a plain function), so its defining module must be
   importable in the container — part of the source you add via
   `add_local_python_source(...)`, not a loose deploy script. That is also
   what makes any module-level code in the hook's own module run in every
