@@ -6,6 +6,51 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-08-14
+
+### Fixed
+
+- **A user package named `modal` no longer breaks target resolution.**
+  Reported from a deployment running `0.19.0`, where `get_directory_target()`
+  failed at import with
+
+  ```
+  AttributeError: module 'modal' has no attribute 'exception'
+  ```
+
+  in a service that did not use Modal at all. Two independent defects had to
+  line up.
+
+  First, the trigger. The service's entrypoint was launched as a script path
+  (`python pkg/service/main.py`, not `python -m`), which puts the script's own
+  directory on `sys.path[0]`. That directory contained a first-party
+  `modal/` subpackage, so **every** `import modal` in the process — stardag's
+  included — resolved to it instead of the installed distribution. `import
+modal` therefore _succeeded_ and returned the wrong module; the failure
+  surfaced only on first attribute access. Nothing on that service's code
+  path had ever imported `stardag.integration.modal` before, which is why the
+  shadowing had been latent and `0.19.0` appeared to cause it.
+
+  Second, why it escalated. `get_default_prefix_to_target_prototype()` imports
+  the optional `stardag.integration.*` backends to register the `s3://` and
+  `modalvol://` prefixes, and guarded those imports against `ImportError` —
+  the "not installed" case — and nothing else. A shadowed `modal` does not
+  raise `ImportError`, so the `AttributeError` propagated out of the factory
+  and killed target resolution for **every** prefix, local paths included.
+
+  Both are fixed. `_runner.py` and `_app.py` no longer resolve
+  `modal.exception` off the parent package — `exception` is not in modal's
+  `__all__`, and the attribute is bound only as a side effect of modal's own
+  `__init__` — so a shadowed or partial `modal` now fails as a plain
+  `ImportError`, which is both accurate and catchable. And the factory's
+  guards now also catch and log an unexpected failure: the affected prefix
+  drops out of the mapping, using it gives the ordinary unsupported-prefix
+  error, and a warning names the cause. A genuinely absent optional dependency
+  stays silent, as before.
+
+  Note the attribute form worked on every modal release stardag supports
+  (`>=1.0.0`); it was the shadowing, not a modal version, that exposed it.
+
 ## [0.19.0] — 2026-08-13
 
 ### Registry API

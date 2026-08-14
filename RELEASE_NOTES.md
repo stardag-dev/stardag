@@ -6,6 +6,80 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.19.1 — A user package named `modal` no longer breaks target resolution
+
+No API changes, nothing to migrate.
+
+**If you have a package or module of your own named `modal` (or `boto3`),
+upgrade.** On `0.19.0` that could make `get_file_target` and
+`get_directory_target` fail at import — in a service that never used Modal or
+S3 — with
+
+```
+AttributeError: module 'modal' has no attribute 'exception'
+```
+
+Here is the whole shape of it, because the interesting part is how ordinary
+each half is.
+
+A deployment launched its entrypoint as a script path — `python
+pkg/service/main.py` rather than `python -m pkg.service.main`. CPython puts
+that script's own directory on `sys.path[0]`, and that directory happened to
+contain a first-party `modal/` subpackage. From then on every `import modal`
+anywhere in the process resolved to it, stardag's included. Note this does
+not raise: the import _succeeds_ and hands back the wrong module, so nothing
+notices until something touches an attribute.
+
+What made it stardag's problem is the target factory. It imports the optional
+`stardag.integration.*` backends to find out which URI prefixes it can serve,
+and guarded those imports against the backend not being _installed_ —
+`ImportError` — and nothing else. A shadowed `modal` is not an `ImportError`.
+So the `AttributeError` came up through the factory and took **every** prefix
+with it, plain local paths included. The service could not build a target at
+all, because of a backend it never asked for. It had simply never imported
+`stardag.integration.modal` before; `0.19.0` reaches it to register
+`modalvol://`, which is why a long-latent name collision surfaced as a
+version bump.
+
+Both halves are fixed. The Modal integration no longer reaches
+`modal.exception` through the parent package, so a shadowed or partial modal
+now fails as a plain `ImportError` — accurate, and catchable by everything
+that already guards these imports. And the factory's guards catch and log an
+unexpected failure rather than only a missing dependency: that integration's
+prefix drops out of the mapping, asking for it afterwards gives the ordinary
+"unsupported prefix" error, and a warning names the cause. A genuinely absent
+optional dependency stays silent, as before, so the warning means something
+when you see it.
+
+### Recognising this in your own code
+
+The generalisable part has nothing to do with modal. When a local package
+shadows an installed distribution, `import x` **succeeds** — it just returns
+the wrong module. So there is no `ImportError` anywhere, nothing fails at
+import time, and the first symptom is an `AttributeError` at whatever line
+first touches the real package's API. That line is usually deep inside a
+library, so the traceback blames the dependency, and CPython's message for a
+missing module attribute is often identical to what the real package's own
+`__getattr__` would have produced.
+
+If you are staring at an `AttributeError` on a dependency that makes no
+sense, check what you actually imported:
+
+```python
+import x
+print(x.__file__, getattr(x, "__version__", None))
+```
+
+A path outside `site-packages` is the answer. The usual cause is running an
+entrypoint as a script path (`python pkg/service/main.py`), which puts that
+script's own directory on `sys.path[0]` — so any sibling module or package
+of your entrypoint can shadow any installed distribution. `python -m
+pkg.service.main` does not do this.
+
+Worth saying plainly: the old attribute form worked on every modal release
+stardag supports. No modal version is implicated — it was the name collision
+that exposed the assumption.
+
 ## v0.19.0 — A task can survive being interrupted
 
 Modal takes containers away. It reclaims preemptible instances, and it kills

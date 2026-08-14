@@ -49,12 +49,24 @@ from stardag.exceptions import ResumableInterruption
 from stardag.registry._base import NoOpRegistry, registry_provider
 from stardag.utils.env import temp_env_vars
 
-# Modal's own "this input was cancelled" BaseException. Looked up rather
-# than imported so a client that predates or renames it degrades to "we
-# cannot recognise a cancellation" instead of failing every worker import.
-_InputCancellation: type[BaseException] | None = getattr(
-    modal.exception, "InputCancellation", None
-)
+# Modal's own "this input was cancelled" BaseException, imported so that a
+# client that predates or renames it degrades to "we cannot recognise a
+# cancellation" instead of failing every worker import.
+#
+# Import the name out of the submodule rather than reaching for
+# ``modal.exception`` off a bare ``import modal``. The attribute form works
+# on every modal release we support, but only as a side effect: ``exception``
+# is not in modal's ``__all__``, and modal's package ``__getattr__`` raises
+# for anything it does not export — it resolves purely because modal's own
+# ``__init__`` imports the submodule early, which binds it on the package.
+# Depending on that is depending on a private detail of modal's import
+# graph. The from-import never consults the parent attribute at all.
+try:
+    from modal.exception import InputCancellation as _InputCancellationImpl
+
+    _InputCancellation: type[BaseException] | None = _InputCancellationImpl
+except ImportError:  # pragma: no cover - depends on the installed modal
+    _InputCancellation = None
 
 MODAL_INTERRUPTIONS: tuple[type[BaseException], ...] = tuple(
     e for e in (KeyboardInterrupt, _InputCancellation) if e is not None

@@ -20,6 +20,7 @@ import typing
 from uuid import UUID
 
 import modal
+from modal.exception import NotFoundError as ModalNotFoundError
 
 from stardag import BaseTask
 from stardag.build import BuildSummary
@@ -530,7 +531,7 @@ class StardagApp:
         assert self.stardag_api_key_secret is not None
         try:
             self.stardag_api_key_secret.hydrate()
-        except modal.exception.NotFoundError as e:
+        except ModalNotFoundError as e:
             name = self._api_key_secret_name
             secret_name_flag = (
                 "" if name == "stardag-api-key" else f" --secret-name {name}"
