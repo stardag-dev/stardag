@@ -1,6 +1,8 @@
 """Tests for StardagApp build_function and run_function customization."""
 
 import contextlib
+import threading
+import time
 import typing
 
 import pytest
@@ -25,6 +27,7 @@ from stardag.integration.modal import (
     StardagApp,
 )
 from stardag.integration.modal._builder import _default_build
+from stardag.integration.modal import _container_setup as _container_setup_module
 from stardag.integration.modal._container_setup import (
     _reset_container_setup_for_testing,
 )
@@ -2860,10 +2863,135 @@ class TestContainerSetup:
         with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
             registered["tick"](str(uuid4()), None)
 
+        # Nothing recorded, so nothing was run and nothing is retained.
+        assert _container_setup_module._setup_done == []
+
     def test_rejects_a_non_callable(self):
         """Caught where the app is declared, not in a container hours later."""
         with pytest.raises(TypeError, match="container_setup must be callable"):
             self._app("not-callable")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("function_name", list(_INVOCATIONS))
+    def test_runs_before_the_wrapper_body(self, function_name):
+        """Not merely *that* it ran — that it ran FIRST.
+
+        Everything the feature claims rests on this: the hook has to
+        precede the wrapper's own body, which is what puts it ahead of
+        ``Builder.setup`` / ``Runner.setup`` / ``_run_tick`` and therefore
+        ahead of stardag's ``logging.basicConfig`` default. Asserting only
+        that the hook ran would pass with the call moved to the bottom of
+        every wrapper.
+        """
+        order: list[str] = []
+
+        def body(*args, **kwargs):
+            order.append("body")
+            return None
+
+        app = StardagApp(
+            "test-app",
+            container_setup=lambda: order.append("container_setup"),
+            build_function=body,
+            run_function=body,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(image=_make_image()),
+                "gpu": FunctionSettings(image=_make_image()),
+            },
+            watchdog_period_minutes=5,
+        )
+        registered = _finalize_capturing_functions(app)
+
+        with contextlib.ExitStack() as stack:
+            tick = stack.enter_context(
+                patch("stardag.integration.modal._app._run_tick")
+            )
+            bootstrap = stack.enter_context(
+                patch("stardag.integration.modal._app.run_reactive_bootstrap")
+            )
+            sweep = stack.enter_context(
+                patch("stardag.integration.modal._app._run_watchdog_sweep")
+            )
+            stack.enter_context(registry_provider.override(NoOpRegistry()))
+            tick.side_effect = lambda *a, **kw: (order.append("body"), {})[1]
+            bootstrap.side_effect = lambda *a, **kw: (
+                order.append("body"),
+                MagicMock(summary={}),
+            )[1]
+            sweep.side_effect = lambda *a, **kw: order.append("body")
+            self._INVOCATIONS[function_name](registered[function_name])
+
+        assert order == ["container_setup", "body"]
+
+    def test_watchdog_reentering_tick_does_not_rerun_or_deadlock(self):
+        """The watchdog sweep calls the tick wrapper in-process.
+
+        The guard's lock is a plain ``threading.Lock``, so a path that
+        re-entered it while holding it would deadlock the container rather
+        than fail it. The outer call has already released the lock and
+        recorded the hook by then, so the inner call short-circuits — pin
+        that, because a future change here fails silently until a watchdog
+        container hangs.
+        """
+        calls = []
+        app = self._app(lambda: calls.append("setup"))
+        registered = _finalize_capturing_functions(app)
+
+        with contextlib.ExitStack() as stack:
+            tick = stack.enter_context(
+                patch("stardag.integration.modal._app._run_tick")
+            )
+            sweep = stack.enter_context(
+                patch("stardag.integration.modal._app._run_watchdog_sweep")
+            )
+            stack.enter_context(registry_provider.override(NoOpRegistry()))
+            tick.return_value = {}
+            # Mimic the real sweep: invoke the tick wrapper it was handed.
+            sweep.side_effect = lambda registry, tick_fn, **kw: tick_fn("bid", None)
+            registered["tick_watchdog"]()
+
+        assert calls == ["setup"]
+        assert tick.call_count == 1
+
+    def test_concurrent_inputs_run_the_hook_exactly_once(self):
+        """``allow_concurrent_inputs`` serves inputs on threads.
+
+        Sparing every app from writing this guard is the stated reason it
+        lives in stardag, so the double-checked lock is worth pinning: a
+        regression to a bare check would let several threads through.
+        """
+        calls = []
+        barrier = threading.Barrier(8)
+
+        def slow_setup():
+            calls.append("setup")
+            time.sleep(0.05)
+
+        app = self._app(slow_setup)
+        registered = _finalize_capturing_functions(app)
+        errors: list[BaseException] = []
+
+        def invoke():
+            try:
+                barrier.wait(timeout=5)
+                registered["worker_default"]("task")
+            except BaseException as e:  # noqa: BLE001 - reported below
+                errors.append(e)
+
+        threads = [threading.Thread(target=invoke) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert errors == []
+        assert calls == ["setup"]
+
+    def test_rejects_a_hook_that_takes_arguments(self):
+        """The likelier mistake than a non-callable, and it would
+        otherwise deploy cleanly and raise in every container."""
+        with pytest.raises(TypeError, match="no arguments"):
+            self._app(lambda config: None)  # type: ignore[arg-type,misc]
 
 
 class TestUnreachableWorkerWarning:

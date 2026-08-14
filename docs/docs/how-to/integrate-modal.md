@@ -1194,6 +1194,22 @@ and then never again for the rest of that container's inputs.
   logger has handlers, so a hook that configures root logging wins, and an
   app that does not still gets the default. A hook that configures a
   _non-root_ logger will still see stardag add a root `StreamHandler`.
+- **Only containers this app deploys.** `reactive_discovery="local"` runs
+  discovery in the _triggering_ process, which is not a container of this
+  app, so the hook does not run there — writing credentials or
+  reconfiguring root logging in someone's shell would be the wrong call.
+  An app that relies on the hook and also triggers with `"local"` has to
+  prepare the triggering process itself.
+- **It runs outside per-task `env_overrides`.** A `worker_selector`
+  returning `(worker_name, env_overrides)` applies those around the task's
+  `run` call only, so a hook that reads the environment sees the
+  container's base environment, not the per-task overrides. Correct by
+  scope — the container is set up once, the overrides vary per task — but
+  worth knowing if you route credentials through both.
+- **A failing hook is visible in Modal, not in the registry.** It runs
+  before the worker's lifecycle reporter exists, so it does not record a
+  `TASK_FAILED`; a reactive build sees the execution claim lapse and the
+  next tick re-spawn. Same shape as a raising `Runner.setup()`.
 
 <!-- TODO below needs significant cleanup.
 ## Running the `stardag-examples` Examples

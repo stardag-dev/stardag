@@ -17,6 +17,7 @@ reactive ``tick`` / ``bootstrap`` / ``tick_watchdog``. Passing
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 import typing
@@ -56,6 +57,39 @@ _setup_done: list[ContainerSetup] = []
 _setup_lock = threading.Lock()
 
 
+def _validate_container_setup(container_setup: typing.Any) -> None:
+    """Reject a hook that cannot be called the way containers will call it.
+
+    Raised where the app is declared rather than surfacing in every
+    container of a deployed app. ``callable()`` alone would miss the
+    likelier mistake: passing a function that takes an argument, which
+    deploys cleanly and then raises ``TypeError`` on every input.
+
+    Signature introspection is best-effort — some callables (C builtins,
+    exotic wrappers) have no inspectable signature, and those are let
+    through rather than rejected on the strength of a failed guess.
+    """
+    if not callable(container_setup):
+        raise TypeError(
+            f"container_setup must be callable, got {type(container_setup).__name__}"
+        )
+    try:
+        signature = inspect.signature(container_setup)
+    except (TypeError, ValueError):
+        return
+    try:
+        signature.bind()
+    except TypeError as e:
+        raise TypeError(
+            f"container_setup must be callable with no arguments; "
+            f"{getattr(container_setup, '__name__', container_setup)!r} has "
+            f"signature {signature}. It is invoked as container_setup() at "
+            f"the top of every function the app deploys, with nothing to "
+            f"pass it — bind any configuration it needs at the call site "
+            f"(a closure or functools.partial)."
+        ) from e
+
+
 def _already_run(container_setup: ContainerSetup) -> bool:
     return any(done is container_setup for done in _setup_done)
 
@@ -73,8 +107,17 @@ def _run_container_setup(container_setup: ContainerSetup | None) -> None:
     done only on success, so one that raised is attempted again on the
     next input rather than leaving the rest of the container's inputs
     running silently un-set-up. A hook that fails deterministically
-    therefore fails every input, loudly — which is the honest outcome when
-    the container is not in the state the app requires.
+    therefore fails every input — the honest outcome when the container is
+    not in the state the app requires.
+
+    Note where that failure is visible. Running before the wrapper's own
+    body means running before a worker's lifecycle reporter exists, so a
+    raising hook surfaces in the Modal logs and *not* as a TASK_FAILED in
+    the registry; a reactive build sees the execution claim lapse and the
+    next tick re-spawn. That is the same shape as a raising
+    ``Runner.setup()`` and is the right layering — the hook is what makes
+    the container able to talk to the registry in the first place — but it
+    does mean the registry is not where you will see it.
     """
     if container_setup is None or _already_run(container_setup):
         return

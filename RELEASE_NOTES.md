@@ -43,10 +43,12 @@ and `worker_*` over your `run_function`, so those modules are imported and
 their module-level code runs — the behaviour `StardagApp.__init__` documents
 and that apps have relied on. The other three were never covered. A
 `bootstrap` container closes over the app name, the task-module patterns and
-two booleans: nothing of yours, so none of your modules are imported at all. A
-`tick` or `tick_watchdog` container imports your code only as a side effect —
-of a `worker_selector` or `limit_key_selector` if you passed one, and of
-whatever the expanded `task_modules` pull in.
+two booleans — nothing of yours, so nothing pulls in the module your setup
+lives in. (Its root tasks arrive by value, so unpickling them does import
+_their_ modules; that is not the same thing, and is no help if your setup
+lives anywhere else.) A `tick` or `tick_watchdog` container imports your code
+only as a side effect — of a `worker_selector` or `limit_key_selector` if you
+passed one, and of whatever the expanded `task_modules` pull in.
 
 The failure mode this produces is a quiet one. Setup that plainly works —
 because you see it working in your workers — is simply absent from the

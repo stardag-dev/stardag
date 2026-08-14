@@ -41,6 +41,7 @@ from stardag.integration.modal._builder import _default_build
 from stardag.integration.modal._container_setup import (
     ContainerSetup,
     _run_container_setup,
+    _validate_container_setup,
 )
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._metadata import (
@@ -330,6 +331,14 @@ class StardagApp:
                 fails deterministically fails every input rather than
                 letting later ones run un-set-up.
 
+                **Only containers this app deploys.** It is not run by
+                ``reactive_discovery="local"``, where discovery happens in
+                the *triggering* process: that machine is not a container
+                of this app, and writing credentials or reconfiguring root
+                logging in someone's shell would be the wrong call. An app
+                that both relies on the hook and triggers with
+                ``"local"`` has to prepare the triggering process itself.
+
                 **Ordering with logging.** The hook runs before stardag's
                 own ``logging.basicConfig`` default, and ``basicConfig``
                 no-ops once the root logger has handlers, so a hook that
@@ -391,15 +400,21 @@ class StardagApp:
                 ``"modal"`` is the default because discovery is target-root
                 I/O — one existence check per task — and inside Modal a
                 ``modalvol://`` root is a mounted filesystem rather than a
-                rate-limited API. Only the placement changes: the same code
-                runs, in the same order, with the same failure handling.
+                rate-limited API. The same discovery code runs either way,
+                in the same order and with the same failure handling; what
+                differs is the machine, and therefore the container-level
+                preparation around it (see ``container_setup`` below).
 
                 Reach for ``"local"`` when the deployed app predates the
                 ``bootstrap`` function, or when the target root is
                 reachable from the triggering process but not from the
                 Modal app. Note that ``"local"`` also puts the coverage
                 pre-flight on the *local* ``task_modules`` rather than the
-                deployed one, reinstating the stale-deploy blind spot.
+                deployed one, reinstating the stale-deploy blind spot —
+                and that ``container_setup`` does **not** run, because the
+                triggering process is not a container this app deployed
+                (see that argument). Discovery there runs against whatever
+                the triggering process is already configured with.
             watchdog_period_minutes: If set, register a scheduled watchdog
                 that periodically re-ticks running reactive builds (the
                 safety net for lost wake-ups, UI-cancelled builds, and stale
@@ -506,11 +521,8 @@ class StardagApp:
         # wrapper in finalize(). Deployed-app configuration exactly like
         # worker_selector: captured here, carried into the serialized
         # functions, run once per container.
-        if container_setup is not None and not callable(container_setup):
-            raise TypeError(
-                f"container_setup must be callable, got "
-                f"{type(container_setup).__name__}"
-            )
+        if container_setup is not None:
+            _validate_container_setup(container_setup)
         self.container_setup = container_setup
         self._builder_settings = builder_settings
         self._worker_settings = worker_settings
