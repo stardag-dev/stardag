@@ -6,6 +6,128 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.20.0 — Container setup you can actually rely on, in every Modal container
+
+Additive. Nothing to migrate: an app that does not pass `container_setup`
+behaves exactly as before.
+
+**If your Modal app has setup code that must run before anything else —
+credentials written to disk, your own log formatter, an environment check —
+move it to `container_setup`.** It may not be running where you think it is.
+
+```python
+# my_app/setup.py — an importable module, not the deploy script
+def container_setup() -> None:
+    configure_logging()
+    write_credentials()
+
+
+# my_app/app.py
+app = StardagApp(
+    "my-app",
+    container_setup=container_setup,
+    builder_settings=FunctionSettings(image=image),
+    worker_settings={"default": FunctionSettings(image=image)},
+)
+```
+
+### Why it was needed
+
+`StardagApp.finalize()` registers every function with `serialized=True`. A
+container therefore unpickles a closure rather than importing the module your
+app was declared in, and which of your modules get imported is decided by what
+each function's closure happens to reference.
+
+That worked out for two of the five. `build` closes over your `build_function`
+and `worker_*` over your `run_function`, so those modules are imported and
+their module-level code runs — the behaviour `StardagApp.__init__` documents
+and that apps have relied on. The other three were never covered. A
+`bootstrap` container closes over the app name, the task-module patterns and
+two booleans — nothing of yours, so nothing pulls in the module your setup
+lives in. (Its root tasks arrive by value, so unpickling them does import
+_their_ modules; that is not the same thing, and is no help if your setup
+lives anywhere else.) A `tick` or `tick_watchdog` container imports your code
+only as a side effect — of a `worker_selector` or `limit_key_selector` if you
+passed one, and of whatever the expanded `task_modules` pull in.
+
+The failure mode this produces is a quiet one. Setup that plainly works —
+because you see it working in your workers — is simply absent from the
+containers that drive a reactive build, and the first symptom is somewhere
+else entirely. It was reported by a deployed app whose object-store
+credentials are prepared by exactly such a routine: its reactive builds failed
+in `bootstrap`, at the first completion check of discovery, with a storage
+error that said nothing about setup.
+
+`container_setup` turns that accident into a contract. It runs at the top of
+all five functions, so where your setup runs is no longer a property of your
+import graph.
+
+### Semantics worth knowing
+
+- **Once per container, not once per input.** A worker serves many tasks and a
+  tick container may be reused. The guard lives in stardag so you do not have
+  to write one.
+- **A hook that raises propagates, and is retried on the next input.** It is
+  deliberately not remembered as done on failure — the alternative is a
+  container whose remaining inputs run silently un-set-up. A hook that fails
+  deterministically fails every input, loudly.
+- **It runs before stardag's own logging default**, a plain
+  `logging.basicConfig(level=INFO)`. `basicConfig` no-ops once the root logger
+  has handlers, so a hook that configures root logging wins and an app that
+  does not still gets the default. A hook that configures a _non-root_ logger
+  will still see stardag add a root `StreamHandler`.
+- **Define it in an importable module.** Like `worker_selector`, it is pickled
+  by reference, so its defining module must be importable inside the container
+  — part of the source you add via `add_local_python_source(...)`, not a loose
+  deploy script. That is also what makes module-level code in the hook's own
+  module run in every container.
+
+### How it relates to a custom `Builder` or `Runner`
+
+It does not replace them, and they do not replace it. The three hooks have
+different scopes and are meant to be used together:
+
+| Hook                   | Scope         | Runs                                                            | For                                                                                                |
+| ---------------------- | ------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `container_setup()`    | the container | once per container, before anything else, in all five functions | credentials, logging, environment checks — nothing build- or task-specific (it takes no arguments) |
+| `Builder.setup(tasks)` | one build     | once per `build` invocation, in the `build` container only      | preparation that depends on the roots being built                                                  |
+| `Runner.setup(task)`   | one task      | before every input a worker container serves                    | preparation that depends on that task                                                              |
+
+For the reactive functions there is nothing to weigh up: a `tick`, `bootstrap`
+or `tick_watchdog` container contains no `Builder` and no `Runner`, so
+`container_setup` is the only hook that reaches them. In the other direction,
+moving per-task work into `container_setup` would run it once and then never
+again for the rest of that container's inputs.
+
+See [Integrate with Modal](https://stardag-dev.github.io/stardag/how-to/integrate-modal/)
+for the full section.
+
+### Also: worker routing is checked at deploy
+
+An app with **no `"default"` worker and no `worker_selector`** now fails
+`finalize()` instead of deploying. Every task would route to a
+`worker_default` function the app does not deploy, so nothing would have
+worked; previously it deployed cleanly and failed at the first task. This is
+scoped to the no-selector case — an app that declares a selector may omit
+`"default"` and route everything to its own tiers, which works today and
+keeps working.
+
+The softer case gets a warning instead.
+
+`finalize()` now warns when an app declares several `worker_settings` but no
+`worker_selector`. Every task then routes to `"default"`, so the other tiers
+are deployed and never reached — and nothing looks wrong, because the build
+succeeds, just entirely on the wrong worker. The warning names the unreachable
+workers, and passing a selector explicitly — even one that always returns
+`"default"` — silences it.
+
+Per-trigger overrides (`build_spawn`/`build_trigger(worker_selector=...)`)
+remain a valid way to route a _resident_ build. Reactive builds reject them,
+because later ticks (worker wake-ups, watchdog sweeps) could not honour them,
+which is why the app-level selector is what the warning points at.
+
+---
+
 ## v0.19.1 — A user package named `modal` no longer breaks target resolution
 
 No API changes, nothing to migrate.

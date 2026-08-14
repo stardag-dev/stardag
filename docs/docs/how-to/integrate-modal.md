@@ -1114,6 +1114,103 @@ app = sd_modal.StardagApp(
 )
 ```
 
+## Container setup: code that runs in every container
+
+Some setup is a property of the _container_, not of a build or a task:
+materialising credentials onto disk, installing your own log formatter,
+validating that the environment is what you think it is. Pass it as
+`container_setup` and stardag runs it once per container, at the top of
+**every** function the app registers — `build`, each `worker_*`, and the
+reactive `tick`, `bootstrap` and `tick_watchdog`.
+
+```{.python notest}
+# my_app/setup.py — an importable module, not the deploy script (see below)
+def container_setup() -> None:
+    configure_logging()
+    write_credentials()
+
+
+# my_app/app.py
+from my_app.setup import container_setup
+
+app = sd_modal.StardagApp(
+    "stardag-poc",
+    container_setup=container_setup,
+    builder_settings=sd_modal.FunctionSettings(image=image),
+    worker_settings={"default": sd_modal.FunctionSettings(image=image)},
+    watchdog_period_minutes=5,
+)
+```
+
+**Why this exists.** `StardagApp` registers its functions with
+`serialized=True`, so a container unpickles a closure rather than importing
+the module your app was declared in. Which of your modules get imported is
+therefore decided by what each function's closure happens to reference:
+`build` and `worker_*` close over your `build_function` / `run_function`,
+so their modules are imported — but a `bootstrap` container closes over
+nothing of yours at all, and `tick` / `tick_watchdog` import your code only
+as a side effect of a `worker_selector` or the expanded `task_modules`.
+Setup that "obviously runs everywhere" because it runs in your workers can
+therefore be silently absent from the containers that drive a reactive
+build. `container_setup` is the contract that replaces that accident.
+
+### Which hook does what
+
+`container_setup` does **not** replace a custom `Builder` or `Runner`, and
+they do not replace it — the three have different scopes and are meant to
+be used together:
+
+| Hook                   | Scope         | Runs                                                            | For                                                                                                |
+| ---------------------- | ------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `container_setup()`    | the container | once per container, before anything else, in all five functions | credentials, logging, environment checks — nothing build- or task-specific (it takes no arguments) |
+| `Builder.setup(tasks)` | one build     | once per `build` invocation, in the `build` container only      | preparation that depends on the roots being built                                                  |
+| `Runner.setup(task)`   | one task      | before every input a worker container serves                    | preparation that depends on that task                                                              |
+
+For the reactive functions this is not a matter of taste: a `tick`,
+`bootstrap` or `tick_watchdog` container contains no `Builder` and no
+`Runner`, so `container_setup` is the only hook that reaches them.
+Conversely, moving per-task work into `container_setup` would run it once
+and then never again for the rest of that container's inputs.
+
+### Details worth knowing
+
+- **Define it in an importable module.** Like `worker_selector` and your
+  build/run functions, the hook is captured by the serialized Modal
+  functions and pickled _by reference_ (via its class, if you pass a
+  callable instance rather than a plain function), so its defining module must be
+  importable in the container — part of the source you add via
+  `add_local_python_source(...)`, not a loose deploy script. That is also
+  what makes any module-level code in the hook's own module run in every
+  container of the app.
+- **Once per container, not once per input.** A worker serves many tasks
+  and a tick container may be reused; stardag holds the guard so you do
+  not have to write one.
+- **A hook that raises propagates, and is retried on the next input.** It
+  is deliberately not remembered as done on failure — the alternative is a
+  container whose remaining inputs run silently un-set-up. A hook that
+  fails deterministically therefore fails every input, loudly.
+- **It runs before stardag's own logging default**, which is a plain
+  `logging.basicConfig(level=INFO)`. `basicConfig` no-ops once the root
+  logger has handlers, so a hook that configures root logging wins, and an
+  app that does not still gets the default. A hook that configures a
+  _non-root_ logger will still see stardag add a root `StreamHandler`.
+- **Only containers this app deploys.** `reactive_discovery="local"` runs
+  discovery in the _triggering_ process, which is not a container of this
+  app, so the hook does not run there — writing credentials or
+  reconfiguring root logging in someone's shell would be the wrong call.
+  An app that relies on the hook and also triggers with `"local"` has to
+  prepare the triggering process itself.
+- **It runs outside per-task `env_overrides`.** A `worker_selector`
+  returning `(worker_name, env_overrides)` applies those around the task's
+  `run` call only, so a hook that reads the environment sees the
+  container's base environment, not the per-task overrides. Correct by
+  scope — the container is set up once, the overrides vary per task — but
+  worth knowing if you route credentials through both.
+- **A failing hook is visible in Modal, not in the registry.** It runs
+  before the worker's lifecycle reporter exists, so it does not record a
+  `TASK_FAILED`; a reactive build sees the execution claim lapse and the
+  next tick re-spawn. Same shape as a raising `Runner.setup()`.
+
 <!-- TODO below needs significant cleanup.
 ## Running the `stardag-examples` Examples
 

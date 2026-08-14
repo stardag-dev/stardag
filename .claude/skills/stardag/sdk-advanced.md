@@ -323,6 +323,7 @@ app = StardagApp(
     worker_settings={"default": FunctionSettings(image=image)},
     watchdog_period_minutes=5,          # recommended with reactive mode
     limit_key_selector=lambda t: [],    # named concurrency-limit keys per task
+    container_setup=my_container_setup, # runs once in EVERY container
 )
 
 # After `stardag modal deploy`:
@@ -334,6 +335,16 @@ result = app.build_trigger(root_task, reactive=True)  # experimental: no
                                                    # scheduler ticks drive it
 app.build_spawn(root_task)                         # legacy fire-and-forget
 ```
+
+**Container setup**: `container_setup` (a zero-arg callable, `ContainerSetup`)
+runs once per container at the top of all five registered functions —
+`build`, `worker_*`, `tick`, `bootstrap`, `tick_watchdog` — before stardag's
+logging default. It is the only setup hook that reaches the reactive
+functions (a `tick`/`bootstrap`/`tick_watchdog` container has no `Builder`
+or `Runner` in it). It complements rather than replaces `Builder.setup(tasks)`
+(per build, `build` container only) and `Runner.setup(task)` (per task).
+Define it in a module importable inside the container — it is pickled by
+reference, like `worker_selector`.
 
 Worker executions are **detached** Modal function calls by default: they
 survive orchestrator restarts (resumed builds re-attach instead of

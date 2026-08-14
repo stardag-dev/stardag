@@ -39,6 +39,9 @@ modules directly. Roughly in the order a build passes through them:
   declaration and the merge applied to it.
 - :mod:`._protocols`, :mod:`._selector` — the contracts of the two
   callables an app deploys, and worker routing.
+- :mod:`._container_setup`, :mod:`._logging` — what runs at the top of
+  every container the app deploys: the app's own ``container_setup`` hook,
+  then stardag's logging default.
 - :mod:`._app` — ``StardagApp`` itself: registering those functions
   (``finalize``) and triggering builds on them.
 - :mod:`._builder` — the resident ``build`` function (``Builder``).
@@ -66,6 +69,7 @@ from stardag.integration.modal._builder import (
     PrefectBuilder,
 )
 from stardag.integration.modal._config import get_package_deps, with_stardag_on_image
+from stardag.integration.modal._container_setup import ContainerSetup
 from stardag.integration.modal._executor import ModalTaskExecutor
 from stardag.integration.modal._profile import get_profile_env_vars, get_profile_secret
 from stardag.integration.modal._protocols import BuildFunction, RunFunction
@@ -89,6 +93,7 @@ __all__ = [
     "BuildFailedError",
     "BuildFunction",
     "BuildTriggerResult",
+    "ContainerSetup",
     "ReactiveDiscovery",
     "RunFunction",
     "StardagApp",

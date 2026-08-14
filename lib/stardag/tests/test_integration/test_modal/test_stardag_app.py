@@ -1,5 +1,8 @@
 """Tests for StardagApp build_function and run_function customization."""
 
+import contextlib
+import threading
+import time
 import typing
 
 import pytest
@@ -15,6 +18,7 @@ from uuid import uuid4
 import stardag as _sd
 from stardag import BaseTask
 from stardag.build._base import BuildSummary
+from stardag.exceptions import StardagError
 from stardag.integration.modal import (
     Builder,
     BuildFunction,
@@ -24,6 +28,10 @@ from stardag.integration.modal import (
     StardagApp,
 )
 from stardag.integration.modal._builder import _default_build
+from stardag.integration.modal import _container_setup as _container_setup_module
+from stardag.integration.modal._container_setup import (
+    _reset_container_setup_for_testing,
+)
 from stardag.integration.modal._runner import _default_run
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
@@ -2690,3 +2698,364 @@ class TestBuildTickConfig:
         from stardag.integration.modal._tick import _TICK_KWARGS_ALLOWED
 
         assert "tick_timeout_seconds" not in _TICK_KWARGS_ALLOWED
+
+
+class TestContainerSetup:
+    """``StardagApp(container_setup=...)``: the app's per-container hook.
+
+    The point of the hook is that it reaches all five registered
+    functions. ``build`` and ``worker_*`` already import the app's code
+    (they close over its build/run functions); ``tick``, ``bootstrap`` and
+    ``tick_watchdog`` did not, and ``bootstrap`` closed over nothing of the
+    app's at all — so those three are what these tests are really about.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_container(self):
+        """Each test starts as a container that has not run setup yet."""
+        _reset_container_setup_for_testing()
+        yield
+        _reset_container_setup_for_testing()
+
+    @staticmethod
+    def _app(container_setup) -> StardagApp:
+        return StardagApp(
+            "test-app",
+            container_setup=container_setup,
+            build_function=lambda *args, **kwargs: None,
+            run_function=lambda task, **kwargs: None,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(image=_make_image()),
+                "gpu": FunctionSettings(image=_make_image()),
+            },
+            watchdog_period_minutes=5,
+        )
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _stubbed_bodies():
+        """Stub out what the wrappers delegate to, leaving only the hook."""
+        with contextlib.ExitStack() as stack:
+            tick = stack.enter_context(
+                patch("stardag.integration.modal._app._run_tick")
+            )
+            bootstrap = stack.enter_context(
+                patch("stardag.integration.modal._app.run_reactive_bootstrap")
+            )
+            stack.enter_context(
+                patch("stardag.integration.modal._app._run_watchdog_sweep")
+            )
+            tick.return_value = {}
+            bootstrap.return_value = MagicMock(summary={})
+            yield
+
+    # One invocation of each registered function, with dummy arguments.
+    _INVOCATIONS: dict[str, typing.Callable[[typing.Any], typing.Any]] = {
+        "build": lambda fn: fn("task", "selector", "test-app", None),
+        "worker_default": lambda fn: fn("task"),
+        "worker_gpu": lambda fn: fn("task"),
+        "tick": lambda fn: fn(str(uuid4()), None),
+        "bootstrap": lambda fn: fn(str(uuid4()), [], None),
+        "tick_watchdog": lambda fn: fn(),
+    }
+
+    @pytest.mark.parametrize("function_name", list(_INVOCATIONS))
+    def test_runs_in_every_registered_function(self, function_name):
+        """Including the three that import nothing of the app's own."""
+        calls = []
+        app = self._app(lambda: calls.append("setup"))
+        registered = _finalize_capturing_functions(app)
+
+        assert function_name in registered
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            self._INVOCATIONS[function_name](registered[function_name])
+
+        assert calls == ["setup"]
+
+    def test_runs_once_per_container_not_once_per_input(self):
+        """A worker serves many tasks and a tick container may be reused —
+        stardag holds the guard so apps need not write one."""
+        calls = []
+        app = self._app(lambda: calls.append("setup"))
+        registered = _finalize_capturing_functions(app)
+
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            registered["worker_default"]("task")
+            registered["worker_default"]("task")
+            registered["worker_gpu"]("task")
+            registered["build"]("task", "selector", "test-app", None)
+            registered["tick"](str(uuid4()), None)
+
+        assert calls == ["setup"]
+
+    def test_failure_propagates_and_is_retried_on_the_next_input(self):
+        """Not memoised on failure: the alternative is a container whose
+        remaining inputs run silently un-set-up."""
+        attempts = []
+
+        def flaky():
+            attempts.append("attempt")
+            if len(attempts) == 1:
+                raise RuntimeError("setup boom")
+
+        app = self._app(flaky)
+        registered = _finalize_capturing_functions(app)
+
+        with pytest.raises(RuntimeError, match="setup boom"):
+            registered["worker_default"]("task")
+        registered["worker_default"]("task")  # retried, and succeeds
+        registered["worker_default"]("task")  # now remembered as done
+
+        assert attempts == ["attempt", "attempt"]
+
+    def test_runs_before_stardag_logging_default(self):
+        """The whole reason an app can own its log formatter in these
+        containers: ``basicConfig`` no-ops once root has handlers."""
+        order = []
+        app = self._app(lambda: order.append("container_setup"))
+        registered = _finalize_capturing_functions(app)
+
+        with (
+            self._stubbed_bodies(),
+            registry_provider.override(NoOpRegistry()),
+            patch(
+                "stardag.integration.modal._app._setup_logging",
+                side_effect=lambda: order.append("stardag_logging"),
+            ),
+        ):
+            registered["bootstrap"](str(uuid4()), [], None)
+
+        assert order == ["container_setup", "stardag_logging"]
+
+    def test_two_apps_in_one_process_each_run_their_own_hook(self):
+        """The guard is per hook, not one global flag.
+
+        A deployed container only ever unpickles one app's closure, so in
+        production there is one hook — but a process holding two apps
+        would otherwise have the first app's hook silence the second's,
+        which is a wrong answer rather than a missed optimisation.
+        """
+        first, second = [], []
+        app_a = self._app(lambda: first.append("a"))
+        app_b = self._app(lambda: second.append("b"))
+        registered_a = _finalize_capturing_functions(app_a)
+        registered_b = _finalize_capturing_functions(app_b)
+
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            registered_a["worker_default"]("task")
+            registered_b["worker_default"]("task")
+            registered_a["worker_default"]("task")
+            registered_b["worker_default"]("task")
+
+        assert first == ["a"]
+        assert second == ["b"]
+
+    def test_defaults_to_none_and_is_a_no_op(self):
+        """Additive: an app that passes nothing behaves exactly as before."""
+        app = StardagApp(
+            "test-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+        assert app.container_setup is None
+
+        registered = _finalize_capturing_functions(app)
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            registered["tick"](str(uuid4()), None)
+
+        # Nothing recorded, so nothing was run and nothing is retained.
+        assert _container_setup_module._setup_done == []
+
+    def test_rejects_a_non_callable(self):
+        """Caught where the app is declared, not in a container hours later."""
+        with pytest.raises(TypeError, match="container_setup must be callable"):
+            self._app("not-callable")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("function_name", list(_INVOCATIONS))
+    def test_runs_before_the_wrapper_body(self, function_name):
+        """Not merely *that* it ran — that it ran FIRST.
+
+        Everything the feature claims rests on this: the hook has to
+        precede the wrapper's own body, which is what puts it ahead of
+        ``Builder.setup`` / ``Runner.setup`` / ``_run_tick`` and therefore
+        ahead of stardag's ``logging.basicConfig`` default. Asserting only
+        that the hook ran would pass with the call moved to the bottom of
+        every wrapper.
+        """
+        order: list[str] = []
+
+        def body(*args, **kwargs):
+            order.append("body")
+            return None
+
+        app = StardagApp(
+            "test-app",
+            container_setup=lambda: order.append("container_setup"),
+            build_function=body,
+            run_function=body,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(image=_make_image()),
+                "gpu": FunctionSettings(image=_make_image()),
+            },
+            watchdog_period_minutes=5,
+        )
+        registered = _finalize_capturing_functions(app)
+
+        with contextlib.ExitStack() as stack:
+            tick = stack.enter_context(
+                patch("stardag.integration.modal._app._run_tick")
+            )
+            bootstrap = stack.enter_context(
+                patch("stardag.integration.modal._app.run_reactive_bootstrap")
+            )
+            sweep = stack.enter_context(
+                patch("stardag.integration.modal._app._run_watchdog_sweep")
+            )
+            stack.enter_context(registry_provider.override(NoOpRegistry()))
+            tick.side_effect = lambda *a, **kw: (order.append("body"), {})[1]
+            bootstrap.side_effect = lambda *a, **kw: (
+                order.append("body"),
+                MagicMock(summary={}),
+            )[1]
+            sweep.side_effect = lambda *a, **kw: order.append("body")
+            self._INVOCATIONS[function_name](registered[function_name])
+
+        assert order == ["container_setup", "body"]
+
+    def test_watchdog_reentering_tick_does_not_rerun_or_deadlock(self):
+        """The watchdog sweep calls the tick wrapper in-process.
+
+        The guard's lock is a plain ``threading.Lock``, so a path that
+        re-entered it while holding it would deadlock the container rather
+        than fail it. The outer call has already released the lock and
+        recorded the hook by then, so the inner call short-circuits — pin
+        that, because a future change here fails silently until a watchdog
+        container hangs.
+        """
+        calls = []
+        app = self._app(lambda: calls.append("setup"))
+        registered = _finalize_capturing_functions(app)
+
+        with contextlib.ExitStack() as stack:
+            tick = stack.enter_context(
+                patch("stardag.integration.modal._app._run_tick")
+            )
+            sweep = stack.enter_context(
+                patch("stardag.integration.modal._app._run_watchdog_sweep")
+            )
+            stack.enter_context(registry_provider.override(NoOpRegistry()))
+            tick.return_value = {}
+            # Mimic the real sweep: invoke the tick wrapper it was handed.
+            sweep.side_effect = lambda registry, tick_fn, **kw: tick_fn("bid", None)
+            registered["tick_watchdog"]()
+
+        assert calls == ["setup"]
+        assert tick.call_count == 1
+
+    def test_concurrent_inputs_run_the_hook_exactly_once(self):
+        """``allow_concurrent_inputs`` serves inputs on threads.
+
+        Sparing every app from writing this guard is the stated reason it
+        lives in stardag, so the double-checked lock is worth pinning: a
+        regression to a bare check would let several threads through.
+        """
+        calls = []
+        barrier = threading.Barrier(8)
+
+        def slow_setup():
+            calls.append("setup")
+            time.sleep(0.05)
+
+        app = self._app(slow_setup)
+        registered = _finalize_capturing_functions(app)
+        errors: list[BaseException] = []
+
+        def invoke():
+            try:
+                barrier.wait(timeout=5)
+                registered["worker_default"]("task")
+            except BaseException as e:  # noqa: BLE001 - reported below
+                errors.append(e)
+
+        threads = [threading.Thread(target=invoke) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert errors == []
+        assert calls == ["setup"]
+
+    def test_rejects_a_hook_that_takes_arguments(self):
+        """The likelier mistake than a non-callable, and it would
+        otherwise deploy cleanly and raise in every container."""
+        with pytest.raises(TypeError, match="no arguments"):
+            self._app(lambda config: None)  # type: ignore[arg-type,misc]
+
+
+class TestUnreachableWorkerWarning:
+    """finalize() flags workers no task can be routed to.
+
+    Without a ``worker_selector`` everything routes to ``"default"``, so a
+    declared ``gpu`` worker is deployed and never reached — a deployment
+    that looks entirely healthy while running on the wrong tier.
+    """
+
+    @staticmethod
+    def _app(workers, worker_selector=None) -> StardagApp:
+        return StardagApp(
+            "test-app",
+            worker_selector=worker_selector,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                name: FunctionSettings(image=_make_image()) for name in workers
+            },
+        )
+
+    def test_warns_when_extra_workers_have_no_selector(self, caplog):
+        app = self._app(["default", "gpu", "high_memory"])
+
+        with caplog.at_level("WARNING", logger="stardag.integration.modal._app"):
+            _finalize_capturing_functions(app)
+
+        assert "no worker_selector" in caplog.text
+        # Names the workers that are actually unreachable, not "default".
+        assert "gpu, high_memory" in caplog.text
+
+    def test_no_warning_when_a_selector_is_declared(self, caplog):
+        """Explicit is intent — even a selector that returns 'default'."""
+        app = self._app(["default", "gpu"], worker_selector=lambda task: "default")
+
+        with caplog.at_level("WARNING", logger="stardag.integration.modal._app"):
+            _finalize_capturing_functions(app)
+
+        assert "worker_selector" not in caplog.text
+
+    def test_raises_when_there_is_no_default_worker_and_no_selector(self):
+        """Nothing works at all here, so it is an error, not a warning:
+        every task routes to a function the app does not deploy."""
+        app = self._app(["gpu", "high_memory"])
+
+        with pytest.raises(StardagError, match="no 'default' worker"):
+            _finalize_capturing_functions(app)
+
+    def test_no_default_worker_is_fine_with_a_declared_selector(self):
+        """An app routing everything to its own tiers works today —
+        refusing it would break a working deployment over a name."""
+        app = self._app(["gpu"], worker_selector=lambda task: "gpu")
+
+        registered = _finalize_capturing_functions(app)
+
+        assert "worker_gpu" in registered
+        assert "worker_default" not in registered
+
+    def test_no_warning_for_a_single_worker(self, caplog):
+        """The default routing is correct by construction here."""
+        app = self._app(["default"])
+
+        with caplog.at_level("WARNING", logger="stardag.integration.modal._app"):
+            _finalize_capturing_functions(app)
+
+        assert "worker_selector" not in caplog.text

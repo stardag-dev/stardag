@@ -533,7 +533,12 @@ class Runner(RunFunction):
         self.report_lifecycle = report_lifecycle
 
     def setup(self, task: BaseTask) -> None:
-        """Optional setup logic before the task runs."""
+        """Optional setup logic before the task runs.
+
+        Per *task*, so it runs again for every input a worker container
+        serves. Setup that need only happen once per container belongs in
+        ``StardagApp(container_setup=...)`` instead — it runs before this.
+        """
         _setup_logging()
 
     def teardown(self, task: BaseTask, exception: BaseException | None) -> None:
