@@ -1,4 +1,5 @@
 import json
+import logging
 import typing
 from contextlib import contextmanager
 
@@ -6,6 +7,8 @@ from stardag.config import DEFAULT_TARGET_ROOT_KEY, config_provider
 from stardag.target import DirectoryTarget, FileTarget, LocalFileTarget
 from stardag.target._base import RemoteFileTarget
 from stardag.utils.resource_provider import resource_provider
+
+logger = logging.getLogger(__name__)
 
 # A class or callable that takes a (fully qualifed/"absolute") path (/uri) and returns
 # a FileTarget.
@@ -16,6 +19,25 @@ PrefixToFileTargetPrototype = typing.Mapping[str, FileTargetPrototype]
 
 
 def get_default_prefix_to_target_prototype() -> dict[str, FileTargetPrototype]:
+    """The built-in URI-prefix → target mapping, with optional integrations.
+
+    Every stardag process that resolves a target root goes through here, so
+    this is a load-bearing import site: it reaches into
+    ``stardag.integration.*`` for backends whose third-party dependency may
+    or may not be installed. An integration that is merely *absent* is the
+    expected case (``ImportError`` → that prefix is unsupported), but an
+    integration that is installed and **broken** must not take the process
+    with it. A user who only ever writes to local files or S3 should not
+    fail to import a target because, say, the Modal integration does not
+    like the ``modal`` version that happens to be in the environment — they
+    would get an error from a backend they never asked for, on a code path
+    that has nothing to do with it.
+
+    So each guard is deliberately broad, and logs rather than passes: the
+    prefix drops out of the mapping, and anyone who *does* use it gets the
+    ordinary "unsupported prefix" error from
+    :meth:`TargetFactory.get_target` plus a warning naming the real cause.
+    """
     prefix_to_target_prototype: dict[str, FileTargetPrototype] = {
         "/": LocalFileTarget,
     }
@@ -29,6 +51,12 @@ def get_default_prefix_to_target_prototype() -> dict[str, FileTargetPrototype]:
         prefix_to_target_prototype["s3://"] = s3_target_from_path
     except ImportError:
         pass
+    except Exception:
+        logger.warning(
+            "The stardag S3 integration is installed but failed to import; "
+            "the 's3://' target prefix is unavailable in this process.",
+            exc_info=True,
+        )
 
     # Modal integration
     try:
@@ -37,6 +65,13 @@ def get_default_prefix_to_target_prototype() -> dict[str, FileTargetPrototype]:
         prefix_to_target_prototype["modalvol://"] = get_modal_target
     except ImportError:
         pass
+    except Exception:
+        logger.warning(
+            "The stardag Modal integration is installed but failed to "
+            "import; the 'modalvol://' target prefix is unavailable in this "
+            "process.",
+            exc_info=True,
+        )
 
     return prefix_to_target_prototype
 

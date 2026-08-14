@@ -6,6 +6,44 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-08-14
+
+### Fixed
+
+- **`0.19.0` could fail at import for anyone who had `modal` installed but
+  was not using it.** `stardag.integration.modal._runner` read
+  `modal.exception.InputCancellation` with only a bare `import modal` in
+  scope, at module level. `exception` is not in modal's `__all__`, and
+  modal's package `__getattr__` raises for anything it does not export, so
+  that attribute exists only when something else in the process has already
+  imported the submodule — an accident of the import graph. Where nothing
+  had, importing the integration raised
+
+  ```
+  AttributeError: module 'modal' has no attribute 'exception'
+  ```
+
+  This was not confined to Modal users.
+  `get_default_prefix_to_target_prototype()` imports the Modal integration to
+  register the `modalvol://` prefix, so the failure landed on the ordinary
+  target-factory path — `get_file_target` / `get_directory_target` — in any
+  process where `modal` was merely present, typically as a transitive
+  dependency. Services that never touched Modal crashed at import.
+
+  Fixed by importing the name out of the submodule
+  (`from modal.exception import InputCancellation`), which does not depend on
+  the parent-package attribute. `_app.py` had the same latent pattern in an
+  `except` clause and is fixed the same way. Affects `0.19.0` only.
+
+- **A broken optional integration no longer takes down the target factory.**
+  The guards in `get_default_prefix_to_target_prototype()` caught only
+  `ImportError` — the "not installed" case — so anything else raised while
+  importing an integration propagated and killed target resolution for every
+  prefix, including purely local ones. They now also catch and log an
+  unexpected failure: the affected prefix drops out of the mapping (using it
+  gives the ordinary unsupported-prefix error) and a warning names the real
+  cause. A genuinely absent dependency stays silent, as before.
+
 ## [0.19.0] — 2026-08-13
 
 ### Registry API

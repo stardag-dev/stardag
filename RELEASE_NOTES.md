@@ -6,6 +6,32 @@ For changes to the Registry API, UI, and other components, see [CHANGELOG.md](CH
 
 ---
 
+## v0.19.1 — Import fix for `0.19.0`
+
+**Upgrade if you are on `0.19.0`.** No API changes, nothing to migrate.
+
+`0.19.0` could raise at import time:
+
+```
+AttributeError: module 'modal' has no attribute 'exception'
+```
+
+You did not have to be using Modal to hit it. The Modal integration read
+`modal.exception` off a bare `import modal`, and the target factory imports
+that integration to register the `modalvol://` prefix — so the crash landed
+on `get_file_target` / `get_directory_target`, the ordinary path every task
+with a target goes through. Any environment with the `modal` package merely
+present, often as a transitive dependency, could be affected. Whether it
+actually raised came down to import order: `modal.exception` is bound on the
+`modal` package only if something else imported the submodule first, so the
+same code worked in one environment and failed in the next.
+
+Also in this release: an optional integration that fails to import for an
+unexpected reason no longer takes the target factory with it. Only that
+integration's prefix drops out, with a logged warning naming the cause — the
+guard previously handled "not installed" and nothing else, which is what
+turned the bug above into a hard crash instead of a degraded `modalvol://`.
+
 ## v0.19.0 — A task can survive being interrupted
 
 Modal takes containers away. It reclaims preemptible instances, and it kills
