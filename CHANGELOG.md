@@ -58,6 +58,19 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   Additive — an app that passes nothing behaves exactly as before. The new
   `ContainerSetup` type alias is exported from `stardag.integration.modal`.
 
+- **`finalize()` now warns about workers nothing can route to.** An app that
+  declares several `worker_settings` but no `worker_selector` sends every task
+  to `"default"`, so its other tiers are deployed and never reached — and the
+  symptom is indistinguishable from a healthy deployment, because the build
+  succeeds, just entirely on the wrong worker. The warning names the
+  unreachable workers and fires at deploy, not on the app object the
+  triggering process constructs. Passing a selector explicitly — even one that
+  always returns `"default"` — silences it. Per-trigger overrides
+  (`build_spawn`/`build_trigger(worker_selector=...)`) remain a valid way to
+  route a **resident** build; reactive builds reject them, since later ticks
+  could not honour them, which is why the app-level selector is what the
+  warning points at.
+
 ## [0.19.1] — 2026-08-14
 
 ### Fixed

@@ -100,6 +100,20 @@ again for the rest of that container's inputs.
 See [Integrate with Modal](https://stardag-dev.github.io/stardag/how-to/integrate-modal/)
 for the full section.
 
+### Also: a warning for workers nothing can reach
+
+`finalize()` now warns when an app declares several `worker_settings` but no
+`worker_selector`. Every task then routes to `"default"`, so the other tiers
+are deployed and never reached — and nothing looks wrong, because the build
+succeeds, just entirely on the wrong worker. The warning names the unreachable
+workers, and passing a selector explicitly — even one that always returns
+`"default"` — silences it.
+
+Per-trigger overrides (`build_spawn`/`build_trigger(worker_selector=...)`)
+remain a valid way to route a _resident_ build. Reactive builds reject them,
+because later ticks (worker wake-ups, watchdog sweeps) could not honour them,
+which is why the app-level selector is what the warning points at.
+
 ---
 
 ## v0.19.1 — A user package named `modal` no longer breaks target resolution

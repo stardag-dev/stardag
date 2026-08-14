@@ -348,7 +348,12 @@ class StardagApp:
             worker_settings: Dict of worker name to settings. Must include
                 "default". Fully independent per worker.
             worker_selector: Function to select the worker name for each task.
-                Defaults to always returning "default".
+                Defaults to always returning "default" — which means an app
+                that declares more than one worker and leaves this unset
+                deploys workers nothing can reach, so ``finalize()`` warns
+                about it. Passing a selector explicitly, even one that
+                always returns ``"default"``, is how to say that is
+                intended.
             tick_settings: Settings for the reactive-scheduling ``tick`` /
                 ``tick_watchdog`` functions. Defaults to ``builder_settings``
                 when not given.
@@ -479,6 +484,12 @@ class StardagApp:
             self.modal_app = modal_app_or_name
 
         self.worker_selector = worker_selector or _default_worker_selector
+        # Whether a selector was *declared*, as opposed to defaulted. Only
+        # used for the deploy-time reachability warning in finalize(): an
+        # app with several workers and no selector routes everything to
+        # "default". Explicitly passing one — even one that always returns
+        # "default" — is the way to say that is intended.
+        self._worker_selector_declared = worker_selector is not None
         self._build_function = build_function
         self._run_function = run_function
         # The app's container-level setup, closed over by every registered
@@ -680,6 +691,41 @@ class StardagApp:
             extra_secrets.append(self.stardag_api_key_secret)
         return extra_secrets
 
+    def _warn_if_workers_unreachable(self) -> None:
+        """Warn at deploy when extra workers cannot be routed to.
+
+        Without a ``worker_selector`` every task routes to ``"default"``,
+        so an app that went to the trouble of declaring a ``gpu`` worker
+        deploys one that nothing will ever reach. The symptom is
+        indistinguishable from a working deployment — the build succeeds,
+        just entirely on the wrong tier — so it is worth one line at the
+        only moment someone is watching: the deploy.
+
+        Deliberately in ``finalize()`` rather than ``__init__``: the app
+        object is also constructed in the *triggering* process, which has
+        no business being warned about the deployment's configuration.
+
+        Not an error, because per-trigger overrides
+        (``build_spawn(tasks, worker_selector=...)``) are a legitimate way
+        to route a resident build. They are not available to reactive
+        builds, though, which is why the app-level selector is the answer
+        being pointed at.
+        """
+        if self._worker_selector_declared or len(self._worker_settings) <= 1:
+            return
+        extra = sorted(name for name in self._worker_settings if name != "default")
+        logger.warning(
+            f"StardagApp {self.name!r} declares {len(self._worker_settings)} "
+            f"workers but no worker_selector, so every task routes to "
+            f"'default' and these are unreachable: {', '.join(extra)}. Pass "
+            f"worker_selector=... to StardagApp (see WorkerSelectorByName). "
+            f"Per-trigger overrides — build_spawn/build_trigger("
+            f"worker_selector=...) — cover resident builds only; reactive "
+            f"builds reject them, because later ticks could not honour "
+            f"them. If routing everything to 'default' is intended, pass a "
+            f"selector that says so to silence this."
+        )
+
     def _worker_timeouts(self) -> dict[str, int]:
         """Per-worker Modal ``timeout``, as declared in ``worker_settings``.
 
@@ -729,6 +775,8 @@ class StardagApp:
         """
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
+
+        self._warn_if_workers_unreachable()
 
         # Discover and create Modal volumes from target roots
         target_roots_volumes = get_target_roots_volumes(

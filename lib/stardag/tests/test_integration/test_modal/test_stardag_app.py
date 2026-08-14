@@ -2841,3 +2841,51 @@ class TestContainerSetup:
         """Caught where the app is declared, not in a container hours later."""
         with pytest.raises(TypeError, match="container_setup must be callable"):
             self._app("not-callable")  # type: ignore[arg-type]
+
+
+class TestUnreachableWorkerWarning:
+    """finalize() flags workers no task can be routed to.
+
+    Without a ``worker_selector`` everything routes to ``"default"``, so a
+    declared ``gpu`` worker is deployed and never reached — a deployment
+    that looks entirely healthy while running on the wrong tier.
+    """
+
+    @staticmethod
+    def _app(workers, worker_selector=None) -> StardagApp:
+        return StardagApp(
+            "test-app",
+            worker_selector=worker_selector,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                name: FunctionSettings(image=_make_image()) for name in workers
+            },
+        )
+
+    def test_warns_when_extra_workers_have_no_selector(self, caplog):
+        app = self._app(["default", "gpu", "high_memory"])
+
+        with caplog.at_level("WARNING", logger="stardag.integration.modal._app"):
+            _finalize_capturing_functions(app)
+
+        assert "no worker_selector" in caplog.text
+        # Names the workers that are actually unreachable, not "default".
+        assert "gpu, high_memory" in caplog.text
+
+    def test_no_warning_when_a_selector_is_declared(self, caplog):
+        """Explicit is intent — even a selector that returns 'default'."""
+        app = self._app(["default", "gpu"], worker_selector=lambda task: "default")
+
+        with caplog.at_level("WARNING", logger="stardag.integration.modal._app"):
+            _finalize_capturing_functions(app)
+
+        assert "worker_selector" not in caplog.text
+
+    def test_no_warning_for_a_single_worker(self, caplog):
+        """The default routing is correct by construction here."""
+        app = self._app(["default"])
+
+        with caplog.at_level("WARNING", logger="stardag.integration.modal._app"):
+            _finalize_capturing_functions(app)
+
+        assert "worker_selector" not in caplog.text
