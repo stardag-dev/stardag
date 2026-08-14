@@ -486,7 +486,14 @@ class StardagApp:
             assert modal_app_or_name.name is not None
             self.modal_app = modal_app_or_name
 
-        self.worker_selector = worker_selector or _default_worker_selector
+        # `is not None` rather than truthiness: a selector is an arbitrary
+        # callable, and one whose class defines __bool__/__len__ falsey
+        # would otherwise be silently swapped for the default — and, since
+        # the warning below keys off declaration, swapped *without* the
+        # warning that is supposed to catch exactly that outcome.
+        self.worker_selector = (
+            worker_selector if worker_selector is not None else _default_worker_selector
+        )
         # Whether a selector was *declared*, as opposed to defaulted. Only
         # used for the deploy-time reachability warning in finalize(): an
         # app with several workers and no selector routes everything to
