@@ -713,27 +713,51 @@ class StardagApp:
             extra_secrets.append(self.stardag_api_key_secret)
         return extra_secrets
 
-    def _warn_if_workers_unreachable(self) -> None:
-        """Warn at deploy when extra workers cannot be routed to.
+    def _check_worker_routing(self) -> None:
+        """Check at deploy that tasks can reach the workers being deployed.
 
-        Without a ``worker_selector`` every task routes to ``"default"``,
-        so an app that went to the trouble of declaring a ``gpu`` worker
-        deploys one that nothing will ever reach. The symptom is
-        indistinguishable from a working deployment — the build succeeds,
-        just entirely on the wrong tier — so it is worth one line at the
-        only moment someone is watching: the deploy.
+        Two failure shapes, and the difference in severity is the whole
+        point. With no ``worker_selector`` every task routes to
+        ``"default"``:
+
+        - **No ``"default"`` worker at all** — nothing works. Every task
+          routes to a function this app does not deploy, so the deployment
+          is dead on arrival. Raises.
+        - **A ``"default"`` plus other tiers** — everything works, on the
+          wrong worker. The build succeeds, so the symptom is
+          indistinguishable from a healthy deployment, which is exactly
+          why it is worth one line at the only moment someone is watching.
+          Warns.
+
+        The error is scoped to the case where no selector was declared. An
+        app that declares one is free to omit ``"default"`` and route
+        everything to its own tiers — that works today, and refusing it
+        would break a working deployment to enforce a naming convention.
 
         Deliberately in ``finalize()`` rather than ``__init__``: the app
         object is also constructed in the *triggering* process, which has
-        no business being warned about the deployment's configuration.
+        no business being told about the deployment's configuration.
 
-        Not an error, because per-trigger overrides
+        The warning is not an error because per-trigger overrides
         (``build_spawn(tasks, worker_selector=...)``) are a legitimate way
         to route a resident build. They are not available to reactive
         builds, though, which is why the app-level selector is the answer
         being pointed at.
         """
-        if self._worker_selector_declared or len(self._worker_settings) <= 1:
+        if self._worker_selector_declared:
+            return
+        if "default" not in self._worker_settings:
+            declared = sorted(self._worker_settings) or ["<none>"]
+            raise StardagError(
+                f"StardagApp {self.name!r} has no 'default' worker and no "
+                f"worker_selector, so every task would route to a "
+                f"'worker_default' function this app does not deploy. "
+                f"Declared workers: {', '.join(declared)}. Either add a "
+                f"'default' entry to worker_settings, or pass "
+                f"worker_selector=... so tasks are routed to the workers "
+                f"that do exist (see WorkerSelectorByName)."
+            )
+        if len(self._worker_settings) <= 1:
             return
         extra = sorted(name for name in self._worker_settings if name != "default")
         logger.warning(
@@ -798,7 +822,7 @@ class StardagApp:
         if self._is_finalized:
             raise RuntimeError("StardagApp has already been finalized")
 
-        self._warn_if_workers_unreachable()
+        self._check_worker_routing()
 
         # Discover and create Modal volumes from target roots
         target_roots_volumes = get_target_roots_volumes(

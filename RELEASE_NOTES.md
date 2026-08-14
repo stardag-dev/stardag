@@ -102,7 +102,17 @@ again for the rest of that container's inputs.
 See [Integrate with Modal](https://stardag-dev.github.io/stardag/how-to/integrate-modal/)
 for the full section.
 
-### Also: a warning for workers nothing can reach
+### Also: worker routing is checked at deploy
+
+An app with **no `"default"` worker and no `worker_selector`** now fails
+`finalize()` instead of deploying. Every task would route to a
+`worker_default` function the app does not deploy, so nothing would have
+worked; previously it deployed cleanly and failed at the first task. This is
+scoped to the no-selector case — an app that declares a selector may omit
+`"default"` and route everything to its own tiers, which works today and
+keeps working.
+
+The softer case gets a warning instead.
 
 `finalize()` now warns when an app declares several `worker_settings` but no
 `worker_selector`. Every task then routes to `"default"`, so the other tiers

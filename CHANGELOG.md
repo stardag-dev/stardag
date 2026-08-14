@@ -58,6 +58,13 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
   Additive — an app that passes nothing behaves exactly as before. The new
   `ContainerSetup` type alias is exported from `stardag.integration.modal`.
 
+- **`finalize()` now fails an app with no `"default"` worker and no
+  `worker_selector`.** Every task would route to a `worker_default` function
+  the app does not deploy, so the deployment is dead on arrival — previously
+  it deployed cleanly and failed at the first task. Scoped to the
+  no-selector case: an app that declares a selector may omit `"default"` and
+  route everything to its own tiers, which works today and keeps working.
+
 - **`finalize()` now warns about workers nothing can route to.** An app that
   declares several `worker_settings` but no `worker_selector` sends every task
   to `"default"`, so its other tiers are deployed and never reached — and the

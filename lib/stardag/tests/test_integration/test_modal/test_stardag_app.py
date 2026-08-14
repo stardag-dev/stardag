@@ -18,6 +18,7 @@ from uuid import uuid4
 import stardag as _sd
 from stardag import BaseTask
 from stardag.build._base import BuildSummary
+from stardag.exceptions import StardagError
 from stardag.integration.modal import (
     Builder,
     BuildFunction,
@@ -3031,6 +3032,24 @@ class TestUnreachableWorkerWarning:
             _finalize_capturing_functions(app)
 
         assert "worker_selector" not in caplog.text
+
+    def test_raises_when_there_is_no_default_worker_and_no_selector(self):
+        """Nothing works at all here, so it is an error, not a warning:
+        every task routes to a function the app does not deploy."""
+        app = self._app(["gpu", "high_memory"])
+
+        with pytest.raises(StardagError, match="no 'default' worker"):
+            _finalize_capturing_functions(app)
+
+    def test_no_default_worker_is_fine_with_a_declared_selector(self):
+        """An app routing everything to its own tiers works today —
+        refusing it would break a working deployment over a name."""
+        app = self._app(["gpu"], worker_selector=lambda task: "gpu")
+
+        registered = _finalize_capturing_functions(app)
+
+        assert "worker_gpu" in registered
+        assert "worker_default" not in registered
 
     def test_no_warning_for_a_single_worker(self, caplog):
         """The default routing is correct by construction here."""
