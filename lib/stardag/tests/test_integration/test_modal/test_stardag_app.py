@@ -1,5 +1,6 @@
 """Tests for StardagApp build_function and run_function customization."""
 
+import contextlib
 import typing
 
 import pytest
@@ -24,6 +25,9 @@ from stardag.integration.modal import (
     StardagApp,
 )
 from stardag.integration.modal._builder import _default_build
+from stardag.integration.modal._container_setup import (
+    _reset_container_setup_for_testing,
+)
 from stardag.integration.modal._runner import _default_run
 from stardag.registry import NoOpRegistry, RegistryABC, registry_provider
 
@@ -2690,3 +2694,150 @@ class TestBuildTickConfig:
         from stardag.integration.modal._tick import _TICK_KWARGS_ALLOWED
 
         assert "tick_timeout_seconds" not in _TICK_KWARGS_ALLOWED
+
+
+class TestContainerSetup:
+    """``StardagApp(container_setup=...)``: the app's per-container hook.
+
+    The point of the hook is that it reaches all five registered
+    functions. ``build`` and ``worker_*`` already import the app's code
+    (they close over its build/run functions); ``tick``, ``bootstrap`` and
+    ``tick_watchdog`` did not, and ``bootstrap`` closed over nothing of the
+    app's at all — so those three are what these tests are really about.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_container(self):
+        """Each test starts as a container that has not run setup yet."""
+        _reset_container_setup_for_testing()
+        yield
+        _reset_container_setup_for_testing()
+
+    @staticmethod
+    def _app(container_setup) -> StardagApp:
+        return StardagApp(
+            "test-app",
+            container_setup=container_setup,
+            build_function=lambda *args, **kwargs: None,
+            run_function=lambda task, **kwargs: None,
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={
+                "default": FunctionSettings(image=_make_image()),
+                "gpu": FunctionSettings(image=_make_image()),
+            },
+            watchdog_period_minutes=5,
+        )
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _stubbed_bodies():
+        """Stub out what the wrappers delegate to, leaving only the hook."""
+        with contextlib.ExitStack() as stack:
+            tick = stack.enter_context(
+                patch("stardag.integration.modal._app._run_tick")
+            )
+            bootstrap = stack.enter_context(
+                patch("stardag.integration.modal._app.run_reactive_bootstrap")
+            )
+            stack.enter_context(
+                patch("stardag.integration.modal._app._run_watchdog_sweep")
+            )
+            tick.return_value = {}
+            bootstrap.return_value = MagicMock(summary={})
+            yield
+
+    # One invocation of each registered function, with dummy arguments.
+    _INVOCATIONS: dict[str, typing.Callable[[typing.Any], typing.Any]] = {
+        "build": lambda fn: fn("task", "selector", "test-app", None),
+        "worker_default": lambda fn: fn("task"),
+        "worker_gpu": lambda fn: fn("task"),
+        "tick": lambda fn: fn(str(uuid4()), None),
+        "bootstrap": lambda fn: fn(str(uuid4()), [], None),
+        "tick_watchdog": lambda fn: fn(),
+    }
+
+    @pytest.mark.parametrize("function_name", list(_INVOCATIONS))
+    def test_runs_in_every_registered_function(self, function_name):
+        """Including the three that import nothing of the app's own."""
+        calls = []
+        app = self._app(lambda: calls.append("setup"))
+        registered = _finalize_capturing_functions(app)
+
+        assert function_name in registered
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            self._INVOCATIONS[function_name](registered[function_name])
+
+        assert calls == ["setup"]
+
+    def test_runs_once_per_container_not_once_per_input(self):
+        """A worker serves many tasks and a tick container may be reused —
+        stardag holds the guard so apps need not write one."""
+        calls = []
+        app = self._app(lambda: calls.append("setup"))
+        registered = _finalize_capturing_functions(app)
+
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            registered["worker_default"]("task")
+            registered["worker_default"]("task")
+            registered["worker_gpu"]("task")
+            registered["build"]("task", "selector", "test-app", None)
+            registered["tick"](str(uuid4()), None)
+
+        assert calls == ["setup"]
+
+    def test_failure_propagates_and_is_retried_on_the_next_input(self):
+        """Not memoised on failure: the alternative is a container whose
+        remaining inputs run silently un-set-up."""
+        attempts = []
+
+        def flaky():
+            attempts.append("attempt")
+            if len(attempts) == 1:
+                raise RuntimeError("setup boom")
+
+        app = self._app(flaky)
+        registered = _finalize_capturing_functions(app)
+
+        with pytest.raises(RuntimeError, match="setup boom"):
+            registered["worker_default"]("task")
+        registered["worker_default"]("task")  # retried, and succeeds
+        registered["worker_default"]("task")  # now remembered as done
+
+        assert attempts == ["attempt", "attempt"]
+
+    def test_runs_before_stardag_logging_default(self):
+        """The whole reason an app can own its log formatter in these
+        containers: ``basicConfig`` no-ops once root has handlers."""
+        order = []
+        app = self._app(lambda: order.append("container_setup"))
+        registered = _finalize_capturing_functions(app)
+
+        with (
+            self._stubbed_bodies(),
+            registry_provider.override(NoOpRegistry()),
+            patch(
+                "stardag.integration.modal._app._setup_logging",
+                side_effect=lambda: order.append("stardag_logging"),
+            ),
+        ):
+            registered["bootstrap"](str(uuid4()), [], None)
+
+        assert order == ["container_setup", "stardag_logging"]
+
+    def test_defaults_to_none_and_is_a_no_op(self):
+        """Additive: an app that passes nothing behaves exactly as before."""
+        app = StardagApp(
+            "test-app",
+            builder_settings=FunctionSettings(image=_make_image()),
+            worker_settings={"default": FunctionSettings(image=_make_image())},
+        )
+        assert app.container_setup is None
+
+        registered = _finalize_capturing_functions(app)
+        with self._stubbed_bodies(), registry_provider.override(NoOpRegistry()):
+            registered["tick"](str(uuid4()), None)
+
+    def test_rejects_a_non_callable(self):
+        """Caught where the app is declared, not in a container hours later."""
+        with pytest.raises(TypeError, match="container_setup must be callable"):
+            self._app("not-callable")  # type: ignore[arg-type]

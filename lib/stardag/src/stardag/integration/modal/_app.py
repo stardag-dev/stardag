@@ -38,6 +38,10 @@ from stardag.integration.modal._bootstrap import (
     run_reactive_bootstrap,
 )
 from stardag.integration.modal._builder import _default_build
+from stardag.integration.modal._container_setup import (
+    ContainerSetup,
+    _run_container_setup,
+)
 from stardag.integration.modal._logging import _setup_logging
 from stardag.integration.modal._metadata import (
     MODAL_EXECUTOR_NAME,
@@ -218,6 +222,8 @@ class StardagApp:
         modal_app: The underlying modal.App instance.
         name: The app name.
         is_finalized: Whether finalize() has been called.
+        container_setup: The app's container-level setup hook, or None
+            (see the ``container_setup`` argument).
         task_modules: The validated task-module patterns (see the
             ``task_modules`` argument); empty when opted out.
         require_pickle_free: Whether a reactive build refuses to fall
@@ -232,6 +238,7 @@ class StardagApp:
         *,
         build_function: BuildFunction = _default_build,
         run_function: RunFunction = _default_run,
+        container_setup: ContainerSetup | None = None,
         builder_settings: FunctionSettings,
         worker_settings: dict[str, FunctionSettings],
         worker_selector: WorkerSelector | None = None,
@@ -258,18 +265,82 @@ class StardagApp:
                 ``Builder`` for customization, or implement the protocol
                 directly.
 
-                Any module-level code in the module where this callable is
-                defined will run inside the Modal container at import time —
-                use this for container-level setup.
+                Because this callable is pickled by reference, the module
+                defining it is imported inside the ``build`` container, so
+                its module-level code runs there. That is a property of
+                the ``build`` container only — for setup that must run in
+                *every* container the app deploys, pass
+                ``container_setup``.
             run_function: Callable registered as the Modal worker functions.
                 Must match the ``RunFunction`` protocol:
                 ``(task) -> None``.
                 Defaults to ``Runner()`` which provides overridable
                 ``setup()``/``teardown()`` hooks.
 
-                Any module-level code in the module where this callable is
-                defined will run inside the Modal container at import time —
-                use this for worker-level setup (GPU init, library preloading).
+                As with ``build_function``, the module defining this
+                callable is imported inside every ``worker_*`` container —
+                use that (or ``Runner.setup()``) for worker-specific setup
+                such as GPU init or library preloading, and
+                ``container_setup`` for setup every container needs.
+            container_setup: Called once per container, at the top of
+                **every** function this app registers — ``build``, each
+                ``worker_*``, and the reactive ``tick``, ``bootstrap`` and
+                ``tick_watchdog`` — before any stardag work and before the
+                per-build/per-task ``Builder.setup()`` / ``Runner.setup()``
+                hooks. Takes no arguments. Default: nothing to run.
+
+                This is the hook for state a container must have before it
+                does anything: credentials materialised onto disk, log
+                formatting, environment validation. Without it, whether an
+                app's setup code runs at all depends on which of its
+                modules a given function's closure happens to drag in —
+                dependable for ``build`` and ``worker_*``, which close over
+                the callables above, but not for the reactive functions,
+                and not at all for ``bootstrap``.
+
+                **It does not replace a custom builder or runner, and they
+                do not replace it.** The three hooks have different scopes
+                and all three are expected to be used together:
+
+                - ``container_setup`` — the *container*. Once, before
+                  anything else, in all five functions. Nothing about a
+                  build or a task is in scope here (it takes no arguments).
+                - ``Builder.setup(tasks)`` — one *build*, in the ``build``
+                  container only. Prep that depends on the roots being
+                  built.
+                - ``Runner.setup(task)`` — one *task*, before each input a
+                  worker serves. Prep that depends on that task.
+
+                The split is not a matter of taste for the reactive
+                functions: a ``tick``, ``bootstrap`` or ``tick_watchdog``
+                container has no ``Builder`` and no ``Runner`` in it at
+                all, so ``container_setup`` is the *only* hook that reaches
+                them. Conversely, moving per-task work into
+                ``container_setup`` would run it once and then never again
+                for the rest of that container's inputs.
+
+                **Once per container, not once per input.** A worker
+                serves many tasks and a tick container may be reused;
+                stardag holds the guard so apps do not each have to write
+                one. A hook that raises propagates and is *not* remembered
+                as done — the next input tries again — so a hook that
+                fails deterministically fails every input rather than
+                letting later ones run un-set-up.
+
+                **Ordering with logging.** The hook runs before stardag's
+                own ``logging.basicConfig`` default, and ``basicConfig``
+                no-ops once the root logger has handlers, so a hook that
+                configures root logging wins and an app that does not still
+                gets the default. A hook that instead configures a
+                non-root logger will still see stardag add a root
+                ``StreamHandler``.
+
+                Like ``worker_selector`` and the callables above, this is
+                captured by the serialized Modal functions, so **define it
+                in a module that is importable inside the container**
+                (source added via ``add_local_python_source(...)``, not a
+                loose deploy script). That is also what makes module-level
+                code in the hook's own module run in every container.
             builder_settings: Settings for the "build" function. Each
                 function's settings are independent — nothing is propagated
                 between them, except ``stardag_api_key_secret`` (below) and
@@ -410,6 +481,16 @@ class StardagApp:
         self.worker_selector = worker_selector or _default_worker_selector
         self._build_function = build_function
         self._run_function = run_function
+        # The app's container-level setup, closed over by every registered
+        # wrapper in finalize(). Deployed-app configuration exactly like
+        # worker_selector: captured here, pickled by reference into the
+        # serialized functions, run once per container.
+        if container_setup is not None and not callable(container_setup):
+            raise TypeError(
+                f"container_setup must be callable, got "
+                f"{type(container_setup).__name__}"
+            )
+        self.container_setup = container_setup
         self._builder_settings = builder_settings
         self._worker_settings = worker_settings
         # Reactive scheduling: the "tick" function's settings (defaults to
@@ -683,6 +764,13 @@ class StardagApp:
         # Modal's is_async() only accepts inspect.isfunction()-compatible objects,
         # not callable class instances. The wrappers delegate to the actual callable
         # and are what get serialized/sent to Modal.
+        #
+        # Every wrapper below opens with _run_container_setup(container_setup):
+        # it is the app's one chance to prepare a container, and the top of
+        # the wrapper is the only place common to all five functions that
+        # runs before any stardag work. _run_container_setup no-ops when the
+        # app supplied no hook, and after the first input in this container.
+        container_setup = self.container_setup
         build_fn = self._build_function
 
         def _modal_build(
@@ -691,6 +779,7 @@ class StardagApp:
             app_name: str,
             build_kwargs: dict[str, typing.Any] | None = None,
         ) -> BuildSummary | None:
+            _run_container_setup(container_setup)
             return build_fn(tasks, worker_selector, app_name, build_kwargs=build_kwargs)
 
         run_fn = self._run_function
@@ -703,6 +792,7 @@ class StardagApp:
         def _modal_run(
             task: BaseTask, *, env_overrides: dict[str, str] | None = None
         ) -> typing.Any:
+            _run_container_setup(container_setup)
             # Publish the app's task-module patterns for the worker-side
             # code that needs them but is nowhere near the app object:
             # _WorkerLifecycleReporter._register_dynamic_deps checks the
@@ -751,6 +841,7 @@ class StardagApp:
             build_id: str,
             tick_kwargs: dict[str, typing.Any] | None = None,
         ) -> dict[str, typing.Any]:
+            _run_container_setup(container_setup)
             return _run_tick(build_id, tick_kwargs, deployment=tick_deployment)
 
         # tick/watchdog default to builder_settings when tick_settings is
@@ -773,6 +864,7 @@ class StardagApp:
             tasks: typing.Sequence[BaseTask] | BaseTask,
             tick_kwargs: dict[str, typing.Any] | None = None,
         ) -> dict[str, typing.Any]:
+            _run_container_setup(container_setup)
             _setup_logging()
             build_uuid = UUID(build_id)
             task_list = [tasks] if isinstance(tasks, BaseTask) else list(tasks)
@@ -812,6 +904,7 @@ class StardagApp:
         if self.watchdog_period_minutes is not None:
 
             def _modal_tick_watchdog() -> None:
+                _run_container_setup(container_setup)
                 _setup_logging()
                 # The watchdog runs on the same settings as `tick`, so its
                 # container has the same timeout — which it then splits

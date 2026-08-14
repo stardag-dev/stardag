@@ -76,7 +76,12 @@ class Builder(BuildFunction):
         self.detached = detached
 
     def setup(self, tasks: typing.Sequence[BaseTask] | BaseTask) -> None:
-        """Optional setup logic before the build starts."""
+        """Optional setup logic before the build starts.
+
+        Per *build*, and scoped to the ``build`` container. Setup that
+        every container of the app needs, once per container, belongs in
+        ``StardagApp(container_setup=...)`` instead — it runs before this.
+        """
         _setup_logging()
 
     def teardown(

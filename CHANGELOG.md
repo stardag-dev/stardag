@@ -6,6 +6,58 @@ For detailed SDK migration guides, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-08-14
+
+### SDK
+
+- **`StardagApp(container_setup=...)` — one declared place for setup that
+  every Modal container of an app needs.** A zero-argument callable, run once
+  per container at the top of **all five** registered functions: `build`, each
+  `worker_*`, and the reactive `tick`, `bootstrap` and `tick_watchdog`.
+
+  It closes a real gap rather than adding sugar. `finalize()` registers every
+  function with `serialized=True`, so a container unpickles a closure instead
+  of importing the module the app was declared in — and which of the app's
+  modules _do_ get imported was decided by what each closure happened to
+  reference. `build` and `worker_*` close over the app's `build_function` /
+  `run_function`, so their modules are imported and their module-level setup
+  runs; that is the behaviour `StardagApp.__init__` has always documented. But
+  a `bootstrap` container closes over nothing of the app's at all (just the app
+  name, the task-module patterns and two flags), and `tick` / `tick_watchdog`
+  import app code only as a side effect of a supplied `worker_selector` /
+  `limit_key_selector` or of the expanded `task_modules`. Setup that appears to
+  "run everywhere" because it runs in the workers could therefore be silently
+  absent from exactly the containers that drive a reactive build — reported
+  from a deployed app whose storage credentials were prepared by such a
+  routine, whose reactive builds then failed in `bootstrap` at the first
+  completion check.
+
+  Semantics:
+
+  - **Once per container, not once per input** — a worker serves many tasks and
+    a tick container may be reused; the guard lives in stardag so apps do not
+    each write one.
+  - **A hook that raises propagates and is retried on the next input.** It is
+    deliberately not remembered as done on failure, so a container's remaining
+    inputs cannot run silently un-set-up; a deterministic failure fails every
+    input, loudly.
+  - **Runs before stardag's own `logging.basicConfig` default.** `basicConfig`
+    no-ops once the root logger has handlers, so an app that configures root
+    logging in the hook owns log formatting in these containers, and an app
+    that does not still gets the default.
+  - Pickled by reference like `worker_selector`, so **define it in a module
+    importable inside the container** — which is also what makes module-level
+    code in the hook's own module run in every container.
+
+  It complements, and does not replace, `Builder.setup(tasks)` (per build,
+  `build` container only) and `Runner.setup(task)` (per task). For the reactive
+  functions there is no choice to make: a `tick` / `bootstrap` /
+  `tick_watchdog` container holds neither a `Builder` nor a `Runner`, so this
+  is the only hook that reaches them.
+
+  Additive — an app that passes nothing behaves exactly as before. The new
+  `ContainerSetup` type alias is exported from `stardag.integration.modal`.
+
 ## [0.19.1] — 2026-08-14
 
 ### Fixed

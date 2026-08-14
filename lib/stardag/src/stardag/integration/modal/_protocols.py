@@ -39,8 +39,11 @@ class BuildFunction(typing.Protocol):
     implement this protocol directly for full control.
 
     Any module-level code in the module where a custom build function is
-    defined will execute inside the Modal container before the function is
-    called — use this for container-level setup (imports, config, etc.).
+    defined will execute inside the ``build`` container before the function
+    is called, because the callable is pickled by reference. That covers
+    the ``build`` container only; for setup every container of the app
+    needs — workers and the reactive functions included — pass
+    ``StardagApp(container_setup=...)``.
     """
 
     def __call__(
@@ -69,8 +72,10 @@ class RunFunction(typing.Protocol):
     ``setup()``/``teardown()``/``run()``, or implement this protocol directly.
 
     Any module-level code in the module where a custom run function is
-    defined will execute inside the Modal container before the function is
-    called — use this for container-level setup (imports, config, etc.).
+    defined will execute inside every ``worker_*`` container before the
+    function is called, because the callable is pickled by reference — use
+    it for worker-specific setup. For setup every container of the app
+    needs, pass ``StardagApp(container_setup=...)``.
 
     Args (of ``__call__``):
         task: The task instance to execute.
